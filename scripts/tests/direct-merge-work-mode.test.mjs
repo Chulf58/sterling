@@ -20,6 +20,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { parseOriginRepo } from '../lib/work-pr.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ATTRIBUTION = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
@@ -44,36 +45,62 @@ function gitMaybe(cwd, args) {
   return r.status === 0 ? r.stdout.trim() : null;
 }
 
-// The fake gh. State dir files:
-//   log.jsonl    one JSON argv array per invocation (appended)
-//   prs.json     what `gh pr list` prints (default [])
-//   create_fail  present => `gh pr create` exits 1
-//   auth_fail    present => `gh auth status` exits 1
+// The fake gh. It keeps PR state PER REPO and resolves the repo the way real gh
+// does: --repo when given, otherwise its OWN default (github.com/other/default),
+// which is never origin's repo — so a call that omits --repo lands on the wrong
+// repo and the test sees it. State dir files:
+//   log.jsonl         one JSON argv array per invocation (appended)
+//   prs.json          [{repo, number, url, headRefName, baseRefName}] (open PRs)
+//   create_fail       present => `gh pr create` exits 1 and creates nothing
+//   create_fail_after present => `gh pr create` creates the PR, then exits 1
+//   auth_fail         present => `gh auth status` exits 1
 const FAKE_GH_IMPL = `
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const state = process.env.FAKE_GH_STATE;
 const argv = process.argv.slice(2);
 appendFileSync(join(state, 'log.jsonl'), JSON.stringify(argv) + '\\n');
+const flag = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
+const norm = (r) => (r && r.split('/').length === 2 ? 'github.com/' + r : r);
+const repo = norm(flag('--repo')) ?? 'github.com/other/default';
+const prsFile = join(state, 'prs.json');
+const prs = existsSync(prsFile) ? JSON.parse(readFileSync(prsFile, 'utf8')) : [];
 const [a, b] = argv;
 if (a === '--version') { console.log('gh version 9.9.9 (fake)'); process.exit(0); }
 if (a === 'auth' && b === 'status') {
   if (existsSync(join(state, 'auth_fail'))) { console.error('You are not logged into any GitHub hosts. To log in, run: gh auth login'); process.exit(1); }
   console.error('Logged in to github.com as fake'); process.exit(0);
 }
-if (a === 'repo' && b === 'view') { console.log(JSON.stringify({ nameWithOwner: 'acme/widget' })); process.exit(0); }
+if (a === 'repo' && b === 'view') { console.log(JSON.stringify({ nameWithOwner: 'other/default' })); process.exit(0); }
 if (a === 'pr' && b === 'list') {
-  const f = join(state, 'prs.json');
-  console.log(existsSync(f) ? readFileSync(f, 'utf8') : '[]'); process.exit(0);
+  const head = flag('--head');
+  const base = flag('--base');
+  const fields = (flag('--json') ?? 'url,number').split(',');
+  const hits = prs.filter((p) => p.repo === repo && (!head || p.headRefName === head) && (!base || p.baseRefName === base));
+  console.log(JSON.stringify(hits.map((p) => Object.fromEntries(fields.map((f) => [f, p[f]])))));
+  process.exit(0);
 }
 if (a === 'pr' && b === 'create') {
   if (existsSync(join(state, 'create_fail'))) { console.error('GraphQL: something went wrong (createPullRequest)'); process.exit(1); }
-  const url = 'https://github.com/acme/widget/pull/7';
-  writeFileSync(join(state, 'prs.json'), JSON.stringify([{ url, number: 7 }]));
+  const number = 7 + prs.length;
+  const url = 'https://' + repo + '/pull/' + number;
+  prs.push({ repo, number, url, headRefName: flag('--head'), baseRefName: flag('--base') });
+  writeFileSync(prsFile, JSON.stringify(prs));
+  if (existsSync(join(state, 'create_fail_after'))) { console.error('HTTP 502: gateway timeout (the PR was created anyway)'); process.exit(1); }
   console.log(url); process.exit(0);
 }
 console.error('fake gh: unhandled ' + JSON.stringify(argv)); process.exit(3);
 `;
+
+const ORIGIN_URL = 'https://github.com/acme/widget.git';
+const ORIGIN_REPO = 'github.com/acme/widget';
+
+function seedPr(p, { number, head = p.branchName, base = 'main', repo = ORIGIN_REPO }) {
+  const f = join(p.gh.state, 'prs.json');
+  const prs = existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : [];
+  prs.push({ repo, number, url: `https://${repo}/pull/${number}`, headRefName: head, baseRefName: base });
+  writeFileSync(f, JSON.stringify(prs));
+}
 
 function makeFakeGh(base) {
   const bin = join(base, 'fakebin');
@@ -110,7 +137,10 @@ function makeProject({ mode, commits = [{ subject: 'feat: widget sprockets', bod
   writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
   git(dir, ['add', '-A']);
   git(dir, ['commit', '-m', 'base']);
-  git(dir, ['remote', 'add', 'origin', origin]);
+  // origin's identity is a GitHub URL; pushes are redirected to the local bare
+  // repo with pushInsteadOf, so no network is touched.
+  git(dir, ['remote', 'add', 'origin', ORIGIN_URL]);
+  git(dir, ['config', `url.${origin}.pushInsteadOf`, ORIGIN_URL]);
   git(dir, ['push', 'origin', 'main']);
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   if (mode !== undefined) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode }));
@@ -183,7 +213,7 @@ test('work: a merge pushes the branch and CREATES the PR with an explicit repo/h
     assert.equal(creates.length, 1, 'exactly one gh pr create');
     const c = creates[0];
     const flag = (name) => c[c.indexOf(name) + 1];
-    assert.equal(flag('--repo'), 'acme/widget');
+    assert.equal(flag('--repo'), ORIGIN_REPO);
     assert.equal(flag('--head'), p.branchName);
     assert.equal(flag('--base'), 'main');
     assert.equal(flag('--title'), p.branchName, 'several commits: the title is the branch name (gh --fill semantics)');
@@ -201,7 +231,7 @@ test('work: a merge pushes the branch and CREATES the PR with an explicit repo/h
 test('work: an existing open PR for the head is REUSED — the branch is pushed, no second gh pr create', () => {
   const p = makeProject({ mode: 'work' });
   try {
-    writeFileSync(join(p.gh.state, 'prs.json'), JSON.stringify([{ url: 'https://github.com/acme/widget/pull/41', number: 41 }]));
+    seedPr(p, { number: 41 });
     const r = runDirectMerge(p);
     assert.equal(r.status, 0, `reuse must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
     const out = parseSingleJson(r.stdout, 'work reuse');
@@ -248,6 +278,57 @@ test('work: pushed but gh pr create FAILED exits 1 naming what succeeded; the re
     assertBaseUntouched(p, 'rerun');
   } finally {
     p.cleanup();
+  }
+});
+
+test('work: with several remotes and a conflicting gh default repo, EVERY gh call names origin\'s repo (host/owner/repo from the origin URL) and the PR lands there', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    git(p.dir, ['remote', 'add', 'upstream', 'git@github.com:other/fork.git']);
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `work merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.pr_url, 'https://github.com/acme/widget/pull/7', 'the PR is opened in origin\'s repo, never gh\'s default');
+    const calls = ghCalls(p.gh.state);
+    const repoCalls = calls.filter((c) => c[0] === 'pr' || c[0] === 'repo');
+    assert.ok(repoCalls.length >= 2, 'at least a lookup and a create');
+    for (const c of repoCalls) {
+      assert.equal(c[c.indexOf('--repo') + 1], ORIGIN_REPO, `every repo-scoped gh call passes --repo ${ORIGIN_REPO}: ${JSON.stringify(c)}`);
+    }
+    const auth = calls.find((c) => c[0] === 'auth');
+    assert.ok(auth && auth[auth.indexOf('--hostname') + 1] === 'github.com', 'auth is checked for origin\'s host');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: an origin that is not a GitHub-shaped URL (a local path) is refused with exit 2, nothing pushed', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    git(p.dir, ['remote', 'set-url', 'origin', p.origin]);
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 2, `a non-GitHub origin exits 2 — stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /origin/);
+    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, 'no pr call');
+    assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('parseOriginRepo: https, ssh:// and scp-style origin URLs give host/owner/repo; anything else is null', () => {
+  const ok = {
+    'https://github.com/acme/widget.git': 'github.com/acme/widget',
+    'https://github.com/acme/widget': 'github.com/acme/widget',
+    'https://user@ghe.corp.example/acme/widget.git/': 'ghe.corp.example/acme/widget',
+    'ssh://git@github.com/acme/widget.git': 'github.com/acme/widget',
+    'ssh://git@github.com:22/acme/widget.git': 'github.com/acme/widget',
+    'git@github.com:acme/widget.git': 'github.com/acme/widget',
+    'github.com:acme/my.repo': 'github.com/acme/my.repo',
+  };
+  for (const [url, repo] of Object.entries(ok)) assert.equal(parseOriginRepo(url)?.repo, repo, url);
+  for (const bad of ['/tmp/origin.git', 'file:///tmp/origin.git', 'https://github.com/acme', 'https://github.com/a/b/c', 'git@github.com:acme/..', '', 'C:\\repos\\x.git']) {
+    assert.equal(parseOriginRepo(bad), null, bad);
   }
 });
 

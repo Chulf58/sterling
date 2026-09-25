@@ -5,8 +5,9 @@
 // pushes the base: a human merges the PR, and the work repos block direct
 // merges server-side, so no hook guards a hand-typed merge.
 //
-// Every gh call names the repo, head and base explicitly, so the result never
-// depends on gh's own remote guessing. Push reuses the gate's Windows git.exe
+// Every gh call names the repo (host/owner/repo, parsed from origin's URL),
+// head and base explicitly, so the result never depends on gh's own
+// default-repo guessing. Push reuses the gate's Windows git.exe
 // retry. The flow is retryable end to end: a rerun after "pushed, but no PR"
 // finds no open PR, pushes again (a no-op) and creates it.
 import { spawnSync } from 'node:child_process';
@@ -19,8 +20,41 @@ function gh(cwd, args) {
 
 const streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? '')).trim();
 
+/** origin's GitHub identity from its fetch URL: `https://host/owner/repo(.git)`,
+ * `ssh://[user@]host[:port]/owner/repo(.git)` or `[user@]host:owner/repo(.git)`.
+ * Returns { host, repo: 'host/owner/repo' } or null when the URL is not of
+ * that shape. The repo is derived from the remote that `git push` targets,
+ * never from gh's own default-repo resolution, which can pick another remote. */
+export function parseOriginRepo(url) {
+  const u = String(url ?? '').trim();
+  let host;
+  let path;
+  let m = u.match(/^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/);
+  if (m) [, host, path] = m;
+  else if ((m = u.match(/^(?:[^@/:]+@)?([^/:]+):(?!\/)(.+)$/))) [, host, path] = m;
+  else return null;
+  const parts = path.replace(/\/+$/, '').replace(/\.git$/, '').split('/');
+  if (parts.length !== 2) return null;
+  const [owner, name] = parts;
+  const seg = /^[A-Za-z0-9_.-]+$/;
+  if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(host) || !seg.test(owner) || !seg.test(name) || owner.startsWith('.') || name.startsWith('.')) return null;
+  return { host, repo: `${host}/${owner}/${name}` };
+}
+
 /** Cheap preconditions, checked BEFORE the battery. Returns { repo } or { refusal }. */
 export function workPreflight(cwd) {
+  const url = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd, encoding: 'utf8', timeout: 30_000 });
+  if (url.status !== 0) {
+    return { refusal: "direct-merge: work mode opens a PR against the 'origin' remote, and this repository has none. Add it: git remote add origin <url>" };
+  }
+  const origin = parseOriginRepo(url.stdout);
+  if (!origin) {
+    return {
+      refusal:
+        `direct-merge: origin's URL '${url.stdout.trim()}' is not a GitHub repository URL (https://host/owner/repo, ssh://host/owner/repo or host:owner/repo) — ` +
+        'work mode derives the PR repo from origin and will not guess one.',
+    };
+  }
   const version = gh(cwd, ['--version']);
   if (version.error || version.status !== 0) {
     return {
@@ -29,25 +63,11 @@ export function workPreflight(cwd) {
         'Install gh, then authenticate: gh auth login',
     };
   }
-  const auth = gh(cwd, ['auth', 'status']);
+  const auth = gh(cwd, ['auth', 'status', '--hostname', origin.host]);
   if (auth.status !== 0) {
-    return { refusal: `direct-merge: work mode needs an authenticated gh — \`gh auth status\` failed:\n${streams(auth)}\nRun: gh auth login` };
+    return { refusal: `direct-merge: work mode needs gh authenticated for ${origin.host} — \`gh auth status --hostname ${origin.host}\` failed:\n${streams(auth)}\nRun: gh auth login --hostname ${origin.host}` };
   }
-  const remotes = spawnSync('git', ['remote'], { cwd, encoding: 'utf8', timeout: 30_000 });
-  if (remotes.status !== 0 || !remotes.stdout.split('\n').map((r) => r.trim()).includes('origin')) {
-    return { refusal: "direct-merge: work mode opens a PR against the 'origin' remote, and this repository has none. Add it: git remote add origin <url>" };
-  }
-  const view = gh(cwd, ['repo', 'view', '--json', 'nameWithOwner']);
-  let repo;
-  try {
-    repo = view.status === 0 ? JSON.parse(view.stdout).nameWithOwner : undefined;
-  } catch {
-    repo = undefined;
-  }
-  if (typeof repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repo)) {
-    return { refusal: `direct-merge: could not resolve origin's GitHub repo with \`gh repo view --json nameWithOwner\` (exit ${view.status}): ${streams(view)}` };
-  }
-  return { repo };
+  return { repo: origin.repo };
 }
 
 /** Title and body from the branch's own commits, oldest first. One commit:
