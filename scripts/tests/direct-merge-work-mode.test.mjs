@@ -34,8 +34,8 @@ function oneLine(s) {
   return String(s ?? '').replace(/\s+/g, ' ').trim();
 }
 
-function git(cwd, args) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
+function git(cwd, args, env = process.env) {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000, env });
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${oneLine(r.stderr)}`);
   return (r.stdout ?? '').trim();
 }
@@ -92,7 +92,34 @@ if (a === 'pr' && b === 'create') {
 console.error('fake gh: unhandled ' + JSON.stringify(argv)); process.exit(3);
 `;
 
-const ORIGIN_URL = 'https://github.com/acme/widget.git';
+// ORIGIN is a real GitHub-shaped ssh URL, used unchanged for fetch AND push
+// (no pushurl, no insteadOf/pushInsteadOf), so `git remote get-url origin` and
+// `git remote get-url --push --all origin` both normalize to ORIGIN_REPO — the
+// exact setup the push-destination rule accepts. The bytes still land locally:
+// GIT_SSH_COMMAND points at a fake ssh that ignores the host and serves the
+// repo path from FAKE_SSH_ROOT (<root>/<owner>/<repo>.git), so no network is
+// touched and a push to ANOTHER GitHub repo lands in another local bare repo.
+// (A pushInsteadOf or insteadOf rewrite to a local path cannot be used any
+// more: git applies it to the push URLs the rule reads, which then no longer
+// name a GitHub repo.)
+const ORIGIN_URL = 'ssh://git@github.com/acme/widget.git';
+const FAKE_SSH_IMPL = `
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+const args = process.argv.slice(2);
+if (args[0] === '-G') process.exit(0);
+const m = args[args.length - 1].match(/^git-(upload-pack|receive-pack|upload-archive) '(.+)'$/);
+if (!m) { console.error('fake ssh: unexpected command ' + JSON.stringify(args)); process.exit(128); }
+const repoPath = join(process.env.FAKE_SSH_ROOT, m[2].replace(/^\\/+/, ''));
+const r = spawnSync('git', [m[1], repoPath], { stdio: 'inherit' });
+process.exit(r.status ?? 128);
+`;
+
+function sshEnv(base) {
+  const impl = join(base, 'fake-ssh.mjs');
+  writeFileSync(impl, FAKE_SSH_IMPL);
+  return { GIT_SSH_COMMAND: `"${process.execPath}" "${impl}"`, GIT_SSH_VARIANT: 'ssh', FAKE_SSH_ROOT: join(base, 'remotes') };
+}
 const ORIGIN_REPO = 'github.com/acme/widget';
 
 function seedPr(p, { number, head = p.branchName, base = 'main', repo = ORIGIN_REPO }) {
@@ -126,7 +153,9 @@ function ghCalls(state) {
 function makeProject({ mode, commits = [{ subject: 'feat: widget sprockets', body: 'Adds sprockets to the widget.' }], branchName = 'feat/sprockets', checkScript } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'sterling-dm-work-'));
   const dir = join(base, 'repo');
-  const origin = join(base, 'origin.git');
+  const ssh = sshEnv(base);
+  const origin = join(ssh.FAKE_SSH_ROOT, 'acme', 'widget.git');
+  const env = { ...process.env, ...ssh };
   mkdirSync(dir);
   git(base, ['init', '--bare', '-b', 'main', origin]);
   git(dir, ['init', '-b', 'main']);
@@ -140,11 +169,8 @@ function makeProject({ mode, commits = [{ subject: 'feat: widget sprockets', bod
   if (checkScript) writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { check: checkScript } }));
   git(dir, ['add', '-A']);
   git(dir, ['commit', '-m', 'base']);
-  // origin's identity is a GitHub URL; pushes are redirected to the local bare
-  // repo with pushInsteadOf, so no network is touched.
   git(dir, ['remote', 'add', 'origin', ORIGIN_URL]);
-  git(dir, ['config', `url.${origin}.pushInsteadOf`, ORIGIN_URL]);
-  git(dir, ['push', 'origin', 'main']);
+  git(dir, ['push', 'origin', 'main'], env);
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   if (mode !== undefined) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode }));
   new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
@@ -161,6 +187,7 @@ function makeProject({ mode, commits = [{ subject: 'feat: widget sprockets', bod
     origin,
     branchName,
     gh,
+    ssh,
     mainSha: git(dir, ['rev-parse', 'main']),
     originMainSha: git(origin, ['rev-parse', 'main']),
     branchSha: git(dir, ['rev-parse', 'HEAD']),
@@ -173,7 +200,7 @@ function runDirectMerge(p, extra = [], { path } = {}) {
     encoding: 'utf8',
     cwd: p.dir,
     timeout: 60_000,
-    env: { ...process.env, PATH: path ?? `${p.gh.bin}${delimiter}${process.env.PATH}`, FAKE_GH_STATE: p.gh.state, GIT_TERMINAL_PROMPT: '0' },
+    env: { ...process.env, ...p.ssh, PATH: path ?? `${p.gh.bin}${delimiter}${process.env.PATH}`, FAKE_GH_STATE: p.gh.state, GIT_TERMINAL_PROMPT: '0' },
   });
 }
 
@@ -499,6 +526,71 @@ test('work: gh pr create FAILS but the PR exists afterwards (a create race or a 
     assert.equal(after[after.indexOf('--repo') + 1], ORIGIN_REPO);
     assert.equal(after[after.indexOf('--head') + 1], p.branchName);
     assert.equal(after[after.indexOf('--base') + 1], 'main');
+  } finally {
+    p.cleanup();
+  }
+});
+
+/** Push-destination rule: every effective push URL of origin must name the
+ * same GitHub repo gh is bound to, or the run refuses in work-preflight. */
+function assertPushDestinationRefusal(p, r, label, destinations) {
+  assert.equal(r.status, 2, `${label}: exit 2 — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.stage, 'work-preflight', label);
+  assert.equal(out.pushed, false, label);
+  for (const d of destinations) assert.ok(r.stderr.includes(d), `${label}: the refusal names destination ${d}`);
+  assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, `${label}: no pr call`);
+  assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, `${label}: nothing pushed to origin`);
+  const other = join(p.ssh.FAKE_SSH_ROOT, 'other', 'fork.git');
+  if (existsSync(other)) assert.equal(gitMaybe(other, ['rev-parse', '--verify', p.branchName]), null, `${label}: nothing pushed to the other repo`);
+}
+
+function makeOtherRepo(p) {
+  git(p.base, ['init', '--bare', '-q', '-b', 'main', join(p.ssh.FAKE_SSH_ROOT, 'other', 'fork.git')]);
+}
+
+test('work push destinations: a remote.origin.pushurl naming ANOTHER repo is refused with exit 2 before pushing, naming every destination', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    makeOtherRepo(p);
+    git(p.dir, ['config', 'remote.origin.pushurl', 'ssh://git@github.com/other/fork.git']);
+    assertPushDestinationRefusal(p, runDirectMerge(p), 'pushurl elsewhere', ['ssh://git@github.com/other/fork.git', ORIGIN_REPO]);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work push destinations: TWO push URLs, one of them another repo, are refused with exit 2 before pushing', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    makeOtherRepo(p);
+    git(p.dir, ['remote', 'set-url', '--add', '--push', 'origin', 'git@github.com:acme/widget.git']);
+    git(p.dir, ['remote', 'set-url', '--add', '--push', 'origin', 'git@github.com:other/fork.git']);
+    assertPushDestinationRefusal(p, runDirectMerge(p), 'two push URLs', ['git@github.com:acme/widget.git', 'git@github.com:other/fork.git']);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work push destinations: a pushInsteadOf rewrite sending pushes to ANOTHER repo is refused with exit 2 before pushing', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    makeOtherRepo(p);
+    git(p.dir, ['config', 'url.ssh://git@github.com/other/fork.git.pushInsteadOf', ORIGIN_URL]);
+    assertPushDestinationRefusal(p, runDirectMerge(p), 'pushInsteadOf elsewhere', ['ssh://git@github.com/other/fork.git']);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work push destinations: an explicit pushurl naming the SAME repo in another URL form still ships', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    git(p.dir, ['config', 'remote.origin.pushurl', 'git@github.com:acme/widget.git']);
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `a matching pushurl ships — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.equal(JSON.parse(r.stdout).created, true);
+    assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the branch landed in origin\'s repo');
   } finally {
     p.cleanup();
   }

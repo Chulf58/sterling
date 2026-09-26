@@ -55,6 +55,27 @@ export function workPreflight(cwd) {
         'work mode derives the PR repo from origin and will not guess one.',
     };
   }
+  // EVERY EFFECTIVE PUSH DESTINATION must be the repo gh is bound to. `git push
+  // origin` uses remote.origin.pushurl when set (possibly several), and
+  // pushInsteadOf rewrites the destination; `get-url --push --all` applies
+  // both. A mismatch would land the branch in one repo while the PR is opened
+  // in another, so it refuses before anything is pushed.
+  const pushUrls = spawnSync('git', ['remote', 'get-url', '--push', '--all', 'origin'], { cwd, encoding: 'utf8', timeout: 30_000 });
+  if (pushUrls.status !== 0) {
+    return { refusal: `direct-merge: could not read origin's push URLs (git remote get-url --push --all origin, exit ${pushUrls.status}): ${streams(pushUrls)}` };
+  }
+  const destinations = pushUrls.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+  const mismatched = destinations.filter((d) => parseOriginRepo(d)?.repo !== origin.repo);
+  if (destinations.length === 0 || mismatched.length > 0) {
+    return {
+      refusal: [
+        `direct-merge: origin's push destinations do not all match the repo the PR would be opened in (${origin.repo}, from the fetch URL ${url.stdout.trim()}) — refusing before pushing.`,
+        'Effective push destinations (remote.origin.pushurl and pushInsteadOf applied):',
+        ...(destinations.length ? destinations : ['(none)']).map((d) => `  ${d}  →  ${parseOriginRepo(d)?.repo ?? 'not a GitHub repository URL'}${mismatched.includes(d) ? '  (MISMATCH)' : ''}`),
+        `Point every push URL of origin at ${origin.repo} (git remote set-url --push origin <url>, or remove the pushInsteadOf rewrite), then rerun.`,
+      ].join('\n'),
+    };
+  }
   const version = gh(cwd, ['--version']);
   if (version.error || version.status !== 0) {
     return {
