@@ -41,7 +41,9 @@ If the session ends before the loop does, leave a board item pointing at the PR 
 
 ## S0: first real run (UNVERIFIED assumptions)
 
-The helper matches the reviewer by login `/copilot/i`, and assumes review ids grow monotonically and that `review.commit_id` is the reviewed head. None of this is verified yet. On the first real run on a work machine, record and report to the user, so they can be pinned as fixtures:
+**Identity.** The reviewer must be a Bot account (`user.type` `Bot`). Until `.sterling/config.json` `pr_review.copilot_logins` lists the exact login, the helper accepts any Bot login matching `/copilot/i` and reports `identity_confirmed: false`. With an unconfirmed identity, **confirm the observed login with the user (AskUserQuestion) before the first CLEAN**; once confirmed, pin it in `pr_review.copilot_logins`, and from then on only that login counts.
+
+The helper matches the reviewer by a Bot login `/copilot/i` while unpinned, and assumes review ids grow monotonically and that `review.commit_id` is the reviewed head. None of this is verified yet. On the first real run on a work machine, record and report to the user, so they can be pinned as fixtures:
 
 - the exact `observed_copilot_login`;
 - whether a push re-triggers a Copilot review within the wait window, or needs a re-request;

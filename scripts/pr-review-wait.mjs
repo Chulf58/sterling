@@ -22,8 +22,9 @@
 // deadline bounds the whole call and each gh call has its own timeout.
 //
 // UNVERIFIED until the S0 first use on a work machine: the Copilot reviewer's
-// login (matched by /copilot/i, and reported verbatim as
-// observed_copilot_login), that review ids grow monotonically (the
+// login (a Bot matched by /copilot/i until pinned in pr_review.copilot_logins,
+// reported verbatim as observed_copilot_login, identity_confirmed only when
+// pinned), that review ids grow monotonically (the
 // --since-review comparison), and that a review's commit_id is the head it
 // reviewed. The skill asks for the observed facts to be reported back so they
 // can be pinned as fixtures.
@@ -31,7 +32,7 @@
 // Stdout is ONE JSON object:
 //   {status:'review'|'timeout'|'error', head_sha, review:{id, commit_id,
 //    author, state, body}|null, comments:[{id, path, line, body, in_reply_to}],
-//    observed_copilot_login, stale_review_ignored[, error]}
+//    observed_copilot_login, stale_review_ignored, identity_confirmed[, error]}
 // Exit 0 = review, 2 = timeout, 1 = error. Timeout and error are never clean.
 //
 // SETTLE: the deliberate conductor act that discharges H10's 'PR review loop
@@ -39,7 +40,8 @@
 // armed PR matches --pr. Exit 0 with {status, pr_number, pr_url}; any refusal
 // exits 1 and writes nothing.
 import { spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { parseOriginRepo, settlePrLoop } from './lib/work-pr.mjs';
 
 const argv = process.argv.slice(2);
@@ -49,20 +51,48 @@ const flag = (name) => {
 };
 const target = resolve(flag('--target') ?? process.cwd());
 
-const COPILOT_LOGIN = /copilot/i; // UNVERIFIED until S0 (see the header)
+const COPILOT_LOGIN = /copilot/i; // UNVERIFIED until S0 (see the header); used only while unpinned
 const COMPLETED_STATES = new Set(['COMMENTED', 'APPROVED', 'CHANGES_REQUESTED']);
 const GH_CALL_TIMEOUT_MS = 60_000;
 const DEFAULT_TIMEOUT_S = 540; // under a 10-minute background Bash window
 const DEFAULT_INTERVAL_S = 30;
 const MAX_INTERVAL_S = 120;
 
-const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review_ignored: false };
+const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review_ignored: false, identity_confirmed: false };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + '\n');
   process.exit(status === 'review' ? 0 : status === 'timeout' ? 2 : 1);
 }
 const error = (message) => finish('error', { review: null, comments: [], error: message });
+
+// ------------------------------------------------------------------ identity
+// The Copilot reviewer is a GitHub App: user.type must be 'Bot' (a human or an
+// unrelated account whose login merely contains "copilot" never counts). While
+// .sterling/config.json pr_review.copilot_logins is empty (the default) any
+// Bot login matching /copilot/i is accepted and identity_confirmed is false —
+// the skill has the user confirm it before the first CLEAN, and the S0 first
+// use pins the exact login there. Pinned, only an exact login matches. The
+// config schema keeps pr_review permissive; this is the strict judge.
+function readPinnedLogins() {
+  const file = join(target, '.sterling', 'config.json');
+  if (!existsSync(file)) return [];
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (e) {
+    error(`.sterling/config.json is not valid JSON (${e.message}) — the pinned Copilot login cannot be read`);
+  }
+  const block = cfg?.pr_review;
+  if (block === undefined) return [];
+  const logins = block?.copilot_logins;
+  if (block === null || typeof block !== 'object' || Array.isArray(block) || (logins !== undefined && (!Array.isArray(logins) || !logins.every((l) => typeof l === 'string' && l.length > 0)))) {
+    error(`config pr_review.copilot_logins must be a list of exact reviewer logins, got ${JSON.stringify(block)}`);
+  }
+  return logins ?? [];
+}
+const isCopilot = (r, pinned) =>
+  typeof r?.user?.login === 'string' && r.user.type === 'Bot' && Number.isInteger(r.id) && (pinned.length ? pinned.includes(r.user.login) : COPILOT_LOGIN.test(r.user.login));
 
 // ------------------------------------------------------------------ settle
 if (argv.includes('--settle')) {
@@ -95,6 +125,8 @@ const sinceRaw = flag('--since-review');
 if (sinceRaw !== undefined && !/^\d+$/.test(sinceRaw)) error(`--since-review must be a review id, got '${sinceRaw}'`);
 const sinceReview = sinceRaw === undefined ? null : Number(sinceRaw);
 const expectedHead = flag('--head') ?? null;
+const pinnedLogins = readPinnedLogins();
+result.identity_confirmed = pinnedLogins.length > 0;
 
 // ------------------------------------------------------ repo, bound to origin
 const originUrl = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
@@ -160,7 +192,7 @@ function poll() {
   if (typeof head !== 'string') throw new Error(`gh api ${base} returned no head.sha`);
   result.head_sha = head;
   const reviews = parsePages(ghApi(`${base}/reviews`, { paginate: true }));
-  const copilot = reviews.filter((r) => typeof r?.user?.login === 'string' && COPILOT_LOGIN.test(r.user.login) && Number.isInteger(r.id));
+  const copilot = reviews.filter((r) => isCopilot(r, pinnedLogins));
   if (copilot.length) result.observed_copilot_login = copilot.reduce((a, b) => (b.id > a.id ? b : a)).user.login;
   const fresh = copilot.filter((r) => COMPLETED_STATES.has(r.state) && (sinceReview === null || r.id > sinceReview));
   const current = expectedHead === null || expectedHead === head ? fresh.filter((r) => r.commit_id === head) : [];

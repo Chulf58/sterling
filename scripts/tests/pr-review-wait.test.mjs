@@ -112,7 +112,9 @@ function calls(f) {
   return existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 }
 
-const review = (id, { login = COPILOT, commit = HEAD, state = 'COMMENTED', body = `review ${id}` } = {}) => ({ id, user: { login }, commit_id: commit, state, body });
+// user.type follows GitHub: '[bot]' logins are Bots, everything else a User
+// unless the test says otherwise (identity needs type 'Bot', Sol review).
+const review = (id, { login = COPILOT, type = login.endsWith('[bot]') ? 'Bot' : 'User', commit = HEAD, state = 'COMMENTED', body = `review ${id}` } = {}) => ({ id, user: { login, type }, commit_id: commit, state, body });
 const comment = (id, reviewId, extra = {}) => ({ id, pull_request_review_id: reviewId, path: 'src/a.mjs', line: 3, body: `comment ${id}`, ...extra });
 // Fast polling for tests: a 50ms first interval, a 2s bound.
 const FAST = ['--interval', '0.05', '--timeout', '2'];
@@ -137,6 +139,7 @@ test('a NEW Copilot review on the CURRENT head is returned with its comments (pa
       ],
       observed_copilot_login: COPILOT,
       stale_review_ignored: false,
+      identity_confirmed: false,
     });
   } finally {
     f.cleanup();
@@ -312,6 +315,52 @@ test('HIGH (Sol): two fresh reviews — 101 with actionable comments, then an em
     const next = run(f, ['7', '--since-review', '101', ...FAST]);
     assert.equal(next.out.review.id, 102);
     assert.deepEqual(next.out.comments, []);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('identity (Sol): a NON-bot login containing copilot is never taken for Copilot', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(800, { login: 'copilot-fan' }), review(801, { login: 'Copilot', type: 'User' })]]);
+    const r = run(f, ['7', ...FAST]);
+    assert.equal(r.out.status, 'timeout', oneLine(r.stdout));
+    assert.equal(r.out.observed_copilot_login, null);
+    assert.equal(r.out.identity_confirmed, false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('identity (Sol): unpinned, any Bot matching /copilot/i is accepted with identity_confirmed false; pinned in pr_review.copilot_logins, only the EXACT login counts and identity_confirmed is true', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(900, { login: 'copilot-helper[bot]' }), review(901)]]);
+    const unpinned = run(f, ['7', ...FAST]);
+    assert.equal(unpinned.out.review.id, 900);
+    assert.equal(unpinned.out.identity_confirmed, false);
+    writeFileSync(join(f.dir, '.sterling', 'config.json'), JSON.stringify({ pr_review: { copilot_logins: [COPILOT] } }));
+    const pinned = run(f, ['7', ...FAST]);
+    assert.equal(pinned.out.review.id, 901, oneLine(pinned.stdout));
+    assert.equal(pinned.out.review.author, COPILOT);
+    assert.equal(pinned.out.identity_confirmed, true);
+    assert.equal(pinned.out.observed_copilot_login, COPILOT);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('identity: a malformed pr_review.copilot_logins is an error, never silently unpinned', () => {
+  const f = makeFixture();
+  try {
+    for (const bad of [{ copilot_logins: 'copilot' }, { copilot_logins: [''] }, 'x']) {
+      writeFileSync(join(f.dir, '.sterling', 'config.json'), JSON.stringify({ pr_review: bad }));
+      const r = run(f, ['7', ...FAST]);
+      assert.equal(r.code, 1, JSON.stringify(bad));
+      assert.equal(r.out.status, 'error');
+      assert.match(r.out.error, /copilot_logins|pr_review/);
+    }
   } finally {
     f.cleanup();
   }
