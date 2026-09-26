@@ -106,14 +106,19 @@ test('check-agent-prompts runs the fence and vocabulary lint over the shipped te
 // template_hash. If a LATER commit edits a template's Claude-visible prose on
 // purpose, move this pin to that commit — the pin guards the fencing, not the prose.
 const FENCE_BASELINE = '703a327';
+// conductor.md's Claude-visible prose changed on purpose in 797307f (work-mode
+// push and review rules, decision project-mode-hobby-work-toggle-decides-flow),
+// so its pin moves there; every other template stays pinned to 703a327.
+const BASELINE_OVERRIDES = { 'conductor.md': '797307f' };
 const renderConfig = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
 const renderOpts = { pluginVersion: '0.0.0-test', now: '2026-01-01T00:00:00.000Z', vars: { NODE: '"/usr/bin/node"', HOOKS_DIR: '/x/hooks', GIT_RO: '/x/git-ro.mjs' }, config: renderConfig };
 const withoutHeader = (content) => content.replace(parseInstalledHeader(content).headerLine + '\n', '');
 
 for (const entry of loadRegistry(registryPath).agents) {
-  test(`Claude render of ${entry.file} is byte-identical to the ${FENCE_BASELINE} render (header aside)`, () => {
-    const shown = spawnSync('git', ['show', `${FENCE_BASELINE}:agent-templates/${entry.file}`], { cwd: root, encoding: 'utf8' });
-    assert.equal(shown.status, 0, `git show ${FENCE_BASELINE} failed: ${shown.stderr}`);
+  const baseline = BASELINE_OVERRIDES[entry.file] ?? FENCE_BASELINE;
+  test(`Claude render of ${entry.file} is byte-identical to the ${baseline} render (header aside)`, () => {
+    const shown = spawnSync('git', ['show', `${baseline}:agent-templates/${entry.file}`], { cwd: root, encoding: 'utf8' });
+    assert.equal(shown.status, 0, `git show ${baseline} failed: ${shown.stderr}`);
     const before = renderInstalledAgent(shown.stdout, entry.file, renderOpts).installedContent;
     const after = renderInstalledAgent(template(entry.name), entry.file, renderOpts).installedContent;
     assert.equal(withoutHeader(after), withoutHeader(before));
