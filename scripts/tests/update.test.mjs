@@ -1776,3 +1776,59 @@ test('fan-out: a project that left the registry is not visited, even when an old
   }
 });
 
+
+// Sol review of the scheduling rebuild, HIGH: the CLI's registry loader used to
+// swallow an unloadable @sterling/store and hand runUpdate an EMPTY project list,
+// so an already-current update printed "Already current" and exited 0 while no
+// registered project was refreshed. Pinned at the CLI seam: the REAL
+// scripts/update.mjs runs against a temp clone that is current with a matching
+// core marker, with @sterling/store made unresolvable by a module hook.
+test('CLI: an unloadable @sterling/store is a visible exit 2 on the already-current path, never a false empty registry', () => {
+  const work = mkdtempSync(join(tmpdir(), 'sterling-update-cli-'));
+  try {
+    const git = (cwd, ...args) => {
+      const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'init.defaultBranch=main', ...args], { cwd, encoding: 'utf8' });
+      assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    const seed = join(work, 'seed');
+    mkdirSync(seed);
+    git(seed, 'init', '-q');
+    writeFileSync(join(seed, '.gitignore'), '.sterling/\n');
+    git(seed, 'add', '.');
+    git(seed, 'commit', '-q', '-m', 'seed');
+    git(work, 'clone', '-q', '--bare', seed, 'origin.git');
+    git(work, 'clone', '-q', join(work, 'origin.git'), 'clone');
+    const clone = join(work, 'clone');
+    mkdirSync(join(clone, '.sterling'), { recursive: true });
+    writeFileSync(join(clone, UPDATE_MARKER_RELATIVE_PATH), JSON.stringify({ sha: git(clone, 'rev-parse', 'HEAD'), completed_at: new Date().toISOString() }));
+    const hook = join(work, 'block-store.mjs');
+    const resolver = `export async function resolve(s, c, n) { if (s === '@sterling/store') { const e = new Error("Cannot find package '@sterling/store' (test: made unloadable)"); e.code = 'ERR_MODULE_NOT_FOUND'; throw e; } return n(s, c); }`;
+    writeFileSync(hook, `import { register } from 'node:module';\nregister('data:text/javascript,' + encodeURIComponent(${JSON.stringify(resolver)}));\n`);
+
+    const r = spawnSync(process.execPath, ['--import', hook, join(dirname(fileURLToPath(import.meta.url)), '..', 'update.mjs'), '--target', clone, '--no-fetch', '--no-test'], { encoding: 'utf8', timeout: 120_000 });
+    const out = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 2, out);
+    assert.doesNotMatch(out, /Already current/, 'no registered project was refreshed, so the run must not read as current');
+    assert.match(out, /project registry unavailable.*@sterling\/store/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+// Both paths treat project-list resolution the same way: the full path used to
+// let a registry throw reject runUpdate outright.
+test('full path: a project registry that cannot be read is exit 2; the completed core is still stamped', async () => {
+  const cwd = scratchCwd();
+  try {
+    const { exec, calls } = fakeExec({ behind: 1 });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: async () => { throw new Error('registry db locked'); }, opts: {} });
+    assert.equal(report.exit, 2);
+    assert.match(lines.join('\n'), /project registry unavailable.*registry db locked/);
+    assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 0);
+    assert.equal(JSON.parse(readFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), 'utf8')).sha, HEAD_B, 'the core completed, so the core marker is stamped');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});

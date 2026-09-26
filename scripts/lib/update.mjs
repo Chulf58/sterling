@@ -393,6 +393,19 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   const fail = (code) => {
     if (report.exit === 0) report.exit = code;
   };
+  // The registered project list, resolved the SAME way on both paths. An
+  // unreadable registry (or an unloadable store module) is never an empty list:
+  // it is logged and null is returned, so no project is refreshed; the CALLER
+  // records exit 2 once the core verdict is taken — it is a per-project
+  // failure, never a core one, so the marker still follows the core.
+  const resolveProjects = async () => {
+    try {
+      return typeof projects === 'function' ? (await projects()) ?? [] : projects;
+    } catch (err) {
+      log(`\n✗ per-project refresh SKIPPED — project registry unavailable: ${err?.message ?? err}`);
+      return null;
+    }
+  };
 
   // THE PER-PROJECT REFRESH (decision project-mode-hobby-work-toggle-decides-flow,
   // Astra design review item 2 — rebuilt as ONE idempotent pass). Every explicit
@@ -641,17 +654,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     if (markerSha === before.head) {
       // The core update is complete at this head: nothing is installed, built,
       // tested or migrated. The per-project pass still runs — every target once.
-      let list = [];
-      let registryOk = true;
-      if (opts.projects !== false) {
-        try {
-          list = typeof projects === 'function' ? (await projects()) ?? [] : projects;
-        } catch (err) {
-          log(`\n✗ per-project refresh SKIPPED — project registry unavailable: ${err?.message ?? err}`);
-          fail(2);
-          registryOk = false;
-        }
-      }
+      const resolved = opts.projects === false ? [] : await resolveProjects();
+      const registryOk = resolved !== null;
+      if (!registryOk) fail(2);
+      const list = resolved ?? [];
       // The blind spot this reports is INDEPENDENT of clone lag — an
       // already-current clone with two unregistered projects is the measured
       // 2026-08-28 state exactly — so the report belongs on this path too.
@@ -795,7 +801,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // never merged, and never stops the other projects.
   // Resolved HERE, not at startup: on a fresh clone the registry cannot be read
   // until the build above has run (see the projects param note).
-  const projectList = opts.projects === false ? [] : (typeof projects === 'function' ? (await projects()) ?? [] : projects);
+  const resolvedList = opts.projects === false ? [] : await resolveProjects();
+  const registryFailed = resolvedList === null;
+  const projectList = resolvedList ?? [];
   // Review fix H1: the machine-store loop above covers this clone + the domain
   // stores, but every OTHER registered project on this machine has its own
   // .sterling store that the new code refuses to write until migrated — and
@@ -844,6 +852,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // failed store migration or a failed step leaves it incomplete, and the next
   // run resumes it. The per-project refresh below never decides this.
   const coreComplete = report.exit === 0;
+  if (registryFailed) fail(2);
   let refreshFailures = 0;
   if (opts.projects !== false && projectList.length) {
     log(`\n▸ syncing agents across ${projectList.length} registered project(s)`);
@@ -889,6 +898,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       writeUpdateMarker(cwd, after.head);
     } catch (err) {
       log(`\n⚠ update marker write FAILED (nonfatal — the update itself already succeeded): ${err?.message ?? err}`);
+    }
+    if (registryFailed) {
+      log('\n✗ the core update is complete, but the project registry could not be read — NO registered project was migrated or refreshed (see above). Fix it and rerun /sterling:update.');
     }
     if (refreshFailures) {
       log(`\n✗ the core update is complete, but ${refreshFailures} project(s) failed their refresh (above) — fix them and rerun /sterling:update; every registered project is refreshed on every run.`);
