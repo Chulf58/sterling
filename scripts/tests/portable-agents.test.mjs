@@ -113,8 +113,8 @@ const FENCE_BASELINE = '703a327';
 // (state READY TO CLEAR plainly) and 993c29b (a store-unsettleable consequential
 // choice goes through the grill skill, decision sterling-grill-skill-design);
 // those last two meet in the release/0.18.16 merge, so its pin moves to
-// 993c29b; every other template stays pinned to 703a327.
-const BASELINE_OVERRIDES = { 'conductor.md': '993c29b' };
+// 4603394; every other template stays pinned to 703a327.
+const BASELINE_OVERRIDES = { 'conductor.md': '4603394' };
 const renderConfig = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
 const renderOpts = { pluginVersion: '0.0.0-test', now: '2026-01-01T00:00:00.000Z', vars: { NODE: '"/usr/bin/node"', HOOKS_DIR: '/x/hooks', GIT_RO: '/x/git-ro.mjs' }, config: renderConfig };
 const withoutHeader = (content) => content.replace(parseInstalledHeader(content).headerLine + '\n', '');
