@@ -109,15 +109,29 @@ const withEol = (lfText, eol) => (eol === '\r\n' ? lfText.replace(/\n/g, '\r\n')
 // the continuation rule keeps this robust if they ever wrap).
 // Lines inside a fenced code block (``` or ~~~) are examples, never bullets (Sol review of
 // b41f29d..f32c48a, HIGH): a lead is only ever located outside every fence.
+// A fence closes only on a line of the SAME character with a run at least as long as its
+// opener's (CommonMark; Sol re-check of af99713) — a ~~~ line inside a ``` fence is content.
+// An unclosed fence runs to the end of the text, as in CommonMark.
 const FENCE = /^\s*(```|~~~)/;
+// fenceSpans(lines) → Map(openerIndex → closerIndex) for every fenced block.
+function fenceSpans(lines) {
+  const spans = new Map();
+  for (let i = 0; i < lines.length; i++) {
+    const open = /^\s*(`{3,}|~{3,})/.exec(lines[i]);
+    if (!open) continue;
+    const ch = open[1][0];
+    const closer = new RegExp(`^\\s*\\${ch}{${open[1].length},}\\s*$`);
+    let j = i + 1;
+    while (j < lines.length && !closer.test(lines[j])) j++;
+    spans.set(i, Math.min(j, lines.length - 1));
+    i = j;
+  }
+  return spans;
+}
 function unfencedLineIndexes(lines) {
-  const out = [];
-  let inFence = false;
-  lines.forEach((l, i) => {
-    if (FENCE.test(l)) inFence = !inFence;
-    else if (!inFence) out.push(i);
-  });
-  return out;
+  const fenced = new Set();
+  for (const [open, close] of fenceSpans(lines)) for (let k = open; k <= close; k++) fenced.add(k);
+  return lines.map((_, i) => i).filter((i) => !fenced.has(i));
 }
 function extractBlock(text, lead) {
   const lines = text.split('\n');
@@ -131,19 +145,26 @@ function extractBlock(text, lead) {
 // Where to INSERT after a list item: past its whole extent, including blank-separated INDENTED
 // continuation paragraphs, so an insert never lands inside an item. extractBlock's stop at the
 // first blank line stays as it is — it defines the compared block, not the item's extent.
+// An INDENTED fenced block continues the item and is taken whole, through its closing fence
+// (Sol re-check of af99713); an unindented fence starts a new top-level block and ends it.
 function itemEnd(text, start) {
   const lines = text.split('\n');
+  const spans = fenceSpans(lines);
   let end = start + 1;
   let i = start + 1;
   while (i < lines.length) {
     if (/^\s*$/.test(lines[i])) {
       let j = i;
       while (j < lines.length && /^\s*$/.test(lines[j])) j++;
-      if (j < lines.length && /^\s+\S/.test(lines[j]) && !FENCE.test(lines[j])) {
+      if (j < lines.length && /^\s+\S/.test(lines[j])) {
         i = j;
         continue;
       }
       break;
+    }
+    if (/^\s+/.test(lines[i]) && spans.has(i)) {
+      end = i = spans.get(i) + 1;
+      continue;
     }
     if (/^(- |#)/.test(lines[i]) || FENCE.test(lines[i])) break;
     end = ++i;

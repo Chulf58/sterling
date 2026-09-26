@@ -437,3 +437,41 @@ test('stamp-contract: a valid anchor followed by a blank-separated indented cont
     f.cleanup();
   }
 });
+
+// Sol re-check of af99713: fences close only on the SAME character with a run at least as long
+// (CommonMark), and an indented fenced block is part of the list item it continues.
+test('stamp-contract: a ``` example containing a ~~~ line, then an exact Knowledge bullet STILL inside the fence, is never an anchor — the bullets land after the REAL one', () => {
+  const f = stampFixture('fence-mixed', (complete) => {
+    const knowledge = complete.split('\n').find((l) => l.startsWith(KNOWLEDGE_LEAD));
+    const fence = `\n## Example\n\n\`\`\`md\n~~~\n${knowledge}\n\`\`\`\n`;
+    const [first, ...rest] = complete.split('\n');
+    const withFence = [first, fence, ...rest].join('\n');
+    return { planted: dropBlock(dropBlock(withFence, CODEX_LEAD), READY_LEAD), expected: withFence };
+  });
+  try {
+    const r = runStampContract(f.regDb);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'a ~~~ line does not close a ``` fence; the fenced copy stays untouched');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: a valid anchor whose item continues with an INDENTED fenced code block gets the insert after that block, never re-parenting it under the new bullet', () => {
+  const f = stampFixture('fence-continuation', (complete) => {
+    const knowledge = complete.split('\n').find((l) => l.startsWith(KNOWLEDGE_LEAD));
+    // In the render the Codex line directly follows Knowledge, so here it follows the fenced block.
+    const withBlock = complete.replace(knowledge, `${knowledge}\n\n  \`\`\`sh\n  echo example\n\n  - not a bullet\n  \`\`\``);
+    return { planted: dropBlock(withBlock, CODEX_LEAD), expected: withBlock };
+  });
+  try {
+    const r1 = runStampContract(f.regDb);
+    assert.equal(r1.status, 0, `${r1.stdout}\n${r1.stderr}`);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'Codex lands after the closing fence of the item\'s code block');
+    const r2 = runStampContract(f.regDb);
+    assert.ok(!/inserted|updated|renamed/.test(r2.stdout), `second run writes nothing:\n${r2.stdout}`);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected);
+  } finally {
+    f.cleanup();
+  }
+});
