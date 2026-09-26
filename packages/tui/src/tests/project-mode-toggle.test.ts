@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { SterlingStore } from '@sterling/store';
 import { initialUi, type UiState } from '../state.js';
 import * as stateMod from '../state.js';
@@ -207,4 +208,24 @@ test('applyModeToggle: an unreadable config reports the failure through onError 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// The notice after a mode toggle (Astra design review item 5, decision
+// project-mode-hobby-work-toggle-decides-flow). sync-agents refreshes only the
+// portable agents; the handoff projection runs from init or /sterling:update. So
+// the work notice must name /sterling:update (or init) as the path that writes
+// BOTH file sets, and must never claim sync-agents writes the handoff files.
+// The notice is composed inline in main.ts (the terminal entry, which cannot be
+// imported under test), so this pins its source text.
+test('mode toggle notice: work names /sterling:update (or init) for both file sets, never sync-agents for the handoff files', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, '..', '..', 'src', 'main.ts'), 'utf8');
+  const work = src.match(/'project mode set to work[^']*'/)?.[0];
+  assert.ok(work, 'the work notice is present');
+  assert.match(work, /\/sterling:update/);
+  assert.match(work, /\binit\b/);
+  assert.match(work, /OpenCode agents and (the )?handoff files/);
+  assert.doesNotMatch(work, /sync-agents[^.]*handoff/, 'sync-agents does not run the handoff projection');
+  assert.match(work, /sync-agents[^.]*only[^.]*OpenCode agents|OpenCode agents only/, 'if sync-agents is named, it is named as the agents-only path');
 });
