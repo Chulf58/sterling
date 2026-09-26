@@ -69,8 +69,11 @@ const TARGET_LEADS = [
   // block found under the OLD lead is replaced by the new bullet under the SAME
   // template-descended guard as the normal replace path.
   '- **Knowledge is born structured.**',
-  // 2026-09-26 (commit 6661665): NEW to every existing sibling, so it arrives only
-  // through the insert path — see INSERT_AFTER below.
+  // 2026-09-26: the Codex and READY TO CLEAR bullets are NEW to older siblings, so they
+  // arrive through the insert path — see INSERT_AFTER below. Codex stays BEFORE
+  // READY TO CLEAR here: leads are processed in order, and READY TO CLEAR anchors on
+  // the Codex bullet, so a sibling missing both gets them back in template order.
+  '- **Codex runs through the MCP tool, never the shell.**',
   '- **Say `READY TO CLEAR` plainly when it is time.**',
 ];
 
@@ -78,10 +81,11 @@ const TARGET_LEADS = [
 // absent from a sibling (and not renamed) is inserted after the FIRST anchor the sibling
 // carries; with no anchor present it is ANCHOR_MISSING_REFUSED. Declared per lead, so
 // reordering TARGET_LEADS no longer retargets an insert (the old index-pinned hazard).
-// READY TO CLEAR sits after the Codex bullet in the template; that bullet is not stamped,
-// so older siblings may lack it and the always-stamped Knowledge bullet is the fallback.
+// READY TO CLEAR sits after the Codex bullet in the template; when the Codex bullet is
+// refused (e.g. present only in the wrong layer) the Knowledge bullet is the fallback.
 const INSERT_AFTER = new Map([
   ['- **Concept articles — capture design the moment it settles', ['- **Reconcile _every affected_ article, not just the primary one**']],
+  ['- **Codex runs through the MCP tool, never the shell.**', ['- **Knowledge is born structured.**']],
   ['- **Say `READY TO CLEAR` plainly when it is time.**', ['- **Codex runs through the MCP tool, never the shell.**', '- **Knowledge is born structured.**']],
 ]);
 

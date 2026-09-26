@@ -285,20 +285,69 @@ test('stamp-contract: a sibling CLAUDE.md lacking the READY TO CLEAR bullet gets
   }
 });
 
-test('stamp-contract: a sibling lacking BOTH the Codex and READY TO CLEAR bullets gets READY TO CLEAR inserted after "Knowledge is born structured." (the fallback anchor), exit 0', () => {
+test('stamp-contract: a sibling lacking BOTH the Codex and READY TO CLEAR bullets gets both back in template order — Codex after "Knowledge is born structured.", READY TO CLEAR after Codex — byte-identical to the render, exit 0', () => {
   const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
   const regDb = join(scratch, 'registry.db');
   const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-ready-fallback-'));
   const registry = new ProjectRegistry(regDb);
   try {
     writeCompleteSibling(dir, 'ready-fallback-sibling');
-    const noCodex = dropBlock(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), CODEX_LEAD);
-    writeFileSync(join(dir, 'CLAUDE.md'), dropBlock(noCodex, READY_LEAD));
+    const complete = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+    writeFileSync(join(dir, 'CLAUDE.md'), dropBlock(dropBlock(complete, CODEX_LEAD), READY_LEAD));
     registry.register({ repo_path: dir, name: 'ready-fallback-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
 
     const r = runStampContract(regDb);
-    assert.equal(r.status, 0, `fallback-anchored insert is not a refusal: ${r.stdout}\n${r.stderr}`);
-    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), noCodex, 'READY TO CLEAR lands directly after the Knowledge bullet; the absent Codex bullet is not invented');
+    assert.equal(r.status, 0, `chained inserts are not a refusal: ${r.stdout}\n${r.stderr}`);
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), complete, 'both bullets restored in their template positions, nothing else changed');
+  } finally {
+    registry.close();
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('stamp-contract: a sibling CLAUDE.md lacking the Codex bullet gets it inserted after "Knowledge is born structured." — byte-identical to the current template render, exit 0', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-codex-'));
+  const registry = new ProjectRegistry(regDb);
+  try {
+    writeCompleteSibling(dir, 'codex-sibling');
+    const complete = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+    writeFileSync(join(dir, 'CLAUDE.md'), dropBlock(complete, CODEX_LEAD));
+    registry.register({ repo_path: dir, name: 'codex-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+
+    const r = runStampContract(regDb);
+    assert.equal(r.status, 0, `inserting a missing bullet is not a refusal: ${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /inserted {2}- \*\*Codex runs through the MCP tool/);
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), complete, 'bullet inserted in its template position, nothing else changed');
+  } finally {
+    registry.close();
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('stamp-contract: with the Codex bullet refused (present only in AGENTS.md, the wrong layer), READY TO CLEAR still inserts via the fallback anchor "Knowledge is born structured." — exit 2 for the refusal only', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-ready-anchor-fallback-'));
+  const registry = new ProjectRegistry(regDb);
+  try {
+    writeCompleteSibling(dir, 'ready-anchor-fallback-sibling');
+    const claude = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+    const codexLine = claude.split('\n').find((l) => l.startsWith(CODEX_LEAD));
+    const noBoth = dropBlock(dropBlock(claude, CODEX_LEAD), READY_LEAD);
+    const readyLine = claude.split('\n').find((l) => l.startsWith(READY_LEAD));
+    writeFileSync(join(dir, 'CLAUDE.md'), noBoth);
+    writeFileSync(join(dir, 'AGENTS.md'), `${readFileSync(join(dir, 'AGENTS.md'), 'utf8')}\n${codexLine}\n`);
+    registry.register({ repo_path: dir, name: 'ready-anchor-fallback-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+
+    const r = runStampContract(regDb);
+    assert.equal(r.status, 2, 'the wrong-layer Codex bullet is a refusal');
+    assert.match(r.stdout, /WRONG_LAYER_REFUSED {2}- \*\*Codex runs through/);
+    const knowledge = noBoth.split('\n').find((l) => l.startsWith('- **Knowledge is born structured.**'));
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), noBoth.replace(knowledge, `${knowledge}\n${readyLine}`), 'READY TO CLEAR lands directly after the Knowledge bullet; no Codex copy is written into CLAUDE.md');
   } finally {
     registry.close();
     rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
