@@ -44,15 +44,23 @@ case "$MODE" in
   tui)
     tmux has-session -t "$SESSION" 2>/dev/null \
       || { echo "sterling-launch: session '$SESSION' not running - start it with: sterling-launch.sh" >&2; exit 1; }
+    # Session-scoped (not -g): click-to-focus a pane; Shift+drag still selects
+    # plain terminal text in the claude pane. Set again here so a session
+    # created before this option existed picks it up when the TUI pane is re-added.
+    tmux set-option -t "$SESSION" mouse on
     add_tui_pane
     ;;
   up)
     [ -n "$CLAUDE_BIN" ] || { echo "sterling-launch: 'claude' not found on PATH (set CLAUDE_BIN)" >&2; exit 1; }
     # Idempotent: this project already running -> just attach (never a duplicate).
     if tmux has-session -t "$SESSION" 2>/dev/null; then
+      tmux set-option -t "$SESSION" mouse on
       exec tmux attach-session -t "$SESSION"
     fi
     tmux new-session -d -s "$SESSION" -c "$WORKDIR" "$CLAUDE_BIN" --plugin-dir "$PLUGIN_DIR"
+    # Session-scoped (not -g): click-to-focus a pane; Shift+drag still selects
+    # plain terminal text in the claude pane.
+    tmux set-option -t "$SESSION" mouse on
     add_tui_pane
     tmux select-pane -t "$SESSION".0
     exec tmux attach-session -t "$SESSION"

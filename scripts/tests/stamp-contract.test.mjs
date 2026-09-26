@@ -250,3 +250,228 @@ test('stamp-contract: realpath self-exclusion — this Sterling clone\'s own pat
     rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
+
+// The READY TO CLEAR bullet (commit 6661665) is NEW to every existing sibling, so it can only
+// arrive through the insert path — the replace path needs a block to already be there.
+const READY_LEAD = '- **Say `READY TO CLEAR` plainly when it is time.**';
+const CODEX_LEAD = '- **Codex runs through the MCP tool, never the shell.**';
+function dropBlock(text, lead) {
+  const lines = text.split('\n');
+  const i = lines.findIndex((l) => l.startsWith(lead));
+  assert.notEqual(i, -1, `fixture sanity: '${lead}' present before removal`);
+  lines.splice(i, 1);
+  return lines.join('\n');
+}
+
+test('stamp-contract: a sibling CLAUDE.md lacking the READY TO CLEAR bullet gets it inserted after the Codex bullet — the result is byte-identical to the current template render, exit 0', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-ready-'));
+  const registry = new ProjectRegistry(regDb);
+  try {
+    writeCompleteSibling(dir, 'ready-sibling');
+    const complete = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+    writeFileSync(join(dir, 'CLAUDE.md'), dropBlock(complete, READY_LEAD));
+    registry.register({ repo_path: dir, name: 'ready-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+
+    const r = runStampContract(regDb);
+    assert.equal(r.status, 0, `inserting a missing bullet is not a refusal: ${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /inserted {2}- \*\*Say `READY TO CLEAR`/);
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), complete, 'bullet inserted in its template position, nothing else changed');
+  } finally {
+    registry.close();
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('stamp-contract: a sibling lacking BOTH the Codex and READY TO CLEAR bullets gets both back in template order — Codex after "Knowledge is born structured.", READY TO CLEAR after Codex — byte-identical to the render, exit 0', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-ready-fallback-'));
+  const registry = new ProjectRegistry(regDb);
+  try {
+    writeCompleteSibling(dir, 'ready-fallback-sibling');
+    const complete = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+    writeFileSync(join(dir, 'CLAUDE.md'), dropBlock(dropBlock(complete, CODEX_LEAD), READY_LEAD));
+    registry.register({ repo_path: dir, name: 'ready-fallback-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+
+    const r = runStampContract(regDb);
+    assert.equal(r.status, 0, `chained inserts are not a refusal: ${r.stdout}\n${r.stderr}`);
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), complete, 'both bullets restored in their template positions, nothing else changed');
+  } finally {
+    registry.close();
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('stamp-contract: a sibling CLAUDE.md lacking the Codex bullet gets it inserted after "Knowledge is born structured." — byte-identical to the current template render, exit 0', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-codex-'));
+  const registry = new ProjectRegistry(regDb);
+  try {
+    writeCompleteSibling(dir, 'codex-sibling');
+    const complete = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+    writeFileSync(join(dir, 'CLAUDE.md'), dropBlock(complete, CODEX_LEAD));
+    registry.register({ repo_path: dir, name: 'codex-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+
+    const r = runStampContract(regDb);
+    assert.equal(r.status, 0, `inserting a missing bullet is not a refusal: ${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /inserted {2}- \*\*Codex runs through the MCP tool/);
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), complete, 'bullet inserted in its template position, nothing else changed');
+  } finally {
+    registry.close();
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('stamp-contract: with the Codex bullet refused (present only in AGENTS.md, the wrong layer), READY TO CLEAR still inserts via the fallback anchor "Knowledge is born structured." — exit 2 for the refusal only', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-ready-anchor-fallback-'));
+  const registry = new ProjectRegistry(regDb);
+  try {
+    writeCompleteSibling(dir, 'ready-anchor-fallback-sibling');
+    const claude = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+    const codexLine = claude.split('\n').find((l) => l.startsWith(CODEX_LEAD));
+    const noBoth = dropBlock(dropBlock(claude, CODEX_LEAD), READY_LEAD);
+    const readyLine = claude.split('\n').find((l) => l.startsWith(READY_LEAD));
+    writeFileSync(join(dir, 'CLAUDE.md'), noBoth);
+    writeFileSync(join(dir, 'AGENTS.md'), `${readFileSync(join(dir, 'AGENTS.md'), 'utf8')}\n${codexLine}\n`);
+    registry.register({ repo_path: dir, name: 'ready-anchor-fallback-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+
+    const r = runStampContract(regDb);
+    assert.equal(r.status, 2, 'the wrong-layer Codex bullet is a refusal');
+    assert.match(r.stdout, /WRONG_LAYER_REFUSED {2}- \*\*Codex runs through/);
+    const knowledge = noBoth.split('\n').find((l) => l.startsWith('- **Knowledge is born structured.**'));
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), noBoth.replace(knowledge, `${knowledge}\n${readyLine}`), 'READY TO CLEAR lands directly after the Knowledge bullet; no Codex copy is written into CLAUDE.md');
+  } finally {
+    registry.close();
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// Sol review of b41f29d..f32c48a (HIGH): an insert anchor must be the REAL top-level bullet (never
+// a copy inside a fenced example), must itself have passed validation this run (never a refused,
+// hand-tuned block), and the insert must land after the anchor's COMPLETE list item.
+const KNOWLEDGE_LEAD = '- **Knowledge is born structured.**';
+function stampFixture(name, mutate) {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), `sterling-stamp-${name}-`));
+  const registry = new ProjectRegistry(regDb);
+  writeCompleteSibling(dir, name);
+  const complete = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+  const { planted, expected } = mutate(complete);
+  writeFileSync(join(dir, 'CLAUDE.md'), planted);
+  registry.register({ repo_path: dir, name, stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+  const cleanup = () => {
+    registry.close();
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  };
+  return { regDb, claudePath: join(dir, 'CLAUDE.md'), planted, expected, cleanup };
+}
+
+test('stamp-contract: an exact Knowledge bullet inside a fenced ``` example BEFORE the conduct section is never an anchor — the missing bullets land after the REAL one, and a second run changes nothing (idempotent)', () => {
+  const f = stampFixture('fenced', (complete) => {
+    const knowledge = complete.split('\n').find((l) => l.startsWith(KNOWLEDGE_LEAD));
+    const fence = `\n## Example\n\n\`\`\`md\n${knowledge}\n\`\`\`\n`;
+    const [first, ...rest] = complete.split('\n');
+    const withFence = [first, fence, ...rest].join('\n');
+    return { planted: dropBlock(dropBlock(withFence, CODEX_LEAD), READY_LEAD), expected: withFence };
+  });
+  try {
+    const r1 = runStampContract(f.regDb);
+    assert.equal(r1.status, 0, `${r1.stdout}\n${r1.stderr}`);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'both bullets restored after the REAL Knowledge bullet; the fenced example is untouched');
+    const r2 = runStampContract(f.regDb);
+    assert.equal(r2.status, 0, `${r2.stdout}\n${r2.stderr}`);
+    assert.ok(!/inserted|updated|renamed/.test(r2.stdout), `second run writes nothing:\n${r2.stdout}`);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'second run leaves the file byte-identical');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: a hand-tuned MULTI-PARAGRAPH Knowledge bullet is refused AND never used as an anchor — Codex and READY TO CLEAR are ANCHOR_MISSING_REFUSED, file byte-identical, exit 2', () => {
+  const f = stampFixture('handtuned-anchor', (complete) => {
+    const knowledge = complete.split('\n').find((l) => l.startsWith(KNOWLEDGE_LEAD));
+    const tuned = complete.replace(knowledge, `${KNOWLEDGE_LEAD} This project words it its own way.\n\n  A second paragraph of the same hand-tuned item.`);
+    const planted = dropBlock(dropBlock(tuned, CODEX_LEAD), READY_LEAD);
+    return { planted, expected: planted };
+  });
+  try {
+    const r = runStampContract(f.regDb);
+    assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /HAND_TUNED_REFUSED {2}- \*\*Knowledge is born structured/);
+    assert.match(r.stdout, /ANCHOR_MISSING_REFUSED {2}- \*\*Codex runs through/);
+    assert.match(r.stdout, /ANCHOR_MISSING_REFUSED {2}- \*\*Say `READY TO CLEAR`/);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'the refused bullet is not restructured and nothing is inserted');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: a valid anchor followed by a blank-separated indented continuation paragraph gets the insert after the WHOLE list item, and a second run changes nothing (idempotent)', () => {
+  const f = stampFixture('continuation', (complete) => {
+    const knowledge = complete.split('\n').find((l) => l.startsWith(KNOWLEDGE_LEAD));
+    const extra = '\n  A project-added paragraph under the Knowledge item.';
+    // In the render the Codex line directly follows Knowledge, so here it follows the continuation.
+    const withExtra = complete.replace(knowledge, `${knowledge}\n${extra}`);
+    return { planted: dropBlock(withExtra, CODEX_LEAD), expected: withExtra };
+  });
+  try {
+    const r1 = runStampContract(f.regDb);
+    assert.equal(r1.status, 0, `${r1.stdout}\n${r1.stderr}`);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'Codex lands after the continuation paragraph, never between the item and its continuation');
+    const r2 = runStampContract(f.regDb);
+    assert.equal(r2.status, 0, `${r2.stdout}\n${r2.stderr}`);
+    assert.ok(!/inserted|updated|renamed/.test(r2.stdout), `second run writes nothing:\n${r2.stdout}`);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected);
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Sol re-check of af99713: fences close only on the SAME character with a run at least as long
+// (CommonMark), and an indented fenced block is part of the list item it continues.
+test('stamp-contract: a ``` example containing a ~~~ line, then an exact Knowledge bullet STILL inside the fence, is never an anchor — the bullets land after the REAL one', () => {
+  const f = stampFixture('fence-mixed', (complete) => {
+    const knowledge = complete.split('\n').find((l) => l.startsWith(KNOWLEDGE_LEAD));
+    const fence = `\n## Example\n\n\`\`\`md\n~~~\n${knowledge}\n\`\`\`\n`;
+    const [first, ...rest] = complete.split('\n');
+    const withFence = [first, fence, ...rest].join('\n');
+    return { planted: dropBlock(dropBlock(withFence, CODEX_LEAD), READY_LEAD), expected: withFence };
+  });
+  try {
+    const r = runStampContract(f.regDb);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'a ~~~ line does not close a ``` fence; the fenced copy stays untouched');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: a valid anchor whose item continues with an INDENTED fenced code block gets the insert after that block, never re-parenting it under the new bullet', () => {
+  const f = stampFixture('fence-continuation', (complete) => {
+    const knowledge = complete.split('\n').find((l) => l.startsWith(KNOWLEDGE_LEAD));
+    // In the render the Codex line directly follows Knowledge, so here it follows the fenced block.
+    const withBlock = complete.replace(knowledge, `${knowledge}\n\n  \`\`\`sh\n  echo example\n\n  - not a bullet\n  \`\`\``);
+    return { planted: dropBlock(withBlock, CODEX_LEAD), expected: withBlock };
+  });
+  try {
+    const r1 = runStampContract(f.regDb);
+    assert.equal(r1.status, 0, `${r1.stdout}\n${r1.stderr}`);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'Codex lands after the closing fence of the item\'s code block');
+    const r2 = runStampContract(f.regDb);
+    assert.ok(!/inserted|updated|renamed/.test(r2.stdout), `second run writes nothing:\n${r2.stdout}`);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected);
+  } finally {
+    f.cleanup();
+  }
+});

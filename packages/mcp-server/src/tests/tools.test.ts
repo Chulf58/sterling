@@ -1055,6 +1055,14 @@ test('session-event writers (no_capture / concept_designed / capture_pending) ap
       'one event per declaration, in order, in the ONE register H10 reads'
     );
     assert.ok(events.every((e) => e.detail && e.at === NOW), 'every event carries detail + timestamp (sessionEventSchema shape)');
+    // board f003082d: the target rides as its own field (trimmed) so H10 keys
+    // the debt on the target alone; detail keeps the readable joined form
+    const pendingEvent = events[3] as { detail: string; target?: string };
+    assert.equal(pendingEvent.target, 'commit sterling/wave-3', 'capture_pending records target as its own field');
+    assert.equal(pendingEvent.detail, pending.pending, 'detail is still the joined "<target> — <reason>"');
+    assert.equal(tools.capturePending('  commit padded  ', 'reason').pending.startsWith('commit padded — '), true);
+    const padded = (JSON.parse(readFileSync(eventsPath, 'utf8')) as { target?: string }[]).at(-1);
+    assert.equal(padded?.target, 'commit padded', 'the target field is trimmed like the detail');
 
     // a server with no resolvable project root refuses loudly instead of
     // writing the register somewhere no hook will ever read it (P5)

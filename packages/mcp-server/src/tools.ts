@@ -8737,7 +8737,7 @@ export class SterlingTools {
    * append the SAME sessionEventSchema shape to the same register, so H10
    * cannot tell them apart — one shape, one consumer (invariant 1).
    */
-  private appendSessionEvents(entries: { kind: SessionEvent['kind']; detail: string; lane?: NoCaptureLane }[]): { at: string } {
+  private appendSessionEvents(entries: { kind: SessionEvent['kind']; detail: string; lane?: NoCaptureLane; target?: string }[]): { at: string } {
     if (!this.repoRoot) {
       throw new Error(
         'session-event write: no project root is known to this server, so the transient register location cannot be resolved — use the script fallback (scripts/no-capture.mjs / scripts/concept-designed.mjs in the plugin clone)'
@@ -8830,7 +8830,9 @@ export class SterlingTools {
       throw new Error(`capture_pending: 'reason' is required — say what capture is in flight`);
     }
     const detail = `${target.trim()} — ${reason.trim()}`;
-    const { at } = this.appendSessionEvents([{ kind: 'capture_pending', detail }]);
+    // `target` rides as its own field (board f003082d): H10 keys the lapsed
+    // debt on it alone, so the same target with a different reason is one item.
+    const { at } = this.appendSessionEvents([{ kind: 'capture_pending', detail, target: target.trim() }]);
     return { pending: detail, at };
   }
 

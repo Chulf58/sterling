@@ -65,7 +65,6 @@ import {
   extractAxisTerms,
   axisHits,
   outgoingProposalText,
-  renderDecisionPointers,
   renderArticlePointers,
   ARTICLE_POINTER_CAP,
   AXIS_MIN_HITS,
@@ -82,7 +81,7 @@ import {
   subQuestionText,
   assembleDelivery,
   resolveTotalCap,
-  decisionBlockPointer,
+  decisionPointerPart,
 } from './lib/delivery.mjs';
 
 // Injection ceilings. Deliberately tighter than H19's file-touch payload: a
@@ -445,7 +444,11 @@ function main(input) {
     // fire even when the true match count was higher (decision 92088a62:
     // "at most 3 per package... with the omitted count stated").
     const hazards = fresh.filter((x) => x.record.type === 'anti_pattern');
-    const decisions = fresh.filter((x) => x.record.type === 'decision').slice(0, MAX_DECISIONS);
+    // NOT sliced to MAX_DECISIONS here either (board 6c0c848f item 3): an
+    // early slice silently dropped the sixth match with no count and no
+    // degraded flag. decisionPointerPart caps the rendered pointers AND the
+    // credited identities at MAX_DECISIONS and discloses the rest.
+    const decisions = fresh.filter((x) => x.record.type === 'decision');
     // NOT sliced here — renderArticlePointers itself caps at ARTICLE_POINTER_CAP
     // and discloses the overflow, the same shape as renderHazards/
     // renderDecisionPointers; slicing early would lose the true matched count
@@ -504,7 +507,6 @@ function main(input) {
     // MAX_SAFE_INTEGER) — a whole hazard IS substance, on every surface that
     // renders one (decision 92088a62 item 4). Decisions stay pointer-only —
     // discovery.
-    const shownDecisions = decisions.slice(0, MAX_DECISIONS).map((x) => x.record);
     const hazardBlocks = [
       ...hazardParts(hazards.map((x) => x.record), {
         remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
@@ -515,13 +517,9 @@ function main(input) {
     const decisionBlocks = [
       ...(decisions.length
         ? [
-            {
-              kind: 'ordinary', contentClass: 'discovery',
-              identities: shownDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d), name: d.slug || d.title })),
-              text: renderDecisionPointers('(subject match)', decisions.map((x) => x.record), MAX_DECISIONS, { remedy: decisionRemedy, matchLabel: 'for this subject' }),
-              pointer: decisionBlockPointer(decisions.length, decisionRemedy, shownDecisions[0]),
-              suffix: `  … the rest held back by the delivery cap — ${decisionRemedy}`,
-            },
+            decisionPointerPart('(subject match)', decisions.map((x) => x.record), {
+              widen: decisionRemedy, cap: MAX_DECISIONS, remedy: decisionRemedy, matchLabel: 'for this subject',
+            }),
           ]
         : []),
     ];

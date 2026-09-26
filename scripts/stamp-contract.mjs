@@ -51,16 +51,15 @@ const TARGET_LEADS = [
   // only for TARGET_LEADS[1] and anchoring on TARGET_LEADS[0]. A lead appended at
   // any other index gets ANCHOR_MISSING_REFUSED, so folding was still the right
   // call for THIS bullet — but for that reason, not the one first written down.
-  // Note the index pinning is itself a hazard: reordering TARGET_LEADS silently
-  // retargets an insert into seven foreign repos. Generalizing it to a declared
-  // {lead, insertAfter} pair is tracked, not done here.
+  // [2026-09-26: the index pinning is gone — inserts are now declared per lead in
+  // INSERT_AFTER, the {lead, insertAfter} generalization this note once tracked.]
   '- **Stage retrieval before acting**',
   // Added 2026-07-27. The mirror rule says the template is the SOURCE, but the two
   // had diverged and the stronger text was in Sterling's own CLAUDE.md — so seven
   // siblings were running weaker conduct rules than the repo that ships them. Both
   // bullets ALREADY EXIST in every sibling (they were generated from this template),
   // so these ride the REPLACE path; neither depends on the index-pinned insert above.
-  // APPEND ONLY: reordering this array retargets that insert into foreign repos.
+  // (The APPEND-ONLY constraint this note once stated died with the index pinning.)
   '- **Anti-speculation:**',
   '- **No false action claims:**',
   // 2026-08-11: the note surface was retired (decision 'note-surface-retired')
@@ -70,7 +69,25 @@ const TARGET_LEADS = [
   // block found under the OLD lead is replaced by the new bullet under the SAME
   // template-descended guard as the normal replace path.
   '- **Knowledge is born structured.**',
+  // 2026-09-26: the Codex and READY TO CLEAR bullets are NEW to older siblings, so they
+  // arrive through the insert path — see INSERT_AFTER below. Codex stays BEFORE
+  // READY TO CLEAR here: leads are processed in order, and READY TO CLEAR anchors on
+  // the Codex bullet, so a sibling missing both gets them back in template order.
+  '- **Codex runs through the MCP tool, never the shell.**',
+  '- **Say `READY TO CLEAR` plainly when it is time.**',
 ];
+
+// Insertable bullets: lead → the anchor lead(s) it goes after, tried in order. A lead
+// absent from a sibling (and not renamed) is inserted after the FIRST anchor the sibling
+// carries; with no anchor present it is ANCHOR_MISSING_REFUSED. Declared per lead, so
+// reordering TARGET_LEADS no longer retargets an insert (the old index-pinned hazard).
+// READY TO CLEAR sits after the Codex bullet in the template; when the Codex bullet is
+// refused (e.g. present only in the wrong layer) the Knowledge bullet is the fallback.
+const INSERT_AFTER = new Map([
+  ['- **Concept articles — capture design the moment it settles', ['- **Reconcile _every affected_ article, not just the primary one**']],
+  ['- **Codex runs through the MCP tool, never the shell.**', ['- **Knowledge is born structured.**']],
+  ['- **Say `READY TO CLEAR` plainly when it is time.**', ['- **Codex runs through the MCP tool, never the shell.**', '- **Knowledge is born structured.**']],
+]);
 
 // Renamed bullets: new lead → the old lead(s) it replaced. When the new lead is
 // absent from a sibling, a block under an old lead is replaced by the new bullet
@@ -90,13 +107,69 @@ const withEol = (lfText, eol) => (eol === '\r\n' ? lfText.replace(/\n/g, '\r\n')
 // A block = the bullet line plus continuation lines until the next top-level
 // bullet, heading, or blank line (template bullets are single long lines today;
 // the continuation rule keeps this robust if they ever wrap).
+// Lines inside a fenced code block (``` or ~~~) are examples, never bullets (Sol review of
+// b41f29d..f32c48a, HIGH): a lead is only ever located outside every fence.
+// A fence closes only on a line of the SAME character with a run at least as long as its
+// opener's (CommonMark; Sol re-check of af99713) — a ~~~ line inside a ``` fence is content.
+// An unclosed fence runs to the end of the text, as in CommonMark.
+const FENCE = /^\s*(```|~~~)/;
+// fenceSpans(lines) → Map(openerIndex → closerIndex) for every fenced block.
+function fenceSpans(lines) {
+  const spans = new Map();
+  for (let i = 0; i < lines.length; i++) {
+    const open = /^\s*(`{3,}|~{3,})/.exec(lines[i]);
+    if (!open) continue;
+    const ch = open[1][0];
+    const closer = new RegExp(`^\\s*\\${ch}{${open[1].length},}\\s*$`);
+    let j = i + 1;
+    while (j < lines.length && !closer.test(lines[j])) j++;
+    spans.set(i, Math.min(j, lines.length - 1));
+    i = j;
+  }
+  return spans;
+}
+function unfencedLineIndexes(lines) {
+  const fenced = new Set();
+  for (const [open, close] of fenceSpans(lines)) for (let k = open; k <= close; k++) fenced.add(k);
+  return lines.map((_, i) => i).filter((i) => !fenced.has(i));
+}
 function extractBlock(text, lead) {
   const lines = text.split('\n');
-  const start = lines.findIndex((l) => l.startsWith(lead));
+  const start = unfencedLineIndexes(lines).find((i) => lines[i].startsWith(lead)) ?? -1;
   if (start === -1) return null;
   let end = start + 1;
-  while (end < lines.length && !/^(- |#|\s*$)/.test(lines[end])) end++;
+  while (end < lines.length && !/^(- |#|\s*$)/.test(lines[end]) && !FENCE.test(lines[end])) end++;
   return { start, end, block: lines.slice(start, end).join('\n') };
+}
+
+// Where to INSERT after a list item: past its whole extent, including blank-separated INDENTED
+// continuation paragraphs, so an insert never lands inside an item. extractBlock's stop at the
+// first blank line stays as it is — it defines the compared block, not the item's extent.
+// An INDENTED fenced block continues the item and is taken whole, through its closing fence
+// (Sol re-check of af99713); an unindented fence starts a new top-level block and ends it.
+function itemEnd(text, start) {
+  const lines = text.split('\n');
+  const spans = fenceSpans(lines);
+  let end = start + 1;
+  let i = start + 1;
+  while (i < lines.length) {
+    if (/^\s*$/.test(lines[i])) {
+      let j = i;
+      while (j < lines.length && /^\s*$/.test(lines[j])) j++;
+      if (j < lines.length && /^\s+\S/.test(lines[j])) {
+        i = j;
+        continue;
+      }
+      break;
+    }
+    if (/^\s+/.test(lines[i]) && spans.has(i)) {
+      end = i = spans.get(i) + 1;
+      continue;
+    }
+    if (/^(- |#)/.test(lines[i]) || FENCE.test(lines[i])) break;
+    end = ++i;
+  }
+  return end;
 }
 
 // Every historical variant of each target bullet, from BOTH templates' git log — the "clean
@@ -172,6 +245,10 @@ for (const p of projects) {
   };
   const siblingFiles = new Map([[AGENTS_TEMPLATE_REL, loadSibling(agentsMd)], [CLAUDE_TEMPLATE_REL, loadSibling(claudeMd)]]);
   const actions = [];
+  // Only a bullet that validated THIS run (in sync, or replaced by the current wording) may
+  // anchor an insert — a refused block is never restructured by an insert beside it.
+  const VALID_ANCHOR = new Set(['matches', 'updated', 'would_update', 'inserted', 'would_insert', 'renamed', 'would_rename']);
+  const outcome = (lead) => [...actions].reverse().find((a) => a.lead === lead)?.action;
   for (const lead of TARGET_LEADS) {
     const home = leadLayer.get(lead);
     const other = TEMPLATE_RELS.find((rel) => rel !== home);
@@ -229,17 +306,18 @@ for (const p of projects) {
       break;
     }
     if (renamed) continue;
-    // The Concept bullet is NEW — insert it after the sibling's
-    // Reconcile bullet when that anchor is clean; everything else missing = drift.
-    if (lead === TARGET_LEADS[1]) {
-      const anchor = extractBlock(target.text, TARGET_LEADS[0]);
-      if (anchor) {
-        const lines = target.text.split('\n');
-        lines.splice(anchor.end, 0, ...want.split('\n'));
-        target.text = lines.join('\n');
-        actions.push({ lead, action: APPLY ? 'inserted' : 'would_insert', file: layerFileName(home) });
-        continue;
-      }
+    // An insertable bullet goes after the first anchor in its chain that validated this run,
+    // past that anchor's whole list item; everything else missing = drift.
+    const anchor = (INSERT_AFTER.get(lead) ?? [])
+      .filter((a) => VALID_ANCHOR.has(outcome(a)))
+      .map((a) => extractBlock(target.text, a))
+      .find(Boolean);
+    if (anchor) {
+      const lines = target.text.split('\n');
+      lines.splice(itemEnd(target.text, anchor.start), 0, ...want.split('\n'));
+      target.text = lines.join('\n');
+      actions.push({ lead, action: APPLY ? 'inserted' : 'would_insert', file: layerFileName(home) });
+      continue;
     }
     actions.push({ lead, action: 'ANCHOR_MISSING_REFUSED', file: layerFileName(home) });
     drift++;

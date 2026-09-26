@@ -4777,7 +4777,14 @@ var sessionEventSchema = external_exports.object({
   ]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
-  lane: noCaptureLaneSchema.optional()
+  lane: noCaptureLaneSchema.optional(),
+  // capture_pending only (board f003082d): the declared target, trimmed, as its
+  // own field. H10 keys a lapsed declaration's capture_owed debt on it alone,
+  // so one target declared with two reasons is one debt. OPTIONAL because a
+  // legacy event carries only the joined detail; H10 keys such an event on the
+  // whole detail (never a split on ' — ', which may occur inside a target).
+  // Trimmed before the length check, so a whitespace-only target is refused.
+  target: external_exports.string().trim().min(1).optional()
 });
 
 // packages/schemas/dist/config.js
@@ -9069,6 +9076,7 @@ function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}
     pinned: part.kind === "hazard" ? true : !!part.pinned
   }));
   const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision, name: part.name }] : []);
+  const disclosureIdsOf = (part) => part.disclosureIdentities ?? idsOf(part);
   const dedupeEntries = (entries) => {
     const seen = /* @__PURE__ */ new Set();
     const out = [];
@@ -9162,25 +9170,28 @@ ${line}` : line;
   for (const part of items) if (isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
   for (const part of items) if (isHazard(part)) tryDegradeHazard(part);
   const idsForDisclosure = (part) => {
-    const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
+    const tagged = disclosureIdsOf(part).map((e) => e.identity).filter(Boolean);
     if (tagged.length) return tagged;
     return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
   };
   const disclosureEntries = (list) => {
     const names = /* @__PURE__ */ new Map();
-    for (const e of list.flatMap(idsOf)) {
+    for (const e of list.flatMap(disclosureIdsOf)) {
       if (e?.identity && typeof e.name === "string" && e.name.trim() && !names.has(e.identity)) {
         names.set(e.identity, clipToBytes(e.name.replace(/\s+/g, " ").trim(), 80));
       }
     }
     return [...new Set(list.flatMap(idsForDisclosure))].map((id) => ({ id8: id.slice(0, 8), name: names.get(id) }));
   };
-  const disclosureCount = (list) => dedupeEntries(list.flatMap(idsOf)).length || list.length;
+  const disclosureCount = (list) => dedupeEntries(list.flatMap(disclosureIdsOf)).length || list.length;
   const renderDisclosure = (count, entries) => {
     const prefix = `+${count} more records: knowledge_query`;
     return entries.length ? `${prefix}; knowledge_get ${entries.map((e) => e.name ? `${e.name} (${e.id8})` : e.id8).join(" ")}` : `${prefix}; knowledge_get`;
   };
-  const disclosureSize = (list, named) => aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => named ? e : { id8: e.id8 })));
+  const disclosureSize = (list, named) => {
+    const custom2 = aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : Infinity;
+    return custom2 <= ordinaryCeiling ? custom2 : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => named ? e : { id8: e.id8 })));
+  };
   const sepCost = (renderedBefore) => renderedBefore > 0 ? bytes(sep) : 0;
   const ordinaryParts = items.filter((part) => !isHazard(part) && !isChrome(part));
   const baseOmitted = [...omitted];
@@ -9234,7 +9245,7 @@ ${line}` : line;
           ids.pop();
           line2 = aggregateLabel(count, ids);
         }
-        return line2;
+        if (bytes(line2) <= ordinaryCeiling) return line2;
       }
       const sepBytes = sepCost([...selected.keys()].filter((part) => part !== aggregatePart).length);
       const room = Math.min(ordinaryCeiling - ordinaryBytesUsed() - sepBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes() - sepBytes);
@@ -9276,7 +9287,7 @@ ${line}` : line;
   }
   const survivors = items.filter((part) => selected.has(part) && selected.get(part).full);
   const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
-  const omittedEntries = dedupeEntries(omitted.flatMap(idsOf));
+  const omittedEntries = dedupeEntries(omitted.flatMap(disclosureIdsOf));
   const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
   return {
     text: output().join(sep),
@@ -9299,6 +9310,21 @@ function decisionBlockPointer(count, widen, top) {
   const name = top ? clipToBytes(String(top.slug || top.title || "").replace(/\s+/g, " ").trim(), 120) : "";
   const lead = top?.id ? ` \u2014 top: ${name ? `'${name}' ` : ""}(knowledge_get ${top.id})` : "";
   return `\u25B8 DECISIONS (${count}) held back by the delivery cap${lead} \u2014 ${widen}`;
+}
+function decisionPointerPart(rel, decisions, { widen, cap = DECISION_POINTER_CAP, remedy, matchLabel } = {}) {
+  const shown = decisions.slice(0, cap);
+  const entry = (d) => ({ identity: d.id, revision: recordRevision(d), name: d.slug || d.title });
+  return {
+    kind: "ordinary",
+    contentClass: "discovery",
+    identities: shown.map(entry),
+    // Every decision the block represents: if the whole block is omitted, its
+    // '+N more' disclosure counts and names all of them, not only the slice.
+    disclosureIdentities: decisions.map(entry),
+    text: renderDecisionPointers(rel, decisions, cap, { remedy, matchLabel }),
+    pointer: decisionBlockPointer(decisions.length, widen, shown[0]),
+    suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${widen}`
+  };
 }
 function payloadHeaderLine(rel) {
   return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
@@ -9444,14 +9470,7 @@ async function main(input2) {
           const contentClass = isOwnerDiscoveryOnly(r) ? "discovery" : "substance";
           return { kind: "ordinary", contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
         });
-        const decisionParts = freshDecisions.length ? [{
-          kind: "ordinary",
-          contentClass: "discovery",
-          identities: freshDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-          text: renderDecisionPointers(rels.join(", "), freshDecisions),
-          pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
-          suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionWiden}`
-        }] : [];
+        const decisionParts = freshDecisions.length ? [decisionPointerPart(rels.join(", "), freshDecisions, { widen: decisionWiden })] : [];
         parts.push(
           { kind: "ordinary", contentClass: "chrome", text: payloadHeaderLine(rels.join(", ")) },
           ...hazardParts(freshHazards, { fileKeys: rels }),
@@ -9474,14 +9493,12 @@ async function main(input2) {
           },
           ...hazardParts(subjectHazards, { remedy, matchLabel: "for this subject" }),
           ...subjectDecisions.length ? [
-            {
-              kind: "ordinary",
-              contentClass: "discovery",
-              identities: subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS).map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-              text: renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy, matchLabel: "for this subject" }),
-              pointer: decisionBlockPointer(subjectDecisions.length, decisionRemedy),
-              suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionRemedy}`
-            }
+            decisionPointerPart("(subject match)", subjectDecisions, {
+              widen: decisionRemedy,
+              cap: SUBJECT_MAX_DECISIONS,
+              remedy: decisionRemedy,
+              matchLabel: "for this subject"
+            })
           ] : []
         );
       }

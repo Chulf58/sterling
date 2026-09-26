@@ -18,7 +18,8 @@ import { z } from 'zod';
 // drift, not a bypass). Since 2026-08-09 (board 1af5d630/75b1a05f) no_capture,
 // concept_designed and the SIXTH kind capture_pending are also writable via
 // the MCP tool surface — the scripts stay as the no-server fallback.
-// capture_pending: detail carries "<target> — <reason>", declaring the capture
+// capture_pending: detail carries "<target> — <reason>" (and `target` carries
+// the target alone, see the field below), declaring the capture
 // EXISTS and its write is in flight on a named commit/agent/lane; H10 defers
 // the capture duty one Stop (registers preserved, so a landed write settles
 // cleanly) and converts a still-pending duty to ONE deduped capture_owed item
@@ -73,5 +74,12 @@ export const sessionEventSchema = z.object({
   detail: z.string().min(1),
   at: z.string().min(1),
   lane: noCaptureLaneSchema.optional(),
+  // capture_pending only (board f003082d): the declared target, trimmed, as its
+  // own field. H10 keys a lapsed declaration's capture_owed debt on it alone,
+  // so one target declared with two reasons is one debt. OPTIONAL because a
+  // legacy event carries only the joined detail; H10 keys such an event on the
+  // whole detail (never a split on ' — ', which may occur inside a target).
+  // Trimmed before the length check, so a whitespace-only target is refused.
+  target: z.string().trim().min(1).optional(),
 });
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
