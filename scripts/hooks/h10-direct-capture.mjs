@@ -42,6 +42,8 @@ import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy } from './lib
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 import { publishNotice } from './lib/delivery.mjs';
+import { readProjectMode } from '../lib/handoff-projection.mjs';
+import { readPrLoop, PR_LOOP_REL } from '../lib/work-pr.mjs';
 
 /**
  * ARTICLE_MISSING TEXT (shared by the §6 mint and the live-recompute heal —
@@ -468,6 +470,9 @@ try {
     // process.stdout.write() followed by a separate allow() can exit before
     // the pipe drains (decision hook-stdout-exit-after-write-callback-bound-
     // exit-deny-stays-synchronous).
+    // PR REVIEW LOOP nag due and no duty block carried it: this release BLOCKS
+    // once instead (see the prLoop block below disclosureParts).
+    if (prLoop?.blockDue) writeThenSpend(disclosureParts.join('\n\n'), [prLoop.spend, spendDispatchUnknownKeys]);
     if (disclosureParts.length || advisoryText) {
       // dispatch-unknown-noted.json is spent here too (point C, decision
       // ee8ab1f5): these rows ride disclosureParts, which leaves through BOTH
@@ -948,6 +953,59 @@ try {
       )
     );
   }
+
+  // PR REVIEW LOOP OWED (decision project-mode-hobby-work-toggle-decides-flow,
+  // slice S3; skill pr-review-loop). A work-mode /sterling:merge that creates or
+  // reuses a PR arms .sterling/transient/pr-loop.json {status:'owed'}; the
+  // conductor discharges it only by settling it clean, capped or escalated
+  // (pr-review-wait.mjs --settle). Policy inside H10, not a new hook. It is
+  // computed HERE, before every release, so it fires on a Stop with no file
+  // changes too. PRESERVED-DEBT lifecycle, never an indefinite refusal: the
+  // debt lives in pr-loop.json until settled; the nag BLOCKS once per session
+  // per arming (marker pr-loop-nagged.json {session_id, armed_at}, spent only
+  // after delivery), riding the duty-nag block when one is due so it never
+  // steals the capture nag; every other Stop carries a non-blocking reminder.
+  // A hobby (or mode-less) project never carries it, whatever the file says.
+  const prLoopNaggedPath = join(input.cwd, '.sterling', 'transient', 'pr-loop-nagged.json');
+  const prLoop = (() => {
+    let mode;
+    try {
+      mode = readProjectMode(input.cwd);
+    } catch {
+      return null; // an unreadable/invalid mode is refused loudly by H1 and every mode-gated surface
+    }
+    if (mode !== 'work') return null;
+    let state;
+    try {
+      state = readPrLoop(input.cwd);
+    } catch (e) {
+      disclosureParts.push(`• PR review loop: ${PR_LOOP_REL} is unreadable (${String((e && e.message) || e)}) — whether a loop is owed is UNKNOWN; rerun /sterling:merge to re-arm it, or delete the file if no PR is open.`);
+      return null;
+    }
+    if (!state || state.status !== 'owed') return null;
+    const spent = (() => {
+      try {
+        const m = JSON.parse(readFileSync(prLoopNaggedPath, 'utf8'));
+        return hasSession && m.session_id === input.session_id && m.armed_at === state.armed_at;
+      } catch {
+        return false;
+      }
+    })();
+    const next =
+      `run the pr-review-loop skill: wait with node "\${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" ${state.pr_url} (background), disposition each finding, push fixes via /sterling:merge; ` +
+      `when the loop ends, settle it: node "\${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" --settle <clean|capped|escalated> --pr ${state.pr_number}. ` +
+      `Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`;
+    return {
+      blockDue: !input.stop_hook_active && !spent,
+      text: `• PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? '?').slice(0, 7)}, armed ${state.armed_at}) — ${next}`,
+      reminder: `PR review loop owed: PR #${state.pr_number} ${state.pr_url} — next: pr-review-loop skill, then --settle clean|capped|escalated --pr ${state.pr_number}.`,
+      spend: () => {
+        if (!hasSession) return;
+        writeFileSync(prLoopNaggedPath, JSON.stringify({ session_id: input.session_id, armed_at: state.armed_at, at: now }));
+      },
+    };
+  })();
+  if (prLoop) disclosureParts.push(prLoop.blockDue ? prLoop.text : prLoop.reminder);
 
   // Clear the transient registers at the end of the work they represent (P4).
   // INVARIANT: at a Stop, settled work may be consumed, durably queued work may
@@ -2355,6 +2413,8 @@ try {
         writeFileSync(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
       },
       spendDispatchUnknownKeys,
+      // The PR review loop text rode disclosureParts into this block.
+      () => prLoop?.blockDue && prLoop.spend(),
     ]);
   }
 
