@@ -193,3 +193,44 @@ for (const [label, over] of [
     }
   });
 }
+
+test('sessionless Stops (Sol review): with no session_id the owed loop NEVER blocks — a loud non-blocking reminder every Stop', () => {
+  const p = makeProject('work');
+  try {
+    arm(p.dir);
+    for (let i = 0; i < 2; i++) {
+      const r = stop(p.dir, { session: null }); // null: undefined would take the default 's1'
+      assert.equal(r.code, 0, `sessionless Stop ${i + 1} must not block: ${r.stderr}`);
+      assert.ok(systemMessage(r).includes(PR_URL), r.stdout);
+      assert.match(systemMessage(r), /no session id/i);
+    }
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('an INVALID mode with a pr-loop.json present is disclosed: the mode is unreadable and the PR loop state was not evaluated (never silently suppressed)', () => {
+  const p = makeProject('banana');
+  try {
+    arm(p.dir);
+    const r = stop(p.dir);
+    assert.equal(r.code, 0, r.stderr);
+    const msg = systemMessage(r);
+    assert.match(msg, /mode/i, r.stdout);
+    assert.match(msg, /not evaluated/, r.stdout);
+    assert.match(msg, /pr-loop\.json/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('an invalid mode with NO pr-loop.json adds no PR-loop disclosure', () => {
+  const p = makeProject('banana');
+  try {
+    const r = stop(p.dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.doesNotMatch(r.stdout + r.stderr, /pr-loop/);
+  } finally {
+    p.cleanup();
+  }
+});

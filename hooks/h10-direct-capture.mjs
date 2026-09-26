@@ -9061,7 +9061,12 @@ try {
     let mode;
     try {
       mode = readProjectMode(input.cwd);
-    } catch {
+    } catch (e) {
+      if (existsSync7(join10(input.cwd, PR_LOOP_REL))) {
+        disclosureParts.push(
+          `\u2022 PR review loop: the project mode is unreadable (${String(e && e.message || e)}) \u2014 ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
+        );
+      }
       return null;
     }
     if (mode !== "work") return null;
@@ -9082,12 +9087,17 @@ try {
       }
     })();
     const next = `run the pr-review-loop skill: wait with node "\${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" ${state.pr_url} (background), disposition each finding, push fixes via /sterling:merge; when the loop ends, settle it: node "\${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" --settle <clean|capped|escalated> --pr ${state.pr_number}. Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`;
+    if (!hasSession) {
+      return {
+        blockDue: false,
+        reminder: `PR review loop owed: PR #${state.pr_number} ${state.pr_url} \u2014 NO SESSION ID on this Stop, so this is a reminder only (it cannot nag once per session). Next: ${next}`
+      };
+    }
     return {
       blockDue: !input.stop_hook_active && !spent,
       text: `\u2022 PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? "?").slice(0, 7)}, armed ${state.armed_at}) \u2014 ${next}`,
       reminder: `PR review loop owed: PR #${state.pr_number} ${state.pr_url} \u2014 next: pr-review-loop skill, then --settle clean|capped|escalated --pr ${state.pr_number}.`,
       spend: () => {
-        if (!hasSession) return;
         writeFileSync5(prLoopNaggedPath, JSON.stringify({ session_id: input.session_id, armed_at: state.armed_at, at: now }));
       }
     };

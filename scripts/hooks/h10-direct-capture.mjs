@@ -965,14 +965,23 @@ try {
   // per arming (marker pr-loop-nagged.json {session_id, armed_at}, spent only
   // after delivery), riding the duty-nag block when one is due so it never
   // steals the capture nag; every other Stop carries a non-blocking reminder.
-  // A hobby (or mode-less) project never carries it, whatever the file says.
+  // A Stop without a session id never blocks (reminder only). A hobby (or
+  // mode-less) project never carries it, whatever the file says; an unreadable
+  // mode with a pr-loop.json present is disclosed as not evaluated.
   const prLoopNaggedPath = join(input.cwd, '.sterling', 'transient', 'pr-loop-nagged.json');
   const prLoop = (() => {
     let mode;
     try {
       mode = readProjectMode(input.cwd);
-    } catch {
-      return null; // an unreadable/invalid mode is refused loudly by H1 and every mode-gated surface
+    } catch (e) {
+      // Never guessed as work — but an ARMED loop is never silently suppressed
+      // either (Sol review): say that its state was not evaluated.
+      if (existsSync(join(input.cwd, PR_LOOP_REL))) {
+        disclosureParts.push(
+          `• PR review loop: the project mode is unreadable (${String((e && e.message) || e)}) — ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
+        );
+      }
+      return null;
     }
     if (mode !== 'work') return null;
     let state;
@@ -995,12 +1004,20 @@ try {
       `run the pr-review-loop skill: wait with node "\${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" ${state.pr_url} (background), disposition each finding, push fixes via /sterling:merge; ` +
       `when the loop ends, settle it: node "\${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" --settle <clean|capped|escalated> --pr ${state.pr_number}. ` +
       `Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`;
+    // SESSIONLESS (Sol review): without a session identity the once-per-session
+    // marker cannot be kept, so blocking would repeat on every Stop. Degrade to
+    // a loud NON-blocking reminder instead.
+    if (!hasSession) {
+      return {
+        blockDue: false,
+        reminder: `PR review loop owed: PR #${state.pr_number} ${state.pr_url} — NO SESSION ID on this Stop, so this is a reminder only (it cannot nag once per session). Next: ${next}`,
+      };
+    }
     return {
       blockDue: !input.stop_hook_active && !spent,
       text: `• PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? '?').slice(0, 7)}, armed ${state.armed_at}) — ${next}`,
       reminder: `PR review loop owed: PR #${state.pr_number} ${state.pr_url} — next: pr-review-loop skill, then --settle clean|capped|escalated --pr ${state.pr_number}.`,
       spend: () => {
-        if (!hasSession) return;
         writeFileSync(prLoopNaggedPath, JSON.stringify({ session_id: input.session_id, armed_at: state.armed_at, at: now }));
       },
     };
