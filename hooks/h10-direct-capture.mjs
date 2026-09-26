@@ -8604,6 +8604,7 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync6, renameSync as renameSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname6, join as join9 } from "node:path";
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
+var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
 var prLoopPath = (root) => join9(root, PR_LOOP_REL);
 function readPrLoop(root) {
   const file = prLoopPath(root);
@@ -8614,9 +8615,14 @@ function readPrLoop(root) {
   } catch (e) {
     throw new Error(`${PR_LOOP_REL} is not valid JSON (${e.message})`);
   }
-  if (!s2 || typeof s2 !== "object" || typeof s2.pr_url !== "string" || !Number.isInteger(s2.pr_number) || typeof s2.status !== "string" || typeof s2.armed_at !== "string") {
-    throw new Error(`${PR_LOOP_REL} lacks pr_url/pr_number/status/armed_at: ${JSON.stringify(s2)}`);
+  const str = (v) => typeof v === "string" && v.length > 0;
+  if (!s2 || typeof s2 !== "object" || Array.isArray(s2) || !str(s2.pr_url) || !Number.isInteger(s2.pr_number) || !str(s2.repo) || !str(s2.head_sha) || !str(s2.armed_at)) {
+    throw new Error(`${PR_LOOP_REL} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
   }
+  if (s2.status !== "owed" && !PR_LOOP_OUTCOMES.includes(s2.status)) {
+    throw new Error(`${PR_LOOP_REL} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
+  }
+  if (s2.status !== "owed" && !str(s2.settled_at)) throw new Error(`${PR_LOOP_REL} is settled '${s2.status}' without settled_at`);
   return s2;
 }
 

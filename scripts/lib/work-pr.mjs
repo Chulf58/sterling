@@ -365,9 +365,17 @@ export function readPrLoop(root) {
   } catch (e) {
     throw new Error(`${PR_LOOP_REL} is not valid JSON (${e.message})`);
   }
-  if (!s || typeof s !== 'object' || typeof s.pr_url !== 'string' || !Number.isInteger(s.pr_number) || typeof s.status !== 'string' || typeof s.armed_at !== 'string') {
-    throw new Error(`${PR_LOOP_REL} lacks pr_url/pr_number/status/armed_at: ${JSON.stringify(s)}`);
+  // STRICT (Sol review): anything but an exact known status, a missing
+  // repo/head_sha, or a settled outcome without settled_at is UNREADABLE —
+  // the caller discloses it; it is never read as settled.
+  const str = (v) => typeof v === 'string' && v.length > 0;
+  if (!s || typeof s !== 'object' || Array.isArray(s) || !str(s.pr_url) || !Number.isInteger(s.pr_number) || !str(s.repo) || !str(s.head_sha) || !str(s.armed_at)) {
+    throw new Error(`${PR_LOOP_REL} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s)}`);
   }
+  if (s.status !== 'owed' && !PR_LOOP_OUTCOMES.includes(s.status)) {
+    throw new Error(`${PR_LOOP_REL} has status ${JSON.stringify(s.status)} — it must be exactly owed, ${PR_LOOP_OUTCOMES.join(', ')}`);
+  }
+  if (s.status !== 'owed' && !str(s.settled_at)) throw new Error(`${PR_LOOP_REL} is settled '${s.status}' without settled_at`);
   return s;
 }
 

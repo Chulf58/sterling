@@ -170,3 +170,26 @@ test('an unreadable pr-loop.json in a work project is disclosed, never silently 
     p.cleanup();
   }
 });
+
+// Sol review (MEDIUM): a loop state that is not EXACTLY owed|clean|capped|
+// escalated, lacks repo/head_sha, or is settled without settled_at is
+// UNREADABLE — disclosed, never read as settled (silence) and never blocking.
+for (const [label, over] of [
+  ['an unknown status', { status: 'done' }],
+  ['a wrong-case status', { status: 'CLEAN', settled_at: '2026-09-26T12:00:00.000Z' }],
+  ['a settled status without settled_at', { status: 'clean' }],
+  ['no repo', { repo: undefined }],
+  ['no head_sha', { head_sha: undefined }],
+]) {
+  test(`a malformed loop state (${label}) is disclosed as unreadable, never treated as settled`, () => {
+    const p = makeProject('work');
+    try {
+      arm(p.dir, over);
+      const r = stop(p.dir);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(systemMessage(r), /pr-loop\.json is unreadable/, `disclosed: ${r.stdout}`);
+    } finally {
+      p.cleanup();
+    }
+  });
+}
