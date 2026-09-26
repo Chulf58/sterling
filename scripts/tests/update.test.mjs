@@ -1817,8 +1817,11 @@ test('CLI: an unloadable @sterling/store is a visible exit 2 on the already-curr
 });
 
 // Both paths treat project-list resolution the same way: the full path used to
-// let a registry throw reject runUpdate outright.
-test('full path: a project registry that cannot be read is exit 2; the completed core is still stamped', async () => {
+// let a registry throw reject runUpdate outright. On the full path the marker is
+// WITHHELD: the per-project store migrations (schema changes) could not run, so
+// they must not be lost behind a stamped marker — the next update resumes the
+// full sequence, migrations included.
+test('full path: a project registry that cannot be read is exit 2 and withholds the completion marker', async () => {
   const cwd = scratchCwd();
   try {
     const { exec, calls } = fakeExec({ behind: 1 });
@@ -1827,7 +1830,8 @@ test('full path: a project registry that cannot be read is exit 2; the completed
     assert.equal(report.exit, 2);
     assert.match(lines.join('\n'), /project registry unavailable.*registry db locked/);
     assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 0);
-    assert.equal(JSON.parse(readFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), 'utf8')).sha, HEAD_B, 'the core completed, so the core marker is stamped');
+    assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'the per-project migrations never ran, so the marker is withheld');
+    assert.ok(!lines.some((l) => l.includes('Already current')));
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

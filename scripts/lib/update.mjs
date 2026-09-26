@@ -395,9 +395,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   };
   // The registered project list, resolved the SAME way on both paths. An
   // unreadable registry (or an unloadable store module) is never an empty list:
-  // it is logged and null is returned, so no project is refreshed; the CALLER
-  // records exit 2 once the core verdict is taken — it is a per-project
-  // failure, never a core one, so the marker still follows the core.
+  // it is logged and null is returned, so no project is refreshed, and the
+  // caller records exit 2. On the FULL path it also withholds the marker: the
+  // per-project store migrations (schema changes) could not run, so the next
+  // update must redo the full sequence rather than skip them behind a stamp.
   const resolveProjects = async () => {
     try {
       return typeof projects === 'function' ? (await projects()) ?? [] : projects;
@@ -849,9 +850,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     }
   }
   // The core is complete when everything above succeeded — a red battery, a
-  // failed store migration or a failed step leaves it incomplete, and the next
-  // run resumes it. The per-project refresh below never decides this.
-  const coreComplete = report.exit === 0;
+  // failed store migration, a failed step, or an unreadable registry (the
+  // per-project migrations never ran) leaves it incomplete, and the next run
+  // resumes it. The per-project refresh below never decides this.
+  const coreComplete = report.exit === 0 && !registryFailed;
   if (registryFailed) fail(2);
   let refreshFailures = 0;
   if (opts.projects !== false && projectList.length) {
@@ -893,14 +895,14 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // A per-project refresh failure does not withhold it: the refresh runs on
   // every update, so the next run refreshes that project again, loudly. Never
   // fatal: the update itself already succeeded by the time this runs.
+  if (registryFailed) {
+    log('\n✗ the project registry could not be read — NO registered project was migrated or refreshed (see above). The completion marker is NOT written, so the next /sterling:update reruns the full sequence, per-project store migrations included.');
+  }
   if (coreComplete) {
     try {
       writeUpdateMarker(cwd, after.head);
     } catch (err) {
       log(`\n⚠ update marker write FAILED (nonfatal — the update itself already succeeded): ${err?.message ?? err}`);
-    }
-    if (registryFailed) {
-      log('\n✗ the core update is complete, but the project registry could not be read — NO registered project was migrated or refreshed (see above). Fix it and rerun /sterling:update.');
     }
     if (refreshFailures) {
       log(`\n✗ the core update is complete, but ${refreshFailures} project(s) failed their refresh (above) — fix them and rerun /sterling:update; every registered project is refreshed on every run.`);
