@@ -595,8 +595,17 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // A REPORT, NEVER AN ACTION: nothing is registered, synced or written here
   // (registry self-heal was ruled OUT for this build, user 2026-08-29), and
   // nothing here can change report.exit.
-  const reportCoverage = async (list) => {
+  const reportCoverage = async (list, registryOk = true) => {
     if (opts.projects === false) return;
+    if (!registryOk) {
+      // The registry itself could not be read (resolveProjects returned null),
+      // so `list` is [] for a reason that has nothing to do with coverage: an
+      // empty list here would either falsely call registered siblings
+      // unregistered, or print an affirmative "ok" while the registry that
+      // 'ok' depends on is unknown. Neither claim is safe to make.
+      log('\n▸ registry coverage — SKIPPED: the project registry could not be read, so coverage is UNKNOWN (neither "ok" nor "unregistered" can be asserted).');
+      return;
+    }
     try {
       // Imported DYNAMICALLY on purpose: this module is builtins-only at load
       // time (it must load on a clone where nothing is built), while
@@ -662,7 +671,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // The blind spot this reports is INDEPENDENT of clone lag — an
       // already-current clone with two unregistered projects is the measured
       // 2026-08-28 state exactly — so the report belongs on this path too.
-      await reportCoverage(list);
+      await reportCoverage(list, registryOk);
       let failures = 0;
       if (opts.projects === false) {
         log('\n▸ project refresh — SKIPPED (--no-projects)');
@@ -864,7 +873,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   }
 
   // Registry coverage — the SAME call the already-current path makes above.
-  await reportCoverage(projectList);
+  await reportCoverage(projectList, !registryFailed);
 
   // Read-only: reports AGENTS.md/CLAUDE.md contract drift in sibling projects without
   // touching them (--apply stays a deliberate act — it rewrites seven repos).

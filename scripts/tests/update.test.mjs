@@ -306,8 +306,15 @@ test('already current: an unreadable project registry is a visible non-zero fail
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: async () => { throw new Error('registry db locked'); }, opts: {} });
     assert.equal(report.exit, 2);
     assert.equal(calls.filter((c) => c.startsWith('npm')).length, 0);
-    assert.match(lines.join('\n'), /project registry unavailable.*registry db locked/);
+    const out = lines.join('\n');
+    assert.match(out, /project registry unavailable.*registry db locked/);
     assert.ok(!lines.some((l) => l.includes('Already current — nothing to do')));
+    // Residual (1): a failed registry must never leave reportCoverage([]) to run
+    // — that would falsely call registered siblings unregistered, or print an
+    // affirmative "ok" while the registry it depends on is unknown.
+    assert.doesNotMatch(out, /ok — under these known roots/);
+    assert.doesNotMatch(out, /NOT in the shared project registry/);
+    assert.match(out, /registry coverage — SKIPPED.*coverage is UNKNOWN/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -1828,10 +1835,15 @@ test('full path: a project registry that cannot be read is exit 2 and withholds 
     const lines = [];
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: async () => { throw new Error('registry db locked'); }, opts: {} });
     assert.equal(report.exit, 2);
-    assert.match(lines.join('\n'), /project registry unavailable.*registry db locked/);
+    const out = lines.join('\n');
+    assert.match(out, /project registry unavailable.*registry db locked/);
     assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 0);
     assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'the per-project migrations never ran, so the marker is withheld');
     assert.ok(!lines.some((l) => l.includes('Already current')));
+    // Residual (1) — same guarantee on the full path's reportCoverage call.
+    assert.doesNotMatch(out, /ok — under these known roots/);
+    assert.doesNotMatch(out, /NOT in the shared project registry/);
+    assert.match(out, /registry coverage — SKIPPED.*coverage is UNKNOWN/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
