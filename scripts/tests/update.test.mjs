@@ -307,7 +307,7 @@ test('already current: an unreadable project registry is a visible non-zero fail
     assert.equal(report.exit, 2);
     assert.equal(calls.filter((c) => c.startsWith('npm')).length, 0);
     const out = lines.join('\n');
-    assert.match(out, /project registry unavailable.*registry db locked/);
+    assert.match(out, /project registry .*unavailable.*registry db locked/);
     assert.ok(!lines.some((l) => l.includes('Already current — nothing to do')));
     // Residual (1): a failed registry must never leave reportCoverage([]) to run
     // — that would falsely call registered siblings unregistered, or print an
@@ -315,6 +315,24 @@ test('already current: an unreadable project registry is a visible non-zero fail
     assert.doesNotMatch(out, /ok — under these known roots/);
     assert.doesNotMatch(out, /NOT in the shared project registry/);
     assert.match(out, /registry coverage — SKIPPED.*coverage is UNKNOWN/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// Residual (2): the refusal used to only say "see above" — name the registry
+// path (resolved the same way loadProjects does) and the remedy, so the reader
+// does not have to guess which file to fix.
+test('an unreadable registry (not a module-load failure) names the registry path and remedy', async () => {
+  const cwd = scratchCwd();
+  try {
+    seedUpdateMarker(cwd, HEAD_A);
+    const { exec } = fakeExec({ behind: 0 });
+    const lines = [];
+    await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: async () => { throw new Error('EACCES: permission denied'); }, opts: {} });
+    const out = lines.join('\n');
+    assert.match(out, /registry\.db/, `expected the registry file path in the refusal:\n${out}`);
+    assert.match(out, /Make it readable or unlocked, or restore it, then rerun \/sterling:update/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -1836,7 +1854,7 @@ test('full path: a project registry that cannot be read is exit 2 and withholds 
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: async () => { throw new Error('registry db locked'); }, opts: {} });
     assert.equal(report.exit, 2);
     const out = lines.join('\n');
-    assert.match(out, /project registry unavailable.*registry db locked/);
+    assert.match(out, /project registry .*unavailable.*registry db locked/);
     assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 0);
     assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'the per-project migrations never ran, so the marker is withheld');
     assert.ok(!lines.some((l) => l.includes('Already current')));

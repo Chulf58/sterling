@@ -399,11 +399,28 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // caller records exit 2. On the FULL path it also withholds the marker: the
   // per-project store migrations (schema changes) could not run, so the next
   // update must redo the full sequence rather than skip them behind a stamp.
+  // Set on failure so the later "registry could not be read" summary (below)
+  // can repeat the path and remedy instead of pointing back up with "see above".
+  let registryFailureDetail = null;
   const resolveProjects = async () => {
     try {
       return typeof projects === 'function' ? (await projects()) ?? [] : projects;
     } catch (err) {
-      log(`\n✗ per-project refresh SKIPPED — project registry unavailable: ${err?.message ?? err}`);
+      // Name the registry file so the remedy is actionable, not just "see
+      // above" (board residual, LOW). Resolved the SAME way loadProjects does
+      // (scripts/update.mjs). When @sterling/store itself cannot load, this
+      // second import fails identically and pathHint stays empty — err.message
+      // below already carries that case's own remedy (npm run build).
+      let pathHint = '';
+      try {
+        const store = await import('@sterling/store');
+        pathHint = ` at ${store.registryPath()}`;
+      } catch {
+        // no path to add — see the comment above.
+      }
+      const remedy = pathHint ? ' Make it readable or unlocked, or restore it, then rerun /sterling:update.' : '';
+      registryFailureDetail = `project registry${pathHint} unavailable: ${err?.message ?? err}${remedy}`;
+      log(`\n✗ per-project refresh SKIPPED — ${registryFailureDetail}`);
       return null;
     }
   };
@@ -905,7 +922,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // every update, so the next run refreshes that project again, loudly. Never
   // fatal: the update itself already succeeded by the time this runs.
   if (registryFailed) {
-    log('\n✗ the project registry could not be read — NO registered project was migrated or refreshed (see above). The completion marker is NOT written, so the next /sterling:update reruns the full sequence, per-project store migrations included.');
+    log(`\n✗ the project registry could not be read — NO registered project was migrated or refreshed (${registryFailureDetail}). The completion marker is NOT written, so the next /sterling:update reruns the full sequence, per-project store migrations included.`);
   }
   if (coreComplete) {
     try {
