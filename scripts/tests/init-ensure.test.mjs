@@ -1140,8 +1140,8 @@ test('sparring-partner case 7: never-overwrite guard holds through the codex man
 // sterling-mcp.json — it is NOT generated whenever the native launcher is (an
 // earlier version of this file's five probe-behavior pins below wrongly
 // assumed a per-project copy; an implementer correctly refused to move
-// production code to satisfy that error). templates/launcher-win-native.bat:34
-// hardcodes --mcp-config against
+// production code to satisfy that error). templates/launcher-win-native.bat:43
+// (through the dual-context {{MCP_ARGS}} init renders) points --mcp-config at
 // "{{WIN_PLUGIN_DIR}}\.claude-plugin\sterling-mcp-win.json" — the ONE
 // plugin-repo clone's copy every project's native launcher points at (matches
 // the standing architecture: every project launches with --plugin-dir pointing
@@ -1192,7 +1192,7 @@ test('sparring-partner-win: outside the plugin repo (no STERLING_PLUGIN_ROOT_MAT
     // skip — if generation were probe-gated only, 'ok' would produce the file.
     const r = init(dir, FRESH_FLAGS, { STERLING_CODEX_PROBE_WIN: 'ok' });
     assert.equal(r.code, 0, r.stderr);
-    assert.ok(!existsSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json')), 'no per-project sterling-mcp-win.json — generation is gated to the plugin-repo branch (fwd(target) === fwd(pluginRootMatch)), identical to sterling-mcp.json; a per-project copy would be dead weight nothing reads (templates/launcher-win-native.bat:34 always points at the single plugin-repo clone)');
+    assert.ok(!existsSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json')), 'no per-project sterling-mcp-win.json — generation is gated to the plugin-repo branch (fwd(target) === fwd(pluginRootMatch)), identical to sterling-mcp.json; a per-project copy would be dead weight nothing reads (templates/launcher-win-native.bat:43, through the dual-context {{MCP_ARGS}}, always points at the single plugin-repo clone)');
     // the native launcher itself is still produced — only the win MCP config is plugin-repo-only
     assert.ok(existsSync(join(dir, 'sterling-windows.bat')), 'native launcher still generated in an ordinary consuming project');
   } finally {
