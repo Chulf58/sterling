@@ -13,7 +13,8 @@
 // ERR_MODULE_NOT_FOUND before it can do the very build that would fix it (caught
 // 2026-07-27 by running this against a fresh clone). Therefore: at load time this
 // file imports only node builtins and the dependency-free lib/update.mjs; the
-// store is imported DYNAMICALLY and its absence degrades loudly. The argv reader
+// store is imported DYNAMICALLY, after the build, and its absence then is a loud
+// per-project failure (exit 2), never an empty registry. The argv reader
 // is inlined for the same reason — lib/project.mjs pulls in the workspace
 // packages, which is exactly what a fresh clone does not have.
 //
@@ -21,7 +22,7 @@
 //                           [--no-projects] [--target <sterling clone>]
 //
 // Exit codes: 0 = updated or already current · 1 = a step failed · 2 = refused
-// (nothing mutated) or an agent-sync refusal in a consuming project.
+// (nothing mutated), a per-project refusal, or an unreadable project registry.
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,12 +48,15 @@ const opts = {
   projects: !process.argv.includes('--no-projects'),
 };
 
-/** The store, or null when the packages are not built yet (a fresh clone). */
+/** The store. Imported lazily (see BOOTSTRAP INDEPENDENCE) — by the time the
+ *  fan-out asks for it the build has run, so a failure here is a real defect
+ *  (unbuilt or broken dist), never an empty registry: it THROWS, and runUpdate
+ *  reports it as a per-project refresh failure (exit 2). */
 async function loadStoreModule() {
   try {
     return await import('@sterling/store');
-  } catch {
-    return null;
+  } catch (err) {
+    throw new Error(`could not load @sterling/store (packages unbuilt or broken — run npm run build in ${pluginRoot}): ${err?.message ?? err}`);
   }
 }
 
@@ -66,10 +70,6 @@ const norm = (p) => {
 };
 async function loadProjects() {
   const store = await loadStoreModule();
-  if (!store) {
-    console.error('update: could not load the project registry (packages still unbuilt) — the per-project agent sync is SKIPPED. Run /sterling:sync-agents in each project, or rerun this command.');
-    return [];
-  }
   const registry = new store.ProjectRegistry(store.registryPath());
   try {
     return registry

@@ -318,7 +318,7 @@ async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   } else if (modeWritten !== undefined) {
     // what the switch does to the files, said at the moment it is made
     notice(modeWritten === 'work'
-      ? 'project mode set to work — the next init, sync-agents or /sterling:update writes the OpenCode agents and handoff files.'
+      ? 'project mode set to work — run /sterling:update (or init) to write the OpenCode agents and handoff files; sync-agents refreshes only the OpenCode agents.'
       : 'project mode set to hobby — OpenCode agents and handoff files are no longer maintained; existing files were NOT deleted.');
   } else if (toggleWrote) {
     // Was: "run enforcement_reconcile {adopt:true}… (H17 latch)" — H17's

@@ -5,8 +5,10 @@
 //   node scripts/sync-agents.mjs --target <projectDir>
 // Exit codes: 0 = synced/up-to-date (config_drift is reported, never a refusal —
 // decision 256d1059); 2 = at least one refusal (loud), including a
-// refused conductor activation (route A) — /sterling:update must not stamp complete
-// while the conductor is installed but not the project's main-session agent.
+// refused conductor activation (route A). /sterling:update reports a refusal as
+// a per-project failure: it exits non-zero, its core completion marker stays
+// valid, and it revisits the project on every later update until the refusal
+// clears.
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
