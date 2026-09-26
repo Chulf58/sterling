@@ -107,9 +107,10 @@ test('check-agent-prompts runs the fence and vocabulary lint over the shipped te
 // purpose, move this pin to that commit — the pin guards the fencing, not the prose.
 const FENCE_BASELINE = '703a327';
 // conductor.md's Claude-visible prose changed on purpose in 797307f (work-mode
-// push and review rules, decision project-mode-hobby-work-toggle-decides-flow),
-// so its pin moves there; every other template stays pinned to 703a327.
-const BASELINE_OVERRIDES = { 'conductor.md': '797307f' };
+// push and review rules, decision project-mode-hobby-work-toggle-decides-flow)
+// and again in 42b8f23 (work-mode landing; Sol-before-PR over Terra→Opus), so
+// its pin moves to 42b8f23; every other template stays pinned to 703a327.
+const BASELINE_OVERRIDES = { 'conductor.md': '42b8f23' };
 const renderConfig = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
 const renderOpts = { pluginVersion: '0.0.0-test', now: '2026-01-01T00:00:00.000Z', vars: { NODE: '"/usr/bin/node"', HOOKS_DIR: '/x/hooks', GIT_RO: '/x/git-ro.mjs' }, config: renderConfig };
 const withoutHeader = (content) => content.replace(parseInstalledHeader(content).headerLine + '\n', '');
