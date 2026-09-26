@@ -550,7 +550,8 @@ test('sessionEventSchema: the six register kinds parse; unknown kind + missing f
   // legacy event with only the joined detail still parses.
   const withTarget = s.parse({ kind: 'capture_pending', detail: 'commit wave-3 — decisions drafted', target: 'commit wave-3', at: NOW }) as { target?: string };
   assert.equal(withTarget.target, 'commit wave-3', 'target is kept, not stripped as an unknown key');
-  assert.throws(() => s.parse({ kind: 'capture_pending', detail: 'x — y', target: '', at: NOW }), 'a blank target is rejected');
+  assert.throws(() => s.parse({ kind: 'capture_pending', detail: 'x — y', target: '', at: NOW }), 'an empty target is rejected');
+  assert.throws(() => s.parse({ kind: 'capture_pending', detail: 'x — y', target: '   ', at: NOW }), 'a whitespace-only target is rejected');
 
   // kind is a closed enum of exactly the six register writers
   assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the six writers is rejected');

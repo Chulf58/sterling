@@ -4803,7 +4803,8 @@ var sessionEventSchema = external_exports.object({
   // so one target declared with two reasons is one debt. OPTIONAL because a
   // legacy event carries only the joined detail; H10 keys such an event on the
   // whole detail (never a split on ' — ', which may occur inside a target).
-  target: external_exports.string().min(1).optional()
+  // Trimmed before the length check, so a whitespace-only target is refused.
+  target: external_exports.string().trim().min(1).optional()
 });
 
 // packages/schemas/dist/config.js
@@ -9229,9 +9230,11 @@ try {
     for (const e of declarations) {
       const detail = String(e.detail).trim();
       const target = typeof e.target === "string" && e.target.trim() ? e.target.trim() : detail;
-      byTarget.set(target, detail);
+      const at = isValidAt(e.at) ? e.at : null;
+      const prior = byTarget.get(target);
+      if (!prior || prior.at === null || at !== null && at >= prior.at) byTarget.set(target, { detail, at });
     }
-    for (const [target, detail] of byTarget) {
+    for (const [target, { detail }] of byTarget) {
       store.enqueueSystemTodo({
         id: randomUUID3(),
         type: "todo",

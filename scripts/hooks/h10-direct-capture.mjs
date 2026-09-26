@@ -1516,7 +1516,10 @@ try {
   // `declared pending (…)` head is unchanged; hooks-full.test.mjs pins it.)
   // The target is the event's own `target` field (board f003082d), so the same
   // target declared with a different reason is one item whose head shows the
-  // latest declaration. A legacy event without the field keys on its whole
+  // latest declaration: the greatest valid `at` (clock skew can reorder the
+  // array, see PG-g); a declaration with an invalid `at` never displaces one
+  // with a valid `at`, and between equal or both-invalid stamps the later
+  // array position wins. A legacy event without the field keys on its whole
   // trimmed detail, never a split on ' — ' (which may occur inside a target).
   // The same exact target joins its own item;
   // an unrelated open capture_owed, or another target over the same files,
@@ -1526,9 +1529,11 @@ try {
     for (const e of declarations) {
       const detail = String(e.detail).trim();
       const target = typeof e.target === 'string' && e.target.trim() ? e.target.trim() : detail;
-      byTarget.set(target, detail);
+      const at = isValidAt(e.at) ? e.at : null;
+      const prior = byTarget.get(target);
+      if (!prior || prior.at === null || (at !== null && at >= prior.at)) byTarget.set(target, { detail, at });
     }
-    for (const [target, detail] of byTarget) {
+    for (const [target, { detail }] of byTarget) {
       store.enqueueSystemTodo({
         id: randomUUID(),
         type: 'todo',

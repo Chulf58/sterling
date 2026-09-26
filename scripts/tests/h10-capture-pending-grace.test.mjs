@@ -600,3 +600,22 @@ test('PG-k2 (target field, one Stop): two declarations of one target with differ
     cleanup();
   }
 });
+
+test('PG-k3 (target field, clock skew): "latest" is the greatest valid `at`, not the later array position', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    touchRegister(dir, [WORKFILE]);
+    writeSessionEvents(dir, [
+      cpTargetEvent('commit-eeee555', 'later reason', '2026-06-10T12:20:00.000Z'),
+      cpTargetEvent('commit-eeee555', 'earlier reason', '2026-06-10T12:10:00.000Z'),
+    ]);
+    writeRegisterRaw(dir, []);
+    assert.equal(stopOnce(dir).code, 0, 'grace Stop');
+    assert.equal(stopOnce(dir).code, 0, 'converting Stop');
+    const items = captureOwed(store);
+    assert.equal(items.length, 1, `texts: ${JSON.stringify(items.map((t) => t.text))}`);
+    assert.match(items[0].text, /^capture owed: declared pending \(commit-eeee555 — later reason\)/, 'ARRAY-ORDER SHAPE if "earlier reason": the head followed physical order, not `at`');
+  } finally {
+    cleanup();
+  }
+});

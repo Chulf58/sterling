@@ -79,6 +79,7 @@ export const sessionEventSchema = z.object({
   // so one target declared with two reasons is one debt. OPTIONAL because a
   // legacy event carries only the joined detail; H10 keys such an event on the
   // whole detail (never a split on ' — ', which may occur inside a target).
-  target: z.string().min(1).optional(),
+  // Trimmed before the length check, so a whitespace-only target is refused.
+  target: z.string().trim().min(1).optional(),
 });
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
