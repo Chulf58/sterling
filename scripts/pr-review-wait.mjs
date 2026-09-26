@@ -16,7 +16,8 @@
 // never applies. Each poll fetches the PR head SHA, then the reviews and the
 // review comments with --paginate. It returns as soon as a COPILOT review
 // (author login matching /copilot/i) that is completed, newer than
-// --since-review and of the current head exists; otherwise it sleeps with
+// --since-review and of the current head exists — the OLDEST such review
+// first, so none is ever skipped; otherwise it sleeps with
 // backoff and polls again until --timeout. One call never runs forever: the
 // deadline bounds the whole call and each gh call has its own timeout.
 //
@@ -165,7 +166,10 @@ function poll() {
   const current = expectedHead === null || expectedHead === head ? fresh.filter((r) => r.commit_id === head) : [];
   result.stale_review_ignored = result.stale_review_ignored || fresh.some((r) => r.commit_id !== head);
   if (!current.length) return null;
-  const review = current.reduce((a, b) => (b.id > a.id ? b : a));
+  // The LOWEST fresh id first (Sol review, HIGH): a later review never hides an
+  // earlier one's findings. The skill advances --since-review only after each
+  // returned review is fully dispositioned, so the next call yields the next.
+  const review = current.reduce((a, b) => (b.id < a.id ? b : a));
   const comments = parsePages(ghApi(`${base}/comments`, { paginate: true }))
     .filter((c) => c?.pull_request_review_id === review.id)
     .map((c) => ({ id: c.id, path: c.path ?? null, line: c.line ?? c.original_line ?? null, body: c.body ?? '', in_reply_to: c.in_reply_to_id ?? null }));

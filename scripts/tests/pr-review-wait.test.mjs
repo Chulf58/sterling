@@ -300,6 +300,23 @@ test('usage errors (no PR, a bad --timeout) are status error with exit 1 and one
   }
 });
 
+test('HIGH (Sol): two fresh reviews — 101 with actionable comments, then an empty 102 — return 101 FIRST; 102 only once 101 is consumed', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(101), review(102, { body: '' })]]);
+    f.put('comments', 0, [[comment(1, 101), comment(2, 101)]]);
+    const first = run(f, ['7', ...FAST]);
+    assert.equal(first.out?.status, 'review', oneLine(first.stdout + first.stderr));
+    assert.equal(first.out.review.id, 101, 'the LOWEST fresh review id comes first, never skipped');
+    assert.deepEqual(first.out.comments.map((c) => c.id), [1, 2]);
+    const next = run(f, ['7', '--since-review', '101', ...FAST]);
+    assert.equal(next.out.review.id, 102);
+    assert.deepEqual(next.out.comments, []);
+  } finally {
+    f.cleanup();
+  }
+});
+
 // ------------------------------------------------------------------ settle
 
 const loopPath = (f) => join(f.dir, '.sterling', 'transient', 'pr-loop.json');

@@ -19,7 +19,7 @@ One **progress comment** on the PR holds the state: round, consumed review id, r
 
 ## One round
 
-1. Wait: `pr-review-wait.mjs <pr_url> --since-review <consumed id> --head <pushed sha>`. It returns `{status, head_sha, review, comments, observed_copilot_login, stale_review_ignored}`. `review` means a completed Copilot review of the current head. `timeout` and `error` are never clean; after repeated timeouts with no review, ask the user whether Copilot needs a re-request.
+1. Wait: `pr-review-wait.mjs <pr_url> --since-review <consumed id> --head <pushed sha>`. It returns `{status, head_sha, review, comments, observed_copilot_login, stale_review_ignored}`. `review` means a completed Copilot review of the current head, and it is always the OLDEST one not yet consumed. **Advance the consumed review id (the `--since-review` watermark) only after every comment of that review is dispositioned**, then call again at once: the next unconsumed review comes back before any wait. A later review never hides an earlier one's findings. `timeout` and `error` are never clean; after repeated timeouts with no review, ask the user whether Copilot needs a re-request.
 2. Disposition **every** finding, and reply to each comment on GitHub:
    - **fixed**: reply only AFTER the fix is pushed, citing the commit SHA ("will fix" is not a disposition);
    - **disagreed**: reply with the reason; a justified disagreement counts as handled;
