@@ -351,3 +351,14 @@ test('mode: parseConfig is PERMISSIVE — hobby/work pass, any other value is pr
     assert.deepEqual(parsed.mode, raw, `mode ${JSON.stringify(raw)} is preserved verbatim, never coerced to hobby`);
   }
 });
+
+test('pr_review (PR review loop identity pin): permissive, defaults to copilot_logins [], and the template carries the same default', () => {
+  assert.deepEqual(parseConfig({}).pr_review, { copilot_logins: [] });
+  const rawTemplate = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
+  assert.deepEqual(rawTemplate.pr_review, { copilot_logins: [] }, 'templates/default-config.json declares pr_review explicitly');
+  assert.deepEqual(parseConfig(rawTemplate).pr_review, parseConfig({}).pr_review);
+  // PERMISSIVE like mode: a malformed value is preserved raw, never thrown on;
+  // pr-review-wait.mjs is the strict judge.
+  assert.doesNotThrow(() => parseConfig({ pr_review: { copilot_logins: 'x' } }));
+  assert.deepEqual(parseConfig({ pr_review: { copilot_logins: ['a[bot]'] } }).pr_review, { copilot_logins: ['a[bot]'] });
+});

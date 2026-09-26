@@ -696,8 +696,66 @@ for (const mode of [undefined, 'hobby']) {
       assert.notEqual(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'hobby merges into main');
       assert.equal(git(p.origin, ['rev-parse', 'main']), git(p.dir, ['rev-parse', 'main']), 'hobby pushes main to origin');
       assert.equal(gitMaybe(p.dir, ['rev-parse', '--verify', `refs/heads/${p.branchName}`]), null, 'hobby deletes the merged branch');
+      assert.equal(existsSync(prLoopFile(p)), false, 'hobby never arms the PR review loop duty');
     } finally {
       p.cleanup();
     }
   });
 }
+
+// ---------------------------------------------------------------- S3 arming
+// A work-mode merge that CREATES or REUSES a PR arms the H10 'PR review loop
+// owed' duty (slice S3): .sterling/transient/pr-loop.json with the PR, origin's
+// repo, the pushed (pinned) head SHA and status 'owed'. A failed ship arms
+// nothing.
+
+const prLoopFile = (p) => join(p.dir, '.sterling', 'transient', 'pr-loop.json');
+
+function assertArmed(p, { number }) {
+  assert.ok(existsSync(prLoopFile(p)), 'pr-loop.json is written');
+  const s = JSON.parse(readFileSync(prLoopFile(p), 'utf8'));
+  assert.deepEqual(Object.keys(s).sort(), ['armed_at', 'head_sha', 'pr_number', 'pr_url', 'repo', 'status']);
+  assert.equal(s.pr_url, `https://${ORIGIN_REPO}/pull/${number}`);
+  assert.equal(s.pr_number, number);
+  assert.equal(s.repo, ORIGIN_REPO);
+  assert.equal(s.head_sha, p.branchSha);
+  assert.equal(s.status, 'owed');
+  assert.ok(!Number.isNaN(Date.parse(s.armed_at)), 'armed_at is an ISO time');
+}
+
+test('work S3: CREATING the PR arms the PR review loop duty (pr-loop.json, status owed, the pushed head)', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, oneLine(r.stdout + r.stderr));
+    assertArmed(p, { number: 7 });
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work S3: REUSING an open PR re-arms the duty — a settled loop goes back to owed for the new head', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    seedPr(p, { number: 41 });
+    mkdirSync(join(p.dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(prLoopFile(p), JSON.stringify({ pr_url: `https://${ORIGIN_REPO}/pull/41`, pr_number: 41, repo: ORIGIN_REPO, head_sha: 'f'.repeat(40), armed_at: '2026-01-01T00:00:00.000Z', status: 'clean', settled_at: '2026-01-01T01:00:00.000Z' }));
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, oneLine(r.stdout + r.stderr));
+    assertArmed(p, { number: 41 });
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work S3: a ship that FAILS (gh pr create fails, no PR found) arms nothing', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    writeFileSync(join(p.gh.state, 'create_fail'), '');
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 1, oneLine(r.stdout + r.stderr));
+    assert.equal(existsSync(prLoopFile(p)), false);
+  } finally {
+    p.cleanup();
+  }
+});

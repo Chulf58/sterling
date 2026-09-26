@@ -52,5 +52,8 @@
   "tdd": {
     "enabled": true
   },
-  "mode": "hobby"
+  "mode": "hobby",
+  "pr_review": {
+    "copilot_logins": []
+  }
 }

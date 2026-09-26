@@ -5010,7 +5010,15 @@ var configSchema = external_exports.object({
   // Consumers of the PARSED config must narrow this field themselves.
   // The default lives twice (anti_pattern 85d15143): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
-  mode: external_exports.unknown().default("hobby")
+  mode: external_exports.unknown().default("hobby"),
+  // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
+  // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
+  // first use; empty means unpinned (any Bot login matching /copilot/i, with
+  // identity_confirmed false). PERMISSIVE like mode: a malformed value is
+  // preserved raw, never thrown on; scripts/pr-review-wait.mjs is the strict
+  // judge. The default lives twice: here and in templates/default-config.json
+  // (config.test.ts pins that they agree).
+  pr_review: external_exports.unknown().default({ copilot_logins: [] })
 });
 
 // packages/schemas/dist/registry.js

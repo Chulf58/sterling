@@ -19,7 +19,7 @@ import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/l
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
 import { readProjectMode } from './lib/handoff-projection.mjs';
-import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal, installWorkResult } from './lib/work-pr.mjs';
+import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal, installWorkResult, armPrLoop, PR_LOOP_REL } from './lib/work-pr.mjs';
 // Attestation disclosure (decision attestation-staleness-disclosure-only-never-
 // a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
 // block above the merge action.
@@ -668,6 +668,15 @@ for (const line of attestationDisclosure) console.error(line);
 if (work) {
   const shipped = shipAsPr({ cwd: target, repo: workRepo, branch, base: into, mergeBase, branchTip, state: work.state, log: (m) => console.error(m) });
   if (shipped) work.fail(shipped.error, shipped.exitCode);
+  // ARM the H10 'PR review loop owed' duty on create AND reuse (slice S3): a
+  // new head is owed a Copilot review. The PR exists either way, so a failed
+  // write never fails the ship — it is announced loudly instead (P5).
+  try {
+    armPrLoop(target, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
+    console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} — run the pr-review-loop skill (armed in ${PR_LOOP_REL}).`);
+  } catch (e) {
+    console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOP_REL}: ${e?.message ?? e}) — H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
+  }
   work.succeed();
 }
 
