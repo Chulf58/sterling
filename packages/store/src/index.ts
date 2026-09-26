@@ -1109,8 +1109,9 @@ export class JournalDemotionRefusedError extends Error {
  * capture-pending-grace-per-declaration-held-while-any-dispatch-live, fix
  * rounds): H10 converts a lapsed capture_pending declaration into a capture_owed
  * item whose text opens with `capture owed: declared pending (` and ends with
- * the trailer ` [target <JSON string>]`, the JSON string being the declaration
- * exactly as H10 holds it, trimmed. That string is the item's identity,
+ * the trailer ` [target <JSON string>]`, the JSON string being the declared
+ * target, trimmed: the event's own `target` field, or for a legacy event
+ * without one its whole joined detail (board f003082d). That string is the item's identity,
  * compared byte-exact (no case folding, no split on ' — ', which may occur
  * inside a target); its file_keys are context only. Keyed on file_keys, two
  * targets over one file collapsed and one target over two file sets
