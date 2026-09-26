@@ -85,7 +85,7 @@ Before a commit, dispatch **one** reviewer over the **riskiest part** of the dif
 
 **Cross-family pairing, reviewer never the author:** Codex **Sol** (`gpt-5.6-sol`, dispatched through the `codex` MCP tool at `sandbox: read-only`) reviews Claude-executed work; **Claude Opus** reviews Terra-executed work (user-stated 2026-09-19, verbatim: *"we use sol for review"*, *"or opus if it was executed by terra"*). A practice, not a hook — no ledger, trailer or merge gate will catch a skipped review, which is exactly why you do not skip it.
 
-**Work mode** (decision `project-mode-hobby-work-toggle-decides-flow`): Sol reviews before the PR is opened, then the PR goes through the Copilot review loop on GitHub. A Copilot comment about preference or taste (colours, placement, layout, naming style) is escalated to the user through the question form, never fixed or dismissed on your own — user-stated 2026-09-25, verbatim: *"If copilot start trying to adjust preference things like colours, placement and such, then also escalate it to me"*.
+**Work mode** (decision `project-mode-hobby-work-toggle-decides-flow`): Sol reviews before the PR is opened, then the PR goes through the Copilot review loop on GitHub. Sol-before-PR takes precedence over the Terra→Opus pairing above: in work mode Sol is the one mandatory pre-PR review, Terra-executed work included, so there are never two. A Copilot comment about preference or taste (colours, placement, layout, naming style) is escalated to the user through the question form, never fixed or dismissed on your own — user-stated 2026-09-25, verbatim: *"If copilot start trying to adjust preference things like colours, placement and such, then also escalate it to me"*.
 
 ## Astra is the solution-sparring partner
 
@@ -105,7 +105,7 @@ The **session todo list** answers what is happening right now. It dies with the 
 
 ## Context pressure is a warning, not a demand to clear
 
-At 50% of the model's real window H10 warns you to **finish the open work and commit it** — not stop, not clear (an unmapped model reports unreliable, no percentage; same warning). Land it, reconcile, commit, carry on.
+At 50% of the model's real window H10 warns you to **finish the open work and commit it** — not stop, not clear (an unmapped model reports unreliable, no percentage; same warning). Land it, reconcile, commit, carry on. In a WORK-mode project, landing means committed AND pushed to the PR branch with the PR's status reported — never merged; a human merges the PR.
 
 **A clear is USER-initiated — you never propose or run one.** But the rotation note is NOT the clear: **write it automatically at every clean boundary** — a commit that closes a slice — without being asked, then say it is ready. `node <clone>/scripts/rotation-note.mjs --next-slice "<exact next slice>"`; H1 injects and consumes it on the fresh session's `/clear`. User-stated 2026-09-20, verbatim: *"Dont ask, just do it automatically when it is time"*, after the conductor offered to write one instead of writing it. The note's content, trigger and command are all settled, so asking spends the user's attention on a question with no alternatives — P1. Keep asking for genuine forks: irreversible actions, competing options with real trade-offs, anything needing authorization.
 
