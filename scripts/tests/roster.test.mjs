@@ -226,6 +226,20 @@ test('the allowlist agents keep their tools: line (a read-only agent must not si
   }
 });
 
+// Decision researcher-gets-web-search-and-fetch (user-ruled 2026-09-26): the
+// researcher's allowlist gains WebSearch and WebFetch; scout and librarian stay
+// without web tools. A pin moved on purpose — the allowlists are otherwise fixed.
+test('web tools: the researcher allowlist carries WebSearch and WebFetch; scout and librarian carry neither', () => {
+  const toolsOf = (file) => fmOf(readFileSync(join(TPL, file), 'utf8')).match(/^tools:\s*(.+)$/m)[1].split(',').map((t) => t.trim());
+  const researcher = toolsOf('researcher.md');
+  for (const web of ['WebSearch', 'WebFetch']) assert.ok(researcher.includes(web), `researcher.md grants ${web}`);
+  for (const file of ['scout.md', 'librarian.md']) {
+    const tools = toolsOf(file);
+    assert.ok(!tools.includes('WebSearch') && !tools.includes('WebFetch'), `${file} stays without web tools`);
+  }
+  for (const write of ['Edit', 'Write', 'NotebookEdit']) assert.ok(!researcher.includes(write), `researcher.md stays read-only — no ${write}`);
+});
+
 test('tool-grant linter: inherit-all (disallowedTools, no tools:) passes; a template with neither still fails; deny entries are linted like grants', () => {
   const registeredTools = readRegisteredToolNames(join(root, 'packages', 'mcp-server', 'src', 'server.ts'));
   const tpl = (fmLine) => `---\nname: probe\n${fmLine}required_inputs:\n  - x\n---\n\nbody\n`;

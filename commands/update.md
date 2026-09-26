@@ -10,7 +10,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/update.mjs"
 
 (The script ships with the plugin and updates the Sterling clone it lives in — never the project you invoked it from. A bare `scripts/` path only resolves inside the Sterling repo itself.)
 
-Flags, when the user asks for them: `--check` (currency report only, mutates nothing), `--force` (rebuild and re-sync even when already current), `--no-test` (skip the ~90s battery), `--no-projects` (skip the per-project agent sync), `--no-fetch` (report against the last fetch, offline).
+Flags, when the user asks for them: `--check` (currency report only — it still fetches and prunes origin's refs, but changes nothing else), `--force` (rebuild and re-sync even when already current), `--no-test` (skip the ~90s battery), `--no-projects` (skip the per-project agent sync), `--no-fetch` (skips only the fetch — every other step runs against the last fetched state). `--check --no-fetch` is the report-only, offline combination.
 
 **Every machine but the authoring one is a pure consumer of the default branch.** The update is a fast-forward or a refusal — never a merge, never a rebase, and never a file-by-file comparison against GitHub.
 

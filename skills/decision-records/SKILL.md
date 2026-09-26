@@ -7,7 +7,7 @@ description: Capture and read Sterling's durable decision records through the kn
 
 Decisions that live only in chat, a commit message, or one person's memory rot. Sterling keeps them instead as `decision` (or `anti_pattern` / `research_finding`) records in the knowledge store, retrieved through the `knowledge_*` MCP tools.
 
-**Only the conductor creates a record, and it does so directly.** `researcher`, `scout`, and `implementor` hold no `knowledge_create` grant — even where a tool might be technically reachable, using it is out of role for them. If any of them surfaces a decision worth recording, it comes back as a **capture candidate** in its report, and the conductor writes the record itself, never by dispatching another agent to do it. `librarian`'s grant is update-only (`knowledge_update`/`append`/`edit`) — it applies conductor-drafted text verbatim and never authors a new record.
+**Only the conductor authors a record, and it creates one directly.** `researcher`, `scout`, and `implementor` hold no store-write grant. If any of them surfaces a decision worth recording, it comes back as a **capture candidate** in its report, and the conductor writes the record itself, never by dispatching another agent to do it. `librarian`'s grant (`agent-templates/librarian.md`) is update-shaped knowledge writes (`knowledge_update`/`append`/`edit`/`array_remove`) plus board and queue writes — all applying conductor-drafted content verbatim; it never creates a record and never authors one.
 
 ## When to activate
 
@@ -18,8 +18,8 @@ Decisions that live only in chat, a commit message, or one person's memory rot. 
 
 Two different situations, two different responses:
 
-- **The decision is already settled** — the user stated it explicitly, or it is the direct, unambiguous conclusion of research that already resolved the question. This is routine capture: write the record. It does not need a suggestion or a separate ask.
-- **The decision is not actually settled yet** — you noticed an implicit choice being made but the alternatives were never weighed, or it's genuinely unclear which option the user wants. That is an open question: raise it through `AskUserQuestion` (per CLAUDE.md's "ask, don't guess, one question at a time" rule) so the user can decide, and record it only once they have.
+- **The decision is already settled** — the user ruled it through an `AskUserQuestion` form, or it is the direct, unambiguous conclusion of research that already resolved the question, or it is a conductor decision within the conductor's own remit. This is routine capture: write the record. It does not need a suggestion or a separate ask. **Label it as what it is**: only a form answer is a user ruling (`CLAUDE.md`, "Ask, don't guess — through the AskUserQuestion tool" — a ruling exists only if it came through the form; a prose answer is not one). A research conclusion or a conductor decision is recorded as that, never attributed to the user.
+- **The decision is not actually settled yet** — you noticed an implicit choice being made but the alternatives were never weighed, or it's genuinely unclear which option the user wants. That is an open question: put it to the user through `AskUserQuestion`, one question at a time (`AGENTS.md`, "Ask, don't guess — one question at a time"), and record it only once they have answered the form.
 
 ## Before writing anything: check for a conflict
 
@@ -44,7 +44,7 @@ If nothing exists, say so and offer to record one once the discussion resolves.
 
 ## Correcting or replacing a decision — fix forward, never a second copy
 
-- **The old decision was simply wrong or incomplete** → `knowledge_update` (fix-forward, same id — ids are permanent across updates, decision `stable-identity-design-v2`; only the version bumps). For a long string field, prefer `knowledge_edit(id, field, find, replace)` over a full retransmit — `find` must match exactly once. `status`/`superseded_by` are server-owned and refused if you pass them.
+- **The old decision was simply wrong or incomplete** → `knowledge_update` (fix-forward, same id — ids are permanent across updates; only the version bumps). For a long string field, prefer `knowledge_edit(id, field, find, replace)` over a full retransmit — `find` must match exactly once. `status`/`superseded_by` are server-owned and refused if you pass them.
 - **A genuine duplicate** (two records describe the same thing) → `knowledge_retire(id, in_favor_of)`, pointing at the survivor. This is narrow — it is not a way to discard a merely-wrong record; use `knowledge_update` for that. Never create a replacement beside the original and leave both live: two records under one slug is worse than one wrong record, because retrieval serves both and they contradict.
 
 ## What makes a good decision record

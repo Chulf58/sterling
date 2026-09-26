@@ -1866,3 +1866,20 @@ test('full path: a project registry that cannot be read is exit 2 and withholds 
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+// PORTED from init-ensure's F3a when the native launcher was retired (decision
+// native-windows-launcher-retired-wsl2-only): the stamp must sit on LINE 2,
+// after `@echo off`, or every double-click echoes the marker; and it must carry
+// the content hash that lets a later ensure tell stale-but-unmodified from
+// hand-edited. sterling-update.bat is the stamp's surviving .bat consumer.
+test('sterling-update.bat keeps `@echo off` on line 1 and the rem-commented content_hash stamp on line 2, on both arms', () => {
+  for (const platform of ['linux', 'win32']) {
+    const lines = renderUpdateLauncher(REPO_ROOT, { platform, nodeExe: 'C:\\Tools\\node.exe' }).split(/\r?\n/);
+    assert.match(lines[0], /^@echo off/i, `${platform}: line 1 still turns echo off — the stamp must sit AFTER it`);
+    assert.match(
+      lines[1],
+      /^rem sterling-generated\b.*\bcontent_hash=[0-9a-f]{64}\s*$/,
+      `${platform}: line 2 is the rem-commented stamp carrying a sha256 content hash`
+    );
+  }
+});

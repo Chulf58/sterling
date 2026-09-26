@@ -113,8 +113,17 @@ const FENCE_BASELINE = '703a327';
 // (state READY TO CLEAR plainly) and 993c29b (a store-unsettleable consequential
 // choice goes through the grill skill, decision sterling-grill-skill-design);
 // those last two meet in the release/0.18.16 merge, so its pin moves to
-// 4603394; every other template stays pinned to 703a327.
-const BASELINE_OVERRIDES = { 'conductor.md': '4603394' };
+// 4603394; every other template stays pinned to 703a327. All five moved to 87aa5ff,
+// the 2026-09-26 agent-template audit fixes (research_finding
+// agent-templates-dual-lane-audit-september-2026), which changed Claude-visible prose
+// in every template on purpose.
+const BASELINE_OVERRIDES = {
+  'conductor.md': '87aa5ff',
+  'implementor.md': '87aa5ff',
+  'researcher.md': '87aa5ff',
+  'scout.md': '87aa5ff',
+  'librarian.md': '87aa5ff',
+};
 const renderConfig = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
 const renderOpts = { pluginVersion: '0.0.0-test', now: '2026-01-01T00:00:00.000Z', vars: { NODE: '"/usr/bin/node"', HOOKS_DIR: '/x/hooks', GIT_RO: '/x/git-ro.mjs' }, config: renderConfig };
 const withoutHeader = (content) => content.replace(parseInstalledHeader(content).headerLine + '\n', '');
@@ -151,7 +160,9 @@ const EXPECTED_FRONTMATTER = {
     'mode: subagent',
     'permission:',
     '  edit: deny',
-    '  webfetch: deny',
+    // allow, not deny: decision researcher-gets-web-search-and-fetch gave the
+    // Claude researcher WebFetch, and the portable copy follows (a pin moved on purpose)
+    '  webfetch: allow',
     '  task: deny',
     '---',
   ].join('\n'),

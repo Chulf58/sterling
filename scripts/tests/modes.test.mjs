@@ -97,6 +97,49 @@ test('fs-move: renames AND rewrites file_keys on every owning record — knowled
   }
 });
 
+// Decision debug-scope-is-metadata-fs-helpers-stop-refusing: a registered
+// debug scope is observation metadata only. fs-remove and fs-move act on a path
+// outside the map, and keep their file-touch registration.
+function registerOutOfMapDebugScope(dir) {
+  const r = runScript('debug-scope.mjs', ['register', '--path', 'src/inmap.mjs', '--target', dir], dir);
+  assert.equal(r.code, 0, `precondition: debug scope registered — ${r.stderr}`);
+  assert.ok(existsSync(join(dir, '.sterling', 'transient', 'debug-scope.json')), 'precondition: the scope file exists');
+}
+
+test('fs-remove: a registered debug scope does NOT refuse an out-of-map path; the file is removed and the owner still gets its reconcile item', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const article = store.create(articleRec('feat-r', ['src/outside.mjs']));
+    writeFileSync(join(dir, 'src', 'outside.mjs'), 'export const x = 1;');
+    registerOutOfMapDebugScope(dir);
+    const r = runScript('fs-remove.mjs', ['src/outside.mjs', '--target', dir], dir);
+    assert.equal(r.code, 0, `out-of-map removal proceeds — stderr=${r.stderr}`);
+    assert.deepEqual(JSON.parse(r.stdout).removed, ['src/outside.mjs']);
+    assert.ok(!existsSync(join(dir, 'src', 'outside.mjs')), 'the file is gone');
+    const reconcile = store.query({ types: ['todo'], cap: 100 })
+      .filter((t) => t.system_reason === 'reconcile_needed' && t.feature_link === article.id);
+    assert.equal(reconcile.length, 1, 'the file-touch registration still runs');
+    assert.ok(existsSync(join(dir, '.sterling', 'transient', 'debug-scope.json')), 'the scope metadata is left in place');
+  } finally {
+    cleanup();
+  }
+});
+
+test('fs-move: a registered debug scope does NOT refuse an out-of-map rename; file_keys follow the move', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const article = store.create(articleRec('feat-mv', ['src/outside-a.mjs']));
+    writeFileSync(join(dir, 'src', 'outside-a.mjs'), 'export const x = 1;');
+    registerOutOfMapDebugScope(dir);
+    const r = runScript('fs-move.mjs', ['src/outside-a.mjs', 'src/outside-b.mjs', '--target', dir], dir);
+    assert.equal(r.code, 0, `out-of-map rename proceeds — stderr=${r.stderr}`);
+    assert.ok(existsSync(join(dir, 'src', 'outside-b.mjs')), 'the file moved');
+    assert.equal(store.get(article.id).files[0].path, 'src/outside-b.mjs', 'the owner follows the move');
+  } finally {
+    cleanup();
+  }
+});
+
 test('cleanup-plan: dormant/deprecated candidates with dependency evidence; active dependents block (§8.4)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
