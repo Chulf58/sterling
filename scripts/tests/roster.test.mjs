@@ -162,6 +162,7 @@ test('skills ship with live file references and pass the skill linter', () => {
     'delegating-to-subagents/SKILL.md',
     'design-research/SKILL.md',
     'drain/SKILL.md',
+    'grill/SKILL.md',
     'pr-review-loop/SKILL.md',
     'review-brief/SKILL.md',
   ]);
