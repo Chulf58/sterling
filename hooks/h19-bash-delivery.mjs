@@ -7991,7 +7991,10 @@ ${line}` : line;
     const prefix = `+${count} more records: knowledge_query`;
     return entries.length ? `${prefix}; knowledge_get ${entries.map((e) => e.name ? `${e.name} (${e.id8})` : e.id8).join(" ")}` : `${prefix}; knowledge_get`;
   };
-  const disclosureSize = (list, named) => aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => named ? e : { id8: e.id8 })));
+  const disclosureSize = (list, named) => {
+    const custom2 = aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : Infinity;
+    return custom2 <= ordinaryCeiling ? custom2 : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => named ? e : { id8: e.id8 })));
+  };
   const sepCost = (renderedBefore) => renderedBefore > 0 ? bytes(sep) : 0;
   const ordinaryParts = items.filter((part) => !isHazard(part) && !isChrome(part));
   const baseOmitted = [...omitted];
@@ -8045,7 +8048,7 @@ ${line}` : line;
           ids.pop();
           line2 = aggregateLabel(count, ids);
         }
-        return line2;
+        if (bytes(line2) <= ordinaryCeiling) return line2;
       }
       const sepBytes = sepCost([...selected.keys()].filter((part) => part !== aggregatePart).length);
       const room = Math.min(ordinaryCeiling - ordinaryBytesUsed() - sepBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes() - sepBytes);

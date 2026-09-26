@@ -929,3 +929,51 @@ test('rank: a standing-authority decision stages among a coder dispatch\'s point
 // (staging its own unranked/differently-ordered decision list instead of the
 // shared ranking function) evicts the standing ruling from the capped staged
 // set — the `/the old standing ruling/` match above goes red.
+
+// ---------------------------------------------------------------------------
+// CAPPED-OUT DECISIONS STAY DELIVERABLE (board 6c0c848f item 1, decision
+// 92088a62 ONE ASSEMBLER CONTRACT: a false 'delivered' mark is forbidden). The
+// decision block renders only DECISION_POINTER_CAP (8) pointers and discloses
+// the rest as NOT shown, so only those 8 may earn a discovery mark; the ninth
+// must stage on the next dispatch instead of being suppressed for the session.
+// ---------------------------------------------------------------------------
+test('nine fresh decisions: only the eight rendered pointers are guard-credited; the ninth stages on the next dispatch', () => {
+  // Configured cap disabled so the block renders whole and the only cut is
+  // the renderer's own pointer cap.
+  const { dir, store, cleanup } = makeProject({ delivery: { total_cap_bytes: 0 } });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    // Distinct recency, same authority and breadth: rank order is newest
+    // first, so 'capped choice 0' (the oldest) is the one past the cap.
+    const ids = [];
+    for (let i = 0; i < 9; i += 1) {
+      const rec = decisionRecord(`capped choice ${i}`, ['src/a.mjs'], { updated_at: `2026-09-0${i + 1}T12:00:00.000Z` });
+      store.create(rec);
+      ids.push(rec.id);
+    }
+    const ninth = ids[0];
+
+    const transcript = stageDispatch(dir, 'Go read src/a.mjs and fix the bug there.');
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /1 more NOT shown \(cap 8\)/, 'the renderer discloses the ninth as not shown');
+    assert.doesNotMatch(ctx, /capped choice 0\b/, 'the ninth decision is not rendered');
+
+    const credited = new Set(guardOf(dir, 'agent-1').discovery.map((e) => e.id));
+    for (const id of ids.slice(1)) assert.ok(credited.has(id), `rendered decision ${id} earns a discovery mark`);
+    assert.ok(!credited.has(ninth), 'the unrendered ninth decision must NOT be marked delivered');
+
+    const transcript2 = stageDispatch(dir, 'Go read src/a.mjs again and finish the fix.');
+    const again = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript2), dir);
+    assert.equal(again.code, 0, again.stderr);
+    const againCtx = JSON.parse(again.stdout).hookSpecificOutput.additionalContext;
+    assert.match(againCtx, /capped choice 0\b/, 'the ninth decision stages on the next dispatch');
+    assert.ok(guardOf(dir, 'agent-1').discovery.some((e) => e.id === ninth), 'and is credited once it is actually rendered');
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: attaching every fresh decision's identity to the block (the
+// pre-fix h19-dispatch-staging.mjs:411) credits the ninth — the
+// `!credited.has(ninth)` assertion goes red.

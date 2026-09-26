@@ -21,7 +21,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { assembleDelivery, DELIVERY_TRANSPORT_VISIBLE_BYTES, decisionBlockPointer, renderDecisionPointers } from '../hooks/lib/delivery.mjs';
+import { assembleDelivery, DELIVERY_TRANSPORT_VISIBLE_BYTES, decisionBlockPointer, decisionPointerPart, renderDecisionPointers } from '../hooks/lib/delivery.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -263,18 +263,22 @@ test('review P1: the "+N more" line never evicts a RESERVED decision pointer, an
   assert.match(assembled.text, /\+1 more records: knowledge_query; knowledge_get no-pointer-part \(nopointe\)/, 'the omitted part is named');
 });
 
+// The fixture FORCES the eviction (board 6c0c848f item 6: the previous
+// fixture never evicted, so its guarded assertion never ran). The first part
+// can only render as its 100 B pointer, and the pointer stage holds back no
+// room for the '+N more' line, so the line cannot fit beside it and the
+// eviction loop must take it. Its name after the first omission's proves it
+// was evicted, not omitted during placement (placement omits in caller order).
 test('review P3: a part evicted to make room for the "+N more" line is named in it, like any other omission', () => {
   const parts = [
     { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: blockOf('HEADER', 2850, 'c') },
-    { kind: 'ordinary', contentClass: 'discovery', identity: 'keep0000-1', revision: 'r', name: 'evicted-but-named', text: 'short whole part 1' },
+    { kind: 'ordinary', contentClass: 'discovery', identity: 'keep0000-1', revision: 'r', name: 'evicted-but-named', text: 'k'.repeat(2000), pointer: 'P'.repeat(100) },
     { kind: 'ordinary', contentClass: 'discovery', identity: 'omit0000-1', revision: 'r', name: 'omitted-first', text: blockOf('BIG', 2000) },
   ];
   const assembled = assembleDelivery(parts, 3000);
   assert.ok(bytes(assembled.text) <= 3000);
-  if (!assembled.text.includes('short whole part 1')) {
-    assert.match(assembled.text, /evicted-but-named \(keep0000\)/, 'an evicted record is disclosed WITH its name');
-  }
-  assert.match(assembled.text, /omitted-first \(omit0000\)/);
+  assert.doesNotMatch(assembled.text, /PPPP/, 'the part was evicted to make room for the disclosure');
+  assert.match(assembled.text, /omitted-first \(omit0000\) evicted-but-named \(keep0000\)/, 'the evicted record is disclosed WITH its name, after the placement omission');
 });
 
 function p6Parts(headerBytes) {
@@ -353,4 +357,58 @@ test('review #8: renderDecisionPointers honours the subject case in its heading'
   const d = { id: randomUUID(), slug: 's', statement: 'stmt', alternatives_rejected: [] };
   assert.match(renderDecisionPointers('(subject match)', [d], 5, { matchLabel: 'for this subject' }), /^▸ DECISIONS for this subject \(1\)/);
   assert.match(renderDecisionPointers('src/a.mjs', [d]), /^▸ DECISIONS for this path \(1\)/, 'the path case is unchanged');
+});
+
+// ---------------------------------------------------------------------------
+// 5. Residuals (board 6c0c848f, Codex Sol review 2026-09-26).
+// ---------------------------------------------------------------------------
+
+test('residual 2: a custom aggregateLabel larger than the cap falls back to the generic line instead of overrunning it', () => {
+  // Each part exceeds even the transport ceiling and has no pointer, so both
+  // are omitted under either budget.
+  const omittedParts = [0, 1].map((i) => ({ kind: 'ordinary', contentClass: 'discovery', identity: `${i}${'0'.repeat(7)}-l`, revision: 'r', text: 'z'.repeat(DELIVERY_TRANSPORT_VISIBLE_BYTES + 1) }));
+  const capped = assembleDelivery(omittedParts, 500, { aggregateLabel: () => 'L'.repeat(501) });
+  assert.ok(bytes(capped.text) <= 500, `cap 500 holds (was ${bytes(capped.text)})`);
+  assert.match(capped.text, /^\+2 more records: knowledge_query; knowledge_get/, 'the count is still stated, in the generic form');
+  const uncapped = assembleDelivery(omittedParts, 0, { aggregateLabel: () => 'L'.repeat(DELIVERY_TRANSPORT_VISIBLE_BYTES + 1) });
+  assert.ok(bytes(uncapped.text) <= DELIVERY_TRANSPORT_VISIBLE_BYTES, `the transport ceiling holds with no configured cap (was ${bytes(uncapped.text)})`);
+  assert.match(uncapped.text, /^\+2 more records: knowledge_query; knowledge_get/);
+  const fitting = assembleDelivery(omittedParts, 500, { aggregateLabel: (n) => `(+${n} held back by the caller's own wording)` });
+  assert.equal(fitting.text, "(+2 held back by the caller's own wording)", 'a label that fits is kept verbatim');
+});
+
+test('residual 1/5: decisionPointerPart credits exactly the rendered slice, each identity named, and names the top record in its pointer', () => {
+  const ds = Array.from({ length: 6 }, (_, i) => ({ id: randomUUID(), slug: `slug-${i}`, statement: `statement ${i}`, alternatives_rejected: [], updated_at: NOW }));
+  const part = decisionPointerPart('(subject match)', ds, { widen: 'WIDEN', cap: 5, remedy: 'WIDEN', matchLabel: 'for this subject' });
+  assert.deepEqual(part.identities.map((e) => e.identity), ds.slice(0, 5).map((d) => d.id), 'only the five rendered decisions are identities');
+  assert.deepEqual(part.identities.map((e) => e.name), ds.slice(0, 5).map((d) => d.slug), 'each identity carries its name');
+  assert.match(part.text, /^▸ DECISIONS for this subject \(6\)/, 'the heading counts all six');
+  assert.match(part.text, /1 more NOT shown \(cap 5\) — WIDEN/, 'the sixth is disclosed, not silently dropped');
+  assert.doesNotMatch(part.text, /statement 5/);
+  assert.match(part.pointer, new RegExp(`top: 'slug-0' \\(knowledge_get ${ds[0].id}\\)`), 'the pointer names the top decision');
+  assert.equal(part.contentClass, 'discovery');
+});
+
+test('residual 3 (H20 E2E): a sixth matching decision is counted and disclosed, never silently dropped before the renderer', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-h20-crowd-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { total_cap_bytes: 0 } }));
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  try {
+    store.create(decision(TOP_SLUG, TOP_TITLE,
+      'Quorumite treasury credits split half to the shared treasury and half to each ledger wallet when a quorumite ledger settles; the wallet split is decided on the host.'));
+    store.create(decision('quorumite-ledger-settles-nightly', 'Quorumite ledger settles treasury credits nightly', 'The quorumite ledger settles treasury credits once per night cycle.'));
+    store.create(decision('quorumite-wallet-credits-carry', 'Quorumite wallet credits carry across ledger resets', 'Quorumite wallet credits carry across a ledger reset.'));
+    store.create(decision('quorumite-treasury-ledger-audit', 'Quorumite treasury ledger keeps an audit trail', 'Every quorumite treasury ledger entry keeps an audit trail of credits.'));
+    store.create(decision('quorumite-wallet-split-rounding', 'Quorumite wallet split rounds credits down', 'A quorumite wallet split rounds odd treasury credits down.'));
+    store.create(decision('quorumite-treasury-wallet-ledger-cap', 'Quorumite treasury wallet credits cap per ledger', 'Quorumite treasury wallet credits are capped per ledger settle.'));
+    const r = runH20(dir, BRIEF);
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /▸ DECISIONS for this subject \(6\)/, 'all six matches are counted');
+    assert.match(ctx, /1 more NOT shown \(cap 5\)/, 'the sixth is disclosed');
+  } finally {
+    store.close?.();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

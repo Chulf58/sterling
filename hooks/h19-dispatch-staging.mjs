@@ -9180,7 +9180,10 @@ ${line}` : line;
     const prefix = `+${count} more records: knowledge_query`;
     return entries.length ? `${prefix}; knowledge_get ${entries.map((e) => e.name ? `${e.name} (${e.id8})` : e.id8).join(" ")}` : `${prefix}; knowledge_get`;
   };
-  const disclosureSize = (list, named) => aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => named ? e : { id8: e.id8 })));
+  const disclosureSize = (list, named) => {
+    const custom2 = aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : Infinity;
+    return custom2 <= ordinaryCeiling ? custom2 : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => named ? e : { id8: e.id8 })));
+  };
   const sepCost = (renderedBefore) => renderedBefore > 0 ? bytes(sep) : 0;
   const ordinaryParts = items.filter((part) => !isHazard(part) && !isChrome(part));
   const baseOmitted = [...omitted];
@@ -9234,7 +9237,7 @@ ${line}` : line;
           ids.pop();
           line2 = aggregateLabel(count, ids);
         }
-        return line2;
+        if (bytes(line2) <= ordinaryCeiling) return line2;
       }
       const sepBytes = sepCost([...selected.keys()].filter((part) => part !== aggregatePart).length);
       const room = Math.min(ordinaryCeiling - ordinaryBytesUsed() - sepBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes() - sepBytes);
@@ -9299,6 +9302,17 @@ function decisionBlockPointer(count, widen, top) {
   const name = top ? clipToBytes(String(top.slug || top.title || "").replace(/\s+/g, " ").trim(), 120) : "";
   const lead = top?.id ? ` \u2014 top: ${name ? `'${name}' ` : ""}(knowledge_get ${top.id})` : "";
   return `\u25B8 DECISIONS (${count}) held back by the delivery cap${lead} \u2014 ${widen}`;
+}
+function decisionPointerPart(rel, decisions, { widen, cap = DECISION_POINTER_CAP, remedy, matchLabel } = {}) {
+  const shown = decisions.slice(0, cap);
+  return {
+    kind: "ordinary",
+    contentClass: "discovery",
+    identities: shown.map((d) => ({ identity: d.id, revision: recordRevision(d), name: d.slug || d.title })),
+    text: renderDecisionPointers(rel, decisions, cap, { remedy, matchLabel }),
+    pointer: decisionBlockPointer(decisions.length, widen, shown[0]),
+    suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${widen}`
+  };
 }
 function payloadHeaderLine(rel) {
   return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
@@ -9444,14 +9458,7 @@ async function main(input2) {
           const contentClass = isOwnerDiscoveryOnly(r) ? "discovery" : "substance";
           return { kind: "ordinary", contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
         });
-        const decisionParts = freshDecisions.length ? [{
-          kind: "ordinary",
-          contentClass: "discovery",
-          identities: freshDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-          text: renderDecisionPointers(rels.join(", "), freshDecisions),
-          pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
-          suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionWiden}`
-        }] : [];
+        const decisionParts = freshDecisions.length ? [decisionPointerPart(rels.join(", "), freshDecisions, { widen: decisionWiden })] : [];
         parts.push(
           { kind: "ordinary", contentClass: "chrome", text: payloadHeaderLine(rels.join(", ")) },
           ...hazardParts(freshHazards, { fileKeys: rels }),
@@ -9474,14 +9481,12 @@ async function main(input2) {
           },
           ...hazardParts(subjectHazards, { remedy, matchLabel: "for this subject" }),
           ...subjectDecisions.length ? [
-            {
-              kind: "ordinary",
-              contentClass: "discovery",
-              identities: subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS).map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-              text: renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy, matchLabel: "for this subject" }),
-              pointer: decisionBlockPointer(subjectDecisions.length, decisionRemedy),
-              suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionRemedy}`
-            }
+            decisionPointerPart("(subject match)", subjectDecisions, {
+              widen: decisionRemedy,
+              cap: SUBJECT_MAX_DECISIONS,
+              remedy: decisionRemedy,
+              matchLabel: "for this subject"
+            })
           ] : []
         );
       }

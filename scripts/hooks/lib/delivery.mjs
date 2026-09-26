@@ -1494,10 +1494,14 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
   };
   // The fully-named line for a candidate omission set — what the ordinary
   // phase reserves room for (a custom `aggregateLabel` is sized as given).
-  const disclosureSize = (list, named) =>
-    aggregateLabel
-      ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8)))
+  // A custom label too large for the ordinary ceiling is sized as the generic
+  // line it falls back to (see `aggregate` below).
+  const disclosureSize = (list, named) => {
+    const custom = aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : Infinity;
+    return custom <= ordinaryCeiling
+      ? custom
       : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => (named ? e : { id8: e.id8 }))));
+  };
   const sepCost = (renderedBefore) => (renderedBefore > 0 ? bytes(sep) : 0);
 
   // RESERVED POINTERS (decision 301d8a0a: "Each later block's pointer is
@@ -1576,6 +1580,11 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
     // mark) are identical either way.
     // Names are shed lowest-ranked first to fit the room still free beside
     // the content already selected; only then are ids dropped (for the cap).
+    // A custom label that cannot fit the ordinary ceiling even with every id
+    // shed falls back to the generic line below (board 6c0c848f item 2):
+    // eviction can never make room for it, so keeping it meant the final
+    // accept-the-overrun resort shipped the caller's wording past the cap or
+    // the transport ceiling.
     const aggregate = () => {
       const count = disclosureCount(omitted);
       const entries = disclosureEntries(omitted);
@@ -1586,7 +1595,7 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
           ids.pop();
           line = aggregateLabel(count, ids);
         }
-        return line;
+        if (bytes(line) <= ordinaryCeiling) return line;
       }
       const sepBytes = sepCost([...selected.keys()].filter((part) => part !== aggregatePart).length);
       const room = Math.min(ordinaryCeiling - ordinaryBytesUsed() - sepBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes() - sepBytes);
@@ -1694,6 +1703,27 @@ export function decisionBlockPointer(count, widen, top) {
   const name = top ? clipToBytes(String(top.slug || top.title || '').replace(/\s+/g, ' ').trim(), 120) : '';
   const lead = top?.id ? ` — top: ${name ? `'${name}' ` : ''}(knowledge_get ${top.id})` : '';
   return `▸ DECISIONS (${count}) held back by the delivery cap${lead} — ${widen}`;
+}
+
+/** THE decision-pointer assembler part — one block of pointer lines speaking
+ *  for SEVERAL decisions (board 6c0c848f items 1, 3, 5). The renderer shows
+ *  only `decisions.slice(0, cap)`; the part's `identities` are built from that
+ *  SAME slice, so a decision disclosed as "N more NOT shown" never earns a
+ *  discovery mark (decision 92088a62: a false 'delivered' mark is forbidden)
+ *  and stays eligible for a later, real delivery. Callers pass the FULL fresh
+ *  list, never a pre-sliced one, so the renderer's count stays true. Each
+ *  identity carries its `name` and the pointer names the top record, so the
+ *  '+N more' disclosure and a pointer-only fallback both read `name (id8)`. */
+export function decisionPointerPart(rel, decisions, { widen, cap = DECISION_POINTER_CAP, remedy, matchLabel } = {}) {
+  const shown = decisions.slice(0, cap);
+  return {
+    kind: 'ordinary',
+    contentClass: 'discovery',
+    identities: shown.map((d) => ({ identity: d.id, revision: recordRevision(d), name: d.slug || d.title })),
+    text: renderDecisionPointers(rel, decisions, cap, { remedy, matchLabel }),
+    pointer: decisionBlockPointer(decisions.length, widen, shown[0]),
+    suffix: `  … the rest held back by the delivery cap — ${widen}`,
+  };
 }
 
 export function payloadHeaderLine(rel) {
