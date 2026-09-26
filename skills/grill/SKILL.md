@@ -15,7 +15,7 @@ Decision `sterling-grill-skill-design`. The interview and its capture only; no b
 ## 1. Stage before asking
 
 - `knowledge_preflight` and `knowledge_query` on the subject **in the store's vocabulary** (its titles' words, sibling slugs); re-ask once in that vocabulary after an `ungoverned` verdict on a subject you expect to be governed.
-- **Facts go to lanes, never to the user.** Anything the code, the store or the web can answer goes to a scout or researcher (web: your WebSearch or an Astra consult). Only decisions go to the user.
+- **Facts go to lanes, never to the user.** Anything the code, the store or the web can answer goes to a scout or researcher (web: a general-purpose lane, which has the web tools, or an Astra consult). Only decisions go to the user.
 - **A settled ruling is not a question.** Never re-ask it. Show it only where it explains a recommendation, cited by slug.
 
 ## 2. The tree
