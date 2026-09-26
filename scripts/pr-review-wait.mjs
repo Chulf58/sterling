@@ -19,7 +19,9 @@
 // --since-review and of the current head exists — the OLDEST such review
 // first, so none is ever skipped; otherwise it sleeps with
 // backoff and polls again until --timeout. One call never runs forever: the
-// deadline bounds the whole call and each gh call has its own timeout.
+// deadline is checked before every gh call and caps each call's own timeout.
+// A review is returned only when the head read AFTER fetching it is still the
+// reviewed SHA.
 //
 // UNVERIFIED until the S0 first use on a work machine: the Copilot reviewer's
 // login (a Bot matched by /copilot/i until pinned in pr_review.copilot_logins,
@@ -144,13 +146,21 @@ else {
   if (`${m[1]}/${m[2]}/${m[3]}` !== origin.repo) error(`the PR URL ${pr} is not in origin's repo (${origin.repo}) — the PR repo is bound to origin`);
   prNumber = Number(m[4]);
 }
+const deadline = Date.now() + timeoutS * 1000;
 const [, owner, name] = origin.repo.split('/');
 const base = `repos/${owner}/${name}/pulls/${prNumber}`;
 
 // -------------------------------------------------------------------- gh
+// THE DEADLINE BOUNDS THE WHOLE CALL (Sol review): it is checked before every
+// gh call, and each call's own timeout is capped to the budget left, so a
+// hanging gh ends the call at --timeout instead of after another full poll.
+class DeadlineReached extends Error {}
 function ghApi(path, { paginate = false } = {}) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new DeadlineReached();
   const args = ['api', '--hostname', origin.host, ...(paginate ? ['--paginate'] : []), path];
-  const r = spawnSync('gh', args, { cwd: target, encoding: 'utf8', timeout: GH_CALL_TIMEOUT_MS, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  const r = spawnSync('gh', args, { cwd: target, encoding: 'utf8', timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  if (r.error?.code === 'ETIMEDOUT' && Date.now() >= deadline) throw new DeadlineReached();
   if (r.error || r.status !== 0) {
     throw new Error(`gh ${args.join(' ')} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || r.stdout || '').trim()}`);
   }
@@ -205,19 +215,28 @@ function poll() {
   const comments = parsePages(ghApi(`${base}/comments`, { paginate: true }))
     .filter((c) => c?.pull_request_review_id === review.id)
     .map((c) => ({ id: c.id, path: c.path ?? null, line: c.line ?? c.original_line ?? null, body: c.body ?? '', in_reply_to: c.in_reply_to_id ?? null }));
+  // HEAD RACE (Sol review): a push between the first head read and here would
+  // make this a review of a superseded head. Re-read the head; return the
+  // review only if both reads equal the reviewed SHA (and --head, checked
+  // above), otherwise poll again — the next poll sees it as stale.
+  const [again] = parsePages(ghApi(base));
+  if (again?.head?.sha !== head) {
+    result.head_sha = typeof again?.head?.sha === 'string' ? again.head.sha : head;
+    return null;
+  }
   return {
     review: { id: review.id, commit_id: review.commit_id, author: review.user.login, state: review.state, body: review.body ?? '' },
     comments,
   };
 }
 
-const deadline = Date.now() + timeoutS * 1000;
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 for (;;) {
   let found;
   try {
     found = poll();
   } catch (e) {
+    if (e instanceof DeadlineReached) finish('timeout', { review: null, comments: [] });
     error(e.message);
   }
   if (found) finish('review', found);

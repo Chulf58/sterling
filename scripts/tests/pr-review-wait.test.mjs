@@ -40,7 +40,7 @@ function oneLine(s) {
 //   With --paginate every page is printed back to back (gh's own output for
 //   array endpoints); without it, only the first page.
 //   A path whose repo is not acme/widget answers 404; a file named
-//   fail_<endpoint> makes that endpoint exit 1.
+//   fail_<endpoint> makes that endpoint exit 1; delay_ms delays every answer.
 const FAKE_GH_IMPL = `
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -53,6 +53,7 @@ const m = path.match(/^repos\\/([^/]+)\\/([^/]+)\\/pulls\\/(\\d+)(?:\\/(reviews|
 if (!m) { console.error('fake gh: unexpected path ' + path); process.exit(3); }
 if (m[1] + '/' + m[2] !== 'acme/widget') { console.error('gh: Not Found (HTTP 404)'); process.exit(1); }
 const endpoint = m[4] ?? 'pull';
+if (existsSync(join(state, 'delay_ms'))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(readFileSync(join(state, 'delay_ms'), 'utf8')));
 if (existsSync(join(state, 'fail_' + endpoint))) { console.error('gh: Server Error (HTTP 502)'); process.exit(1); }
 const countFile = join(state, 'count_' + endpoint);
 const count = existsSync(countFile) ? Number(readFileSync(countFile, 'utf8')) : 0;
@@ -361,6 +362,48 @@ test('identity: a malformed pr_review.copilot_logins is an error, never silently
       assert.equal(r.out.status, 'error');
       assert.match(r.out.error, /copilot_logins|pr_review/);
     }
+  } finally {
+    f.cleanup();
+  }
+});
+
+const NEW_HEAD = 'c'.repeat(40);
+
+test('head race (Sol): the head moves while the review is fetched — the review is NOT returned; it polls again and the old-head review is stale', () => {
+  const f = makeFixture();
+  try {
+    f.put('pull', 1, [{ number: 7, head: { sha: NEW_HEAD } }]);
+    f.put('reviews', 0, [[review(1000)]]);
+    f.put('comments', 0, [[comment(1, 1000)]]);
+    const r = run(f, ['7', ...FAST]);
+    assert.equal(r.out.status, 'timeout', `a review of a head that moved is never returned: ${oneLine(r.stdout)}`);
+    assert.equal(r.out.head_sha, NEW_HEAD);
+    assert.equal(r.out.stale_review_ignored, true);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('deadline (Sol): a gh call that hangs is cut at the --timeout budget; the whole call returns timeout within the bound', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'delay_ms'), '8000');
+    const r = run(f, ['7', '--interval', '0.05', '--timeout', '1']);
+    assert.equal(r.code, 2, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'timeout');
+    assert.ok(r.ms < 4000, `bounded by --timeout, took ${r.ms}ms`);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('deadline (Sol): slow calls that each fit but together exceed the budget stop at the deadline, not after another full poll', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'delay_ms'), '400');
+    const r = run(f, ['7', '--interval', '0.05', '--timeout', '1']);
+    assert.equal(r.out.status, 'timeout', oneLine(r.stdout + r.stderr));
+    assert.ok(r.ms < 2500, `bounded by --timeout, took ${r.ms}ms`);
   } finally {
     f.cleanup();
   }
