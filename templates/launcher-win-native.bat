@@ -6,7 +6,7 @@ rem re-running /sterling:init. The tmux variant is sterling.bat.
 rem
 rem Windows Terminal is a WindowsApps execution alias - call it by ABSOLUTE path:
 rem the WindowsApps dir is NOT reliably on the PATH a double-clicked .bat inherits,
-rem so a bare invocation flashes-and-closes (anti_pattern 6ac730b1). %LOCALAPPDATA%
+rem so a bare invocation flashes-and-closes. %LOCALAPPDATA%
 rem and %USERPROFILE% expand per-user, so the template ships portable; the node
 rem path is baked by init from process.execPath on a native-Windows host (decision
 rem host-native-init-with-dev-machine-escape-hatch) - no PATH lookup is involved,
@@ -22,7 +22,7 @@ rem                  This is the default for a Windows-only installation.
 rem   dual-context - adds --mcp-config <win json> --strict-mcp-config, because on a
 rem                  MIXED host the plugin's own entry names a Linux interpreter that
 rem                  Windows cannot execute. The cost is that --strict makes this
-rem                  claude see ONLY the sterling server (decision 67350de4 CAVEAT 1)
+rem                  claude see ONLY the sterling server
 rem                  - paid only where that premise still holds.
 {{MCP_MODE_NOTE}}
 rem
@@ -30,9 +30,9 @@ rem split-pane focuses the new (TUI) pane and wt has no create-unfocused flag, s
 rem the trailing `move-focus left` returns the keyboard to the conductor (left)
 rem pane - otherwise terminal-kit grabs all input.
 rem
-rem NO DOMAIN-SNAPSHOT BRIDGE, DELIBERATELY (board 3873d33b). This launcher used to
+rem NO DOMAIN-SNAPSHOT BRIDGE, DELIBERATELY. This launcher used to
 rem run a snapshot step through the WSL side first, because a native process cannot
-rem live-read WSL-resident WAL domain stores (research_finding 5c6437d8). That step
+rem live-read WSL-resident WAL domain stores. That step
 rem only ever served a MIXED host: packages/store/src/mounted.ts derives the domains
 rem root from homedir(), so a Windows-only user's native server and native TUI
 rem already open %USERPROFILE%\.sterling\domains directly, with no boundary to

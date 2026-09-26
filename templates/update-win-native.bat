@@ -7,15 +7,15 @@ rem fan-out); machine-specific; gitignored; regenerable.
 rem
 rem The WSL sibling (templates/update-win.bat) shells to wsl.exe + bash
 rem scripts/update-console.sh; a 100%-Windows user has no WSL, and the clone
-rem update is the ONLY way a consuming machine receives Sterling changes
-rem (decisions e6240afe, ffe7c416, 1fe2a5e3). So this template is chosen instead
+rem update is the ONLY way a consuming machine receives Sterling changes.
+rem So this template is chosen instead
 rem whenever the RENDERING host is win32. There is no native counterpart of
 rem update-console.sh and there must not be: the whole updater already lives in
 rem node (scripts/update.mjs), and cmd.exe can hold its own window open - so the
 rem console duties (outcome line + pause) are the five lines below, not a port.
 rem
 rem NODE IS BAKED, NOT LOOKED UP: node is measurably NOT on the PATH a
-rem double-clicked .bat inherits on this host class (ffe7c416 defect 1), so the
+rem double-clicked .bat inherits on this host class, so the
 rem absolute path of the node that RENDERED this file - already proven runnable,
 rem needing no PATH membership - is baked in, with a PATH lookup only as the
 rem fallback for a moved/upgraded install. No wt.exe: a double-clicked .bat
