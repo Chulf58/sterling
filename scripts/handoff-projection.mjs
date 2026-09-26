@@ -21,7 +21,8 @@
 //      invalid config.mode; no store; an empty store while exports exist; a
 //      hand-written file in the way; a symlink or non-directory on the way; a
 //      generated path the target's own ignore rules cover. /sterling:update
-//      withholds its completion marker, so the next update retries.
+//      exits non-zero; its core completion marker stays valid, and every later
+//      update revisits this project until the refusal clears.
 //   1  failed part-way — the export may be INCOMPLETE; rerun after fixing
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
