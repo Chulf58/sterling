@@ -18,7 +18,6 @@
 // refusal matrix and the step ordering are unit-testable without a network, an
 // npm install, or a 90-second test battery. scripts/update.mjs is the thin CLI.
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -26,9 +25,8 @@ import { dirname, join } from 'node:path';
 // bootstrap-independence note in scripts/update.mjs).
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
-import { readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL, HANDOFF_ROOT_FILES, isHandoffPath } from './handoff-projection.mjs';
-import { ContainmentError, existsContained, readContained } from './contained-fs.mjs';
-import { fileURLToPath } from 'node:url';
+import { readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './handoff-projection.mjs';
+import { ContainmentError } from './contained-fs.mjs';
 
 // Build + test batteries dominate an update (measured on this machine: build
 // ~19s, check ~12s, tests ~87s), so the ceiling is generous — a timeout here
@@ -300,50 +298,35 @@ export const UPDATE_MARKER_RELATIVE_PATH = join('.sterling', 'update-complete.js
  * silent; present-but-corrupt is a DEGRADATION and must announce itself
  * (P5) — both return null so the caller resumes either way, but only the
  * corrupt case logs.
+ *
+ * The marker attests the CORE update only (install, build, check, test,
+ * migrations, re-bake) — never per-project state. Per-project convergence comes
+ * from the refresh pass every run makes (decision
+ * project-mode-hobby-work-toggle-decides-flow, Astra design review item 2).
+ * A marker written before that rebuild may still carry `projects`,
+ * `project_retry` or `handoff_retry`: they are ignored, never validated, so an
+ * old marker neither degrades to a resume nor schedules anything.
  */
-// Also carries `handoff_retry`: the project paths whose handoff projection ended
-// in an ACTIONABLE refusal (exit 3). That is per-project retry state, not a
-// failure of the clone update: one project that can never be repaired must not
-// keep the whole sequence from completing (Sol re-check, the update wedge).
 function readUpdateMarker(cwd, log) {
   const p = join(cwd, UPDATE_MARKER_RELATIVE_PATH);
   if (!existsSync(p)) return null;
   try {
     const parsed = JSON.parse(readFileSync(p, 'utf8'));
     if (typeof parsed?.sha !== 'string' || !parsed.sha) throw new Error('missing or invalid "sha" field');
-    const retry = parsed.handoff_retry ?? [];
-    if (!Array.isArray(retry) || retry.some((r) => typeof r !== 'string')) throw new Error('invalid "handoff_retry" field');
-    const projects = parsed.projects ?? {};
-    const isState = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && typeof v.mode === 'string';
-    if (projects === null || typeof projects !== 'object' || Array.isArray(projects) || !Object.values(projects).every(isState)) {
-      throw new Error('invalid "projects" field');
-    }
-    const projectRetry = parsed.project_retry ?? [];
-    if (!Array.isArray(projectRetry) || projectRetry.some((r) => typeof r !== 'string')) throw new Error('invalid "project_retry" field');
-    return { sha: parsed.sha, handoff_retry: retry, projects, project_retry: projectRetry };
+    return { sha: parsed.sha };
   } catch (err) {
     log(`\n⚠ update marker '${p}' is corrupt/unreadable — degrading to a full resume rather than trusting a marker that cannot be verified: ${err?.message ?? err}`);
     return null;
   }
 }
 
-/** Written ONLY once runUpdate reaches its clean end with report.exit === 0 —
- *  see the call site. A halted or failed run must never leave a marker that
- *  makes the NEXT run believe "Already current" without the sequence having
- *  actually finished. */
-// `projects` is the per-project PROVISIONING STATE (decision
-// project-mode-hobby-work-toggle-decides-flow; Sol review of S1): repo_path →
-// { mode: 'hobby' } for a project last seen in hobby mode, or { mode: 'work',
-// head, outcome } for the last successful work provisioning (agent sync plus
-// projection) at clone sha `head`. The already-current path reads it to decide
-// which work projects need provisioning; presence of files alone never decides.
-// `project_retry` (Sol review of S1, item 3): projects whose config.mode is
-// invalid. Unlike handoff_retry it reruns BOTH the agent sync and the
-// projection once the mode is fixed; update exits non-zero while it is non-empty.
-function writeUpdateMarker(cwd, sha, handoffRetry = [], projects = {}, projectRetry = []) {
+/** Written ONLY once runUpdate's core sequence has completed cleanly — see the
+ *  call site. A halted or failed core run must never leave a marker that makes
+ *  the NEXT run skip the core without it having actually finished. */
+function writeUpdateMarker(cwd, sha) {
   const p = join(cwd, UPDATE_MARKER_RELATIVE_PATH);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString(), handoff_retry: handoffRetry, project_retry: projectRetry, projects }, null, 2) + '\n');
+  writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString() }, null, 2) + '\n');
 }
 
 // A Node filesystem error (EACCES, EPERM, EIO, ...) raised while reading ONE
@@ -354,35 +337,10 @@ const isFsError = (err) => typeof err?.code === 'string' && typeof err?.syscall 
 // or a filesystem error.
 const isProjectReadRefusal = (err) => err instanceof ProjectModeError || err instanceof ContainmentError || isFsError(err);
 
-// The project's config bytes, hashed: a STANDING refusal (outcome 'standing')
-// is retried only when this or the clone head changes. Read through contained-fs.
-function configHash(repoPath) {
-  const rel = '.sterling/config.json';
-  return existsContained(repoPath, rel, 'file') ? createHash('sha256').update(readContained(repoPath, rel)).digest('hex') : 'absent';
-}
-
-// The clone this module lives in: its registry declares the portable set.
-const MODULE_PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-
-// A work project's files are complete when EVERY portable agent the registry
-// declares, both handoff indexes, and every docs/sterling file registered in its
-// config.generated_projections exist as regular files — checked exactly, never
-// "some .md". Target paths go through contained-fs (a symlink or non-directory
-// on the way throws ContainmentError). `handoff: false` checks the portable
-// agents only — for a STANDING projection refusal, whose handoff files are
-// legitimately absent, while its agent set must still be exactly complete.
-function workFilesComplete(repoPath, { handoff = true } = {}) {
-  const registry = JSON.parse(readFileSync(join(MODULE_PLUGIN_ROOT, 'agent-templates', 'registry.json'), 'utf8'));
-  const portable = registry.agents.filter((a) => a.opencode !== undefined).map((a) => `.opencode/agents/${a.name}.md`);
-  const config = existsContained(repoPath, '.sterling/config.json', 'file') ? JSON.parse(readContained(repoPath, '.sterling/config.json')) : {};
-  const registered = Array.isArray(config.generated_projections) ? config.generated_projections.filter((r) => typeof r === 'string' && isHandoffPath(r)) : [];
-  return [...portable, ...(handoff ? [...HANDOFF_ROOT_FILES, ...registered] : [])].every((rel) => existsContained(repoPath, rel, 'file'));
-}
-
 // What to do about a project whose handoff refusal will not go away by itself.
-export function handoffRetryRemedy(repoPath) {
+export function handoffRefusalRemedy(repoPath) {
   return (
-    `fix it in ${repoPath} and rerun /sterling:update (only this project is retried). ` +
+    `fix it in ${repoPath} and rerun /sterling:update (every registered project is refreshed on every run). ` +
     `If it cannot be repaired: retire it (move or delete the project, then \`node scripts/list-projects.mjs --prune-missing\` unregisters it), ` +
     `or set "store_authority": "secondary" in its .sterling/config.json so the refusal becomes a standing one.`
   );
@@ -429,80 +387,119 @@ function probeSchemaVersion(dbPath) {
 export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {} }) {
   const git = gitFrom(exec, cwd);
   const nodeBin = opts.nodeBin ?? process.execPath;
-  const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null, handoff_retry: [], project_retry: [] };
-  // A project whose config.mode is invalid (or unreadable through contained-fs):
-  // its own refusal class, logged with its own message, joining project_retry.
-  // Returns the mode, or null after reporting the refusal.
-  const projectModeOrRefuse = (p, indent = '  ') => {
-    try {
-      return readProjectMode(p.repo_path);
-    } catch (err) {
-      if (!isProjectReadRefusal(err)) throw err;
-      log(`${indent}✗ ${p.name}: REFUSED — project mode: ${err.message}. Nothing was synced or projected for this project; the next /sterling:update reruns its agent sync and handoff projection once config.mode is fixed.`);
-      if (!report.project_retry.includes(p.repo_path)) report.project_retry.push(p.repo_path);
-      return null;
-    }
-  };
-  // Per-project provisioning state persisted in the completion marker (see
-  // writeUpdateMarker). Seeded from the marker on the already-current path; the
-  // full fan-out rebuilds it for every project it visits.
-  let provisioning = {};
-  // outcome 'ok': agent sync and projection both succeeded. outcome 'standing':
-  // the agents synced but the projection refused STANDING (exit 2, e.g. a
-  // secondary store) — nothing to retry until the config or the head changes,
-  // so `config` records the config hash it was judged against.
-  const recordProvisioning = (p, head, syncStatus, handoffStatus) => {
-    if (handoffStatus === 'skipped') {
-      provisioning[p.repo_path] = { mode: 'hobby' };
-      return;
-    }
-    const outcome = syncStatus === 0 && handoffStatus === 0 ? 'ok' : syncStatus === 0 && handoffStatus === 2 ? 'standing' : null;
-    if (!outcome) {
-      delete provisioning[p.repo_path];
-      return;
-    }
-    try {
-      provisioning[p.repo_path] = { mode: 'work', head, outcome, config: configHash(p.repo_path) };
-    } catch (err) {
-      if (!(err instanceof ContainmentError) && !isFsError(err)) throw err;
-      delete provisioning[p.repo_path]; // unprovable: the next run judges it afresh
-    }
+  const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null };
+  // Keeps the FIRST non-zero exit: a later, milder per-project outcome never
+  // masks an earlier failure.
+  const fail = (code) => {
+    if (report.exit === 0) report.exit = code;
   };
 
-  // Handoff projection for one project (decision
-  // init-prepares-opencode-portable-agents-and-target-handoff-projections): refresh
-  // its committed architecture.md / rulings.md / docs/sterling/ from ITS OWN store.
-  // Exit 2 is a STANDING refusal (a secondary store): loud, never fatal. Exit 3 is
-  // an ACTIONABLE refusal (a hand-written file, symlink or ignore rule in the way, a
-  // missing or empty store): the project joins report.handoff_retry, which the
-  // completion marker persists, and the next already-current run retries ONLY it.
-  // Any other failure (exit 1) may have left an INCOMPLETE export: update exit 1.
-  // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-  // projection is WORK-ONLY, read from the project's OWN config. Hobby is a loud
-  // skip (returns 'skipped', deletes nothing, never enters the retry set); an
-  // invalid mode is an actionable refusal that joins the retry set like exit 3.
-  const runHandoff = (p) => {
-    const mode = projectModeOrRefuse(p, '      ');
-    if (mode === null) return 'refused_project_mode';
-    if (mode !== 'work') {
-      log(`      skipped — ${HOBBY_SKIP_DETAIL}`);
-      return 'skipped';
+  // THE PER-PROJECT REFRESH (decision project-mode-hobby-work-toggle-decides-flow,
+  // Astra design review item 2 — rebuilt as ONE idempotent pass). Every explicit
+  // update visits each registered target exactly once, on the full path and the
+  // already-current path alike; the target's CURRENT mode, read from its own
+  // config, decides what runs:
+  //   - valid mode: sync-agents (it gates the portable agents on work itself);
+  //   - work: also the handoff projection; hobby: no portable-file maintenance,
+  //     nothing deleted;
+  //   - invalid mode, or a filesystem/containment error reading it: a visible
+  //     per-project refusal, exit 2, nothing synced or projected.
+  // The generators carry every safety guard (containment, foreign/local-edit
+  // refusal, store authority, missing/empty-store protection, unchanged-byte
+  // preservation), so running them on every update converges the files without
+  // any persisted schedule. One target's failure never stops another's refresh.
+  // This guarantees convergence when refresh runs, not freshness between runs.
+  // Returns the number of targets whose refresh failed or was refused.
+  const refreshProjects = (list, { launchers }) => {
+    let failures = 0;
+    for (const p of list) {
+      const entry = { name: p.name, repo_path: p.repo_path, status: null };
+      report.projects.push(entry);
+      let mode;
+      try {
+        mode = readProjectMode(p.repo_path);
+      } catch (err) {
+        if (!isProjectReadRefusal(err)) throw err;
+        log(`  ✗ ${p.name}: REFUSED — project mode: ${err.message}. Nothing was synced or projected for this project; fix config.mode ('hobby' or 'work', TUI System tab) and rerun /sterling:update.`);
+        entry.handoff = 'refused_project_mode';
+        fail(2);
+        failures++;
+        continue;
+      }
+      let failed = false;
+      const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
+      const out = `${r.stdout}${r.stderr}`.trim();
+      const statuses = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^[a-z_]+: /.test(l));
+      // config_drift (decision 256d1059) wrote nothing, so it is not a change; it is
+      // relayed verbatim below (the line carries the fix command), never a failure.
+      const driftedAgents = statuses.filter((l) => l.startsWith('config_drift: '));
+      const changedAgents = statuses.filter((l) => !l.startsWith('up_to_date') && !l.startsWith('locally_modified_up_to_date') && !l.startsWith('config_drift: '));
+      Object.assign(entry, { status: r.status, changed: changedAgents.length, config_drift: driftedAgents.length });
+      if (r.status === 2) {
+        log(`  ✗ ${p.name}: agent sync REFUSED (exit 2 — a locally modified agent or an unsafe path). Output verbatim:\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
+        fail(2);
+        failed = true;
+      } else if (r.status !== 0) {
+        log(`  ✗ ${p.name}: agent sync failed (exit ${r.status}):\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
+        fail(1);
+        failed = true;
+      } else {
+        log(`  • ${p.name}: ${changedAgents.length ? changedAgents.join(', ') : driftedAgents.length ? 'no agent changes' : 'up to date'}`);
+        for (const line of driftedAgents) log(`      ⚠ ${line}`);
+      }
+      // Handoff projection (decision
+      // init-prepares-opencode-portable-agents-and-target-handoff-projections):
+      // refresh the project's committed architecture.md / rulings.md /
+      // docs/sterling/ from ITS OWN store. Exit 2 is a STANDING refusal (a
+      // secondary store): a visible ⚠ skip, never a failure. Exit 3 is an
+      // ACTIONABLE refusal (a hand-written file, symlink or ignore rule in the way,
+      // a missing or empty store): exit 2. Anything else non-zero may have left an
+      // INCOMPLETE export: exit 1.
+      if (mode !== 'work') {
+        log(`      skipped — ${HOBBY_SKIP_DETAIL}`);
+        entry.handoff = 'skipped';
+      } else {
+        const handoff = exec(nodeBin, [join(cwd, 'scripts', 'handoff-projection.mjs'), p.repo_path], { cwd });
+        const handoffOut = `${handoff.stdout}${handoff.stderr}`.trim();
+        const handoffLine = handoffOut.split('\n')[0];
+        entry.handoff = handoff.status;
+        if (handoff.status === 2) {
+          log(`      ⚠ ${handoffLine}`);
+        } else if (handoff.status === 3) {
+          log(`      ✗ ${handoffLine}\n        (${handoffRefusalRemedy(p.repo_path)})`);
+          fail(2);
+          failed = true;
+        } else if (handoff.status !== 0) {
+          log(`      ✗ handoff projection FAILED (exit ${handoff.status}) — the export may be INCOMPLETE:\n${handoffOut.split('\n').map((l) => `          ${l}`).join('\n')}`);
+          fail(1);
+          failed = true;
+        } else if (!handoffLine.startsWith('handoff projection: unchanged')) {
+          log(`      ${handoffLine}`);
+        }
+      }
+      if (failed) failures++;
+      if (!launchers) continue;
+      // Deliver the double-click updater to every registered project — the
+      // update event is how a machine receives new artifacts, so a project
+      // init'd before this launcher existed gets one here rather than waiting
+      // on someone remembering a per-project re-init (P4). Ensure semantics:
+      // never overwrites what it cannot prove it generated; nonfatal always.
+      try {
+        const launcher = ensureUpdateLauncher(p.repo_path, cwd);
+        if (launcher.status !== 'matches') log(`      ${UPDATE_LAUNCHER_NAME}: ${launcher.status} — ${launcher.detail}`);
+      } catch (err) {
+        log(`      ⚠ ${UPDATE_LAUNCHER_NAME} ensure FAILED (nonfatal): ${err?.message ?? err}`);
+      }
+      // Deliver the consumer-runnable checks entry the same way (board 4ccf0644):
+      // a project init'd before this launcher existed otherwise never gets one.
+      try {
+        const checkLauncher = ensureConsumerCheckLauncher(p.repo_path, cwd);
+        if (checkLauncher.status !== 'matches') log(`      ${CONSUMER_CHECK_LAUNCHER_NAME}: ${checkLauncher.status} — ${checkLauncher.detail}`);
+      } catch (err) {
+        log(`      ⚠ ${CONSUMER_CHECK_LAUNCHER_NAME} ensure FAILED (nonfatal): ${err?.message ?? err}`);
+      }
     }
-    const handoff = exec(nodeBin, [join(cwd, 'scripts', 'handoff-projection.mjs'), p.repo_path], { cwd });
-    const handoffOut = `${handoff.stdout}${handoff.stderr}`.trim();
-    const handoffLine = handoffOut.split('\n')[0];
-    if (handoff.status === 2) {
-      log(`      ⚠ ${handoffLine}`);
-    } else if (handoff.status === 3) {
-      log(`      ✗ ${handoffLine}\n        (${handoffRetryRemedy(p.repo_path)})`);
-      report.handoff_retry.push(p.repo_path);
-    } else if (handoff.status !== 0) {
-      log(`      ✗ handoff projection FAILED (exit ${handoff.status}) — the export may be INCOMPLETE:\n${handoffOut.split('\n').map((l) => `          ${l}`).join('\n')}`);
-      report.exit = report.exit === 0 ? 1 : report.exit;
-    } else if (!handoffLine.startsWith('handoff projection: unchanged')) {
-      log(`      ${handoffLine}`);
-    }
-    return handoff.status;
+    return failures;
   };
 
   // A step: loud on failure (full output), one line on success. A failure stops
@@ -641,148 +638,36 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   if (before.behind === 0 && !opts.force) {
     const marker = readUpdateMarker(cwd, log);
     const markerSha = marker?.sha ?? null;
-    provisioning = { ...(marker?.projects ?? {}) };
     if (markerSha === before.head) {
-      // The clone update itself is complete. Unresolved projects are retried
-      // FIRST (handoff_retry reruns the projection, project_retry — an invalid
-      // mode — reruns the agent sync AND the projection), then the normal scan
-      // below covers every registered project that was NOT retried, so a stuck
-      // project never starves another one's provisioning (Sol re-check). One
-      // marker write at the end.
-      const hasRetry = (marker.handoff_retry.length || marker.project_retry.length) && opts.projects !== false;
-      let noopProjectList = [];
-      try {
-        noopProjectList =
-          opts.projects === false ? [] : (typeof projects === 'function' ? (await projects()) ?? [] : projects);
-      } catch (err) {
-        if (hasRetry) {
-          log(`\n⚠ handoff retry skipped — project registry unavailable: ${err?.message ?? err}`);
-          report.exit = 2;
-          return report;
-        }
-        // FULLY NONFATAL without a retry set: an already-current update has
-        // already succeeded, so a registry failure must NOT reject it.
-        log(`\n⚠ registry coverage skipped — project registry unavailable (nonfatal): ${err?.message ?? err}`);
-      }
-      try {
-        // The blind spot this reports is INDEPENDENT of clone lag — an
-        // already-current clone with two unregistered projects is the measured
-        // 2026-08-28 state exactly — so the report belongs on this path too.
-        await reportCoverage(noopProjectList);
-      } catch (err) {
-        log(`\n⚠ registry coverage skipped (nonfatal): ${err?.message ?? err}`);
-      }
-      const recordedBefore = JSON.stringify(provisioning);
-      const retriedPaths = new Set();
-      if (hasRetry) {
-        const byPath = new Map(noopProjectList.map((p) => [p.repo_path, p]));
-        const retried = (repoPath) => {
-          retriedPaths.add(repoPath);
-          const p = byPath.get(repoPath);
-          if (!p) log(`  • ${repoPath}: no longer registered — dropped from the retry set`);
-          return p;
-        };
-        if (marker.project_retry.length) {
-          log(`\n▸ already current at ${before.head_short}; retrying the agent sync and handoff projection for ${marker.project_retry.length} project(s) whose project mode was invalid`);
-          for (const repoPath of marker.project_retry) {
-            const p = retried(repoPath);
-            if (!p || projectModeOrRefuse(p) === null) continue;
-            const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
-            if (r.status !== 0) {
-              log(`  ✗ ${p.name}: agent sync ${r.status === 2 ? 'REFUSED' : 'failed'} (exit ${r.status}):\n${`${r.stdout}${r.stderr}`.trim().split('\n').map((l) => `      ${l}`).join('\n')}`);
-              report.exit = r.status === 2 ? 2 : report.exit === 0 ? 1 : report.exit;
-            } else {
-              log(`  • ${p.name}: agents synced`);
-            }
-            const handoff = runHandoff(p);
-            recordProvisioning(p, markerSha, r.status, handoff);
-            report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, handoff });
-          }
-        }
-        if (marker.handoff_retry.length) {
-          log(`\n▸ already current at ${before.head_short}; retrying the handoff projection for ${marker.handoff_retry.length} project(s) left unresolved by the last update`);
-          for (const repoPath of marker.handoff_retry) {
-            if (retriedPaths.has(repoPath)) continue; // already rerun in full above
-            const p = retried(repoPath);
-            if (!p) continue;
-            log(`  • ${p.name}:`);
-            const handoff = runHandoff(p);
-            recordProvisioning(p, markerSha, 0, handoff);
-            report.projects.push({ name: p.name, repo_path: p.repo_path, handoff });
-          }
-        }
-      }
-      // Hobby→work with HEAD unchanged (decision
-      // project-mode-hobby-work-toggle-decides-flow; Sol review of S1): no new
-      // commit will ever trigger the fan-out for a project switched to work, and
-      // files present on disk prove nothing about their currency. A work project
-      // is provisioned (idempotent agent sync + projection) when its recorded
-      // state is missing, is not work, or is at another head — or when its file
-      // set is incomplete. A hobby project's state is recorded as hobby, so a
-      // later switch back to work re-provisions it.
-      const toProvision = [];
-      for (const p of noopProjectList) {
-        if (retriedPaths.has(p.repo_path)) continue;
-        const mode = projectModeOrRefuse(p, '\n');
-        if (mode === null) {
-          delete provisioning[p.repo_path];
-          report.exit = 2;
-          continue;
-        }
-        if (mode !== 'work') {
-          provisioning[p.repo_path] = { mode: 'hobby' };
-          continue;
-        }
-        const state = provisioning[p.repo_path];
-        if (!state || state.mode !== 'work' || state.head !== before.head) {
-          toProvision.push(p);
-          continue;
-        }
-        // The probes read target paths through contained-fs: a symlink or a
-        // non-directory on the way is a REPORTED refusal, never a throw out of
-        // the update and never a provisioning through the unsafe path.
+      // The core update is complete at this head: nothing is installed, built,
+      // tested or migrated. The per-project pass still runs — every target once.
+      let list = [];
+      let registryOk = true;
+      if (opts.projects !== false) {
         try {
-          // The exact portable-agent set is ALWAYS checked; a standing outcome
-          // skips only the handoff-file completeness and is otherwise retried
-          // only when its config changes.
-          const standing = state.outcome === 'standing';
-          const stale = !workFilesComplete(p.repo_path, { handoff: !standing }) || (standing && configHash(p.repo_path) !== state.config);
-          if (stale) toProvision.push(p);
+          list = typeof projects === 'function' ? (await projects()) ?? [] : projects;
         } catch (err) {
-          if (!(err instanceof ContainmentError) && !isFsError(err)) throw err;
-          log(`\n✗ ${p.name}: REFUSED — ${err.message}; its OpenCode and handoff files were not checked or provisioned (fix the path, then rerun /sterling:update)`);
-          if (!report.project_retry.includes(p.repo_path)) report.project_retry.push(p.repo_path);
-          report.exit = 2;
+          log(`\n✗ per-project refresh SKIPPED — project registry unavailable: ${err?.message ?? err}`);
+          fail(2);
+          registryOk = false;
         }
       }
-      if (toProvision.length) {
-        log(`\n▸ already current at ${before.head_short}; provisioning ${toProvision.length} work-mode project(s) whose OpenCode or handoff files are unrecorded, stale or incomplete`);
-        for (const p of toProvision) {
-          const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
-          const out = `${r.stdout}${r.stderr}`.trim();
-          if (r.status !== 0) {
-            log(`  ✗ ${p.name}: agent sync ${r.status === 2 ? 'REFUSED' : 'failed'} (exit ${r.status}):\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
-            report.exit = r.status === 2 ? 2 : report.exit === 0 ? 1 : report.exit;
-          } else {
-            log(`  • ${p.name}: agents synced`);
-          }
-          const handoff = runHandoff(p);
-          recordProvisioning(p, before.head, r.status, handoff);
-          report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, handoff });
-        }
+      // The blind spot this reports is INDEPENDENT of clone lag — an
+      // already-current clone with two unregistered projects is the measured
+      // 2026-08-28 state exactly — so the report belongs on this path too.
+      await reportCoverage(list);
+      let failures = 0;
+      if (opts.projects === false) {
+        log('\n▸ project refresh — SKIPPED (--no-projects)');
+      } else if (list.length) {
+        log(`\n▸ already current at ${before.head_short}; refreshing ${list.length} registered project(s) — each once, by its current mode (unchanged files stay byte-identical)`);
+        failures = refreshProjects(list, { launchers: false });
       }
-      const unresolved = report.handoff_retry.length || report.project_retry.length;
-      if (hasRetry || toProvision.length || unresolved || JSON.stringify(provisioning) !== recordedBefore) {
-        try {
-          writeUpdateMarker(cwd, markerSha, report.handoff_retry, provisioning, report.project_retry);
-        } catch (err) {
-          log(`\n⚠ update marker write FAILED: ${err?.message ?? err}`);
-          report.exit = report.exit === 0 ? 1 : report.exit;
-        }
+      if (report.exit === 0) {
+        log(`\nAlready current — nothing to do for the core update at ${before.head_short}${list.length ? `; ${list.length} registered project(s) refreshed` : ''}. (Rerun with --force to rebuild and re-sync anyway.)`);
+      } else if (registryOk) {
+        log(`\n✗ the core update is already current at ${before.head_short}, but ${failures} project(s) failed their refresh (above) — fix them and rerun /sterling:update; every registered project is refreshed on every run.`);
       }
-      if (unresolved) report.exit = report.exit === 0 ? 2 : report.exit;
-      else if (hasRetry) log('\nEvery previously unresolved project is now resolved.');
-      if (report.exit === 0 && !hasRetry && !toProvision.length) log('\nAlready current — nothing to do. (Rerun with --force to rebuild and re-sync anyway.)');
       return report;
     }
     // Git is current, but nothing on disk proves the LAST post-merge sequence
@@ -955,61 +840,14 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       }
     }
   }
-  // The full fan-out rebuilds the provisioning state for every project it
-  // visits; with --no-projects the previous record is kept as it was.
-  provisioning = opts.projects === false ? { ...(readUpdateMarker(cwd, () => {})?.projects ?? {}) } : {};
+  // The core is complete when everything above succeeded — a red battery, a
+  // failed store migration or a failed step leaves it incomplete, and the next
+  // run resumes it. The per-project refresh below never decides this.
+  const coreComplete = report.exit === 0;
+  let refreshFailures = 0;
   if (opts.projects !== false && projectList.length) {
     log(`\n▸ syncing agents across ${projectList.length} registered project(s)`);
-    for (const p of projectList) {
-      // An invalid project mode is its own refusal (never a "locally modified
-      // agent"): nothing is synced or projected for the project, the core
-      // marker is still stamped, and project_retry reruns both once it is fixed.
-      if (projectModeOrRefuse(p) === null) {
-        delete provisioning[p.repo_path];
-        report.projects.push({ name: p.name, repo_path: p.repo_path, status: null, handoff: 'refused_project_mode' });
-        continue;
-      }
-      const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
-      const out = `${r.stdout}${r.stderr}`.trim();
-      const statuses = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^[a-z_]+: /.test(l));
-      // config_drift (decision 256d1059) wrote nothing, so it is not a change; it is
-      // relayed verbatim below (the line carries the fix command), never a failure.
-      const driftedAgents = statuses.filter((l) => l.startsWith('config_drift: '));
-      const changedAgents = statuses.filter((l) => !l.startsWith('up_to_date') && !l.startsWith('locally_modified_up_to_date') && !l.startsWith('config_drift: '));
-      report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, changed: changedAgents.length, config_drift: driftedAgents.length });
-      if (r.status === 2) {
-        log(`  ✗ ${p.name}: REFUSED — a locally modified agent. Output verbatim:\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
-        report.exit = 2;
-      } else if (r.status !== 0) {
-        log(`  ✗ ${p.name}: sync failed (exit ${r.status}):\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
-        report.exit = report.exit === 0 ? 1 : report.exit;
-      } else {
-        log(`  • ${p.name}: ${changedAgents.length ? changedAgents.join(', ') : driftedAgents.length ? 'no agent changes' : 'up to date'}`);
-        for (const line of driftedAgents) log(`      ⚠ ${line}`);
-      }
-      const handoff = runHandoff(p);
-      report.projects[report.projects.length - 1].handoff = handoff;
-      recordProvisioning(p, after.head, r.status, handoff);
-      // Deliver the double-click updater to every registered project — the
-      // update event is how a machine receives new artifacts, so a project
-      // init'd before this launcher existed gets one here rather than waiting
-      // on someone remembering a per-project re-init (P4). Ensure semantics:
-      // never overwrites what it cannot prove it generated; nonfatal always.
-      try {
-        const launcher = ensureUpdateLauncher(p.repo_path, cwd);
-        if (launcher.status !== 'matches') log(`      ${UPDATE_LAUNCHER_NAME}: ${launcher.status} — ${launcher.detail}`);
-      } catch (err) {
-        log(`      ⚠ ${UPDATE_LAUNCHER_NAME} ensure FAILED (nonfatal): ${err?.message ?? err}`);
-      }
-      // Deliver the consumer-runnable checks entry the same way (board 4ccf0644):
-      // a project init'd before this launcher existed otherwise never gets one.
-      try {
-        const checkLauncher = ensureConsumerCheckLauncher(p.repo_path, cwd);
-        if (checkLauncher.status !== 'matches') log(`      ${CONSUMER_CHECK_LAUNCHER_NAME}: ${checkLauncher.status} — ${checkLauncher.detail}`);
-      } catch (err) {
-        log(`      ⚠ ${CONSUMER_CHECK_LAUNCHER_NAME} ensure FAILED (nonfatal): ${err?.message ?? err}`);
-      }
-    }
+    refreshFailures = refreshProjects(projectList, { launchers: true });
   } else if (opts.projects === false) {
     log('\n▸ project agent sync — SKIPPED (--no-projects)');
   }
@@ -1040,28 +878,20 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       'RESTART THE SESSION before working — that means EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough, MCP servers survive it): the MCP server and every project subagent load at CLI start, so the code now on disk is not the code running.'
   );
 
-  // Stamp completion ONLY on a clean exit (board 2b37272a claim A) — a
-  // per-project sync refusal or migration failure already left report.exit
-  // non-zero above, and writing the marker anyway would make the NEXT
-  // behind-0 run report "Already current" while that failure is still
-  // unresolved. Never fatal: the update itself already succeeded by the time
-  // this runs.
-  // An actionable handoff refusal is NOT a core failure: the marker is stamped
-  // with the unresolved project paths, and the next already-current run retries
-  // only those (Sol re-check, the update wedge). The exit stays loud (2).
-  if (report.exit === 0) {
+  // Stamp completion ONLY when the CORE completed (board 2b37272a claim A) — a
+  // halted step, a red battery or a failed migration leaves it unstamped, so the
+  // next behind-0 run resumes the core instead of reporting "Already current".
+  // A per-project refresh failure does not withhold it: the refresh runs on
+  // every update, so the next run refreshes that project again, loudly. Never
+  // fatal: the update itself already succeeded by the time this runs.
+  if (coreComplete) {
     try {
-      writeUpdateMarker(cwd, after.head, report.handoff_retry, provisioning, report.project_retry);
+      writeUpdateMarker(cwd, after.head);
     } catch (err) {
       log(`\n⚠ update marker write FAILED (nonfatal — the update itself already succeeded): ${err?.message ?? err}`);
     }
-    if (report.handoff_retry.length) {
-      log(`\n✗ ${report.handoff_retry.length} project(s) have an unresolved handoff projection: ${report.handoff_retry.join(', ')} — the next /sterling:update retries only these.`);
-      report.exit = 2;
-    }
-    if (report.project_retry.length) {
-      log(`\n✗ ${report.project_retry.length} project(s) have an invalid project mode: ${report.project_retry.join(', ')} — fix config.mode ('hobby' or 'work', TUI System tab); the next /sterling:update reruns their agent sync and handoff projection.`);
-      report.exit = 2;
+    if (refreshFailures) {
+      log(`\n✗ the core update is complete, but ${refreshFailures} project(s) failed their refresh (above) — fix them and rerun /sterling:update; every registered project is refreshed on every run.`);
     }
   }
 

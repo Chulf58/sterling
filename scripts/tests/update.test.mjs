@@ -268,7 +268,11 @@ test('refusal path mutates nothing: no merge, no npm, exit 2', async () => {
   }
 });
 
-test('already current: fetches, reports, and runs no build or sync (exit 0)', async () => {
+// REWRITTEN (scheduling rebuild, decision project-mode-hobby-work-toggle-decides-flow,
+// Astra design review item 2): this pinned ZERO agent syncs on the already-current
+// path — the dropped provisioning cache. The core is still not rebuilt; every
+// registered target is now visited once (the generators preserve unchanged bytes).
+test('already current: fetches, reports, runs no build, and visits each registered project once (exit 0)', async () => {
   const cwd = scratchCwd();
   try {
     // A legitimate shortcut requires proof the LAST run completed in full at
@@ -276,12 +280,34 @@ test('already current: fetches, reports, and runs no build or sync (exit 0)', as
     // (board 2b37272a claim A; see the halted-run/rerun tests below).
     seedUpdateMarker(cwd, HEAD_A);
     const { exec, calls } = fakeExec({ behind: 0 });
-    const report = await runUpdate({ cwd, exec, log: () => {}, projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
 
     assert.equal(report.exit, 0);
     assert.ok(calls.some((c) => c.startsWith('git fetch')));
     assert.equal(calls.filter((c) => c.startsWith('npm')).length, 0);
-    assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 0);
+    assert.equal(calls.filter((c) => c.includes('merge --ff-only')).length, 0);
+    assert.deepEqual(calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), ['/tmp/p'], 'the one registered project is visited once');
+    assert.equal(calls.filter((c) => c.includes('handoff-projection')).length, 0, 'a project with no config is hobby: no projection');
+    assert.ok(lines.some((l) => l.includes('Already current — nothing to do for the core update')));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// The per-project pass is part of every explicit update, so an unreadable registry
+// on the already-current path is a visible failure, not a silent "Already current".
+test('already current: an unreadable project registry is a visible non-zero failure, never "nothing to do"', async () => {
+  const cwd = scratchCwd();
+  try {
+    seedUpdateMarker(cwd, HEAD_A);
+    const { exec, calls } = fakeExec({ behind: 0 });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: async () => { throw new Error('registry db locked'); }, opts: {} });
+    assert.equal(report.exit, 2);
+    assert.equal(calls.filter((c) => c.startsWith('npm')).length, 0);
+    assert.match(lines.join('\n'), /project registry unavailable.*registry db locked/);
+    assert.ok(!lines.some((l) => l.includes('Already current — nothing to do')));
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -593,7 +619,20 @@ test('a per-project sync refusal surfaces as exit 2 without stopping the other p
     assert.equal(report.exit, 2);
     assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 2, 'the refusal must not abort the fan-out');
     assert.deepEqual(report.projects.map((p) => p.status), [2, 0]);
-    assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'a sync refusal must not leave a completion marker');
+    // REWRITTEN (scheduling rebuild): this pinned that a per-project sync refusal
+    // WITHHELD the core marker, so the next behind-0 run could not report "Already
+    // current" over an unresolved failure (board 2b37272a claim A). The marker now
+    // attests the core only; claim A is kept by the per-project pass, which runs on
+    // every update — the next run refuses the project again, loudly, without
+    // rebuilding the core and without claiming "nothing to do".
+    assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), true, 'the core update completed, so the core marker is stamped');
+    const { exec: again, calls: againCalls } = fakeExec({ behind: 0, head: HEAD_B, syncStatus: (target) => (target === '/tmp/salesforce' ? 2 : 0) });
+    const lines = [];
+    const rerun = await runUpdate({ cwd, exec: again, log: (l) => lines.push(l), projects: [{ name: 'Salesforce', repo_path: '/tmp/salesforce' }, { name: 'comsoft', repo_path: '/tmp/comsoft' }], opts: {} });
+    assert.equal(rerun.exit, 2, 'the unresolved refusal keeps the next run loud');
+    assert.equal(againCalls.filter((c) => c.startsWith('npm')).length, 0, 'the core is not rebuilt');
+    assert.equal(againCalls.filter((c) => c.includes('sync-agents')).length, 2, 'both projects are visited again');
+    assert.ok(!lines.some((l) => l.includes('Already current — nothing to do')), 'never "nothing to do" over an unresolved refusal');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -1573,17 +1612,15 @@ test('the created native launcher is CRLF on disk end to end — the appended ge
 
 // Handoff projection in the fan-out (decision
 // init-prepares-opencode-portable-agents-and-target-handoff-projections): it runs once
-// per project after the agent sync. A REFUSED run (exit 2 — a secondary, missing or
-// empty store) is a standing state of that project: loud, never fatal. A run that
-// failed part-way (exit 1) may have left an incomplete export, so it withholds the
-// completion marker.
+// per project after the agent sync. A REFUSED run (exit 2 — a secondary store) is a
+// standing state of that project: loud, never fatal. A run that failed part-way
+// (exit 1) may have left an incomplete export: the update exits non-zero, and the
+// next run — which refreshes every registered project — projects it again.
 // The projection is WORK-ONLY (decision project-mode-hobby-work-toggle-decides-flow):
 // the fan-out reads each project's own config.mode before running it, so the
 // projects below are real temp dirs declaring mode 'work' (the hobby skip is pinned
-// in project-mode-gating.test.mjs). `provisioned` seeds the EXACT portable agent
-// set and the handoff indexes a completed run would have left, so an
-// already-current run does not provision them again (completeness is checked
-// exactly — Sol review of S1 — so a single agent file would not do).
+// in project-mode-gating.test.mjs). `provisioned` seeds the portable agent set and
+// the handoff indexes a completed run would have left.
 const workProjects = [];
 function workProject(name, { provisioned = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), `${name}-`));
@@ -1599,8 +1636,8 @@ function workProject(name, { provisioned = true } = {}) {
 }
 after(() => { for (const d of workProjects) rmSync(d, { recursive: true, force: true }); });
 
-test('fan-out: the handoff projection runs per project; a refusal is loud but not fatal, a failure withholds completion', async () => {
-  const run = async (statuses) => {
+test('fan-out: the handoff projection runs per project; a refusal is loud but not fatal, a failure is non-zero and re-projected on the next run', async () => {
+  const run = async (statuses, { rerun = false } = {}) => {
     const cwd = scratchCwd();
     try {
       const { exec: base, calls } = fakeExec({ behind: 2, changed: ['packages/store/src/index.ts'] });
@@ -1614,7 +1651,20 @@ test('fan-out: the handoff projection runs per project; a refusal is loud but no
       const lines = [];
       const projects = Object.keys(statuses).map((repo_path) => ({ name: repo_path.split('/').pop(), repo_path }));
       const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects, opts: {} });
-      return { report, calls, log: lines.join('\n'), markerPresent: existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)) };
+      const markerPresent = existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH));
+      let next = null;
+      if (rerun) {
+        const { exec: nextBase, calls: nextCalls } = fakeExec({ behind: 0, head: HEAD_B });
+        const nextExec = (cmd, args, o) => {
+          if (!args[0]?.endsWith('handoff-projection.mjs')) return nextBase(cmd, args, o);
+          nextCalls.push(`${cmd} ${args.join(' ')}`);
+          return { status: statuses[args[1]], stdout: 'handoff projection: FAILED — the export is INCOMPLETE\n', stderr: '' };
+        };
+        const nextLines = [];
+        const nextReport = await runUpdate({ cwd, exec: nextExec, log: (l) => nextLines.push(l), projects, opts: {} });
+        next = { report: nextReport, calls: nextCalls, log: nextLines.join('\n') };
+      }
+      return { report, calls, log: lines.join('\n'), markerPresent, next };
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -1627,25 +1677,36 @@ test('fan-out: the handoff projection runs per project; a refusal is loud but no
   assert.match(refusedOnly.log, /⚠ handoff projection: REFUSED — store_authority is 'secondary'/);
   assert.doesNotMatch(refusedOnly.log, /handoff projection: unchanged/, 'an unchanged projection stays quiet');
 
-  const failed = await run({ [workProject('handoff-broken')]: 1 });
-  assert.equal(failed.report.exit, 1, 'an incomplete export withholds the completion marker');
+  const failed = await run({ [workProject('handoff-broken')]: 1 }, { rerun: true });
+  assert.equal(failed.report.exit, 1, 'an incomplete export fails the update');
   assert.match(failed.log, /✗ handoff projection FAILED \(exit 1\) — the export may be INCOMPLETE/);
-  // Sol re-check LOW: prove the part-way failure really withholds the marker.
-  assert.equal(failed.markerPresent, false, 'no completion marker after a part-way failure');
+  // REWRITTEN (scheduling rebuild): this pinned that the part-way failure WITHHELD
+  // the core marker, which was how the failed export got retried. The marker now
+  // attests the core only (the core did complete); the retry is the per-project
+  // pass that every update runs. The property Sol's LOW re-check protected —
+  // the incomplete export is never left unretried and never reported as done — is
+  // pinned directly on the next run instead.
+  assert.equal(failed.markerPresent, true, 'the core completed, so the core marker is stamped');
+  assert.equal(failed.next.calls.filter((c) => c.startsWith('npm')).length, 0, 'the next run does not rebuild the core');
+  assert.equal(failed.next.calls.filter((c) => c.includes('handoff-projection.mjs')).length, 1, 'the next run projects the broken export again');
+  assert.equal(failed.next.report.exit, 1, 'and stays non-zero while it still fails');
+  assert.doesNotMatch(failed.next.log, /Already current — nothing to do/);
   assert.equal(refusedOnly.markerPresent, true, 'control: a standing refusal alone still completes the update');
 });
 
-// Sol re-check MEDIUM (update wedge): an ACTIONABLE handoff conflict (exit 3) is
-// per-project retry state, not a failure of the clone update. The core marker is
-// stamped with the unresolved project paths; an already-current run retries ONLY
-// those; a project that recovers, or leaves the registry, clears from the set.
-// (Replaces this branch's earlier test that expected the whole marker to be
-// withheld — the wedge Sol found in that design.)
-test('fan-out: an actionable handoff conflict does not wedge the update; only that project is retried until it clears', async () => {
+// Sol re-check MEDIUM (update wedge): an ACTIONABLE handoff conflict (exit 3) is a
+// per-project failure, not a failure of the clone update — the core marker is
+// stamped regardless, so the core is never rebuilt on its account.
+// REWRITTEN (scheduling rebuild, decision project-mode-hobby-work-toggle-decides-flow,
+// Astra design review item 2): this pinned the retry-set mechanics — handoff_retry
+// in the marker, "A retried first", "only B re-synced", and ZERO calls once the
+// set emptied. The retry set is gone: every run visits every registered target
+// once, so the behaviours are pinned directly — no wedge, the stuck project stays
+// loud without blocking the other, and it clears when fixed.
+test('fan-out: an actionable handoff conflict does not wedge the update or block another project, and clears once fixed', async () => {
   const cwd = scratchCwd();
   const A = workProject('handoff-stuck');
   const B = workProject('handoff-fine');
-  const marker = () => JSON.parse(readFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), 'utf8'));
   try {
     const runOnce = async ({ behind, statuses, registered = [A, B] }) => {
       // after run 1 fast-forwarded to HEAD_B, an already-current run sits at HEAD_B
@@ -1662,60 +1723,54 @@ test('fan-out: an actionable handoff conflict does not wedge the update; only th
       const lines = [];
       const projects = registered.map((repo_path) => ({ name: repo_path.split('/').pop(), repo_path }));
       const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects, opts: {} });
-      return { report, calls, log: lines.join('\n'), handoffCalls: calls.filter((c) => c.includes('handoff-projection.mjs')) };
+      return { report, calls, log: lines.join('\n'), handoffCalls: calls.filter((c) => c.includes('handoff-projection.mjs')), syncCalls: calls.filter((c) => c.includes('sync-agents')) };
     };
+    const targets = (cs) => cs.map((c) => c.split(' ').pop());
 
     // 1) a full update: B is fine, A has an actionable conflict
     const first = await runOnce({ behind: 2, statuses: { [A]: 3 } });
     assert.equal(first.report.exit, 2, 'loud: the update reports the unresolved project');
     assert.ok(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), 'the core update is stamped complete regardless');
-    assert.deepEqual(marker().handoff_retry, [A]);
     assert.match(first.log, /cannot be repaired.*--prune-missing.*store_authority/s, 'names the unregister / retire remedy');
+    assert.deepEqual(targets(first.handoffCalls), [A, B]);
 
-    // 2) already current: A is retried, and the retry does NOT starve the normal
-    // scan (Sol re-check, final round): B lost a portable agent, so B is still
-    // scanned and provisioned in the same run. No build, and the core sequence is
-    // not repeated.
-    rmSync(join(B, '.opencode', 'agents', 'scout.md'));
+    // 2) already current, A still stuck: both are visited once, B is not blocked,
+    // and the core sequence is not repeated.
     const second = await runOnce({ behind: 0, statuses: { [A]: 3 } });
-    assert.deepEqual(second.handoffCalls.map((c) => c.split(' ').pop()), [A, B], 'A retried first, then B provisioned');
+    assert.deepEqual(targets(second.handoffCalls), [A, B], 'each target projected once, in registry order');
+    assert.deepEqual(targets(second.syncCalls), [A, B], 'each target synced once');
     assert.equal(second.calls.filter((c) => c.startsWith('npm ')).length, 0, 'the core sequence is not repeated');
-    assert.deepEqual(second.calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), [B], 'only B, the stale project, is re-synced');
     assert.equal(second.report.exit, 2);
-    assert.deepEqual(marker().handoff_retry, [A]);
-    writeFileSync(join(B, '.opencode', 'agents', 'scout.md'), 'x\n'); // what B's real sync restores (the fake exec writes nothing)
+    assert.match(second.log, /cannot be repaired/);
+    assert.doesNotMatch(second.log, /Already current — nothing to do/);
 
-    // 3) A is fixed: it clears from the retry set
+    // 3) A is fixed: the run is clean and says the core is already current
     const third = await runOnce({ behind: 0, statuses: {} });
-    assert.deepEqual(third.handoffCalls.map((c) => c.split(' ').pop()), [A]);
+    assert.deepEqual(targets(third.handoffCalls), [A, B]);
     assert.equal(third.report.exit, 0);
-    assert.deepEqual(marker().handoff_retry, []);
-
-    // 4) nothing left to retry: already current means nothing runs
-    const fourth = await runOnce({ behind: 0, statuses: {} });
-    assert.equal(fourth.handoffCalls.length, 0);
-    assert.match(fourth.log, /Already current/);
+    assert.match(third.log, /Already current — nothing to do for the core update/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
 });
 
-test('fan-out: a retry-set project that left the registry is dropped, not retried', async () => {
+// REWRITTEN (scheduling rebuild): this pinned that a retry-set entry for a project
+// that left the registry was dropped from the marker's handoff_retry. There is no
+// retry set now; the behaviour it protected — an unregistered project is never
+// touched — is pinned directly, including through an OLD marker that still names it.
+test('fan-out: a project that left the registry is not visited, even when an old marker still names it', async () => {
   const cwd = scratchCwd();
   const A = workProject('handoff-retired');
   try {
-    const { exec: base } = fakeExec({ behind: 2, changed: ['packages/store/src/index.ts'] });
-    const stuck = (cmd, args, o) => (args[0]?.endsWith('handoff-projection.mjs') ? { status: 3, stdout: 'handoff projection: REFUSED — x\n', stderr: '' } : base(cmd, args, o));
-    await runUpdate({ cwd, exec: stuck, log: () => {}, projects: [{ name: 'retired', repo_path: A }], opts: {} });
-    assert.deepEqual(JSON.parse(readFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), 'utf8')).handoff_retry, [A]);
-
+    mkdirSync(join(cwd, '.sterling'), { recursive: true });
+    writeFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), JSON.stringify({ sha: HEAD_B, completed_at: new Date().toISOString(), handoff_retry: [A], project_retry: [A], projects: { [A]: { mode: 'work', head: HEAD_B, outcome: 'ok', config: 'x' } } }));
     const { exec: current, calls } = fakeExec({ behind: 0, head: HEAD_B });
     const lines = [];
     const report = await runUpdate({ cwd, exec: current, log: (l) => lines.push(l), projects: [], opts: {} });
-    assert.equal(calls.filter((c) => c.includes('handoff-projection.mjs')).length, 0);
+    assert.equal(calls.filter((c) => c.includes(A)).length, 0, 'nothing runs against the unregistered project');
+    assert.equal(calls.filter((c) => c.startsWith('npm')).length, 0, 'the old marker still proves the core is complete');
     assert.equal(report.exit, 0);
-    assert.deepEqual(JSON.parse(readFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), 'utf8')).handoff_retry, []);
-    assert.match(lines.join('\n'), /no longer registered/);
+    assert.match(lines.join('\n'), /Already current — nothing to do for the core update/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
