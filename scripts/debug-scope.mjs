@@ -1,7 +1,7 @@
-// Debug-scope registration (spec §8.3 step 6): the explorer's map registers
-// as the lightweight contract for an inline debug play; scripts/fs-move.mjs
-// and scripts/fs-remove.mjs deny operations outside it (scripts/lib/
-// debug-scope.mjs's scopeCheck). Cleared at debug capture.
+// Debug-scope registration (skills/debug): the scout's map of the code a debug
+// play touches is registered as observation and capture metadata — it arms
+// H10's capture duty and never refuses an operation (decision
+// debug-scope-is-metadata-fs-helpers-stop-refusing). Cleared at debug capture.
 //   node scripts/debug-scope.mjs register --path <p> [--path <p>...] [--target <dir>]
 //   node scripts/debug-scope.mjs show|clear [--target <dir>]
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';

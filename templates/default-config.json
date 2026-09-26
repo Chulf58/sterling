@@ -16,8 +16,7 @@
     "researcher": { "model": "claude-sonnet-5", "effort": "medium" },
     "scout": { "model": "claude-sonnet-5", "effort": "low" },
     "classifiers": { "model": "claude-haiku-4-5", "effort": "low" },
-    "librarian": { "model": "claude-sonnet-5", "effort": "low" },
-    "debugger": { "model": "claude-sonnet-5", "effort": "high" }
+    "librarian": { "model": "claude-sonnet-5", "effort": "low" }
   },
   "session_events": {
     "research_agents": ["researcher", "claude-code-guide"]

@@ -151,7 +151,9 @@ const EXPECTED_FRONTMATTER = {
     'mode: subagent',
     'permission:',
     '  edit: deny',
-    '  webfetch: deny',
+    // allow, not deny: decision researcher-gets-web-search-and-fetch gave the
+    // Claude researcher WebFetch, and the portable copy follows (a pin moved on purpose)
+    '  webfetch: allow',
     '  task: deny',
     '---',
   ].join('\n'),

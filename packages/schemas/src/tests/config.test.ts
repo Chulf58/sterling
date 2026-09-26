@@ -32,6 +32,14 @@ test('shipped default config parses and carries the spec defaults (§12, §7.2)'
   assert.equal(shipped.staleness.research_days.fast, 30);
 });
 
+// Decision agent-roster-is-classless-four-agents rejected a debugger role, so
+// neither the schema nor the shipped file may carry a models.debugger key.
+test('models carries no retired debugger key, in the schema defaults or the shipped config', () => {
+  const shippedRaw = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
+  assert.ok(!('debugger' in shippedRaw.models), 'templates/default-config.json models has no debugger key');
+  assert.ok(!('debugger' in parseConfig({}).models), 'the schema models defaults have no debugger key');
+});
+
 test('empty config gets full defaults; malformed config fails loud', () => {
   const empty = parseConfig({});
   assert.equal(empty.context_watch.conductor.soft_pct, 35);

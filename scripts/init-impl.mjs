@@ -33,7 +33,6 @@ import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.m
 import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
-import { stampBody, verifyStamp } from './lib/generated-marker.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, probeCodexWin, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
@@ -675,7 +674,7 @@ if (dualContext && (process.platform === 'win32' || nativeMcpModeOverride === 'h
       (process.platform === 'win32'
         ? '(win32 host: the MCP mode and the Windows node both key on the rendering host, which wins over the flag)'
         : "(STERLING_NATIVE_MCP_MODE='host-native' forced the arm)") +
-      '. Why: the launcher flags and sterling-mcp-win.json are ONE mechanism keyed on the rendering host, so they can never disagree about which node native claude runs. ' +
+      '. Why: the MCP mode is keyed on the rendering host, so it can never disagree with the node native claude runs. ' +
       'Genuine cross-host dual-context FROM a Windows host would need a second interpreter path (e.g. a STERLING_WSL_NODE naming the Linux node) that init cannot invent — it is not built. ' +
       // "nothing was BLOCKED", not "nothing was refused": init reserves the word
       // REFUSED for its actual refusal paths (`init REFUSED: …`, exit 2), and this
@@ -689,16 +688,15 @@ if (dualContext && (process.platform === 'win32' || nativeMcpModeOverride === 'h
 // EXACTLY ONE MODE, NAMED UNAMBIGUOUSLY (decision host-native-init-with-dev-machine-
 // escape-hatch): every run states one of the ruling's two mode names, and a single note
 // naming BOTH tells a user nothing about which mode they are in — so the default arm
-// spells its opt-in as the ENV form only (STERLING_DUAL_CONTEXT=1, complete and
-// sufficient on its own); the `--dual-context` flag spelling stays in the per-artifact
-// skip detail below, where it is attached to the artifact the user is missing.
+// never claims Windows artifacts: init generates none in any mode (decision
+// native-windows-launcher-retired-wsl2-only).
 notes.push(
   winNodeSource === 'host-native-elsewhere'
-    ? `note: host-native init (default) on ${process.platform} — Windows launcher/MCP artifacts are NOT generated; set STERLING_DUAL_CONTEXT=1 to also emit them from this host (the skip lines below name the flag form too)`
+    ? `note: host-native init (default) on ${process.platform} — no Windows artifacts are generated (the native launcher and its MCP config are retired, decision native-windows-launcher-retired-wsl2-only)`
     : winNodeSource === 'dual-context'
-      ? `note: DUAL-CONTEXT mode (explicitly opted in) — Windows artifacts generated beside the ${process.platform} ones; Windows node resolved via \`where.exe node\`${winNode ? ` -> ${winNode}` : ' -> not found'}`
+      ? `note: DUAL-CONTEXT mode (explicitly opted in) — no Windows artifacts are generated (the native launcher and its MCP config are retired, decision native-windows-launcher-retired-wsl2-only); Windows node resolved via \`where.exe node\`${winNode ? ` -> ${winNode}` : ' -> not found'}`
       : winNodeSource === 'host-native'
-        ? `note: host-native init on win32 — Windows node is this interpreter (process.execPath -> ${winNode ?? 'MISSING'}), no PATH lookup`
+        ? `note: host-native init on win32 — no Windows artifacts are generated (the native launcher and its MCP config are retired, decision native-windows-launcher-retired-wsl2-only); Windows node is this interpreter (process.execPath -> ${winNode ?? 'MISSING'}), no PATH lookup`
         // The explicit override still owes the run a MODE name. Which one is already
         // settled by the resolution-order comment above: naming a Windows node path from
         // a non-Windows host IS an explicit dual-context declaration, while on win32 the
@@ -706,31 +704,8 @@ notes.push(
         // that governs nativeMcpNeedsWinConfig, so the note and the artifacts it explains
         // can never disagree. The STERLING_WIN_NODE provenance is kept — it is what makes
         // an unexpected path (or the '' skip) diagnosable.
-        : `note: ${process.platform === 'win32' ? 'host-native' : 'DUAL-CONTEXT'} mode (explicit STERLING_WIN_NODE override) — Windows node taken from STERLING_WIN_NODE${winNode ? ` -> ${winNode}` : " -> '' (Windows artifacts skipped)"}`,
+        : `note: ${process.platform === 'win32' ? 'host-native' : 'DUAL-CONTEXT'} mode (explicit STERLING_WIN_NODE override) — no Windows artifacts are generated (the native launcher and its MCP config are retired, decision native-windows-launcher-retired-wsl2-only); Windows node taken from STERLING_WIN_NODE${winNode ? ` -> ${winNode}` : " -> '' (none named)"}`,
 );
-// Skip detail for the two winNode-gated artifacts. A host-native skip is a MODE, not a
-// failure — it must not read as "your PATH is broken"; an unresolved Windows node under
-// an explicit override or the dual-context hatch still gets the actionable PATH advice.
-const winSkipDetail = (what) =>
-  winNodeSource === 'host-native-elsewhere'
-    ? `host-native init (default) on ${process.platform}: ${what} is a Windows-only artifact and is not generated here — pass --dual-context (or STERLING_DUAL_CONTEXT=1) and re-run to also emit it`
-    : `Windows node not resolved — ${what} not generated; add the node dir to the Windows PATH, or set STERLING_WIN_NODE to the absolute node.exe path, and re-run init`;
-// STALE-ARTIFACT DISCLOSURE (decision host-native-init-with-dev-machine-escape-hatch).
-// A skip line describes an artifact as ABSENT. After a MODE FLIP it may not be: flip a
-// clone from dual-context back to host-native (drop the flag) and sterling-windows.bat
-// and sterling-mcp-win.json both stay on disk, the launcher still passing --strict
-// --mcp-config at a config init has stopped maintaining — while the report says "not
-// generated". A file that exists must never be reported as one that does not (P5).
-// DISCLOSURE ONLY, never deletion: init's ensure semantics reserve destruction for the
-// refusal paths, and a leftover launcher may be exactly what a mixed host still wants.
-const staleOrSkipped = (path, detail, why) =>
-  existsSync(path)
-    ? { status: 'stale', detail: `${detail}. STILL ON DISK, no longer maintained by init: ${basename(path)} was generated by an earlier run in a different mode and ${why}. Nothing was deleted — delete it by hand if you do not want it, or re-run with the other mode to bring it back under management` }
-    : { status: 'skipped', detail };
-const winTuiBundle = toWindowsPath(tuiBundle);
-const winPluginDir = toWindowsPath(fwd(pluginRoot));
-const winMcpServerEntry = toWindowsPath(fwd(mcpServerEntry)); // Windows path to dist/main.js for native-claude MCP
-const splitRatio01 = String(eff.splitRatio); // wt split-pane --size wants a 0–1 float
 // the .sh is bash — ALWAYS LF (a CRLF shebang/line breaks bash); the .bat files
 // are ALWAYS CRLF (cmd.exe misparses LF-only batch files), regardless of eol config
 const lf = (s) => s.replace(/\r\n/g, '\n');
@@ -784,95 +759,18 @@ if (!existsSync(tuiLauncherPath)) {
   items.push({ item: 'tui.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
 }
 
-// (4) the FULLY-NATIVE Windows entry (decision: a SECOND launcher beside the WSL
-// sterling.bat — partially reverses bb5e25cd): a wt split running native claude.exe
-// (left) + the TUI on native Windows node (right), no WSL. Needs the Windows node
-// path; when init can't resolve it (node not on the Windows PATH), the launcher is
-// SKIPPED loudly (P5) without blocking the rest of init.
-let expectedNativeLauncher;
+// (4) the native-Windows launcher (sterling-windows.bat) is RETIRED — decision
+// native-windows-launcher-retired-wsl2-only: Sterling runs WSL2-only, so init no
+// longer generates it. A copy an earlier init wrote is left on disk for the user
+// to delete (never deleted or migrated here) and reported, so it is not silent.
 const nativeLauncherPath = join(target, 'sterling-windows.bat');
-if (winNode) {
-  // MCP flags are MODE-DEPENDENT (see nativeMcpNeedsWinConfig above): host-native adds
-  // NOTHING, so native claude loads sterling from the plugin and keeps every other MCP
-  // server the user has; dual-context still elects the Windows-node config strictly,
-  // because the plugin's own entry names this Linux interpreter.
-  // The WSL domain-snapshot bridge that used to be rendered here is GONE in BOTH modes
-  // (board 3873d33b): homedir()-derived domain roots make it a no-op for a Windows-only
-  // user, and the ruling's "a Windows installation invokes WSL nowhere" is unconditional.
-  // The former hand-run bridge script for a mixed host has since been deleted entirely
-  // (cleanup run, decision cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key).
-  const mcpArgs = nativeMcpNeedsWinConfig
-    ? ` --mcp-config "${winPluginDir}\\.claude-plugin\\sterling-mcp-win.json" --strict-mcp-config`
-    : '';
-  const mcpModeNote = nativeMcpNeedsWinConfig
-    ? `rem MODE: dual-context — generated from ${process.platform}, so the Windows-node MCP config is elected strictly (other MCP servers ARE suppressed here).`
-    : 'rem MODE: host-native — sterling comes from --plugin-dir; no --strict, so other MCP servers (codex) still load.';
-  // GENERATED MARKER (generated-marker.mjs, board bb3aa162) — applied here for the
-  // same reason it was applied to sterling-update.bat, and load-bearing for decision
-  // host-native-init-with-dev-machine-escape-hatch specifically: without a marker this
-  // launcher's bare content compare reports `differs — left untouched` on EVERY machine
-  // that ever ran init, so the OLD `--strict --mcp-config` + wsl.exe-bridge launcher
-  // survives the upgrade and codex stays suppressed for exactly the Windows-only users
-  // this ruling exists to serve. Marker semantics are unchanged: an unmodified-since-
-  // generation body re-bakes freely, a hand-edited (or unmarked legacy) one is still
-  // refused. `rem` is this file's comment syntax; the marker lands on line 2, after
-  // `@echo off`, which must stay line 1.
-  expectedNativeLauncher = assertNoDeadTerms('sterling-windows.bat', crlf(stampBody(
-    readFileSync(join(pluginRoot, 'templates', 'launcher-win-native.bat'), 'utf8')
-      .replaceAll('{{WIN_PLUGIN_DIR}}', winPluginDir)
-      .replaceAll('{{WIN_NODE}}', winNode)
-      .replaceAll('{{WIN_TUI_BUNDLE}}', winTuiBundle)
-      .replaceAll('{{SPLIT_RATIO}}', splitRatio01)
-      .replaceAll('{{MCP_ARGS}}', mcpArgs)
-      .replaceAll('{{MCP_MODE_NOTE}}', mcpModeNote),
-    'rem',
-  )));
-  if (!existsSync(nativeLauncherPath)) {
-    writeFileSync(nativeLauncherPath, expectedNativeLauncher);
-    items.push({
-      item: 'sterling-windows.bat',
-      status: 'created',
-      detail: `native claude.exe + Windows-node TUI, ${splitRatio01} split; MCP ${nativeMcpNeedsWinConfig ? 'via the strict Windows config (dual-context — other MCP servers suppressed)' : 'via --plugin-dir (host-native — other MCP servers preserved)'}`,
-    });
-  } else if (normalize(readFileSync(nativeLauncherPath, 'utf8')) === normalize(expectedNativeLauncher)) {
-    items.push({ item: 'sterling-windows.bat', status: 'matches', detail: 'unchanged' });
-  } else {
-    const nativeStamp = verifyStamp(normalize(readFileSync(nativeLauncherPath, 'utf8')), 'rem');
-    if (nativeStamp && nativeStamp.unmodified) {
-      writeFileSync(nativeLauncherPath, expectedNativeLauncher);
-      items.push({
-        item: 'sterling-windows.bat',
-        status: 'refreshed',
-        detail: `regenerated: unmodified since last generation, but this machine now renders it differently (mode/clone/template change) — MCP ${nativeMcpNeedsWinConfig ? 'via the strict Windows config (dual-context — other MCP servers suppressed)' : 'via --plugin-dir (host-native — other MCP servers preserved)'}`,
-      });
-    } else if (nativeStamp) {
-      // A marker IS present and its hash no longer matches the body: something touched
-      // the file after generation. Never re-baked — that is the never-clobber floor.
-      items.push({ item: 'sterling-windows.bat', status: 'differs', detail: 'left untouched — it carries a sterling-generated stamp but its body no longer matches it, so it was edited after generation; delete and re-run init to regenerate' });
-    } else {
-      // NO MARKER AT ALL. verifyStamp returns null here, which distinguishes this from
-      // the edited-after-generation case above — but NOT pre-stamp legacy from a
-      // hand-authored file, since neither carries a stamp, so the wording accuses
-      // nobody of an edit they may not have made. The verdict stays `differs` and
-      // nothing is deleted or rewritten: an unmarked file is indistinguishable from a
-      // hand-edited one, and re-baking it would clobber real user edits.
-      // WHY THIS MESSAGE EXISTS (final-review addition to decision
-      // host-native-init-with-dev-machine-escape-hatch): every launcher on a machine
-      // initialized BEFORE the stamp is unmarked, so this branch is exactly where the
-      // users this ruling exists to serve land — and a generic "delete to regenerate"
-      // never tells them why they should want to.
-      items.push({
-        item: 'sterling-windows.bat',
-        status: 'differs',
-        detail:
-          'left untouched — UNMARKED (no sterling-generated stamp), so init cannot prove it generated this file: either it PREDATES the host-native change (any init before the stamp) or it was hand-authored. ' +
-          'If it predates the change it is still the OLD launcher: it passes --strict-mcp-config, which suppresses every other MCP server in the native session (codex, your default independent reviewer, included), and it still calls the WSL snapshot bridge — the two things the host-native launcher removes. ' +
-          'Nothing here is deleted. If you have not hand-edited it, delete sterling-windows.bat and re-run init to get the host-native launcher; if you HAVE, port your edits onto a freshly generated one',
-      });
-    }
-  }
-} else {
-  items.push({ item: 'sterling-windows.bat', ...staleOrSkipped(nativeLauncherPath, winSkipDetail('the native launcher'), 'it still launches native claude with whatever MCP flags were baked when it was written — in host-native mode that can mean --strict --mcp-config pointing at a config init no longer maintains') });
+if (existsSync(nativeLauncherPath)) {
+  items.push({
+    item: 'sterling-windows.bat',
+    status: 'stale',
+    detail:
+      'retired (decision native-windows-launcher-retired-wsl2-only) — init no longer generates or maintains it; Sterling runs under WSL2 via sterling.bat. Left on disk untouched: delete it yourself when you no longer want it',
+  });
 }
 
 // (5) the double-click updater entry: brings the machine's Sterling CLONE to
@@ -1281,8 +1179,8 @@ if (!pluginMcpExists) {
     } else {
       items.push({ item: '.claude-plugin/sterling-mcp.json', status: 'differs', detail: 'differs from generated — left untouched (delete to regenerate)' });
       // HOST-NATIVE HAS NO FALLBACK, so an untouched `differs` here is not cosmetic:
-      // sterling-windows.bat passes no --mcp-config in that mode, so whatever this
-      // file says IS native claude's Sterling MCP server. Never let the report leave
+      // nothing else names a Sterling MCP server for native claude in that mode, so
+      // whatever this file says IS native claude's Sterling MCP server. Never let the report leave
       // that connection for the reader to make (P5).
       // GATED ON THE STERLING ENTRY, NOT THE FILE'S VERDICT (final-review defect 3).
       // The file's overall `differs` has more than one cause. A codex-only delta — the
@@ -1293,7 +1191,7 @@ if (!pluginMcpExists) {
       const sterlingEntryMatches = existingSterling !== undefined && canonical(existingSterling) === canonical(pluginMcpEntry);
       if (!nativeMcpNeedsWinConfig && !sterlingEntryMatches) {
         warns.push(
-          'warn: host-native MCP mode, and .claude-plugin/sterling-mcp.json reports `differs` — it was left untouched, and in this mode it is the ONLY source of the Sterling MCP server for native claude (sterling-windows.bat passes no --mcp-config, and no sterling-mcp-win.json is generated). ' +
+          'warn: host-native MCP mode, and .claude-plugin/sterling-mcp.json reports `differs` — it was left untouched, and in this mode it is the ONLY source of the Sterling MCP server for native claude (no other MCP config for it is generated). ' +
             'If its sterling entry names a node or a server entry that no longer exists, native claude will start with NO Sterling MCP and nothing else will report it. Inspect the file; delete it and re-run init to regenerate.',
         );
       }
@@ -1312,134 +1210,17 @@ if (!initIsPluginRepo) {
 }
 
 if (initIsPluginRepo) {
-  // ALSO — IN DUAL-CONTEXT MODE ONLY — the native-claude Windows MCP config (option B,
-  // decision foreign_a756e5d9 / native-claude-mcp-via-strict-win-config): sterling-windows.bat
-  // launches claude.exe with `--mcp-config <this> --strict-mcp-config` so NATIVE claude
-  // runs the MCP server on the WINDOWS node, because the plugin's sterling-mcp.json names
-  // THIS (non-Windows) interpreter and cannot run under native claude (-32000). Generated
-  // only here (the plugin repo), referenced by every project's launcher.
-  // On a win32 host it is NOT generated at all (decision
-  // host-native-init-with-dev-machine-escape-hatch): the plugin entry is already the
-  // Windows node, so a second file would be the duplicate sterling entry the ruling
-  // removes — dead weight nothing reads, whose only historical purpose was to be elected
-  // by the --strict flag the launcher no longer passes there. Skipped loudly (P5) in that
-  // mode and when no Windows node resolved — the two skips read differently on purpose.
-  // STORE ARG EXPANSION differs by scope (verified 2026-07-12, code.claude.com/docs/en/mcp):
-  // a --mcp-config file gets project-scope ${VAR} env expansion — CLAUDE_PROJECT_DIR is set
-  // in the SERVER's env, not the parse-time shell, so the bare form passes through literally
-  // and the server mkdirs a literal '${CLAUDE_PROJECT_DIR}/' store at its cwd (the phantom
-  // store, 2026-06-24). The documented idiom is the ${CLAUDE_PROJECT_DIR:-.} default: '.'
-  // resolves against the server's cwd = the project dir. The PLUGIN config (above) keeps the
-  // bare form — plugin-scope configs substitute it unconditionally, no default needed.
-  // Sparring-partner auto-wire for NATIVE Windows claude (board 43051819 slice B,
-  // decision sparring-partner-partnership-shape) — this config's codex story needed
-  // its own Windows-node probe (native `codex.exe`/login state differ from the WSL
-  // probe above the plugin config uses) because a bare spawnSync('codex') here would
-  // resolve under WSL's own PATH, not the Windows one native claude actually runs in.
-  // probeCodexWin (scripts/lib/codex-mcp.mjs) resolves via `where.exe codex` instead.
-  // On failure, report a loud skip line — never silently omitted, and distinguishable
-  // from the feature being off in config (P5 degraded-loud). Reuses the SAME
-  // CODEX_MCP_ENTRY (via withCodexEntry) as the WSL branch — the entry itself is
-  // identical; only the PROBE differs.
-  // DELIBERATELY STILL CLONE-INIT-SCOPED, unlike sterling-mcp.json above (board
-  // 2a6b45c2). This file is a DUAL-CONTEXT-ONLY artifact under decision
-  // host-native-init-with-dev-machine-escape-hatch: a Windows-only consumer runs
-  // HOST-NATIVE, where the launcher passes no --mcp-config and this file is not
-  // generated at all, and a Linux-only consumer has no native-Windows launch path —
-  // so neither consumer shape can be stranded by its absence. The one shape that
-  // needs it is the dual-context authoring machine, which is by definition the
-  // machine whose --target IS the clone. If a dual-context consumer ever becomes
-  // real, this arm moves out beside the plugin config (see the report note there).
+  // The native-claude Windows MCP config (.claude-plugin/sterling-mcp-win.json) is
+  // RETIRED with the native launcher, its only reader (decision
+  // native-windows-launcher-retired-wsl2-only): init no longer generates or
+  // maintains it. A copy an earlier init wrote is left on disk and reported.
   const winMcpConfigPath = join(pluginArtifactRoot, '.claude-plugin', 'sterling-mcp-win.json');
-  if (!nativeMcpNeedsWinConfig) {
+  if (existsSync(winMcpConfigPath)) {
     items.push({
       item: '.claude-plugin/sterling-mcp-win.json',
-      ...staleOrSkipped(
-        winMcpConfigPath,
-        'not generated in host-native MCP mode: .claude-plugin/sterling-mcp.json already names the node native claude runs (process.execPath on a Windows host), so sterling-windows.bat inherits it via --plugin-dir — one host-appropriate entry, no --strict, and the user\'s other MCP servers (codex, the default independent reviewer) keep loading',
-        'nothing on the host-native launch path reads it any more, so its sterling entry (and any codex entry beside it) will silently rot as node paths move',
-      ),
-    });
-  } else if (winNode) {
-    // STERLING_CODEX_PROBE_WIN: test-isolation seam mirroring STERLING_CODEX_PROBE
-    // above (same enum), scoped to this native-Windows probe. unset/'' -> real
-    // probeCodexWin(); 'ok'/'absent'/'not-logged-in' force the outcome; any other
-    // value fails init loud (unknown signals halt, P5).
-    // A forced 'ok' carries STERLING_CODEX_WIN_PATH as the resolved command when that
-    // seam names one, mirroring what a real probeCodexWin success now returns (board
-    // 4c3a8e59: the written entry is the exact command the probe succeeded with). With
-    // no path seam set, 'ok' still yields the bare CODEX_MCP_ENTRY spelling.
-    const codexProbeWinOverride = process.env.STERLING_CODEX_PROBE_WIN;
-    const codexProbeWin = !codexProbeWinOverride
-      ? probeCodexWin()
-      : codexProbeWinOverride === 'ok'
-        ? { ok: true, command: process.env.STERLING_CODEX_WIN_PATH || undefined }
-        : codexProbeWinOverride === 'absent'
-          ? { ok: false, reason: 'binary-absent' }
-          : codexProbeWinOverride === 'not-logged-in'
-            ? { ok: false, reason: 'not-logged-in' }
-            : fail(`STERLING_CODEX_PROBE_WIN must be 'ok', 'absent', or 'not-logged-in' (got '${codexProbeWinOverride}')`, 2);
-    if (!codexProbeWin.ok) warns.push(codexSkipLine(codexProbeWin.reason, codexProbeWin.version));
-    const desiredWin = {
-      mcpServers: withCodexEntry(
-        { sterling: { command: winNode, args: [winMcpServerEntry, '--store', '${CLAUDE_PROJECT_DIR:-.}/.sterling/sterling.db'] } },
-        codexProbeWin,
-      ),
-    };
-    if (!existsSync(winMcpConfigPath)) {
-      mkdirSync(dirname(winMcpConfigPath), { recursive: true });
-      writeFileSync(winMcpConfigPath, JSON.stringify(desiredWin, null, 2));
-      items.push({
-        item: '.claude-plugin/sterling-mcp-win.json',
-        status: 'created',
-        detail: `native-claude MCP config (Windows node) — referenced by sterling-windows.bat --mcp-config${codexProbeWin.ok ? '; codex mcp-server wired (probe succeeded)' : ''}`,
-      });
-    } else {
-      let existingWin;
-      try { existingWin = JSON.parse(readFileSync(winMcpConfigPath, 'utf8')); } catch { existingWin = undefined; }
-      if (existingWin && canonical(existingWin) === canonical(desiredWin)) {
-        items.push({ item: '.claude-plugin/sterling-mcp-win.json', status: 'matches', detail: 'native-claude MCP config as generated' });
-      } else {
-        // Managed refresh — the EXACT mirror of the WSL branch above (review D1's
-        // upgrade path), and load-bearing for THIS arm rather than a nicety: every
-        // clone that ever ran init already carries a sterling-only
-        // sterling-mcp-win.json (this repo's own copy does), so without the refresh
-        // the codex entry could never arrive once a native-Windows codex install
-        // makes probeCodexWin succeed — the compare would report 'differs — left
-        // untouched' forever and the only route would be deleting the file by hand.
-        // Additive-only and provably ours: the sterling entry and every OTHER key
-        // must already equal what init would generate, and ONLY the codex key may be
-        // missing. Any other difference still reports 'differs — left untouched'.
-        const desiredWinMinusCodex = {
-          mcpServers: Object.fromEntries(Object.entries(desiredWin.mcpServers).filter(([k]) => k !== 'codex')),
-        };
-        const isManagedCodexAddWin =
-          codexProbeWin.ok &&
-          existingWin &&
-          typeof existingWin === 'object' &&
-          existingWin.mcpServers &&
-          !('codex' in existingWin.mcpServers) &&
-          canonical(existingWin) === canonical(desiredWinMinusCodex);
-        if (isManagedCodexAddWin) {
-          writeFileSync(winMcpConfigPath, JSON.stringify(desiredWin, null, 2));
-          items.push({
-            item: '.claude-plugin/sterling-mcp-win.json',
-            status: 'refreshed',
-            detail: 'refreshed — added generated codex entry (native-Windows probe succeeded; sterling entry and all other keys unchanged)',
-          });
-        } else {
-          items.push({ item: '.claude-plugin/sterling-mcp-win.json', status: 'differs', detail: 'differs from generated — left untouched (delete to regenerate)' });
-        }
-      }
-    }
-  } else {
-    items.push({
-      item: '.claude-plugin/sterling-mcp-win.json',
-      ...staleOrSkipped(
-        winMcpConfigPath,
-        winSkipDetail('the native-claude MCP config'),
-        'no Windows node resolved this run, so init could not verify or refresh the sterling entry it names',
-      ),
+      status: 'stale',
+      detail:
+        'retired (decision native-windows-launcher-retired-wsl2-only) — its only reader was the retired sterling-windows.bat; init no longer generates or maintains it. Left on disk untouched: delete it yourself when you no longer want it',
     });
   }
   // a root .mcp.json must NOT exist in the plugin repo: it would be auto-discovered by

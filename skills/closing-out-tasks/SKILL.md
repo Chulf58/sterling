@@ -16,7 +16,7 @@ Done is a claim about the world, so back it with the world:
 - Run the **narrowest meaningful check first** (the failing test, the one affected command), then the broader gates the repo convention expects (typecheck, `npm run check`, targeted suite).
 - Run checks **in this session, after the last edit**. A pass from before your final change is not a pass. A predicted or remembered pass is not a pass.
 - **Paste the actual command and its actual output**, or the relevant tail of it. "Tests pass" with nothing attached is an assertion, not a result.
-- A new test must be shown to **fail without the fix** — self-written tests that only ever passed are weak evidence.
+- A test you claim as a **regression test** must be shown to **fail without the fix** — a regression test that only ever passed proves nothing about the regression. Other new tests need no pre-fix failure evidence.
 - If a gate cannot be run here, say `not run: <reason>` and state the residual risk explicitly. Never imply a check passed that you did not run.
 - Re-read the final diff once with fresh eyes before closing: debug output, commented-out code, `TODO` markers, accidental scope creep, files touched the task didn't ask for.
 
@@ -36,15 +36,13 @@ Leave no droppings.
 
 ## Gate 3 — Capture: three surfaces, never collapsed
 
-This is where Sterling's own contract differs sharply from a generic close-out — read it carefully, because collapsing these three is drift, not a shortcut.
+What each surface answers — the session todo list, the **board** and the **maintenance queue** — and why they are never collapsed is in the conductor prompt (`agent-templates/conductor.md`, installed in each project as `.claude/agents/conductor.md`), section "Three surfaces, never collapsed"; close-on-commit is in `CLAUDE.md`, "Conduct rules (Sterling layer)". At the finish line that means:
 
-- **The board** (`board_add`/`board_update`, `source: "user"`) — real work the user wants done. The only surface for wanted-but-not-done work. An item leaves it *only* through the artifact-write that fulfils it: `board_remove`, citing the commit that paid it (close-on-commit) — never by being called done in conversation.
-- **The maintenance queue** (`board_query source:"system"`, drained by `/sterling:drain`) — mechanism-detected debt, every item carrying a registered `system_reason` (`reconcile_needed`, `capture_owed`, `article_missing`, …), minted by the event that detected it and removed by the artifact that closes it. Never hand-park a "remember to do X" item here — that belongs on the board. Closing an item you did not actually fulfil makes the store lie.
-- **The knowledge store** (`knowledge_create`/`knowledge_update`, conductor-only, direct — see `decision-records`) — durable facts, decisions, and reconciled article state. Most tasks produce nothing durable here; the bar is **will this matter in a month to someone who wasn't in this session?**
+- A board item this work paid is `board_remove`d citing the commit — never just called done in conversation. Anything genuinely deferred goes on the board, not in the dying todo list.
+- A maintenance item closes only through the artifact that fulfils it (see the `drain` skill); never hand-park a "remember to do X" item on the queue.
+- **The knowledge store** gets what will matter in a month to someone who wasn't in this session — most tasks produce nothing durable. The conductor alone authors it and creates records directly (see `decision-records`); the `librarian` may apply conductor-drafted update-shaped and board writes verbatim, never author. A `researcher`, `scout` or `implementor` names a **capture candidate** in its report instead of writing.
 
-When a finding clears that bar, put it in the right place and link rather than duplicate. A read-only or write-scoped agent (`researcher`, `scout`, `implementor`) stays out of the store and the board by role — it names a **capture candidate** in its report; only the conductor decides whether to write it, and does so directly.
-
-**Reconcile is part of this gate, not a separate afterthought.** Every affected `feature_article` — the one owning the touched files *and* any whose described behavior the change invalidates (follow `relies_on`/`relied_by`) — gets updated before the work is done. The articles most often forgotten are the ones owning files the conductor edited *by hand*, not through a dispatched agent — a subagent's report names its files for you; your own edits produce no such report. Before the reconcile batch, `git diff --name-only` against the merge base and ask which paths no agent report mentioned — that set is your hand-edits, and each needs its owning article found deliberately.
+**Reconcile is part of this gate, not a separate afterthought** — the rule and its scope (every affected article, following `relies_on`/`relied_by`) are in `CLAUDE.md`, "Reconcile-always". The articles most often forgotten own files the conductor edited *by hand*: before the reconcile batch, `git diff --name-only` against the last settled commit and ask which paths no agent report mentioned — that set is your hand-edits, and each needs its owning article found deliberately.
 
 ## The final message
 

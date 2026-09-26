@@ -1,5 +1,5 @@
 ---
-description: Enter the Sterling debug play (§8.3) — root-cause SOP with verification fan-out.
+description: Enter the Sterling debug play — root-cause SOP with verification fan-out.
 ---
 
 Invoke the `debug` skill and follow its six steps exactly. Before any edit, have the scout locate the relevant code and register that observed scope:

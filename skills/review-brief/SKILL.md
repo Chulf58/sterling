@@ -5,20 +5,9 @@ description: Use before dispatching a review of a finished diff — the brief te
 
 # Review brief
 
-Sterling reviews **sparsely, and only before a commit** (user ruling, 2026-09-18: "we dont review everything as that is overkill, we only review before a commit, and we still do it sparsely"). Per-slice work is verification-only — the `implementor` pastes its own test output, the conductor spot-checks, work proceeds. There is no standing `reviewer` agent template; a review is a **brief** the conductor sends to a model, structured by this skill.
+When a review happens, who reviews whose work, and the loop cap are in the conductor prompt (`agent-templates/conductor.md`, installed in each project as `.claude/agents/conductor.md`), section "Review sparsely, and only before a commit": one review before a commit, over the riskiest part of the diff; Codex **Sol** (`gpt-5.6-sol`) for Claude-executed work and Claude **Opus** for Terra-executed work; in a WORK-mode project, Sol reviews before the PR and takes precedence over the Terra→Opus pairing; one review, one fix round, one re-check by the same warm reviewer. There is no standing `reviewer` agent template; a review is a **brief** the conductor sends to a model, structured by this skill.
 
-## Who reviews what — cross-family pairing, reviewer never the author
-
-- **Codex Sol** (`gpt-5.6-sol`) reviews Claude-executed work. Dispatch it through the `codex` MCP tool — never a shelled `codex exec` (user-ruled 2026-09-20) — setting `model`, `sandbox`, `approval-policy: never` and `config.model_reasoning_effort: "high"` at the call site. A review lane is `sandbox: read-only` — an enforced filesystem boundary, not a prose instruction.
-- **Claude Opus** reviews Terra-executed work.
-
-The reviewer is always the *other* family from whoever wrote the diff — never the same model checking its own output, and never routed through the agent that authored the change. This is a practice the conductor follows, not a hook or a merge gate that will catch a skipped review — which is exactly why it does not get skipped.
-
-## When to dispatch one
-
-Before a commit, over the **riskiest part** of the accumulated diff — never every file. Riskiest means: runtime/product code, config, permissions, credentials, lifecycle, migrations, generated catalogs, third-party patches. Docs, probe scripts, and generated projections go unreviewed.
-
-Cap the loop at **one review + one fix round + one re-check by the same warm reviewer**; leftover MEDIUM-or-below findings become recorded residual risk, not an endless loop.
+Dispatch a Sol review through the `codex` MCP tool at `sandbox: read-only` — the call-site shape is in `CLAUDE.md`, "Codex runs through the MCP tool, never the shell". Riskiest means runtime/product code, config, permissions, credentials, lifecycle, migrations, generated catalogs, third-party patches; docs, probe scripts and generated projections go unreviewed.
 
 ## The brief
 
@@ -74,4 +63,4 @@ Residual risk: what could not be checked
 
 ## Reading the result back
 
-A review claim needs a substantive response on the **final** diff — a review consult that only saw an earlier slice does not discharge the duty for what actually landed. Treat the reviewer's findings as evidence, not a verdict: the conductor adjudicates, fixes what's real, and records disagreement rather than silently overriding it. Per CLAUDE.md's sparring-partner rule, a genuine disagreement is not escalated to the user — the conductor's solution stands and gets built, with the disagreement recorded.
+A review claim needs a substantive response on the **final** diff — a review consult that only saw an earlier slice does not discharge the duty for what actually landed. Treat the reviewer's findings as evidence, not a verdict: the conductor adjudicates, fixes what's real, and records disagreement rather than silently overriding it. A disagreement over a correctness finding is settled on evidence — reproduce it, run the test, read the cited line — not by authority. The "conductor's solution stands" default in the conductor prompt ("Astra is the solution-sparring partner") covers Astra design consults only; it does not dismiss a review finding.

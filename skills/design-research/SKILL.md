@@ -29,7 +29,7 @@ Search in this order and stop as soon as the question is answered:
 2. **This repo** — `AGENTS.md`, `CLAUDE.md`, `docs/`, existing scripts and config. Design intent often lives here even beyond the store.
 3. **Prior art via `scout`.** Dispatch it to map an unfamiliar area of the repo instead of reading it all yourself — its `path:line` map plus stated coverage gaps is the compact form you need.
 4. **The platform itself.** If you're building on a shared runtime (Claude Code, an MCP server, a shared library), check its own docs and source for the exact behavior before assuming you need to build around it.
-5. **The web** — only after local and prior-art channels are exhausted or clearly insufficient. Sterling on Claude Code has no online research agent (`researcher` is read-only local tracing); a genuine web question goes to the conductor directly or to the Codex sparring-partner consult, per CLAUDE.md's sparring-partner rule.
+5. **The web** — only after local and prior-art channels are exhausted or clearly insufficient. A web FACT (a library's documented behavior, a version, a known issue) goes to the `researcher`, which has WebSearch and WebFetch and cites every web claim with its URL and access date; a question of JUDGEMENT goes to an Astra consult (the conductor prompt, `agent-templates/conductor.md` — installed in each project as `.claude/agents/conductor.md` — section "Astra is the solution-sparring partner"). Decision `researcher-gets-web-search-and-fetch`.
 
 State honestly which channels you actually checked. "Nothing found" is only valid if you say *where* you looked. `researcher` and `scout` read the knowledge store as part of this research, but writing to it is out of role for them — a finding worth keeping durably is a **capture candidate** for the conductor to record, never something they save themselves.
 
@@ -52,7 +52,7 @@ Default bias: reuse what the store and repo already carry over building new mech
 3. **Gather local evidence** (repo, scout) — keep the returned context compact.
 4. **Gather external evidence** only if needed, with dates.
 5. **Separate the layers** (below) — never blur them.
-6. **For a non-trivial design, run the two-round Codex/Astra sparring pass** per CLAUDE.md before committing to a shape (shape round, then the concrete-mechanism round) — never for a routine change, and dispatch it through the `codex` MCP tool at `model: gpt-6-astra`, `sandbox: read-only`, `approval-policy: never`, `config.model_reasoning_effort: "high"` — never a shelled `codex exec` (user-ruled 2026-09-20).
+6. **For a non-trivial design, put it to Astra before committing to a shape** — when a design counts as non-trivial, what the consult carries, how it is dispatched and how a disagreement resolves are all in the conductor prompt, section "Astra is the solution-sparring partner". Never for a routine change.
 7. **Recommend** with a clear adopt/extend/reuse/build call and the main risk, then capture the settled decision (see the `decision-records` skill).
 
 ## Evidence boundaries (non-negotiable)

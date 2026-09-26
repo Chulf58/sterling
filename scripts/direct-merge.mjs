@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { arg, fail as baseFail, openProject } from './lib/project.mjs';
-import { isGitRepo, currentBranch, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
+import { isGitRepo, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
 import { defaultExec } from './lib/update.mjs';
 import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/lib/settlement.mjs';
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
@@ -79,11 +79,42 @@ if (mode === 'work') {
 
 stage('branch');
 const into = arg('--into') ?? defaultBranch(target);
-const branch = arg('--branch') ?? currentBranch(target);
+// `git rev-parse --abbrev-ref HEAD` prints the literal 'HEAD' when detached, which
+// would equal a defaulted --branch and merge the base into itself. symbolic-ref
+// names the checked-out branch or fails when there is none.
+const symbolic = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: target, encoding: 'utf8', timeout: 60_000 });
+// Only exit 1 with no error output is the normal "HEAD is detached" answer. A spawn
+// error, a timeout or any other status means git could not answer — fail loudly.
+if (symbolic.error || (symbolic.status !== 0 && !(symbolic.status === 1 && !(symbolic.stderr ?? '').trim()))) {
+  fail(
+    `direct-merge: could not determine the checked-out branch (git symbolic-ref HEAD ` +
+      `${symbolic.error ? `failed to run: ${symbolic.error.message}` : `exited ${symbolic.status ?? `by signal ${symbolic.signal}`}: ${(symbolic.stderr || symbolic.stdout || '').trim()}`}) — refusing before the battery.`
+  );
+}
+const checkedOut = symbolic.status === 0 ? symbolic.stdout.trim() : '';
+if (!checkedOut) {
+  fail(
+    `direct-merge: no branch is checked out (detached HEAD) — refusing before the battery.\n` +
+      `The gate merges or pushes the checked-out branch, and the battery validates its tree. Check out the branch to merge and rerun.`,
+    2
+  );
+}
+const branch = arg('--branch') ?? checkedOut;
 if (work) work.state.branch = branch;
+// Decision merge-keeps-battery-and-version-refusals (audit finding A2): the
+// battery below runs `npm run check` in the CHECKED-OUT tree, so merging or
+// pushing any other branch would ship a tree the battery never validated.
+if (branch !== checkedOut) {
+  fail(
+    `direct-merge: --branch '${branch}' is not the checked-out branch '${checkedOut}' — refusing before the battery.\n` +
+      `The consistency battery (npm run check) validates the checked-out tree, so it cannot vouch for '${branch}'.\n` +
+      `Check out '${branch}' and rerun (with or without --branch).`,
+    2
+  );
+}
 if (branch === into) {
   fail(
-    `direct-merge: currently on the base branch '${into}' — checkout the branch to merge, or pass --branch.\n` +
+    `direct-merge: currently on the base branch '${into}' — checkout the branch to merge.\n` +
       `If a merge just completed here, the work is ALREADY on ${into} and its branch was deleted:\n` +
       `check 'git log --oneline -3 ${into}' before merging anything again. A gate that exits\n` +
       `non-zero after a SUCCESSFUL merge (stale bundles / failed sweep) says so on its first line.`

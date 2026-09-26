@@ -764,7 +764,7 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DIS
   // config-only keys have NO installed/registered agent, so they are NOT keys of AGENT_MODEL_KEY.
   assert.ok(!('coder_hard' in lookup), 'coder_hard is a config-only key — never a registered-agent key');
   assert.ok(!('classifiers' in lookup), 'classifiers is a config-only key — never a registered-agent key');
-  assert.ok(!('debugger' in lookup), 'debugger is a config-only key — no debugger template is registered yet');
+  assert.ok(!('debugger' in lookup), 'debugger is retired (decision agent-roster-is-classless-four-agents) — neither a registered agent nor a config key');
 
   // every VALUE the map yields must be a real config.models key (cross-check against parseConfig defaults).
   const cfg = parseConfig({}) as unknown as { models: Record<string, unknown> };

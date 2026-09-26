@@ -4925,13 +4925,10 @@ var configSchema = external_exports.object({
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
     scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
-    // Conductor-direct agents (no agent_exit/handoff_write; final text is the
-    // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort. No debugger.md
-    // template is registered yet (agent-templates/registry.json) — this key
-    // stays config-only until one is.
-    librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
-    debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
+    // librarian is mechanical clerking — cheap model, low effort (P8). The
+    // roster is classless (decision agent-roster-is-classless-four-agents), and
+    // the debugger role it rejected has no key here.
+    librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" })
   }).default({}),
   // Per-project agent tool extension (decision
   // per-project-agent-extra-tools-config-appended-at-render, 587472e3):

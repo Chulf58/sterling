@@ -42,8 +42,15 @@ test('the section matches case-insensitively and at any heading depth', () => {
   }
 });
 
+test('researcher.md is now LISTED: without an Absence claims section it fails the rule', () => {
+  const v = lintAbsenceDiscipline('# Role\n# Inputs\n', 'researcher.md');
+  assert.equal(v.length, 1);
+  assert.equal(v[0].kind, 'missing_absence_discipline');
+  assert.match(v[0].detail, /researcher\.md/);
+});
+
 test('an UNLISTED template is not required to carry the section (scope is deliberate)', () => {
-  for (const other of ['implementor.md', 'researcher.md', 'librarian.md']) {
+  for (const other of ['implementor.md', 'librarian.md']) {
     assert.deepEqual(lintAbsenceDiscipline('# Role\n', other), [], `${other} is out of scope for this rule`);
   }
 });

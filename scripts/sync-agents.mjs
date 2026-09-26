@@ -57,8 +57,7 @@ const { report, restartInstruction } = syncAgents({
   vars: {
     NODE: `"${process.execPath.replace(/\\/g, '/')}"`,
     HOOKS_DIR: join(pluginRoot, 'hooks').replace(/\\/g, '/'),
-    // the plugin-owned read-only git wrapper; H14 grants only this exact file
-    // identity, so templates must name it by absolute path
+    // the plugin-owned read-only git wrapper, named by absolute path
     GIT_RO: join(pluginRoot, 'scripts', 'git-ro.mjs').replace(/\\/g, '/'),
   },
   config,

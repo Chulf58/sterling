@@ -70,8 +70,9 @@ export function probeCodex({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_MS, 
 // probeCodexWin — the NATIVE-WINDOWS counterpart (board 43051819 slice A). init.mjs
 // runs under WSL node, so a bare spawnSync('codex', ...) would resolve `codex` under
 // WSL's OWN PATH (or find nothing, since a WSL-side install is a different binary from
-// the Windows-side one) — wrong side entirely for the native-claude sterling-mcp-win.json
-// this feeds. Resolution instead goes through `where.exe codex` (WSL interop reaching
+// the Windows-side one) — wrong side entirely for native claude on a win32 host, whose
+// plugin MCP config this feeds (sterling-mcp-win.json, its old consumer, is retired —
+// decision native-windows-launcher-retired-wsl2-only). Resolution instead goes through `where.exe codex` (WSL interop reaching
 // the WINDOWS PATH, same mechanism as init.mjs's own whereWin('node')), THEN the
 // resolved path is probed with `login status` exactly like probeCodex above. Same
 // {ok, reason} contract PLUS `command` on success — the exact executable the probe

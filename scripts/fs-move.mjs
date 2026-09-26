@@ -1,13 +1,13 @@
-// fs-move (spec §7.1): contract-checked rename that additionally updates
+// fs-move: conductor-invoked rename that additionally updates
 // file_keys on every owning record AS PART OF THE MOVE — renames inside the
-// machinery never orphan knowledge. H14 admits exactly this invocation shape.
+// machinery never orphan knowledge. A registered debug scope is metadata only
+// and never refuses a path (decision debug-scope-is-metadata-fs-helpers-stop-refusing).
 //   node scripts/fs-move.mjs <from> <to> [--target <dir>]
 import { renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { normalizeRepoPath } from '@sterling/schemas';
 import { arg, fail, openProject } from './lib/project.mjs';
-import { scopeCheck, readDebugScope } from './lib/debug-scope.mjs';
 
 const target = arg('--target') ?? process.cwd();
 const positional = process.argv.slice(2).filter((a) => !a.startsWith('--') && a !== target);
@@ -17,11 +17,6 @@ const to = normalizeRepoPath(positional[1]);
 
 const { store } = openProject(target);
 try {
-  const debugScope = readDebugScope(target);
-  for (const rel of [from, to]) {
-    const scope = scopeCheck({ debugScope, rel });
-    if (scope.deny) fail(`fs-move REFUSED (nothing moved): ${scope.deny}`, 2);
-  }
   if (!existsSync(join(target, from))) fail(`fs-move REFUSED: '${from}' does not exist`, 2);
   if (existsSync(join(target, to))) fail(`fs-move REFUSED: '${to}' already exists`, 2);
 

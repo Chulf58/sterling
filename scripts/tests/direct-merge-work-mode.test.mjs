@@ -417,6 +417,82 @@ test('work: --branch naming something that is not a local branch (a tag) is refu
   }
 });
 
+// Decision merge-keeps-battery-and-version-refusals (audit finding A2): the
+// battery runs in the CHECKED-OUT tree, so a --branch naming any other branch
+// would validate one tree and merge or push another. Refused in both modes,
+// before the battery and before anything moves.
+for (const mode of ['hobby', 'work']) {
+  test(`${mode}: --branch naming a branch other than the checked-out one is refused with exit 2 before the battery; nothing merged or pushed`, () => {
+    const p = makeProject({ mode, checkScript: 'echo BATTERY-RAN >&2; exit 0' });
+    try {
+      git(p.dir, ['branch', 'feat/other', 'main']);
+      const r = runDirectMerge(p, ['--branch', 'feat/other']);
+      assert.equal(r.status, 2, `a foreign --branch exits 2 — stderr=${oneLine(r.stderr)}`);
+      assert.match(r.stderr, /feat\/other/, 'the refusal names the requested branch');
+      assert.match(r.stderr, /feat\/sprockets/, 'the refusal names the checked-out branch');
+      assert.match(r.stderr, /checked-out tree/, 'the refusal says why: the battery validates the checked-out tree');
+      assert.doesNotMatch(r.stderr, /BATTERY-RAN/, 'refused before the battery');
+      assertBaseUntouched(p, `${mode} foreign --branch`);
+      assert.ok(gitMaybe(p.dir, ['rev-parse', '--verify', 'refs/heads/feat/other']), 'the named branch is not deleted');
+      assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, 'no pr call');
+      assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', 'refs/heads/feat/other']), null, 'nothing pushed');
+    } finally {
+      p.cleanup();
+    }
+  });
+}
+
+// Sol review (MEDIUM): on a detached HEAD, `git rev-parse --abbrev-ref HEAD`
+// prints the literal 'HEAD', which equalled the defaulted --branch and let the
+// gate merge main into itself. No branch checked out is refused with exit 2.
+for (const mode of ['hobby', 'work']) {
+  test(`${mode}: a detached HEAD (no branch checked out) is refused with exit 2 before the battery; nothing merged or pushed`, () => {
+    const p = makeProject({ mode, checkScript: 'echo BATTERY-RAN >&2; exit 0' });
+    try {
+      git(p.dir, ['checkout', '-q', '--detach', 'HEAD']);
+      const r = runDirectMerge(p);
+      assert.equal(r.status, 2, `a detached HEAD exits 2 — stderr=${oneLine(r.stderr)}`);
+      assert.match(r.stderr, /no branch is checked out/i, 'the refusal says why');
+      assert.doesNotMatch(r.stderr, /BATTERY-RAN/, 'refused before the battery');
+      assert.equal(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'local main does not move');
+      assert.equal(git(p.origin, ['rev-parse', 'main']), p.originMainSha, 'origin main does not move');
+      assert.ok(gitMaybe(p.dir, ['rev-parse', '--verify', `refs/heads/${p.branchName}`]), 'the feature branch survives');
+      assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, 'no pr call');
+    } finally {
+      p.cleanup();
+    }
+  });
+}
+
+// Sol re-check: only `git symbolic-ref --quiet` exiting 1 with no output is the
+// normal detached-HEAD answer. A HEAD naming an invalid ref makes it exit 128 with
+// "fatal: No such ref: HEAD" while `git rev-parse --git-dir` still succeeds — that
+// must fail loudly with git's own stderr, never read as "detached".
+test('hobby: a HEAD git cannot resolve fails loudly with git\'s stderr (not the detached-HEAD refusal), before the battery', () => {
+  const p = makeProject({ mode: 'hobby', checkScript: 'echo BATTERY-RAN >&2; exit 0' });
+  try {
+    writeFileSync(join(p.dir, '.git', 'HEAD'), 'ref: refs/heads/bad..name\n');
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 1, `an unresolvable HEAD is a loud failure (exit 1) — stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /could not determine the checked-out branch/, 'the failure names what could not be determined');
+    assert.match(r.stderr, /No such ref/, "git's own stderr is carried through");
+    assert.doesNotMatch(r.stderr, /no branch is checked out/i, 'never mistaken for a detached HEAD');
+    assert.doesNotMatch(r.stderr, /BATTERY-RAN/, 'refused before the battery');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: --branch naming the checked-out branch itself is accepted (the rule refuses only a DIFFERENT branch)', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    const r = runDirectMerge(p, ['--branch', p.branchName]);
+    assert.equal(r.status, 0, `--branch equal to the checkout proceeds — stderr=${oneLine(r.stderr)}`);
+  } finally {
+    p.cleanup();
+  }
+});
+
 /** Every work-mode exit prints ONE JSON object: {mode:'work', ok:false,
  * stage, error, exit, pushed, pr_url, …}, with exit equal to the process's. */
 function assertWorkFailureJson(r, label) {
