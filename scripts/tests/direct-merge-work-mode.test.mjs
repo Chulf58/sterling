@@ -605,9 +605,11 @@ test('parseOriginRepo: https, ssh:// and scp-style origin URLs give host/owner/r
     'ssh://git@github.com:22/acme/widget.git': 'github.com/acme/widget',
     'git@github.com:acme/widget.git': 'github.com/acme/widget',
     'github.com:acme/my.repo': 'github.com/acme/my.repo',
+    'https://github.com/acme/.github.git': 'github.com/acme/.github',
+    'git@github.com:acme/.dotfiles': 'github.com/acme/.dotfiles',
   };
   for (const [url, repo] of Object.entries(ok)) assert.equal(parseOriginRepo(url)?.repo, repo, url);
-  for (const bad of ['/tmp/origin.git', 'file:///tmp/origin.git', 'https://github.com/acme', 'https://github.com/a/b/c', 'git@github.com:acme/..', '', 'C:\\repos\\x.git']) {
+  for (const bad of ['/tmp/origin.git', 'file:///tmp/origin.git', 'https://github.com/acme', 'https://github.com/a/b/c', 'git@github.com:acme/..', 'git@github.com:acme/.', 'https://github.com/../widget.git', '', 'C:\\repos\\x.git']) {
     assert.equal(parseOriginRepo(bad), null, bad);
   }
 });

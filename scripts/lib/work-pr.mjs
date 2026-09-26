@@ -37,7 +37,7 @@ export function parseOriginRepo(url) {
   if (parts.length !== 2) return null;
   const [owner, name] = parts;
   const seg = /^[A-Za-z0-9_.-]+$/;
-  if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(host) || !seg.test(owner) || !seg.test(name) || owner.startsWith('.') || name.startsWith('.')) return null;
+  if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(host) || !seg.test(owner) || !seg.test(name) || [owner, name].some((part) => part === '.' || part === '..')) return null;
   return { host, repo: `${host}/${owner}/${name}` };
 }
 
