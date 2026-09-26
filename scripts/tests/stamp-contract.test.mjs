@@ -250,3 +250,58 @@ test('stamp-contract: realpath self-exclusion — this Sterling clone\'s own pat
     rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
+
+// The READY TO CLEAR bullet (commit 6661665) is NEW to every existing sibling, so it can only
+// arrive through the insert path — the replace path needs a block to already be there.
+const READY_LEAD = '- **Say `READY TO CLEAR` plainly when it is time.**';
+const CODEX_LEAD = '- **Codex runs through the MCP tool, never the shell.**';
+function dropBlock(text, lead) {
+  const lines = text.split('\n');
+  const i = lines.findIndex((l) => l.startsWith(lead));
+  assert.notEqual(i, -1, `fixture sanity: '${lead}' present before removal`);
+  lines.splice(i, 1);
+  return lines.join('\n');
+}
+
+test('stamp-contract: a sibling CLAUDE.md lacking the READY TO CLEAR bullet gets it inserted after the Codex bullet — the result is byte-identical to the current template render, exit 0', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-ready-'));
+  const registry = new ProjectRegistry(regDb);
+  try {
+    writeCompleteSibling(dir, 'ready-sibling');
+    const complete = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+    writeFileSync(join(dir, 'CLAUDE.md'), dropBlock(complete, READY_LEAD));
+    registry.register({ repo_path: dir, name: 'ready-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+
+    const r = runStampContract(regDb);
+    assert.equal(r.status, 0, `inserting a missing bullet is not a refusal: ${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /inserted {2}- \*\*Say `READY TO CLEAR`/);
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), complete, 'bullet inserted in its template position, nothing else changed');
+  } finally {
+    registry.close();
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('stamp-contract: a sibling lacking BOTH the Codex and READY TO CLEAR bullets gets READY TO CLEAR inserted after "Knowledge is born structured." (the fallback anchor), exit 0', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-stamp-ready-fallback-'));
+  const registry = new ProjectRegistry(regDb);
+  try {
+    writeCompleteSibling(dir, 'ready-fallback-sibling');
+    const noCodex = dropBlock(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), CODEX_LEAD);
+    writeFileSync(join(dir, 'CLAUDE.md'), dropBlock(noCodex, READY_LEAD));
+    registry.register({ repo_path: dir, name: 'ready-fallback-sibling', stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+
+    const r = runStampContract(regDb);
+    assert.equal(r.status, 0, `fallback-anchored insert is not a refusal: ${r.stdout}\n${r.stderr}`);
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), noCodex, 'READY TO CLEAR lands directly after the Knowledge bullet; the absent Codex bullet is not invented');
+  } finally {
+    registry.close();
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});

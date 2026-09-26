@@ -51,16 +51,15 @@ const TARGET_LEADS = [
   // only for TARGET_LEADS[1] and anchoring on TARGET_LEADS[0]. A lead appended at
   // any other index gets ANCHOR_MISSING_REFUSED, so folding was still the right
   // call for THIS bullet — but for that reason, not the one first written down.
-  // Note the index pinning is itself a hazard: reordering TARGET_LEADS silently
-  // retargets an insert into seven foreign repos. Generalizing it to a declared
-  // {lead, insertAfter} pair is tracked, not done here.
+  // [2026-09-26: the index pinning is gone — inserts are now declared per lead in
+  // INSERT_AFTER, the {lead, insertAfter} generalization this note once tracked.]
   '- **Stage retrieval before acting**',
   // Added 2026-07-27. The mirror rule says the template is the SOURCE, but the two
   // had diverged and the stronger text was in Sterling's own CLAUDE.md — so seven
   // siblings were running weaker conduct rules than the repo that ships them. Both
   // bullets ALREADY EXIST in every sibling (they were generated from this template),
   // so these ride the REPLACE path; neither depends on the index-pinned insert above.
-  // APPEND ONLY: reordering this array retargets that insert into foreign repos.
+  // (The APPEND-ONLY constraint this note once stated died with the index pinning.)
   '- **Anti-speculation:**',
   '- **No false action claims:**',
   // 2026-08-11: the note surface was retired (decision 'note-surface-retired')
@@ -70,7 +69,21 @@ const TARGET_LEADS = [
   // block found under the OLD lead is replaced by the new bullet under the SAME
   // template-descended guard as the normal replace path.
   '- **Knowledge is born structured.**',
+  // 2026-09-26 (commit 6661665): NEW to every existing sibling, so it arrives only
+  // through the insert path — see INSERT_AFTER below.
+  '- **Say `READY TO CLEAR` plainly when it is time.**',
 ];
+
+// Insertable bullets: lead → the anchor lead(s) it goes after, tried in order. A lead
+// absent from a sibling (and not renamed) is inserted after the FIRST anchor the sibling
+// carries; with no anchor present it is ANCHOR_MISSING_REFUSED. Declared per lead, so
+// reordering TARGET_LEADS no longer retargets an insert (the old index-pinned hazard).
+// READY TO CLEAR sits after the Codex bullet in the template; that bullet is not stamped,
+// so older siblings may lack it and the always-stamped Knowledge bullet is the fallback.
+const INSERT_AFTER = new Map([
+  ['- **Concept articles — capture design the moment it settles', ['- **Reconcile _every affected_ article, not just the primary one**']],
+  ['- **Say `READY TO CLEAR` plainly when it is time.**', ['- **Codex runs through the MCP tool, never the shell.**', '- **Knowledge is born structured.**']],
+]);
 
 // Renamed bullets: new lead → the old lead(s) it replaced. When the new lead is
 // absent from a sibling, a block under an old lead is replaced by the new bullet
@@ -229,17 +242,15 @@ for (const p of projects) {
       break;
     }
     if (renamed) continue;
-    // The Concept bullet is NEW — insert it after the sibling's
-    // Reconcile bullet when that anchor is clean; everything else missing = drift.
-    if (lead === TARGET_LEADS[1]) {
-      const anchor = extractBlock(target.text, TARGET_LEADS[0]);
-      if (anchor) {
-        const lines = target.text.split('\n');
-        lines.splice(anchor.end, 0, ...want.split('\n'));
-        target.text = lines.join('\n');
-        actions.push({ lead, action: APPLY ? 'inserted' : 'would_insert', file: layerFileName(home) });
-        continue;
-      }
+    // An insertable bullet goes after the first anchor the sibling carries;
+    // everything else missing = drift.
+    const anchor = (INSERT_AFTER.get(lead) ?? []).map((a) => extractBlock(target.text, a)).find(Boolean);
+    if (anchor) {
+      const lines = target.text.split('\n');
+      lines.splice(anchor.end, 0, ...want.split('\n'));
+      target.text = lines.join('\n');
+      actions.push({ lead, action: APPLY ? 'inserted' : 'would_insert', file: layerFileName(home) });
+      continue;
     }
     actions.push({ lead, action: 'ANCHOR_MISSING_REFUSED', file: layerFileName(home) });
     drift++;
