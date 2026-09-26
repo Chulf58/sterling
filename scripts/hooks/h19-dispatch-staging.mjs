@@ -54,7 +54,6 @@ import {
   renderArticle,
   isOwnerDiscoveryOnly,
   renderReference,
-  renderDecisionPointers,
   rankFileDecisionPointers,
   payloadHeaderLine,
   extractAxisTerms,
@@ -75,7 +74,7 @@ import {
   markDiscoveryDelivered,
   ownerPointer,
   ownerSuffix,
-  decisionBlockPointer,
+  decisionPointerPart,
 } from './lib/delivery.mjs';
 
 // Subject-channel decision ceiling — mirrors H20's MAX_DECISIONS: a keyword
@@ -405,15 +404,7 @@ async function main(input) {
           const contentClass = isOwnerDiscoveryOnly(r) ? 'discovery' : 'substance';
           return { kind: 'ordinary', contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
         });
-        const decisionParts = freshDecisions.length
-          ? [{
-              kind: 'ordinary', contentClass: 'discovery',
-              identities: freshDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-              text: renderDecisionPointers(rels.join(', '), freshDecisions),
-              pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
-              suffix: `  … the rest held back by the delivery cap — ${decisionWiden}`,
-            }]
-          : [];
+        const decisionParts = freshDecisions.length ? [decisionPointerPart(rels.join(', '), freshDecisions, { widen: decisionWiden })] : [];
         parts.push(
           { kind: 'ordinary', contentClass: 'chrome', text: payloadHeaderLine(rels.join(', ')) },
           ...hazardParts(freshHazards, { fileKeys: rels }),
@@ -441,13 +432,9 @@ async function main(input) {
           ...hazardParts(subjectHazards, { remedy, matchLabel: 'for this subject' }),
           ...(subjectDecisions.length
             ? [
-                {
-                  kind: 'ordinary', contentClass: 'discovery',
-                  identities: subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS).map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-                  text: renderDecisionPointers('(subject match)', subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy, matchLabel: 'for this subject' }),
-                  pointer: decisionBlockPointer(subjectDecisions.length, decisionRemedy),
-                  suffix: `  … the rest held back by the delivery cap — ${decisionRemedy}`,
-                },
+                decisionPointerPart('(subject match)', subjectDecisions, {
+                  widen: decisionRemedy, cap: SUBJECT_MAX_DECISIONS, remedy: decisionRemedy, matchLabel: 'for this subject',
+                }),
               ]
             : [])
         );

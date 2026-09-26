@@ -7880,6 +7880,7 @@ function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}
     pinned: part.kind === "hazard" ? true : !!part.pinned
   }));
   const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision, name: part.name }] : []);
+  const disclosureIdsOf = (part) => part.disclosureIdentities ?? idsOf(part);
   const dedupeEntries = (entries) => {
     const seen = /* @__PURE__ */ new Set();
     const out = [];
@@ -7973,25 +7974,28 @@ ${line}` : line;
   for (const part of items) if (isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
   for (const part of items) if (isHazard(part)) tryDegradeHazard(part);
   const idsForDisclosure = (part) => {
-    const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
+    const tagged = disclosureIdsOf(part).map((e) => e.identity).filter(Boolean);
     if (tagged.length) return tagged;
     return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
   };
   const disclosureEntries = (list) => {
     const names = /* @__PURE__ */ new Map();
-    for (const e of list.flatMap(idsOf)) {
+    for (const e of list.flatMap(disclosureIdsOf)) {
       if (e?.identity && typeof e.name === "string" && e.name.trim() && !names.has(e.identity)) {
         names.set(e.identity, clipToBytes(e.name.replace(/\s+/g, " ").trim(), 80));
       }
     }
     return [...new Set(list.flatMap(idsForDisclosure))].map((id) => ({ id8: id.slice(0, 8), name: names.get(id) }));
   };
-  const disclosureCount = (list) => dedupeEntries(list.flatMap(idsOf)).length || list.length;
+  const disclosureCount = (list) => dedupeEntries(list.flatMap(disclosureIdsOf)).length || list.length;
   const renderDisclosure = (count, entries) => {
     const prefix = `+${count} more records: knowledge_query`;
     return entries.length ? `${prefix}; knowledge_get ${entries.map((e) => e.name ? `${e.name} (${e.id8})` : e.id8).join(" ")}` : `${prefix}; knowledge_get`;
   };
-  const disclosureSize = (list, named) => aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => named ? e : { id8: e.id8 })));
+  const disclosureSize = (list, named) => {
+    const custom2 = aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : Infinity;
+    return custom2 <= ordinaryCeiling ? custom2 : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => named ? e : { id8: e.id8 })));
+  };
   const sepCost = (renderedBefore) => renderedBefore > 0 ? bytes(sep) : 0;
   const ordinaryParts = items.filter((part) => !isHazard(part) && !isChrome(part));
   const baseOmitted = [...omitted];
@@ -8045,7 +8049,7 @@ ${line}` : line;
           ids.pop();
           line2 = aggregateLabel(count, ids);
         }
-        return line2;
+        if (bytes(line2) <= ordinaryCeiling) return line2;
       }
       const sepBytes = sepCost([...selected.keys()].filter((part) => part !== aggregatePart).length);
       const room = Math.min(ordinaryCeiling - ordinaryBytesUsed() - sepBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes() - sepBytes);
@@ -8087,7 +8091,7 @@ ${line}` : line;
   }
   const survivors = items.filter((part) => selected.has(part) && selected.get(part).full);
   const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
-  const omittedEntries = dedupeEntries(omitted.flatMap(idsOf));
+  const omittedEntries = dedupeEntries(omitted.flatMap(disclosureIdsOf));
   const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
   return {
     text: output().join(sep),

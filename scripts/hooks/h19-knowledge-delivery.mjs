@@ -36,7 +36,7 @@ import {
   resolveTotalCap,
   ownerPointer,
   ownerSuffix,
-  decisionBlockPointer,
+  decisionPointerPart,
   claimLegacyInjectionRungNotice,
 } from './lib/delivery.mjs';
 
@@ -258,20 +258,7 @@ function main(input) {
       const decisionWiden = `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${freshDecisions.length}`;
       const ownerParts = freshOwners.map(ownerPart);
       const suspectParts = [{ kind: 'ordinary', contentClass: 'chrome', text: joinSuspectBlock(suspectBlock ?? {}) }];
-      const shownPathDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
-      const decisionParts = [
-        ...(freshDecisions.length
-          ? [
-              {
-                kind: 'ordinary', contentClass: 'discovery',
-                identities: shownPathDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-                text: renderDecisionPointers(rel, freshDecisions),
-                pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
-                suffix: `  … the rest held back by the delivery cap — ${decisionWiden}`,
-              },
-            ]
-          : []),
-      ];
+      const decisionParts = freshDecisions.length ? [decisionPointerPart(rel, freshDecisions, { widen: decisionWiden })] : [];
       const tailParts = [...ownerParts, ...decisionParts, ...suspectParts];
 
       // MIGRATION NOTICE CHARGED ON THE CAP TOO (fix-round HIGH 4): this used

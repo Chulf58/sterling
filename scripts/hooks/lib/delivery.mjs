@@ -1260,7 +1260,7 @@ export function resolveTotalCap(cwd) {
  * spend no mark at all, and stay eligible for a later, real delivery.
  *
  * A part is `{text, kind, contentClass, pinned, identity, revision,
- * identities, pointer, suffix}`. "PINNED" below means exempt from the
+ * identities, disclosureIdentities, pointer, suffix}`. "PINNED" below means exempt from the
  * ordinary excerpt-then-pointer CLIPPING path — it is NOT a guarantee of
  * unconditional wholeness (fix-round HIGH 1/4 correction: pinned parts
  * used to be described as "always whole", which stopped being true once
@@ -1316,6 +1316,12 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
   // record's human name — slug or title — used ONLY to title the '+N more'
   // disclosure line; it never affects credit, dedupe or omission counts.
   const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision, name: part.name }] : []);
+  // CREDIT vs DISCLOSURE (Sol review of 652bd5d): a part may render fewer
+  // records than it represents (a capped decision-pointer block). `identities`
+  // is what its full text shows and is the ONLY credit source; optional
+  // `disclosureIdentities` is every record it represents, used only for the
+  // omission count, names and `omitted` metadata when the part is omitted.
+  const disclosureIdsOf = (part) => part.disclosureIdentities ?? idsOf(part);
   const dedupeEntries = (entries) => {
     const seen = new Set();
     const out = [];
@@ -1460,7 +1466,7 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
   // of its own pointer/text — cosmetic only, never a delivery mark, and
   // scoped to exactly the omitted part being described.
   const idsForDisclosure = (part) => {
-    const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
+    const tagged = disclosureIdsOf(part).map((e) => e.identity).filter(Boolean);
     if (tagged.length) return tagged;
     return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
   };
@@ -1472,7 +1478,7 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
   // closes each named entry, so a title's own spaces stay unambiguous.
   const disclosureEntries = (list) => {
     const names = new Map();
-    for (const e of list.flatMap(idsOf)) {
+    for (const e of list.flatMap(disclosureIdsOf)) {
       if (e?.identity && typeof e.name === 'string' && e.name.trim() && !names.has(e.identity)) {
         names.set(e.identity, clipToBytes(e.name.replace(/\s+/g, ' ').trim(), 80));
       }
@@ -1485,7 +1491,7 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
   // computed the same way below. Falls back to the PART count only when
   // NOTHING omitted carries any identity at all (pure chrome/framing —
   // never "+0 more records" over content that visibly vanished).
-  const disclosureCount = (list) => dedupeEntries(list.flatMap(idsOf)).length || list.length;
+  const disclosureCount = (list) => dedupeEntries(list.flatMap(disclosureIdsOf)).length || list.length;
   const renderDisclosure = (count, entries) => {
     const prefix = `+${count} more records: knowledge_query`;
     return entries.length
@@ -1494,10 +1500,14 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
   };
   // The fully-named line for a candidate omission set — what the ordinary
   // phase reserves room for (a custom `aggregateLabel` is sized as given).
-  const disclosureSize = (list, named) =>
-    aggregateLabel
-      ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8)))
+  // A custom label too large for the ordinary ceiling is sized as the generic
+  // line it falls back to (see `aggregate` below).
+  const disclosureSize = (list, named) => {
+    const custom = aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : Infinity;
+    return custom <= ordinaryCeiling
+      ? custom
       : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => (named ? e : { id8: e.id8 }))));
+  };
   const sepCost = (renderedBefore) => (renderedBefore > 0 ? bytes(sep) : 0);
 
   // RESERVED POINTERS (decision 301d8a0a: "Each later block's pointer is
@@ -1576,6 +1586,11 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
     // mark) are identical either way.
     // Names are shed lowest-ranked first to fit the room still free beside
     // the content already selected; only then are ids dropped (for the cap).
+    // A custom label that cannot fit the ordinary ceiling even with every id
+    // shed falls back to the generic line below (board 6c0c848f item 2):
+    // eviction can never make room for it, so keeping it meant the final
+    // accept-the-overrun resort shipped the caller's wording past the cap or
+    // the transport ceiling.
     const aggregate = () => {
       const count = disclosureCount(omitted);
       const entries = disclosureEntries(omitted);
@@ -1586,7 +1601,7 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
           ids.pop();
           line = aggregateLabel(count, ids);
         }
-        return line;
+        if (bytes(line) <= ordinaryCeiling) return line;
       }
       const sepBytes = sepCost([...selected.keys()].filter((part) => part !== aggregatePart).length);
       const room = Math.min(ordinaryCeiling - ordinaryBytesUsed() - sepBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes() - sepBytes);
@@ -1664,7 +1679,7 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
 
   const survivors = items.filter((part) => selected.has(part) && selected.get(part).full);
   const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
-  const omittedEntries = dedupeEntries(omitted.flatMap(idsOf));
+  const omittedEntries = dedupeEntries(omitted.flatMap(disclosureIdsOf));
   const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
   return {
     text: output().join(sep),
@@ -1694,6 +1709,31 @@ export function decisionBlockPointer(count, widen, top) {
   const name = top ? clipToBytes(String(top.slug || top.title || '').replace(/\s+/g, ' ').trim(), 120) : '';
   const lead = top?.id ? ` — top: ${name ? `'${name}' ` : ''}(knowledge_get ${top.id})` : '';
   return `▸ DECISIONS (${count}) held back by the delivery cap${lead} — ${widen}`;
+}
+
+/** THE decision-pointer assembler part — one block of pointer lines speaking
+ *  for SEVERAL decisions (board 6c0c848f items 1, 3, 5). The renderer shows
+ *  only `decisions.slice(0, cap)`; the part's `identities` are built from that
+ *  SAME slice, so a decision disclosed as "N more NOT shown" never earns a
+ *  discovery mark (decision 92088a62: a false 'delivered' mark is forbidden)
+ *  and stays eligible for a later, real delivery. Callers pass the FULL fresh
+ *  list, never a pre-sliced one, so the renderer's count stays true. Each
+ *  identity carries its `name` and the pointer names the top record, so the
+ *  '+N more' disclosure and a pointer-only fallback both read `name (id8)`. */
+export function decisionPointerPart(rel, decisions, { widen, cap = DECISION_POINTER_CAP, remedy, matchLabel } = {}) {
+  const shown = decisions.slice(0, cap);
+  const entry = (d) => ({ identity: d.id, revision: recordRevision(d), name: d.slug || d.title });
+  return {
+    kind: 'ordinary',
+    contentClass: 'discovery',
+    identities: shown.map(entry),
+    // Every decision the block represents: if the whole block is omitted, its
+    // '+N more' disclosure counts and names all of them, not only the slice.
+    disclosureIdentities: decisions.map(entry),
+    text: renderDecisionPointers(rel, decisions, cap, { remedy, matchLabel }),
+    pointer: decisionBlockPointer(decisions.length, widen, shown[0]),
+    suffix: `  … the rest held back by the delivery cap — ${widen}`,
+  };
 }
 
 export function payloadHeaderLine(rel) {
