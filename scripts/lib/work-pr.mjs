@@ -379,15 +379,33 @@ export function readPrLoop(root) {
   return s;
 }
 
-/** The deliberate settle act: mark the armed loop for PR `prNumber` clean,
- * capped or escalated. Throws (nothing written) on an unknown outcome, no
- * armed loop, or a loop armed for another PR. */
-export function settlePrLoop(root, outcome, prNumber, now = new Date().toISOString()) {
+/** `https://host/owner/repo/pull/<n>` → { repo: 'host/owner/repo', number }, or null. */
+export function parsePrUrl(url) {
+  const m = String(url ?? '').match(/^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);
+  return m ? { repo: `${m[1]}/${m[2]}/${m[3]}`, number: Number(m[4]) } : null;
+}
+
+/** The deliberate settle act: mark the armed loop clean, capped or escalated.
+ * `prRef` is the PR number or its full URL. BOUND (Sol review): the armed
+ * state must be coherent (pr_url, repo and pr_number agree), its repo must be
+ * `originRepo` (the current origin), `prRef` must name that same PR, and the
+ * loop must still be OWED — a settled loop is never re-settled. Throws
+ * (nothing written) otherwise. */
+export function settlePrLoop(root, outcome, prRef, { originRepo, now = new Date().toISOString() }) {
   if (!PR_LOOP_OUTCOMES.includes(outcome)) throw new Error(`--settle must be one of ${PR_LOOP_OUTCOMES.join('|')}, got '${outcome}'`);
-  if (!Number.isInteger(prNumber)) throw new Error('--settle needs --pr <number>, the PR the loop was armed for');
+  const ref = /^\d+$/.test(String(prRef ?? '')) ? { repo: null, number: Number(prRef) } : parsePrUrl(prRef);
+  if (!ref) throw new Error('--settle needs --pr <number|PR URL>, the PR the loop was armed for');
   const s = readPrLoop(root);
   if (!s) throw new Error(`no PR review loop is armed here (${PR_LOOP_REL} is absent) — nothing to settle`);
-  if (s.pr_number !== prNumber) throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not #${prNumber} — nothing settled`);
+  const armed = parsePrUrl(s.pr_url);
+  if (!armed || armed.repo !== s.repo || armed.number !== s.pr_number) {
+    throw new Error(`${PR_LOOP_REL} is incoherent (pr_url ${s.pr_url}, repo ${s.repo}, pr_number ${s.pr_number}) — nothing settled; rerun /sterling:merge to re-arm it`);
+  }
+  if (s.repo !== originRepo) throw new Error(`the armed loop is for ${s.repo}, not origin's repo (${originRepo}) — nothing settled`);
+  if (ref.number !== s.pr_number || (ref.repo !== null && ref.repo !== s.repo)) {
+    throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} — nothing settled`);
+  }
+  if (s.status !== 'owed') throw new Error(`the loop for ${s.pr_url} is already settled '${s.status}' (${s.settled_at}); only an owed loop can be settled`);
   const next = { ...s, status: outcome, settled_at: now };
   writeAtomic(prLoopPath(root), next);
   return next;

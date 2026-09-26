@@ -453,3 +453,63 @@ test('--settle refuses (exit 1, file unchanged): another PR number, an unknown o
     f.cleanup();
   }
 });
+
+// Sol review (MEDIUM): settle is bound to the CURRENT origin, the armed state
+// must be coherent (pr_url, repo and number agree), and only an OWED loop can
+// be settled. --pr accepts the full PR URL too.
+test('--settle accepts the full PR URL as --pr', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    const r = run(f, ['--settle', 'clean', '--pr', 'https://github.com/acme/widget/pull/7']);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(JSON.parse(readFileSync(loopPath(f), 'utf8')).status, 'clean');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--settle refuses a loop armed for ANOTHER repo than origin, even with a matching PR number', () => {
+  const f = makeFixture();
+  try {
+    arm(f, { repo: 'github.com/other/thing', pr_url: 'https://github.com/other/thing/pull/7' });
+    const before = readFileSync(loopPath(f), 'utf8');
+    for (const pr of ['7', 'https://github.com/other/thing/pull/7']) {
+      const r = run(f, ['--settle', 'clean', '--pr', pr]);
+      assert.equal(r.code, 1, `${pr}: ${oneLine(r.stdout + r.stderr)}`);
+      assert.match(r.out.error, /origin/);
+    }
+    assert.equal(readFileSync(loopPath(f), 'utf8'), before);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--settle refuses an incoherent state and a --pr URL for another repo', () => {
+  const f = makeFixture();
+  try {
+    arm(f, { pr_url: 'https://github.com/acme/widget/pull/8' });
+    assert.equal(run(f, ['--settle', 'clean', '--pr', '7']).code, 1, 'pr_url and pr_number disagree');
+    arm(f);
+    const before = readFileSync(loopPath(f), 'utf8');
+    assert.equal(run(f, ['--settle', 'clean', '--pr', 'https://github.com/other/thing/pull/7']).code, 1);
+    assert.equal(readFileSync(loopPath(f), 'utf8'), before);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--settle refuses to RE-settle: only an owed loop can be settled', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    assert.equal(run(f, ['--settle', 'escalated', '--pr', '7']).code, 0);
+    const settled = readFileSync(loopPath(f), 'utf8');
+    const again = run(f, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(again.code, 1, oneLine(again.stdout + again.stderr));
+    assert.match(again.out.error, /owed/);
+    assert.equal(readFileSync(loopPath(f), 'utf8'), settled);
+  } finally {
+    f.cleanup();
+  }
+});

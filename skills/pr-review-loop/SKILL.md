@@ -33,7 +33,7 @@ One **progress comment** on the PR holds the state: round, consumed review id, r
 - **CAPPED**: 5 completed review/response cycles across the PR's lifetime, not per session. Poll attempts do not count.
 - **ESCALATED**: a ruling from the user is outstanding (taste or ambiguity), and nothing else is left to do.
 
-Then settle H10's duty. This is a deliberate act, and it names the PR: `node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" --settle <clean|capped|escalated> --pr <n>`. Report the outcome, the PR link and the round count to the user.
+Then settle H10's duty. This is a deliberate act, and it names the PR: `node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" --settle <clean|capped|escalated> --pr <n|PR URL>`. It refuses unless the armed loop is still owed, is for origin's repo and is the PR you name; a settled loop is never re-settled (the next `/sterling:merge` push re-arms it). Report the outcome, the PR link and the round count to the user.
 
 ## Interrupted mid-loop
 

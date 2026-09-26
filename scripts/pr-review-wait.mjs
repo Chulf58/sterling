@@ -6,7 +6,7 @@
 //   node scripts/pr-review-wait.mjs <pr-url|number> [--repo host/owner/repo]
 //        [--since-review <id>] [--head <sha>] [--timeout <s>] [--interval <s>]
 //        [--target <dir>]
-//   node scripts/pr-review-wait.mjs --settle <clean|capped|escalated> --pr <n> [--target <dir>]
+//   node scripts/pr-review-wait.mjs --settle <clean|capped|escalated> --pr <n|pr-url> [--target <dir>]
 //
 // WAIT: the repo is bound to origin exactly as work-mode /sterling:merge binds
 // it (parseOriginRepo over origin's fetch URL); a PR URL or --repo naming any
@@ -39,12 +39,13 @@
 //
 // SETTLE: the deliberate conductor act that discharges H10's 'PR review loop
 // owed' duty — writes the outcome on .sterling/transient/pr-loop.json when the
-// armed PR matches --pr. Exit 0 with {status, pr_number, pr_url}; any refusal
+// armed loop is owed, coherent, in origin's repo, and the PR --pr names
+// (number or full URL). Exit 0 with {status, pr_number, pr_url}; any refusal
 // exits 1 and writes nothing.
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { parseOriginRepo, settlePrLoop } from './lib/work-pr.mjs';
+import { parseOriginRepo, parsePrUrl, settlePrLoop } from './lib/work-pr.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (name) => {
@@ -98,9 +99,11 @@ const isCopilot = (r, pinned) =>
 
 // ------------------------------------------------------------------ settle
 if (argv.includes('--settle')) {
-  const pr = flag('--pr');
   try {
-    const s = settlePrLoop(target, flag('--settle'), pr !== undefined && /^\d+$/.test(pr) ? Number(pr) : NaN);
+    const url = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+    const originRepo = url.status === 0 ? parseOriginRepo(url.stdout)?.repo : null;
+    if (!originRepo) throw new Error(`origin in ${target} is missing or not a GitHub repository URL — settle is bound to origin`);
+    const s = settlePrLoop(target, flag('--settle'), flag('--pr'), { originRepo });
     process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at }) + '\n');
     process.exit(0);
   } catch (e) {
@@ -141,10 +144,10 @@ let prNumber;
 const pr = positional[0];
 if (/^\d+$/.test(pr)) prNumber = Number(pr);
 else {
-  const m = pr.match(/^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);
-  if (!m) error(`'${pr}' is neither a PR number nor a PR URL (https://host/owner/repo/pull/<n>)`);
-  if (`${m[1]}/${m[2]}/${m[3]}` !== origin.repo) error(`the PR URL ${pr} is not in origin's repo (${origin.repo}) — the PR repo is bound to origin`);
-  prNumber = Number(m[4]);
+  const parsed = parsePrUrl(pr);
+  if (!parsed) error(`'${pr}' is neither a PR number nor a PR URL (https://host/owner/repo/pull/<n>)`);
+  if (parsed.repo !== origin.repo) error(`the PR URL ${pr} is not in origin's repo (${origin.repo}) — the PR repo is bound to origin`);
+  prNumber = parsed.number;
 }
 const deadline = Date.now() + timeoutS * 1000;
 const [, owner, name] = origin.repo.split('/');
