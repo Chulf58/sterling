@@ -990,8 +990,7 @@ const readMcp = () => {
 // runs and codex is wired exactly as an init against the clone would wire it. On probe failure
 // (binary absent, not logged in, timeout) a loud skip line and nothing wired, never
 // blocking the rest of init (P5 degraded-loud). The native-Windows sterling-mcp-win.json
-// is untouched by THIS probe — it has its own Windows-node probe (probeCodexWin /
-// STERLING_CODEX_PROBE_WIN) in the plugin-repo branch further down.
+// is retired (decision native-windows-launcher-retired-wsl2-only) and init no longer writes it.
 // STERLING_CODEX_PROBE: test-isolation seam mirroring STERLING_WIN_NODE — honored
 // at THIS call site (not inside probeCodex), same precedent as `winNode` above.
 // unset/'' -> real probe; 'ok' -> force success; 'absent' -> force binary-absent;
