@@ -107,13 +107,48 @@ const withEol = (lfText, eol) => (eol === '\r\n' ? lfText.replace(/\n/g, '\r\n')
 // A block = the bullet line plus continuation lines until the next top-level
 // bullet, heading, or blank line (template bullets are single long lines today;
 // the continuation rule keeps this robust if they ever wrap).
+// Lines inside a fenced code block (``` or ~~~) are examples, never bullets (Sol review of
+// b41f29d..f32c48a, HIGH): a lead is only ever located outside every fence.
+const FENCE = /^\s*(```|~~~)/;
+function unfencedLineIndexes(lines) {
+  const out = [];
+  let inFence = false;
+  lines.forEach((l, i) => {
+    if (FENCE.test(l)) inFence = !inFence;
+    else if (!inFence) out.push(i);
+  });
+  return out;
+}
 function extractBlock(text, lead) {
   const lines = text.split('\n');
-  const start = lines.findIndex((l) => l.startsWith(lead));
+  const start = unfencedLineIndexes(lines).find((i) => lines[i].startsWith(lead)) ?? -1;
   if (start === -1) return null;
   let end = start + 1;
-  while (end < lines.length && !/^(- |#|\s*$)/.test(lines[end])) end++;
+  while (end < lines.length && !/^(- |#|\s*$)/.test(lines[end]) && !FENCE.test(lines[end])) end++;
   return { start, end, block: lines.slice(start, end).join('\n') };
+}
+
+// Where to INSERT after a list item: past its whole extent, including blank-separated INDENTED
+// continuation paragraphs, so an insert never lands inside an item. extractBlock's stop at the
+// first blank line stays as it is — it defines the compared block, not the item's extent.
+function itemEnd(text, start) {
+  const lines = text.split('\n');
+  let end = start + 1;
+  let i = start + 1;
+  while (i < lines.length) {
+    if (/^\s*$/.test(lines[i])) {
+      let j = i;
+      while (j < lines.length && /^\s*$/.test(lines[j])) j++;
+      if (j < lines.length && /^\s+\S/.test(lines[j]) && !FENCE.test(lines[j])) {
+        i = j;
+        continue;
+      }
+      break;
+    }
+    if (/^(- |#)/.test(lines[i]) || FENCE.test(lines[i])) break;
+    end = ++i;
+  }
+  return end;
 }
 
 // Every historical variant of each target bullet, from BOTH templates' git log — the "clean
@@ -189,6 +224,10 @@ for (const p of projects) {
   };
   const siblingFiles = new Map([[AGENTS_TEMPLATE_REL, loadSibling(agentsMd)], [CLAUDE_TEMPLATE_REL, loadSibling(claudeMd)]]);
   const actions = [];
+  // Only a bullet that validated THIS run (in sync, or replaced by the current wording) may
+  // anchor an insert — a refused block is never restructured by an insert beside it.
+  const VALID_ANCHOR = new Set(['matches', 'updated', 'would_update', 'inserted', 'would_insert', 'renamed', 'would_rename']);
+  const outcome = (lead) => [...actions].reverse().find((a) => a.lead === lead)?.action;
   for (const lead of TARGET_LEADS) {
     const home = leadLayer.get(lead);
     const other = TEMPLATE_RELS.find((rel) => rel !== home);
@@ -246,12 +285,15 @@ for (const p of projects) {
       break;
     }
     if (renamed) continue;
-    // An insertable bullet goes after the first anchor the sibling carries;
-    // everything else missing = drift.
-    const anchor = (INSERT_AFTER.get(lead) ?? []).map((a) => extractBlock(target.text, a)).find(Boolean);
+    // An insertable bullet goes after the first anchor in its chain that validated this run,
+    // past that anchor's whole list item; everything else missing = drift.
+    const anchor = (INSERT_AFTER.get(lead) ?? [])
+      .filter((a) => VALID_ANCHOR.has(outcome(a)))
+      .map((a) => extractBlock(target.text, a))
+      .find(Boolean);
     if (anchor) {
       const lines = target.text.split('\n');
-      lines.splice(anchor.end, 0, ...want.split('\n'));
+      lines.splice(itemEnd(target.text, anchor.start), 0, ...want.split('\n'));
       target.text = lines.join('\n');
       actions.push({ lead, action: APPLY ? 'inserted' : 'would_insert', file: layerFileName(home) });
       continue;
