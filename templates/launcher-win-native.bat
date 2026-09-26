@@ -28,7 +28,7 @@ rem                  - paid only where that premise still holds.
 rem
 rem split-pane focuses the new (TUI) pane and wt has no create-unfocused flag, so
 rem the trailing `move-focus left` returns the keyboard to the conductor (left)
-rem pane - otherwise terminal-kit grabs all input (decisions 6fda899c/5126b77d).
+rem pane - otherwise terminal-kit grabs all input.
 rem
 rem NO DOMAIN-SNAPSHOT BRIDGE, DELIBERATELY (board 3873d33b). This launcher used to
 rem run a snapshot step through the WSL side first, because a native process cannot
