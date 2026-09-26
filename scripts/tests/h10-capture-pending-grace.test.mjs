@@ -547,3 +547,56 @@ test('PG-j (a deferring second pass never hides an article demand): 1 unowned pa
     cleanup();
   }
 });
+
+// ===========================================================================
+// TARGET FIELD (board f003082d residual 1): capture_pending records `target`
+// as its own field on the session event (tools.ts), and the debt is keyed on
+// that field alone, so the same target declared with a different reason is
+// ONE item. A legacy event carries only the joined `detail` and keeps keying on
+// the whole detail (PG-e1/e2/e3 above pin that; no split on ' — ').
+// ===========================================================================
+
+const cpTargetEvent = (target, reason, at = PENDING_AT) => ({ kind: 'capture_pending', detail: `${target} — ${reason}`, target, at });
+
+for (const secondPass of [false, true]) {
+  const site = secondPass ? 'second-pass site' : 'pending branch';
+
+  test(`PG-k1 (target field, ${site}): the SAME target declared with DIFFERENT reasons across two lapses is one capture_owed item`, () => {
+    const { dir, store, cleanup } = makeProject();
+    try {
+      for (const [reason, files] of [['decision A rides it', [WORKFILE]], ['decision B rides it', [OTHERFILE]]]) {
+        touchRegister(dir, files);
+        const decl = cpTargetEvent('commit-cccc333', reason);
+        writeSessionEvents(dir, secondPass ? [rEvent('WebSearch lapse'), decl] : [decl]);
+        writeRegisterRaw(dir, []);
+        stopOnce(dir);
+        stopOnce(dir);
+        assert.equal(existsSync(eventsPath(dir)), false, 'PRECONDITION: the cycle ended in a terminal conversion');
+      }
+      const items = captureOwed(store);
+      assert.equal(items.length, 1, `REASON-IN-IDENTITY SHAPE if 2: the reason split one target into two debts (texts: ${JSON.stringify(items.map((t) => t.text))})`);
+      assert.match(items[0].text, / \[target "commit-cccc333"\]$/, 'the trailer carries the target alone');
+    } finally {
+      cleanup();
+    }
+  });
+}
+
+test('PG-k2 (target field, one Stop): two declarations of one target with different reasons that lapse together are one capture_owed item', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    touchRegister(dir, [WORKFILE]);
+    writeSessionEvents(dir, [
+      cpTargetEvent('commit-dddd444', 'first reason', '2026-06-10T12:10:00.000Z'),
+      cpTargetEvent('commit-dddd444', 'second reason', '2026-06-10T12:20:00.000Z'),
+    ]);
+    writeRegisterRaw(dir, []);
+    assert.equal(stopOnce(dir).code, 0, 'grace Stop');
+    assert.equal(stopOnce(dir).code, 0, 'converting Stop');
+    const items = captureOwed(store);
+    assert.equal(items.length, 1, `REASON-IN-IDENTITY SHAPE if 2 (texts: ${JSON.stringify(items.map((t) => t.text))})`);
+    assert.match(items[0].text, /^capture owed: declared pending \(commit-dddd444 — second reason\)/, 'the readable head shows the latest declaration of the target');
+  } finally {
+    cleanup();
+  }
+});

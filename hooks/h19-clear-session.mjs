@@ -4628,7 +4628,13 @@ var sessionEventSchema = external_exports.object({
   ]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
-  lane: noCaptureLaneSchema.optional()
+  lane: noCaptureLaneSchema.optional(),
+  // capture_pending only (board f003082d): the declared target, trimmed, as its
+  // own field. H10 keys a lapsed declaration's capture_owed debt on it alone,
+  // so one target declared with two reasons is one debt. OPTIONAL because a
+  // legacy event carries only the joined detail; H10 keys such an event on the
+  // whole detail (never a split on ' — ', which may occur inside a target).
+  target: external_exports.string().min(1).optional()
 });
 
 // packages/schemas/dist/config.js

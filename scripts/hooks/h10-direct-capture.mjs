@@ -1509,16 +1509,26 @@ try {
       : '';
   // EXACT-TARGET DEBT for lapsed capture_pending declarations (decision
   // capture-pending-grace-per-declaration-held-while-any-dispatch-live): one
-  // enqueue PER DECLARATION, each keyed by its declared target through
-  // enqueueSystemTodo: the trimmed declaration is repeated as a JSON-quoted
+  // enqueue PER DECLARED TARGET, each keyed by that target through
+  // enqueueSystemTodo: the trimmed target is repeated as a JSON-quoted
   // ` [target "…"]` trailer, and packages/store declaredCaptureTarget recovers
   // it byte-exact from that literal — keep the two in step. (The readable
   // `declared pending (…)` head is unchanged; hooks-full.test.mjs pins it.)
+  // The target is the event's own `target` field (board f003082d), so the same
+  // target declared with a different reason is one item whose head shows the
+  // latest declaration. A legacy event without the field keys on its whole
+  // trimmed detail, never a split on ' — ' (which may occur inside a target).
   // The same exact target joins its own item;
   // an unrelated open capture_owed, or another target over the same files,
   // never suppresses or overwrites it (finding b8ce1d54).
   const enqueuePendingDebt = (declarations) => {
-    for (const detail of [...new Set(declarations.map((e) => String(e.detail).trim()))]) {
+    const byTarget = new Map();
+    for (const e of declarations) {
+      const detail = String(e.detail).trim();
+      const target = typeof e.target === 'string' && e.target.trim() ? e.target.trim() : detail;
+      byTarget.set(target, detail);
+    }
+    for (const [target, detail] of byTarget) {
       store.enqueueSystemTodo({
         id: randomUUID(),
         type: 'todo',
@@ -1530,7 +1540,7 @@ try {
         links: [],
         scope: 'project',
         stack_tags: [],
-        text: `capture owed: declared pending (${detail}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close${clipped} [target ${JSON.stringify(detail)}]`,
+        text: `capture owed: declared pending (${detail}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close${clipped} [target ${JSON.stringify(target)}]`,
         source: 'system',
         system_reason: 'capture_owed',
         file_keys: owedKeys,

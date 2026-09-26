@@ -4797,7 +4797,13 @@ var sessionEventSchema = external_exports.object({
   ]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
-  lane: noCaptureLaneSchema.optional()
+  lane: noCaptureLaneSchema.optional(),
+  // capture_pending only (board f003082d): the declared target, trimmed, as its
+  // own field. H10 keys a lapsed declaration's capture_owed debt on it alone,
+  // so one target declared with two reasons is one debt. OPTIONAL because a
+  // legacy event carries only the joined detail; H10 keys such an event on the
+  // whole detail (never a split on ' — ', which may occur inside a target).
+  target: external_exports.string().min(1).optional()
 });
 
 // packages/schemas/dist/config.js
@@ -9219,7 +9225,13 @@ try {
   const owedKeys = activePaths.slice(0, 20);
   const clipped = activePaths.length > owedKeys.length ? ` (file list truncated: naming ${owedKeys.length} of ${activePaths.length} touched path(s))` : "";
   const enqueuePendingDebt = (declarations) => {
-    for (const detail of [...new Set(declarations.map((e) => String(e.detail).trim()))]) {
+    const byTarget = /* @__PURE__ */ new Map();
+    for (const e of declarations) {
+      const detail = String(e.detail).trim();
+      const target = typeof e.target === "string" && e.target.trim() ? e.target.trim() : detail;
+      byTarget.set(target, detail);
+    }
+    for (const [target, detail] of byTarget) {
       store.enqueueSystemTodo({
         id: randomUUID3(),
         type: "todo",
@@ -9231,7 +9243,7 @@ try {
         links: [],
         scope: "project",
         stack_tags: [],
-        text: `capture owed: declared pending (${detail}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close${clipped} [target ${JSON.stringify(detail)}]`,
+        text: `capture owed: declared pending (${detail}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close${clipped} [target ${JSON.stringify(target)}]`,
         source: "system",
         system_reason: "capture_owed",
         file_keys: owedKeys
