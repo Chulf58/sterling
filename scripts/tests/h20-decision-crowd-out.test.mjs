@@ -389,6 +389,25 @@ test('residual 1/5: decisionPointerPart credits exactly the rendered slice, each
   assert.equal(part.contentClass, 'discovery');
 });
 
+// Fix round (Sol review of 652bd5d, MEDIUM): credit and disclosure are
+// separate. A decision block the ceiling omits entirely earns no mark, and its
+// '+N more' line and omission metadata cover EVERY decision it represents, not
+// only the capped rendered slice.
+for (const [label, total, cap] of [['H20 shape', 6, 5], ['H19 shape', 9, 8]]) {
+  test(`fix round (${label}): a decisionPointerPart omitted by the ceiling discloses all ${total} decisions and credits none`, () => {
+    const ds = Array.from({ length: total }, (_, i) => ({ id: `${i}${'d'.repeat(7)}-${randomUUID()}`, slug: `dec-${i}`, statement: `statement ${i}`, alternatives_rejected: [], updated_at: NOW }));
+    const part = decisionPointerPart('(subject match)', ds, { widen: 'W'.repeat(700), cap, remedy: 'WIDEN', matchLabel: 'for this subject' });
+    // Pinned chrome leaves too little room for even the block's pointer.
+    const filler = { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: 'f'.repeat(2900) };
+    const assembled = assembleDelivery([filler, part], 3000);
+    assert.doesNotMatch(assembled.text, /DECISIONS/, 'control: the whole block is omitted');
+    assert.deepEqual(assembled.emittedDiscovery, [], 'an omitted block credits nothing');
+    assert.match(assembled.text, new RegExp(`\\+${total} more records`), `the disclosure counts every decision: ${assembled.text.slice(2900)}`);
+    assert.equal(assembled.omittedCount, total, 'omittedCount covers every decision');
+    assert.deepEqual(assembled.omitted.map((e) => e.identity).sort(), ds.map((d) => d.id).sort(), 'omission metadata covers every represented identity');
+  });
+}
+
 test('residual 3 (H20 E2E): a sixth matching decision is counted and disclosed, never silently dropped before the renderer', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-h20-crowd-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
