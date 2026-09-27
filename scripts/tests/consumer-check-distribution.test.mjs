@@ -58,7 +58,7 @@ function buildConsumerFixture(prefix) {
       encoding: 'utf8',
       cwd: dir,
       timeout: 180_000,
-      env: { ...process.env, STERLING_REGISTRY_DB: join(dir, 'registry.db'), STERLING_WIN_NODE: '' },
+      env: { ...process.env, STERLING_REGISTRY_DB: join(dir, 'registry.db') },
     }
   );
   assert.equal(initResult.status, 0, `consumer fixture init failed: ${initResult.stdout}${initResult.stderr}`);

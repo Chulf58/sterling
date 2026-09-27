@@ -13,8 +13,9 @@ import { findDeadTerms } from '../lib/agent-distribution.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-// fake Windows node path so init's Windows-node resolution is deterministic
-// without a real Windows node on PATH (mirrors STERLING_REGISTRY_DB).
+// A fake Windows node path. Init no longer reads STERLING_WIN_NODE (decision
+// native-windows-launcher-retired-wsl2-only); the retired-artifact tests still set
+// it, so a Windows node being named can be shown to produce no Windows artifact.
 const WIN_NODE_FAKE = 'C:\\TestNode\\node-v24-win-x64\\node.exe';
 
 const fwdPath = (p) => String(p).replace(/\\/g, '/');
@@ -89,9 +90,7 @@ function init(dir, args = [], extraEnv = {}) {
     cwd: dir,
     timeout: 180_000,
     // isolate the machine-global project registry to this test's temp dir, so
-    // init's registration never pollutes the real ~/.sterling/registry.db; pin
-    // STERLING_WIN_NODE so a Windows-node resolution never depends on this machine's
-    // Windows PATH (the host-native/dual-context mode note reads it).
+    // init's registration never pollutes the real ~/.sterling/registry.db.
     //
     // STERLING_CODEX_PROBE defaults to 'absent', and it became LOAD-BEARING with the containment fix above: aimed at
     // a fresh scratch plugin root, the plugin MCP config is CREATED on every spawn
@@ -103,7 +102,6 @@ function init(dir, args = [], extraEnv = {}) {
     env: {
       ...process.env,
       STERLING_REGISTRY_DB: join(dir, 'registry.db'),
-      STERLING_WIN_NODE: WIN_NODE_FAKE,
       STERLING_PLUGIN_ROOT_MATCH: pluginRootMatch,
       STERLING_CODEX_PROBE: 'absent',
       ...extraEnv,
@@ -186,7 +184,7 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
 test('retired native launcher: init writes no sterling-windows.bat even with a Windows node resolvable', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
-    const r = init(dir, FRESH_FLAGS); // STERLING_WIN_NODE pinned to WIN_NODE_FAKE by the helper
+    const r = init(dir, FRESH_FLAGS, { STERLING_WIN_NODE: WIN_NODE_FAKE });
     assert.equal(r.code, 0, r.stderr);
     assert.ok(!existsSync(join(dir, 'sterling-windows.bat')), 'no native launcher is generated');
     assert.ok(!/^sterling-windows\.bat\b/m.test(r.stdout), 'no report row for a launcher that does not exist');
@@ -224,7 +222,7 @@ test('retired native launcher: an existing sterling-windows.bat is left byte-ide
 test('retired win MCP config: init writes no sterling-mcp-win.json even in the plugin repo with a Windows node resolvable', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
-    const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir });
+    const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_WIN_NODE: WIN_NODE_FAKE });
     assert.equal(r.code, 0, r.stderr);
     assert.ok(!existsSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json')), 'no win MCP config is generated');
     assert.ok(!/^\.claude-plugin\/sterling-mcp-win\.json\b/m.test(r.stdout), 'no report row for a file that does not exist');
@@ -1013,318 +1011,112 @@ test('sparring-partner case 7: never-overwrite guard holds through the codex man
 // with the file (decision native-windows-launcher-retired-wsl2-only): every case
 // pinned the win config's codex entry, its STERLING_CODEX_PROBE_WIN seam or its
 // plugin-repo-only gate, none of which exists any more. The WSL/plugin codex
-// wiring stays pinned in Part C above; probeCodexWin keeps its own unit tests in
-// scripts/tests/codex-mcp.test.mjs.
+// wiring stays pinned in Part C above. Init no longer calls the native-Windows
+// codex probe on any host.
 
 // =============================================================================
-// Part F (decision foreign_ffe7c416 — host-native init with a dev-machine escape hatch,
-// USER-DECIDED 2026-08-27; boards 99f53af8 / 4c3a8e59 / 3873d33b). SPEC-ONLY:
-// scripts/init-impl.mjs's implementation body was NOT read to author these.
+// Part F — WSL2-ONLY INIT (decision native-windows-launcher-retired-wsl2-only).
 //
-// THE RULING, in the two clauses these pins hold:
-//
-//   (1) HOST-NATIVE IS THE DEFAULT MODE, and a missing Windows launcher on a
-//       non-Windows host is that MODE, not a broken PATH. ffe7c416 defect (1):
-//       `where.exe node` gated BOTH the native launcher AND the Windows MCP
-//       config, and research_finding foreign_0c712d94 MEASURED node to be absent from
-//       the Windows PATH on the very host this must serve — so one PATH miss
-//       cost a Windows user both artifacts. The resolution order is now
-//       STERLING_WIN_NODE (honored on KEY PRESENCE, defined-even-empty) ->
-//       process.platform === 'win32' ? process.execPath -> `where.exe node`
-//       ONLY under an explicit opt-in -> otherwise nothing. "Otherwise nothing"
-//       is a deliberate, reported outcome.
-//
-//   (2) THE ESCAPE HATCH IS EXPLICIT. The dual-context mode exists for THIS
-//       authoring machine and is opted into deliberately (--dual-context or
-//       STERLING_DUAL_CONTEXT=1) — ffe7c416 rejected "full host-native with no
-//       exception" precisely because it would degrade the one machine Sterling
-//       is built on.
-//
-// WHY THE MODE NOTE IS PINNED BY ITS MODE NAME. The ruling requires each init
-// report to state which mode it ran in, exactly once. This suite therefore
-// treats "a mode note" as a report line naming one of the ruling's OWN two mode
-// names — `host-native` or `dual-context` (ffe7c416's title and statement). A
-// note that does not name its mode is not a mode note: it leaves a user with a
-// missing launcher unable to tell a deliberate mode from a failure, which is the
-// entire user-visible point of the ruling. The literals come from the ruling and
-// the dispatch spec, not from this file's invention; the surrounding wording is
-// deliberately unpinned.
-//
-// WHAT IS NOT PINNED HERE, AND WHY — a documented coverage gap, not an oversight:
-//   • The `process.platform === 'win32' -> process.execPath` arm has NO
-//     injection seam by design, so it cannot be exercised from a Linux/WSL test
-//     run. Faking one would test the fake. It is owed a real native-Windows
-//     sitting; note that research_finding foreign_0c712d94 measured the h17 suite
-//     returning 0 pass / 36 SKIP on that host, so a pin added "for Windows"
-//     today would be permanently skipped, i.e. hollow by construction. The
-//     host-native arms below are therefore explicitly skipped ON win32 rather
-//     than silently passing for the wrong reason there.
-//   • Whether a launcher actually APPEARS under the dual-context opt-in depends
-//     on the running machine's Windows PATH (measured absent on this one), so
-//     the opt-in arm pins the NOTE and never the artifact. An artifact assertion
-//     there would be machine-dependent — green here, red on a colleague's box,
-//     for reasons having nothing to do with the code.
+// Sterling runs only under WSL2. The machinery that once chose between a
+// Windows-host mode and an opt-in cross-host mode (decision foreign_ffe7c416)
+// existed only to decide which Windows artifacts to write, and both of those
+// artifacts are retired. What that machinery read — STERLING_NATIVE_MCP_MODE,
+// STERLING_DUAL_CONTEXT, the --dual-context flag, STERLING_WIN_NODE and a
+// `where.exe node` lookup — is now read by nothing. These pins hold that:
+//   • a stray value of any of them is INERT: it neither aborts init nor changes
+//     one status row, and no report line names a mode;
+//   • init never spawns `where.exe`, whatever is set;
+//   • no Windows artifact is written.
+// The mode-note pins that preceded this Part (exactly one mode note per run,
+// the opt-in switching it, the '1'-not-truthy opt-in value) were deleted with
+// the note: their subject no longer exists.
 // =============================================================================
 
-// init() with STERLING_WIN_NODE genuinely ABSENT. Not the same thing as the
-// ''-valued case at the top of this file: ffe7c416 honors STERLING_WIN_NODE on
-// KEY PRESENCE, so '' is an EXPLICIT (empty) override and absence is the
-// host-native default. Written as its own helper rather than by threading an
-// undefined through init(), so the deletion is visible at the call site.
-function initHostNative(dir, args = [], extraEnv = {}) {
-  if ('STERLING_PLUGIN_ROOT_MATCH' in extraEnv && extraEnv.STERLING_PLUGIN_ROOT_MATCH === undefined) {
-    throw new Error('initHostNative(): STERLING_PLUGIN_ROOT_MATCH must never be deleted — see the containment note at the top of this file.');
-  }
-  // Same containment default as init(): unset means init ensures THIS clone's live
-  // .claude-plugin/sterling-mcp.json. Not the target (that would open the plugin-repo
-  // branch and invert these mode fixtures), and an explicit value still wins.
-  const pluginRootMatch = extraEnv.STERLING_PLUGIN_ROOT_MATCH ?? scratchPluginRoot();
-  const env = {
-    ...process.env,
-    STERLING_REGISTRY_DB: join(dir, 'registry.db'),
-    STERLING_PLUGIN_ROOT_MATCH: pluginRootMatch,
-    STERLING_CODEX_PROBE: 'absent',
-    ...extraEnv,
-  };
-  delete env.STERLING_WIN_NODE; // unconditional: this helper's whole purpose
-  // Inherited-env hygiene: only the caller's explicit values survive, so a
-  // developer with either variable exported cannot silently flip a mode arm.
-  if (!('STERLING_DUAL_CONTEXT' in extraEnv)) delete env.STERLING_DUAL_CONTEXT;
-  if (!('STERLING_CODEX_WIN_PATH' in extraEnv)) delete env.STERLING_CODEX_WIN_PATH;
-  const r = spawnSync(process.execPath, [join(root, 'scripts', 'init.mjs'), '--target', dir, ...args], {
-    encoding: 'utf8',
-    cwd: dir,
-    timeout: 180_000,
-    env,
-  });
-  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', pluginRootMatch };
-}
+// A run's status rows as `item status` pairs — the whole observable outcome of
+// an init, minus the per-run detail text (which carries temp paths).
+const statusRows = (out) =>
+  out.split('\n')
+    .map((l) => l.match(/^(\S+)\s+(created|skipped|matches|refreshed|differs|refused|stale|exists|ok|migrated|manual)\b/))
+    .filter(Boolean)
+    .map((m) => `${m[1]} ${m[2]}`);
+// Any line that reports a run MODE. Matched on the retired mode names.
+const NAMES_A_MODE = /\b(host-native|dual-context)\b/i;
+const modeLines = (out) => out.split('\n').filter((l) => NAMES_A_MODE.test(l) && !/^\S+\s+(created|skipped|matches|refreshed|differs|refused|stale|exists)\b/.test(l));
 
-// A mode note is a report line naming one of the ruling's two mode names —
-// EXCLUDING the per-artifact status lines. An artifact line ("<path>  skipped
-// …", "<path>  created …") reports on ONE ITEM; the mode note reports on the
-// RUN, and "exactly one mode note per run" is a claim about the latter. Without
-// the exclusion this helper would also count a mode word appearing legitimately
-// inside a skip DETAIL, which turns the pin into "the string 'host-native'
-// occurs on exactly one line of output" — a red on wording rather than on
-// behavior. The exclusion costs the pin nothing it was written to catch: a
-// dropped run-level note still counts 0, and a duplicated one still counts 2.
-const ARTIFACT_STATUS_LINE = /^\S+\s+(created|skipped|matches|refreshed|differs|refused)\b/;
-const modeNoteLines = (out) => out
-  .split('\n')
-  .filter((l) => !ARTIFACT_STATUS_LINE.test(l) && /\b(host-native|dual-context)\b/i.test(l));
-
-// The single mode a run reported, or null when the report is missing,
-// duplicated, or ambiguous (one line naming BOTH modes tells a user nothing, so
-// it is deliberately not resolved to a winner).
-const modeName = (out) => {
-  const notes = modeNoteLines(out);
-  if (notes.length !== 1) return null;
-  const host = /host-native/i.test(notes[0]);
-  const dual = /dual-context/i.test(notes[0]);
-  if (host === dual) return null;
-  return host ? 'host-native' : 'dual-context';
-};
-
-const HOST_NATIVE_ONLY = process.platform === 'win32'
-  ? 'host-native arm: on a win32 host process.execPath resolves a native node, so there is no skip to observe — see Part F\'s documented gap'
-  : false;
-
-// Trimmed with the retired Windows artifacts (decision
-// native-windows-launcher-retired-wsl2-only): the win-config control, its
-// absence and 'skipped' report, and the PATH-advice negation (the advice text no
-// longer exists in init) were removed. The mode note and the rest of the
-// manifest still ship and stay pinned.
-test('ffe7c416 (1): with NO Windows node and NO opt-in, init runs host-native AS A MODE — exits 0, states that mode exactly once, and completes the rest', { skip: HOST_NATIVE_ONLY }, () => {
-  const ctlDir = mkdtempSync(join(tmpdir(), 'sterling-hostnative-ctl-'));
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-hostnative-'));
+test('WSL2-only: an unrecognized STERLING_NATIVE_MCP_MODE no longer aborts init — the value is inert and changes no status row', () => {
+  const ctlDir = mkdtempSync(join(tmpdir(), 'sterling-wslonly-ctl-'));
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-wslonly-mode-'));
   try {
-    const ctl = init(ctlDir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: ctlDir });
+    // CONTROL, PLACED FIRST: the same fixture with the variable absent. Its
+    // status rows are what "changes nothing" is measured against.
+    const ctl = init(ctlDir, FRESH_FLAGS, { STERLING_NATIVE_MCP_MODE: undefined });
     assert.equal(ctl.code, 0, ctl.stderr);
-    assert.equal(modeNoteLines(ctl.stdout).length, 1, 'CONTROL: exactly one mode note on this run too — every init run states its mode exactly once, including the explicit-override shape');
+    const ctlRows = statusRows(ctl.stdout);
+    assert.ok(ctlRows.length > 5, `CONTROL: the baseline run reports its manifest — got ${JSON.stringify(ctlRows)}`);
 
-    const r = initHostNative(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir });
-    assert.equal(r.code, 0, `host-native is a MODE, not a failure — init still exits 0: ${r.stderr}`);
-    assert.ok(!existsSync(join(dir, 'sterling-windows.bat')), 'no Windows launcher on disk');
-    assert.ok(!existsSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json')), 'no Windows MCP config on disk');
+    const r = init(dir, FRESH_FLAGS, { STERLING_NATIVE_MCP_MODE: 'no-such-mode' });
+    assert.equal(r.code, 0, `a stray STERLING_NATIVE_MCP_MODE must not abort init — the subsystem it steered is gone: ${r.stderr}`);
+    assert.doesNotMatch(r.stdout + r.stderr, /STERLING_NATIVE_MCP_MODE/, 'init neither validates nor mentions the retired variable');
+    assert.deepEqual(statusRows(r.stdout), ctlRows, 'every status row equals the run without the variable');
+    assert.deepEqual(modeLines(r.stdout + r.stderr), [], 'no line reports a run mode');
+  } finally {
+    for (const d of [ctlDir, dir]) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+// SABOTAGE: restore the `fail(...)` on an unknown STERLING_NATIVE_MCP_MODE — the
+// exit-0 assertion goes red while the control stays green.
 
-    const notes = modeNoteLines(r.stdout);
-    assert.equal(notes.length, 1, 'exactly one mode note line per init run');
-    assert.match(notes[0], /host-native/i, 'and it names the host-native mode');
-    assert.ok(!/dual-context/i.test(notes[0]), 'the single note names ONE mode, not both');
+test('WSL2-only: init never spawns where.exe and writes no Windows artifact — even with every former opt-in set (--dual-context, STERLING_DUAL_CONTEXT=1, STERLING_NATIVE_MCP_MODE, STERLING_WIN_NODE)', { skip: process.platform === 'win32' ? 'the fake where.exe is a POSIX shell script' : false }, () => {
+  const bin = mkdtempSync(join(tmpdir(), 'sterling-wslonly-bin-'));
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-wslonly-optin-'));
+  const marker = join(bin, 'where-exe-was-spawned');
+  try {
+    // A where.exe on PATH that records being spawned.
+    const fake = join(bin, 'where.exe');
+    writeFileSync(fake, `#!/bin/sh\necho "$@" >> '${marker}'\necho 'C:\\\\fake\\\\node.exe'\n`, { mode: 0o755 });
+    const env = { PATH: `${bin}:${process.env.PATH}` };
 
-    // the rest of the manifest is untouched by the mode
+    // CONTROL, PLACED FIRST: the fake is really what a bare `where.exe` resolves
+    // to under this PATH, so an absent marker below means init never spawned it
+    // — not that the fake was unreachable.
+    spawnSync('where.exe', ['node'], { env: { ...process.env, ...env }, encoding: 'utf8' });
+    assert.ok(existsSync(marker), 'CONTROL: the fake where.exe is resolvable and records its spawn');
+    rmSync(marker);
+
+    // Plugin-repo branch (seam aimed at the target) so the retired win MCP
+    // config's old site is exercised too.
+    const r = init(dir, [...FRESH_FLAGS, '--dual-context'], {
+      ...env,
+      STERLING_PLUGIN_ROOT_MATCH: dir,
+      STERLING_DUAL_CONTEXT: '1',
+      STERLING_NATIVE_MCP_MODE: 'host-native',
+      STERLING_WIN_NODE: undefined,
+    });
+    assert.equal(r.code, 0, `the former opt-ins are ignored, never refused: ${r.stderr}`);
+    const report = r.stdout + r.stderr;
+    assert.ok(!existsSync(marker), `init spawned where.exe (args: ${existsSync(marker) ? readFileSync(marker, 'utf8') : ''})`);
+    assert.ok(!existsSync(join(dir, 'sterling-windows.bat')), 'no native launcher');
+    assert.ok(!existsSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json')), 'no win MCP config');
+    assert.ok(existsSync(join(dir, '.claude-plugin', 'sterling-mcp.json')), 'CONTROL: the plugin-root gate is open — the plugin MCP config IS generated');
+    // Former inert-opt-in disclosure (Part G F2) is gone with the opt-in itself.
+    assert.doesNotMatch(report, /STERLING_WSL_NODE|no effect/i, 'no inert-flag disclosure: there is no flag left to be inert');
+    assert.deepEqual(modeLines(report), [], 'no line reports a run mode');
+    assert.ok(!/REFUSED/.test(report), 'nothing was refused');
     assert.match(r.stdout, /^CLAUDE\.md\s+created\b/m, 'init completed the rest of the manifest');
-    assert.ok(existsSync(join(dir, 'sterling.bat')), 'the Linux/WSL launcher is still generated');
-    assert.ok(existsSync(join(dir, '.sterling', 'config.json')), 'config still written');
+    assert.ok(existsSync(join(dir, 'sterling.bat')), 'the WSL launcher is still generated');
     assert.ok(existsSync(join(dir, '.claude', 'agents', 'librarian.md')), 'agents still installed');
-  } finally {
-    rmSync(ctlDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-test('ffe7c416 (2): the dual-context escape hatch is OPT-IN and named in the report — the mode note switches on STERLING_DUAL_CONTEXT=1 and on --dual-context, and only then', { skip: HOST_NATIVE_ONLY }, () => {
-  // Pins the NOTE, never the artifact: whether `where.exe node` then resolves a
-  // launcher depends on the running machine's Windows PATH (research_finding
-  // 0c712d94 measured it absent on this one), so an artifact assertion would be
-  // machine-dependent. What the ruling actually promises is that the opt-in is
-  // explicit and disclosed.
-  const dirOff = mkdtempSync(join(tmpdir(), 'sterling-dualctx-off-'));
-  const dirEnv = mkdtempSync(join(tmpdir(), 'sterling-dualctx-env-'));
-  const dirFlag = mkdtempSync(join(tmpdir(), 'sterling-dualctx-flag-'));
-  const dirOverride = mkdtempSync(join(tmpdir(), 'sterling-dualctx-override-'));
-  try {
-    // ---- CONTROL ARM, PLACED FIRST: identical env MINUS the opt-in ------
-    // It must pass for the OPPOSITE reason — same fixture, same absent
-    // STERLING_WIN_NODE, and the note reads host-native. Without it, "the note
-    // says dual-context" could be satisfied by a build that prints
-    // dual-context unconditionally, which is a mode label that tells the user
-    // nothing.
-    const off = initHostNative(dirOff, FRESH_FLAGS);
-    assert.equal(off.code, 0, off.stderr);
-    const offNotes = modeNoteLines(off.stdout);
-    assert.equal(offNotes.length, 1, 'CONTROL: exactly one mode note with no opt-in');
-    assert.match(offNotes[0], /host-native/i, 'CONTROL: no opt-in -> host-native');
-    assert.ok(!/dual-context/i.test(offNotes[0]), 'CONTROL: the escape hatch is NOT entered by default — that is what makes it an escape hatch');
 
-    // ---- ARM A: the environment opt-in ---------------------------------
-    const viaEnv = initHostNative(dirEnv, FRESH_FLAGS, { STERLING_DUAL_CONTEXT: '1' });
-    assert.equal(viaEnv.code, 0, viaEnv.stderr);
-    const envNotes = modeNoteLines(viaEnv.stdout);
-    assert.equal(envNotes.length, 1, 'exactly one mode note under the env opt-in');
-    assert.match(envNotes[0], /dual-context/i, 'STERLING_DUAL_CONTEXT=1 puts the run in dual-context mode and says so');
-
-    // ---- ARM B: the flag opt-in ----------------------------------------
-    // Asserted separately because the two opt-in forms are two code paths: a
-    // build wiring only the env var passes ARM A and fails here, and that is a
-    // real defect for the authoring machine, whose escape hatch the ruling says
-    // must not be degraded.
-    const viaFlag = initHostNative(dirFlag, [...FRESH_FLAGS, '--dual-context']);
-    assert.equal(viaFlag.code, 0, `--dual-context is a recognized flag, not an unknown-arg failure: ${viaFlag.stderr}`);
-    const flagNotes = modeNoteLines(viaFlag.stdout);
-    assert.equal(flagNotes.length, 1, 'exactly one mode note under the flag opt-in');
-    assert.match(flagNotes[0], /dual-context/i, '--dual-context puts the run in dual-context mode and says so');
-
-    // ---- NO ARM CLAIMS WINDOWS ARTIFACTS (decision
-    // native-windows-launcher-retired-wsl2-only): init writes neither the native
-    // launcher nor its MCP config in ANY mode, so no mode note may say or imply
-    // it generates, emits or skips them. The '' override arm is the one that
-    // used to print "(Windows artifacts skipped)".
-    const viaEmptyOverride = init(dirOverride, FRESH_FLAGS, { STERLING_WIN_NODE: '' });
-    assert.equal(viaEmptyOverride.code, 0, viaEmptyOverride.stderr);
-    const overrideNotes = modeNoteLines(viaEmptyOverride.stdout);
-    assert.equal(overrideNotes.length, 1, 'exactly one mode note under an empty override');
-    for (const [label, note] of [['no opt-in', offNotes[0]], ['env opt-in', envNotes[0]], ['flag opt-in', flagNotes[0]], ["'' override", overrideNotes[0]]]) {
-      assert.match(note, /no Windows artifacts are generated/i, `${label}: the note says plainly that no Windows artifacts are generated — got: ${note}`);
-      assert.doesNotMatch(note, /artifacts generated beside|also emit|artifacts skipped|are NOT generated;/i, `${label}: no wording that claims or implies Windows generation — got: ${note}`);
-    }
-  } finally {
-    for (const d of [dirOff, dirEnv, dirFlag, dirOverride]) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-// SABOTAGE: honor the opt-in but never change the note (print host-native
-// always) — both /dual-context/i assertions go red while the control arm stays
-// green.
-// SABOTAGE: enter dual-context unconditionally (drop the opt-in test) — the
-// CONTROL arm's /host-native/i match goes red and its !dual-context negation
-// goes red, while ARMs A and B stay green. This is the direction a
-// success-only pin cannot see.
-// SABOTAGE (flag arm only): wire STERLING_DUAL_CONTEXT but not --dual-context —
-// ARM B's /dual-context/i match goes red (or, if the flag is rejected as an
-// unknown argument, its exit-0 assertion does) while ARM A stays green.
-
-test('ffe7c416 (2b): the dual-context opt-in is the VALUE "1", not mere presence — STERLING_DUAL_CONTEXT="0" and "" both stay host-native (the string-truthiness trap)', () => {
-  // A BOUNDARY THE DISPATCH SPEC DID NOT NAME, and the one an implementer is
-  // most likely to get wrong: in JavaScript the STRING '0' is TRUTHY, so the
-  // natural `if (env.STERLING_DUAL_CONTEXT)` opts a user INTO the escape hatch
-  // at the exact moment they explicitly turned it OFF — and `'X' in env` opts
-  // them in merely for having the variable exported. ffe7c416 makes the hatch
-  // DELIBERATE; a hatch you enter by accident is not one, and neither failure
-  // is visible to the =1 arm above.
-  //
-  // Not skipped on win32: this arm asserts only the NOTE, and a win32 host
-  // resolves process.execPath into the SAME host-native mode, so unlike the two
-  // arms above there is nothing here that only a non-Windows host can observe.
-  const dirOn = mkdtempSync(join(tmpdir(), 'sterling-dualctx-on-'));
-  const dirZero = mkdtempSync(join(tmpdir(), 'sterling-dualctx-zero-'));
-  const dirEmpty = mkdtempSync(join(tmpdir(), 'sterling-dualctx-empty-'));
-  try {
-    // ---- POSITIVE CONTROL, PLACED FIRST --------------------------------
-    // "the note says host-native" has more than one cause: the value was
-    // correctly rejected, OR this build never reaches dual-context at all. This
-    // arm settles it in the same fixture before either negative is read.
-    const on = initHostNative(dirOn, FRESH_FLAGS, { STERLING_DUAL_CONTEXT: '1' });
-    assert.equal(on.code, 0, on.stderr);
-    assert.equal(modeName(on.stdout), 'dual-context', 'CONTROL: "1" DOES reach dual-context in this exact fixture, so the negatives below discriminate the VALUE rather than an unreachable branch');
-
-    for (const [label, value, dir] of [['"0"', '0', dirZero], ['empty string', '', dirEmpty]]) {
-      const r = initHostNative(dir, FRESH_FLAGS, { STERLING_DUAL_CONTEXT: value });
-      assert.equal(r.code, 0, `${label}: an explicit non-"1" value is an ordinary run, never an error: ${r.stderr}`);
-      assert.equal(modeName(r.stdout), 'host-native', `${label}: STERLING_DUAL_CONTEXT=${JSON.stringify(value)} must NOT enter the escape hatch — got ${JSON.stringify(modeNoteLines(r.stdout))}`);
-    }
-  } finally {
-    for (const d of [dirOn, dirZero, dirEmpty]) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-// SABOTAGE (truthiness): opt in with `if (env.STERLING_DUAL_CONTEXT)` — '0' is
-// truthy, so the "0" arm's modeName goes dual-context and that assertion goes
-// red, while the empty-string arm and the =1 control both stay green. That
-// single-arm red is the discrimination this pin buys.
-// SABOTAGE (key presence): opt in with `'STERLING_DUAL_CONTEXT' in env` — BOTH
-// negative arms go red and the control stays green.
-// SABOTAGE (never opt in): ignore the env var entirely — only the CONTROL arm
-// goes red, which is the direction the two negatives cannot see.
-// WHICH GUARD CARRIES THE VERDICT: the single equality against the literal '1'
-// in init's opt-in test. There is no second layer, and the --dual-context flag
-// is a SEPARATE path (ffe7c416 (2) ARM B) that this pin deliberately does not
-// exercise, so nothing else can mask the mutation.
-
-test('ffe7c416 (3): EVERY init run states its mode exactly once — ordinary consuming project, plugin-repo branch, and a flagless RE-RUN that writes nothing and still reports the same mode', () => {
-  // "exactly one mode note line" is a per-RUN promise, so it is pinned across
-  // the run SHAPES this suite already treats as distinct code paths: the
-  // ordinary consuming project (plugin-root gate CLOSED), the plugin-repo
-  // branch (gate OPEN — two extra MCP configs generated), and the ensure-
-  // outcome-2 flagless re-run, where every artifact reports 'matches' and not a
-  // byte is written. The re-run is the load-bearing one: it is exactly where a
-  // note emitted from inside the create path disappears, and no other pin in
-  // Part F exercises a no-op run.
-  //
-  // WHICH mode these runs report is deliberately NOT pinned. They all set
-  // STERLING_WIN_NODE explicitly (the init() helper does), which ffe7c416 makes
-  // an explicit OVERRIDE rather than an opt-in, and the ruling names no third
-  // mode for that case — pinning a winner here would invent spec. What is
-  // pinned is that one mode IS stated, that it is one of the ruling's two and
-  // never both on one line, and that it does not CHANGE between a create run
-  // and a no-op re-run of the same environment.
-  const dirPlain = mkdtempSync(join(tmpdir(), 'sterling-modenote-plain-'));
-  const dirPlugin = mkdtempSync(join(tmpdir(), 'sterling-modenote-plugin-'));
-  try {
-    const fresh = init(dirPlain, FRESH_FLAGS);
-    assert.equal(fresh.code, 0, fresh.stderr);
-    const freshMode = modeName(fresh.stdout);
-    assert.ok(freshMode, `an ordinary consuming project states exactly one unambiguous mode — got ${JSON.stringify(modeNoteLines(fresh.stdout))}`);
-
-    const rerun = init(dirPlain); // no flags: declarations read back from config
+    // A flagless re-run in the same environment: still no where.exe, no mode line.
+    const rerun = init(dir, [], { ...env, STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_DUAL_CONTEXT: '1', STERLING_WIN_NODE: undefined });
     assert.equal(rerun.code, 0, rerun.stderr);
-    assert.match(rerun.stdout, /\bmatches\b/, 'precondition: this really is the no-op re-run shape (ensure outcome 2)');
-    assert.equal(modeName(rerun.stdout), freshMode, 'a flagless re-run states the SAME single mode — the note reports the RUN, not whichever writes it happened to make');
-
-    const plugin = init(dirPlugin, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dirPlugin });
-    assert.equal(plugin.code, 0, plugin.stderr);
-    assert.ok(modeName(plugin.stdout), `the plugin-repo branch states exactly one unambiguous mode too — got ${JSON.stringify(modeNoteLines(plugin.stdout))}`);
+    assert.ok(!existsSync(marker), 'the re-run never spawns where.exe either');
+    assert.deepEqual(modeLines(rerun.stdout + rerun.stderr), [], 'the re-run reports no run mode either');
   } finally {
-    for (const d of [dirPlain, dirPlugin]) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    for (const d of [bin, dir]) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
-// SABOTAGE (the one this pin exists for): emit the mode note from inside the
-// launcher-CREATION branch rather than once per run — the fresh and plugin arms
-// stay green and ONLY the re-run's modeName equality goes red, because a
-// re-run creates nothing.
-// SABOTAGE: print the note twice (e.g. once per Windows artifact decision) —
-// modeNoteLines returns 2, modeName returns null, and all three arms go red.
-// SABOTAGE: name both modes on one line ("host-native (dual-context available)")
-// — modeName returns null on every arm; the note is then unreadable to a user
-// deciding whether a missing launcher is deliberate, which is what it is for.
+// SABOTAGE: restore the `where.exe node` lookup under the opt-in — the marker
+// assertion goes red while the CONTROL stays green.
 
 // =============================================================================
 // Part G — the FOUR review-driven fixes that landed on top of decision foreign_ffe7c416
@@ -1349,25 +1141,19 @@ test('ffe7c416 (3): EVERY init run states its mode exactly once — ordinary con
 //       node upgrade, and before this fix sterling-mcp.json kept naming a deleted
 //       node.exe forever while the launcher regenerated happily — native claude
 //       got no Sterling MCP at all.
-//   F1b under the host-native MODE a 'differs' on that same file also warns,
-//       because there it is the ONLY source of Sterling MCP for native claude.
-//   F2  AN INERT OPT-IN IS DISCLOSED, NOT REFUSED — --dual-context /
-//       STERLING_DUAL_CONTEXT=1 cannot take effect where the launcher flags and
-//       the win config are one mechanism keyed on the rendering host; init says
-//       so, names what a genuine cross-host setup would need, and exits 0.
+//   F1b (ported to WSL2-only) a 'differs' on that same file is reported and left
+//       byte-identical, with no native-claude warn — the warn existed only for a
+//       Windows-host mode that is retired.
+//   F2  (removed with the retired opt-in — see the note at its old site)
 //   F3  (removed with the retired native launcher — see the note at its old site)
 //   F4  (removed with the retired Windows artifacts — see the note at its old site)
 //
-// SEAMS USED (all pre-existing in this file except STERLING_NATIVE_MCP_MODE,
-// which the dispatch declares): STERLING_PLUGIN_ROOT_MATCH, STERLING_WIN_NODE,
-// STERLING_CODEX_PROBE / _WIN, STERLING_DUAL_CONTEXT, STERLING_NATIVE_MCP_MODE.
+// SEAMS USED: STERLING_PLUGIN_ROOT_MATCH, STERLING_CODEX_PROBE.
 // =============================================================================
 
-// Part G carries its OWN status-line regex rather than widening the Part F
-// ARTIFACT_STATUS_LINE above. Deliberate: F4 introduces a status word ('stale')
-// the Part F helper does not know, three live mode-note pins read from that
-// helper, and silently changing what another pin counts as a status line is
-// exactly how a passing test stops pinning anything.
+// Part G carries its OWN status-line regex rather than sharing Part F's helpers,
+// so changing what one Part counts as a status line never silently changes what
+// another Part's pin counts.
 const STATUS_LINE_G = /^\S+\s+(created|skipped|matches|refreshed|differs|refused|stale|exists)\b/;
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const statusLineFor = (out, path) => (out.match(new RegExp(`^${escapeRe(path)}\\s+.+$`, 'm')) ?? [null])[0];
@@ -1387,9 +1173,6 @@ const nonStatusLinesNaming = (out, token) =>
 // come from the behaviour under test.
 const G_ENV = {
   STERLING_CODEX_PROBE: 'absent',
-  STERLING_CODEX_WIN_PATH: undefined,
-  STERLING_DUAL_CONTEXT: undefined,
-  STERLING_NATIVE_MCP_MODE: undefined,
 };
 const PLUGIN_MCP = '.claude-plugin/sterling-mcp.json';
 
@@ -1475,30 +1258,19 @@ test('F1 (ffe7c416 review fix): a plugin MCP config whose sterling COMMAND drift
 // WHICH GUARD CARRIES THE VERDICT: the args[0] equality. The command inequality
 // is NOT a second layer — it only selects between 'matches' and a refresh.
 
-test('F1b (ffe7c416 review fix): under the host-native MODE a `differs` on the plugin MCP config also WARNS — the warn is mode-driven AND verdict-driven, neither alone', () => {
+test('F1b (WSL2-only port): a `differs` on the plugin MCP config is reported, left byte-identical, and carries no native-claude warn — a stray STERLING_NATIVE_MCP_MODE no longer turns one on', () => {
   const dirClean = mkdtempSync(join(tmpdir(), 'sterling-hnwarn-clean-'));
   const dirForeign = mkdtempSync(join(tmpdir(), 'sterling-hnwarn-foreign-'));
   try {
-    // ---- CONTROL 1, PLACED FIRST: the MODE without the VERDICT -----------
-    // "host-native printed a warn about sterling-mcp.json" is satisfied
-    // identically by a mode BANNER that fires on every host-native run. This arm
-    // forbids that: same mode, nothing wrong with the file, no warn.
+    // ---- a clean re-run with the stray value: matches, no warn ------------
     const cleanFirst = init(dirClean, FRESH_FLAGS, { ...G_ENV, STERLING_PLUGIN_ROOT_MATCH: dirClean });
     assert.equal(cleanFirst.code, 0, cleanFirst.stderr);
     const c1 = init(dirClean, [], { ...G_ENV, STERLING_PLUGIN_ROOT_MATCH: dirClean, STERLING_NATIVE_MCP_MODE: 'host-native' });
     assert.equal(c1.code, 0, c1.stderr);
-    assert.match(
-      statusLineFor(c1.stdout, PLUGIN_MCP) ?? '',
-      /\bmatches\b/,
-      'CONTROL 1 precondition: the host-native mode does not itself change the GENERATED plugin config — if this reds, the mode is rewriting the file and the whole pin below needs re-cutting'
-    );
-    assert.deepEqual(
-      nonStatusLinesNaming(c1.stdout + c1.stderr, 'sterling-mcp.json'),
-      [],
-      'CONTROL 1: host-native ALONE never warns about this file — the warn is not a mode banner'
-    );
+    assert.match(statusLineFor(c1.stdout, PLUGIN_MCP) ?? '', /\bmatches\b/, 'a stray value does not change the GENERATED plugin config');
+    assert.deepEqual(nonStatusLinesNaming(c1.stdout + c1.stderr, 'sterling-mcp.json'), [], 'no warn about the file on a clean run');
 
-    // ---- CONTROL 2: the VERDICT without the MODE -------------------------
+    // ---- a hand-edited sterling entry: differs, byte-identical, no warn ----
     const foreignFirst = init(dirForeign, FRESH_FLAGS, { ...G_ENV, STERLING_PLUGIN_ROOT_MATCH: dirForeign });
     assert.equal(foreignFirst.code, 0, foreignFirst.stderr);
     const mcpPath = join(dirForeign, '.claude-plugin', 'sterling-mcp.json');
@@ -1507,103 +1279,27 @@ test('F1b (ffe7c416 review fix): under the host-native MODE a `differs` on the p
     writeFileSync(mcpPath, JSON.stringify(cfg, null, 2));
     const beforeBytes = readFileSync(mcpPath, 'utf8');
 
-    const c2 = init(dirForeign, [], { ...G_ENV, STERLING_PLUGIN_ROOT_MATCH: dirForeign });
-    assert.equal(c2.code, 0, c2.stderr);
-    assert.match(statusLineFor(c2.stdout, PLUGIN_MCP) ?? '', /\bdiffers\b/, 'CONTROL 2 precondition: the foreign entry really does produce a differs');
-    assert.deepEqual(
-      nonStatusLinesNaming(c2.stdout + c2.stderr, 'sterling-mcp.json'),
-      [],
-      "CONTROL 2: a 'differs' OUTSIDE host-native prints no warn — in dual-context this file is not the only source of Sterling MCP, so there is no consequence to name"
-    );
-
-    // ---- THE PIN: same fixture, same verdict, mode flipped ---------------
-    const pin = init(dirForeign, [], { ...G_ENV, STERLING_PLUGIN_ROOT_MATCH: dirForeign, STERLING_NATIVE_MCP_MODE: 'host-native' });
-    assert.equal(pin.code, 0, pin.stderr);
-    assert.match(statusLineFor(pin.stdout, PLUGIN_MCP) ?? '', /\bdiffers\b/, "still 'differs' — the warn discloses, it never licenses a write");
-    const warns = nonStatusLinesNaming(pin.stdout + pin.stderr, 'sterling-mcp.json');
-    assert.ok(
-      warns.length >= 1,
-      `host-native + differs must warn: this file is the ONLY source of Sterling MCP for native claude, so leaving it hand-edited silently costs the user every Sterling tool — got ${JSON.stringify(pin.stdout + pin.stderr)}`
-    );
-    assert.match(warns.join('\n'), /native/i, 'the warn names the consequence for NATIVE claude, not merely that a file differs (wording otherwise unpinned)');
-    assert.equal(readFileSync(mcpPath, 'utf8'), beforeBytes, 'a warn, not a write — the hand-written file is byte-identical');
+    for (const [label, extra] of [['no stray value', {}], ['stray STERLING_NATIVE_MCP_MODE', { STERLING_NATIVE_MCP_MODE: 'host-native' }]]) {
+      const r = init(dirForeign, [], { ...G_ENV, STERLING_PLUGIN_ROOT_MATCH: dirForeign, ...extra });
+      assert.equal(r.code, 0, `${label}: ${r.stderr}`);
+      assert.match(statusLineFor(r.stdout, PLUGIN_MCP) ?? '', /\bdiffers\b/, `${label}: the foreign entry is reported differs`);
+      assert.deepEqual(
+        nonStatusLinesNaming(r.stdout + r.stderr, 'sterling-mcp.json'),
+        [],
+        `${label}: no native-claude warn — under WSL2 native claude does not exist, so the file has no such consequence to name`
+      );
+      assert.equal(readFileSync(mcpPath, 'utf8'), beforeBytes, `${label}: never-overwrite holds — the hand-written file is byte-identical`);
+    }
   } finally {
     for (const d of [dirClean, dirForeign]) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
-// SABOTAGE (one line): delete the warn push on the host-native differs path —
-// `warns.length >= 1` goes red and both controls stay green.
-// SABOTAGE (unconditional banner): emit the warn on every host-native run
-// regardless of verdict — CONTROL 1's deepEqual([]) goes red alone.
-// SABOTAGE (mode-blind): emit the warn on every 'differs' regardless of mode —
-// CONTROL 2's deepEqual([]) goes red alone. The two controls fail in opposite
-// directions, which is what makes the green above mean one thing.
-// WHICH GUARD CARRIES THE VERDICT: the conjunction of the host-native mode test
-// and the differs branch. Neither is defense in depth for the other — each
-// sabotage above reddens a different arm.
 
-test('F2 (ffe7c416 review fix): an INERT dual-context opt-in is DISCLOSED, never refused — the warn fires only where the flag cannot take effect, for BOTH opt-in forms, and nothing is refused or missing', () => {
-  const dirFlagOnly = mkdtempSync(join(tmpdir(), 'sterling-inert-flagonly-'));
-  const dirModeOnly = mkdtempSync(join(tmpdir(), 'sterling-inert-modeonly-'));
-  const dirFlag = mkdtempSync(join(tmpdir(), 'sterling-inert-flag-'));
-  const dirEnv = mkdtempSync(join(tmpdir(), 'sterling-inert-env-'));
-  // The warn is identified by the variable it names. STERLING_WSL_NODE is the
-  // interpreter path a genuine cross-host dual-context would need and init
-  // cannot invent — it appears nowhere else in any init report, so it
-  // discriminates the warn without pinning a sentence.
-  const NAMES_THE_HATCH = /STERLING_WSL_NODE/;
-  try {
-    // ---- CONTROL 1, PLACED FIRST: the opt-in WITHOUT the inert condition --
-    // On this (non-win32) host with no host-native override the predicate's
-    // second arm is false, so the flag is NOT inert and there is nothing to
-    // disclose. Forbids a build that warns whenever --dual-context is passed —
-    // which would be the same green with none of the meaning.
-    const c1 = init(dirFlagOnly, [...FRESH_FLAGS, '--dual-context'], { ...G_ENV });
-    assert.equal(c1.code, 0, c1.stderr);
-    assert.ok(!NAMES_THE_HATCH.test(c1.stdout + c1.stderr), 'CONTROL 1: --dual-context where it CAN take effect prints no inert-flag warn');
-
-    // ---- CONTROL 2: the inert condition WITHOUT the opt-in ---------------
-    const c2 = init(dirModeOnly, FRESH_FLAGS, { ...G_ENV, STERLING_NATIVE_MCP_MODE: 'host-native' });
-    assert.equal(c2.code, 0, c2.stderr);
-    assert.ok(!NAMES_THE_HATCH.test(c2.stdout + c2.stderr), 'CONTROL 2: host-native without any opt-in prints no inert-flag warn — a user who asked for nothing is told nothing');
-
-    // ---- ARM A: the FLAG opt-in, inert ----------------------------------
-    const flagArm = init(dirFlag, [...FRESH_FLAGS, '--dual-context'], { ...G_ENV, STERLING_NATIVE_MCP_MODE: 'host-native' });
-    assert.equal(flagArm.code, 0, `an inert opt-in is DISCLOSED, never refused — init still exits 0: ${flagArm.stderr}`);
-    const flagReport = flagArm.stdout + flagArm.stderr;
-    assert.match(flagReport, NAMES_THE_HATCH, 'the warn names STERLING_WSL_NODE — the second interpreter path a genuine cross-host dual-context needs and init cannot invent');
-    assert.match(flagReport, /no effect/i, 'and says the flag has no effect here, rather than leaving the user to infer it from a missing artifact');
-    assert.ok(!/REFUSED/i.test(flagReport), 'nothing was refused — P5 loud, not fatal');
-    assert.match(flagArm.stdout, /^CLAUDE\.md\s+created\b/m, 'init completed the rest of the manifest around the disclosure');
-    assert.ok(existsSync(join(dirFlag, '.sterling', 'config.json')), 'and nothing is missing — the run is an ordinary complete init');
-
-    // ---- ARM B: the ENV opt-in, inert -----------------------------------
-    // Asserted separately because the two opt-in forms are two code paths: a
-    // build that disclosed only the flag would pass ARM A and leave every
-    // STERLING_DUAL_CONTEXT=1 user with an unexplained no-op.
-    const envArm = init(dirEnv, FRESH_FLAGS, { ...G_ENV, STERLING_DUAL_CONTEXT: '1', STERLING_NATIVE_MCP_MODE: 'host-native' });
-    assert.equal(envArm.code, 0, envArm.stderr);
-    assert.match(envArm.stdout + envArm.stderr, NAMES_THE_HATCH, 'STERLING_DUAL_CONTEXT=1 is disclosed as inert too, not only the flag form');
-  } finally {
-    for (const d of [dirFlagOnly, dirModeOnly, dirFlag, dirEnv]) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-// SABOTAGE (the reachability one, one character): change the predicate's `||` to
-// `&&` so it reads `dualContext && (platform === 'win32' && override ===
-// 'host-native')` — unreachable from a Linux run, so ARMs A and B both go red
-// while both controls stay green. This is why the override arm exists at all: a
-// win32-only predicate would make this pin permanently skipped, i.e. hollow.
-// SABOTAGE (refuse instead of disclose): exit non-zero on the inert opt-in — ARM
-// A's exit-0 assertion goes red first.
-// SABOTAGE (warn always): drop the `dualContext &&` conjunct — CONTROL 2 goes
-// red alone. Drop the platform/override conjunct instead — CONTROL 1 goes red
-// alone.
-// NOTE ON INTERFERENCE: this warn names 'dual-context' on a line that is not an
-// artifact status line, so it would be counted by Part F's modeNoteLines(). No
-// Part F arm can reach it — every one of them runs without
-// STERLING_NATIVE_MCP_MODE on a non-win32 host — but if a future Part F fixture
-// adopts the override, that pin's "exactly one mode note" count is where it will
-// surface.
+// F2 (the inert-opt-in disclosure) was REMOVED with the opt-in it disclosed
+// (decision native-windows-launcher-retired-wsl2-only). Its surviving CONTROL —
+// the former opt-in prints no inert-flag warn and init exits 0 with the rest of
+// the manifest — is ported into Part F's "never spawns where.exe" pin, which runs
+// with both opt-in forms and the stray mode value set together.
 
 // F3a/F3b (the native launcher's line-2 stamp and its marker-driven re-bake)
 // were REMOVED with the launcher itself (decision

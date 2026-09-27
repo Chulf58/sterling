@@ -34,12 +34,12 @@ import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readProjectMode, ProjectM
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
-import { probeCodex, probeCodexWin, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
+import { probeCodex, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-// Test-isolation seam (mirrors STERLING_REGISTRY_DB/STERLING_WIN_NODE): the
+// Test-isolation seam (mirrors STERLING_REGISTRY_DB): the
 // plugin-repo branch below (codex probe + .claude-plugin/sterling-mcp*.json
 // ensure) only fires when target === pluginRoot — running init with
 // --target <the real pluginRoot> for real would write into THIS live repo's
@@ -576,136 +576,6 @@ const winProjectDir = toWindowsPath(fwd(target));
 const sessionName = `sterling-${sanitizeSession(basename(target))}`;
 const splitPercent = Math.round(eff.splitRatio * 100);
 const tuiBundle = fwd(join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs'));
-// Native-Windows launcher (decision: revive the native split as a SECOND launcher).
-// The Windows node path used to come ONLY from `where.exe node` (WSL interop), which
-// required the node dir to be on the Windows PATH. HOST-NATIVE since decision
-// host-native-init-with-dev-machine-escape-hatch: that PATH lookup is measured to find
-// NOTHING on the real native-Windows host (research_finding
-// native-windows-platform-measurements-2026-08-27 — node runs there only by absolute
-// path), and the same lookup gated BOTH this launcher AND the native MCP config, so one
-// PATH miss cost a Windows user both. A native-Windows init instead uses process.execPath:
-// the interpreter already executing this script is by definition runnable, and PATH
-// membership adds no evidence on top of that.
-const whereWin = (exe) => {
-  const r = spawnSync('where.exe', [exe], { encoding: 'utf8', timeout: 15_000 });
-  if (r.status !== 0) return undefined;
-  const lines = r.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-  return lines.find((l) => l.toLowerCase().endsWith('.exe')) ?? lines[0];
-};
-// DUAL-CONTEXT ESCAPE HATCH (decision host-native-init-with-dev-machine-escape-hatch):
-// host-native is the DEFAULT and dual-context is EXPLICIT + OPT-IN, never inferred. A
-// non-Windows host emits Windows artifacts only when the operator says so, because the
-// ruling's users are 100% one host or the other and only THIS authoring machine really
-// runs both. Two equivalent spellings, no config field: --dual-context on the command
-// line, or STERLING_DUAL_CONTEXT=1 in the environment (a durable .sterling/config.json
-// field would need a packages/schemas change — deliberately not taken here).
-const dualContext = process.argv.includes('--dual-context') || process.env.STERLING_DUAL_CONTEXT === '1';
-// ONE HOST-APPROPRIATE MCP ENTRY (decision host-native-init-with-dev-machine-escape-hatch,
-// AMENDING decision native-claude-mcp-via-strict-win-config). That decision's CAVEAT 1 —
-// `--strict-mcp-config` suppresses EVERY other MCP server in the native session — was
-// accepted because the plugin's own sterling entry named a WSL node that native claude
-// cannot execute, so both entries would load and collide on the name 'sterling' (-32000).
-// That premise holds ONLY when the two are generated on different hosts. The plugin entry's
-// command is `process.execPath`, so on a win32 host it IS the Windows node: there is exactly
-// one host-appropriate entry, nothing to collide with, and the native launcher can inherit
-// it through --plugin-dir alone. Dropping --strict there is what restores codex — the
-// DEFAULT independent reviewer (decision codex-preferred-for-read-shaped-analysis) — to a
-// 100%-Windows user, who under --strict had no outside-family review at all.
-// The predicate is the HOST, not `winNodeSource`: an STERLING_WIN_NODE override on win32
-// still leaves the plugin entry runnable by native claude, so it needs no second config.
-// This one flag governs BOTH the launcher flags and whether sterling-mcp-win.json is
-// generated, because they are one mechanism — the config exists only to be passed by the
-// launcher, and an unreferenced copy is the second entry this ruling exists to remove.
-// STERLING_NATIVE_MCP_MODE: test seam, same precedent and shape as STERLING_WIN_NODE /
-// STERLING_CODEX_PROBE — honored at THIS call site only. unset/'' -> the real host
-// predicate; 'host-native' / 'dual-context' force the arm. It exists because the
-// host-native arm is otherwise unreachable from the Linux host the suite runs on, and a
-// permanently-skipped pin is a hollow pin (research_finding foreign_0c712d94, M6: 36 tests that
-// reported 0 failures by running none). Unknown value halts loud (P5).
-const nativeMcpModeOverride = process.env.STERLING_NATIVE_MCP_MODE;
-const nativeMcpNeedsWinConfig = !nativeMcpModeOverride
-  ? process.platform !== 'win32'
-  : nativeMcpModeOverride === 'dual-context'
-    ? true
-    : nativeMcpModeOverride === 'host-native'
-      ? false
-      : fail(`STERLING_NATIVE_MCP_MODE must be 'host-native' or 'dual-context' (got '${nativeMcpModeOverride}')`, 2);
-// STERLING_WIN_NODE, when DEFINED (even empty), still bypasses detection entirely:
-// a path forces that path; '' forces the skip path. Naming a Windows node path from a
-// non-Windows host IS an explicit dual-context declaration, so it needs no second flag.
-// Otherwise: native-Windows host -> process.execPath (existence-validated; no --version
-// probe, since this interpreter IS the running process); non-Windows host -> the
-// where.exe cross-detection ONLY under the opt-in above; otherwise nothing, reported
-// loudly below as a host-native skip rather than a failure.
-let winNodeSource;
-let winNode;
-if (process.env.STERLING_WIN_NODE !== undefined) {
-  winNode = process.env.STERLING_WIN_NODE;
-  winNodeSource = 'override';
-} else if (process.platform === 'win32') {
-  winNode = existsSync(process.execPath) ? process.execPath : undefined;
-  winNodeSource = 'host-native';
-} else if (dualContext) {
-  winNode = whereWin('node');
-  winNodeSource = 'dual-context';
-} else {
-  winNode = undefined;
-  winNodeSource = 'host-native-elsewhere';
-}
-// A REQUESTED-BUT-INERT DUAL-CONTEXT OPT-IN IS DISCLOSED, NOT REFUSED (P5; decision
-// host-native-init-with-dev-machine-escape-hatch). On a win32 host the MCP mode keys on
-// the RENDERING host and the node resolution keys on `process.platform === 'win32'`
-// BEFORE it ever consults `dualContext` — so --dual-context / STERLING_DUAL_CONTEXT=1
-// changes nothing there. The predicate is deliberately kept as-is: keying on the
-// rendering host is what makes the launcher's flags and the win config's existence one
-// mechanism that cannot disagree with itself. But a flag that is silently ignored is the
-// defect (unknown signals halt; ignored ones at least speak), so the run says so out
-// loud. NOT a refusal: refusing would block a legitimate host-native init merely because
-// the operator passed a flag that does nothing, and the artifacts this run produced are
-// correct for this host either way.
-// REACHABLE FROM THE SUITE, deliberately: the second arm is the STERLING_NATIVE_MCP_MODE
-// seam that forces the same host-native MCP arm — a win32-only predicate would be a
-// permanently-skipped pin on the Linux host the suite runs on (research_finding
-// 0c712d94, M6). Both arms describe the same fact: dual-context was asked for and the
-// run resolved host-native MCP anyway.
-if (dualContext && (process.platform === 'win32' || nativeMcpModeOverride === 'host-native')) {
-  warns.push(
-    `warn: --dual-context / STERLING_DUAL_CONTEXT=1 has NO effect on the MCP mode of this run — it resolved HOST-NATIVE MCP regardless ` +
-      (process.platform === 'win32'
-        ? '(win32 host: the MCP mode and the Windows node both key on the rendering host, which wins over the flag)'
-        : "(STERLING_NATIVE_MCP_MODE='host-native' forced the arm)") +
-      '. Why: the MCP mode is keyed on the rendering host, so it can never disagree with the node native claude runs. ' +
-      'Genuine cross-host dual-context FROM a Windows host would need a second interpreter path (e.g. a STERLING_WSL_NODE naming the Linux node) that init cannot invent — it is not built. ' +
-      // "nothing was BLOCKED", not "nothing was refused": init reserves the word
-      // REFUSED for its actual refusal paths (`init REFUSED: …`, exit 2), and this
-      // sentence exists to say the opposite happened. Reusing the reserved word inside
-      // a success message makes the report un-greppable for the condition it names.
-      'Nothing was blocked and nothing is missing: the host-native artifacts reported above are the correct ones for this host.',
-  );
-}
-// The mode and its default are LOUD in every report — a Windows-artifact decision the
-// user never sees is exactly the silent degradation this ruling exists to end (P5).
-// EXACTLY ONE MODE, NAMED UNAMBIGUOUSLY (decision host-native-init-with-dev-machine-
-// escape-hatch): every run states one of the ruling's two mode names, and a single note
-// naming BOTH tells a user nothing about which mode they are in — so the default arm
-// never claims Windows artifacts: init generates none in any mode (decision
-// native-windows-launcher-retired-wsl2-only).
-notes.push(
-  winNodeSource === 'host-native-elsewhere'
-    ? `note: host-native init (default) on ${process.platform} — no Windows artifacts are generated (the native launcher and its MCP config are retired, decision native-windows-launcher-retired-wsl2-only)`
-    : winNodeSource === 'dual-context'
-      ? `note: DUAL-CONTEXT mode (explicitly opted in) — no Windows artifacts are generated (the native launcher and its MCP config are retired, decision native-windows-launcher-retired-wsl2-only); Windows node resolved via \`where.exe node\`${winNode ? ` -> ${winNode}` : ' -> not found'}`
-      : winNodeSource === 'host-native'
-        ? `note: host-native init on win32 — no Windows artifacts are generated (the native launcher and its MCP config are retired, decision native-windows-launcher-retired-wsl2-only); Windows node is this interpreter (process.execPath -> ${winNode ?? 'MISSING'}), no PATH lookup`
-        // The explicit override still owes the run a MODE name. Which one is already
-        // settled by the resolution-order comment above: naming a Windows node path from
-        // a non-Windows host IS an explicit dual-context declaration, while on win32 the
-        // override just renames this host's own node. That is the same HOST predicate
-        // that governs nativeMcpNeedsWinConfig, so the note and the artifacts it explains
-        // can never disagree. The STERLING_WIN_NODE provenance is kept — it is what makes
-        // an unexpected path (or the '' skip) diagnosable.
-        : `note: ${process.platform === 'win32' ? 'host-native' : 'DUAL-CONTEXT'} mode (explicit STERLING_WIN_NODE override) — no Windows artifacts are generated (the native launcher and its MCP config are retired, decision native-windows-launcher-retired-wsl2-only); Windows node taken from STERLING_WIN_NODE${winNode ? ` -> ${winNode}` : " -> '' (none named)"}`,
-);
 // the .sh is bash — ALWAYS LF (a CRLF shebang/line breaks bash); the .bat files
 // are ALWAYS CRLF (cmd.exe misparses LF-only batch files), regardless of eol config
 const lf = (s) => s.replace(/\r\n/g, '\n');
@@ -991,8 +861,8 @@ const readMcp = () => {
 // (binary absent, not logged in, timeout) a loud skip line and nothing wired, never
 // blocking the rest of init (P5 degraded-loud). The native-Windows sterling-mcp-win.json
 // is retired (decision native-windows-launcher-retired-wsl2-only) and init no longer writes it.
-// STERLING_CODEX_PROBE: test-isolation seam mirroring STERLING_WIN_NODE — honored
-// at THIS call site (not inside probeCodex), same precedent as `winNode` above.
+// STERLING_CODEX_PROBE: test-isolation seam — honored at THIS call site (not
+// inside probeCodex).
 // unset/'' -> real probe; 'ok' -> force success; 'absent' -> force binary-absent;
 // 'not-logged-in' -> force not-logged-in. Any other value fails loud (unknown
 // signals halt, P5) rather than silently falling back to a real probe — and it is
@@ -1039,18 +909,9 @@ const inheritedCodex = existingPluginMcpServers ? existingPluginMcpServers.codex
 // either way, and the probe result is what makes the eventual delete-and-re-run wire codex.
 const existingHasCodexKey = existingPluginMcpServers ? 'codex' in existingPluginMcpServers : false;
 const codexIsThisRunsConcern = initIsPluginRepo || !pluginMcpExists || !existingHasCodexKey;
-// WHICH PROBE: the one whose SIDE will actually spawn this entry. On win32 THIS file is
-// what native claude reads (host-native mode generates no sterling-mcp-win.json), and a
-// bare spawnSync('codex') there resolves npm's codex.cmd — which node cannot spawn
-// shell-lessly — against a PATH measured unreliable on the native host
-// (research_finding native-windows-platform-measurements-2026-08-27). probeCodexWin
-// resolves through `where.exe codex` and returns the absolute command it actually
-// spawned, so the written entry is the thing the probe proved (board 4c3a8e59).
-// The predicate is the HOST, not the MCP mode: it answers which binary will be spawned,
-// not which config file the launcher elects.
-const codexProbe = !codexIsThisRunsConcern
-  ? undefined
-  : (forcedCodexProbe ?? (process.platform === 'win32' ? probeCodexWin() : probeCodex()));
+// Sterling runs only under WSL2 (decision native-windows-launcher-retired-wsl2-only),
+// so the entry is always spawned by the Linux-side claude and probed there.
+const codexProbe = !codexIsThisRunsConcern ? undefined : (forcedCodexProbe ?? probeCodex());
 if (codexProbe && !codexProbe.ok) warns.push(codexSkipLine(codexProbe.reason, codexProbe.version));
 const desired = {
   mcpServers: codexProbe
@@ -1119,13 +980,10 @@ if (!pluginMcpExists) {
     // entry whose args[0] is OUR generated server entry but whose `command` is a
     // DIFFERENT interpreter is still provably ours — nobody else writes a config
     // naming this clone's dist/main.js — it is just pointing at a node that moved
-    // (an nvm-windows upgrade, a runtime relocation). Before this ruling that was
-    // harmless: sterling-windows.bat elected its own sterling-mcp-win.json strictly,
-    // so a rotten plugin command never reached native claude. In HOST-NATIVE mode
-    // there is no second config and no --strict — this file is the ONLY thing that
-    // gives native claude the Sterling MCP server, and `differs — left untouched`
-    // would strand a Windows user with a deleted node.exe and NO repair path short
-    // of deleting the file by hand.
+    // (an nvm upgrade, a runtime relocation). This file is the only thing that
+    // gives claude the Sterling MCP server, so `differs — left untouched` would
+    // strand the user with a deleted node and NO repair path short of deleting the
+    // file by hand.
     // THE BOUNDARY IS args[0], NOT command: a hand-written entry pointing at some
     // OTHER server is not ours and is still left alone. Only the command is rebased;
     // every other key must already equal what init would generate.
@@ -1177,23 +1035,6 @@ if (!pluginMcpExists) {
       );
     } else {
       items.push({ item: '.claude-plugin/sterling-mcp.json', status: 'differs', detail: 'differs from generated — left untouched (delete to regenerate)' });
-      // HOST-NATIVE HAS NO FALLBACK, so an untouched `differs` here is not cosmetic:
-      // nothing else names a Sterling MCP server for native claude in that mode, so
-      // whatever this file says IS native claude's Sterling MCP server. Never let the report leave
-      // that connection for the reader to make (P5).
-      // GATED ON THE STERLING ENTRY, NOT THE FILE'S VERDICT (final-review defect 3).
-      // The file's overall `differs` has more than one cause. A codex-only delta — the
-      // probe dropped the key on a win32 clone-init, or an inherited entry is not what
-      // this run would generate — leaves the STERLING entry perfectly correct, and
-      // warning then that native claude "may get no Sterling MCP" is simply false. The
-      // warning's whole subject is the Sterling entry, so that is what must mismatch.
-      const sterlingEntryMatches = existingSterling !== undefined && canonical(existingSterling) === canonical(pluginMcpEntry);
-      if (!nativeMcpNeedsWinConfig && !sterlingEntryMatches) {
-        warns.push(
-          'warn: host-native MCP mode, and .claude-plugin/sterling-mcp.json reports `differs` — it was left untouched, and in this mode it is the ONLY source of the Sterling MCP server for native claude (no other MCP config for it is generated). ' +
-            'If its sterling entry names a node or a server entry that no longer exists, native claude will start with NO Sterling MCP and nothing else will report it. Inspect the file; delete it and re-run init to regenerate.',
-        );
-      }
     }
   }
 }
