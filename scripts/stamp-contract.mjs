@@ -75,6 +75,12 @@ const TARGET_LEADS = [
   // the Codex bullet, so a sibling missing both gets them back in template order.
   '- **Codex runs through the MCP tool, never the shell.**',
   '- **Say `READY TO CLEAR` plainly when it is time.**',
+  // 2026-09-28: auto-memory is off (decision sterling-projects-run-with-claude-code-auto-memory-off),
+  // and the new bullet replacing it reads right after "Ask, don't guess" in the template, so
+  // that bullet is tracked here too (it was not before) purely to serve as this insert's anchor —
+  // its own wording was already stable and unchanged, so tracking it adds no drift risk.
+  "- **Ask, don't guess — through the AskUserQuestion tool.**",
+  '- **Instruction-file proposals replace memory.**',
 ];
 
 // Insertable bullets: lead → the anchor lead(s) it goes after, tried in order. A lead
@@ -87,6 +93,7 @@ const INSERT_AFTER = new Map([
   ['- **Concept articles — capture design the moment it settles', ['- **Reconcile _every affected_ article, not just the primary one**']],
   ['- **Codex runs through the MCP tool, never the shell.**', ['- **Knowledge is born structured.**']],
   ['- **Say `READY TO CLEAR` plainly when it is time.**', ['- **Codex runs through the MCP tool, never the shell.**', '- **Knowledge is born structured.**']],
+  ['- **Instruction-file proposals replace memory.**', ["- **Ask, don't guess — through the AskUserQuestion tool.**"]],
 ]);
 
 // Renamed bullets: new lead → the old lead(s) it replaced. When the new lead is
