@@ -27,10 +27,10 @@ import * as viewmodel from '../viewmodel.js';
 //
 // Plus the phase-4 machinery the ACs ride on: the last TABS entry + hotkey/
 // hit-test scaling by TABS.length; the inline selector state machine
-// (open/navigate/commit/cancel); the effort rule (no xhigh/max for subagent
-// keys, xhigh only on coder_hard); the ^claude- model-value refusal; the
-// catalog-status banner (absent / fresh / stale-with-date); and rendering at
-// the 33-column floor.
+// (open/navigate/commit/cancel); the effort rule (no xhigh/max for ANY key —
+// the sole one-time exception, coder_hard, is no longer even a renderable
+// row, LOW-3); the ^claude- model-value refusal; the catalog-status banner
+// (absent / fresh / stale-with-date); and rendering at the 33-column floor.
 //
 // OUT OF THIS ORACLE (impure — main.ts owns them, unreachable from the pure
 // layers): the actual config.json write, the actual setInstalledModelEffort
@@ -230,14 +230,20 @@ function freshCatalog(entries: CatalogEntry[] = CATALOG_ENTRIES): CatalogStatusV
 
 function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnapshot {
   return {
-    agents: [
-      { name: 'coder', installedModel: 'claude-sonnet-4-6', installedEffort: 'high' },
-      ...ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
-    ],
+    agents: ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
     // insertion order fixes the row order + the cursor index per key:
-    // coder=0 (orphan), implementor=1, researcher=2, scout=3, librarian=4, classifiers=5
+    // implementor=0, researcher=1, scout=2, librarian=3, classifiers=4.
+    // LOW-3 (second Opus re-check round): the System tab now filters
+    // config.models to exactly this 5-key set (the classless four-agent
+    // roster, decision agent-roster-is-classless-four-agents f0893161, plus
+    // classifiers) — the fixture previously also carried an orphan 'coder'
+    // key + agent (a relic of the pre-rename roster) at index 0 specifically
+    // to exercise "an unmapped key/agent renders inertly"; that behavior no
+    // longer exists to exercise (an unmapped key is now FILTERED OUT, never
+    // rendered at all — see the dedicated LOW-3 test below), so it was
+    // removed here rather than kept as dead weight every other test had to
+    // route cursor math around.
     configModels: {
-      coder: { model: 'claude-sonnet-4-6', effort: 'high' },
       implementor: { model: 'claude-opus-4-8', effort: 'low' },
       researcher: { model: 'claude-opus-4-8', effort: 'low' },
       scout: { model: 'claude-opus-4-8', effort: 'low' },
@@ -366,8 +372,8 @@ test('AC1: config-only key (classifiers) appears with no governed agent, showing
   const hard = rowOf(view, 'classifiers');
   assert.ok(hard, 'the classifiers config-only row is present');
   const hardText = rowText(hard!);
-  // no installed/registered agent maps to coder_hard, so no agent name is listed on it
-  for (const name of ['coder', ...ROSTER_AGENTS]) {
+  // no installed/registered agent maps to classifiers, so no agent name is listed on it
+  for (const name of ROSTER_AGENTS) {
     assert.doesNotMatch(hardText, new RegExp(name), `classifiers is config-only — it does not list the agent ${name}`);
   }
   assert.match(hardText, /claude-haiku-4-5/, 'classifiers shows its config model');
@@ -389,12 +395,8 @@ test('AC1: the row shows the INSTALLED frontmatter value (the governing copy), N
   // researcher: installed frontmatter says opus-4-8, but config.models says sonnet-4-6.
   // The tab must surface the INSTALLED opus value — the copy that governs dispatch.
   const snap = baseSnapshot({
-    agents: [
-      { name: 'coder', installedModel: 'claude-sonnet-4-6', installedEffort: 'high' },
-      ...ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
-    ],
+    agents: ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
     configModels: {
-      coder: { model: 'claude-sonnet-4-6', effort: 'high' },
       implementor: { model: 'claude-opus-4-8', effort: 'low' },
       researcher: { model: 'claude-sonnet-4-6', effort: 'high' },
       scout: { model: 'claude-opus-4-8', effort: 'low' },
@@ -429,31 +431,29 @@ test('AC4: driftOf is a pure scalar comparison — equal values do not drift, di
 
 test('AC4: a row whose installed model disagrees with config shows a visible drift marker; an aligned row does not', () => {
   assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
-  // researcher installed on sonnet, config on opus → model drift on that row.
+  // every governed agent installed on sonnet, config on opus → model drift on those rows.
   const snap = baseSnapshot({
-    agents: [
-      { name: 'coder', installedModel: 'claude-sonnet-4-6', installedEffort: 'high' },
-      ...ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-sonnet-4-6', installedEffort: 'low' })),
-    ],
+    agents: ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-sonnet-4-6', installedEffort: 'low' })),
   });
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
   const governed = rowOf(view, GOVERNED_KEY)!;
   assert.equal(governed.drift, true, 'the governed row is flagged drift (installed sonnet ≠ config opus)');
   assert.match(rowText(governed), /drift/i, 'the drift is visible in the governed row text (AC4 marker)');
 
-  const coder = rowOf(view, 'coder')!;
-  assert.notEqual(coder.drift, true, 'the aligned coder row is not flagged drift');
-  assert.doesNotMatch(rowText(coder), /drift/i, 'no drift marker on the aligned coder row');
+  // classifiers is config-only (no governed agent, so `governed.some(...)` over
+  // an empty array is structurally always false) — a row that categorically
+  // CANNOT drift, used here as the "an aligned row does not" half of this AC
+  // (LOW-3 removed the old 'coder' row this half used to check).
+  const classifiersRow = rowOf(view, 'classifiers')!;
+  assert.notEqual(classifiersRow.drift, true, 'the config-only classifiers row is never flagged drift');
+  assert.doesNotMatch(rowText(classifiersRow), /drift/i, 'no drift marker on the classifiers row');
 });
 
 test('AC4: EFFORT-only disagreement (model equal) still drifts the row', () => {
   assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
   // models all match config; only the governed agents' effort differs (installed high vs config low)
   const snap = baseSnapshot({
-    agents: [
-      { name: 'coder', installedModel: 'claude-sonnet-4-6', installedEffort: 'high' },
-      ...ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'high' })),
-    ],
+    agents: ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'high' })),
   });
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
   const governed = rowOf(view, GOVERNED_KEY)!;
@@ -467,12 +467,12 @@ test('AC4/AC5 (P5 backstop): a partially applied projection — config updated b
   // still holds opus (the file write partially failed). The disagreeing agent must show drift —
   // the AC4 marker is the P5 backstop for a partial projection (decision 98064d77c).
   const snap = baseSnapshot({
-    agents: [
-      { name: 'coder', installedModel: 'claude-sonnet-4-6', installedEffort: 'high' },
-      ...ROSTER_AGENTS.map((name) => ({ name, installedModel: name === GOVERNED_KEY ? 'claude-opus-4-8' : 'claude-sonnet-4-6', installedEffort: 'low' })),
-    ],
+    agents: ROSTER_AGENTS.map((name) => ({
+      name,
+      installedModel: name === GOVERNED_KEY ? 'claude-opus-4-8' : 'claude-sonnet-4-6',
+      installedEffort: 'low',
+    })),
     configModels: {
-      coder: { model: 'claude-sonnet-4-6', effort: 'high' },
       implementor: { model: 'claude-sonnet-4-6', effort: 'low' },
       researcher: { model: 'claude-sonnet-4-6', effort: 'low' }, // config already swapped to sonnet
       scout: { model: 'claude-sonnet-4-6', effort: 'low' },
@@ -521,7 +521,7 @@ test('selector open: ENTER on a key row opens the MODEL picker listing the catal
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
-    // cursor on the coder row (index 0); ENTER opens the picker.
+    // cursor on the implementor row (index 0); ENTER opens the picker.
     const opened = drive(store, st({ tab: SYS_TAB, cursor: 0 }), [key('ENTER')], snap);
     const view = buildSystemTab!(snap, opened.ui, 80);
     const text = allText(view);
@@ -558,7 +558,7 @@ test('audit finding 24/43: committing a non-claude model is REFUSED with a visib
   try {
     // a catalog whose only entry is a non-claude id → the commit fails MODEL_VALUE_RE
     const snap = baseSnapshot({ catalog: freshCatalog([{ id: 'gpt-5x', label: 'GPT 5X', tier: 'opus', status: 'active' }]) });
-    // coder row: open model picker, confirm the (only) entry, advance to effort, commit
+    // implementor row: open model picker, confirm the (only) entry, advance to effort, commit
     const r = drive(store, st({ tab: SYS_TAB, cursor: 0 }), [key('ENTER'), key('ENTER'), key('ENTER')], snap);
     assert.equal(findSwap(r.effects), undefined, 'no model_swap effect emitted for a non-claude model');
     assert.equal(r.ui.selector, undefined, 'the picker closed');
@@ -589,11 +589,12 @@ test('AC5 commit (governed key): ENTER→DOWN→ENTER→ENTER emits ONE model_sw
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
-    // researcher row (cursor 1): open model picker (highlights opus-4-8 at index 0),
-    // DOWN → sonnet-4-6 (index 1), ENTER confirm model, ENTER commit (effort[0]).
+    // implementor row (cursor 0, GOVERNED_KEY): open model picker (highlights
+    // opus-4-8 at index 0), DOWN → sonnet-4-6 (index 1), ENTER confirm model,
+    // ENTER commit (effort[0]).
     const res = drive(
       store,
-      st({ tab: SYS_TAB, cursor: 1 }),
+      st({ tab: SYS_TAB, cursor: 0 }),
       [key('ENTER'), key('DOWN'), key('ENTER'), key('ENTER')],
       snap,
     );
@@ -623,11 +624,11 @@ test('AC5 commit (config-only key): a classifiers swap emits the effect with NO 
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
-    // classifiers row (cursor 5: coder=0, implementor=1, researcher=2, scout=3,
-    // librarian=4, classifiers=5): open → DOWN to sonnet-4-6 (index 1) → confirm → commit.
+    // classifiers row (cursor 4: implementor=0, researcher=1, scout=2,
+    // librarian=3, classifiers=4): open → DOWN to sonnet-4-6 (index 1) → confirm → commit.
     const res = drive(
       store,
-      st({ tab: SYS_TAB, cursor: 5 }),
+      st({ tab: SYS_TAB, cursor: 4 }),
       [key('ENTER'), key('DOWN'), key('ENTER'), key('ENTER')],
       snap,
     );
@@ -674,7 +675,7 @@ test('selector validation: a selected model failing /^claude-/ is REFUSED at com
     ]);
     const snap = baseSnapshot({ catalog: badCatalog });
 
-    // (refusal) coder row (cursor 0): DOWN once → gpt-4o (index 1) → confirm → commit.
+    // (refusal) implementor row (cursor 0): DOWN once → gpt-4o (index 1) → confirm → commit.
     const refused = drive(
       store,
       st({ tab: SYS_TAB, cursor: 0 }),
@@ -683,8 +684,9 @@ test('selector validation: a selected model failing /^claude-/ is REFUSED at com
     );
     assert.equal(findSwap(refused.effects), undefined, 'a non-claude model value is refused before commit — no swap effect (^claude- floor)');
 
-    // (happy path, red anchor) coder current is sonnet; confirm opus-4-8 (index 0, a
-    // valid claude id ≠ current) → commit → a swap effect IS emitted.
+    // (happy path, red anchor) confirm opus-4-8 (index 0, a valid claude id)
+    // → commit → a swap effect IS emitted (the model floor gates on VALIDITY,
+    // not on the value actually changing).
     const ok = drive(
       store,
       st({ tab: SYS_TAB, cursor: 0 }),
@@ -727,6 +729,50 @@ test('33-col floor: an OPEN selector still renders within the 33-column pane', (
         assert.ok(line.text.length <= 33, `open-selector line fits 33 cols: "${line.text}"`);
       }
     }
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// LOW-3 (second Opus re-check round, on top of commit 22e20f9): the System
+// tab used to render/edit whatever key the caller's configModels handed it,
+// trusting it blindly — including a relic like 'coder_hard' that no agent
+// has EVER read (decision agent-roster-is-classless-four-agents f0893161).
+// Now filtered to exactly the classless roster + classifiers
+// (SYSTEM_TAB_MODEL_KEYS), regardless of what a stray key in the snapshot
+// carries — a defensive floor, not just fixture hygiene, since an old
+// project's config.json can carry such a key forever.
+// ===========================================================================
+
+test("LOW-3: a relic config.models key outside the classless roster (e.g. 'coder_hard') never renders a row, is skipped by cursor math, and is unreachable through the selector — even though it is present in the snapshot", () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const { store, cleanup } = storeFixture();
+  try {
+    const snap = baseSnapshot({
+      configModels: {
+        // a relic key SNUCK IN ahead of the real roster — if it were still
+        // rendered, it would occupy cursor 0 and shift every row below it,
+        // exactly the class of bug this fix closes.
+        coder_hard: { model: 'claude-opus-4-8', effort: 'xhigh' },
+        implementor: { model: 'claude-opus-4-8', effort: 'low' },
+        researcher: { model: 'claude-opus-4-8', effort: 'low' },
+        scout: { model: 'claude-opus-4-8', effort: 'low' },
+        librarian: { model: 'claude-opus-4-8', effort: 'low' },
+        classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
+      },
+    });
+    const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
+    assert.equal(rowOf(view, 'coder_hard'), undefined, 'no row is rendered for the relic key');
+    assert.equal(view.rows.length, 5, 'exactly 5 rows — the relic key never counts toward the row total');
+    assert.doesNotMatch(allText(view), /xhigh/i, "the relic key's xhigh effort value never reaches the screen");
+    // cursor 0 lands on implementor (the relic key never occupies a slot) —
+    // proven by driving ENTER→DOWN→ENTER→ENTER and checking the swap
+    // targets 'implementor', never 'coder_hard'.
+    const res = drive(store, st({ tab: SYS_TAB, cursor: 0 }), [key('ENTER'), key('DOWN'), key('ENTER'), key('ENTER')], snap);
+    const swap = findSwap(res.effects);
+    assert.ok(swap, 'cursor 0 still opens a real, committable key');
+    assert.equal(swap!.key, 'implementor', 'cursor 0 addresses implementor, not the filtered-out relic key');
   } finally {
     cleanup();
   }

@@ -154,10 +154,18 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
       { name: 'coder', installedModel: 'claude-sonnet-4-6', installedEffort: 'high' },
       ...REVIEWER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
     ],
+    // LOW-3 (second Opus re-check round): the System tab now filters
+    // config.models to the classless four-agent roster
+    // (agent-roster-is-classless-four-agents f0893161) plus classifiers, so a
+    // relic key here (the old 'coder'/'reviewers'/'coder_hard' roster names)
+    // would simply never render a row — this fixture only cares about
+    // numKeys (the row count the sparring/tdd rows sit past), so it uses the
+    // real 5 keys directly rather than keys that would now be filtered out.
     configModels: {
-      coder: { model: 'claude-sonnet-4-6', effort: 'high' },
-      reviewers: { model: 'claude-opus-4-8', effort: 'low' },
-      coder_hard: { model: 'claude-opus-4-8', effort: 'xhigh' },
+      implementor: { model: 'claude-sonnet-4-6', effort: 'high' },
+      researcher: { model: 'claude-opus-4-8', effort: 'low' },
+      scout: { model: 'claude-opus-4-8', effort: 'low' },
+      librarian: { model: 'claude-opus-4-8', effort: 'low' },
       classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
     },
     catalog: freshCatalog(),

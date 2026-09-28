@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { initialUi, reduce, runEffects, TASKS_TAB, KNOWLEDGE_TAB, type UiState } from '../state.js';
 
@@ -299,6 +299,65 @@ test("board-edit 9 (fix 2): a version that moved since 'e' was pressed refuses t
 });
 
 // ===========================================================================
+// MEDIUM-1 (second Opus re-check round, on top of commit 22e20f9): after a
+// version-conflict refusal, boardEdit.version was left pointing at the STALE
+// (pre-conflict) version forever, so the notice's "press ENTER to try again"
+// was false — every subsequent ENTER re-read the same stale version, saw the
+// same mismatch, and refused again in an infinite loop with no way out but
+// ESCAPE. Fixed: on refusal, boardEdit.version now moves to the CURRENT
+// version, so the very next ENTER (version now matching) writes.
+// ===========================================================================
+
+test("board-edit 11 (MEDIUM-1): after a version-conflict refusal, the SECOND ENTER writes — boardEdit.version was adopted to the current version, not left stale", () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    const created = store.create({ ...envelope('todo'), text: 'original', source: 'user' }) as { id: string; version: number };
+    const opened = reduce(store, st({ tab: TASKS_TAB, cursor: 0 }), charEv('e'));
+    const conflicting = store.updateTodo(created.id, {
+      ...(store.get(created.id) as Record<string, unknown>),
+      text: 'changed elsewhere',
+    }) as { version: number };
+    const typed = reduce(store, opened.ui, charEv('!'));
+
+    // FIRST ENTER: refused (version moved) — but the refusal must ADOPT the
+    // current version into the kept buffer, not leave the stale one behind.
+    const firstAttempt = reduce(store, typed.ui, key('ENTER'), undefined, undefined, undefined, () => FAKE_HEAD);
+    assert.equal(findBoardEdit(firstAttempt.effects), undefined, 'first ENTER is still refused — the buffer has not been re-synced yet');
+    assert.ok(firstAttempt.ui.boardEdit, 'the editor stays open after the first refusal');
+    assert.equal(
+      firstAttempt.ui.boardEdit!.version,
+      conflicting.version,
+      'boardEdit.version is moved to the CURRENT version on refusal — this is the bug fix: without it, every future ENTER refuses again forever'
+    );
+    assert.match(
+      firstAttempt.ui.notice ?? '',
+      /changed since it was opened/i,
+      "the notice says the item changed since it was opened (not the old 'press ENTER to try again' wording, which was false — the OLD ENTER kept refusing)"
+    );
+    assert.match(firstAttempt.ui.notice ?? '', /enter again/i, 'the notice says ENTER again overwrites it');
+    assert.match(firstAttempt.ui.notice ?? '', /esc/i, 'the notice says ESC cancels');
+
+    // SECOND ENTER: version now matches (adopted above) — this MUST write.
+    const secondAttempt = reduce(store, firstAttempt.ui, key('ENTER'), undefined, undefined, undefined, () => FAKE_HEAD);
+    const commit = findBoardEdit(secondAttempt.effects);
+    assert.ok(commit, 'the second ENTER commits a board_edit effect — the false "press ENTER to try again" promise is now true');
+    assert.equal(commit!.text, 'original!', 'the committed text is the buffer that survived both refusals');
+    assert.equal(commit!.version, conflicting.version, 'the effect carries the ADOPTED version, matching what is actually live in the store');
+    assert.equal(secondAttempt.ui.boardEdit, undefined, 'the editor closes on the successful second commit');
+
+    // integration: runEffects can actually apply this effect without a
+    // version-conflict throw, proving the adopted version really matches
+    // what applyInPlace's own expected_version guard sees.
+    assert.doesNotThrow(() => runEffects(store, secondAttempt.effects), 'the store write succeeds — the adopted version is genuinely current');
+    const after = store.get(created.id) as unknown as { text: string; version: number };
+    assert.equal(after.text, 'original!', 'the store now holds the overwritten text');
+    assert.equal(after.version, conflicting.version + 1, 'version bumped once more by this second, now-successful write');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
 // Fix 3 — the item vanishing (or going non-live) before commit
 // ===========================================================================
 
@@ -318,4 +377,26 @@ test('board-edit 10 (fix 3): the item vanishing before commit (e.g. board_remove
   } finally {
     cleanup();
   }
+});
+
+// ===========================================================================
+// LOW-2 (second Opus re-check round): main.ts now roots the HEAD resolver at
+// dirname(dirname(storePath)) — the project owning the store (main.ts's own
+// agentsDir already used this exact expression) — rather than state.ts's
+// default resolver's process.cwd() fallback, which is only correct when
+// sterling-tui happens to be launched from the project directory.
+//
+// main.ts itself CANNOT be unit-tested by importing it here: it runs
+// side-effecting startup code at MODULE EVALUATION time (argv parsing that
+// calls process.exit(2) when --store is missing, the non-TTY guard, a
+// dynamic terminal-kit import) — importing it would kill this test process
+// before a single assertion ran. Its only existing coverage is the built-
+// bundle smoke test (scripts/tests/tui-bundle.test.mjs, STERLING_TUI_SMOKE=1).
+// This pins the one genuinely testable, side-effect-free piece of the fix:
+// the path arithmetic main.ts's resolver is rooted on.
+// ===========================================================================
+
+test('LOW-2: the project root main.ts roots its HEAD resolver at is dirname(dirname(storePath)) — climbing <project>/.sterling/sterling.db back to <project>, the same expression main.ts already used for agentsDir', () => {
+  const storePath = '/mnt/c/Users/chulf/some-project/.sterling/sterling.db';
+  assert.equal(dirname(dirname(storePath)), '/mnt/c/Users/chulf/some-project', 'two dirname() calls climb .sterling/sterling.db back to the project root');
 });

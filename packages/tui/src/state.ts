@@ -224,10 +224,25 @@ export function driftOf(installed: string, config: string): boolean {
   return installed !== config;
 }
 
-/** §7.2 effort rule as data: subagent keys never offer xhigh or max; only
- *  coder_hard is permitted xhigh; max never appears anywhere. */
+/** System tab, LOW-3 (second Opus re-check round, feat/gap-hunt-round-1
+ *  22e20f9): the ONLY config.models keys the System tab may render/edit —
+ *  every governed agent key from AGENT_MODEL_KEY (the classless four-agent
+ *  roster, decision agent-roster-is-classless-four-agents f0893161) plus
+ *  'classifiers', the schema's one legitimate config-only key
+ *  (packages/schemas/src/config.ts's `models` object — the only 5 keys it
+ *  actually defines). A relic/legacy key such as 'coder_hard' — no agent has
+ *  EVER read it, and update/init now flag it as unread — is filtered out
+ *  here rather than trusted from whatever `configModels` the caller hands
+ *  in: a defensive floor, not just a fixture cleanup, since an old
+ *  project's config.json can carry a stray key forever. */
+const SYSTEM_TAB_MODEL_KEYS = new Set<string>([...Object.values(AGENT_MODEL_KEY), 'classifiers']);
+
+/** §7.2 effort rule as data: no System-tab key ever offers xhigh or max. The
+ *  one-time exception (coder_hard) was itself a config-only key no agent
+ *  ever read, and it is no longer a renderable row at all (LOW-3 above) —
+ *  so there is no longer a key this function needs to special-case. */
 export function effortOptions(key: string): string[] {
-  return key === 'coder_hard' ? ['low', 'medium', 'high', 'xhigh'] : ['low', 'medium', 'high'];
+  return ['low', 'medium', 'high'];
 }
 
 /** The model-value floor (decision foreign_98064d77): a committed swap model must be a
@@ -626,19 +641,22 @@ const clipEllipsis = (s: string, width: number): string =>
   Number.isFinite(width) && s.length > width ? `${s.slice(0, Math.max(1, width) - 1)}…` : s;
 
 /**
- * Pure System-tab projection (run r-f9a7): one row per config.models KEY, in
- * insertion order, id 'sys:<key>'. Governed agents (AGENT_MODEL_KEY) list under
- * their key; the INSTALLED frontmatter value renders (the copy that governs
- * dispatch), and a key whose installed value disagrees with config is flagged
- * drift with a visible marker (AC4; the P5 backstop for a partial projection).
- * config-only keys (coder_hard/classifiers) render their config value with no
- * governed agent. When ui.selector is open on a key, that row also renders the
- * inline picker options (catalog entries at the model stage; effort options at
- * the effort stage). Every line is clipped to `width` so the 33-col floor holds.
+ * Pure System-tab projection (run r-f9a7): one row per LIVE config.models
+ * KEY (SYSTEM_TAB_MODEL_KEYS — LOW-3, second Opus re-check round: a relic
+ * key like 'coder_hard' is filtered out here regardless of what the caller's
+ * snapshot carries), in insertion order, id 'sys:<key>'. Governed agents
+ * (AGENT_MODEL_KEY) list under their key; the INSTALLED frontmatter value
+ * renders (the copy that governs dispatch), and a key whose installed value
+ * disagrees with config is flagged drift with a visible marker (AC4; the P5
+ * backstop for a partial projection). classifiers, the one config-only key,
+ * renders its config value with no governed agent. When ui.selector is open
+ * on a key, that row also renders the inline picker options (catalog
+ * entries at the model stage; effort options at the effort stage). Every
+ * line is clipped to `width` so the 33-col floor holds.
  */
 export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width = Infinity): SystemTabView {
   const snap = snapshot ?? EMPTY_ROSTER;
-  const keys = Object.keys(snap.configModels);
+  const keys = Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
   const selector = ui.selector;
   const clip = (s: string): string => clipEllipsis(s, width);
 
@@ -657,8 +675,8 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
     const selected = i === ui.cursor;
     const marker = selected ? '› ' : '  ';
     // Title-cased label: the leading letter is capitalized so a config-only key
-    // like coder_hard never surfaces the substring an agent name ('coder') would
-    // match — the roster lists each agent in exactly one row (AC1).
+    // like classifiers never surfaces the substring an agent name would match —
+    // the roster lists each agent in exactly one row (AC1).
     const label = key.charAt(0).toUpperCase() + key.slice(1);
     const lines: SystemLine[] = [
       { text: clip(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? '  drift' : ''}`), kind: 'title', selected },
@@ -682,8 +700,8 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   });
 
   // While a selector is open the view FOCUSES on the key under edit — the other
-  // rows (and their config values, e.g. coder_hard's xhigh) are hidden so the
-  // open picker's offered set is the only model/effort text on screen.
+  // rows (and their config values) are hidden so the open picker's offered set
+  // is the only model/effort text on screen.
   const shown = selector ? rows.filter((r) => r.key === selector.key) : rows;
   // transient notice as a ⚠ banner line (audit findings 24/43, 41/43): a refusal
   // or a catalog/roster failure is visible above the roster, not lost.
@@ -1195,17 +1213,28 @@ export function reduce(
             //     notice and KEEP the buffer open — never a silent overwrite
             //     (lost-update guard).
             const current = store.get(be.id) as (Record<string, unknown> & { type?: string; status?: string; version?: number }) | undefined;
-            if (!current || current.type !== 'todo' || current.status === 'superseded') {
+            if (!current || current.type !== 'todo' || current.status === 'superseded' || typeof current.version !== 'number') {
               return {
                 ui: { ...ui, boardEdit: undefined, notice: `board item no longer exists — the edit was discarded` },
                 effects,
               };
             }
             if (current.version !== be.version) {
+              // MEDIUM-1 (second Opus re-check round): ADOPT the current
+              // version into the kept buffer. Leaving be.version at the
+              // stale value it was opened with made "press ENTER to try
+              // again" a lie — every later ENTER would re-read the same
+              // still-live-but-now-current version, find it STILL disagrees
+              // with the never-updated be.version, and refuse forever with
+              // no way out but ESCAPE. Adopting it here means the very next
+              // ENTER's version check passes and the buffer commits — a
+              // deliberate, explicit overwrite the user asked for by
+              // pressing ENTER again, never a silent one.
               return {
                 ui: {
                   ...ui,
-                  notice: `board item changed since you started editing (now at version ${current.version}) — refusing to overwrite; your edit is kept, press ENTER to try again`,
+                  boardEdit: { ...be, version: current.version },
+                  notice: `board item changed since it was opened — press ENTER again to overwrite it, ESC to cancel`,
                 },
                 effects,
               };
@@ -1244,7 +1273,11 @@ export function reduce(
       // Handles roster navigation + open/navigate/confirm/commit/cancel; the
       // tab-switch / quit keys fall through to the generic handler below.
       if (ui.tab === SYSTEM_TAB && roster) {
-        const sysKeys = Object.keys(roster.configModels);
+        // LOW-3 (second Opus re-check round): filtered the SAME way buildSystemTab
+        // filters `keys` — a relic key never occupies a cursor slot here either,
+        // so the two stay in lockstep (a stray key in roster.configModels would
+        // otherwise misalign every row/toggle index below it).
+        const sysKeys = Object.keys(roster.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
         // + 3: the sparring-partner toggle row (index sysKeys.length) and its
         // model row (sysKeys.length + 1), appended after the config.models
         // roster (board a0714d0b) — then the tdd toggle row (sysKeys.length + 2),
