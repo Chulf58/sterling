@@ -137,10 +137,15 @@ if (agentChangesRequireRestart(report)) console.log('\n' + restartInstruction);
 // /sterling:update's sync-agents fan-out also activates the conductor on every sibling.
 const activationResult = ensureConductorActivation(targetDir, report);
 console.log(`conductor activation: ${activationResult.activation}${activationResult.reason ? ` (${activationResult.reason})` : ''}`);
+console.log(`auto-memory off: ${activationResult.autoMemory}${activationResult.autoMemoryNotice ? ` (${activationResult.autoMemoryNotice})` : ''}`);
 if (activationResult.activation === 'written') {
   console.log(`EXIT AND RELAUNCH: conductor activation newly written in ${activationResult.path}`);
+} else if (activationResult.autoMemory === 'written') {
+  console.log(`EXIT AND RELAUNCH: "autoMemoryEnabled": false newly written in ${activationResult.path}`);
 }
 // A refused activation means the conductor is installed but NOT the main-session
 // agent — /sterling:update must not stamp this complete (Sol review HIGH finding).
 if (activationResult.activation === 'refused') refused += 1;
+// An explicit non-false autoMemoryEnabled is a NOTICE (printed above), never a refusal:
+// counting it would fail every /sterling:update on the machine for one project's choice.
 process.exit(refused > 0 ? 2 : 0);

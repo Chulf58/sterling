@@ -720,6 +720,15 @@ items.push({
   status: { written: 'created', already: 'matches', refused: 'refused', skipped: 'skipped' }[conductorActivation.activation],
   detail: conductorActivation.reason ?? (conductorActivation.activation === 'written' ? `wrote "agent": "conductor" to ${conductorActivation.path}` : 'already "agent": "conductor"'),
 });
+items.push({
+  item: '.claude/settings.json (auto-memory off)',
+  status: { written: 'created', already: 'matches', kept: 'notice', wrong_type: 'notice', skipped: 'skipped' }[conductorActivation.autoMemory],
+  detail: conductorActivation.autoMemoryNotice ?? {
+    written: `wrote "autoMemoryEnabled": false to ${conductorActivation.path}`,
+    already: 'already "autoMemoryEnabled": false',
+    skipped: 'settings.json is not a valid JSON object — not touched',
+  }[conductorActivation.autoMemory],
+});
 
 // OpenCode handoff (decision
 // init-prepares-opencode-portable-agents-and-target-handoff-projections): portable
@@ -1193,9 +1202,11 @@ try {
 
 if (conductorActivation.activation === 'written') {
   console.log(`\nEXIT AND RELAUNCH: conductor activation newly written in ${conductorActivation.path}`);
+} else if (conductorActivation.autoMemory === 'written') {
+  console.log(`\nEXIT AND RELAUNCH: "autoMemoryEnabled": false newly written in ${conductorActivation.path}`);
 }
 
-if (restartNeeded || conductorActivation.activation === 'written') {
+if (restartNeeded || conductorActivation.activation === 'written' || conductorActivation.autoMemory === 'written') {
   console.log('\n' + RESTART_INSTRUCTION);
 } else {
   console.log('\nno agent changes — no restart required');

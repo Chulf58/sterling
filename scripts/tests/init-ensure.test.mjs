@@ -140,6 +140,20 @@ test('init records a Windows-drive --backup-path in WSL /mnt form (r-dd88 backup
   }
 });
 
+test('fresh init writes .claude/settings.json with "agent": "conductor" AND "autoMemoryEnabled": false, and reports both', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    const settings = JSON.parse(readFileSync(join(dir, '.claude', 'settings.json'), 'utf8'));
+    assert.equal(settings.agent, 'conductor');
+    assert.equal(settings.autoMemoryEnabled, false, 'auto-memory off (user-ruled 2026-09-28: "Write it into settings")');
+    assert.match(r.stdout, /^\.claude\/settings\.json \(auto-memory off\)\s+created\b/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('ensure outcome 1 — create absent: fresh init creates every manifest item and records declarations', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {

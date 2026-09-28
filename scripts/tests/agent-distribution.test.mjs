@@ -964,7 +964,7 @@ test('ensureConductorActivation: no settings.json — creates it with {"agent":"
     assert.deepEqual(report, [{ name: 'conductor', status: 'installed' }]);
     const result = ensureConductorActivation(dir, report);
     assert.equal(result.activation, 'written');
-    assert.deepEqual(readSettings(dir), { agent: 'conductor' });
+    assert.deepEqual(readSettings(dir), { agent: 'conductor', autoMemoryEnabled: false });
     assert.match(readFileSync(settingsPath(dir), 'utf8'), /\n$/, 'the written file ends with a newline');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1068,7 +1068,7 @@ test('ensureConductorActivation: "agent" already "conductor" — reports already
   const dir = tmpdtemp();
   try {
     mkdirSync(join(dir, '.claude'), { recursive: true });
-    const original = JSON.stringify({ agent: 'conductor', marker: 'untouched' }, null, 2);
+    const original = JSON.stringify({ agent: 'conductor', autoMemoryEnabled: false, marker: 'untouched' }, null, 2);
     writeFileSync(settingsPath(dir), original);
     const report = conductorSync(dir);
     const result = ensureConductorActivation(dir, report);
@@ -1083,7 +1083,7 @@ test('ensureConductorActivation: "agent" set to a different value — refuses, w
   const dir = tmpdtemp();
   try {
     mkdirSync(join(dir, '.claude'), { recursive: true });
-    const original = JSON.stringify({ agent: 'someone-else' }, null, 2);
+    const original = JSON.stringify({ agent: 'someone-else', autoMemoryEnabled: false }, null, 2);
     writeFileSync(settingsPath(dir), original);
     const report = conductorSync(dir);
     const result = ensureConductorActivation(dir, report);
@@ -1185,12 +1185,178 @@ test('ensureConductorActivation: "installed" / "up_to_date" / "refreshed" all co
   }
 });
 
+// "autoMemoryEnabled": false rides the same write (user-ruled 2026-09-28, "Write it
+// into settings"; finding de5104c9): Sterling projects keep knowledge in the store and
+// CLAUDE.md, never in Claude Code's auto-memory, which is on by default.
+test('ensureConductorActivation: no settings.json — writes both "agent" and "autoMemoryEnabled": false', () => {
+  const dir = tmpdtemp();
+  try {
+    const result = ensureConductorActivation(dir, conductorSync(dir));
+    assert.equal(result.activation, 'written');
+    assert.equal(result.autoMemory, 'written');
+    assert.deepEqual(readSettings(dir), { agent: 'conductor', autoMemoryEnabled: false });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: "agent" already "conductor" but no autoMemoryEnabled — adds the key, keeps every other key', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(dir), JSON.stringify({ agent: 'conductor', permissions: { allow: ['Bash'] }, marker: 'kept' }, null, 2) + '\n');
+    const result = ensureConductorActivation(dir, conductorSync(dir));
+    assert.equal(result.activation, 'already', 'the agent key was already right');
+    assert.equal(result.autoMemory, 'written');
+    assert.equal(result.path, settingsPath(dir));
+    assert.deepEqual(readSettings(dir), { agent: 'conductor', permissions: { allow: ['Bash'] }, marker: 'kept', autoMemoryEnabled: false });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: idempotent — a second run reports already/already and leaves the file byte-identical', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(dir), JSON.stringify({ marker: 'kept' }, null, 2) + '\n');
+    const report = conductorSync(dir);
+    ensureConductorActivation(dir, report);
+    const after1 = readFileSync(settingsPath(dir), 'utf8');
+    const second = ensureConductorActivation(dir, report);
+    assert.equal(second.activation, 'already');
+    assert.equal(second.autoMemory, 'already');
+    assert.equal(readFileSync(settingsPath(dir), 'utf8'), after1, 'no rewrite on the second run');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Policy (conductor fix round after the pre-commit review): an explicit non-false value
+// is NEVER overwritten, but it is a loud NOTICE, not a refusal — a refusal would make
+// every /sterling:update on the machine exit 2 for one project's deliberate choice.
+test('ensureConductorActivation: an explicit "autoMemoryEnabled": true is kept with a notice — never overwritten, the agent key still activates', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(dir), JSON.stringify({ autoMemoryEnabled: true, marker: 'kept' }, null, 2) + '\n');
+    const result = ensureConductorActivation(dir, conductorSync(dir));
+    assert.equal(result.activation, 'written');
+    assert.equal(result.autoMemory, 'kept');
+    assert.equal(result.autoMemoryNotice, `autoMemoryEnabled is true in ${settingsPath(dir)}: left as a deliberate choice; Sterling projects run with auto-memory off (set it to false to comply)`);
+    assert.deepEqual(readSettings(dir), { autoMemoryEnabled: true, marker: 'kept', agent: 'conductor' }, 'the deliberate true survives');
+
+    // agent already right AND memory explicitly true: nothing to write at all
+    const original = readFileSync(settingsPath(dir), 'utf8');
+    const again = ensureConductorActivation(dir, conductorSync(dir));
+    assert.equal(again.activation, 'already');
+    assert.equal(again.autoMemory, 'kept');
+    assert.equal(readFileSync(settingsPath(dir), 'utf8'), original, 'byte-identical');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: a non-boolean autoMemoryEnabled ("false", 0) gets a wrong-type notice and is never overwritten', () => {
+  for (const value of ['false', 0]) {
+    const dir = tmpdtemp();
+    try {
+      mkdirSync(join(dir, '.claude'), { recursive: true });
+      const original = JSON.stringify({ agent: 'conductor', autoMemoryEnabled: value }, null, 2) + '\n';
+      writeFileSync(settingsPath(dir), original);
+      const result = ensureConductorActivation(dir, conductorSync(dir));
+      assert.equal(result.autoMemory, 'wrong_type', JSON.stringify(value));
+      assert.match(result.autoMemoryNotice, /autoMemoryEnabled is .* not a boolean.*set it to boolean false/);
+      assert.equal(readFileSync(settingsPath(dir), 'utf8'), original, 'byte-identical');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('ensureConductorActivation: "autoMemoryEnabled": null is treated as absent — false is written', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(dir), JSON.stringify({ agent: 'conductor', autoMemoryEnabled: null }, null, 2) + '\n');
+    const result = ensureConductorActivation(dir, conductorSync(dir));
+    assert.equal(result.autoMemory, 'written');
+    assert.deepEqual(readSettings(dir), { agent: 'conductor', autoMemoryEnabled: false });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: decoupled — a foreign "agent" is refused and left alone, but autoMemoryEnabled false is still written', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(dir), JSON.stringify({ agent: 'my-agent' }, null, 2) + '\n');
+    const result = ensureConductorActivation(dir, conductorSync(dir));
+    assert.equal(result.activation, 'refused');
+    assert.equal(result.autoMemory, 'written');
+    assert.deepEqual(readSettings(dir), { agent: 'my-agent', autoMemoryEnabled: false });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: decoupled — a skipped activation (no conductor entry) still writes autoMemoryEnabled false and no "agent"', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(dir), JSON.stringify({ marker: 'kept' }, null, 2) + '\n');
+    const result = ensureConductorActivation(dir, []);
+    assert.equal(result.activation, 'skipped');
+    assert.equal(result.autoMemory, 'written');
+    assert.deepEqual(readSettings(dir), { marker: 'kept', autoMemoryEnabled: false });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: malformed and array JSON — autoMemory skipped, file byte-identical', () => {
+  for (const body of ['{ not json', '[1,2,3]']) {
+    const dir = tmpdtemp();
+    try {
+      mkdirSync(join(dir, '.claude'), { recursive: true });
+      writeFileSync(settingsPath(dir), body);
+      const result = ensureConductorActivation(dir, conductorSync(dir));
+      assert.equal(result.autoMemory, 'skipped', body);
+      assert.equal(readFileSync(settingsPath(dir), 'utf8'), body);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 // Regression: sync-agents exited 0 on a sync refusal because syncAgents omitted
 // `refused: true` for foreign_file / refused_local_modification (installAgents set
 // it), so /sterling:update printed the refusal as a change and could stamp
 // update-complete.json while the agent stayed stale. The CLI contract is exit 2.
 const SYNC_CLI = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'sync-agents.mjs');
 const runSyncCli = (target) => spawnSync(process.execPath, [SYNC_CLI, '--target', target], { encoding: 'utf8' });
+
+test('sync-agents CLI: reports the autoMemoryEnabled write, and an explicit true is a notice with exit 0', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(dir), JSON.stringify({ agent: 'conductor' }, null, 2) + '\n');
+    let r = runSyncCli(dir);
+    assert.match(r.stdout, /^auto-memory off: written\b/m, r.stdout + r.stderr);
+    assert.equal(readSettings(dir).autoMemoryEnabled, false);
+    r = runSyncCli(dir);
+    assert.match(r.stdout, /^auto-memory off: already\b/m);
+    writeFileSync(settingsPath(dir), JSON.stringify({ agent: 'conductor', autoMemoryEnabled: true }, null, 2) + '\n');
+    r = runSyncCli(dir);
+    assert.match(r.stdout, /^auto-memory off: kept\b/m);
+    assert.match(r.stdout + r.stderr, /^NOTICE: autoMemoryEnabled is true in .*left as a deliberate choice/m);
+    assert.equal(r.status, 0, 'an explicit true is a notice, never a refusal — it must not fail /sterling:update');
+    assert.equal(readSettings(dir).autoMemoryEnabled, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // config_drift through the CLI (decision 256d1059): a sparse project config that
 // bumps one model (other keys filled from the zod defaults, as install-agents
@@ -1378,6 +1544,21 @@ test('describeConfigDrift: a model-only drift keeps naming installed and configu
 });
 
 const INSTALL_CLI = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'install-agents.mjs');
+
+test('install-agents CLI: an explicit autoMemoryEnabled true prints the notice, is left alone, and exits 0', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(dir), JSON.stringify({ autoMemoryEnabled: true }, null, 2) + '\n');
+    const r = spawnSync(process.execPath, [INSTALL_CLI, '--target', dir], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^auto-memory off: kept\b/m);
+    assert.match(r.stdout + r.stderr, /^NOTICE: autoMemoryEnabled is true in /m);
+    assert.deepEqual(readSettings(dir), { autoMemoryEnabled: true, agent: 'conductor' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('install-agents + sync-agents CLI: extras render into the real researcher (not scout), an extras-only change reports config_drift (exit 0, nothing written); extras on the inherit-all implementor or the conductor fail the install', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-extras-cli-'));

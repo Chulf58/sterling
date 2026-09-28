@@ -870,19 +870,17 @@ export function checkRegistryConsistency({ templatesDir, registryPath, scanDirs 
 // half-installed state (P5). Preserves every other settings key; a settings file that
 // already names a DIFFERENT agent is a deliberate project choice, refused loudly rather
 // than silently overwritten.
+// The same write also ensures "autoMemoryEnabled": false (user-ruled 2026-09-28, "Write
+// it into settings": Sterling keeps knowledge in the store and CLAUDE.md, never in
+// Claude Code's auto-memory, which is on by default). It is DECOUPLED from the "agent"
+// outcome — written whether activation is written, already, refused or skipped; only a
+// malformed or non-object settings.json is never touched. An explicit non-false value is
+// never overwritten, but it is a loud NOTICE (`autoMemoryNotice`), not a refusal: a
+// refusal would make every /sterling:update on the machine exit 2 for one project's
+// deliberate choice. null counts as absent.
 const CONDUCTOR_ACTIVATION_SUCCESS_STATUSES = new Set(['installed', 'up_to_date', 'refreshed', 'header_repaired']);
 
 export function ensureConductorActivation(targetDir, agentResults) {
-  const conductorResult = (agentResults ?? []).find((r) => r.name === 'conductor');
-  if (!conductorResult || !CONDUCTOR_ACTIVATION_SUCCESS_STATUSES.has(conductorResult.status)) {
-    return {
-      activation: 'skipped',
-      reason: conductorResult
-        ? `conductor's own install/sync result was '${conductorResult.status}', not installed/up_to_date/refreshed/header_repaired`
-        : "no 'conductor' entry in the agent install/sync report",
-    };
-  }
-
   const settingsPath = join(targetDir, '.claude', 'settings.json');
   let parsed;
   // Preserved on write, never assumed: a hand-authored settings.json may carry a
@@ -899,29 +897,54 @@ export function ensureConductorActivation(targetDir, agentResults) {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      const reason = `${settingsPath} is not valid JSON — refusing to touch it; add "agent": "conductor" by hand`;
+      const reason = `${settingsPath} is not valid JSON — refusing to touch it; add "agent": "conductor" and "autoMemoryEnabled": false by hand`;
       console.error(`REFUSED: ${reason}`);
-      return { activation: 'refused', reason };
+      return { activation: 'refused', reason, autoMemory: 'skipped' };
     }
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      const reason = `${settingsPath} does not contain a JSON object — refusing to touch it; add "agent": "conductor" by hand`;
+      const reason = `${settingsPath} does not contain a JSON object — refusing to touch it; add "agent": "conductor" and "autoMemoryEnabled": false by hand`;
       console.error(`REFUSED: ${reason}`);
-      return { activation: 'refused', reason };
+      return { activation: 'refused', reason, autoMemory: 'skipped' };
     }
   } else {
     parsed = {};
   }
 
-  if ('agent' in parsed) {
-    if (parsed.agent === 'conductor') {
-      return { activation: 'already' };
-    }
-    const reason = `${settingsPath} already sets "agent": "${parsed.agent}" — refusing to overwrite a deliberate choice`;
-    console.error(`REFUSED: ${reason}`);
-    return { activation: 'refused', reason };
+  const result = {};
+  const conductorResult = (agentResults ?? []).find((r) => r.name === 'conductor');
+  if (!conductorResult || !CONDUCTOR_ACTIVATION_SUCCESS_STATUSES.has(conductorResult.status)) {
+    result.activation = 'skipped';
+    result.reason = conductorResult
+      ? `conductor's own install/sync result was '${conductorResult.status}', not installed/up_to_date/refreshed/header_repaired`
+      : "no 'conductor' entry in the agent install/sync report";
+  } else if (!('agent' in parsed)) {
+    result.activation = 'written';
+  } else if (parsed.agent === 'conductor') {
+    result.activation = 'already';
+  } else {
+    result.activation = 'refused';
+    result.reason = `${settingsPath} already sets "agent": "${parsed.agent}" — refusing to overwrite a deliberate choice`;
+    console.error(`REFUSED: ${result.reason}`);
   }
 
-  parsed.agent = 'conductor';
+  const memory = parsed.autoMemoryEnabled;
+  if (memory === undefined || memory === null) {
+    result.autoMemory = 'written';
+  } else if (memory === false) {
+    result.autoMemory = 'already';
+  } else if (memory === true) {
+    result.autoMemory = 'kept';
+    result.autoMemoryNotice = `autoMemoryEnabled is true in ${settingsPath}: left as a deliberate choice; Sterling projects run with auto-memory off (set it to false to comply)`;
+  } else {
+    result.autoMemory = 'wrong_type';
+    result.autoMemoryNotice = `autoMemoryEnabled is ${JSON.stringify(memory)} in ${settingsPath}, not a boolean: left untouched; Sterling projects run with auto-memory off (set it to boolean false to comply)`;
+  }
+  if (result.autoMemoryNotice) console.error(`NOTICE: ${result.autoMemoryNotice}`);
+
+  if (result.activation !== 'written' && result.autoMemory !== 'written') return result;
+
+  if (result.activation === 'written') parsed.agent = 'conductor';
+  if (result.autoMemory === 'written') parsed.autoMemoryEnabled = false;
   mkdirSync(join(targetDir, '.claude'), { recursive: true });
   const tmp = `${settingsPath}.tmp-${randomUUID()}`;
   let body = JSON.stringify(parsed, null, 2);
@@ -929,5 +952,6 @@ export function ensureConductorActivation(targetDir, agentResults) {
   if (trailingNewline) body += eol;
   writeFileSync(tmp, body);
   renameSync(tmp, settingsPath);
-  return { activation: 'written', path: settingsPath };
+  result.path = settingsPath;
+  return result;
 }

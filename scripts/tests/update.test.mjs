@@ -403,6 +403,30 @@ test('fan-out: a config_drift line is logged loudly, never counted as a change, 
   }
 });
 
+// The auto-memory NOTICE (explicit non-false autoMemoryEnabled, kept, exit 0) must reach
+// the /sterling:update log: its stdout status line is hyphenated, so the agent-status
+// filter never saw it and the project printed "up to date". Relayed from stdout only
+// (never also from stderr's NOTICE line), so it prints once.
+test('fan-out: an auto-memory kept/wrong_type notice is relayed verbatim once, exit 0, not a change', async () => {
+  const cwd = scratchCwd();
+  try {
+    const kept = 'auto-memory off: kept (autoMemoryEnabled is true in /tmp/dome/.claude/settings.json: left as a deliberate choice; Sterling projects run with auto-memory off (set it to false to comply))';
+    const wrong = 'auto-memory off: wrong_type (autoMemoryEnabled is "false" in /tmp/rome/.claude/settings.json, not a boolean: left untouched; Sterling projects run with auto-memory off (set it to boolean false to comply))';
+    for (const line of [kept, wrong]) {
+      const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStdout: `up_to_date: scout\nconductor activation: already\n${line}\n` });
+      const lines = [];
+      const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: '/tmp/dome' }], opts: {} });
+      assert.equal(report.exit, 0, 'a notice never fails the update');
+      assert.equal(report.projects[0].changed, 0);
+      const log = lines.join('\n');
+      assert.equal(log.split(line).length - 1, 1, `the notice is relayed verbatim exactly once:\n${log}`);
+      assert.ok(log.includes(`⚠ ${line}`), `relayed with the warning mark:\n${log}`);
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 // THE BOOTSTRAP DEFECT, found by running the real CLI against a fresh clone:
 // the workspace packages are gitignored, so on a first update NOTHING is built —
 // and the CLI needs @sterling/store to read the project registry. Reading it at
