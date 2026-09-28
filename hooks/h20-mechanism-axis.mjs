@@ -8583,7 +8583,9 @@ function main(input2) {
     if (!scored.length) return finish();
     const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
     const guard = readGuard(gPath);
-    const fresh = scored.filter((x) => !isKnownDelivered(guard, x.record));
+    const fresh = scored.filter(
+      (x) => x.record.type === "anti_pattern" && !isQuestion ? !isSubstanceDelivered(guard, x.record) : !isKnownDelivered(guard, x.record)
+    );
     if (!fresh.length) return finish();
     const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
     const decisions = fresh.filter((x) => x.record.type === "decision");

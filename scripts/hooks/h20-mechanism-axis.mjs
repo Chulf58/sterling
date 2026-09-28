@@ -73,6 +73,7 @@ import {
   hasRecordCentralityHit,
   recordCentralityHits,
   isKnownDelivered,
+  isSubstanceDelivered,
   markSubstanceDelivered,
   markDiscoveryDelivered,
   hazardParts,
@@ -437,7 +438,25 @@ function main(input) {
     // is noise this stage need not risk (decision 92088a62's split still
     // holds: an owner shown here as a mere article POINTER is untouched by
     // this check's effect on H19, which guards SUBSTANCE independently).
-    const fresh = scored.filter((x) => !isKnownDelivered(guard, x.record));
+    //
+    // EXCEPTION (fix round on decision 6300c1e8, board review of 9b32948): a
+    // hazard is no longer ALWAYS substance here — on the question surface it
+    // renders as a one-line pointer and is marked DISCOVERY only (hazardParts'
+    // 'question' mode). `isKnownDelivered` treats that discovery mark as
+    // "already shown", so a later dispatch/consult in the SAME session would
+    // drop the hazard from `fresh` before it ever got the chance to render
+    // whole — silently violating 301d8a0a's "dispatch keeps hazards whole"
+    // with no trace that the hazard was never actually shown whole. An
+    // anti_pattern candidate on the non-question surface is therefore judged
+    // by `isSubstanceDelivered` alone: only a WHOLE prior showing suppresses
+    // it. Every other candidate, and every hazard ON the question surface
+    // itself (where discovery IS the mark that surface earns), still uses the
+    // conservative `isKnownDelivered`.
+    const fresh = scored.filter((x) =>
+      x.record.type === 'anti_pattern' && !isQuestion
+        ? !isSubstanceDelivered(guard, x.record)
+        : !isKnownDelivered(guard, x.record)
+    );
     if (!fresh.length) return finish();
 
     // NOT sliced to HAZARD_CAP here (fix-round MEDIUM 5): `hazardParts` below
