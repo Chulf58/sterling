@@ -73,6 +73,7 @@ import {
   hasRecordCentralityHit,
   recordCentralityHits,
   isKnownDelivered,
+  isSubstanceDelivered,
   markSubstanceDelivered,
   markDiscoveryDelivered,
   hazardParts,
@@ -437,7 +438,25 @@ function main(input) {
     // is noise this stage need not risk (decision 92088a62's split still
     // holds: an owner shown here as a mere article POINTER is untouched by
     // this check's effect on H19, which guards SUBSTANCE independently).
-    const fresh = scored.filter((x) => !isKnownDelivered(guard, x.record));
+    //
+    // EXCEPTION (fix round on decision 6300c1e8, board review of 9b32948): a
+    // hazard is no longer ALWAYS substance here — on the question surface it
+    // renders as a one-line pointer and is marked DISCOVERY only (hazardParts'
+    // 'question' mode). `isKnownDelivered` treats that discovery mark as
+    // "already shown", so a later dispatch/consult in the SAME session would
+    // drop the hazard from `fresh` before it ever got the chance to render
+    // whole — silently violating 301d8a0a's "dispatch keeps hazards whole"
+    // with no trace that the hazard was never actually shown whole. An
+    // anti_pattern candidate on the non-question surface is therefore judged
+    // by `isSubstanceDelivered` alone: only a WHOLE prior showing suppresses
+    // it. Every other candidate, and every hazard ON the question surface
+    // itself (where discovery IS the mark that surface earns), still uses the
+    // conservative `isKnownDelivered`.
+    const fresh = scored.filter((x) =>
+      x.record.type === 'anti_pattern' && !isQuestion
+        ? !isSubstanceDelivered(guard, x.record)
+        : !isKnownDelivered(guard, x.record)
+    );
     if (!fresh.length) return finish();
 
     // NOT sliced to HAZARD_CAP here (fix-round MEDIUM 5): `hazardParts` below
@@ -554,15 +573,22 @@ function main(input) {
       return `${head} — REFUTED TRAIL${q} — rejected: ${clip(r.rejected_answer, 100)}`;
     };
     const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
-    // Hazards render WHOLE here too (they always have, `renderHazards` at
-    // MAX_SAFE_INTEGER) — a whole hazard IS substance, on every surface that
-    // renders one (decision 92088a62 item 4). Decisions stay pointer-only —
-    // discovery.
+    // Hazards render WHOLE on the dispatch/consult surface (they always have,
+    // `renderHazards` at MAX_SAFE_INTEGER) — a whole hazard IS substance there
+    // (decision 92088a62 item 4). On the AskUserQuestion surface only, they
+    // render as ONE-LINE POINTERS (decision question-surface-gets-hazards-
+    // as-pointers, 6300c1e8 — the second narrowing of 301d8a0a's hazards-whole
+    // rule, after 21e3637e's read-only-lane pointer): no edit happens while
+    // the user answers a question, so the whole right-way text is not needed
+    // there. `hazardParts`' 'question' mode is the SAME cap-and-disclose
+    // renderer as 'whole'/'pointer' mode, never a second one built here.
+    // Decisions stay pointer-only on both surfaces — discovery.
     const hazardBlocks = [
       ...hazardParts(hazards.map((x) => x.record), {
         remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
         // Matched on the prompt's SUBJECT, not a file path (the H19 label).
         matchLabel: 'for this subject',
+        mode: isQuestion ? 'question' : 'whole',
       }),
     ];
     // The question surface keeps the part's identities and disclosure (the SAME

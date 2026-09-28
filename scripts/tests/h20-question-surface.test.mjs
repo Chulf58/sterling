@@ -21,8 +21,11 @@ const HOOKS = join(root, 'scripts', 'hooks');
 const NOW = '2026-09-28T12:00:00.000Z';
 
 let SterlingStore;
+let guardPath;
+let readGuard;
 before(async () => {
   ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+  ({ guardPath, readGuard } = await import(pathToFileURL(join(HOOKS, 'lib', 'delivery.mjs')).href));
 });
 
 function runHook(input, cwd) {
@@ -75,6 +78,21 @@ function finding(question, slug) {
   };
 }
 
+function antiPattern(title, trigger, slug, paths = []) {
+  return {
+    ...envelope('anti_pattern'),
+    ...(slug ? { slug } : {}),
+    title,
+    trigger,
+    guidance: 'guidance',
+    wrong_way: 'wrong way',
+    right_way: 'right way text the question surface must never inline',
+    source_evidence: 'evidence',
+    basis: 'codebase',
+    file_keys: paths,
+  };
+}
+
 function makeProject() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-h20-question-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
@@ -108,6 +126,10 @@ const OPTIONS = [
 ];
 
 const DISPATCH_WORDING = /RE-DERIVE|fanning out|fan-out|about to dispatch|before the brief goes out/;
+
+const HAZARD_TITLE = 'Breach countdown widget re-triggers a HUD timer reload mid-breach';
+const HAZARD_TRIGGER =
+  'Any breach countdown widget that shows countdown seconds while the HUD timer subsystem reloads during a breach — the reload restarts the seconds from zero.';
 
 function ctxOf(r) {
   assert.equal(r.code, 0, `never blocks (AC7); stderr: ${r.stderr}`);
@@ -172,6 +194,84 @@ test('question surface: a prior answer renders as ONE line, name first then (id8
   }
 });
 
+test('question surface: a matching hazard renders as ONE line, name first then (id8), with HAZARD: and the clipped trigger', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const ap = store.create(antiPattern(HAZARD_TITLE, HAZARD_TRIGGER, 'breach-countdown-hud-reload'));
+    const ctx = ctxOf(runHook(askQuestion(dir, QUESTION, OPTIONS), dir));
+    const lines = ctx.split('\n').filter((l) => l.includes(ap.id.slice(0, 8)));
+    assert.equal(lines.length, 1, `the hazard occupies exactly one line:\n${ctx}`);
+    assert.match(
+      lines[0],
+      new RegExp(`^\\s+→ breach-countdown-hud-reload \\(${ap.id.slice(0, 8)}\\) — HAZARD: `),
+      'name first, then (id8), then HAZARD:'
+    );
+    assert.ok(!ctx.includes(ap.id), 'the full uuid is not printed — the id8 beside the name is the pointer');
+    assert.doesNotMatch(ctx, /RIGHT WAY:/, 'the right-way body is never inlined on the question surface');
+    assert.doesNotMatch(ctx, /right way text the question surface must never inline/, 'the right_way field itself is never inlined');
+    assert.doesNotMatch(ctx, /⚠ ANTI-PATTERN \[/, 'the whole-hazard header form is not used here');
+    assert.match(lines[0], /HAZARD: Any breach countdown widget that shows countdown seconds/, 'the clipped trigger rides the line');
+  } finally {
+    cleanup();
+  }
+});
+
+test('question surface: a hazard with no slug is named by its title', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const ap = store.create(antiPattern(HAZARD_TITLE, HAZARD_TRIGGER));
+    const ctx = ctxOf(runHook(askQuestion(dir, QUESTION, OPTIONS), dir));
+    assert.match(ctx, new RegExp(`→ ${HAZARD_TITLE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(${ap.id.slice(0, 8)}\\) — HAZARD: `));
+  } finally {
+    cleanup();
+  }
+});
+
+test('same-session guard: a hazard shown as a question pointer must still render WHOLE on a later dispatch (decision 6300c1e8)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(antiPattern(HAZARD_TITLE, HAZARD_TRIGGER, 'breach-countdown-hud-reload'));
+    // First: AskUserQuestion — the hazard renders as a one-line pointer, which
+    // marks it DISCOVERY only (never substance — it was never shown whole).
+    const first = ctxOf(runHook(askQuestion(dir, QUESTION, OPTIONS), dir));
+    assert.match(first, /HAZARD: Any breach countdown widget that shows countdown seconds/, 'the pointer rendered on the question surface');
+    // Then: a Task dispatch on the SAME subject, same session (shared guard).
+    // A discovery mark must never suppress dispatch's own WHOLE rendering —
+    // that would violate 301d8a0a's "dispatch keeps hazards whole" via the
+    // pre-filter alone, with no record of it ever having been shown whole.
+    const second = runHook(
+      dispatch(dir, 'Investigate: should the breach countdown widget show countdown seconds when the HUD timer reloads during a breach?'),
+      dir
+    );
+    assert.equal(second.code, 0, 'never blocks (AC7)');
+    assert.notEqual(second.stdout, '', 'the hazard must still be delivered on this later dispatch, not silently dropped by the pre-filter');
+    const ctx2 = JSON.parse(second.stdout).hookSpecificOutput.additionalContext;
+    assert.match(
+      ctx2,
+      /⚠ ANTI-PATTERN \[WARN\] for this subject — 'Breach countdown widget re-triggers a HUD timer reload mid-breach'/,
+      'the hazard renders WHOLE on dispatch, even though it was already shown as a question pointer'
+    );
+    assert.match(ctx2, /TRIGGER: Any breach countdown widget that shows countdown seconds/);
+    assert.match(ctx2, /RIGHT WAY: right way text the question surface must never inline/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('same-session guard: after the question surface, the hazard sits in guard.discovery, never guard.substance', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const ap = store.create(antiPattern(HAZARD_TITLE, HAZARD_TRIGGER, 'breach-countdown-hud-reload'));
+    ctxOf(runHook(askQuestion(dir, QUESTION, OPTIONS), dir));
+    const gPath = guardPath(dir, undefined, 's1');
+    const guard = readGuard(gPath);
+    assert.ok(guard.discovery.some((e) => e.id === ap.id), 'the question-surface pointer marks discovery');
+    assert.ok(!guard.substance.some((e) => e.id === ap.id), 'but never substance — a pointer is not the whole hazard');
+  } finally {
+    cleanup();
+  }
+});
+
 test('question surface: the post-answer audit role is kept', () => {
   const { dir, store, cleanup } = makeProject();
   try {
@@ -187,11 +287,12 @@ test('question surface: the post-answer audit role is kept', () => {
   }
 });
 
-test('dispatch surface is unchanged: prior answers keep the RE-DERIVE wording and decisions keep the full pointer', () => {
+test('dispatch surface is unchanged: prior answers keep the RE-DERIVE wording, decisions keep the full pointer, and hazards still render WHOLE', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     const d = store.create(decisionRecord('Breach timing is never shown to the player', DECISION_STATEMENT, 'breach-timing-never-shown'));
     const f = store.create(finding(FINDING_QUESTION, 'breach-countdown-reset-on-reload'));
+    const ap = store.create(antiPattern(HAZARD_TITLE, HAZARD_TRIGGER, 'breach-countdown-hud-reload'));
     const ctx = ctxOf(
       runHook(dispatch(dir, 'Investigate: should the breach countdown widget show countdown seconds when the HUD timer reloads during a breach?'), dir)
     );
@@ -199,6 +300,12 @@ test('dispatch surface is unchanged: prior answers keep the RE-DERIVE wording an
     assert.ok(ctx.includes(`knowledge_get ${f.id}`), 'prior answer keeps the full-id read');
     assert.ok(ctx.includes(`knowledge_get ${d.id}`), 'decision keeps the full-id read');
     assert.match(ctx, /ALREADY REJECTED/);
+    // 301d8a0a still governs the dispatch surface: hazards render WHOLE there,
+    // never as the question surface's one-line pointer.
+    assert.match(ctx, /⚠ ANTI-PATTERN \[WARN\] for this subject — '.*Breach countdown widget re-triggers/);
+    assert.match(ctx, /TRIGGER: Any breach countdown widget that shows countdown seconds/);
+    assert.match(ctx, /RIGHT WAY: right way text the question surface must never inline/);
+    assert.ok(ctx.includes(`knowledge_get ${ap.id}`), 'hazard keeps the full-id read on the dispatch surface');
   } finally {
     cleanup();
   }

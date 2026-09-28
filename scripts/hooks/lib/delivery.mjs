@@ -901,6 +901,7 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
 export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = 'whole' } = {}) {
   const shown = cappedHazards(hazards, cap);
   if (mode === 'pointer') return hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
+  if (mode === 'question') return hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   return blocks.map((text, i) =>
     i < shown.length
@@ -937,6 +938,59 @@ function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, supp
   const lines = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel, pointerOnly: true });
   return [
     { kind: 'hazard', contentClass: 'chrome', text: HAZARD_POINTER_HEADER },
+    ...lines.map((text, i) =>
+      i < shown.length
+        ? {
+            kind: 'hazard', contentClass: 'discovery', identity: shown[i].id, revision: recordRevision(shown[i]), name: shown[i].slug || shown[i].title, text,
+            pointer: hazardOverflowPointer(shown[i], matchLabel),
+          }
+        : { kind: 'hazard', contentClass: 'chrome', text }
+    ),
+  ];
+}
+
+/** Per-hazard line format for the QUESTION surface (decision
+ *  question-surface-gets-hazards-as-pointers, 6300c1e8 — the SECOND narrowing
+ *  of 301d8a0a's hazards-whole rule, after 21e3637e's read-only-lane
+ *  pointer): `name (id8) — HAZARD: <clipped trigger>`, name first — the SAME
+ *  name-first, id8 convention h20-mechanism-axis.mjs already uses on this
+ *  surface for decisions and prior answers (`pointerHead`; CLAUDE.md: never a
+ *  bare id in front of a human), extended here to hazards. Distinct from
+ *  hazardHeaderLine (21e3637e's read-only-lane pointer, still used by
+ *  `hazardPointerParts` above): that form leads with severity and the full
+ *  'ANTI-PATTERN' framing for a lane about to ACT on the subject by writing;
+ *  this is the quotable, name-first form for a reader auditing an ANSWER,
+ *  never about to edit (the question surface is a POST-ANSWER AUDIT). */
+const HAZARD_QUESTION_TRIGGER_CLIP = 100;
+function hazardQuestionLine(ap) {
+  const name = ap?.slug || ap?.title;
+  return `  → ${clip(name, 80)} (${String(ap?.id).slice(0, 8)}) — HAZARD: ${clip(ap?.trigger, HAZARD_QUESTION_TRIGGER_CLIP)}`;
+}
+
+/** QUESTION MODE of `hazardParts` (decision 6300c1e8) — the THIRD hazard
+ *  rendering shape, sibling to `hazardPointerParts` above: the SAME
+ *  `cappedHazards` selection `hazardParts` uses for whole mode, the SAME
+ *  '+N more' disclosure math, and the SAME per-hazard credit shape (one part
+ *  per shown hazard, `contentClass:'discovery'`, its own `identity`/
+ *  `revision`/`name` — never one part carrying a bundled array, so the
+ *  one-identity-list-for-credit-and-disclosure anti-pattern (1c22149f) does
+ *  not apply: each pointer already IS its own part, the same shape
+ *  `hazardPointerParts` uses). Differs from `hazardPointerParts` only in the
+ *  header and the per-record line (`hazardQuestionLine` vs
+ *  `hazardHeaderLine`) — no second cap-and-disclose implementation. */
+function hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel = 'for this path' }) {
+  if (!shown.length) return [];
+  const fullTotal = total ?? hazards.length;
+  const dropped = suppressed ?? hazards.length - shown.length;
+  const lines = shown.map(hazardQuestionLine);
+  if (dropped > 0) {
+    const keys = fileKeys.map((k) => `"${k}"`).join(',');
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
+    lines.push(`  … ${dropped} more hazard(s) NOT shown (cap ${cap}) — ${widen} for the full set`);
+  }
+  const header = `▸ HAZARDS ${matchLabel} (${fullTotal}) — anti-patterns the store already governs; check before treating the answer as settled. One line each; knowledge_get the id for the full trigger and right way.`;
+  return [
+    { kind: 'hazard', contentClass: 'chrome', text: header },
     ...lines.map((text, i) =>
       i < shown.length
         ? {

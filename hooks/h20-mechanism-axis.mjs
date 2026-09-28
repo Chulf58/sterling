@@ -8050,6 +8050,7 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
 function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = "whole" } = {}) {
   const shown = cappedHazards(hazards, cap);
   if (mode === "pointer") return hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
+  if (mode === "question") return hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   return blocks.map(
     (text, i) => i < shown.length ? {
@@ -8074,6 +8075,37 @@ function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, supp
   const lines = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel, pointerOnly: true });
   return [
     { kind: "hazard", contentClass: "chrome", text: HAZARD_POINTER_HEADER },
+    ...lines.map(
+      (text, i) => i < shown.length ? {
+        kind: "hazard",
+        contentClass: "discovery",
+        identity: shown[i].id,
+        revision: recordRevision(shown[i]),
+        name: shown[i].slug || shown[i].title,
+        text,
+        pointer: hazardOverflowPointer(shown[i], matchLabel)
+      } : { kind: "hazard", contentClass: "chrome", text }
+    )
+  ];
+}
+var HAZARD_QUESTION_TRIGGER_CLIP = 100;
+function hazardQuestionLine(ap) {
+  const name = ap?.slug || ap?.title;
+  return `  \u2192 ${clip(name, 80)} (${String(ap?.id).slice(0, 8)}) \u2014 HAZARD: ${clip(ap?.trigger, HAZARD_QUESTION_TRIGGER_CLIP)}`;
+}
+function hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel = "for this path" }) {
+  if (!shown.length) return [];
+  const fullTotal = total ?? hazards.length;
+  const dropped = suppressed ?? hazards.length - shown.length;
+  const lines = shown.map(hazardQuestionLine);
+  if (dropped > 0) {
+    const keys = fileKeys.map((k) => `"${k}"`).join(",");
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
+    lines.push(`  \u2026 ${dropped} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
+  }
+  const header = `\u25B8 HAZARDS ${matchLabel} (${fullTotal}) \u2014 anti-patterns the store already governs; check before treating the answer as settled. One line each; knowledge_get the id for the full trigger and right way.`;
+  return [
+    { kind: "hazard", contentClass: "chrome", text: header },
     ...lines.map(
       (text, i) => i < shown.length ? {
         kind: "hazard",
@@ -8551,7 +8583,9 @@ function main(input2) {
     if (!scored.length) return finish();
     const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
     const guard = readGuard(gPath);
-    const fresh = scored.filter((x) => !isKnownDelivered(guard, x.record));
+    const fresh = scored.filter(
+      (x) => x.record.type === "anti_pattern" && !isQuestion ? !isSubstanceDelivered(guard, x.record) : !isKnownDelivered(guard, x.record)
+    );
     if (!fresh.length) return finish();
     const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
     const decisions = fresh.filter((x) => x.record.type === "decision");
@@ -8599,7 +8633,8 @@ function main(input2) {
       ...hazardParts(hazards.map((x) => x.record), {
         remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
         // Matched on the prompt's SUBJECT, not a file path (the H19 label).
-        matchLabel: "for this subject"
+        matchLabel: "for this subject",
+        mode: isQuestion ? "question" : "whole"
       })
     ];
     const decisionBlocks = [
