@@ -674,6 +674,33 @@ test('individually regenerable: deleted artifacts are recreated by a flagless re
   }
 });
 
+// Decision gap-hunt-2026-09-28-rulings item (12): keys the schema no longer
+// defines are silently ignored, so a conductor can write to a dead key with no
+// warning (measured: Dome Farmer's models.coder). A re-run NAMES each by path,
+// with the known rename, and never deletes one.
+test('a re-run lists the config keys Sterling no longer reads, nested ones by path with their renames, and deletes none', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    const fresh = init(dir);
+    assert.equal(fresh.code, 0, fresh.stderr);
+    assert.doesNotMatch(fresh.stdout, /no longer reads/, 'control: a config init wrote itself carries no dead key');
+    const cfgPath = join(dir, '.sterling', 'config.json');
+    const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+    cfg.caps = { inner_loop_n: 3 };
+    cfg.models.coder = { model: 'claude-sonnet-5-5', effort: 'medium' };
+    cfg.models.explorer = { model: 'claude-sonnet-5-5', effort: 'low' };
+    writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+    const before = readFileSync(cfgPath, 'utf8');
+    const rerun = init(dir);
+    assert.equal(rerun.code, 0, rerun.stderr);
+    assert.match(rerun.stdout, /note: \.sterling\/config\.json carries 3 key\(s\) Sterling no longer reads: models\.coder \(renamed to models\.implementor\), models\.explorer \(renamed to models\.scout\), caps — /);
+    assert.equal(readFileSync(cfgPath, 'utf8'), before, 'disclosure only: no key is deleted and the file is not rewritten');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
 test('contradicting flags on a re-run are reported, never applied; consuming .mcp.json is left to the plugin (no sterling added; a stale entry is removed, foreign servers kept)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {

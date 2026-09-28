@@ -49,8 +49,8 @@ export {
 export type { RecordType, RecordTypeEntry, DurableRecord, FieldShape } from './records.js';
 export { sessionEventSchema, NO_CAPTURE_LANES, noCaptureLaneSchema } from './transient.js';
 export type { SessionEvent, NoCaptureLane } from './transient.js';
-export { configSchema, parseConfig, AGENT_TOOL_NAME_RE } from './config.js';
-export type { SterlingConfig } from './config.js';
+export { configSchema, parseConfig, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, unreadConfigKeys, describeUnreadConfigKeys } from './config.js';
+export type { SterlingConfig, UnreadConfigKey } from './config.js';
 export { projectRegistrationSchema } from './registry.js';
 export type { ProjectRegistration } from './registry.js';
 export { BUILD_ID_FILE, runtimeMarkerSchema, buildIdPath, runtimeMarkerPath, stalenessVerdict } from './staleness.js';

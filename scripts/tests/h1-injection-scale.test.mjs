@@ -341,8 +341,30 @@ test('CONDUCTOR ACTIVE: settings "agent": "conductor" AND the installed file bot
   try {
     writeSettings(dir, { agent: 'conductor', other_key: 'preserved elsewhere, not H1\'s concern' });
     writeConductorAgentFile(dir);
-    const ctx = additionalContext(h1(dir, 'startup'));
-    assert.doesNotMatch(ctx, /CONDUCTOR NOT ACTIVE/);
+    const r = h1(dir, 'startup');
+    assert.doesNotMatch(additionalContext(r), /CONDUCTOR NOT ACTIVE/);
+    assert.doesNotMatch(r.out?.systemMessage ?? '', /CONDUCTOR NOT ACTIVE/, 'nor in the user-visible banner');
+  } finally {
+    cleanup();
+  }
+});
+
+// Decision gap-hunt-2026-09-28-rulings item (3): the diagnostic reached only the
+// model's additionalContext, so the HUMAN never saw that the session was running
+// without the conductor. It now leads the user-visible systemMessage as well,
+// carrying the same reason and remedy.
+test('CONDUCTOR NOT ACTIVE is shown to the user in systemMessage as well, with the reason and the remedy', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeSettings(dir, { agent: 'conductor' });
+    const r = h1(dir, 'startup');
+    assert.equal(r.code, 0, r.stderr);
+    const msg = r.out?.systemMessage ?? '';
+    assert.match(msg, /CONDUCTOR NOT ACTIVE: \.claude\/agents\/conductor\.md missing/);
+    assert.match(msg, /sync-agents\.mjs --target/);
+    assert.match(msg, /EXIT AND RELAUNCH/);
+    assert.match(msg, /maintenance items? pending$/, 'the board counts still close the banner');
+    assert.match(additionalContext(r), /CONDUCTOR NOT ACTIVE/, 'and the model still sees it');
   } finally {
     cleanup();
   }

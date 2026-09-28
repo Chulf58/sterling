@@ -23,10 +23,11 @@
 //
 // Exit codes: 0 = updated or already current · 1 = a step failed · 2 = refused
 // (nothing mutated), a per-project refusal, or an unreadable project registry.
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runUpdate } from './lib/update.mjs';
+import { runUpdate, reexecArgs, UPDATE_REEXEC_ENV } from './lib/update.mjs';
 
 const argOf = (name) => {
   const i = process.argv.indexOf(name);
@@ -81,5 +82,19 @@ async function loadProjects() {
   }
 }
 
-const report = await runUpdate({ cwd: target, projects: loadProjects, opts });
+// RE-EXEC GUARD (decision gap-hunt-2026-09-28-rulings item 9; see
+// UPDATE_REEXEC_ENV in lib/update.mjs): the first run hands off to the NEW
+// updater after a fast-forward; the child carries the env flag, so it builds no
+// hook and can never hand off again. Direct node spawn with inherited stdio:
+// process.execPath needs no shell or PATH lookup, and the child's output is the
+// user's output. runUpdate turns a spawn error or a signal into a loud exit 1.
+const reexec = process.env[UPDATE_REEXEC_ENV] === '1'
+  ? null
+  : (script) => spawnSync(process.execPath, [script, ...reexecArgs(process.argv.slice(2))], {
+      cwd: target,
+      stdio: 'inherit',
+      env: { ...process.env, [UPDATE_REEXEC_ENV]: '1' },
+    });
+
+const report = await runUpdate({ cwd: target, projects: loadProjects, opts, reexec });
 process.exit(report.exit);

@@ -47,6 +47,10 @@ const successPredicateSchema = z
 // render step (not in the schema), because the rendered value lands in frontmatter.
 export const AGENT_TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_.-]*\*?$/;
 
+// See undeclared_source_exclude_globs below. Frozen copies are handed out, so a
+// caller can never mutate the shared default.
+export const DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS: readonly string[] = Object.freeze(['**/*.sh']);
+
 export const configSchema = z.object({
   toolchains: z
     .array(
@@ -98,7 +102,14 @@ export const configSchema = z.object({
   // classifyCoverage's excludeGlobs parameter in
   // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
   // toolchain path_glob).
-  undeclared_source_exclude_globs: z.array(z.string()).default([]),
+  // DEFAULT ['**/*.sh'] (decision gap-hunt-2026-09-28-rulings item 6): shell
+  // scripts are launcher and console glue, never a toolchain's source, and
+  // flagging them was banner noise answered the same way every session. The
+  // default lives in THREE places that must agree: here, templates/default-
+  // config.json (anti-pattern 85d15143), and the raw-config ladder in
+  // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
+  // An explicit [] still opts back in.
+  undeclared_source_exclude_globs: z.array(z.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
   // Attestation disclosure (decision attestation-staleness-disclosure-only-
   // never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
   // POSIX globs whose touched paths get a comparable-human-record rollup at
@@ -461,4 +472,69 @@ export type SterlingConfig = z.infer<typeof configSchema>;
 
 export function parseConfig(raw: unknown): SterlingConfig {
   return configSchema.parse(raw);
+}
+
+// ── Config keys Sterling no longer reads (decision gap-hunt-2026-09-28-rulings
+//    item 12) ────────────────────────────────────────────────────────────────
+// Every non-strict z.object above STRIPS a key it does not define, silently, so
+// a key left behind by a rename or a deleted mechanism is never read — and a
+// write to it (config_set has no key allowlist) is lost without a word
+// (measured: Dome Farmer's models.coder, 2026-09-28). This walks a RAW config
+// against the schema and names each such key by dotted path. DISCLOSURE ONLY:
+// callers (/sterling:update, /sterling:init) print it and never delete a key.
+// Descends only into schema objects in 'strip' mode: records, arrays,
+// passthrough objects and z.unknown() fields hold data, not schema keys, and a
+// 'strict' object refuses an unknown key at parse time, which is a louder
+// failure than this one.
+
+export interface UnreadConfigKey {
+  path: string;
+  renamed_to?: string;
+}
+
+// Known renames, so the line says where the value now lives. Source: the
+// Slice 5/8 roster rename recorded on `models` above ('coder' -> 'implementor',
+// 'explorer' -> 'scout'; decision sterling-claude-code-scale-down-boundary).
+const CONFIG_KEY_RENAMES: Readonly<Record<string, string>> = {
+  'models.coder': 'models.implementor',
+  'models.explorer': 'models.scout',
+};
+
+function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
+  let s = schema;
+  for (;;) {
+    if (s instanceof z.ZodDefault) s = s._def.innerType;
+    else if (s instanceof z.ZodOptional || s instanceof z.ZodNullable) s = s.unwrap();
+    else if (s instanceof z.ZodEffects) s = s.innerType();
+    else return s;
+  }
+}
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+export function unreadConfigKeys(raw: unknown): UnreadConfigKey[] {
+  const out: UnreadConfigKey[] = [];
+  const walk = (value: unknown, schema: z.ZodTypeAny, prefix: string): void => {
+    const s = unwrapSchema(schema);
+    if (!(s instanceof z.ZodObject) || s._def.unknownKeys !== 'strip' || !isPlainObject(value)) return;
+    const shape = s.shape as Record<string, z.ZodTypeAny>;
+    for (const [key, child] of Object.entries(value)) {
+      const path = prefix ? `${prefix}.${key}` : key;
+      if (!Object.prototype.hasOwnProperty.call(shape, key)) {
+        const renamed = CONFIG_KEY_RENAMES[path];
+        out.push(renamed ? { path, renamed_to: renamed } : { path });
+      } else {
+        walk(child, shape[key], path);
+      }
+    }
+  };
+  walk(raw, configSchema, '');
+  return out;
+}
+
+/** The one rendering both /sterling:update and /sterling:init print after
+ *  "…/.sterling/config.json carries ". */
+export function describeUnreadConfigKeys(keys: readonly UnreadConfigKey[]): string {
+  const names = keys.map((k) => (k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path));
+  return `${keys.length} key(s) Sterling no longer reads: ${names.join(', ')} — left in place and ignored; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }

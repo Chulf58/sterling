@@ -282,6 +282,37 @@ export function currencyLine(c) {
   return `sterling: ${id} on ${c.branch} · ${c.upstream ?? 'no upstream'} · ${gap}`;
 }
 
+// RE-EXEC AFTER THE FAST-FORWARD (decision gap-hunt-2026-09-28-rulings item 9).
+// Everything after the ff-merge used to run in the OLD code this process loaded
+// before the merge, so an upgrading machine needed a second /sterling:update
+// before the new update logic applied. After a successful fast-forward the CLI
+// hands off ONCE to the NEW scripts/update.mjs; the child sees behind 0 with no
+// completion marker at the new head and resumes the full post-merge sequence.
+// The guard is this env flag: the CLI builds no re-exec hook when it is set, so
+// the child can never re-exec again.
+export const UPDATE_REEXEC_ENV = 'STERLING_UPDATE_REEXEC';
+
+/** The child's argv: the parent's own flags, plus --no-fetch (the parent
+ *  already fetched, and the child must not move the target it was handed). */
+export function reexecArgs(argv) {
+  return argv.includes('--no-fetch') ? [...argv] : [...argv, '--no-fetch'];
+}
+
+// PRE-SCALE-DOWN CLAUDE.md (decision gap-hunt-2026-09-28-rulings item 7). The
+// identifiers below name mechanisms the scale-down deleted (decision
+// sterling-claude-code-scale-down-boundary, landed 8df86a6 on 2026-09-19): the
+// run signal/state tools, the review ledger and its trailer, the frozen-test
+// wall. Measured: templates/target-claude-md.md at 8df86a6^ carries run_signal,
+// run_state, Reviewed-By-Agent, review-ledger and frozen-test, and no template
+// since carries any of them. So a project CLAUDE.md that mentions one was
+// rendered before the scale-down and still instructs its session to use tools
+// that no longer exist. /sterling:init migrates it; update only names it.
+export const PRE_SCALE_DOWN_MARKERS = Object.freeze(['run_signal', 'run_state', 'Reviewed-By-Agent', 'review-ledger', 'frozen-test']);
+
+export function preScaleDownMarkers(text) {
+  return PRE_SCALE_DOWN_MARKERS.filter((m) => text.includes(m));
+}
+
 // The on-disk proof that a PREVIOUS run's post-merge sequence (build through
 // agent sync, :495-634) finished IN FULL, not merely that git itself is
 // current. Board 2b37272a claim A: the ff-merge runs BEFORE build/check/test/
@@ -384,7 +415,7 @@ function probeSchemaVersion(dbPath) {
  * so on a fresh clone the fan-out list must be resolved LATE, at its own step,
  * not at startup.
  */
-export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {} }) {
+export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {}, reexec = null }) {
   const git = gitFrom(exec, cwd);
   const nodeBin = opts.nodeBin ?? process.execPath;
   const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null };
@@ -680,6 +711,56 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     }
   };
 
+  // PROJECT HYGIENE DISCLOSURES (decision gap-hunt-2026-09-28-rulings items 7
+  // and 12), on both paths like the coverage report: a CLAUDE.md rendered before
+  // the scale-down, and .sterling/config.json keys Sterling no longer reads
+  // (nested ones by dotted path, e.g. models.coder, with the known renames).
+  // REPORTS ONLY: nothing is rewritten or deleted and report.exit never moves.
+  // The clone's own config is checked too; its CLAUDE.md is tracked source, not
+  // a generated render, so it is not.
+  const reportProjectHygiene = async (list) => {
+    if (opts.projects === false) return;
+    let describe;
+    try {
+      // Dynamic for bootstrap independence (see reportCoverage): by now the
+      // build has run on the full path, and the already-current path had it.
+      const schemas = await import('@sterling/schemas');
+      describe = (raw) => {
+        const keys = schemas.unreadConfigKeys(raw);
+        return keys.length ? schemas.describeUnreadConfigKeys(keys) : null;
+      };
+    } catch (err) {
+      log(`\n⚠ unread-config-key check SKIPPED — @sterling/schemas could not load (nonfatal): ${err?.message ?? err}`);
+    }
+    const lines = [];
+    for (const p of [{ name: 'Sterling clone', repo_path: cwd, clone: true }, ...list]) {
+      if (!p.clone) {
+        const claudePath = join(p.repo_path, 'CLAUDE.md');
+        try {
+          if (existsSync(claudePath)) {
+            const markers = preScaleDownMarkers(readFileSync(claudePath, 'utf8'));
+            if (markers.length) lines.push(`  ⚠ ${p.name}: CLAUDE.md predates the scale-down (mentions ${markers.join(', ')}) — run /sterling:init there (${p.repo_path}) to migrate it`);
+          }
+        } catch (err) {
+          lines.push(`  ⚠ ${p.name}: pre-scale-down CLAUDE.md check skipped — ${claudePath} could not be read: ${err?.message ?? err}`);
+        }
+      }
+      if (!describe) continue;
+      const configPath = join(p.repo_path, '.sterling', 'config.json');
+      if (!existsSync(configPath)) continue;
+      let raw;
+      try {
+        raw = JSON.parse(readFileSync(configPath, 'utf8'));
+      } catch (err) {
+        lines.push(`  ⚠ ${p.name}: unread-config-key check skipped — .sterling/config.json could not be parsed: ${err?.message ?? err}`);
+        continue;
+      }
+      const text = describe(raw);
+      if (text) lines.push(`  ⚠ ${p.name}: .sterling/config.json carries ${text}`);
+    }
+    if (lines.length) log(`\n▸ project hygiene (disclosure only — nothing was changed)\n${lines.join('\n')}`);
+  };
+
   if (before.behind === 0 && !opts.force) {
     const marker = readUpdateMarker(cwd, log);
     const markerSha = marker?.sha ?? null;
@@ -694,6 +775,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // already-current clone with two unregistered projects is the measured
       // 2026-08-28 state exactly — so the report belongs on this path too.
       await reportCoverage(list, registryOk);
+      await reportProjectHygiene(list);
       let failures = 0;
       if (opts.projects === false) {
         log('\n▸ project refresh — SKIPPED (--no-projects)');
@@ -726,6 +808,27 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     // --ff-only is the posture in one flag: if this cannot fast-forward, the
     // pre-flight missed something and git refuses rather than inventing a merge.
     if (!step(`fast-forward ${before.branch} → ${before.upstream} (${before.behind} commit(s))`, 'git', ['merge', '--ff-only', before.upstream]).ok) {
+      return report;
+    }
+    // Hand off to the NEW updater (see UPDATE_REEXEC_ENV). Only after a real
+    // fast-forward: with nothing merged, the code on disk IS the code running.
+    // The child's exit is this update's exit; a child that could not run at
+    // all is a loud failure (P5), never an exit 0.
+    if (reexec) {
+      const script = join(cwd, 'scripts', 'update.mjs');
+      const failed = (why) => {
+        log(`\n✗ RE-EXEC of the updated updater FAILED — ${why}. The fast-forward stands and nothing after it ran; rerun /sterling:update to finish (it resumes from the build step).`);
+        report.exit = 1;
+        return report;
+      };
+      if (!existsSync(script)) return failed(`${script} not found after the fast-forward`);
+      log(`\n▸ re-running the UPDATED updater (${script}) so the rest of this update runs the code just pulled`);
+      const r = reexec(script);
+      report.reexec = { status: r?.status ?? null, signal: r?.signal ?? null };
+      if (r?.error) return failed(`could not start it: ${r.error.message ?? r.error}`);
+      if (r?.signal) return failed(`it was killed by ${r.signal}`);
+      if (typeof r?.status !== 'number') return failed('it returned no exit status');
+      report.exit = r.status;
       return report;
     }
   }
@@ -896,6 +999,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
 
   // Registry coverage — the SAME call the already-current path makes above.
   await reportCoverage(projectList, !registryFailed);
+  await reportProjectHygiene(projectList);
 
   // Read-only: reports AGENTS.md/CLAUDE.md contract drift in sibling projects without
   // touching them (--apply stays a deliberate act — it rewrites seven repos).

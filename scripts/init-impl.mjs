@@ -23,7 +23,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, sta
 import { spawnSync } from 'node:child_process';
 import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseConfig } from '@sterling/schemas';
+import { parseConfig, unreadConfigKeys, describeUnreadConfigKeys } from '@sterling/schemas';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { arg, argAll, hasFlag, fail } from './lib/project.mjs';
 import { backupPathForRuntime } from './lib/wsl-path.mjs';
@@ -203,6 +203,11 @@ if (recorded) {
   if (flagDiffs.length) {
     notes.push(`note: ${flagDiffs.join(', ')} differ(s) from the recorded config — NOT applied; edit .sterling/config.json directly if the change is intended`);
   }
+  // Keys the schema strips on parse are never read (decision
+  // gap-hunt-2026-09-28-rulings item 12). Disclosure only: init never deletes
+  // one — the same rendering /sterling:update prints.
+  const unread = unreadConfigKeys(rawRecorded);
+  if (unread.length) notes.push(`note: .sterling/config.json carries ${describeUnreadConfigKeys(unread)}`);
 }
 
 // the summary's mode line: set (a fresh config took --mode), defaulted (a fresh

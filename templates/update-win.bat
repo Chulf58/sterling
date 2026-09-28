@@ -10,7 +10,7 @@ rem wt.exe by absolute path: the WindowsApps dir is NOT reliably on the PATH a
 rem double-clicked .bat inherits, so a bare `wt.exe` flashes-and-closes.
 rem `bash scripts/...` (not ./scripts/...) so a clone on ext4 without the exec
 rem bit still runs; drvfs clones are executable-by-default either way.
-rem THIS TEMPLATE IS ONLY RENDERED BY A WSL/LINUX HOST. A native-Windows host has
-rem no WSL to shell into and renders templates/update-win-native.bat instead
-rem (same generated filename; see scripts/lib/update-launcher.mjs).
+rem THIS IS THE ONLY UPDATER TEMPLATE: Sterling runs under WSL2 on every
+rem machine, and the native-Windows arm is retired (see
+rem scripts/lib/update-launcher.mjs).
 "%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe" wsl.exe --cd "{{WIN_PLUGIN_DIR}}" -- bash -lic "bash scripts/update-console.sh"
