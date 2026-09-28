@@ -82,6 +82,8 @@ import {
   assembleDelivery,
   resolveTotalCap,
   decisionPointerPart,
+  statusAnnotation,
+  DECISION_STATEMENT_CLIP,
 } from './lib/delivery.mjs';
 
 // Injection ceilings. Deliberately tighter than H19's file-touch payload: a
@@ -502,6 +504,45 @@ function main(input) {
     const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',');
     const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',');
 
+    const clip = (v, n = 160) => {
+      const t = String(v ?? '').replace(/\s+/g, ' ').trim();
+      return t.length <= n ? t : `${t.slice(0, n)}…`;
+    };
+    // QUESTION-SURFACE POINTERS (gap-hunt idea 13, decision
+    // gap-hunt-2026-09-28-rulings). On AskUserQuestion the reader is weighing a
+    // user's answer, not briefing a fan-out: measured 93 injections at a median
+    // 2.8KB carrying the dispatch wording (finding
+    // sterling-gap-hunt-ranked-ideas-september-2026). So prior answers and
+    // decisions render ONE line each, `name (id8)` name first — the form a
+    // record takes in front of a human (CLAUDE.md), and one the conductor can
+    // quote to the user as-is when it re-affirms. The id8 resolves in
+    // knowledge_get. Hazards and article pointers are unchanged here.
+    const pointerHead = (r, name) => `  → ${clip(name, 80)} (${String(r.id).slice(0, 8)})`;
+    const questionDecisionText = (records, remedy) => {
+      const shown = records.slice(0, MAX_DECISIONS);
+      return [
+        `▸ DECISIONS for this subject (${records.length}) — one may already settle the question you just put; the user's pick must not silently contradict it. One line each, knowledge_get the id for the full ruling:`,
+        ...shown.map(
+          (d) =>
+            `${pointerHead(d, d.slug || d.title || d.statement)} — ${d.authority ? `[${d.authority}] ` : ''}${clip(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}`
+        ),
+        ...(records.length > shown.length ? [`  … ${records.length - shown.length} more NOT shown (cap ${MAX_DECISIONS}) — ${remedy} for the full set`] : []),
+      ].join('\n');
+    };
+    const questionPriorLine = (r) => {
+      const stale = r.status === 'flagged_stale' ? ', FLAGGED STALE — re-verify before trusting' : '';
+      // A slug names the record and the question follows; without one the
+      // clipped question IS the name, so it is not repeated.
+      const head = pointerHead(r, r.slug || r.question);
+      const q = r.slug ? `: ${clip(r.question, 120)}` : '';
+      if (r.type === 'research_finding') return `${head} — ANSWERED${q} (captured ${r.capture_date ?? '?'}${stale})`;
+      if (r.type === 'open_question') {
+        return r.resolution_status === 'closed'
+          ? `${head} — ANSWERED (question closed into ${r.closed_into ?? 'an unnamed record'})${q}`
+          : `${head} — ALREADY UNDER INVESTIGATION (open, no answer yet)${q}`;
+      }
+      return `${head} — REFUTED TRAIL${q} — rejected: ${clip(r.rejected_answer, 100)}`;
+    };
     const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
     // Hazards render WHOLE here too (they always have, `renderHazards` at
     // MAX_SAFE_INTEGER) — a whole hazard IS substance, on every surface that
@@ -514,12 +555,17 @@ function main(input) {
         matchLabel: 'for this subject',
       }),
     ];
+    // The question surface keeps the part's identities and disclosure (the SAME
+    // capped slice, anti-pattern one-identity-list-for-credit-and-disclosure…)
+    // and swaps only its TEXT for one-line pointers (see questionDecisionText).
     const decisionBlocks = [
       ...(decisions.length
         ? [
-            decisionPointerPart('(subject match)', decisions.map((x) => x.record), {
-              widen: decisionRemedy, cap: MAX_DECISIONS, remedy: decisionRemedy, matchLabel: 'for this subject',
-            }),
+            ((part) => (isQuestion ? { ...part, text: questionDecisionText(decisions.map((x) => x.record), decisionRemedy) } : part))(
+              decisionPointerPart('(subject match)', decisions.map((x) => x.record), {
+                widen: decisionRemedy, cap: MAX_DECISIONS, remedy: decisionRemedy, matchLabel: 'for this subject',
+              })
+            ),
           ]
         : []),
     ];
@@ -541,17 +587,16 @@ function main(input) {
     // subject, the clocks say how current the answer is, the id is the read. Shown
     // slice only marks delivered (cappedHazards rule).
     const PRIOR_ANSWER_CAP = 3;
-    const clip = (v, n = 160) => {
-      const t = String(v ?? '').replace(/\s+/g, ' ').trim();
-      return t.length <= n ? t : `${t.slice(0, n)}…`;
-    };
     const shownPrior = priorAnswers.slice(0, PRIOR_ANSWER_CAP);
     const priorBlocks = priorAnswers.length
       ? [
           [
-            `▸ PRIOR ANSWERS in the store (${priorAnswers.length}) — this dispatch may be about to RE-DERIVE one of these, or duplicate a question already under investigation. knowledge_get before fanning out:`,
+            isQuestion
+              ? `▸ PRIOR ANSWERS in the store (${priorAnswers.length}) — the question you just put may already be answered, or already under investigation. If one answers it, tell the user before acting on their pick:`
+              : `▸ PRIOR ANSWERS in the store (${priorAnswers.length}) — this dispatch may be about to RE-DERIVE one of these, or duplicate a question already under investigation. knowledge_get before fanning out:`,
             ...shownPrior.map((x) => {
               const r = x.record;
+              if (isQuestion) return questionPriorLine(r);
               if (r.type === 'research_finding') {
                 return `  → ANSWERED: ${clip(r.question)} (source ${r.source_date ?? '?'}, captured ${r.capture_date ?? '?'}${r.status === 'flagged_stale' ? ', FLAGGED STALE — re-verify before trusting' : ''}) · knowledge_get ${r.id}`;
               }
