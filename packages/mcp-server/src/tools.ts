@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, boardDisplayLabel, normalizeRepoPath, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -1326,12 +1326,25 @@ const CONFIG_SET_FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prot
  * `expected_digest` is how a caller detects that instead of silently losing
  * it.
  */
+/**
+ * decision config-set-warns-on-keys-sterling-does-not-read (77ff9aa8,
+ * user-ruled 2026-09-28): names each unread key the WRITTEN path is or sits
+ * under, reusing the schemas package's own dead-key walk (never a
+ * locally-duplicated key list) — "X is not read by Sterling" plus its
+ * rename target when one is known.
+ */
+function unreadKeyWarnings(path: string, keys: readonly UnreadConfigKey[]): string[] {
+  return keys
+    .filter((k) => k.path === path || path.startsWith(`${k.path}.`))
+    .map((k) => (k.renamed_to ? `${k.path} is not read by Sterling (renamed to ${k.renamed_to})` : `${k.path} is not read by Sterling`));
+}
+
 function configSetImpl(
   repoRoot: string | undefined,
   path: string,
   value: unknown,
   expectedDigest: string | undefined
-): { path: string; previous_value: unknown; value: unknown; digest: string } {
+): { path: string; previous_value: unknown; value: unknown; digest: string; warnings?: string[] } {
   if (!repoRoot) {
     throw new Error(`config_set: no project root is known to this server, so .sterling/config.json cannot be resolved.`);
   }
@@ -1541,7 +1554,10 @@ function configSetImpl(
   }
 
   const digest = createHash('sha256').update(serialized).digest('hex');
-  return { path, previous_value: previousValue, value, digest };
+  const warnings = unreadKeyWarnings(path, unreadConfigKeys(mutated));
+  return warnings.length > 0
+    ? { path, previous_value: previousValue, value, digest, warnings }
+    : { path, previous_value: previousValue, value, digest };
 }
 
 export class SterlingTools {
