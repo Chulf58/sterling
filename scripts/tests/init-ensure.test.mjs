@@ -1539,6 +1539,132 @@ test('project mode: work→hobby re-init deletes nothing — every file byte-ide
   }
 });
 
+// /sterling:init asks work-or-hobby on a NEW project (user-stated 2026-09-28: "When a
+// new proj ct is sterling inited, it should ask if it is a work or hobby project") and
+// passes the answer as --mode. The config is written BEFORE the work-only gating step,
+// so a work project gets its OpenCode and handoff files on the very first init.
+const MODE_LINE = (text) => new RegExp(`^mode: ${text}`, 'm');
+
+test('--mode work on a new init records work and writes the work-only files on that first run', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-work-'));
+  try {
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    const r = init(dir, [...FRESH_FLAGS, '--mode', 'work']);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.equal(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).mode, 'work');
+    assert.match(r.stdout, MODE_LINE('work \\(set by --mode\\)'));
+    assert.doesNotMatch(r.stdout, HOBBY_ROW);
+    for (const name of ['implementor', 'researcher', 'scout']) assert.ok(existsSync(join(dir, '.opencode', 'agents', `${name}.md`)), `${name}.md written`);
+    assert.ok(existsSync(join(dir, 'architecture.md')));
+    assert.ok(existsSync(join(dir, 'rulings.md')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('--mode hobby on a new init records hobby, says it was set, and writes no work-only files', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-hobby-'));
+  try {
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    const r = init(dir, [...FRESH_FLAGS, '--mode', 'hobby']);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.equal(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).mode, 'hobby');
+    assert.match(r.stdout, MODE_LINE('hobby \\(set by --mode\\)'));
+    assert.match(r.stdout, HOBBY_ROW);
+    assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')));
+    assert.ok(!existsSync(join(dir, 'architecture.md')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('a new init with no --mode records hobby explicitly and prints the defaulted line naming the TUI System tab', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-default-'));
+  try {
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.equal(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).mode, 'hobby');
+    assert.match(r.stdout, MODE_LINE('hobby \\(defaulted — no --mode was given; change it in the TUI System tab\\)'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('an invalid --mode refuses with exit 2 naming the valid set, before anything is written', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-invalid-'));
+  try {
+    for (const bad of ['Work', 'banana', '']) {
+      const r = init(dir, [...FRESH_FLAGS, `--mode=${bad}`]);
+      assert.equal(r.code, 2, `--mode=${bad}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout + r.stderr, /--mode must be 'hobby' or 'work'/);
+      assert.ok(!existsSync(join(dir, '.sterling')), `--mode=${bad}: nothing written`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('an existing config\'s mode is never overwritten by --mode: kept, with a loud notice when the flag differs', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-kept-'));
+  try {
+    assert.equal(init(dir, [...FRESH_FLAGS, '--mode', 'hobby']).code, 0);
+    const configBefore = readFileSync(join(dir, '.sterling', 'config.json'), 'utf8');
+    const differs = init(dir, ['--mode', 'work']);
+    assert.equal(differs.code, 0, differs.stdout + differs.stderr);
+    assert.equal(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'), configBefore, 'config byte-identical');
+    assert.match(differs.stdout, MODE_LINE('hobby \\(kept — the recorded config wins\\)'));
+    assert.match(differs.stdout, /^⚠ --mode work NOT applied: this project's recorded mode is hobby — switch it in the TUI System tab, then rerun init or \/sterling:update$/m);
+    assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')), 'the recorded hobby mode still decides');
+
+    const same = init(dir, ['--mode', 'hobby']);
+    assert.equal(same.code, 0, same.stdout + same.stderr);
+    assert.match(same.stdout, MODE_LINE('hobby \\(kept — the recorded config wins\\)'));
+    assert.doesNotMatch(same.stdout, /NOT applied: this project's recorded mode/);
+
+    const flagless = init(dir);
+    assert.equal(flagless.code, 0, flagless.stdout + flagless.stderr);
+    assert.match(flagless.stdout, MODE_LINE('hobby \\(kept — the recorded config wins\\)'));
+    assert.equal(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'), configBefore, 'config still byte-identical');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('a malformed --mode (given twice, or followed by another flag) refuses with exit 2, never a stack trace', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-malformed-'));
+  try {
+    for (const bad of [['--mode', 'work', '--mode=work'], ['--mode', '--backup-opt-out']]) {
+      const r = init(dir, [...FRESH_FLAGS, ...bad]);
+      assert.equal(r.code, 2, `${bad.join(' ')}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /--mode/);
+      assert.doesNotMatch(r.stderr, /^\s+at /m, 'no stack trace');
+      assert.ok(!existsSync(join(dir, '.sterling')), `${bad.join(' ')}: nothing written`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('an existing config with NO mode key is never given one by --mode: bytes identical, key still absent, notice printed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-flag-absent-'));
+  try {
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    const p = join(dir, '.sterling', 'config.json');
+    const { mode: _dropped, ...withoutMode } = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(p, JSON.stringify(withoutMode, null, 2));
+    const configBefore = readFileSync(p, 'utf8');
+    const r = init(dir, ['--mode', 'work']);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.equal(readFileSync(p, 'utf8'), configBefore, 'config byte-identical');
+    assert.ok(!('mode' in JSON.parse(readFileSync(p, 'utf8'))), 'mode still absent');
+    assert.match(r.stdout, MODE_LINE('hobby \\(kept — the recorded config wins\\)'));
+    assert.match(r.stdout, /^⚠ --mode work NOT applied: this project's recorded mode is hobby — switch it in the TUI System tab, then rerun init or \/sterling:update$/m);
+    assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
 test('OpenCode handoff: a work project\'s init writes committed .opencode/agents/ and the handoff projection; a rerun matches', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-opencode-init-'));
   try {
