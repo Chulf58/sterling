@@ -282,6 +282,48 @@ export function currencyLine(c) {
   return `sterling: ${id} on ${c.branch} · ${c.upstream ?? 'no upstream'} · ${gap}`;
 }
 
+// RE-EXEC AFTER THE FAST-FORWARD (decision gap-hunt-2026-09-28-rulings item 9).
+// Everything after the ff-merge used to run in the OLD code this process loaded
+// before the merge, so an upgrading machine needed a second /sterling:update
+// before the new update logic applied. After a successful fast-forward the CLI
+// hands off ONCE to the NEW scripts/update.mjs; the child sees behind 0 with no
+// completion marker at the new head and resumes the full post-merge sequence.
+// The guard is this env flag: the CLI builds no re-exec hook when it is set, so
+// the child can never re-exec again.
+export const UPDATE_REEXEC_ENV = 'STERLING_UPDATE_REEXEC';
+// The parent's PRE-merge head, handed to the child (review HIGH-1): the child
+// starts after the fast-forward, so its own starting head already equals the
+// new head and could never see what the pull changed (npm ci, the changed-file
+// count). runUpdate takes it as opts.from.
+export const UPDATE_REEXEC_FROM_ENV = 'STERLING_UPDATE_REEXEC_FROM';
+
+/** The child's argv: the parent's own flags, plus --no-fetch (the parent
+ *  already fetched, and the child must not move the target it was handed).
+ *  A --target value is replaced by the parent's RESOLVED absolute target
+ *  (review LOW-1): the child runs with cwd = the target, where a relative
+ *  path would resolve somewhere else. */
+export function reexecArgs(argv, { target }) {
+  const out = [...argv];
+  const i = out.indexOf('--target');
+  if (i !== -1 && i + 1 < out.length) out[i + 1] = target;
+  return out.includes('--no-fetch') ? out : [...out, '--no-fetch'];
+}
+
+// PRE-SCALE-DOWN CLAUDE.md (decision gap-hunt-2026-09-28-rulings item 7). The
+// identifiers below name mechanisms the scale-down deleted (decision
+// sterling-claude-code-scale-down-boundary, landed 8df86a6 on 2026-09-19): the
+// run signal/state tools, the review ledger and its trailer, the frozen-test
+// wall. Measured: templates/target-claude-md.md at 8df86a6^ carries run_signal,
+// run_state, Reviewed-By-Agent, review-ledger and frozen-test, and no template
+// since carries any of them. So a project CLAUDE.md that mentions one was
+// rendered before the scale-down and still instructs its session to use tools
+// that no longer exist. /sterling:init migrates it; update only names it.
+export const PRE_SCALE_DOWN_MARKERS = Object.freeze(['run_signal', 'run_state', 'Reviewed-By-Agent', 'review-ledger', 'frozen-test']);
+
+export function preScaleDownMarkers(text) {
+  return PRE_SCALE_DOWN_MARKERS.filter((m) => text.includes(m));
+}
+
 // The on-disk proof that a PREVIOUS run's post-merge sequence (build through
 // agent sync, :495-634) finished IN FULL, not merely that git itself is
 // current. Board 2b37272a claim A: the ff-merge runs BEFORE build/check/test/
@@ -384,7 +426,7 @@ function probeSchemaVersion(dbPath) {
  * so on a fresh clone the fan-out list must be resolved LATE, at its own step,
  * not at startup.
  */
-export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {} }) {
+export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {}, reexec = null }) {
   const git = gitFrom(exec, cwd);
   const nodeBin = opts.nodeBin ?? process.execPath;
   const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null };
@@ -680,6 +722,56 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     }
   };
 
+  // PROJECT HYGIENE DISCLOSURES (decision gap-hunt-2026-09-28-rulings items 7
+  // and 12), on both paths like the coverage report: a CLAUDE.md rendered before
+  // the scale-down, and .sterling/config.json keys Sterling no longer reads
+  // (nested ones by dotted path, e.g. models.coder, with the known renames).
+  // REPORTS ONLY: nothing is rewritten or deleted and report.exit never moves.
+  // The clone's own config is checked too; its CLAUDE.md is tracked source, not
+  // a generated render, so it is not.
+  const reportProjectHygiene = async (list) => {
+    if (opts.projects === false) return;
+    let describe;
+    try {
+      // Dynamic for bootstrap independence (see reportCoverage): by now the
+      // build has run on the full path, and the already-current path had it.
+      const schemas = await import('@sterling/schemas');
+      describe = (raw) => {
+        const keys = schemas.unreadConfigKeys(raw);
+        return keys.length ? schemas.describeUnreadConfigKeys(keys) : null;
+      };
+    } catch (err) {
+      log(`\n⚠ unread-config-key check SKIPPED — @sterling/schemas could not load (nonfatal): ${err?.message ?? err}`);
+    }
+    const lines = [];
+    for (const p of [{ name: 'Sterling clone', repo_path: cwd, clone: true }, ...list]) {
+      if (!p.clone) {
+        const claudePath = join(p.repo_path, 'CLAUDE.md');
+        try {
+          if (existsSync(claudePath)) {
+            const markers = preScaleDownMarkers(readFileSync(claudePath, 'utf8'));
+            if (markers.length) lines.push(`  ⚠ ${p.name}: CLAUDE.md predates the scale-down (mentions ${markers.join(', ')}) — run /sterling:init there (${p.repo_path}) to migrate it`);
+          }
+        } catch (err) {
+          lines.push(`  ⚠ ${p.name}: pre-scale-down CLAUDE.md check skipped — ${claudePath} could not be read: ${err?.message ?? err}`);
+        }
+      }
+      if (!describe) continue;
+      const configPath = join(p.repo_path, '.sterling', 'config.json');
+      if (!existsSync(configPath)) continue;
+      let raw;
+      try {
+        raw = JSON.parse(readFileSync(configPath, 'utf8'));
+      } catch (err) {
+        lines.push(`  ⚠ ${p.name}: unread-config-key check skipped — .sterling/config.json could not be parsed: ${err?.message ?? err}`);
+        continue;
+      }
+      const text = describe(raw);
+      if (text) lines.push(`  ⚠ ${p.name}: .sterling/config.json carries ${text}`);
+    }
+    if (lines.length) log(`\n▸ project hygiene (disclosure only — nothing was changed)\n${lines.join('\n')}`);
+  };
+
   if (before.behind === 0 && !opts.force) {
     const marker = readUpdateMarker(cwd, log);
     const markerSha = marker?.sha ?? null;
@@ -694,6 +786,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // already-current clone with two unregistered projects is the measured
       // 2026-08-28 state exactly — so the report belongs on this path too.
       await reportCoverage(list, registryOk);
+      await reportProjectHygiene(list);
       let failures = 0;
       if (opts.projects === false) {
         log('\n▸ project refresh — SKIPPED (--no-projects)');
@@ -721,24 +814,70 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     );
   }
 
-  const from = before.head;
+  let from = before.head;
   if (before.behind > 0) {
     // --ff-only is the posture in one flag: if this cannot fast-forward, the
     // pre-flight missed something and git refuses rather than inventing a merge.
     if (!step(`fast-forward ${before.branch} → ${before.upstream} (${before.behind} commit(s))`, 'git', ['merge', '--ff-only', before.upstream]).ok) {
       return report;
     }
+    // Hand off to the NEW updater (see UPDATE_REEXEC_ENV). Only after a real
+    // fast-forward: with nothing merged, the code on disk IS the code running.
+    // The child's exit is this update's exit; a child that could not run at
+    // all is a loud failure (P5), never an exit 0.
+    if (reexec) {
+      const script = join(cwd, 'scripts', 'update.mjs');
+      const failed = (why) => {
+        log(`\n✗ RE-EXEC of the updated updater FAILED — ${why}. The fast-forward stands and nothing after it ran; rerun /sterling:update to finish (it resumes from the build step).`);
+        report.exit = 1;
+        return report;
+      };
+      if (!existsSync(script)) return failed(`${script} not found after the fast-forward`);
+      log(`\n▸ re-running the UPDATED updater (${script}) so the rest of this update runs the code just pulled`);
+      // `from` is this process's PRE-merge head: the child starts after the
+      // merge and needs it to see what the pull changed (review HIGH-1).
+      const r = await reexec(script, { from: before.head });
+      report.reexec = { status: r?.status ?? null, signal: r?.signal ?? null };
+      if (r?.error) return failed(`could not start it: ${r.error.message ?? r.error}`);
+      if (r?.signal) return failed(`it was killed by ${r.signal}`);
+      if (typeof r?.status !== 'number') return failed('it returned no exit status');
+      report.exit = r.status;
+      return report;
+    }
   }
 
   const after = readCurrency({ git });
-  const changed = from === after.head
-    ? []
-    : git(['diff', '--name-only', from, after.head], { allowFail: true }).split('\n').filter(Boolean);
+  let changed;
+  // The dependency set is UNKNOWN when a re-exec child cannot use the head it
+  // was handed; npm ci then runs rather than being skipped (P5: an unknown
+  // never reads as "nothing moved").
+  let dependenciesUnknown = false;
+  if (opts.from === undefined || opts.from === null || opts.from === '') {
+    changed = from === after.head
+      ? []
+      : git(['diff', '--name-only', from, after.head], { allowFail: true }).split('\n').filter(Boolean);
+  } else if (!/^[0-9a-f]{40}$/.test(opts.from)) {
+    log(`\n⚠ the pre-merge head handed over by the parent update ('${opts.from}') is not a commit sha — what the pull changed is UNKNOWN, so npm ci runs rather than being skipped`);
+    changed = [];
+    dependenciesUnknown = true;
+  } else {
+    // A re-exec child (review HIGH-1): its own starting head already IS the new
+    // head, so it diffs from the parent's pre-merge head instead.
+    from = opts.from;
+    const d = from === after.head ? { status: 0, stdout: '' } : exec('git', ['diff', '--name-only', from, after.head], { cwd });
+    if (d.status !== 0) {
+      log(`\n⚠ could not diff the handed-over pre-merge head ${from.slice(0, 7)} to ${after.head_short} — what the pull changed is UNKNOWN, so npm ci runs rather than being skipped: ${(d.stderr || d.stdout || '').trim()}`);
+      changed = [];
+      dependenciesUnknown = true;
+    } else {
+      changed = (d.stdout ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+    }
+  }
   if (changed.length) log(`\n${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
 
   // npm ci only when the dependency set actually moved: it is the one step that
   // needs the network, and it deletes node_modules to do it.
-  if (changed.includes('package-lock.json') || changed.includes('package.json')) {
+  if (dependenciesUnknown || changed.includes('package-lock.json') || changed.includes('package.json')) {
     if (!step('dependencies moved — npm ci', 'npm', ['ci']).ok) return report;
   }
 
@@ -896,6 +1035,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
 
   // Registry coverage — the SAME call the already-current path makes above.
   await reportCoverage(projectList, !registryFailed);
+  await reportProjectHygiene(projectList);
 
   // Read-only: reports AGENTS.md/CLAUDE.md contract drift in sibling projects without
   // touching them (--apply stays a deliberate act — it rewrites seven repos).

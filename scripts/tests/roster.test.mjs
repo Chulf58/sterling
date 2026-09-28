@@ -163,6 +163,7 @@ test('skills ship with live file references and pass the skill linter', () => {
     'design-research/SKILL.md',
     'drain/SKILL.md',
     'grill/SKILL.md',
+    'plain-prose/SKILL.md',
     'pr-review-loop/SKILL.md',
     'review-brief/SKILL.md',
   ]);

@@ -293,23 +293,40 @@ test('(h) MEASURED RED: config.json is a bare array ([]) — valid JSON, not nul
 });
 
 // =========================================================================
-// (e) undeclared_source_exclude_globs absent -> treated as []
+// (e) undeclared_source_exclude_globs absent -> the schema default ['**/*.sh']
 // =========================================================================
+// REWRITTEN (decision gap-hunt-2026-09-28-rulings item 6): the default moved
+// from [] to ['**/*.sh'], in the schema, the shipped template AND this raw-config
+// ladder, so a project whose config predates the key stops flagging shell scripts.
 
-test('(e) undeclared_source_exclude_globs absent from config -> treated as [], section renders normally (no UNAVAILABLE line)', () => {
+test('(e) undeclared_source_exclude_globs absent from config -> the schema default ["**/*.sh"], section renders normally (no UNAVAILABLE line)', () => {
   const { dir, cleanup } = makeProject({ configContent: validConfig() }); // no undeclared_source_exclude_globs key at all
   try {
-    initGitWithFiles(dir, ['tools/orphan.py']); // uncovered: no toolchain path_globs match tools/**
+    initGitWithFiles(dir, ['tools/orphan.py', 'ops/deploy.sh']); // tools/ is uncovered; ops/deploy.sh is excluded by the default
     const r = h1(dir, 'startup');
     assert.equal(r.code, 0, `H1 must exit 0: ${r.stderr}`);
     assert.ok(r.out);
     const text = bannerText(r);
-    assert.doesNotMatch(text, /UNDECLARED SOURCE CHECK UNAVAILABLE/, 'an absent exclude-globs key is valid config (defaults to []), not a malformed one');
+    assert.doesNotMatch(text, /UNDECLARED SOURCE CHECK UNAVAILABLE/, 'an absent exclude-globs key is valid config (takes the schema default), not a malformed one');
     assert.match(text, /tools/, 'the normal bucket report still names the uncovered tools/ directory');
+    assert.doesNotMatch(text, /ops|\.sh\b/, 'a shell script is excluded by the default and never reported');
   } finally {
     cleanup();
   }
-  // sabotage: treat an absent undeclared_source_exclude_globs key as malformed config (refuse into UNAVAILABLE) instead of defaulting to [] -> doesNotMatch fails -> red
+  // sabotage: treat an absent undeclared_source_exclude_globs key as malformed config (refuse into UNAVAILABLE) instead of defaulting -> doesNotMatch fails -> red
+  // sabotage: keep the absent-key fallback at [] -> the ops/.sh doesNotMatch goes red
+});
+
+test('(e2) an EXPLICIT empty undeclared_source_exclude_globs opts back in: the shell script is reported', () => {
+  const { dir, cleanup } = makeProject({ configContent: validConfig({ undeclared_source_exclude_globs: [] }) });
+  try {
+    initGitWithFiles(dir, ['ops/deploy.sh']);
+    const r = h1(dir, 'startup');
+    assert.equal(r.code, 0, `H1 must exit 0: ${r.stderr}`);
+    assert.match(bannerText(r), /ops/, 'control: with [] declared, the .sh file is uncovered source again');
+  } finally {
+    cleanup();
+  }
 });
 
 // =========================================================================

@@ -197,7 +197,7 @@ export function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 
 /**
- * GENERATED-PROJECTIONS EXEMPTION (settled ruling e1275166: files
+ * GENERATED-PROJECTIONS EXEMPTION (settled ruling foreign_e1275166: files
  * REGENERATED from the store — architecture.md et al — are exempt from
  * drift machinery). The settlement-time minting path (board c198866d)
  * initially dropped this exemption entirely, measured 2026-08-25 as a
@@ -270,7 +270,7 @@ function buildReconcileItem(article, fileKeys, now) {
  * out of grouping candidates per owning record below, same as before.
  */
 export function mintSettlementReconcile(store, root, candidatePaths, now = new Date().toISOString()) {
-  // Exempt paths are dropped from the candidate set UP FRONT (e1275166) — an
+  // Exempt paths are dropped from the candidate set UP FRONT (foreign_e1275166) — an
   // exempt path can never reach byArticle grouping below, so it can never
   // appear in a minted item's file_keys, even when it shows live drift. An
   // unlisted co-candidate owned by the same article is unaffected and still
@@ -342,7 +342,7 @@ export function isLiveReconcileDebt(store, root, item) {
  *               contentChangedAgainstBaseline reads unreadable-with-a-baseline
  *               as drift, so an unreadable governed file still blocks)
  *   live=false  'all_exempt' (every named path is a generated projection,
- *               ruling e1275166) | 'baseline_match' | 'baseline_absent' |
+ *               ruling foreign_e1275166) | 'baseline_match' | 'baseline_absent' |
  *               'baseline_match_and_absent'
  *
  * 'baseline_absent' is an ABSTENTION, not a verified-clean: the article
@@ -359,7 +359,7 @@ export function explainReconcileDebtLiveness(store, root, item) {
   if (!files.length) return { live: true, code: 'no_files_named' };
   const article = store.get(item.feature_link);
   if (!article) return { live: true, code: 'article_unresolvable' };
-  // GENERATED-PROJECTIONS EXEMPTION (e1275166): drop exempt paths BEFORE the
+  // GENERATED-PROJECTIONS EXEMPTION (foreign_e1275166): drop exempt paths BEFORE the
   // liveness check. An item whose file_keys are ONLY exempt paths is
   // therefore NOT live, even when those files are genuinely drifted; an item
   // mixing one exempt path with one genuinely-drifted UNLISTED path stays

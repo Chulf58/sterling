@@ -5,6 +5,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { MountedStores, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { parseConfig, AGENT_MODEL_KEY } from '@sterling/schemas';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
@@ -30,7 +31,35 @@ const storePath = args[storeIdx + 1];
 // lives at <project>/.sterling/sterling.db, so the config sits beside it and the
 // installed agents under <project>/.claude/agents/.
 const configPath = join(dirname(storePath), 'config.json');
-const agentsDir = join(dirname(dirname(storePath)), '.claude', 'agents');
+// <project>/.sterling/sterling.db → <project> — same two-dirname climb agentsDir
+// already used below. Also the root the board_edit HEAD restamp resolves
+// against (LOW-2, second Opus re-check round): state.ts's own default
+// resolver has no repoRoot and falls back to process.cwd(), which is only
+// correct when the TUI happens to be launched from the project directory —
+// this one is pinned to the STORE's actual project, correct regardless of cwd.
+const projectRoot = dirname(dirname(storePath));
+const agentsDir = join(projectRoot, '.claude', 'agents');
+
+/** Tasks tab board-item edit (LOW-2): `git rev-parse HEAD` rooted at the
+ *  project that owns THIS store, not wherever the process happened to be
+ *  launched from — passed into every reduce() call below so a board_edit
+ *  commit's measured_at_head restamp resolves against the right repo even
+ *  when sterling-tui is started from an unrelated cwd (a wrapper script, a
+ *  different shell directory, …). Mirrors state.ts's own defaultResolveHeadSha
+ *  shape (never throws; undefined on any failure) so a missing git binary or
+ *  a non-repo project degrades the same way — a notice, not a crash. */
+function resolveProjectHeadSha(): string | undefined {
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 const termkit = await import('terminal-kit');
 const term = termkit.default.terminal;
@@ -284,7 +313,7 @@ function redraw(): void {
 async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   if (!event) return;
   const prevTab = ui.tab;
-  const result = reduce(store, ui, event, viewport(), stores, roster);
+  const result = reduce(store, ui, event, viewport(), stores, roster, resolveProjectHeadSha);
   ui = result.ui;
   // System tab: (re)load the roster ONLY on activation (never the 1 Hz loop)
   if (ui.tab === SYSTEM_TAB && (prevTab !== SYSTEM_TAB || !roster)) roster = loadRoster();

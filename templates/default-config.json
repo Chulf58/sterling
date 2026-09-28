@@ -12,7 +12,7 @@
     "conductor": { "soft_pct": 35, "hard_pct": 50 }
   },
   "models": {
-    "implementor": { "model": "claude-sonnet-5-5", "effort": "medium" },
+    "implementor": { "model": "claude-sonnet-5-5", "effort": "high" },
     "researcher": { "model": "claude-sonnet-5-5", "effort": "medium" },
     "scout": { "model": "claude-sonnet-5-5", "effort": "low" },
     "classifiers": { "model": "claude-haiku-4-5", "effort": "low" },
@@ -31,6 +31,7 @@
     "deep_threshold": 15
   },
   "attestation_path_globs": [],
+  "undeclared_source_exclude_globs": ["**/*.sh"],
   "store_authority": "primary",
   "staleness": {
     "research_days": { "fast": 30, "medium": 90, "stable": 365 },

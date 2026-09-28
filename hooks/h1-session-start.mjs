@@ -4820,6 +4820,7 @@ var successPredicateSchema = external_exports.object({
     min_bytes: external_exports.number().optional()
   }).strict().optional()
 }).strict().refine((v) => v.output_regex !== void 0 || v.output_regex_absent !== void 0 || v.artifact !== void 0, { message: "success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)" });
+var DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS = Object.freeze(["**/*.sh"]);
 var configSchema = external_exports.object({
   toolchains: external_exports.array(external_exports.object({
     adapter: external_exports.string(),
@@ -4867,7 +4868,14 @@ var configSchema = external_exports.object({
   // classifyCoverage's excludeGlobs parameter in
   // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
   // toolchain path_glob).
-  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default([]),
+  // DEFAULT ['**/*.sh'] (decision gap-hunt-2026-09-28-rulings item 6): shell
+  // scripts are launcher and console glue, never a toolchain's source, and
+  // flagging them was banner noise answered the same way every session. The
+  // default lives in THREE places that must agree: here, templates/default-
+  // config.json (anti-pattern 85d15143), and the raw-config ladder in
+  // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
+  // An explicit [] still opts back in.
+  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
   // Attestation disclosure (decision attestation-staleness-disclosure-only-
   // never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
   // POSIX globs whose touched paths get a comparable-human-record rollup at
@@ -4951,7 +4959,7 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    implementor: modelEffort.default({ model: "claude-sonnet-5-5", effort: "medium" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: modelEffort.default({ model: "claude-sonnet-5-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
@@ -5267,8 +5275,8 @@ var ProjectRegistry = class {
   constructor(path = registryPath()) {
     mkdirSync(dirname2(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec("PRAGMA busy_timeout=5000");
+    this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec(REGISTRY_DDL);
   }
   /** Upsert by repo_path (init event, P4): create on first init
@@ -8725,7 +8733,9 @@ function validateUndeclaredSourceConfig(config2) {
   return {
     ok: true,
     pathGlobs: toolchains.flatMap((t) => t.path_globs),
-    excludeGlobs: config2.undeclared_source_exclude_globs ?? []
+    // Absent takes the SCHEMA default (decision gap-hunt-2026-09-28-rulings
+    // item 6), imported rather than restated so the two cannot drift.
+    excludeGlobs: config2.undeclared_source_exclude_globs ?? [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]
   };
 }
 function gitSpawnFailureReason(result, label) {
@@ -9589,15 +9599,16 @@ Drain it with /sterling:drain before taking new work, and expect much of it to b
 var registryContext = "";
 if (existsSync6(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, "/");
-  const registry = new ProjectRegistry(registryPath());
+  let registry;
   try {
+    registry = new ProjectRegistry(registryPath());
     registry.touchLastSeen(cwdPosix, (/* @__PURE__ */ new Date()).toISOString());
     const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync6(p.repo_path));
     if (siblings.length) {
       registryContext = "\n\nSibling Sterling projects on this machine (shared project registry) \u2014 other initialized projects; knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n" + siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(", ") || "(no domains)"}`).join("\n");
     }
   } finally {
-    registry.close();
+    registry?.close();
   }
 }
 function markerWriterAlive(pid) {
@@ -9831,8 +9842,9 @@ CONDUCTOR NOT ACTIVE: ${reason} \u2014 run \`node ${shq(clone)}/scripts/sync-age
   }
 } catch {
 }
+var conductorActivationWarning = conductorActivationContext ? `\u26A0 ${conductorActivationContext.trim()}. ` : "";
 var output = {
-  systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
+  systemMessage: `${conductorActivationWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
   hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }

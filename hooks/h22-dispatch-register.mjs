@@ -4666,6 +4666,7 @@ var successPredicateSchema = external_exports.object({
     min_bytes: external_exports.number().optional()
   }).strict().optional()
 }).strict().refine((v) => v.output_regex !== void 0 || v.output_regex_absent !== void 0 || v.artifact !== void 0, { message: "success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)" });
+var DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS = Object.freeze(["**/*.sh"]);
 var configSchema = external_exports.object({
   toolchains: external_exports.array(external_exports.object({
     adapter: external_exports.string(),
@@ -4713,7 +4714,14 @@ var configSchema = external_exports.object({
   // classifyCoverage's excludeGlobs parameter in
   // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
   // toolchain path_glob).
-  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default([]),
+  // DEFAULT ['**/*.sh'] (decision gap-hunt-2026-09-28-rulings item 6): shell
+  // scripts are launcher and console glue, never a toolchain's source, and
+  // flagging them was banner noise answered the same way every session. The
+  // default lives in THREE places that must agree: here, templates/default-
+  // config.json (anti-pattern 85d15143), and the raw-config ladder in
+  // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
+  // An explicit [] still opts back in.
+  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
   // Attestation disclosure (decision attestation-staleness-disclosure-only-
   // never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
   // POSIX globs whose touched paths get a comparable-human-record rollup at
@@ -4797,7 +4805,7 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    implementor: modelEffort.default({ model: "claude-sonnet-5-5", effort: "medium" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: modelEffort.default({ model: "claude-sonnet-5-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),

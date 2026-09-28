@@ -47,8 +47,8 @@ export class ProjectRegistry {
   constructor(path: string = registryPath()) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode=WAL');
     this.db.exec('PRAGMA busy_timeout=5000');
+    this.db.exec('PRAGMA journal_mode=WAL');
     this.db.exec(REGISTRY_DDL);
   }
 

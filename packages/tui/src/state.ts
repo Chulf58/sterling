@@ -2,13 +2,48 @@
 // never the renderer). buildDashboardState derives everything the renderer
 // prints; reduce maps input events (keys AND mouse) to new UI state plus
 // effects. The renderer stays thin enough to be boring.
+import { execFileSync } from 'node:child_process';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
+/** 40-hex commit sha — mirrors mcp-server's MEASURED_AT_HEAD_RE
+ *  (packages/mcp-server/src/tools.ts:1008, decision
+ *  board-provenance-measured-at-head), so a malformed resolver result reads
+ *  the same as an unresolved one rather than reaching the store to fail
+ *  zod's identical regex there. */
+const MEASURED_AT_HEAD_RE = /^[0-9a-f]{40}$/;
+
+/** Tasks tab board-item edit, fix 1 (Opus review round, feat/gap-hunt-round-1
+ *  71c1f41): the default `resolveHeadSha` a board_edit commit uses to restamp
+ *  measured_at_head, mirroring board_update's own restamp-on-text-change
+ *  (packages/mcp-server/src/tools.ts:9684-9690). `git rev-parse HEAD` walks
+ *  UP from cwd to find `.git` on its own, so no repoRoot needs threading in —
+ *  state.ts has none (SterlingStore exposes no public path/repoRoot getter,
+ *  and main.ts, which resolves the project root from --store, is out of this
+ *  round's edit scope). `process.cwd()` is exactly what a user's own git
+ *  commands would resolve against too, since sterling-tui is launched from
+ *  the project directory in normal use. Returns undefined (never throws) on
+ *  any failure — no git binary, not a repo, a shallow clone with no HEAD —
+ *  so reduce()'s caller degrades loud (a notice) rather than crashing. */
+function defaultResolveHeadSha(): string | undefined {
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return MEASURED_AT_HEAD_RE.test(sha) ? sha : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export const TABS = ['Tasks', 'Knowledge', 'Queue', 'System'] as const;
+/** the board (user-source todos) — the tab boardEdit's 'e' key operates on */
+export const TASKS_TAB = TABS.indexOf('Tasks');
 /** the knowledge explorer (formerly 'Articles'): a category→source→record tree */
 export const KNOWLEDGE_TAB = TABS.indexOf('Knowledge');
 export const QUEUE_TAB = TABS.indexOf('Queue');
@@ -43,6 +78,18 @@ export interface UiState {
    *  it, ENTER commits (empty commits as "unset"), ESCAPE cancels. Mirrors the
    *  Knowledge tab's always-visible-field idiom, scoped to one row. */
   sparringModelEdit?: string;
+  /** Tasks tab, board item edit-in-progress (user-ruled 2026-09-28, board
+   *  f25e5547 lane J: "Add TUI edit"). Absent → the plain card is shown;
+   *  present → 'e' has opened the selected todo's text for editing — every
+   *  printable key/BACKSPACE feeds `text`, ENTER commits (through the same
+   *  store write path board_update uses), ESCAPE cancels. Mirrors
+   *  sparringModelEdit's always-capture idiom, scoped to one card.
+   *  `version` (fix round, Opus review of 71c1f41) is the record's version
+   *  as read the moment 'e' was pressed — read fresh via store.get, never
+   *  from the projected Card, which carries no version field. ENTER re-reads
+   *  the live record and refuses the commit (visible notice, buffer KEPT) if
+   *  the stored version has moved — the lost-update guard. */
+  boardEdit?: { id: string; text: string; version: number };
 }
 
 /** The System-tab inline selector (run r-f9a7). `key` is the config.models key
@@ -177,10 +224,25 @@ export function driftOf(installed: string, config: string): boolean {
   return installed !== config;
 }
 
-/** §7.2 effort rule as data: subagent keys never offer xhigh or max; only
- *  coder_hard is permitted xhigh; max never appears anywhere. */
+/** System tab, LOW-3 (second Opus re-check round, feat/gap-hunt-round-1
+ *  22e20f9): the ONLY config.models keys the System tab may render/edit —
+ *  every governed agent key from AGENT_MODEL_KEY (the classless four-agent
+ *  roster, decision agent-roster-is-classless-four-agents f0893161) plus
+ *  'classifiers', the schema's one legitimate config-only key
+ *  (packages/schemas/src/config.ts's `models` object — the only 5 keys it
+ *  actually defines). A relic/legacy key such as 'coder_hard' — no agent has
+ *  EVER read it, and update/init now flag it as unread — is filtered out
+ *  here rather than trusted from whatever `configModels` the caller hands
+ *  in: a defensive floor, not just a fixture cleanup, since an old
+ *  project's config.json can carry a stray key forever. */
+const SYSTEM_TAB_MODEL_KEYS = new Set<string>([...Object.values(AGENT_MODEL_KEY), 'classifiers']);
+
+/** §7.2 effort rule as data: no System-tab key ever offers xhigh or max. The
+ *  one-time exception (coder_hard) was itself a config-only key no agent
+ *  ever read, and it is no longer a renderable row at all (LOW-3 above) —
+ *  so there is no longer a key this function needs to special-case. */
 export function effortOptions(key: string): string[] {
-  return key === 'coder_hard' ? ['low', 'medium', 'high', 'xhigh'] : ['low', 'medium', 'high'];
+  return ['low', 'medium', 'high'];
 }
 
 /** The model-value floor (decision foreign_98064d77): a committed swap model must be a
@@ -308,6 +370,26 @@ export interface ModeToggleEffect {
   type: 'mode_toggle';
   mode: 'hobby' | 'work';
 }
+/** Tasks tab board-item edit commit (user-ruled 2026-09-28, board f25e5547
+ *  lane J): the TUI's second write surface after the System tab. Carries the
+ *  full replacement text; runEffects executes it through the same store
+ *  write path board_update uses (SterlingStore.updateTodo — same id, same
+ *  slug, version bumped), never the MCP tool surface. `version` (fix round)
+ *  is the pre-write version reduce() already confirmed live and unmoved —
+ *  carried through as `expected_version` so the store's own optimistic-
+ *  concurrency check backstops the reduce()-time guard against the (in a
+ *  single TUI process, vanishingly small) window between the check and this
+ *  write. `measuredAtHead`, when reduce() resolved one, restamps
+ *  measured_at_head the same way board_update does on a text change
+ *  (decision board-provenance-measured-at-head); absent when the resolver
+ *  failed — the field is then left untouched, never cleared. */
+export interface BoardEditEffect {
+  type: 'board_edit';
+  id: string;
+  text: string;
+  version: number;
+  measuredAtHead?: string;
+}
 export type Effect =
   | SelectEffect
   | QuitEffect
@@ -315,7 +397,8 @@ export type Effect =
   | SparringToggleEffect
   | SparringModelEffect
   | TddToggleEffect
-  | ModeToggleEffect;
+  | ModeToggleEffect
+  | BoardEditEffect;
 
 export type UiEvent =
   | { kind: 'key'; name: 'LEFT' | 'RIGHT' | 'TAB' | 'UP' | 'DOWN' | 'ENTER' | 'SPACE' | 'QUIT' | 'ESCAPE' | 'BACKSPACE' }
@@ -558,19 +641,22 @@ const clipEllipsis = (s: string, width: number): string =>
   Number.isFinite(width) && s.length > width ? `${s.slice(0, Math.max(1, width) - 1)}…` : s;
 
 /**
- * Pure System-tab projection (run r-f9a7): one row per config.models KEY, in
- * insertion order, id 'sys:<key>'. Governed agents (AGENT_MODEL_KEY) list under
- * their key; the INSTALLED frontmatter value renders (the copy that governs
- * dispatch), and a key whose installed value disagrees with config is flagged
- * drift with a visible marker (AC4; the P5 backstop for a partial projection).
- * config-only keys (coder_hard/classifiers) render their config value with no
- * governed agent. When ui.selector is open on a key, that row also renders the
- * inline picker options (catalog entries at the model stage; effort options at
- * the effort stage). Every line is clipped to `width` so the 33-col floor holds.
+ * Pure System-tab projection (run r-f9a7): one row per LIVE config.models
+ * KEY (SYSTEM_TAB_MODEL_KEYS — LOW-3, second Opus re-check round: a relic
+ * key like 'coder_hard' is filtered out here regardless of what the caller's
+ * snapshot carries), in insertion order, id 'sys:<key>'. Governed agents
+ * (AGENT_MODEL_KEY) list under their key; the INSTALLED frontmatter value
+ * renders (the copy that governs dispatch), and a key whose installed value
+ * disagrees with config is flagged drift with a visible marker (AC4; the P5
+ * backstop for a partial projection). classifiers, the one config-only key,
+ * renders its config value with no governed agent. When ui.selector is open
+ * on a key, that row also renders the inline picker options (catalog
+ * entries at the model stage; effort options at the effort stage). Every
+ * line is clipped to `width` so the 33-col floor holds.
  */
 export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width = Infinity): SystemTabView {
   const snap = snapshot ?? EMPTY_ROSTER;
-  const keys = Object.keys(snap.configModels);
+  const keys = Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
   const selector = ui.selector;
   const clip = (s: string): string => clipEllipsis(s, width);
 
@@ -589,8 +675,8 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
     const selected = i === ui.cursor;
     const marker = selected ? '› ' : '  ';
     // Title-cased label: the leading letter is capitalized so a config-only key
-    // like coder_hard never surfaces the substring an agent name ('coder') would
-    // match — the roster lists each agent in exactly one row (AC1).
+    // like classifiers never surfaces the substring an agent name would match —
+    // the roster lists each agent in exactly one row (AC1).
     const label = key.charAt(0).toUpperCase() + key.slice(1);
     const lines: SystemLine[] = [
       { text: clip(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? '  drift' : ''}`), kind: 'title', selected },
@@ -614,8 +700,8 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   });
 
   // While a selector is open the view FOCUSES on the key under edit — the other
-  // rows (and their config values, e.g. coder_hard's xhigh) are hidden so the
-  // open picker's offered set is the only model/effort text on screen.
+  // rows (and their config values) are hidden so the open picker's offered set
+  // is the only model/effort text on screen.
   const shown = selector ? rows.filter((r) => r.key === selector.key) : rows;
   // transient notice as a ⚠ banner line (audit findings 24/43, 41/43): a refusal
   // or a catalog/roster failure is visible above the roster, not lost.
@@ -882,7 +968,19 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
       type = card.type;
       expanded = ui.expanded.includes(card.id);
       const pad = '  '.repeat(depth);
-      if (expanded && knowledge) {
+      if (ui.boardEdit && ui.boardEdit.id === card.id) {
+        // Tasks tab board-item edit in progress (user-ruled 2026-09-28, board
+        // f25e5547 lane J): the live buffer + caret, wrapped like the legacy
+        // card expansion below — takes priority over both expansion styles so
+        // an editor open on an already-expanded card still shows the buffer,
+        // not the stale stored body.
+        const prefix = 2 + pad.length;
+        const wrapWidth = Number.isFinite(width) ? Math.max(1, width - prefix) : width;
+        lines = wrapText(`${ui.boardEdit.text}▌`, wrapWidth).map((text, j) => ({
+          text: (j === 0 ? marker + pad : ' '.repeat(prefix)) + text,
+          kind: j === 0 ? ('title' as const) : ('body' as const),
+        }));
+      } else if (expanded && knowledge) {
         // readable layout (AC4): title line, blank separator, wrapped body
         // lines, dim meta — the title is NEVER replaced by the body.
         const indent = ' '.repeat(2 + pad.length);
@@ -962,8 +1060,17 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
             : '(empty)'
         : undefined,
     footer:
-      `←/→ or 1-${TABS.length} tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit` +
-      (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears' : ''),
+      // Fix round (Opus review of 71c1f41): a Tasks-tab board_edit notice
+      // (lost-update refusal, vanished item, failed HEAD resolve) must be
+      // VISIBLE, not just carried in ui.notice — render.ts prints
+      // state.footer unconditionally, so this is the one line available to
+      // this scope's two files without touching render.ts. Mirrors the
+      // System tab's own '⚠ ' convention (buildSystemTab's banner).
+      ui.tab === TASKS_TAB && ui.notice
+        ? `⚠ ${ui.notice}`
+        : `←/→ or 1-${TABS.length} tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit` +
+          (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears' : '') +
+          (ui.tab === TASKS_TAB ? (ui.boardEdit ? ' · enter save · esc cancel' : ' · e edit') : ''),
     searchLine: searchActive ? `search: ${ui.searchQuery}` : undefined,
     queueCompleted,
     queueActivity,
@@ -990,7 +1097,19 @@ export function screenLineToRow(state: DashboardState, line1: number, maxBodyLin
   return -1;
 }
 
-export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewport: Viewport = {}, knowledge?: MountedStores, roster?: AgentRosterSnapshot): { ui: UiState; effects: Effect[] } {
+export function reduce(
+  store: SterlingStore,
+  ui: UiState,
+  event: UiEvent,
+  viewport: Viewport = {},
+  knowledge?: MountedStores,
+  roster?: AgentRosterSnapshot,
+  // Tasks tab board-item edit, fix 1: injectable so tests can control HEAD
+  // resolution without shelling out to real git or depending on this
+  // worktree's own repo state. Defaults to the real `git rev-parse HEAD`
+  // resolver, so every existing/main.ts call site needs no change.
+  resolveHeadSha: () => string | undefined = defaultResolveHeadSha
+): { ui: UiState; effects: Effect[] } {
   const maxBodyLines = viewport.maxBodyLines ?? Infinity;
   const nodes = nodesFor(store, ui, knowledge);
   const clamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
@@ -998,7 +1117,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
 
   // a tab switch resets the cursor + scroll AND dismisses any open selector
   // (and any in-progress sparring-partner model edit, same discard-on-switch rule)
-  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: undefined, notice: undefined, sparringModelEdit: undefined });
+  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: undefined, notice: undefined, sparringModelEdit: undefined, boardEdit: undefined });
 
   // the queue tab has a fixed layout; only the card tabs scroll
   const scrollable = ui.tab !== QUEUE_TAB;
@@ -1064,11 +1183,101 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
 
   switch (event.kind) {
     case 'key':
+      // Tasks tab board-item edit (user-ruled 2026-09-28, board f25e5547 lane
+      // J): while ui.boardEdit is open, ENTER commits, BACKSPACE deletes, and
+      // ESCAPE cancels — every other named key is swallowed (no cursor
+      // movement, no quit) so the editor owns input the same way the System
+      // tab's sparringModelEdit does. Checked first, ahead of the System-tab
+      // selector block below, since the two never overlap (boardEdit is only
+      // ever opened on TASKS_TAB).
+      if (ui.tab === TASKS_TAB && ui.boardEdit) {
+        const be = ui.boardEdit;
+        switch (event.name) {
+          case 'ESCAPE':
+            return { ui: { ...ui, boardEdit: undefined, notice: undefined }, effects };
+          case 'BACKSPACE':
+            return { ui: { ...ui, boardEdit: { ...be, text: be.text.slice(0, -1) } }, effects };
+          case 'ENTER': {
+            const trimmed = be.text.trim();
+            // an edit trimmed to empty writes nothing (todoSchema requires
+            // non-empty text) — close the editor rather than let a doomed
+            // write reach the store and throw (P5: refuse loud, not late).
+            if (!trimmed) return { ui: { ...ui, boardEdit: undefined, notice: undefined }, effects };
+            // Fix round (Opus review of 71c1f41), fixes 2+3 — re-read the LIVE
+            // record at commit time, never trust the snapshot 'e' opened with:
+            //   • vanished, or no longer a live todo (status 'superseded') →
+            //     nothing to write to; a notice, never an uncaught throw to
+            //     main.ts's fatal handler (P5: degrade loud, don't crash).
+            //   • still live but its version moved since 'e' was pressed → a
+            //     concurrent write happened elsewhere; refuse with a visible
+            //     notice and KEEP the buffer open — never a silent overwrite
+            //     (lost-update guard).
+            const current = store.get(be.id) as (Record<string, unknown> & { type?: string; status?: string; version?: number }) | undefined;
+            if (!current || current.type !== 'todo' || current.status === 'superseded' || typeof current.version !== 'number') {
+              return {
+                ui: { ...ui, boardEdit: undefined, notice: `board item no longer exists — the edit was discarded` },
+                effects,
+              };
+            }
+            if (current.version !== be.version) {
+              // MEDIUM-1 (second Opus re-check round): ADOPT the current
+              // version into the kept buffer. Leaving be.version at the
+              // stale value it was opened with made "press ENTER to try
+              // again" a lie — every later ENTER would re-read the same
+              // still-live-but-now-current version, find it STILL disagrees
+              // with the never-updated be.version, and refuse forever with
+              // no way out but ESCAPE. Adopting it here means the very next
+              // ENTER's version check passes and the buffer commits — a
+              // deliberate, explicit overwrite the user asked for by
+              // pressing ENTER again, never a silent one.
+              return {
+                ui: {
+                  ...ui,
+                  boardEdit: { ...be, version: current.version },
+                  notice: `board item changed since it was opened — press ENTER again to overwrite it, ESC to cancel`,
+                },
+                effects,
+              };
+            }
+            // Fix 1 — restamp measured_at_head on this text change, mirroring
+            // board_update (decision board-provenance-measured-at-head): a
+            // resolve failure degrades loud (a notice) rather than silently
+            // keeping the stale stamp — but it does NOT block the save, the
+            // same way board_update itself proceeds when git is unavailable.
+            let head: string | undefined;
+            try {
+              head = resolveHeadSha();
+            } catch {
+              head = undefined;
+            }
+            effects.push({
+              type: 'board_edit',
+              id: be.id,
+              text: trimmed,
+              version: be.version,
+              ...(head ? { measuredAtHead: head } : {}),
+            });
+            return {
+              ui: {
+                ...ui,
+                boardEdit: undefined,
+                notice: head ? undefined : `could not read the current git HEAD — measured_at_head was not refreshed (the text edit was still saved)`,
+              },
+              effects,
+            };
+          }
+        }
+        return { ui, effects };
+      }
       // System tab (run r-f9a7): the inline model/effort selector state machine.
       // Handles roster navigation + open/navigate/confirm/commit/cancel; the
       // tab-switch / quit keys fall through to the generic handler below.
       if (ui.tab === SYSTEM_TAB && roster) {
-        const sysKeys = Object.keys(roster.configModels);
+        // LOW-3 (second Opus re-check round): filtered the SAME way buildSystemTab
+        // filters `keys` — a relic key never occupies a cursor slot here either,
+        // so the two stay in lockstep (a stray key in roster.configModels would
+        // otherwise misalign every row/toggle index below it).
+        const sysKeys = Object.keys(roster.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
         // + 3: the sparring-partner toggle row (index sysKeys.length) and its
         // model row (sysKeys.length + 1), appended after the config.models
         // roster (board a0714d0b) — then the tdd toggle row (sysKeys.length + 2),
@@ -1226,6 +1435,13 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       if (ui.tab === SYSTEM_TAB && ui.sparringModelEdit !== undefined) {
         return { ui: { ...ui, sparringModelEdit: ui.sparringModelEdit + ch }, effects };
       }
+      // Tasks tab board-item edit: same always-capture idiom as the two edit
+      // buffers above — every printable key ('e' included) feeds the buffer
+      // while it is open, so typing the letter 'e' into an edit never
+      // re-triggers the open-editor hotkey below.
+      if (ui.tab === TASKS_TAB && ui.boardEdit) {
+        return { ui: { ...ui, boardEdit: { ...ui.boardEdit, text: ui.boardEdit.text + ch } }, effects };
+      }
       // the Knowledge tab is an always-visible search field: EVERY printable key
       // feeds the query — 'q' and digits included (they are not hotkeys here).
       if (ui.tab === KNOWLEDGE_TAB) {
@@ -1241,9 +1457,28 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       // route space to the same selector logic as ENTER — otherwise the picker's
       // SPACE handling was reachable only by tests (audit finding 39/43).
       if (ch === ' ' && ui.tab === SYSTEM_TAB) {
-        return reduce(store, ui, { kind: 'key', name: 'ENTER' }, viewport, knowledge, roster);
+        return reduce(store, ui, { kind: 'key', name: 'ENTER' }, viewport, knowledge, roster, resolveHeadSha);
       }
       if (ch === ' ') return { ui: activate(clamp(ui.cursor)), effects };
+      // Tasks tab board-item edit (user-ruled 2026-09-28, board f25e5547 lane
+      // J): 'e' on a selected todo card opens it for editing, prefilled with
+      // its full text (card.body — the raw todo text, not the derived
+      // label). An objective group header has nothing durable to edit (it is
+      // navigation, not a record), so 'e' there is a no-op, matching how
+      // activate() treats it as fold/unfold rather than a selection.
+      if (ch === 'e' && ui.tab === TASKS_TAB) {
+        const node = nodes[clamp(ui.cursor)];
+        if (node && node.kind === 'card' && node.card.type !== 'objective') {
+          // Fix 2 (Opus review of 71c1f41): read the CURRENT version fresh
+          // via store.get — the projected Card carries no version field, and
+          // a snapshot taken anywhere earlier than this keypress would widen
+          // the lost-update guard's blind spot.
+          const rec = store.get(node.card.id) as { version?: number } | undefined;
+          const version = rec && typeof rec.version === 'number' ? rec.version : 0;
+          return { ui: { ...ui, boardEdit: { id: node.card.id, text: node.card.body, version }, notice: undefined }, effects };
+        }
+        return { ui, effects };
+      }
       if (/^[1-9]$/.test(ch)) {
         const index = Number(ch) - 1;
         if (index < TABS.length) return { ui: switchTab(index), effects };
@@ -1298,6 +1533,32 @@ export function runEffects(store: SterlingStore, effects: Effect[], now: () => s
   for (const e of effects) {
     if (e.type === 'select') store.writeSelection(e.recordType, e.id, now());
     if (e.type === 'quit') quit = true;
+    if (e.type === 'board_edit') {
+      // Same store write path board_update uses (SterlingStore.updateTodo):
+      // the merged candidate carries the old record's id/slug/every other
+      // field unchanged, only `text`/`updated_at` (and, when resolved,
+      // `measured_at_head` — fix 1) replaced — updateTodo pins
+      // id/type/created_at itself and bumps version, so this is exactly an
+      // in-place edit, never a new record (user-ruled 2026-09-28, board
+      // f25e5547 lane J).
+      //
+      // reduce() already re-read the live record at commit time and refused
+      // to push this effect at all if it had vanished, gone non-live, or its
+      // version had moved (fixes 2+3) — so in the ordinary single-TUI-process
+      // case `e.version` is exactly the version this write is about to
+      // replace. `expected_version` is passed anyway as a belt-and-suspenders
+      // backstop against the (vanishingly small, but real for a store shared
+      // by another process) window between that check and this write: the
+      // store's own optimistic-concurrency guard (applyInPlace) then throws
+      // rather than silently applying a stale-based write, and that throw
+      // propagates to main.ts's uncaughtException handler the same way every
+      // other effect's write does (P5) — a race this rare is loud, not
+      // swallowed, but it is no longer the expected path a normal edit takes.
+      const old = store.get(e.id);
+      const candidate: Record<string, unknown> = { ...(old as unknown as Record<string, unknown>), text: e.text, updated_at: now() };
+      if (e.measuredAtHead) candidate.measured_at_head = e.measuredAtHead;
+      store.updateTodo(e.id, candidate, { expected_version: e.version });
+    }
   }
   return quit;
 }

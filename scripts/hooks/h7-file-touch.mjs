@@ -10,7 +10,7 @@
 // against the owning article's CURRENT baseline — so an edit-then-revert, or
 // a path an intervening knowledge_update (or an attested close, R9) already
 // rebaselined, never mints. The generated_projections exemption (ruling
-// e1275166) lives in settlement.mjs's mintSettlementReconcile. Edits made
+// foreign_e1275166) lives in settlement.mjs's mintSettlementReconcile. Edits made
 // outside these tools (by hand, through Bash) reach settlement via H10's
 // git-derived touches (slice 4), not through this register.
 //

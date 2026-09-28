@@ -1222,3 +1222,94 @@ test('CS-26: a deep path whose intermediate exists as a scalar or an array is re
 // NAMED SABOTAGE (CS-26): restore the `existingIsObject ? {...existing} : {}`
 // walk (create-or-replace) → `zz_probe_scalar.child` lands and `zz_probe_scalar`
 // becomes `{child:true}` → RED on the missing refusal.
+
+// ---------------------------------------------------------------------------
+// CS-27 / CS-28 / CS-29 — decision
+// config-set-warns-on-keys-sterling-does-not-read (77ff9aa8, user-ruled
+// 2026-09-28): config_set still WRITES an unread key (no allowlist, no
+// refusal — the scale-down ruling), but the receipt now carries a `warnings`
+// array naming it, reusing packages/schemas' `unreadConfigKeys` so the dead-
+// key list is defined exactly once (idea 12's update/init disclosure uses
+// the same helper). CS-27 covers a dead key with NO known rename (a fully
+// unmodeled top-level namespace, same shape CS-25 proved lands); CS-28 is the
+// live-key control arm (no warnings at all — the existing receipt shape is
+// unchanged); CS-29 covers a dead key WITH a known rename, matching the
+// decision's own example message.
+// ---------------------------------------------------------------------------
+test('CS-27: a dead key with no known rename still lands, and the receipt warns naming it', () => {
+  const h = harness();
+  try {
+    const call = handler(h.tools);
+    const receipt = call({ path: 'store_guard.allow_scripts', value: ['scripts/x.mjs'] }) as Receipt & {
+      warnings?: string[];
+    };
+    assert.deepEqual(receipt.value, ['scripts/x.mjs'], 'the write still lands — this is a warning, never a refusal');
+    assert.deepEqual(
+      (JSON.parse(h.read()) as { store_guard: { allow_scripts: unknown } }).store_guard.allow_scripts,
+      ['scripts/x.mjs'],
+      'and it is really on disk'
+    );
+    assert.ok(Array.isArray(receipt.warnings), 'the receipt carries a warnings array');
+    assert.equal(receipt.warnings?.length, 1, 'exactly one warning — for the one unread namespace the write touched');
+    assert.match(receipt.warnings?.[0] ?? '', /store_guard/, 'the warning names the unread key');
+    assert.doesNotMatch(
+      receipt.warnings?.[0] ?? '',
+      /renamed to/i,
+      'store_guard has no known rename — the warning must not invent one'
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+// NAMED SABOTAGE (CS-27): compute unreadConfigKeys against the SCHEMA'S
+// defined keys only, without walking the actually-written document → no
+// warning is produced for a namespace like store_guard that was never in the
+// schema to begin with, RED on the `Array.isArray` / length assertions.
+
+test('CS-28: a live key (already schema-modeled) writes with no warnings at all — the existing receipt shape is unchanged', () => {
+  const h = harness();
+  try {
+    const call = handler(h.tools);
+    const receipt = call({ path: 'tdd.enabled', value: false }) as Receipt & { warnings?: string[] };
+    assert.equal(receipt.value, false, 'the write lands as before');
+    assert.equal(
+      receipt.warnings,
+      undefined,
+      'a fully-read key must not carry a warnings field — the CONTROL that the new field is conditional, not always-present'
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+// NAMED SABOTAGE (CS-28): always attach `warnings: []` (or a populated one)
+// regardless of whether the written path is actually unread → this pin goes
+// RED on the `undefined` assertion, while CS-27/CS-29 stay green — proving
+// the field is gated on a real unread-key match, not unconditional.
+
+test("CS-29: models.coder (a known rename) warns AND names its rename target — the decision's own example message", () => {
+  const h = harness();
+  try {
+    const call = handler(h.tools);
+    const receipt = call({ path: 'models.coder', value: { model: 'claude-sonnet-5-5', effort: 'high' } }) as Receipt & {
+      warnings?: string[];
+    };
+    assert.deepEqual(
+      receipt.value,
+      { model: 'claude-sonnet-5-5', effort: 'high' },
+      'the write still lands under the dead key — config_set never rewrites the path the caller addressed'
+    );
+    assert.ok(Array.isArray(receipt.warnings), 'the receipt carries a warnings array');
+    assert.equal(receipt.warnings?.length, 1, 'one warning for the one renamed key the write touched');
+    const msg = receipt.warnings?.[0] ?? '';
+    assert.match(msg, /models\.coder/, 'the warning names the dead key');
+    assert.match(msg, /not read by Sterling/i, 'and states it is unread');
+    assert.match(msg, /renamed to models\.implementor/, "and names the rename target, e.g. 'renamed to models.implementor'");
+  } finally {
+    h.cleanup();
+  }
+});
+// NAMED SABOTAGE (CS-29): report the unread path without consulting
+// unreadConfigKeys' `renamed_to` field (a bare "X is not read by Sterling"
+// for every dead key, renamed or not) → the `/renamed to models\.implementor/`
+// assertion fires alone, while CS-27's arm (which asserts the ABSENCE of a
+// rename clause) stays green — proving the two arms are independent.

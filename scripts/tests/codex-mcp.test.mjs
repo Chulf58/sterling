@@ -261,91 +261,12 @@ test('probeCodex: every failure path reports its discriminating reason, carries 
 // SABOTAGE: move the login-status timeout check below the non-zero-status check
 // — the 'login status times out' row reports 'not-logged-in' and goes red.
 
-// =============================================================================
-// Part E (decision foreign_ffe7c416, defect 2) — withCodexEntry consumes the probe's
-// CARRIED COMMAND. Spec-only: scripts/lib/codex-mcp.mjs was NOT read to author
-// these.
-//
-// withCodexEntry still honours a probe result that carries a command (its only
-// producer, the native-Windows probe, was retired with the native launcher —
-// decision native-windows-launcher-retired-wsl2-only — but the helper's contract
-// is unchanged). CODEX_MCP_ENTRY's bare `codex` is the FALLBACK for a probe that
-// carries no path (probeCodex, whose success genuinely means "the `codex` on
-// PATH ran"), so the two arms below are
-// a matched pair and each is the other's control:
-//   path present -> the entry's command IS that path;
-//   path absent  -> the entry is exactly CODEX_MCP_ENTRY, unchanged.
-// An implementation satisfying only one of them is a defect in the other
-// direction, and neither arm alone can see it.
-// =============================================================================
-
-const ENTRY_PATH = 'C:\\x\\codex.cmd';
-
-test('withCodexEntry: a probe carrying a command wires THAT ABSOLUTE PATH as the entry command (ffe7c416 defect 2 — the bare "codex" is what left codex-on-Windows unable to spawn)', () => {
-  const result = withCodexEntry({}, { ok: true, command: ENTRY_PATH });
-  assert.deepEqual(
-    result,
-    { codex: { command: ENTRY_PATH, args: ['mcp-server'] } },
-    'exactly one entry, whose command is the probed path and whose args are still the mcp-server invocation'
-  );
-});
-// SABOTAGE: ignore probeResult.command and splice in CODEX_MCP_ENTRY regardless
-// (the pre-ruling behavior) — the deepEqual goes red on command:'codex'.
-// SABOTAGE (subtler): carry the command but drop args (`{command}` only) — the
-// deepEqual goes red on the missing args, catching an entry that would be
-// written into an MCP config and then never start a server.
-
-test('withCodexEntry: the path-carrying entry gets its OWN args array — mutating the produced entry cannot corrupt the shared CODEX_MCP_ENTRY constant', () => {
-  const result = withCodexEntry({}, { ok: true, command: ENTRY_PATH });
-  // Identity FIRST, mutation second, deliberately: if the arrays are shared this
-  // assertion fails and the test aborts BEFORE the push below, so a genuine
-  // defect never corrupts the module constant for the tests that run after it.
-  assert.notEqual(result.codex.args, CODEX_MCP_ENTRY.args, 'the entry does not alias CODEX_MCP_ENTRY.args — a shared array makes every caller a mutator of the shared constant');
-  assert.notEqual(result.codex, CODEX_MCP_ENTRY, 'nor does the entry alias the CODEX_MCP_ENTRY object itself');
-  result.codex.args.push('--canary');
-  assert.deepEqual(CODEX_MCP_ENTRY.args, ['mcp-server'], 'the shared constant is untouched after mutating the produced entry');
-  assert.deepEqual(CODEX_MCP_ENTRY, { command: 'codex', args: ['mcp-server'] }, 'CODEX_MCP_ENTRY as a whole survives — it is the fallback every no-path caller still receives');
-});
-// SABOTAGE: build the path-carrying entry as `{...CODEX_MCP_ENTRY, command}` —
-// the spread is shallow, so `args` is still the SHARED array; the first
-// notEqual goes red. (This is the whole point of the pin: the spread form looks
-// correct and is the form an implementer reaches for first.)
-
-test('withCodexEntry: a successful probe carrying NO command falls back to CODEX_MCP_ENTRY exactly — the bare-command entry survives for the probe that legitimately has no path (control arm for the pin above)', () => {
-  const result = withCodexEntry({}, { ok: true });
-  assert.deepEqual(result, { codex: CODEX_MCP_ENTRY }, 'no path carried -> the shipped bare entry, unchanged');
-  assert.deepEqual(result.codex, { command: 'codex', args: ['mcp-server'] }, 'spelled out, so the pin does not merely compare CODEX_MCP_ENTRY to itself');
-});
-// SABOTAGE: make the command mandatory (e.g. `command: probeResult.command`
-// unconditionally) — the fallback entry's command becomes undefined and both
-// deepEquals go red. This arm must pass for the OPPOSITE reason to the
-// path-carrying pin above: it is green only when the path is used BECAUSE it
-// was present, not because a command is always taken from the probe.
-
-test('withCodexEntry: a FAILED probe wires nothing even when it carries a command — ok, never command presence, is what gates the entry', () => {
-  // Boundary the spec did not name: a one-line implementation that keys off
-  // `probeResult.command` instead of `probeResult.ok` looks right and passes
-  // every other pin in this file, but it would wire an MCP entry off a probe
-  // that reported NOT LOGGED IN — a server that spawns and then fails.
-  const result = withCodexEntry({ sterling: { command: 'node', args: ['main.js'] } }, { ok: false, reason: 'not-logged-in', command: ENTRY_PATH });
-  assert.ok(!('codex' in result), 'a failed probe adds no codex entry, whatever else it carries');
-  assert.deepEqual(result.sterling, { command: 'node', args: ['main.js'] }, 'existing entries preserved');
-});
-// SABOTAGE: gate on `if (probeResult.command)` instead of `if (probeResult.ok)`
-// — the codex key appears and the `!('codex' in result)` assertion goes red.
-
-test('withCodexEntry: purity holds for the path-carrying arm too — a frozen input yields a NEW object, input untouched, existing entries preserved beside codex', () => {
-  const original = Object.freeze({ sterling: Object.freeze({ command: 'node', args: ['main.js'] }) });
-  let result;
-  // a mutating implementation on a frozen object throws in strict ESM — the call
-  // completing at all is part of the assertion.
-  assert.doesNotThrow(() => { result = withCodexEntry(original, { ok: true, command: ENTRY_PATH }); }, 'withCodexEntry does not attempt to write to its frozen input');
-  assert.notEqual(result, original, 'a NEW object is returned, never the input');
-  assert.deepEqual(original, { sterling: { command: 'node', args: ['main.js'] } }, 'input unchanged after the call');
-  assert.deepEqual(result.codex, { command: ENTRY_PATH, args: ['mcp-server'] }, 'the path-carrying entry is present in the returned object');
-  assert.deepEqual(result.sterling, { command: 'node', args: ['main.js'] }, 'existing sterling entry preserved beside codex');
-});
-// SABOTAGE: mutate and return the input (`mcpServers.codex = entry; return
-// mcpServers;`) — the frozen input makes the assignment throw in strict mode, so
-// doesNotThrow goes red; on a non-frozen input the notEqual identity assertion
-// is what catches it, which is why both are asserted rather than either alone.
+// Part E (decision foreign_ffe7c416, defect 2) — withCodexEntry once consumed a
+// probe's CARRIED COMMAND, wiring an absolute path for the retired native-Windows
+// probe (decision native-windows-launcher-retired-wsl2-only). That producer is
+// gone and withCodexEntry no longer looks for a command field at all (gap-hunt
+// idea 11, decision gap-hunt-2026-09-28-rulings) — CODEX_MCP_ENTRY's bare `codex`
+// is now the ONLY entry a successful probe ever wires, already pinned above
+// ('mc-server help succeeds keeps the codex entry', 'empty mcpServers +
+// successful probe yields ONLY the codex key', and the purity/failure-path
+// tests). The command-carrying arm's dedicated tests were removed with it.

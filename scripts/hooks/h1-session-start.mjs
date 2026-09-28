@@ -1325,8 +1325,9 @@ if (drainable >= deepThreshold) {
 let registryContext = '';
 if (existsSync(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, '/');
-  const registry = new ProjectRegistry(registryPath());
+  let registry;
   try {
+    registry = new ProjectRegistry(registryPath());
     registry.touchLastSeen(cwdPosix, new Date().toISOString());
     const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync(p.repo_path));
     if (siblings.length) {
@@ -1336,7 +1337,7 @@ if (existsSync(registryPath())) {
         siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(', ') || '(no domains)'}`).join('\n');
     }
   } finally {
-    registry.close();
+    registry?.close();
   }
 }
 
@@ -1744,8 +1745,14 @@ try {
   // fail-open (P1): this diagnostic must never break SessionStart
 }
 
+// The HUMAN sees the conductor diagnostic too (decision gap-hunt-2026-09-28-rulings
+// item 3): additionalContext reaches only the model, so a session running without
+// the conductor was invisible to the one person who can run the remedy. Same
+// text, leading the banner, and the counts still close it.
+const conductorActivationWarning = conductorActivationContext ? `⚠ ${conductorActivationContext.trim()}. ` : '';
+
 const output = {
-  systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  systemMessage: `${conductorActivationWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
   hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },

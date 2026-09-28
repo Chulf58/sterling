@@ -1,5 +1,5 @@
 // H7 SETTLEMENT-TIME MINTING — GENERATED-PROJECTIONS EXEMPTION (settled
-// ruling e1275166: generated projections are exempt from drift machinery;
+// ruling foreign_e1275166: generated projections are exempt from drift machinery;
 // the settlement-time minting path introduced in board c198866d dropped that
 // exemption — measured 2026-08-25 as a merge-blocking regen<->reconcile loop).
 //

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseConfig } from '../config.js';
+import { parseConfig, unreadConfigKeys, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS } from '../config.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
@@ -18,8 +18,8 @@ test('shipped default config parses and carries the spec defaults (§12, §7.2)'
   // (user-ruled 2026-09-28, replacing implementor-default-model-opus-5-5); Opus 5.5
   // stays available as a per-dispatch pin.
   assert.equal(shipped.models.implementor.model, 'claude-sonnet-5-5');
-  // medium: unchanged effort — only the model id moved (2026-09-28 ruling).
-  assert.equal(shipped.models.implementor.effort, 'medium');
+  // high: user-ruled 2026-09-28 (decision implementor-default-effort-high) — Sonnet 5.5 is cheap to run.
+  assert.equal(shipped.models.implementor.effort, 'high');
   // The schema's per-key defaults are the effective default for every project
   // whose config omits a models key; they must match the shipped file, or a bump
   // to one silently misses projects that inherit from the other.
@@ -370,4 +370,44 @@ test('pr_review (PR review loop identity pin): permissive, defaults to copilot_l
   // pr-review-wait.mjs is the strict judge.
   assert.doesNotThrow(() => parseConfig({ pr_review: { copilot_logins: 'x' } }));
   assert.deepEqual(parseConfig({ pr_review: { copilot_logins: ['a[bot]'] } }).pr_review, { copilot_logins: ['a[bot]'] });
+});
+
+// Undeclared-source default (decision gap-hunt-2026-09-28-rulings item 6): shell
+// scripts are excluded by default. The default lives in BOTH the zod schema and
+// the shipped template, and the two must agree (anti-pattern 85d15143).
+test('undeclared_source_exclude_globs defaults to ["**/*.sh"] in the schema AND the shipped template', () => {
+  const shippedRaw = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
+  assert.deepEqual(DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, ['**/*.sh']);
+  assert.deepEqual(parseConfig({}).undeclared_source_exclude_globs, ['**/*.sh'], 'schema default');
+  assert.deepEqual(shippedRaw.undeclared_source_exclude_globs, ['**/*.sh'], 'template default');
+  assert.deepEqual(parseConfig({ undeclared_source_exclude_globs: [] }).undeclared_source_exclude_globs, [], 'an explicit [] still opts back in to scanning .sh');
+});
+
+// Unread config keys (decision gap-hunt-2026-09-28-rulings item 12): a key the
+// schema does not define is stripped silently on parse, so Sterling never reads
+// it. Disclosure only — the helper reports, it never edits the config.
+test('unreadConfigKeys: top-level and NESTED keys the schema strips are named by dotted path, in config order', () => {
+  assert.deepEqual(unreadConfigKeys({ mode: 'hobby', models: {}, toolchains: [] }), [], 'a clean config has none');
+  assert.deepEqual(
+    unreadConfigKeys({ caps: { inner_loop_n: 3 }, context_watch: { warn_pct: 40, windows: { default: 1 }, conductor: { soft_pct: 35, junk: 1 } }, reviewer_selection: {} }).map((k) => k.path),
+    ['caps', 'context_watch.warn_pct', 'context_watch.conductor.junk', 'reviewer_selection'],
+  );
+  // records, passthrough objects and unknown-typed values are open by design: their keys are data
+  assert.deepEqual(unreadConfigKeys({ domain_paths: { anything: '/x' }, agents: { implementor: { extra_tools: [], typo: 1 } }, pr_review: { whatever: 1 } }), []);
+  assert.deepEqual(unreadConfigKeys(null), [], 'a non-object config is some other check\'s refusal, not this one');
+  assert.deepEqual(unreadConfigKeys([1, 2]), []);
+});
+
+test('unreadConfigKeys: the Dome Farmer pre-rename models keys are each named, with the known renames', () => {
+  const me = { model: 'm', effort: 'low' };
+  const keys = unreadConfigKeys({ models: { implementor: me, coder: me, coder_hard: me, explorer: me, test_writer: me, reviewers: me, implementation_architect: me, debugger: me } });
+  assert.deepEqual(keys, [
+    { path: 'models.coder', renamed_to: 'models.implementor' },
+    { path: 'models.coder_hard' },
+    { path: 'models.explorer', renamed_to: 'models.scout' },
+    { path: 'models.test_writer' },
+    { path: 'models.reviewers' },
+    { path: 'models.implementation_architect' },
+    { path: 'models.debugger' },
+  ]);
 });

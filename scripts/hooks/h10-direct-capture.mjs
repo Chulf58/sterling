@@ -36,7 +36,8 @@ import { join, basename } from 'node:path';
 import { readStdin, deny, allow, exitAfterWrite, openStore, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
 import { withRegisterLock, classifyRegister, readRegister, formatDispatchRef, registerPath as ownerRegisterPath } from '../lib/dispatch-register.mjs';
 import { disclosure, render } from '../lib/review-errors.mjs';
-import { mintSettlementReconcile, withFileLock, parseTouchesContent, gitTouches, gitTrackedSubset, writeGitSettled } from './lib/settlement.mjs';
+import { mintSettlementReconcile, withFileLock, parseTouchesContent, gitTouches, gitTrackedSubset, writeGitSettled, loadGeneratedProjections } from './lib/settlement.mjs';
+import { VERSION_ONLY_CANDIDATES, isVersionOnlyInWorkingTree } from '../lib/version-only.mjs';
 import { latestUsage, fillPct } from './lib/transcript.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
@@ -1375,9 +1376,26 @@ try {
   // ec9eacaa) — dropped here rather than at activePaths so it cannot backdate
   // `earliest` either, which would anchor the captured-set window to work whose
   // duty is not owed yet.
+  // RELEASE MECHANICS leave the capture trigger set too (decision
+  // gap-hunt-2026-09-28-rulings, items 4+5): a path listed in
+  // config.generated_projections is regenerated from the store, and a
+  // version-only manifest or lockfile bump (the shared proof in
+  // ../lib/version-only.mjs, the same one direct-merge uses) carries no
+  // knowledge. The proof compares against the settled snapshot's commit only.
+  // With NO snapshot yet (a first run) there is no trustworthy base: HEAD may
+  // already hold a dependency edit committed this session, so the version-only
+  // skip does not apply and the path still counts (Opus review LOW-4). A path
+  // already dirty at the snapshot, or an unreachable snapshot, fails closed the
+  // same way. The generated-projection skip needs no base and always applies.
+  // Capture duty only — article demand and settlement are unchanged.
+  const generatedProjections = loadGeneratedProjections(input.cwd);
+  const releaseBase = git.ok && git.settled && !git.base_lost ? git.settled.sha : null;
+  const isReleaseMechanics = (p) =>
+    generatedProjections.has(p) ||
+    (VERSION_ONLY_CANDIDATES.includes(p) && !Object.hasOwn(git.settled?.dirty ?? {}, p) && isVersionOnlyInWorkingTree(input.cwd, releaseBase, p));
   const activeTouches = touches
     .filter((t) => !dischargedOnCaptureLane(t.at))
-    .filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
+    .filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t) && !isReleaseMechanics(t.path));
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync(join(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   // Item 353416a9 (measured 2026-08-22): research events had NO discharge route at

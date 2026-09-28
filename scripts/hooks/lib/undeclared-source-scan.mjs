@@ -22,11 +22,12 @@
 // MED-3 (the two ladders had already diverged): the ONE ladder here carries
 // H1's adjudicated ABSENT vs WRONG-TYPE distinction throughout — an absent
 // field (toolchains, or undeclared_source_exclude_globs) defaults per the
-// schema (z.array(...).default([])), because loadConfig's raw JSON.parse
+// schema (toolchains [], exclude globs DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS), because loadConfig's raw JSON.parse
 // never materializes schema defaults the way parseConfig does, so a project
 // whose config.json simply predates a field must not be misread as
 // malformed. Only a PRESENT-BUT-WRONG-SHAPE field refuses as UNAVAILABLE.
 import { spawnSync } from 'node:child_process';
+import { DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS } from '@sterling/schemas';
 import { classifyCoverage, renderUndeclaredSourceReport, renderUnavailable } from './undeclared-source.mjs';
 
 export const UNDECLARED_SOURCE_TIMEOUT_MS = 3_000;
@@ -98,7 +99,9 @@ export function validateUndeclaredSourceConfig(config) {
   return {
     ok: true,
     pathGlobs: toolchains.flatMap((t) => t.path_globs),
-    excludeGlobs: config.undeclared_source_exclude_globs ?? [],
+    // Absent takes the SCHEMA default (decision gap-hunt-2026-09-28-rulings
+    // item 6), imported rather than restated so the two cannot drift.
+    excludeGlobs: config.undeclared_source_exclude_globs ?? [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS],
   };
 }
 

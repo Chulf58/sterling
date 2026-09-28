@@ -10,6 +10,7 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openProject } from './lib/project.mjs';
+import { existsContained, readContained, writeContained } from './lib/contained-fs.mjs';
 
 // The §15 extensible sets — CLOSED here on purpose, mirrored by the totality
 // pin in scripts/tests/projection.test.mjs: adding a set obligates extending
@@ -80,5 +81,22 @@ the durable store is authoritative; this file is a projection of it.
 ${sections.join('\n')}`;
 
 writeFileSync(join(cwd, 'architecture.md'), md);
+// SELF-REGISTRATION (decision gap-hunt-2026-09-28-rulings, item 1): list
+// architecture.md in config.generated_projections, the way
+// handoff-projection.mjs registers its files, so settlement, H10 and
+// direct-merge treat it as generated even after the key was lost. Appends only
+// when absent (never reorders, so a rerun writes nothing); every other key and
+// entry is kept. rulings-projection.mjs carries the same block for rulings.md.
+// Config is read and written through contained-fs, as handoff-projection.mjs
+// does, so both producers write it the same way (Opus review LOW-5).
+const configRel = '.sterling/config.json';
+const rawConfig = existsContained(cwd, configRel, 'file') ? readContained(cwd, configRel) : '';
+const parsedConfig = rawConfig ? JSON.parse(rawConfig) : {};
+const registered = Array.isArray(parsedConfig.generated_projections) ? parsedConfig.generated_projections : [];
+if (!registered.includes('architecture.md')) {
+  parsedConfig.generated_projections = [...registered, 'architecture.md'];
+  writeContained(cwd, configRel, JSON.stringify(parsedConfig, null, 2) + (rawConfig.endsWith('\n') || !rawConfig ? '\n' : ''));
+  console.log('config.generated_projections: registered architecture.md');
+}
 store.close();
 console.log(`architecture.md written (${SETS.length} sets, ${SETS.filter((s) => !bySlug.get(s.article)).length} article gap(s))`);

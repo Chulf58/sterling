@@ -4790,6 +4790,7 @@ var successPredicateSchema = external_exports.object({
     min_bytes: external_exports.number().optional()
   }).strict().optional()
 }).strict().refine((v) => v.output_regex !== void 0 || v.output_regex_absent !== void 0 || v.artifact !== void 0, { message: "success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)" });
+var DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS = Object.freeze(["**/*.sh"]);
 var configSchema = external_exports.object({
   toolchains: external_exports.array(external_exports.object({
     adapter: external_exports.string(),
@@ -4837,7 +4838,14 @@ var configSchema = external_exports.object({
   // classifyCoverage's excludeGlobs parameter in
   // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
   // toolchain path_glob).
-  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default([]),
+  // DEFAULT ['**/*.sh'] (decision gap-hunt-2026-09-28-rulings item 6): shell
+  // scripts are launcher and console glue, never a toolchain's source, and
+  // flagging them was banner noise answered the same way every session. The
+  // default lives in THREE places that must agree: here, templates/default-
+  // config.json (anti-pattern 85d15143), and the raw-config ladder in
+  // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
+  // An explicit [] still opts back in.
+  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
   // Attestation disclosure (decision attestation-staleness-disclosure-only-
   // never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
   // POSIX globs whose touched paths get a comparable-human-record rollup at
@@ -4921,7 +4929,7 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    implementor: modelEffort.default({ model: "claude-sonnet-5-5", effort: "medium" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: modelEffort.default({ model: "claude-sonnet-5-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
@@ -8560,6 +8568,32 @@ function main(input2) {
     const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
     const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
     const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
+    const clip2 = (v, n = 160) => {
+      const t = String(v ?? "").replace(/\s+/g, " ").trim();
+      return t.length <= n ? t : `${t.slice(0, n)}\u2026`;
+    };
+    const pointerHead = (r, name) => `  \u2192 ${clip2(name, 80)} (${String(r.id).slice(0, 8)})`;
+    const questionDecisionText = (records, remedy) => {
+      const shown = records.slice(0, MAX_DECISIONS);
+      return [
+        `\u25B8 DECISIONS for this subject (${records.length}) \u2014 one may already settle the question you just put; the user's pick must not silently contradict it. One line each, knowledge_get the id for the full ruling:`,
+        ...shown.map((d) => {
+          const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
+          return `${pointerHead(d, d.slug || d.title || d.statement)} \u2014 ${d.authority ? `[${d.authority}] ` : ""}${clip2(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` + (rejected ? ` \u2014 rejected: ${clip2(rejected, DECISION_REJECTED_CLIP)}` : "");
+        }),
+        ...records.length > shown.length ? [`  \u2026 ${records.length - shown.length} more NOT shown (cap ${MAX_DECISIONS}) \u2014 ${remedy} for the full set`] : []
+      ].join("\n");
+    };
+    const questionPriorLine = (r) => {
+      const stale = r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : "";
+      const head = pointerHead(r, r.slug || r.question);
+      const q = r.slug ? `: ${clip2(r.question, 120)}` : "";
+      if (r.type === "research_finding") return `${head} \u2014 ANSWERED${q} (captured ${r.capture_date ?? "?"}${stale})`;
+      if (r.type === "open_question") {
+        return r.resolution_status === "closed" ? `${head} \u2014 ANSWERED (question closed into ${r.closed_into ?? "an unnamed record"})${q}` : `${head} \u2014 ALREADY UNDER INVESTIGATION (open, no answer yet)${q}`;
+      }
+      return `${head} \u2014 REFUTED TRAIL${q} \u2014 rejected: ${clip2(r.rejected_answer, 100)}`;
+    };
     const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
     const hazardBlocks = [
       ...hazardParts(hazards.map((x) => x.record), {
@@ -8570,12 +8604,14 @@ function main(input2) {
     ];
     const decisionBlocks = [
       ...decisions.length ? [
-        decisionPointerPart("(subject match)", decisions.map((x) => x.record), {
-          widen: decisionRemedy,
-          cap: MAX_DECISIONS,
-          remedy: decisionRemedy,
-          matchLabel: "for this subject"
-        })
+        ((part) => isQuestion ? { ...part, text: questionDecisionText(decisions.map((x) => x.record), decisionRemedy) } : part)(
+          decisionPointerPart("(subject match)", decisions.map((x) => x.record), {
+            widen: decisionRemedy,
+            cap: MAX_DECISIONS,
+            remedy: decisionRemedy,
+            matchLabel: "for this subject"
+          })
+        )
       ] : []
     ];
     const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
@@ -8585,16 +8621,13 @@ function main(input2) {
       })
     ] : [];
     const PRIOR_ANSWER_CAP = 3;
-    const clip2 = (v, n = 160) => {
-      const t = String(v ?? "").replace(/\s+/g, " ").trim();
-      return t.length <= n ? t : `${t.slice(0, n)}\u2026`;
-    };
     const shownPrior = priorAnswers.slice(0, PRIOR_ANSWER_CAP);
     const priorBlocks = priorAnswers.length ? [
       [
-        `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 this dispatch may be about to RE-DERIVE one of these, or duplicate a question already under investigation. knowledge_get before fanning out:`,
+        isQuestion ? `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 the question you just put may already be answered, or already under investigation. If one answers it, tell the user before acting on their pick:` : `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 this dispatch may be about to RE-DERIVE one of these, or duplicate a question already under investigation. knowledge_get before fanning out:`,
         ...shownPrior.map((x) => {
           const r = x.record;
+          if (isQuestion) return questionPriorLine(r);
           if (r.type === "research_finding") {
             return `  \u2192 ANSWERED: ${clip2(r.question)} (source ${r.source_date ?? "?"}, captured ${r.capture_date ?? "?"}${r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : ""}) \xB7 knowledge_get ${r.id}`;
           }

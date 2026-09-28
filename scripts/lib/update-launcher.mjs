@@ -15,22 +15,14 @@ import { stampBody, verifyStamp } from './generated-marker.mjs';
 
 export const UPDATE_LAUNCHER_NAME = 'sterling-update.bat';
 
-// TWO TEMPLATES, ONE GENERATED FILENAME. The WSL template shells to
-// wsl.exe + bash scripts/update-console.sh; a 100%-Windows machine has no WSL,
-// and the clone update is the ONLY way a consuming machine ever receives
-// Sterling changes — so on a win32 HOST the native template is rendered
-// instead, driving the same scripts/update.mjs directly through node
-// (decision foreign_ffe7c416 host-native-init-with-dev-machine-escape-hatch; parity
-// decision foreign_1fe2a5e3; distribution model foreign_e6240afe). The discriminator is the
-// RENDERING host's platform, which is exactly the host-native derivation the
-// ruling asks for: a WSL/Linux session keeps emitting the WSL chain, a native-Windows session
-// emits a chain with no wsl.exe in it. The filename, ensure semantics,
-// generated marker and .gitignore entry are identical either way, so no
-// caller (init's manifest, runUpdate's fan-out) changes.
+// ONE TEMPLATE: wsl.exe + bash scripts/update-console.sh. The native-Windows
+// arm (templates/update-win-native.bat, rendered on a win32 host) is RETIRED
+// (decision gap-hunt-2026-09-28-rulings item 11b, extending
+// native-windows-launcher-retired-wsl2-only): Sterling runs under WSL2 on every
+// machine, so no host renders it. A launcher a win32 host generated earlier is
+// refreshed to the WSL body by the ordinary marker rule below when it is
+// unmodified, and reported as 'differs' when it was hand-edited.
 export const UPDATE_TEMPLATE_WSL = 'update-win.bat';
-export const UPDATE_TEMPLATE_NATIVE = 'update-win-native.bat';
-export const updateTemplateName = (platform = process.platform) =>
-  platform === 'win32' ? UPDATE_TEMPLATE_NATIVE : UPDATE_TEMPLATE_WSL;
 
 // /mnt/c/Users/cuj/X -> C:\Users\cuj\X (WSL drvfs); else just backslash-ize.
 // Mirrors init's toWindowsPath — duplicated (5 lines) rather than imported:
@@ -42,35 +34,15 @@ const toWindowsPath = (p) => {
 const crlf = (s) => s.replace(/\r?\n/g, '\r\n'); // cmd.exe misparses LF-only batch files
 const normalize = (s) => s.replace(/\r\n/g, '\n');
 
-export function renderUpdateLauncher(pluginRoot, { platform = process.platform, nodeExe = process.execPath } = {}) {
-  const template = readFileSync(join(pluginRoot, 'templates', updateTemplateName(platform)), 'utf8');
+export function renderUpdateLauncher(pluginRoot) {
+  const template = readFileSync(join(pluginRoot, 'templates', UPDATE_TEMPLATE_WSL), 'utf8');
   // `wsl.exe --cd` accepts an absolute Windows path OR an absolute Linux path.
   // A drvfs clone (/mnt/<d>/...) bakes its Windows form; an ext4 clone has NO
   // Windows form (backslashifying yields a path valid nowhere — the window
   // would flash-and-close), so its POSIX path passes through unchanged.
-  // The native template needs the same value for `cd /d`, and gets a correct
-  // one from the same rule: rendering on win32 the root is already drive-form.
   const posix = pluginRoot.replace(/\\/g, '/');
   const cdPath = /^\/mnt\/[a-z](\/|$)/.test(posix) || !posix.startsWith('/') ? toWindowsPath(posix) : posix;
-  // BAKE THE RENDERING RUNTIME, never a PATH lookup: node is measurably not on
-  // the PATH a double-clicked .bat inherits on a native-Windows host
-  // (ffe7c416 defect 1), while process.execPath is a runtime already proven to
-  // run. The generated file still falls back to a PATH `node` if the baked one
-  // is gone (an upgrade moved it), and refuses loudly if neither resolves.
-  // The node path gets the SAME treatment as cdPath above, and for the same
-  // reason. A bare `.replace(/\//g,'\\')` backslashified unconditionally, so a
-  // POSIX process.execPath rendered as `\home\u\...\node` — the leading slash
-  // became a backslash and the absolute root was LOST, producing a launcher
-  // that could never find its interpreter. Caught by the updater render pins
-  // added under ffe7c416, which is precisely what they were written for: the
-  // defect predates them and no earlier test rendered this template at all.
-  const posixNode = nodeExe.replace(/\\/g, '/');
-  const bakedNode = /^\/mnt\/[a-z](\/|$)/.test(posixNode) || !posixNode.startsWith('/')
-    ? toWindowsPath(posixNode)
-    : posixNode;
-  const body = template
-    .replaceAll('{{WIN_PLUGIN_DIR}}', cdPath)
-    .replaceAll('{{WIN_NODE_EXE}}', bakedNode);
+  const body = template.replaceAll('{{WIN_PLUGIN_DIR}}', cdPath);
   return crlf(stampBody(body, 'rem'));
 }
 
@@ -89,17 +61,15 @@ export function renderUpdateLauncher(pluginRoot, { platform = process.platform, 
  * template edit) refreshes freely; a marker mismatch (or no marker at all —
  * a legacy or foreign file) still leaves it untouched as 'differs'.
  */
-export function ensureUpdateLauncher(target, pluginRoot, opts = {}) {
+export function ensureUpdateLauncher(target, pluginRoot) {
   if (!existsSync(target)) {
     return { status: 'skipped', detail: `target missing: ${target}` };
   }
-  // Guard the template this HOST will actually render (a win32 host needs the
-  // native one), so a clone missing it skips loudly instead of throwing.
-  const templateName = updateTemplateName(opts.platform ?? process.platform);
-  if (!existsSync(join(pluginRoot, 'templates', templateName))) {
-    return { status: 'skipped', detail: `templates/${templateName} missing in the clone` };
+  // A clone missing the template skips loudly instead of throwing.
+  if (!existsSync(join(pluginRoot, 'templates', UPDATE_TEMPLATE_WSL))) {
+    return { status: 'skipped', detail: `templates/${UPDATE_TEMPLATE_WSL} missing in the clone` };
   }
-  const expected = renderUpdateLauncher(pluginRoot, opts);
+  const expected = renderUpdateLauncher(pluginRoot);
   const launcherPath = join(target, UPDATE_LAUNCHER_NAME);
 
   let result;

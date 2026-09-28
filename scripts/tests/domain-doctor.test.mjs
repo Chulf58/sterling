@@ -95,14 +95,20 @@ test('sweep reports a superseded_by that resolves in no store, and is silent onc
 test('restore is dry-run by default, applies only with --apply, resurrects the DANGLING id, and refuses a second apply', () => {
   const { projectDir, domainsRoot, originalId, lostId } = lossScenario();
 
-  const dry = doctor(['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud'], projectDir);
+  // --roots pins the read-only cross-store resolution scan (restore()'s
+  // noteResolution sweep, same population as sweep) to this fixture's own
+  // domainsRoot — without it, restore defaults to scanning this MACHINE's
+  // real ~/.sterling/domains, whose live stores under concurrent Sterling
+  // sessions throw 'database is locked' on the unretried read-only probes
+  // (board 4dab2574; openRO sets no busy_timeout).
+  const dry = doctor(['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--roots', domainsRoot], projectDir);
   assert.equal(dry.code, 0, `dry-run succeeds: ${dry.stderr}`);
   assert.match(dry.stdout, /DRY-RUN/i, 'says nothing was written');
   assert.match(dry.stdout, new RegExp(lostId), 'plans to resurrect exactly the dangling target id');
 
   const domainDb = join(domainsRoot, 'genesys-cloud', 'sterling.db');
   const applied = doctor(
-    ['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply'],
+    ['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply', '--roots', domainsRoot],
     projectDir
   );
   assert.equal(applied.code, 0, `apply succeeds: ${applied.stderr}`);
@@ -129,7 +135,7 @@ test('restore is dry-run by default, applies only with --apply, resurrects the D
 
   // … and a second apply refuses: the id resolves, there is nothing to restore.
   const again = doctor(
-    ['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply'],
+    ['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply', '--roots', domainsRoot],
     projectDir
   );
   assert.notEqual(again.code, 0, 'restoring an id that already resolves is refused');
@@ -139,7 +145,7 @@ test('restore is dry-run by default, applies only with --apply, resurrects the D
 test('scan lists per-domain store files with record counts from an explicit root', () => {
   const { projectDir, domainsRoot, originalId, lostId } = lossScenario();
   // materialize the domain store via a real restore so scan has something to count
-  doctor(['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply'], projectDir);
+  doctor(['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply', '--roots', domainsRoot], projectDir);
   const scanned = doctor(['scan', '--roots', domainsRoot], projectDir);
   assert.equal(scanned.code, 0, scanned.stderr);
   assert.match(scanned.stdout, /genesys-cloud/);

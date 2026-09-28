@@ -13,8 +13,8 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH } from '../lib/update.mjs';
-import { ensureUpdateLauncher, renderUpdateLauncher, updateTemplateName, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
+import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH, preScaleDownMarkers, reexecArgs, UPDATE_REEXEC_ENV, UPDATE_REEXEC_FROM_ENV } from '../lib/update.mjs';
+import { ensureUpdateLauncher, renderUpdateLauncher, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
 
 const GIT_ID = ['-c', 'user.email=t@sterling.test', '-c', 'user.name=sterling test'];
 
@@ -1308,356 +1308,58 @@ test('the migration sweep attributes itself: migrate-stores.mjs is invoked with 
   }
 });
 
-// ── 6. the NATIVE-WINDOWS update arm (decision foreign_ffe7c416 ─────────────────────
-//        `host-native-init-with-dev-machine-escape-hatch`; parity 1fe2a5e3;
-//        consumer update UX 558895a9; article consumer-update-path AC9)
+// ── 6. the WSL updater launcher is the ONLY arm ─────────────────────────────
 //
-// WHY THIS SECTION EXISTS: templates/update-win.bat:13 shells UNCONDITIONALLY
-// to wsl.exe, so before ffe7c416 a 100%-Windows user with no WSL could not
-// update Sterling by ANY shipped route — a whole capability missing, not
-// merely degraded. The native arm restores it, and it shipped with ZERO test
-// coverage: everything above renders synthetic BAT_TEMPLATE fixtures through
-// the WSL template, so an unrendered {{WIN_NODE_EXE}} — a .bat that on the real
-// host tries to run a program literally named `{{WIN_NODE_EXE}}` — would ship
-// GREEN. That is the defect class these pins close.
-//
-// SPEC-ONLY: authored BLIND to scripts/lib/update-launcher.mjs and
-// templates/update-win-native.bat (H4 read wall; both were also being edited
-// concurrently). Every expectation below comes from ffe7c416 and the declared
-// interface, never from the implementation.
-//
-// DELIBERATELY NOT PINNED: the batch file's RUNTIME behaviour. cmd.exe cannot
-// be executed from this repo's test seat, so a runtime pin would be a
-// permanently-skipped test that reads like coverage. The control flow was read
-// by an outside review; a read is not a run, and the gap stays documented here
-// rather than faked.
+// The native-Windows update arm (templates/update-win-native.bat, rendered on a
+// win32 host) is RETIRED by decision gap-hunt-2026-09-28-rulings item (11b),
+// extending native-windows-launcher-retired-wsl2-only: Sterling runs under WSL2
+// everywhere. Its dedicated pins were deleted with it; the assertions that
+// pinned SURVIVING behaviour (the shipped template renders clean and CRLF, the
+// delivered file stays CRLF with the marker line appended) are ported below
+// onto the one remaining arm. The WSL-arm ensure semantics (created / matches /
+// differs / skipped, the gitignore entry exactly once, an ext4 path passed
+// through unchanged) are pinned in section 5 above.
 
-/** repo root — these pins render the REAL shipped templates, not a fixture,
+/** repo root — these pins render the REAL shipped template, not a fixture,
  *  because a fixture cannot catch a placeholder the SHIPPED template forgot. */
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
-/** A native-arm template fixture: no wsl, no bash, no wt — both placeholders. */
-const NATIVE_BAT_TEMPLATE = [
-  '@echo off',
-  'rem native updater fixture',
-  'set "STERLING_NODE={{WIN_NODE_EXE}}"',
-  'cd /d "{{WIN_PLUGIN_DIR}}"',
-  '"%STERLING_NODE%" scripts\\update.mjs %*',
-  '',
-].join('\r\n');
-
-/** A clone carrying BOTH templates, so template SELECTION is a genuine choice
- *  rather than "whichever file happened to exist". */
-function cloneWithBothTemplates() {
-  const clone = mkdtempSync(join(tmpdir(), 'sterling-launcher-clone-'));
-  mkdirSync(join(clone, 'templates'));
-  writeFileSync(join(clone, 'templates', 'update-win.bat'), BAT_TEMPLATE);
-  writeFileSync(join(clone, 'templates', 'update-win-native.bat'), NATIVE_BAT_TEMPLATE);
-  return clone;
-}
-
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-/** A quoted span somewhere in the render containing `value` — satisfied by a
- *  bare `"C:\...\node.exe"` AND by `set "VAR=C:\...\node.exe"`, both of which
- *  keep a Program Files path from splitting into two arguments. Deliberately
- *  not stricter: the quoting FORM is the template author's choice, the
- *  space-safety is the requirement. */
-const quotedSpanContaining = (value) => new RegExp(`"[^"\\r\\n]*${escapeRe(value)}[^"\\r\\n]*"`);
-
-/** rem/:: comment lines stripped. ffe7c416 says the native arm INVOKES no
- *  wsl.exe/bash/wt.exe; an inert `rem` mentioning WSL is not an invocation, so
- *  the negatives run against executable lines only. */
-const execLines = (content) =>
-  content
-    .split(/\r?\n/)
-    .filter((l) => !/^\s*(rem\b|::)/i.test(l))
-    .join('\n');
-
-test('CONTROL ARM — a non-win32 host still renders the WSL chain from a clone that ALSO carries the native template, POSIX clone path passed through unchanged', () => {
-  // Placed FIRST and deliberately: every win32 pin below is a NEGATIVE ("no
-  // wsl", "no bash"), and negatives have more than one possible cause — an
-  // implementation that rewrote the launcher unconditionally, or one whose
-  // render simply produced nothing useful, would satisfy them identically.
-  // This arm must pass for the OPPOSITE reason, so a green win32 pin carries
-  // its own evidence that the platform switch is what did the work.
-  const clone = cloneWithBothTemplates();
-  try {
-    for (const platform of ['linux', 'darwin']) {
-      const wsl = renderUpdateLauncher(clone, { platform });
-      assert.match(wsl, /wsl\.exe/i, `${platform} must still route through wsl.exe — the native arm is win32-only`);
-      assert.match(wsl, /\bbash\b/i, `${platform} still invokes bash inside the distro`);
-      assert.match(wsl, /scripts\/update-console\.sh/, `${platform} still runs the console updater script`);
-      assert.ok(
-        wsl.includes(`--cd "${clone}"`),
-        'an ext4 clone still bakes its POSIX path unchanged — backslashifying it yields a path valid nowhere'
-      );
-      assert.doesNotMatch(wsl, /\{\{/, 'no placeholder survives on the WSL arm either');
-    }
-
-    // and the two arms genuinely differ from the SAME clone — the selection is
-    // driven by platform, not by which template happens to be present
-    assert.notEqual(
-      renderUpdateLauncher(clone, { platform: 'win32', nodeExe: 'C:\\Tools\\node.exe' }),
-      renderUpdateLauncher(clone, { platform: 'linux' }),
-      'one clone, two platforms, two different renders'
-    );
-  } finally {
-    rmSync(clone, { recursive: true, force: true });
-  }
+test('the native-Windows update arm is gone: no update-win-native.bat ships and the launcher module exports no platform switch', async () => {
+  assert.equal(existsSync(join(REPO_ROOT, 'templates', 'update-win-native.bat')), false, 'the retired native template is not shipped');
+  const mod = await import('../lib/update-launcher.mjs');
+  assert.equal(mod.updateTemplateName, undefined, 'no platform-based template selection survives');
+  assert.equal(mod.UPDATE_TEMPLATE_NATIVE, undefined, 'no native template name survives');
 });
-// SABOTAGE: make updateTemplateName return 'update-win-native.bat'
-// unconditionally (drop the platform test) — the linux/darwin iterations lose
-// the wsl.exe/bash/update-console.sh matches and go red. This is the pin that
-// proves the win32 negatives below are not satisfied by an unconditional
-// rewrite; it is the CONTROL for all of them, so it carries no defense in
-// depth of its own by design.
 
-test('updateTemplateName: win32 selects the native template; EVERY other platform keeps the WSL one', () => {
-  assert.equal(updateTemplateName('win32'), 'update-win-native.bat');
-  // freebsd/aix are deliberate: they prove the rule is "win32 vs everything
-  // else", not an allowlist of {linux, darwin} that silently mis-selects on a
-  // platform nobody enumerated.
-  for (const platform of ['linux', 'darwin', 'freebsd', 'aix', 'sunos']) {
-    assert.equal(updateTemplateName(platform), 'update-win.bat', `${platform} is not win32 and must keep the WSL launcher`);
-  }
+test('the SHIPPED WSL template renders clean: no placeholder survives, it routes through wsl.exe + bash scripts/update-console.sh, CRLF throughout', () => {
+  const rendered = renderUpdateLauncher(REPO_ROOT);
+  assert.doesNotMatch(rendered, /\{\{/, 'NO placeholder survives the render — a .bat containing `{{...}}` runs a program with that literal name');
+  assert.match(rendered, /wsl\.exe/i);
+  assert.match(rendered, /\bbash\b/i);
+  assert.match(rendered, /scripts\/update-console\.sh/);
+  assert.ok(rendered.includes('\r\n'), 'the render is CRLF, as a .bat must be');
+  assert.doesNotMatch(rendered, /(^|[^\r])\n/, 'every line is CRLF — a lone LF in a .bat is a cmd.exe parsing hazard');
 });
-// SABOTAGE: invert the comparison (`platform !== 'win32' ? native : wsl`) —
-// the win32 equality goes red and all five non-win32 iterations go red.
-// SABOTAGE (allowlist form): implement as `['linux','darwin'].includes(p) ?
-// 'update-win.bat' : 'update-win-native.bat'` — win32/linux/darwin still pass,
-// and ONLY the freebsd/aix/sunos iterations go red. That mutation is exactly
-// why those three are here.
+// PORTED from the retired native-arm render pin: the placeholder and CRLF
+// assertions pinned the shared render path, not the native template.
 
-test('the SHIPPED native template renders clean on a win32 host: no placeholder survives, nothing invokes WSL/bash/wt, the quoted absolute node runs scripts\\update.mjs, CRLF throughout', () => {
-  const nodeExe = 'C:\\Program Files\\nodejs\\node.exe';
-
-  // CONTROL FIRST, against the same real clone: the shipped WSL template must
-  // still render its wsl.exe chain. Without this, "no wsl in the win32 render"
-  // is equally satisfied by a render that produced an empty or broken string.
-  const wsl = renderUpdateLauncher(REPO_ROOT, { platform: 'linux' });
-  assert.match(wsl, /wsl\.exe/i, 'control: the shipped WSL template still renders its wsl.exe chain');
-
-  const native = renderUpdateLauncher(REPO_ROOT, { platform: 'win32', nodeExe });
-  assert.notEqual(native, wsl, 'the shipped native template is a different artifact, not the WSL one relabelled');
-
-  // THE SHIP GATE: any unrendered placeholder at all, not just WIN_NODE_EXE —
-  // a .bat containing `{{...}}` tries to run a program with that literal name.
-  assert.doesNotMatch(native, /\{\{/, 'NO placeholder survives the win32 render');
-
-  const executable = execLines(native);
-  assert.doesNotMatch(executable, /wsl/i, 'ffe7c416: zero wsl.exe in a Windows installation — the user may not have WSL at all');
-  assert.doesNotMatch(executable, /\bbash\b/i, 'no bash on the native arm');
-  assert.doesNotMatch(executable, /wt\.exe/i, 'no Windows Terminal shim on the native arm');
-  assert.doesNotMatch(executable, /update-console\.sh/i, 'the shell updater is the WSL arm’s entry point, never the native one');
-
-  assert.match(
-    native,
-    quotedSpanContaining(nodeExe),
-    'the baked interpreter sits inside a quoted span — an unquoted "C:\\Program Files\\..." splits into two arguments and the updater never starts'
-  );
-  assert.match(native, /scripts[\\/]update\.mjs/i, 'the native arm runs the updater directly');
-
-  assert.ok(native.includes('\r\n'), 'the render is CRLF, as a .bat must be');
-  assert.doesNotMatch(native, /(^|[^\r])\n/, 'every line is CRLF — a lone LF in a .bat is a cmd.exe parsing hazard');
-});
-// SABOTAGE: delete the `{{WIN_NODE_EXE}}` substitution from renderUpdateLauncher
-// (leave `{{WIN_PLUGIN_DIR}}` working) — the doesNotMatch(/\{\{/) assertion and
-// the quotedSpanContaining(nodeExe) assertion both go red. THIS IS THE PIN FOR
-// THE REPORTED GAP: today that mutation ships green.
-// SABOTAGE (arm-selection): have renderUpdateLauncher read update-win.bat for
-// every platform — the /wsl/i, /\bbash\b/i and /update-console\.sh/i negatives
-// go red together, and notEqual(native, wsl) goes red.
-// SABOTAGE (CRLF): join the rendered lines with '\n' — the lone-LF assertion
-// goes red while every other assertion in this test still passes.
-// WHICH GUARD CARRIES THE VERDICT: these are independent, not layered — each
-// mutation reddens a DIFFERENT assertion here, so no single guard is doing all
-// the work and none of the assertions is decorative.
-
-test('the baked interpreter is the INJECTED absolute exe, and defaults to an ABSOLUTE process.execPath — never the bare literal `node`', () => {
-  // ffe7c416 measured `where.exe node` finding NOTHING on the real native host
-  // (research_finding foreign_0c712d94), which is why the exe is baked from
-  // process.execPath — already known-runnable, needs no PATH membership.
-  const clone = cloneWithBothTemplates();
-  try {
-    const injected = 'C:\\Program Files\\nodejs\\node.exe';
-    const withInjection = renderUpdateLauncher(clone, { platform: 'win32', nodeExe: injected });
-    assert.ok(withInjection.includes(injected), 'the injected path is baked VERBATIM — spaces intact, not escaped or truncated at the space');
-    assert.match(withInjection, quotedSpanContaining(injected), 'and inside a quoted span');
-    assert.doesNotMatch(withInjection, /\{\{WIN_NODE_EXE\}\}/, 'the placeholder is substituted, never shipped raw');
-
-    const asLiteralNode = renderUpdateLauncher(clone, { platform: 'win32', nodeExe: 'node' });
-    const byDefault = renderUpdateLauncher(clone, { platform: 'win32' });
-
-    assert.notEqual(byDefault, asLiteralNode, 'the DEFAULT bake is NOT the bare literal `node` — a PATH lookup finds nothing on the real native host');
-    assert.notEqual(byDefault, withInjection, 'and the default is not the injected fixture either — the option is genuinely read, not ignored');
-    assert.match(
-      byDefault,
-      /"[^"\r\n]*(?:[A-Za-z]:\\|\/)[^"\r\n]*node[^"\r\n]*"/i,
-      'the default bakes an ABSOLUTE interpreter path (process.execPath) — drive-letter or POSIX-rooted, but rooted'
-    );
-  } finally {
-    rmSync(clone, { recursive: true, force: true });
-  }
-});
-// SABOTAGE: default `nodeExe` to the string 'node' instead of process.execPath
-// — notEqual(byDefault, asLiteralNode) goes red AND the absolute-path regex
-// goes red (two assertions, one mutation: this is the ruling's core claim).
-// SABOTAGE (option ignored): hardcode process.execPath and ignore the nodeExe
-// option — includes(injected), quotedSpanContaining(injected) and
-// notEqual(byDefault, withInjection) all go red.
-// SABOTAGE (quoting): render the exe with its quotes stripped — the verbatim
-// includes() still passes, only quotedSpanContaining goes red; that assertion
-// is therefore load-bearing on its own, not defense in depth.
-
-test('ensureUpdateLauncher on the native arm: the SAME sterling-update.bat filename, created → matches → differs, gitignore entry exactly once, hand-edit left byte-identical', () => {
-  const clone = cloneWithBothTemplates();
-  const target = mkdtempSync(join(tmpdir(), 'sterling-launcher-target-'));
-  const opts = { platform: 'win32', nodeExe: 'C:\\Program Files\\nodejs\\node.exe' };
-  try {
-    assert.equal(
-      UPDATE_LAUNCHER_NAME,
-      'sterling-update.bat',
-      'both arms generate the SAME filename — the generated marker, the .gitignore entry and init’s manifest item all key on it'
-    );
-
-    const created = ensureUpdateLauncher(target, clone, opts);
-    assert.equal(created.status, 'created');
-    assert.deepEqual(
-      readdirSync(target).filter((f) => f.toLowerCase().endsWith('.bat')),
-      [UPDATE_LAUNCHER_NAME],
-      'the native arm adds no SECOND launcher under a different name — one file, two possible bodies'
-    );
-
-    const content = readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8');
-    assert.doesNotMatch(content, /\{\{/, 'nothing unrendered reaches disk');
-    assert.match(content, quotedSpanContaining(opts.nodeExe), 'the baked exe reached disk quoted');
-    const executable = execLines(content);
-    assert.doesNotMatch(executable, /wsl/i, 'the delivered native launcher invokes no wsl.exe');
-    assert.doesNotMatch(executable, /\bbash\b/i);
-    assert.doesNotMatch(executable, /wt\.exe/i);
-
-    assert.match(readFileSync(join(target, '.gitignore'), 'utf8'), /^sterling-update\.bat$/m, 'a machine artifact never surfaces as untracked noise');
-
-    assert.equal(ensureUpdateLauncher(target, clone, opts).status, 'matches', 'idempotent on the native arm too');
-    const entries = readFileSync(join(target, '.gitignore'), 'utf8').split(/\r?\n/).filter((l) => l === UPDATE_LAUNCHER_NAME);
-    assert.equal(entries.length, 1, 'the gitignore entry is ensured exactly ONCE across both calls');
-
-    writeFileSync(join(target, UPDATE_LAUNCHER_NAME), 'hand edited');
-    assert.equal(ensureUpdateLauncher(target, clone, opts).status, 'differs');
-    assert.equal(readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8'), 'hand edited', 'a hand-edited native launcher is left byte-identical, never overwritten');
-  } finally {
-    rmSync(clone, { recursive: true, force: true });
-    rmSync(target, { recursive: true, force: true });
-  }
-});
-// SABOTAGE: give the native arm its own output filename (e.g. write
-// `sterling-update-native.bat`) — the readdirSync deepEqual goes red, and the
-// /^sterling-update\.bat$/m gitignore assertion goes red.
-// SABOTAGE (ensure semantics): make the native arm always rewrite — the
-// 'differs' assertion flips to 'refreshed'/'created' and the byte-identical
-// hand-edit assertion goes red.
-// SABOTAGE (gitignore): append the entry on every call instead of ensuring it —
-// entries.length becomes 2 and that assertion goes red on its own.
-
-test('a machine that SWITCHES ARMS is not stranded: an untouched WSL-generated launcher refreshes to the native body under win32, then settles at matches', () => {
-  // The real migration this protects: a machine that installed under the WSL
-  // arm and is re-initialised host-native. If the arm switch reported 'differs'
-  // it would leave a wsl.exe launcher in place on a host with no WSL — the
-  // exact capability loss ffe7c416 exists to end. Composed from the marker
-  // semantics already pinned above (case 1: unmodified-since-generation +
-  // changed render → refreshed); a red here is a genuine spec question for the
-  // conductor, not a typo.
-  const clone = cloneWithBothTemplates();
-  const target = mkdtempSync(join(tmpdir(), 'sterling-launcher-target-'));
-  const nodeExe = 'C:\\Program Files\\nodejs\\node.exe';
-  try {
-    assert.equal(ensureUpdateLauncher(target, clone, { platform: 'linux' }).status, 'created');
-    assert.match(readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8'), /wsl\.exe/i, 'control: the WSL arm really did land a wsl.exe launcher first');
-
-    const switched = ensureUpdateLauncher(target, clone, { platform: 'win32', nodeExe });
-    assert.equal(switched.status, 'refreshed', 'an untouched generated launcher follows the arm switch instead of reporting differs and stranding the host');
-
-    const after = readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8');
-    assert.doesNotMatch(execLines(after), /wsl/i, 'the on-disk CONTENT actually became the native body, not merely the status string');
-    assert.match(after, quotedSpanContaining(nodeExe));
-    assert.doesNotMatch(after, /\{\{/);
-
-    assert.equal(ensureUpdateLauncher(target, clone, { platform: 'win32', nodeExe }).status, 'matches', 'the marker stamped by the arm switch validates the body it wrote — no refresh loop');
-    assert.equal(readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8'), after, 'content untouched on the matching re-run');
-  } finally {
-    rmSync(clone, { recursive: true, force: true });
-    rmSync(target, { recursive: true, force: true });
-  }
-});
-// SABOTAGE: compare the on-disk file against the render of the ORIGINALLY-USED
-// template rather than the currently-selected one (i.e. ignore opts.platform in
-// the ensure comparison) — the switch reports 'matches' immediately, so the
-// 'refreshed' assertion goes red and the on-disk body keeps its wsl.exe.
-// SABOTAGE (no marker re-stamp): refresh the body but leave the OLD marker —
-// the final 'matches' assertion goes red (perpetual refresh loop).
-
-test('a clone carrying ONLY the WSL template SKIPS on a win32 host, naming update-win-native.bat — never a thrown ENOENT, and never a silent WSL fallback', () => {
-  const wslOnly = cloneWithTemplate(); // update-win.bat only — no native template
+test('the created launcher is CRLF on disk end to end — the appended generated-marker line included', () => {
+  const clone = cloneWithTemplate();
   const target = mkdtempSync(join(tmpdir(), 'sterling-launcher-target-'));
   try {
-    // CONTROL FIRST: the same clone and the same target CREATE on a non-win32
-    // host. Without this, the skip below is equally explained by an unwritable
-    // target, a broken clone, or an implementation that skips everything.
-    assert.equal(ensureUpdateLauncher(target, wslOnly, { platform: 'linux' }).status, 'created', 'control: this clone and this target are perfectly usable on the WSL arm');
-    rmSync(join(target, UPDATE_LAUNCHER_NAME));
-
-    let result;
-    assert.doesNotThrow(() => {
-      result = ensureUpdateLauncher(target, wslOnly, { platform: 'win32' });
-    }, 'a missing native template SKIPS — an unhandled ENOENT would abort the whole update fan-out');
-    assert.equal(result.status, 'skipped');
-    assert.match(
-      JSON.stringify(result),
-      /update-win-native\.bat/,
-      'the skip detail names the template that was actually missing — naming update-win.bat (the one it happened to find) sends the reader to the wrong file'
-    );
-    assert.equal(
-      existsSync(join(target, UPDATE_LAUNCHER_NAME)),
-      false,
-      'and nothing was written — a win32 host never silently falls back to the wsl.exe launcher it cannot run'
-    );
-  } finally {
-    rmSync(wslOnly, { recursive: true, force: true });
-    rmSync(target, { recursive: true, force: true });
-  }
-});
-// SABOTAGE: fall back to update-win.bat when the native template is absent —
-// status becomes 'created', the existsSync(...)===false assertion goes red, and
-// the skip-detail assertion goes red. That fallback is the plausible "helpful"
-// implementation and it reinstates the exact defect ffe7c416 closed.
-// SABOTAGE (unguarded read): readFileSync the selected template without an
-// existence check — assert.doesNotThrow goes red with ENOENT.
-// SABOTAGE (wrong name in the detail): report the skip naming update-win.bat —
-// only the JSON.stringify match goes red; that assertion is load-bearing alone.
-
-test('the created native launcher is CRLF on disk end to end — the appended generated-marker line included', () => {
-  // Isolated deliberately: a red here means the render or the marker append
-  // used LF, and it must not mask the ensure-semantics pins above.
-  const clone = cloneWithBothTemplates();
-  const target = mkdtempSync(join(tmpdir(), 'sterling-launcher-target-'));
-  try {
-    assert.equal(ensureUpdateLauncher(target, clone, { platform: 'win32', nodeExe: 'C:\\Tools\\node.exe' }).status, 'created');
+    assert.equal(ensureUpdateLauncher(target, clone).status, 'created');
     const content = readFileSync(join(target, UPDATE_LAUNCHER_NAME), 'utf8');
     assert.ok(content.includes('\r\n'), 'the delivered .bat has CRLF line endings');
-    assert.doesNotMatch(
-      content,
-      /(^|[^\r])\n/,
-      'no lone LF anywhere in the written .bat — including the generated-marker line ensureUpdateLauncher appends'
-    );
+    assert.doesNotMatch(content, /(^|[^\r])\n/, 'no lone LF anywhere in the written .bat — including the generated-marker line ensureUpdateLauncher appends');
   } finally {
     rmSync(clone, { recursive: true, force: true });
     rmSync(target, { recursive: true, force: true });
   }
 });
+// PORTED from the retired native-arm CRLF-on-disk pin, which ran the shared
+// crlf(stampBody(...)) path through the native template only.
 // SABOTAGE: append the generated-marker line with '\n' instead of '\r\n' — the
-// lone-LF assertion goes red while every other native-arm test stays green.
-// That is precisely the hole a render-only CRLF pin cannot see.
+// lone-LF assertion goes red.
 
 // Handoff projection in the fan-out (decision
 // init-prepares-opencode-portable-agents-and-target-handoff-projections): it runs once
@@ -1896,14 +1598,280 @@ test('full path: a project registry that cannot be read is exit 2 and withholds 
 // after `@echo off`, or every double-click echoes the marker; and it must carry
 // the content hash that lets a later ensure tell stale-but-unmodified from
 // hand-edited. sterling-update.bat is the stamp's surviving .bat consumer.
-test('sterling-update.bat keeps `@echo off` on line 1 and the rem-commented content_hash stamp on line 2, on both arms', () => {
-  for (const platform of ['linux', 'win32']) {
-    const lines = renderUpdateLauncher(REPO_ROOT, { platform, nodeExe: 'C:\\Tools\\node.exe' }).split(/\r?\n/);
-    assert.match(lines[0], /^@echo off/i, `${platform}: line 1 still turns echo off — the stamp must sit AFTER it`);
-    assert.match(
-      lines[1],
-      /^rem sterling-generated\b.*\bcontent_hash=[0-9a-f]{64}\s*$/,
-      `${platform}: line 2 is the rem-commented stamp carrying a sha256 content hash`
+test('sterling-update.bat keeps `@echo off` on line 1 and the rem-commented content_hash stamp on line 2', () => {
+  const lines = renderUpdateLauncher(REPO_ROOT).split(/\r?\n/);
+  assert.match(lines[0], /^@echo off/i, 'line 1 still turns echo off — the stamp must sit AFTER it');
+  assert.match(lines[1], /^rem sterling-generated\b.*\bcontent_hash=[0-9a-f]{64}\s*$/, 'line 2 is the rem-commented stamp carrying a sha256 content hash');
+});
+
+// ── 7. re-exec of the NEW updater after the fast-forward (decision
+//        gap-hunt-2026-09-28-rulings item 9) ────────────────────────────────
+// The post-merge steps used to run in the OLD code already loaded into this
+// process, so an upgrading machine needed a second run before the new update
+// logic applied. After a successful fast-forward the updater now hands off to
+// the NEW scripts/update.mjs exactly once (guarded by an env flag) and that
+// child's exit is the update's exit. A re-exec that cannot run is loud (P5).
+
+/** A scratch clone carrying a scripts/update.mjs, so the re-exec target exists. */
+function scratchCloneWithUpdater() {
+  const cwd = scratchCwd();
+  mkdirSync(join(cwd, 'scripts'), { recursive: true });
+  writeFileSync(join(cwd, 'scripts', 'update.mjs'), '// placeholder updater\n');
+  return cwd;
+}
+
+test('re-exec: after a fast-forward the NEW updater runs once and its exit is the update exit; the old process runs no build', async () => {
+  const cwd = scratchCloneWithUpdater();
+  try {
+    const { exec, calls } = fakeExec({ behind: 2, changed: ['scripts/lib/update.mjs'] });
+    const reexecCalls = [];
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {}, reexec: (script) => { reexecCalls.push(script); return { status: 3, signal: null }; } });
+    assert.deepEqual(reexecCalls, [join(cwd, 'scripts', 'update.mjs')], 'the NEW updater in the fast-forwarded clone is re-executed exactly once');
+    assert.equal(report.exit, 3, "the child's exit is the update's exit");
+    assert.equal(calls.filter((c) => c.includes('merge --ff-only')).length, 1, 'the fast-forward itself ran in the old process');
+    assert.equal(calls.filter((c) => c.startsWith('npm')).length, 0, 'no build, check or test runs in the OLD code');
+    assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 0, 'no agent sync runs in the OLD code');
+    assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'the old process never writes the completion marker');
+    assert.match(lines.join('\n'), /re-running the UPDATED updater/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('re-exec: a spawn error, a signal or a missing updater is a LOUD exit-1 failure, never a silent success', async () => {
+  const cases = [
+    { name: 'spawn error', result: { status: null, error: new Error('spawn ENOENT') }, pattern: /spawn ENOENT/ },
+    { name: 'signal', result: { status: null, signal: 'SIGKILL' }, pattern: /SIGKILL/ },
+  ];
+  for (const c of cases) {
+    const cwd = scratchCloneWithUpdater();
+    try {
+      const { exec } = fakeExec({ behind: 1 });
+      const lines = [];
+      const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [], opts: {}, reexec: () => c.result });
+      assert.equal(report.exit, 1, `${c.name}: exit 1`);
+      const out = lines.join('\n');
+      assert.match(out, /✗ RE-EXEC of the updated updater FAILED/, `${c.name}: loud`);
+      assert.match(out, c.pattern, `${c.name}: names the cause`);
+      assert.match(out, /rerun \/sterling:update/, `${c.name}: names the remedy`);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }
+  const bare = scratchCwd(); // no scripts/update.mjs after the fast-forward
+  try {
+    const { exec } = fakeExec({ behind: 1 });
+    const lines = [];
+    let called = false;
+    const report = await runUpdate({ cwd: bare, exec, log: (l) => lines.push(l), projects: [], opts: {}, reexec: () => { called = true; return { status: 0 }; } });
+    assert.equal(called, false, 'a missing updater is never spawned');
+    assert.equal(report.exit, 1);
+    assert.match(lines.join('\n'), /✗ RE-EXEC of the updated updater FAILED.*not found/);
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+test('re-exec: no fast-forward (already current, or resuming a halted run) never re-executes; no reexec hook (the guarded child) runs the full sequence itself', async () => {
+  const cwd = scratchCloneWithUpdater();
+  try {
+    const { exec, calls } = fakeExec({ behind: 0 });
+    let called = 0;
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: [], opts: {}, reexec: () => { called++; return { status: 0 }; } });
+    assert.equal(called, 0, 'behind 0 resumes in-process: the code on disk IS the code running');
+    assert.equal(report.exit, 0);
+    assert.ok(calls.includes('npm run build'), 'the resumed sequence ran in this process');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+  const child = scratchCloneWithUpdater();
+  try {
+    const { exec, calls } = fakeExec({ behind: 1 });
+    const report = await runUpdate({ cwd: child, exec, log: () => {}, projects: [], opts: {} });
+    assert.equal(report.exit, 0);
+    assert.ok(calls.includes('npm run build'), 'with no reexec hook the sequence runs in-process, exactly as before');
+  } finally {
+    rmSync(child, { recursive: true, force: true });
+  }
+});
+
+// END TO END through the real CLI and real git: the fast-forward brings in a
+// scripts/update.mjs that reports how it was started. The CLI must hand off to
+// THAT file (the new code), with the guard flag set and --no-fetch appended,
+// and exit with its status.
+test('re-exec through the real CLI: the fast-forwarded scripts/update.mjs runs once, guarded, and its exit is the CLI exit', () => {
+  const { dir, author, consumer } = makeClonePair();
+  try {
+    mkdirSync(join(author, 'scripts'), { recursive: true });
+    writeFileSync(
+      join(author, 'scripts', 'update.mjs'),
+      "console.log(`NEW UPDATER guard=${process.env.STERLING_UPDATE_REEXEC} from=${process.env.STERLING_UPDATE_REEXEC_FROM} args=${process.argv.slice(2).join(' ')}`);\nprocess.exit(7);\n"
     );
+    const preMergeHead = git(consumer, ['rev-parse', 'HEAD']);
+    git(author, ['add', '-A']);
+    git(author, ['commit', '-m', 'ship a new updater']);
+    git(author, ['push', 'origin', 'main']);
+    // A RELATIVE --target (review LOW-1): the child runs with cwd = the target, so
+    // a relative path would resolve against the wrong directory there. The CLI is
+    // started from the pair's parent dir, where 'consumer' is relative.
+    const r = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts', 'update.mjs'), '--target', 'consumer', '--no-projects'], { cwd: dir, encoding: 'utf8', timeout: 120_000, env: { ...process.env, STERLING_UPDATE_REEXEC: '', STERLING_UPDATE_REEXEC_FROM: '' } });
+    assert.equal(r.status, 7, `the child's exit is the CLI exit:\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /re-running the UPDATED updater/);
+    assert.ok(
+      r.stdout.includes(`NEW UPDATER guard=1 from=${preMergeHead} args=--target ${consumer} --no-projects --no-fetch`),
+      `the child gets the guard, the PRE-merge head (review HIGH-1) and an ABSOLUTE --target (LOW-1):\n${r.stdout}`
+    );
+    assert.equal((r.stdout.match(/NEW UPDATER/g) ?? []).length, 1, 'handed off exactly once');
+    assert.doesNotMatch(r.stdout, /npm run build/, 'the old process ran no build');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('reexecArgs: the child skips the fetch the parent already did and keeps every other flag; the env guard names one variable', () => {
+  assert.deepEqual(reexecArgs(['--force', '--no-test'], { target: '/abs/clone' }), ['--force', '--no-test', '--no-fetch']);
+  assert.deepEqual(reexecArgs(['--no-fetch', '--target', '/x'], { target: '/x' }), ['--no-fetch', '--target', '/x'], 'never doubled');
+  // review LOW-1: the child's cwd is the target, so a relative --target is rewritten to the resolved absolute path
+  assert.deepEqual(reexecArgs(['--target', 'rel/clone', '--no-test'], { target: '/home/u/rel/clone' }), ['--target', '/home/u/rel/clone', '--no-test', '--no-fetch']);
+  assert.equal(UPDATE_REEXEC_ENV, 'STERLING_UPDATE_REEXEC');
+  assert.equal(UPDATE_REEXEC_FROM_ENV, 'STERLING_UPDATE_REEXEC_FROM');
+});
+
+// Review HIGH-1: the child starts AFTER the fast-forward, so its own before.head
+// already equals after.head — without the parent's pre-merge head it computes
+// an empty changed set, skips npm ci even when package-lock.json moved, and loses
+// the "N file(s) changed" line. Driven through the exec seam: the parent's reexec
+// hook runs the child's runUpdate the way the CLI would, handing over `from`.
+test('re-exec: the child diffs from the PARENT\'s pre-merge head, so a pull that moves package-lock.json still runs npm ci', async () => {
+  const cwd = scratchCloneWithUpdater();
+  try {
+    const { exec: parentExec } = fakeExec({ behind: 1, changed: ['package-lock.json'] });
+    const { exec: childExec, calls: childCalls } = fakeExec({ behind: 0, head: HEAD_B, changed: ['package-lock.json'] });
+    const childLines = [];
+    let childReport = null;
+    const report = await runUpdate({
+      cwd,
+      exec: parentExec,
+      log: () => {},
+      projects: [],
+      opts: {},
+      reexec: async (_script, handoff) => {
+        childReport = await runUpdate({ cwd, exec: childExec, log: (l) => childLines.push(l), projects: [], opts: { fetch: false, from: handoff?.from } });
+        return { status: childReport.exit, signal: null };
+      },
+    });
+    assert.equal(report.exit, 0, childLines.join('\n'));
+    assert.ok(childCalls.includes(`git diff --name-only ${HEAD_A} ${HEAD_B}`), `the child diffs the parent's pre-merge head to the new head:\n${childCalls.join('\n')}`);
+    assert.ok(childCalls.includes('npm ci'), 'the moved lockfile triggers npm ci in the child');
+    assert.match(childLines.join('\n'), /1 file\(s\) changed aaaaaaa\.\.bbbbbbb/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('re-exec child: a malformed handed-over head is loud, and npm ci runs because the dependency change is unknown', async () => {
+  const cwd = scratchCloneWithUpdater();
+  try {
+    const { exec, calls } = fakeExec({ behind: 0, head: HEAD_B });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [], opts: { fetch: false, from: 'not-a-sha' } });
+    assert.equal(report.exit, 0);
+    assert.match(lines.join('\n'), /⚠ the pre-merge head handed over by the parent update \('not-a-sha'\) is not a commit sha/);
+    assert.ok(calls.includes('npm ci'), 'unknown dependency change → npm ci runs rather than being skipped');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// ── 8. disclosures: pre-scale-down CLAUDE.md and config keys Sterling no longer
+//        reads (decision gap-hunt-2026-09-28-rulings items 7 and 12) ─────────
+// Both are REPORTS: nothing is rewritten or deleted, and neither changes the exit.
+
+test('preScaleDownMarkers: names the retired-pipeline identifiers only the pre-scale-down template carried; the current templates carry none', () => {
+  assert.deepEqual(preScaleDownMarkers('ABNORMAL exits go to `run_signal` immediately; the review-ledger records it'), ['run_signal', 'review-ledger']);
+  assert.deepEqual(preScaleDownMarkers('# CLAUDE.md\nplain project prose about signals and ledgers\n'), []);
+  for (const t of ['target-claude-md.md', 'target-agents-md.md']) {
+    assert.deepEqual(preScaleDownMarkers(readFileSync(join(REPO_ROOT, 'templates', t), 'utf8')), [], `${t} must never trip its own disclosure`);
+  }
+});
+
+function hygieneProject(name, { claude = null, config = null } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), `${name}-`));
+  if (claude !== null) writeFileSync(join(dir, 'CLAUDE.md'), claude);
+  if (config !== null) {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), typeof config === 'string' ? config : JSON.stringify(config));
+  }
+  workProjects.push(dir);
+  return dir;
+}
+
+for (const path of ['already-current', 'full']) {
+  test(`disclosures (${path} path): a pre-scale-down CLAUDE.md is named with "run /sterling:init there", unread config keys are listed, nothing is rewritten, exit unchanged`, async () => {
+    const cwd = scratchCwd();
+    try {
+      const stale = hygieneProject('stale', { claude: '# CLAUDE.md\nABNORMAL exits go to `run_signal`.\n', config: { mode: 'hobby', caps: { inner_loop_n: 3 }, context_watch: { warn_pct: 40 } } });
+      const clean = hygieneProject('clean', { claude: '@AGENTS.md\n# CLAUDE.md\n', config: { mode: 'hobby' } });
+      const staleClaude = readFileSync(join(stale, 'CLAUDE.md'), 'utf8');
+      const staleConfig = readFileSync(join(stale, '.sterling', 'config.json'), 'utf8');
+      if (path === 'already-current') seedUpdateMarker(cwd, HEAD_A);
+      const { exec } = fakeExec({ behind: path === 'full' ? 1 : 0 });
+      const lines = [];
+      const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'stale', repo_path: stale }, { name: 'clean', repo_path: clean }], opts: {} });
+      const out = lines.join('\n');
+      assert.equal(report.exit, 0, 'a disclosure never fails the update');
+      assert.match(out, /stale: CLAUDE\.md predates the scale-down \(mentions run_signal\) — run \/sterling:init there/);
+      assert.match(out, /stale: \.sterling\/config\.json carries 2 key\(s\) Sterling no longer reads: caps, context_watch\.warn_pct/);
+      assert.doesNotMatch(out, /clean: CLAUDE\.md predates/);
+      assert.doesNotMatch(out, /clean: \.sterling\/config\.json carries/);
+      assert.equal(readFileSync(join(stale, 'CLAUDE.md'), 'utf8'), staleClaude, 'CLAUDE.md is never rewritten by update');
+      assert.equal(readFileSync(join(stale, '.sterling', 'config.json'), 'utf8'), staleConfig, 'unread keys are never deleted');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+}
+
+test('disclosures: an unparseable project config is a visible skip line, never a crash', async () => {
+  const cwd = scratchCwd();
+  try {
+    seedUpdateMarker(cwd, HEAD_A);
+    const broken = hygieneProject('broken', { config: '{ not json' });
+    const { exec } = fakeExec({ behind: 0 });
+    const lines = [];
+    // The refresh reads the mode first and refuses this project (exit 2); the
+    // disclosure itself adds nothing worse than a skip line.
+    await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'broken', repo_path: broken }], opts: {} });
+    assert.match(lines.join('\n'), /broken: unread-config-key check skipped — \.sterling\/config\.json could not be parsed/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// The measured sibling case (Dome Farmer): config.models still held every
+// pre-rename roster key, and config_set wrote to the dead `coder` key with no
+// warning. Each dead nested key is named by its path; a known rename says where
+// the value now lives.
+test('disclosures: the Dome Farmer pre-rename models keys are each named by path, with the known renames', async () => {
+  const cwd = scratchCwd();
+  try {
+    seedUpdateMarker(cwd, HEAD_A);
+    const me = { model: 'm', effort: 'low' };
+    const dome = hygieneProject('dome', {
+      config: { mode: 'hobby', models: { implementor: me, scout: me, coder: me, coder_hard: me, explorer: me, test_writer: me, reviewers: me, implementation_architect: me, debugger: me } },
+    });
+    const { exec } = fakeExec({ behind: 0 });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'dome', repo_path: dome }], opts: {} });
+    const out = lines.join('\n');
+    assert.equal(report.exit, 0);
+    assert.match(
+      out,
+      /dome: \.sterling\/config\.json carries 7 key\(s\) Sterling no longer reads: models\.coder \(renamed to models\.implementor\), models\.coder_hard, models\.explorer \(renamed to models\.scout\), models\.test_writer, models\.reviewers, models\.implementation_architect, models\.debugger — /,
+      'exactly the seven dead keys, in config order; the live implementor and scout keys are not listed'
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
   }
 });

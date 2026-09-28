@@ -128,10 +128,6 @@ export function disclosure(code, facts = {}, message = code) {
   return { kind: 'disclosure', code, facts, message };
 }
 
-export function isRefusal(x) {
-  return !!x && x.kind === 'refusal';
-}
-
 // render() is what every hook/CLI prints — the `[code]` token is what pins
 // match, never sentence text.
 export function render(x) {

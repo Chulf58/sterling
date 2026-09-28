@@ -68,28 +68,19 @@ export function probeCodex({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_MS, 
 }
 
 // The official codex mcp-server stdio subcommand — no wrapper (research_finding foreign_dadf858e).
-// The bare `codex` command is the FALLBACK spelling, used when a probe result carries no
-// resolved path (probeCodex resolves `codex` on PATH by spawning that same bare command,
-// so there its success does prove the entry). A probe result that DOES carry an absolute
-// `command` overrides it — see codexEntryFor below. (Its only producer, the native-Windows
-// probe, was retired with the native launcher: decision native-windows-launcher-retired-wsl2-only.)
+// The bare `codex` spelling is what probeCodex proves: its success means "the `codex` on
+// PATH ran". (An absolute-path override once existed for the native-Windows probe's result;
+// that probe was retired with the native launcher — decision native-windows-launcher-retired-
+// wsl2-only — so nothing produces a probe result carrying a command anymore, and
+// withCodexEntry no longer looks for one.)
 export const CODEX_MCP_ENTRY = { command: 'codex', args: ['mcp-server'] };
-
-// The codex entry a given probe result justifies: the probed absolute command when the
-// probe resolved one, else the bare CODEX_MCP_ENTRY spelling. `args` is always the
-// official mcp-server subcommand — only the command spelling varies.
-function codexEntryFor(probeResult) {
-  return probeResult.command
-    ? { command: probeResult.command, args: [...CODEX_MCP_ENTRY.args] }
-    : CODEX_MCP_ENTRY;
-}
 
 // Given the mcpServers object init is about to write (already carrying `sterling`) and
 // a probe result, returns the mcpServers object WITH or WITHOUT the codex entry. Pure —
 // no fs — so the create/matches/differs ensure comparison in init.mjs stays deterministic
 // and this merge is independently unit-testable.
 export function withCodexEntry(mcpServers, probeResult) {
-  return probeResult.ok ? { ...mcpServers, codex: codexEntryFor(probeResult) } : { ...mcpServers };
+  return probeResult.ok ? { ...mcpServers, codex: CODEX_MCP_ENTRY } : { ...mcpServers };
 }
 
 // Maps probeCodex's terse reason literals to the actionable text named at the
@@ -109,41 +100,4 @@ export function codexSkipLine(reason, version) {
     ? `Codex CLI ${version ?? 'unknown version'} does not support \`mcp-server\`; the supported route is a user-scope pinned Codex MCP server (such as Codex 0.153.4)`
     : (REASON_TEXT[reason] ?? reason);
   return `codex mcp: skipped — ${text}`;
-}
-
-// ---------------------------------------------------------------------------
-// CONSULT-TIME failure surfacing (board 923e3836) — distinct from the
-// init-time probe above. probeCodex only answers "is codex wire-eligible at
-// init?"; it says nothing about a MID-SESSION consult (a real
-// mcp__codex__codex / mcp__codex__codex-reply exchange) failing later
-// because the copied ChatGPT OAuth token (C:/Users/<user>/.codex/auth.json
-// -> ~/.codex/auth.json, finding codex-mcp-live-probe-this-machine) expired.
-// That failure shape is explicitly UNMEASURED (board 923e3836), so this
-// classifies by pattern-matching obvious auth markers in the raw error text
-// rather than a closed reason enum like REASON_TEXT above — and the generic
-// (non-auth) branch always carries the raw error text, so the first real
-// failure measures the shape instead of being swallowed by a wrong guess
-// (P5: fail loud, never a silent skip or a bare stack trace).
-const AUTH_MARKER_RE = /\b(401|unauthorized|auth|token expired)\b/i;
-
-// True when `errorText` looks auth-shaped (401 / unauthorized / auth / token
-// expired, case-insensitive) — a heuristic, not a confirmed error contract,
-// because the real auth-expiry error shape has not yet been observed.
-export function looksLikeAuthFailure(errorText) {
-  return AUTH_MARKER_RE.test(String(errorText ?? ''));
-}
-
-// Turns a consult-time failure (any error/rejection surfacing from an
-// mcp__codex__codex or mcp__codex__codex-reply call) into a LOUD, actionable
-// message — never a silent skip, never a bare stack trace. Auth-shaped
-// errors get the actionable recovery hint (re-copy the token / codex login);
-// anything else gets a generic transport-failure message that still carries
-// the raw error text, so an unmeasured failure shape gets captured the
-// moment it is first observed.
-export function consultFailureMessage(error) {
-  const raw = error instanceof Error ? error.message : String(error ?? '');
-  if (looksLikeAuthFailure(raw)) {
-    return `Codex consult failed — likely auth expiry: re-copy the token / run \`codex login\`. Raw error: ${raw}`;
-  }
-  return `Codex consult failed — transport error (not auth-shaped): ${raw}`;
 }

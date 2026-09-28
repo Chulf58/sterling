@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ProjectRegistry } from '../registry.js';
+import { ProjectRegistry, registryPath } from '../registry.js';
 
 function harness() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-registry-'));
@@ -75,6 +75,19 @@ test('touchLastSeen: updates an existing row, NEVER creates (registration is the
     assert.equal(reg.list()[0].last_seen_at, '2026-06-17T12:00:00.000Z');
   } finally {
     cleanup();
+  }
+});
+
+test('registryPath: STERLING_REGISTRY_DB overrides the per-user default (board 4dab2574 — tests must never open the real registry)', () => {
+  const original = process.env.STERLING_REGISTRY_DB;
+  try {
+    delete process.env.STERLING_REGISTRY_DB;
+    assert.ok(registryPath().endsWith(join('.sterling', 'registry.db')), 'defaults to the per-user ~/.sterling/registry.db when unset');
+    process.env.STERLING_REGISTRY_DB = join(tmpdir(), 'some-isolated-root', 'registry.db');
+    assert.equal(registryPath(), process.env.STERLING_REGISTRY_DB, 'STERLING_REGISTRY_DB relocates the registry when set');
+  } finally {
+    if (original === undefined) delete process.env.STERLING_REGISTRY_DB;
+    else process.env.STERLING_REGISTRY_DB = original;
   }
 });
 

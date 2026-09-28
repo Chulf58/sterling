@@ -1157,16 +1157,6 @@ export function lineSuspectBlock(suspects, charCap) {
   };
 }
 
-/** One trailing block naming every stale-citing record and the token(s) it
- *  cites. `suspects` is `{record, tokens}[]`, already filtered to the stale
- *  ones by the caller's scan — this only renders what it is handed. Returns
- *  `[]` (no block at all) when nothing is suspect, matching the other
- *  render* helpers' empty-array-means-nothing-to-add convention. */
-export function renderLineSuspects(suspects, charCap) {
-  if (!suspects?.length) return [];
-  return [joinSuspectBlock(lineSuspectBlock(suspects, charCap))];
-}
-
 /** Join a decomposed suspect block. Returns '' when NO line survives: the header
  *  promises "cited line position(s) BELOW" and the footer advises about them, so
  *  a header+footer with nothing between them is an advisory about nothing. */
@@ -1255,9 +1245,6 @@ export const DELIVERY_TOTAL_CAP_DEFAULT = 3000;
  *  CHARS — bytes >= chars for any text, so bounding by bytes never UNDER-
  *  protects the transport boundary. */
 export const DELIVERY_TRANSPORT_VISIBLE_BYTES = 10000;
-
-/** Smallest clipped excerpt worth emitting ahead of a pointer. */
-export const DELIVERY_EXCERPT_MIN_BYTES = 160;
 
 /** SCHEMA MINIMUM (decision 92088a62 item 7): the smallest positive
  *  `total_cap_bytes` this build will actually use. A tiny or misconfigured
@@ -1922,42 +1909,6 @@ export function bashPointerBlock(entries, { gapsByOwner, includeHazardLines = tr
   return { header, lines };
 }
 
-/** Dedup + total-cap a `{header, lines}` pointer block (scale-down Slice 3c).
- *  One line per record id (the first path naming it wins); records `skip(id)`
- *  says were already delivered this session are dropped; hazard lines are
- *  retained for queue recipe semantics; at drain, anti-pattern lines become
- *  complete hazard substance while ordinary owner lines are capped and disclosed
- *  in `tail`. capBytes <= 0 disables the cap (dedup still applies). */
-export function capPointerBlock({ header, lines = [] } = {}, capBytes, { skip = () => false } = {}) {
-  const seen = new Set();
-  const kept = [];
-  for (const l of lines) {
-    if (!l?.id || seen.has(l.id) || skip(l.id)) continue;
-    seen.add(l.id);
-    kept.push(l);
-  }
-  if (!capBytes || capBytes <= 0) return { header, lines: kept, tail: '' };
-  const lineBytes = (l) => [l.line, ...(Array.isArray(l.gapLines) ? l.gapLines : [])].reduce((n, x) => n + byteLen(x) + 1, 0);
-  const TAIL_RESERVE = 160;
-  let used = byteLen(header) + kept.filter((l) => l.hazard).reduce((n, l) => n + lineBytes(l), 0);
-  const out = [];
-  let held = 0;
-  for (const l of kept) {
-    if (l.hazard) {
-      out.push(l);
-      continue;
-    }
-    if (used + lineBytes(l) + TAIL_RESERVE <= capBytes) {
-      out.push(l);
-      used += lineBytes(l);
-    } else held++;
-  }
-  const tail = held
-    ? `  (+${held} more pointer line(s) held back by the ${capBytes}-byte delivery cap — knowledge_query the command's governed paths)`
-    : '';
-  return { header, lines: out, tail };
-}
-
 /** Join a `{header, lines, tail}` pointer block into the payload text. ONE
  *  definition (invariant 1) shared by both pointer producers and by the payload
  *  they cache for the drain's fail-open arm. Each entry's optional `gapLines`
@@ -1972,11 +1923,6 @@ export function joinPointerBlock({ header, lines = [], tail } = {}) {
   }
   return [header, ...body, ...(tail ? [tail] : [])].filter((s) => typeof s === 'string' && s).join('\n');
 }
-
-export function renderBashPointers(entries) {
-  return joinPointerBlock(bashPointerBlock(entries));
-}
-
 
 /** The unowned-territory notice. `hasOtherKnowledge` is load-bearing, not
  *  cosmetic: since ca23c811 this notice is the HEADER above any hazard and
