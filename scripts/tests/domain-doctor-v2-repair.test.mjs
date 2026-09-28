@@ -155,7 +155,7 @@ test('restore succeeds against a v2 store when the superseded_by COLUMN is NULL 
   desyncColumnFromRelation(storePath, originalId);
 
   const applied = doctor(
-    ['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply'],
+    ['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply', '--roots', domainsRoot],
     projectDir
   );
   assert.equal(
@@ -215,7 +215,7 @@ test('sweep leaves no -wal/-shm sidecar litter beside any store it touches (idsI
 });
 
 test('restore (dry-run) leaves no -wal/-shm sidecar litter on the stores its dangling-id check reads', () => {
-  const { projectDir, storePath, store } = projectFixture();
+  const { projectDir, domainsRoot, storePath, store } = projectFixture();
   const originalId = randomUUID();
   const lostId = randomUUID();
   store.create(mkRecord(originalId, 'x'));
@@ -225,7 +225,12 @@ test('restore (dry-run) leaves no -wal/-shm sidecar litter on the stores its dan
   assert.equal(existsSync(`${storePath}-wal`), false, 'fixture precondition: cold store, no -wal before the call');
   assert.equal(existsSync(`${storePath}-shm`), false, 'fixture precondition: cold store, no -shm before the call');
 
-  doctor(['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud'], projectDir);
+  // --roots pins restore's cross-store resolution scan to this fixture's own
+  // domainsRoot — without it, restore scans this machine's real
+  // ~/.sterling/domains, whose live stores under concurrent Sterling sessions
+  // throw 'database is locked' on the unretried read-only probes (board
+  // 4dab2574; openRO sets no busy_timeout).
+  doctor(['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--roots', domainsRoot], projectDir);
 
   assert.equal(existsSync(`${storePath}-wal`), false, 'restore dry-run must not leave -wal litter beside the project store');
   assert.equal(existsSync(`${storePath}-shm`), false, 'restore dry-run must not leave -shm litter beside the project store');
@@ -471,7 +476,7 @@ test('restore strips file_baselines from the reconstructed record (server-derive
   store.close();
 
   const applied = doctor(
-    ['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply'],
+    ['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply', '--roots', domainsRoot],
     projectDir
   );
   assert.equal(applied.code, 0, `restore of a feature_article tombstone should succeed: ${applied.stdout}${applied.stderr}`);
@@ -549,7 +554,7 @@ test('restore refuses --apply when the target id already resolves as a record_al
   }
 
   const attempted = doctor(
-    ['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply'],
+    ['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply', '--roots', domainsRoot],
     projectDir
   );
   assert.notEqual(attempted.code, 0, 'restoring under an id an alias already resolves elsewhere must be refused');
@@ -586,7 +591,7 @@ test('restore refuses --apply on a LIVE record id collision with a DIFFERENT mes
   domain.close();
 
   const attempted = doctor(
-    ['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply'],
+    ['restore', '--project', projectDir, '--tombstone', originalId, '--domain', 'genesys-cloud', '--apply', '--roots', domainsRoot],
     projectDir
   );
   assert.notEqual(attempted.code, 0, 'restoring over a live record must be refused');

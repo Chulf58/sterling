@@ -1325,8 +1325,9 @@ if (drainable >= deepThreshold) {
 let registryContext = '';
 if (existsSync(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, '/');
-  const registry = new ProjectRegistry(registryPath());
+  let registry;
   try {
+    registry = new ProjectRegistry(registryPath());
     registry.touchLastSeen(cwdPosix, new Date().toISOString());
     const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync(p.repo_path));
     if (siblings.length) {
@@ -1336,7 +1337,7 @@ if (existsSync(registryPath())) {
         siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(', ') || '(no domains)'}`).join('\n');
     }
   } finally {
-    registry.close();
+    registry?.close();
   }
 }
 

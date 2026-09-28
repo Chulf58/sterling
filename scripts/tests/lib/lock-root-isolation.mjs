@@ -14,10 +14,19 @@
 // marker already set leave it alone. Only the process that created the root
 // removes it, when it exits.
 //
+// STERLING_REGISTRY_DB gets the same treatment (registryPath() in
+// packages/store/src/registry.ts honors it): tests that spawn real init/H1
+// processes must never open the user's actual ~/.sterling/registry.db —
+// contention on that shared file under parallel `node --test` is the
+// 'database is locked' flake (board 4dab2574). The registry.db lives inside
+// the same private temp root as the lock root, so both are cleaned up
+// together.
+//
 // Does NOT guarantee: isolation for a test file run without this preload, a
 // test that spawns a child with an env built from scratch (it falls back to
-// /tmp/sterling-locks-<uid>), or cleanup when the runner is killed by a
-// signal it cannot handle (SIGKILL) — the leftover is then a temp dir.
+// /tmp/sterling-locks-<uid> and the real per-user registry), or cleanup when
+// the runner is killed by a signal it cannot handle (SIGKILL) — the leftover
+// is then a temp dir.
 
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -29,6 +38,7 @@ if (!process.env[MARKER]) {
   const root = mkdtempSync(join(tmpdir(), 'sterling-test-runtime-'));
   process.env[MARKER] = root;
   process.env.XDG_RUNTIME_DIR = root;
+  process.env.STERLING_REGISTRY_DB = join(root, 'registry.db');
   process.on('exit', () => {
     rmSync(root, { recursive: true, force: true });
   });

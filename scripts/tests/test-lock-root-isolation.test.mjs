@@ -56,6 +56,19 @@ test('LRI-2: a spawned child process (a hook) inherits the isolated lock root', 
   }
 });
 
+test('LRI-4: STERLING_REGISTRY_DB is relocated under the per-run temp root, never the real per-user registry (board 4dab2574)', () => {
+  const root = process.env[MARKER];
+  assert.ok(root, `${MARKER} is set — the suite must run with --import ./scripts/tests/lib/lock-root-isolation.mjs (npm test)`);
+  assert.equal(process.env.STERLING_REGISTRY_DB, join(root, 'registry.db'), 'STERLING_REGISTRY_DB points at the per-run root');
+  const home = process.env.HOME ?? '';
+  if (home) {
+    assert.ok(
+      !process.env.STERLING_REGISTRY_DB.startsWith(join(home, '.sterling') + sep),
+      'never the real per-user ~/.sterling/registry.db'
+    );
+  }
+});
+
 test('LRI-3: a fresh run creates its own temp root and removes it — lock dbs included — when the run exits', () => {
   const dir = project();
   try {
