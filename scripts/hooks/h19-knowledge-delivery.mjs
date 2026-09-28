@@ -19,9 +19,7 @@ import {
   renderArticle,
   isOwnerDiscoveryOnly,
   renderReference,
-  renderHazards,
   cappedHazards,
-  renderDecisionPointers,
   DECISION_POINTER_CAP,
   rankFileDecisionPointers,
   lineSuspectBlock,
@@ -66,7 +64,6 @@ function main(input) {
 
     if (event !== 'PostToolUse') return allow();
     const migrationNotice = claimLegacyInjectionRungNotice(input.cwd, rawRung);
-    const mode = 'inject';
 
     // The staged-pipeline skip (`if (run && input.agent_id) return allow()` —
     // prep.mjs had already staged the agent's knowledge pack) was removed with
@@ -221,76 +218,51 @@ function main(input) {
       if (suspects.length) suspectBlock = lineSuspectBlock(suspects, charCap);
     }
 
-    // Hazards LEAD: "do not do this here" outranks the description of what the
-    // territory is, and the reader may stop after the first block. The
-    // line-suspect block, if any, trails everything else — it is a footnote on
-    // knowledge already delivered above, not knowledge in its own right.
-    const blocks = [
-      ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
-      ...freshOwners.map((r) =>
-        r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input.cwd })
-      ),
-      ...(freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []),
-      // joinSuspectBlock returns '' when no line survives; the filter keeps an
-      // empty advisory shell out of the payload exactly as the drain does.
-      joinSuspectBlock(suspectBlock ?? {}),
-    ].filter((b) => typeof b === 'string' && b);
-    const payload = renderPayload(rel, blocks, { unowned });
+    // PER-DELIVERY TOTAL CAP (scale-down Slice 3c; see assembleDelivery in
+    // lib/delivery.mjs — the ONE ASSEMBLER, decision 92088a62). Hazards are
+    // complete, unbudgeted substance; owners, decisions and the line-suspect
+    // footnote share what remains of the cap, degrading to `knowledge_get
+    // <id>` pointers. Only the assembler's OWN returned emittedSubstance/
+    // emittedDiscovery sets — never a UUID scan of the composed text — may
+    // ever be persisted to the guard below.
+    const totalCap = resolveTotalCap(input.cwd);
+    // CONTENT CLASS BY WHAT WAS ACTUALLY RENDERED (fix-round HIGH 2 / MEDIUM
+    // 3): a reference_material owner renders ONLY a pointer (renderReference),
+    // and an oversize feature_article renders a DIGEST (renderArticle's own
+    // bounded, disclosed partial view, never the complete record) — neither
+    // is "complete text", so neither may spend a substance mark. Only a
+    // normal (non-digested) feature_article, now rendered WHOLE (no more
+    // pre-clip — see renderArticle), is substance. `isOwnerDiscoveryOnly` is
+    // the SAME predicate `freshOwners` above filters against, so the
+    // freshness ledger and the rendered contentClass can never disagree.
+    const ownerPart = (r) => {
+      const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input.cwd });
+      const contentClass = isOwnerDiscoveryOnly(r) ? 'discovery' : 'substance';
+      return { kind: 'ordinary', contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
+    };
+    const decisionWiden = `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${freshDecisions.length}`;
+    const ownerParts = freshOwners.map(ownerPart);
+    const suspectParts = [{ kind: 'ordinary', contentClass: 'chrome', text: joinSuspectBlock(suspectBlock ?? {}) }];
+    const decisionParts = freshDecisions.length ? [decisionPointerPart(rel, freshDecisions, { widen: decisionWiden })] : [];
+    const tailParts = [...ownerParts, ...decisionParts, ...suspectParts];
 
-    let injectPayload = payload;
-    let emittedSubstance = [];
-    let emittedDiscovery = [];
-    if (mode === 'inject') {
-      // PER-DELIVERY TOTAL CAP (scale-down Slice 3c; see assembleDelivery in
-      // lib/delivery.mjs — the ONE ASSEMBLER, decision 92088a62). Hazards are
-      // complete, unbudgeted substance; owners, decisions and the line-suspect
-      // footnote share what remains of the cap, degrading to `knowledge_get
-      // <id>` pointers. Only the assembler's OWN returned emittedSubstance/
-      // emittedDiscovery sets — never a UUID scan of the composed text — may
-      // ever be persisted to the guard below.
-      const totalCap = resolveTotalCap(input.cwd);
-      // CONTENT CLASS BY WHAT WAS ACTUALLY RENDERED (fix-round HIGH 2 / MEDIUM
-      // 3): a reference_material owner renders ONLY a pointer (renderReference),
-      // and an oversize feature_article renders a DIGEST (renderArticle's own
-      // bounded, disclosed partial view, never the complete record) — neither
-      // is "complete text", so neither may spend a substance mark. Only a
-      // normal (non-digested) feature_article, now rendered WHOLE (no more
-      // pre-clip — see renderArticle), is substance. `isOwnerDiscoveryOnly` is
-      // the SAME predicate `freshOwners` above filters against, so the
-      // freshness ledger and the rendered contentClass can never disagree.
-      const ownerPart = (r) => {
-        const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input.cwd });
-        const contentClass = isOwnerDiscoveryOnly(r) ? 'discovery' : 'substance';
-        return { kind: 'ordinary', contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
-      };
-      const decisionWiden = `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${freshDecisions.length}`;
-      const ownerParts = freshOwners.map(ownerPart);
-      const suspectParts = [{ kind: 'ordinary', contentClass: 'chrome', text: joinSuspectBlock(suspectBlock ?? {}) }];
-      const decisionParts = freshDecisions.length ? [decisionPointerPart(rel, freshDecisions, { widen: decisionWiden })] : [];
-      const tailParts = [...ownerParts, ...decisionParts, ...suspectParts];
-
-      // MIGRATION NOTICE CHARGED ON THE CAP TOO (fix-round HIGH 4): this used
-      // to be string-prepended AFTER assembly at the final stdout write, so
-      // its bytes escaped the total cap entirely — the same class of bug
-      // decision 92088a62 requires closing for every chrome source. Folded in
-      // as a LEADING pinned-but-charged part instead, exactly like the active-
-      // plan line in h19-dispatch-staging.mjs.
-      const migrationNoticeParts = migrationNotice ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: migrationNotice }] : [];
-      const assemble = () => {
-      const parts = [
-        ...migrationNoticeParts,
-        { kind: 'ordinary', contentClass: 'chrome', text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
-        ...hazardParts(freshHazards, { fileKeys: [rel], mode: hazardMode }),
-        ...tailParts,
-      ];
-      const assembled = assembleDelivery(parts, totalCap);
-      return { text: assembled.text, emittedSubstance: assembled.emittedSubstance, emittedDiscovery: assembled.emittedDiscovery };
-      };
-      const built = assemble();
-      injectPayload = built.text;
-      emittedSubstance = built.emittedSubstance;
-      emittedDiscovery = built.emittedDiscovery;
-    }
+    // MIGRATION NOTICE CHARGED ON THE CAP TOO (fix-round HIGH 4): this used
+    // to be string-prepended AFTER assembly at the final stdout write, so
+    // its bytes escaped the total cap entirely — the same class of bug
+    // decision 92088a62 requires closing for every chrome source. Folded in
+    // as a LEADING pinned-but-charged part instead, exactly like the active-
+    // plan line in h19-dispatch-staging.mjs.
+    const migrationNoticeParts = migrationNotice ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: migrationNotice }] : [];
+    const parts = [
+      ...migrationNoticeParts,
+      { kind: 'ordinary', contentClass: 'chrome', text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
+      ...hazardParts(freshHazards, { fileKeys: [rel], mode: hazardMode }),
+      ...tailParts,
+    ];
+    const assembled = assembleDelivery(parts, totalCap);
+    const injectPayload = assembled.text;
+    const emittedSubstance = assembled.emittedSubstance;
+    const emittedDiscovery = assembled.emittedDiscovery;
 
     // SIDE EFFECT FIRST, GUARD SECOND. The guard is what
     // makes delivery once-per-session, so writing it before the delivery actually
