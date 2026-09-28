@@ -14,10 +14,11 @@ test('shipped default config parses and carries the spec defaults (§12, §7.2)'
   // (738253b2) — bumped 4.x -> 5 on 2026-07-26, so this pair is expected to change
   // on each generational bump; the assertion exists to catch an accidental drift to
   // an alias or a stale pin, not to freeze a version.
-  // implementor -> claude-opus-5-5 per decision implementor-default-model-opus-5-5;
-  // researcher, scout and librarian stay on claude-sonnet-5.
-  assert.equal(shipped.models.implementor.model, 'claude-opus-5-5');
-  // medium: Anthropic's Opus 5.5 launch default effort (finding 6a9b16a1).
+  // all four roles -> claude-sonnet-5-5 per decision subagent-defaults-sonnet-5-5-opus-5-5-as-pin
+  // (user-ruled 2026-09-28, replacing implementor-default-model-opus-5-5); Opus 5.5
+  // stays available as a per-dispatch pin.
+  assert.equal(shipped.models.implementor.model, 'claude-sonnet-5-5');
+  // medium: unchanged effort — only the model id moved (2026-09-28 ruling).
   assert.equal(shipped.models.implementor.effort, 'medium');
   // The schema's per-key defaults are the effective default for every project
   // whose config omits a models key; they must match the shipped file, or a bump
