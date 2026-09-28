@@ -7,7 +7,7 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -62,6 +62,35 @@ for (const [script, file] of [
       assert.deepEqual(JSON.parse(readConfig(dir)).generated_projections, [file]);
     } finally {
       cleanup();
+    }
+  });
+}
+
+for (const script of ['architecture-projection.mjs', 'rulings-projection.mjs']) {
+  // Guard, not a red-first pin: openProject's resolveStoreWritePath already
+  // refuses a config symlinked outside the project before registration runs.
+  // This keeps that true now that registration writes through writeContained
+  // (Opus review LOW-5), which refuses a symlink leaf on its own as well.
+  test(`${script}: a symlinked .sterling/config.json fails loudly and its target outside the project is left untouched`, (t) => {
+    const { dir, cleanup } = makeProject('{}');
+    const outside = mkdtempSync(join(tmpdir(), 'sterling-proj-register-outside-'));
+    try {
+      const target = join(outside, 'config.json');
+      writeFileSync(target, '{}');
+      rmSync(join(dir, '.sterling', 'config.json'));
+      try {
+        symlinkSync(target, join(dir, '.sterling', 'config.json'));
+      } catch {
+        t.skip('symlinks unavailable on this filesystem');
+        return;
+      }
+      const r = spawnSync(process.execPath, [join(root, 'scripts', script)], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+      assert.notEqual(r.status, 0, 'a symlinked config must fail loudly, not be written through');
+      assert.match(r.stderr, /symlink/i, 'the refusal names the symlink');
+      assert.equal(readFileSync(target, 'utf8'), '{}', 'the file outside the project is never written');
+    } finally {
+      cleanup();
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 }

@@ -7,9 +7,10 @@
 // silently drops (P5). Deterministic: no wall-clock stamps — the version line
 // derives from the articles themselves, so an unchanged store regenerates
 // byte-identical output.
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openProject } from './lib/project.mjs';
+import { existsContained, readContained, writeContained } from './lib/contained-fs.mjs';
 
 // The §15 extensible sets — CLOSED here on purpose, mirrored by the totality
 // pin in scripts/tests/projection.test.mjs: adding a set obligates extending
@@ -86,13 +87,15 @@ writeFileSync(join(cwd, 'architecture.md'), md);
 // direct-merge treat it as generated even after the key was lost. Appends only
 // when absent (never reorders, so a rerun writes nothing); every other key and
 // entry is kept. rulings-projection.mjs carries the same block for rulings.md.
-const configPath = join(cwd, '.sterling', 'config.json');
-const rawConfig = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
+// Config is read and written through contained-fs, as handoff-projection.mjs
+// does, so both producers write it the same way (Opus review LOW-5).
+const configRel = '.sterling/config.json';
+const rawConfig = existsContained(cwd, configRel, 'file') ? readContained(cwd, configRel) : '';
 const parsedConfig = rawConfig ? JSON.parse(rawConfig) : {};
 const registered = Array.isArray(parsedConfig.generated_projections) ? parsedConfig.generated_projections : [];
 if (!registered.includes('architecture.md')) {
   parsedConfig.generated_projections = [...registered, 'architecture.md'];
-  writeFileSync(configPath, JSON.stringify(parsedConfig, null, 2) + (rawConfig.endsWith('\n') || !rawConfig ? '\n' : ''));
+  writeContained(cwd, configRel, JSON.stringify(parsedConfig, null, 2) + (rawConfig.endsWith('\n') || !rawConfig ? '\n' : ''));
   console.log('config.generated_projections: registered architecture.md');
 }
 store.close();

@@ -1381,12 +1381,15 @@ try {
   // config.generated_projections is regenerated from the store, and a
   // version-only manifest or lockfile bump (the shared proof in
   // ../lib/version-only.mjs, the same one direct-merge uses) carries no
-  // knowledge. The proof compares against the settled snapshot's commit (HEAD
-  // on a first run); a path already dirty at that snapshot, or an unreachable
-  // snapshot, has no trustworthy base content, so it fails closed and still
-  // counts. Capture duty only — article demand and settlement are unchanged.
+  // knowledge. The proof compares against the settled snapshot's commit only.
+  // With NO snapshot yet (a first run) there is no trustworthy base: HEAD may
+  // already hold a dependency edit committed this session, so the version-only
+  // skip does not apply and the path still counts (Opus review LOW-4). A path
+  // already dirty at the snapshot, or an unreachable snapshot, fails closed the
+  // same way. The generated-projection skip needs no base and always applies.
+  // Capture duty only — article demand and settlement are unchanged.
   const generatedProjections = loadGeneratedProjections(input.cwd);
-  const releaseBase = git.ok && !git.base_lost ? (git.settled ? git.settled.sha : git.next.sha) : null;
+  const releaseBase = git.ok && git.settled && !git.base_lost ? git.settled.sha : null;
   const isReleaseMechanics = (p) =>
     generatedProjections.has(p) ||
     (VERSION_ONLY_CANDIDATES.includes(p) && !Object.hasOwn(git.settled?.dirty ?? {}, p) && isVersionOnlyInWorkingTree(input.cwd, releaseBase, p));

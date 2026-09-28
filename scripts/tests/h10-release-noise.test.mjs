@@ -158,6 +158,28 @@ test('(2) CONTROL: a real dependency edit in the lockfile alongside the bump sti
   }
 });
 
+test('(4) FIRST RUN (no settled snapshot): a dependency edit committed before the first settlement plus an uncommitted version-only bump still arms the capture duty — HEAD is no trustworthy base (Opus review LOW-4)', () => {
+  const { dir, store, g, cleanup } = makeGitProject(['architecture.md']);
+  try {
+    seed(dir, g);
+    ownAll(store, ['package.json', 'package-lock.json', 'architecture.md']);
+    // The session's real work: a dependency edit, committed before any Stop.
+    writeFileSync(join(dir, 'package-lock.json'), lock('0.1.0', '2.0.0', 'sha512-bbb'));
+    g(['commit', '-qam', 'dependency edit']);
+    // Then a version-only bump on top of it, left uncommitted.
+    writeFileSync(join(dir, 'package-lock.json'), lock('0.1.1', '2.0.0', 'sha512-bbb'));
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    // Stamped now, i.e. after the fixture article, so that article does not
+    // read as a capture that already satisfied this touch.
+    writeFileSync(join(dir, '.sterling', 'transient', 'touches.json'), JSON.stringify([{ path: 'package-lock.json', at: new Date().toISOString() }]));
+    const r = runStop(dir);
+    assert.equal(r.code, 2, `with no settled snapshot the version-only skip must not apply — stderr=${r.stderr}`);
+    assert.match(r.stderr, /capture · 1 file/);
+  } finally {
+    cleanup();
+  }
+});
+
 test('(3) CONTROL: a projection file NOT listed in config.generated_projections still arms the capture duty', () => {
   const { dir, g, cleanup } = makeGitProject();
   try {
