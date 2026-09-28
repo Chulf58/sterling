@@ -118,8 +118,8 @@ const FENCE_BASELINE = '703a327';
 // agent-templates-dual-lane-audit-september-2026), which changed Claude-visible prose
 // in every template on purpose.
 const BASELINE_OVERRIDES = {
-  'conductor.md': '034fc6e',
-  'implementor.md': '87aa5ff',
+  'conductor.md': '9fdc3e4',
+  'implementor.md': '9fdc3e4',
   'researcher.md': '87aa5ff',
   'scout.md': '87aa5ff',
   'librarian.md': '87aa5ff',
