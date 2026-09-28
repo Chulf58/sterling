@@ -27,7 +27,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runUpdate, reexecArgs, UPDATE_REEXEC_ENV } from './lib/update.mjs';
+import { runUpdate, reexecArgs, UPDATE_REEXEC_ENV, UPDATE_REEXEC_FROM_ENV } from './lib/update.mjs';
 
 const argOf = (name) => {
   const i = process.argv.indexOf(name);
@@ -88,12 +88,17 @@ async function loadProjects() {
 // hook and can never hand off again. Direct node spawn with inherited stdio:
 // process.execPath needs no shell or PATH lookup, and the child's output is the
 // user's output. runUpdate turns a spawn error or a signal into a loud exit 1.
-const reexec = process.env[UPDATE_REEXEC_ENV] === '1'
+// The parent also hands over its PRE-merge head (UPDATE_REEXEC_FROM_ENV, review
+// HIGH-1) so the child still sees what the pull changed (npm ci), and the
+// resolved absolute --target (review LOW-1), since the child's cwd is the target.
+const isReexecChild = process.env[UPDATE_REEXEC_ENV] === '1';
+if (isReexecChild && process.env[UPDATE_REEXEC_FROM_ENV]) opts.from = process.env[UPDATE_REEXEC_FROM_ENV];
+const reexec = isReexecChild
   ? null
-  : (script) => spawnSync(process.execPath, [script, ...reexecArgs(process.argv.slice(2))], {
+  : (script, { from }) => spawnSync(process.execPath, [script, ...reexecArgs(process.argv.slice(2), { target })], {
       cwd: target,
       stdio: 'inherit',
-      env: { ...process.env, [UPDATE_REEXEC_ENV]: '1' },
+      env: { ...process.env, [UPDATE_REEXEC_ENV]: '1', [UPDATE_REEXEC_FROM_ENV]: from },
     });
 
 const report = await runUpdate({ cwd: target, projects: loadProjects, opts, reexec });

@@ -93,6 +93,16 @@ function makeProject(config = CONFIG) {
   return { dir, store, cleanup };
 }
 
+// A fully set-up project has the conductor ACTIVE ("agent": "conductor" plus the
+// installed agent file). Since decision gap-hunt-2026-09-28-rulings item 3, H1
+// shows CONDUCTOR NOT ACTIVE in the human's banner when either is missing, so a
+// test pinning the counts-only banner of a healthy project must activate it.
+function activateConductor(dir) {
+  mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
+  writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify({ agent: 'conductor' }));
+  writeFileSync(join(dir, '.claude', 'agents', 'conductor.md'), '---\nname: conductor\ndescription: fixture\n---\n\n# Conductor\n');
+}
+
 function hookInput(dir, over = {}) {
   return { session_id: 's1', transcript_path: join(dir, 't', 's1.jsonl'), cwd: dir, permission_mode: 'default', ...over };
 }
@@ -119,6 +129,7 @@ function article(store, slug, files) {
 test('H1: banner art to stderr (env-only suppression), counts to the human, conventions to Claude; quiet outside Sterling projects', () => {
   const ART_ROW = '▀▀▀  ▀  ▀▀▀ ▀ ▀ ▀▀▀ ▀▀▀ ▀  ▀ ▀▀▀▀'; // letterform row 3
   const { dir, store, cleanup } = makeProject();
+  activateConductor(dir);
   try {
     store.create({ ...envelope('todo'), text: 'a', source: 'user' });
     store.create({ ...envelope('todo'), text: 'b', source: 'user' });
@@ -486,6 +497,7 @@ test('H1 machine-activation guard: unresolvable baked hook node warns human + co
 
 test('H1 stale-server guard: a marker build-id differing from the current build warns the human to restart; matching, absent, or orphaned (dead or reused-pid writer) is silent (P1)', async () => {
   const { dir, cleanup } = makeProject();
+  activateConductor(dir);
   const serverDist = mkdtempSync(join(tmpdir(), 'sterling-dist-'));
   const markerPath = join(dir, '.sterling', 'transient', 'mcp-runtime.json');
   // The genuinely-stale RUNNING-server case needs a live writer that the identity

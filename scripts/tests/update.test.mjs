@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH, preScaleDownMarkers, reexecArgs, UPDATE_REEXEC_ENV } from '../lib/update.mjs';
+import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH, preScaleDownMarkers, reexecArgs, UPDATE_REEXEC_ENV, UPDATE_REEXEC_FROM_ENV } from '../lib/update.mjs';
 import { ensureUpdateLauncher, renderUpdateLauncher, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
 
 const GIT_ID = ['-c', 'user.email=t@sterling.test', '-c', 'user.name=sterling test'];
@@ -1706,15 +1706,22 @@ test('re-exec through the real CLI: the fast-forwarded scripts/update.mjs runs o
     mkdirSync(join(author, 'scripts'), { recursive: true });
     writeFileSync(
       join(author, 'scripts', 'update.mjs'),
-      "console.log(`NEW UPDATER guard=${process.env.STERLING_UPDATE_REEXEC} args=${process.argv.slice(2).join(' ')}`);\nprocess.exit(7);\n"
+      "console.log(`NEW UPDATER guard=${process.env.STERLING_UPDATE_REEXEC} from=${process.env.STERLING_UPDATE_REEXEC_FROM} args=${process.argv.slice(2).join(' ')}`);\nprocess.exit(7);\n"
     );
+    const preMergeHead = git(consumer, ['rev-parse', 'HEAD']);
     git(author, ['add', '-A']);
     git(author, ['commit', '-m', 'ship a new updater']);
     git(author, ['push', 'origin', 'main']);
-    const r = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts', 'update.mjs'), '--target', consumer, '--no-projects'], { encoding: 'utf8', timeout: 120_000, env: { ...process.env, STERLING_UPDATE_REEXEC: '' } });
+    // A RELATIVE --target (review LOW-1): the child runs with cwd = the target, so
+    // a relative path would resolve against the wrong directory there. The CLI is
+    // started from the pair's parent dir, where 'consumer' is relative.
+    const r = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts', 'update.mjs'), '--target', 'consumer', '--no-projects'], { cwd: dir, encoding: 'utf8', timeout: 120_000, env: { ...process.env, STERLING_UPDATE_REEXEC: '', STERLING_UPDATE_REEXEC_FROM: '' } });
     assert.equal(r.status, 7, `the child's exit is the CLI exit:\n${r.stdout}\n${r.stderr}`);
     assert.match(r.stdout, /re-running the UPDATED updater/);
-    assert.match(r.stdout, /NEW UPDATER guard=1 args=--target \S+ --no-projects --no-fetch/);
+    assert.ok(
+      r.stdout.includes(`NEW UPDATER guard=1 from=${preMergeHead} args=--target ${consumer} --no-projects --no-fetch`),
+      `the child gets the guard, the PRE-merge head (review HIGH-1) and an ABSOLUTE --target (LOW-1):\n${r.stdout}`
+    );
     assert.equal((r.stdout.match(/NEW UPDATER/g) ?? []).length, 1, 'handed off exactly once');
     assert.doesNotMatch(r.stdout, /npm run build/, 'the old process ran no build');
   } finally {
@@ -1723,9 +1730,58 @@ test('re-exec through the real CLI: the fast-forwarded scripts/update.mjs runs o
 });
 
 test('reexecArgs: the child skips the fetch the parent already did and keeps every other flag; the env guard names one variable', () => {
-  assert.deepEqual(reexecArgs(['--force', '--no-test']), ['--force', '--no-test', '--no-fetch']);
-  assert.deepEqual(reexecArgs(['--no-fetch', '--target', '/x']), ['--no-fetch', '--target', '/x'], 'never doubled');
+  assert.deepEqual(reexecArgs(['--force', '--no-test'], { target: '/abs/clone' }), ['--force', '--no-test', '--no-fetch']);
+  assert.deepEqual(reexecArgs(['--no-fetch', '--target', '/x'], { target: '/x' }), ['--no-fetch', '--target', '/x'], 'never doubled');
+  // review LOW-1: the child's cwd is the target, so a relative --target is rewritten to the resolved absolute path
+  assert.deepEqual(reexecArgs(['--target', 'rel/clone', '--no-test'], { target: '/home/u/rel/clone' }), ['--target', '/home/u/rel/clone', '--no-test', '--no-fetch']);
   assert.equal(UPDATE_REEXEC_ENV, 'STERLING_UPDATE_REEXEC');
+  assert.equal(UPDATE_REEXEC_FROM_ENV, 'STERLING_UPDATE_REEXEC_FROM');
+});
+
+// Review HIGH-1: the child starts AFTER the fast-forward, so its own before.head
+// already equals after.head — without the parent's pre-merge head it computes
+// an empty changed set, skips npm ci even when package-lock.json moved, and loses
+// the "N file(s) changed" line. Driven through the exec seam: the parent's reexec
+// hook runs the child's runUpdate the way the CLI would, handing over `from`.
+test('re-exec: the child diffs from the PARENT\'s pre-merge head, so a pull that moves package-lock.json still runs npm ci', async () => {
+  const cwd = scratchCloneWithUpdater();
+  try {
+    const { exec: parentExec } = fakeExec({ behind: 1, changed: ['package-lock.json'] });
+    const { exec: childExec, calls: childCalls } = fakeExec({ behind: 0, head: HEAD_B, changed: ['package-lock.json'] });
+    const childLines = [];
+    let childReport = null;
+    const report = await runUpdate({
+      cwd,
+      exec: parentExec,
+      log: () => {},
+      projects: [],
+      opts: {},
+      reexec: async (_script, handoff) => {
+        childReport = await runUpdate({ cwd, exec: childExec, log: (l) => childLines.push(l), projects: [], opts: { fetch: false, from: handoff?.from } });
+        return { status: childReport.exit, signal: null };
+      },
+    });
+    assert.equal(report.exit, 0, childLines.join('\n'));
+    assert.ok(childCalls.includes(`git diff --name-only ${HEAD_A} ${HEAD_B}`), `the child diffs the parent's pre-merge head to the new head:\n${childCalls.join('\n')}`);
+    assert.ok(childCalls.includes('npm ci'), 'the moved lockfile triggers npm ci in the child');
+    assert.match(childLines.join('\n'), /1 file\(s\) changed aaaaaaa\.\.bbbbbbb/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('re-exec child: a malformed handed-over head is loud, and npm ci runs because the dependency change is unknown', async () => {
+  const cwd = scratchCloneWithUpdater();
+  try {
+    const { exec, calls } = fakeExec({ behind: 0, head: HEAD_B });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [], opts: { fetch: false, from: 'not-a-sha' } });
+    assert.equal(report.exit, 0);
+    assert.match(lines.join('\n'), /⚠ the pre-merge head handed over by the parent update \('not-a-sha'\) is not a commit sha/);
+    assert.ok(calls.includes('npm ci'), 'unknown dependency change → npm ci runs rather than being skipped');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 // ── 8. disclosures: pre-scale-down CLAUDE.md and config keys Sterling no longer

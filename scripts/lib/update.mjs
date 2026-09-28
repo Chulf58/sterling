@@ -291,11 +291,22 @@ export function currencyLine(c) {
 // The guard is this env flag: the CLI builds no re-exec hook when it is set, so
 // the child can never re-exec again.
 export const UPDATE_REEXEC_ENV = 'STERLING_UPDATE_REEXEC';
+// The parent's PRE-merge head, handed to the child (review HIGH-1): the child
+// starts after the fast-forward, so its own starting head already equals the
+// new head and could never see what the pull changed (npm ci, the changed-file
+// count). runUpdate takes it as opts.from.
+export const UPDATE_REEXEC_FROM_ENV = 'STERLING_UPDATE_REEXEC_FROM';
 
 /** The child's argv: the parent's own flags, plus --no-fetch (the parent
- *  already fetched, and the child must not move the target it was handed). */
-export function reexecArgs(argv) {
-  return argv.includes('--no-fetch') ? [...argv] : [...argv, '--no-fetch'];
+ *  already fetched, and the child must not move the target it was handed).
+ *  A --target value is replaced by the parent's RESOLVED absolute target
+ *  (review LOW-1): the child runs with cwd = the target, where a relative
+ *  path would resolve somewhere else. */
+export function reexecArgs(argv, { target }) {
+  const out = [...argv];
+  const i = out.indexOf('--target');
+  if (i !== -1 && i + 1 < out.length) out[i + 1] = target;
+  return out.includes('--no-fetch') ? out : [...out, '--no-fetch'];
 }
 
 // PRE-SCALE-DOWN CLAUDE.md (decision gap-hunt-2026-09-28-rulings item 7). The
@@ -803,7 +814,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     );
   }
 
-  const from = before.head;
+  let from = before.head;
   if (before.behind > 0) {
     // --ff-only is the posture in one flag: if this cannot fast-forward, the
     // pre-flight missed something and git refuses rather than inventing a merge.
@@ -823,7 +834,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       };
       if (!existsSync(script)) return failed(`${script} not found after the fast-forward`);
       log(`\n▸ re-running the UPDATED updater (${script}) so the rest of this update runs the code just pulled`);
-      const r = reexec(script);
+      // `from` is this process's PRE-merge head: the child starts after the
+      // merge and needs it to see what the pull changed (review HIGH-1).
+      const r = await reexec(script, { from: before.head });
       report.reexec = { status: r?.status ?? null, signal: r?.signal ?? null };
       if (r?.error) return failed(`could not start it: ${r.error.message ?? r.error}`);
       if (r?.signal) return failed(`it was killed by ${r.signal}`);
@@ -834,14 +847,37 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   }
 
   const after = readCurrency({ git });
-  const changed = from === after.head
-    ? []
-    : git(['diff', '--name-only', from, after.head], { allowFail: true }).split('\n').filter(Boolean);
+  let changed;
+  // The dependency set is UNKNOWN when a re-exec child cannot use the head it
+  // was handed; npm ci then runs rather than being skipped (P5: an unknown
+  // never reads as "nothing moved").
+  let dependenciesUnknown = false;
+  if (opts.from === undefined || opts.from === null || opts.from === '') {
+    changed = from === after.head
+      ? []
+      : git(['diff', '--name-only', from, after.head], { allowFail: true }).split('\n').filter(Boolean);
+  } else if (!/^[0-9a-f]{40}$/.test(opts.from)) {
+    log(`\n⚠ the pre-merge head handed over by the parent update ('${opts.from}') is not a commit sha — what the pull changed is UNKNOWN, so npm ci runs rather than being skipped`);
+    changed = [];
+    dependenciesUnknown = true;
+  } else {
+    // A re-exec child (review HIGH-1): its own starting head already IS the new
+    // head, so it diffs from the parent's pre-merge head instead.
+    from = opts.from;
+    const d = from === after.head ? { status: 0, stdout: '' } : exec('git', ['diff', '--name-only', from, after.head], { cwd });
+    if (d.status !== 0) {
+      log(`\n⚠ could not diff the handed-over pre-merge head ${from.slice(0, 7)} to ${after.head_short} — what the pull changed is UNKNOWN, so npm ci runs rather than being skipped: ${(d.stderr || d.stdout || '').trim()}`);
+      changed = [];
+      dependenciesUnknown = true;
+    } else {
+      changed = (d.stdout ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+    }
+  }
   if (changed.length) log(`\n${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
 
   // npm ci only when the dependency set actually moved: it is the one step that
   // needs the network, and it deletes node_modules to do it.
-  if (changed.includes('package-lock.json') || changed.includes('package.json')) {
+  if (dependenciesUnknown || changed.includes('package-lock.json') || changed.includes('package.json')) {
     if (!step('dependencies moved — npm ci', 'npm', ['ci']).ok) return report;
   }
 
