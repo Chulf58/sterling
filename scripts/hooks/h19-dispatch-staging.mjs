@@ -37,6 +37,7 @@
 // own failure posture.
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel } from './lib/common.mjs';
 import { isForeignTree } from './lib/working-tree.mjs';
+import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
 // Plan-lock primitives — ONE implementation, shared with h31-plan-lock.mjs,
 // h1-session-start.mjs and scripts/plan-lock.mjs.
 import { readLock as readPlanLock, sanitizeForContext, sterlingDirOf } from './lib/plan-lock.mjs';
@@ -71,6 +72,7 @@ import {
   resolveTotalCap,
   isSubstanceDelivered,
   isDiscoveryDelivered,
+  isKnownDelivered,
   markSubstanceDelivered,
   markDiscoveryDelivered,
   ownerPointer,
@@ -337,7 +339,13 @@ async function main(input) {
     // Hazards render as SUBSTANCE (whole hazard block) here; decisions and the
     // subject channel's own hazards/decisions split the same way
     // h19-knowledge-delivery.mjs's do — see its equivalent comment.
-    const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
+    // READ-ONLY LANE EXCEPTION (user ruling 2026-09-28): a lane holding no
+    // file-write tool (agent_type is on SubagentStart's stdin) gets hazards as
+    // discovery POINTERS, fresh against either ledger — see
+    // h19-knowledge-delivery.mjs.
+    const hazardMode = hazardLaneMode(input, input.cwd);
+    const hazardFresh = (r) => (hazardMode === 'pointer' ? !isKnownDelivered(guard, r) : !isSubstanceDelivered(guard, r));
+    const freshHazards = hazards.filter(hazardFresh);
     // OWNERS SPLIT BY WHAT THEY WILL ACTUALLY RENDER AS (fix-round MEDIUM 3) —
     // see h19-knowledge-delivery.mjs's identical comment: a reference_material
     // or oversize (digested) article never renders as substance, so filtering
@@ -360,7 +368,7 @@ async function main(input) {
     // subjectMatches is anti_pattern or decision only (the two queries above) —
     // route each to the SAME ledger its rendered contentClass will spend.
     const freshSubject = subjectMatches.filter((x) =>
-      x.record.type === 'anti_pattern' ? !isSubstanceDelivered(guard, x.record) : !isDiscoveryDelivered(guard, x.record)
+      x.record.type === 'anti_pattern' ? hazardFresh(x.record) : !isDiscoveryDelivered(guard, x.record)
     );
     if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return finish('');
 
@@ -408,7 +416,7 @@ async function main(input) {
         const decisionParts = freshDecisions.length ? [decisionPointerPart(rels.join(', '), freshDecisions, { widen: decisionWiden })] : [];
         parts.push(
           { kind: 'ordinary', contentClass: 'chrome', text: payloadHeaderLine(rels.join(', ')) },
-          ...hazardParts(freshHazards, { fileKeys: rels }),
+          ...hazardParts(freshHazards, { fileKeys: rels, mode: hazardMode }),
           ...ownerParts,
           ...decisionParts
         );
@@ -430,7 +438,7 @@ async function main(input) {
             contentClass: 'chrome',
           },
           // Matched on the task's SUBJECT, not a file path.
-          ...hazardParts(subjectHazards, { remedy, matchLabel: 'for this subject' }),
+          ...hazardParts(subjectHazards, { remedy, matchLabel: 'for this subject', mode: hazardMode }),
           ...(subjectDecisions.length
             ? [
                 decisionPointerPart('(subject match)', subjectDecisions, {

@@ -11,6 +11,7 @@ import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel, gitIgnored } from './lib/common.mjs';
 import { isForeignTree } from './lib/working-tree.mjs';
+import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
 import {
   guardPath,
   readGuard,
@@ -28,6 +29,7 @@ import {
   renderPayload,
   isSubstanceDelivered,
   isDiscoveryDelivered,
+  isKnownDelivered,
   markSubstanceDelivered,
   markDiscoveryDelivered,
   budgetKnownGaps,
@@ -102,7 +104,12 @@ function main(input) {
     // shown as discovery still qualifies for substance later" — the
     // regression case this closes is an H20 article POINTER suppressing the
     // later full H19 article).
-    const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
+    // READ-ONLY LANE EXCEPTION (user ruling 2026-09-28): a lane holding no
+    // file-write tool gets hazards as discovery POINTERS, so their freshness
+    // reads either ledger — the substance ledger alone would never see a
+    // pointer delivered and would re-show the same first three every touch.
+    const hazardMode = hazardLaneMode(input, input.cwd);
+    const freshHazards = hazards.filter((r) => (hazardMode === 'pointer' ? !isKnownDelivered(guard, r) : !isSubstanceDelivered(guard, r)));
     // OWNERS SPLIT BY WHAT THEY WILL ACTUALLY RENDER AS (fix-round MEDIUM 3):
     // a reference_material or an oversize (digested) article NEVER renders as
     // substance — filtering it against `isSubstanceDelivered` alone means
@@ -273,7 +280,7 @@ function main(input) {
       const parts = [
         ...migrationNoticeParts,
         { kind: 'ordinary', contentClass: 'chrome', text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
-        ...hazardParts(freshHazards, { fileKeys: [rel] }),
+        ...hazardParts(freshHazards, { fileKeys: [rel], mode: hazardMode }),
         ...tailParts,
       ];
       const assembled = assembleDelivery(parts, totalCap);

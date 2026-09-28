@@ -869,12 +869,14 @@ export function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes, matchLabel
  *  died) and must still replay the ORIGINAL '+N more' tail rather than deriving
  *  a new one from the survivors it happens to have left. Omitted, both fall back
  *  to today's derivation, so every producer call is byte-identical. */
-export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
+export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, pointerOnly = false } = {}) {
   const shown = cappedHazards(hazards, cap);
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map((ap) =>
-    [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join('\n')
+    pointerOnly
+      ? hazardHeaderLine(ap, { matchLabel })
+      : [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join('\n')
   );
   if (dropped > 0) {
     // `remedy` overrides the widening query for callers whose match was not a
@@ -896,8 +898,9 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
  *  (item 4: Bash now included). The trailing '+N more' disclosure line, if
  *  any, carries no identity and `contentClass:'chrome'`, so it can never earn
  *  a delivery mark for a hazard the reader never actually saw. */
-export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
+export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = 'whole' } = {}) {
   const shown = cappedHazards(hazards, cap);
+  if (mode === 'pointer') return hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   return blocks.map((text, i) =>
     i < shown.length
@@ -912,6 +915,37 @@ export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, 
         }
       : { kind: 'hazard', contentClass: 'chrome', text }
   );
+}
+
+/** The header a READ-ONLY lane's hazard pointers render under (P5: a reader
+ *  must never mistake a pointer for the whole hazard). */
+export const HAZARD_POINTER_HEADER = 'HAZARDS (pointer-only: read-only lane — knowledge_get each before acting on its subject)';
+
+/** POINTER MODE of `hazardParts` (user ruling 2026-09-28, "Revisit for
+ *  read-only lanes"; mode chosen by `hazardLaneMode` in
+ *  lib/hazard-lane-mode.mjs). A lane that holds no file-write tool gets each
+ *  shown hazard as its one `hazardHeaderLine` (title, slug, knowledge_get
+ *  pointer) — no TRIGGER, no RIGHT WAY — under HAZARD_POINTER_HEADER. Same
+ *  `cappedHazards` selection and the same '+N more' disclosure as whole mode;
+ *  credit and disclosure stay one helper's job (anti_pattern
+ *  one-identity-list-for-credit-and-disclosure-of-a-capped-delivery-part). A
+ *  pointer is `contentClass:'discovery'`, never substance, so its callers
+ *  must judge freshness with `isKnownDelivered` — the substance ledger alone
+ *  would re-show the same first three on every touch and starve the rest. */
+function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel }) {
+  if (!shown.length) return [];
+  const lines = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel, pointerOnly: true });
+  return [
+    { kind: 'hazard', contentClass: 'chrome', text: HAZARD_POINTER_HEADER },
+    ...lines.map((text, i) =>
+      i < shown.length
+        ? {
+            kind: 'hazard', contentClass: 'discovery', identity: shown[i].id, revision: recordRevision(shown[i]), name: shown[i].slug || shown[i].title, text,
+            pointer: hazardOverflowPointer(shown[i], matchLabel),
+          }
+        : { kind: 'hazard', contentClass: 'chrome', text }
+    ),
+  ];
 }
 
 /** The degraded notice a hazard renders as when its own whole block cannot

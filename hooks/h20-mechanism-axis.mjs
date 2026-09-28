@@ -8025,12 +8025,12 @@ function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes, matchLabel = "for
   const slug = ap?.slug ? typeof clipSlugBytes === "number" ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug : "";
   return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, pointerOnly = false } = {}) {
   const shown = cappedHazards(hazards, cap);
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map(
-    (ap) => [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
+    (ap) => pointerOnly ? hazardHeaderLine(ap, { matchLabel }) : [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
   );
   if (dropped > 0) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
@@ -8039,8 +8039,9 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
   }
   return blocks;
 }
-function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
+function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = "whole" } = {}) {
   const shown = cappedHazards(hazards, cap);
+  if (mode === "pointer") return hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   return blocks.map(
     (text, i) => i < shown.length ? {
@@ -8058,6 +8059,25 @@ function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, 
       pointer: hazardOverflowPointer(shown[i], matchLabel)
     } : { kind: "hazard", contentClass: "chrome", text }
   );
+}
+var HAZARD_POINTER_HEADER = "HAZARDS (pointer-only: read-only lane \u2014 knowledge_get each before acting on its subject)";
+function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel }) {
+  if (!shown.length) return [];
+  const lines = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel, pointerOnly: true });
+  return [
+    { kind: "hazard", contentClass: "chrome", text: HAZARD_POINTER_HEADER },
+    ...lines.map(
+      (text, i) => i < shown.length ? {
+        kind: "hazard",
+        contentClass: "discovery",
+        identity: shown[i].id,
+        revision: recordRevision(shown[i]),
+        name: shown[i].slug || shown[i].title,
+        text,
+        pointer: hazardOverflowPointer(shown[i], matchLabel)
+      } : { kind: "hazard", contentClass: "chrome", text }
+    )
+  ];
 }
 function hazardOverflowPointer(record, matchLabel = "for this path") {
   return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;

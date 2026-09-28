@@ -25,6 +25,7 @@
 //
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel } from './lib/common.mjs';
 import { isForeignTree } from './lib/working-tree.mjs';
+import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -40,6 +41,7 @@ import {
   resolveTotalCap,
   isSubstanceDelivered,
   isDiscoveryDelivered,
+  isKnownDelivered,
   markSubstanceDelivered,
   markDiscoveryDelivered,
   recordRevision,
@@ -150,8 +152,12 @@ function main(input) {
   // strings glued together after the fact. `aggregateLabel` keeps this rung's
   // established "+N more pointer line(s) held back…" overflow wording, which
   // predates the assembler and several tests already pin verbatim.
+  // READ-ONLY LANE EXCEPTION (user ruling 2026-09-28): in a lane holding no
+  // file-write tool a hazard renders as a discovery POINTER, so it counts as
+  // delivered on either ledger — see h19-knowledge-delivery.mjs.
+  const hazardMode = hazardLaneMode(input, input.cwd);
   const alreadyDelivered = (r) =>
-    r.type === 'anti_pattern' ? isSubstanceDelivered(guard, r) : isSubstanceDelivered(guard, r) || isDiscoveryDelivered(guard, r);
+    r.type === 'anti_pattern' && hazardMode !== 'pointer' ? isSubstanceDelivered(guard, r) : isKnownDelivered(guard, r);
 
   const ownerById = new Map();
   const hazardById = new Map();
@@ -176,7 +182,7 @@ function main(input) {
   }
 
   const eligibleHazards = [...hazardById.values()].filter((h) => !alreadyDelivered(h));
-  const hzParts = hazardParts(eligibleHazards, { fileKeys: entries.map((e) => e.rel) });
+  const hzParts = hazardParts(eligibleHazards, { fileKeys: entries.map((e) => e.rel), mode: hazardMode });
 
   if (!ownerParts.length && !hzParts.length) {
     if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: migrationNotice } }), 0);
