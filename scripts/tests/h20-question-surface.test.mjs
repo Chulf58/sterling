@@ -114,16 +114,29 @@ function ctxOf(r) {
   return JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
 }
 
-test('question surface: a matching decision renders as ONE line, name first then (id8), no second rejected-options line', () => {
+test('question surface: a matching decision renders as ONE line, name first then (id8), rejected options on that same line', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    const d = store.create(decisionRecord('Breach timing is never shown to the player', DECISION_STATEMENT, 'breach-timing-never-shown'));
+    const d = store.create({
+      ...decisionRecord('Breach timing is never shown to the player', DECISION_STATEMENT, 'breach-timing-never-shown'),
+      alternatives_rejected: [
+        { option: 'a numeric countdown in the HUD', reason: 'kills the dread' },
+        { option: 'a graphical arc filling toward the breach', reason: 'still a countdown' },
+      ],
+    });
     const ctx = ctxOf(runHook(askQuestion(dir, QUESTION, OPTIONS), dir));
     const lines = ctx.split('\n').filter((l) => l.includes(d.id.slice(0, 8)));
     assert.equal(lines.length, 1, `the decision occupies exactly one line:\n${ctx}`);
     assert.match(lines[0], new RegExp(`^\\s+→ breach-timing-never-shown \\(${d.id.slice(0, 8)}\\)`), 'name first, then (id8)');
     assert.ok(!ctx.includes(d.id), 'the full uuid is not printed — the id8 beside the name is the pointer');
-    assert.doesNotMatch(ctx, /ALREADY REJECTED/, 'the multi-line dispatch rendering is not used on the question surface');
+    // Review MEDIUM-2: the rejected options are the signal a user's pick may
+    // collide with, so they ride the SAME line — never a separate line.
+    assert.match(
+      lines[0],
+      / — rejected: a numeric countdown in the HUD; a graphical arc filling toward the breach/,
+      'rejected options appear on the decision line itself'
+    );
+    assert.doesNotMatch(ctx, /✗ ALREADY REJECTED/, 'the separate multi-line dispatch rejected-options line is still absent');
     assert.match(lines[0], /No surface may display when the next breach arrives/, 'the line still says what the decision rules');
   } finally {
     cleanup();

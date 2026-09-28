@@ -84,6 +84,7 @@ import {
   decisionPointerPart,
   statusAnnotation,
   DECISION_STATEMENT_CLIP,
+  DECISION_REJECTED_CLIP,
 } from './lib/delivery.mjs';
 
 // Injection ceilings. Deliberately tighter than H19's file-touch payload: a
@@ -522,10 +523,19 @@ function main(input) {
       const shown = records.slice(0, MAX_DECISIONS);
       return [
         `▸ DECISIONS for this subject (${records.length}) — one may already settle the question you just put; the user's pick must not silently contradict it. One line each, knowledge_get the id for the full ruling:`,
-        ...shown.map(
-          (d) =>
-            `${pointerHead(d, d.slug || d.title || d.statement)} — ${d.authority ? `[${d.authority}] ` : ''}${clip(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}`
-        ),
+        ...shown.map((d) => {
+          // The rejected options ride the SAME line (review MEDIUM-2): they are
+          // exactly what a user's pick may collide with, so dropping them loses
+          // the signal; a second line would break the one-line form.
+          const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : [])
+            .map((a) => (typeof a?.option === 'string' ? a.option.trim() : ''))
+            .filter(Boolean)
+            .join('; ');
+          return (
+            `${pointerHead(d, d.slug || d.title || d.statement)} — ${d.authority ? `[${d.authority}] ` : ''}${clip(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` +
+            (rejected ? ` — rejected: ${clip(rejected, DECISION_REJECTED_CLIP)}` : '')
+          );
+        }),
         ...(records.length > shown.length ? [`  … ${records.length - shown.length} more NOT shown (cap ${MAX_DECISIONS}) — ${remedy} for the full set`] : []),
       ].join('\n');
     };
