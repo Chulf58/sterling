@@ -8560,6 +8560,31 @@ function main(input2) {
     const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
     const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
     const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
+    const clip2 = (v, n = 160) => {
+      const t = String(v ?? "").replace(/\s+/g, " ").trim();
+      return t.length <= n ? t : `${t.slice(0, n)}\u2026`;
+    };
+    const pointerHead = (r, name) => `  \u2192 ${clip2(name, 80)} (${String(r.id).slice(0, 8)})`;
+    const questionDecisionText = (records, remedy) => {
+      const shown = records.slice(0, MAX_DECISIONS);
+      return [
+        `\u25B8 DECISIONS for this subject (${records.length}) \u2014 one may already settle the question you just put; the user's pick must not silently contradict it. One line each, knowledge_get the id for the full ruling:`,
+        ...shown.map(
+          (d) => `${pointerHead(d, d.slug || d.title || d.statement)} \u2014 ${d.authority ? `[${d.authority}] ` : ""}${clip2(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}`
+        ),
+        ...records.length > shown.length ? [`  \u2026 ${records.length - shown.length} more NOT shown (cap ${MAX_DECISIONS}) \u2014 ${remedy} for the full set`] : []
+      ].join("\n");
+    };
+    const questionPriorLine = (r) => {
+      const stale = r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : "";
+      const head = pointerHead(r, r.slug || r.question);
+      const q = r.slug ? `: ${clip2(r.question, 120)}` : "";
+      if (r.type === "research_finding") return `${head} \u2014 ANSWERED${q} (captured ${r.capture_date ?? "?"}${stale})`;
+      if (r.type === "open_question") {
+        return r.resolution_status === "closed" ? `${head} \u2014 ANSWERED (question closed into ${r.closed_into ?? "an unnamed record"})${q}` : `${head} \u2014 ALREADY UNDER INVESTIGATION (open, no answer yet)${q}`;
+      }
+      return `${head} \u2014 REFUTED TRAIL${q} \u2014 rejected: ${clip2(r.rejected_answer, 100)}`;
+    };
     const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
     const hazardBlocks = [
       ...hazardParts(hazards.map((x) => x.record), {
@@ -8570,12 +8595,14 @@ function main(input2) {
     ];
     const decisionBlocks = [
       ...decisions.length ? [
-        decisionPointerPart("(subject match)", decisions.map((x) => x.record), {
-          widen: decisionRemedy,
-          cap: MAX_DECISIONS,
-          remedy: decisionRemedy,
-          matchLabel: "for this subject"
-        })
+        ((part) => isQuestion ? { ...part, text: questionDecisionText(decisions.map((x) => x.record), decisionRemedy) } : part)(
+          decisionPointerPart("(subject match)", decisions.map((x) => x.record), {
+            widen: decisionRemedy,
+            cap: MAX_DECISIONS,
+            remedy: decisionRemedy,
+            matchLabel: "for this subject"
+          })
+        )
       ] : []
     ];
     const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
@@ -8585,16 +8612,13 @@ function main(input2) {
       })
     ] : [];
     const PRIOR_ANSWER_CAP = 3;
-    const clip2 = (v, n = 160) => {
-      const t = String(v ?? "").replace(/\s+/g, " ").trim();
-      return t.length <= n ? t : `${t.slice(0, n)}\u2026`;
-    };
     const shownPrior = priorAnswers.slice(0, PRIOR_ANSWER_CAP);
     const priorBlocks = priorAnswers.length ? [
       [
-        `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 this dispatch may be about to RE-DERIVE one of these, or duplicate a question already under investigation. knowledge_get before fanning out:`,
+        isQuestion ? `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 the question you just put may already be answered, or already under investigation. If one answers it, tell the user before acting on their pick:` : `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 this dispatch may be about to RE-DERIVE one of these, or duplicate a question already under investigation. knowledge_get before fanning out:`,
         ...shownPrior.map((x) => {
           const r = x.record;
+          if (isQuestion) return questionPriorLine(r);
           if (r.type === "research_finding") {
             return `  \u2192 ANSWERED: ${clip2(r.question)} (source ${r.source_date ?? "?"}, captured ${r.capture_date ?? "?"}${r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : ""}) \xB7 knowledge_get ${r.id}`;
           }

@@ -5267,8 +5267,8 @@ var ProjectRegistry = class {
   constructor(path = registryPath()) {
     mkdirSync(dirname2(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec("PRAGMA busy_timeout=5000");
+    this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec(REGISTRY_DDL);
   }
   /** Upsert by repo_path (init event, P4): create on first init
@@ -9589,15 +9589,16 @@ Drain it with /sterling:drain before taking new work, and expect much of it to b
 var registryContext = "";
 if (existsSync6(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, "/");
-  const registry = new ProjectRegistry(registryPath());
+  let registry;
   try {
+    registry = new ProjectRegistry(registryPath());
     registry.touchLastSeen(cwdPosix, (/* @__PURE__ */ new Date()).toISOString());
     const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync6(p.repo_path));
     if (siblings.length) {
       registryContext = "\n\nSibling Sterling projects on this machine (shared project registry) \u2014 other initialized projects; knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n" + siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(", ") || "(no domains)"}`).join("\n");
     }
   } finally {
-    registry.close();
+    registry?.close();
   }
 }
 function markerWriterAlive(pid) {
