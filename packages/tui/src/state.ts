@@ -2,11 +2,44 @@
 // never the renderer). buildDashboardState derives everything the renderer
 // prints; reduce maps input events (keys AND mouse) to new UI state plus
 // effects. The renderer stays thin enough to be boring.
+import { execFileSync } from 'node:child_process';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
+
+/** 40-hex commit sha — mirrors mcp-server's MEASURED_AT_HEAD_RE
+ *  (packages/mcp-server/src/tools.ts:1008, decision
+ *  board-provenance-measured-at-head), so a malformed resolver result reads
+ *  the same as an unresolved one rather than reaching the store to fail
+ *  zod's identical regex there. */
+const MEASURED_AT_HEAD_RE = /^[0-9a-f]{40}$/;
+
+/** Tasks tab board-item edit, fix 1 (Opus review round, feat/gap-hunt-round-1
+ *  71c1f41): the default `resolveHeadSha` a board_edit commit uses to restamp
+ *  measured_at_head, mirroring board_update's own restamp-on-text-change
+ *  (packages/mcp-server/src/tools.ts:9684-9690). `git rev-parse HEAD` walks
+ *  UP from cwd to find `.git` on its own, so no repoRoot needs threading in —
+ *  state.ts has none (SterlingStore exposes no public path/repoRoot getter,
+ *  and main.ts, which resolves the project root from --store, is out of this
+ *  round's edit scope). `process.cwd()` is exactly what a user's own git
+ *  commands would resolve against too, since sterling-tui is launched from
+ *  the project directory in normal use. Returns undefined (never throws) on
+ *  any failure — no git binary, not a repo, a shallow clone with no HEAD —
+ *  so reduce()'s caller degrades loud (a notice) rather than crashing. */
+function defaultResolveHeadSha(): string | undefined {
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return MEASURED_AT_HEAD_RE.test(sha) ? sha : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export const TABS = ['Tasks', 'Knowledge', 'Queue', 'System'] as const;
 /** the board (user-source todos) — the tab boardEdit's 'e' key operates on */
@@ -50,8 +83,13 @@ export interface UiState {
    *  present → 'e' has opened the selected todo's text for editing — every
    *  printable key/BACKSPACE feeds `text`, ENTER commits (through the same
    *  store write path board_update uses), ESCAPE cancels. Mirrors
-   *  sparringModelEdit's always-capture idiom, scoped to one card. */
-  boardEdit?: { id: string; text: string };
+   *  sparringModelEdit's always-capture idiom, scoped to one card.
+   *  `version` (fix round, Opus review of 71c1f41) is the record's version
+   *  as read the moment 'e' was pressed — read fresh via store.get, never
+   *  from the projected Card, which carries no version field. ENTER re-reads
+   *  the live record and refuses the commit (visible notice, buffer KEPT) if
+   *  the stored version has moved — the lost-update guard. */
+  boardEdit?: { id: string; text: string; version: number };
 }
 
 /** The System-tab inline selector (run r-f9a7). `key` is the config.models key
@@ -321,11 +359,21 @@ export interface ModeToggleEffect {
  *  lane J): the TUI's second write surface after the System tab. Carries the
  *  full replacement text; runEffects executes it through the same store
  *  write path board_update uses (SterlingStore.updateTodo — same id, same
- *  slug, version bumped), never the MCP tool surface. */
+ *  slug, version bumped), never the MCP tool surface. `version` (fix round)
+ *  is the pre-write version reduce() already confirmed live and unmoved —
+ *  carried through as `expected_version` so the store's own optimistic-
+ *  concurrency check backstops the reduce()-time guard against the (in a
+ *  single TUI process, vanishingly small) window between the check and this
+ *  write. `measuredAtHead`, when reduce() resolved one, restamps
+ *  measured_at_head the same way board_update does on a text change
+ *  (decision board-provenance-measured-at-head); absent when the resolver
+ *  failed — the field is then left untouched, never cleared. */
 export interface BoardEditEffect {
   type: 'board_edit';
   id: string;
   text: string;
+  version: number;
+  measuredAtHead?: string;
 }
 export type Effect =
   | SelectEffect
@@ -994,9 +1042,17 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
             : '(empty)'
         : undefined,
     footer:
-      `←/→ or 1-${TABS.length} tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit` +
-      (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears' : '') +
-      (ui.tab === TASKS_TAB ? (ui.boardEdit ? ' · enter save · esc cancel' : ' · e edit') : ''),
+      // Fix round (Opus review of 71c1f41): a Tasks-tab board_edit notice
+      // (lost-update refusal, vanished item, failed HEAD resolve) must be
+      // VISIBLE, not just carried in ui.notice — render.ts prints
+      // state.footer unconditionally, so this is the one line available to
+      // this scope's two files without touching render.ts. Mirrors the
+      // System tab's own '⚠ ' convention (buildSystemTab's banner).
+      ui.tab === TASKS_TAB && ui.notice
+        ? `⚠ ${ui.notice}`
+        : `←/→ or 1-${TABS.length} tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit` +
+          (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears' : '') +
+          (ui.tab === TASKS_TAB ? (ui.boardEdit ? ' · enter save · esc cancel' : ' · e edit') : ''),
     searchLine: searchActive ? `search: ${ui.searchQuery}` : undefined,
     queueCompleted,
     queueActivity,
@@ -1023,7 +1079,19 @@ export function screenLineToRow(state: DashboardState, line1: number, maxBodyLin
   return -1;
 }
 
-export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewport: Viewport = {}, knowledge?: MountedStores, roster?: AgentRosterSnapshot): { ui: UiState; effects: Effect[] } {
+export function reduce(
+  store: SterlingStore,
+  ui: UiState,
+  event: UiEvent,
+  viewport: Viewport = {},
+  knowledge?: MountedStores,
+  roster?: AgentRosterSnapshot,
+  // Tasks tab board-item edit, fix 1: injectable so tests can control HEAD
+  // resolution without shelling out to real git or depending on this
+  // worktree's own repo state. Defaults to the real `git rev-parse HEAD`
+  // resolver, so every existing/main.ts call site needs no change.
+  resolveHeadSha: () => string | undefined = defaultResolveHeadSha
+): { ui: UiState; effects: Effect[] } {
   const maxBodyLines = viewport.maxBodyLines ?? Infinity;
   const nodes = nodesFor(store, ui, knowledge);
   const clamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
@@ -1108,7 +1176,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
         const be = ui.boardEdit;
         switch (event.name) {
           case 'ESCAPE':
-            return { ui: { ...ui, boardEdit: undefined }, effects };
+            return { ui: { ...ui, boardEdit: undefined, notice: undefined }, effects };
           case 'BACKSPACE':
             return { ui: { ...ui, boardEdit: { ...be, text: be.text.slice(0, -1) } }, effects };
           case 'ENTER': {
@@ -1116,8 +1184,58 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
             // an edit trimmed to empty writes nothing (todoSchema requires
             // non-empty text) — close the editor rather than let a doomed
             // write reach the store and throw (P5: refuse loud, not late).
-            if (trimmed) effects.push({ type: 'board_edit', id: be.id, text: trimmed });
-            return { ui: { ...ui, boardEdit: undefined }, effects };
+            if (!trimmed) return { ui: { ...ui, boardEdit: undefined, notice: undefined }, effects };
+            // Fix round (Opus review of 71c1f41), fixes 2+3 — re-read the LIVE
+            // record at commit time, never trust the snapshot 'e' opened with:
+            //   • vanished, or no longer a live todo (status 'superseded') →
+            //     nothing to write to; a notice, never an uncaught throw to
+            //     main.ts's fatal handler (P5: degrade loud, don't crash).
+            //   • still live but its version moved since 'e' was pressed → a
+            //     concurrent write happened elsewhere; refuse with a visible
+            //     notice and KEEP the buffer open — never a silent overwrite
+            //     (lost-update guard).
+            const current = store.get(be.id) as (Record<string, unknown> & { type?: string; status?: string; version?: number }) | undefined;
+            if (!current || current.type !== 'todo' || current.status === 'superseded') {
+              return {
+                ui: { ...ui, boardEdit: undefined, notice: `board item no longer exists — the edit was discarded` },
+                effects,
+              };
+            }
+            if (current.version !== be.version) {
+              return {
+                ui: {
+                  ...ui,
+                  notice: `board item changed since you started editing (now at version ${current.version}) — refusing to overwrite; your edit is kept, press ENTER to try again`,
+                },
+                effects,
+              };
+            }
+            // Fix 1 — restamp measured_at_head on this text change, mirroring
+            // board_update (decision board-provenance-measured-at-head): a
+            // resolve failure degrades loud (a notice) rather than silently
+            // keeping the stale stamp — but it does NOT block the save, the
+            // same way board_update itself proceeds when git is unavailable.
+            let head: string | undefined;
+            try {
+              head = resolveHeadSha();
+            } catch {
+              head = undefined;
+            }
+            effects.push({
+              type: 'board_edit',
+              id: be.id,
+              text: trimmed,
+              version: be.version,
+              ...(head ? { measuredAtHead: head } : {}),
+            });
+            return {
+              ui: {
+                ...ui,
+                boardEdit: undefined,
+                notice: head ? undefined : `could not read the current git HEAD — measured_at_head was not refreshed (the text edit was still saved)`,
+              },
+              effects,
+            };
           }
         }
         return { ui, effects };
@@ -1306,7 +1424,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       // route space to the same selector logic as ENTER — otherwise the picker's
       // SPACE handling was reachable only by tests (audit finding 39/43).
       if (ch === ' ' && ui.tab === SYSTEM_TAB) {
-        return reduce(store, ui, { kind: 'key', name: 'ENTER' }, viewport, knowledge, roster);
+        return reduce(store, ui, { kind: 'key', name: 'ENTER' }, viewport, knowledge, roster, resolveHeadSha);
       }
       if (ch === ' ') return { ui: activate(clamp(ui.cursor)), effects };
       // Tasks tab board-item edit (user-ruled 2026-09-28, board f25e5547 lane
@@ -1318,7 +1436,13 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       if (ch === 'e' && ui.tab === TASKS_TAB) {
         const node = nodes[clamp(ui.cursor)];
         if (node && node.kind === 'card' && node.card.type !== 'objective') {
-          return { ui: { ...ui, boardEdit: { id: node.card.id, text: node.card.body } }, effects };
+          // Fix 2 (Opus review of 71c1f41): read the CURRENT version fresh
+          // via store.get — the projected Card carries no version field, and
+          // a snapshot taken anywhere earlier than this keypress would widen
+          // the lost-update guard's blind spot.
+          const rec = store.get(node.card.id) as { version?: number } | undefined;
+          const version = rec && typeof rec.version === 'number' ? rec.version : 0;
+          return { ui: { ...ui, boardEdit: { id: node.card.id, text: node.card.body, version }, notice: undefined }, effects };
         }
         return { ui, effects };
       }
@@ -1379,16 +1503,28 @@ export function runEffects(store: SterlingStore, effects: Effect[], now: () => s
     if (e.type === 'board_edit') {
       // Same store write path board_update uses (SterlingStore.updateTodo):
       // the merged candidate carries the old record's id/slug/every other
-      // field unchanged, only `text` and `updated_at` replaced — updateTodo
-      // pins id/type/created_at itself and bumps version, so this is exactly
-      // an in-place edit, never a new record (user-ruled 2026-09-28, board
-      // f25e5547 lane J). No swallowed failure here (P5): if the item
-      // vanished or changed type between the key press and this write,
-      // store.updateTodo throws and propagates to main.ts's uncaughtException
-      // handler the same way every other effect's write does — never a
-      // silent no-op.
+      // field unchanged, only `text`/`updated_at` (and, when resolved,
+      // `measured_at_head` — fix 1) replaced — updateTodo pins
+      // id/type/created_at itself and bumps version, so this is exactly an
+      // in-place edit, never a new record (user-ruled 2026-09-28, board
+      // f25e5547 lane J).
+      //
+      // reduce() already re-read the live record at commit time and refused
+      // to push this effect at all if it had vanished, gone non-live, or its
+      // version had moved (fixes 2+3) — so in the ordinary single-TUI-process
+      // case `e.version` is exactly the version this write is about to
+      // replace. `expected_version` is passed anyway as a belt-and-suspenders
+      // backstop against the (vanishingly small, but real for a store shared
+      // by another process) window between that check and this write: the
+      // store's own optimistic-concurrency guard (applyInPlace) then throws
+      // rather than silently applying a stale-based write, and that throw
+      // propagates to main.ts's uncaughtException handler the same way every
+      // other effect's write does (P5) — a race this rare is loud, not
+      // swallowed, but it is no longer the expected path a normal edit takes.
       const old = store.get(e.id);
-      store.updateTodo(e.id, { ...(old as unknown as Record<string, unknown>), text: e.text, updated_at: now() });
+      const candidate: Record<string, unknown> = { ...(old as unknown as Record<string, unknown>), text: e.text, updated_at: now() };
+      if (e.measuredAtHead) candidate.measured_at_head = e.measuredAtHead;
+      store.updateTodo(e.id, candidate, { expected_version: e.version });
     }
   }
   return quit;
