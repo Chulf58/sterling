@@ -4824,6 +4824,7 @@ var successPredicateSchema = external_exports.object({
     min_bytes: external_exports.number().optional()
   }).strict().optional()
 }).strict().refine((v) => v.output_regex !== void 0 || v.output_regex_absent !== void 0 || v.artifact !== void 0, { message: "success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)" });
+var DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS = Object.freeze(["**/*.sh"]);
 var configSchema = external_exports.object({
   toolchains: external_exports.array(external_exports.object({
     adapter: external_exports.string(),
@@ -4871,7 +4872,14 @@ var configSchema = external_exports.object({
   // classifyCoverage's excludeGlobs parameter in
   // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
   // toolchain path_glob).
-  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default([]),
+  // DEFAULT ['**/*.sh'] (decision gap-hunt-2026-09-28-rulings item 6): shell
+  // scripts are launcher and console glue, never a toolchain's source, and
+  // flagging them was banner noise answered the same way every session. The
+  // default lives in THREE places that must agree: here, templates/default-
+  // config.json (anti-pattern 85d15143), and the raw-config ladder in
+  // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
+  // An explicit [] still opts back in.
+  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
   // Attestation disclosure (decision attestation-staleness-disclosure-only-
   // never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
   // POSIX globs whose touched paths get a comparable-human-record rollup at
@@ -8447,7 +8455,6 @@ function main(input2) {
     const event = input2.hook_event_name;
     if (event !== "PostToolUse") return allow();
     const migrationNotice = claimLegacyInjectionRungNotice(input2.cwd, rawRung);
-    const mode = "inject";
     const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, input2.cwd));
     const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
     const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
@@ -8492,48 +8499,28 @@ function main(input2) {
       }
       if (suspects.length) suspectBlock = lineSuspectBlock(suspects, charCap);
     }
-    const blocks = [
-      ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
-      ...freshOwners.map(
-        (r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input2.cwd })
-      ),
-      ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : [],
-      // joinSuspectBlock returns '' when no line survives; the filter keeps an
-      // empty advisory shell out of the payload exactly as the drain does.
-      joinSuspectBlock(suspectBlock ?? {})
-    ].filter((b) => typeof b === "string" && b);
-    const payload = renderPayload(rel, blocks, { unowned });
-    let injectPayload = payload;
-    let emittedSubstance = [];
-    let emittedDiscovery = [];
-    if (mode === "inject") {
-      const totalCap = resolveTotalCap(input2.cwd);
-      const ownerPart = (r) => {
-        const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input2.cwd });
-        const contentClass = isOwnerDiscoveryOnly(r) ? "discovery" : "substance";
-        return { kind: "ordinary", contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
-      };
-      const decisionWiden = `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${freshDecisions.length}`;
-      const ownerParts = freshOwners.map(ownerPart);
-      const suspectParts = [{ kind: "ordinary", contentClass: "chrome", text: joinSuspectBlock(suspectBlock ?? {}) }];
-      const decisionParts = freshDecisions.length ? [decisionPointerPart(rel, freshDecisions, { widen: decisionWiden })] : [];
-      const tailParts = [...ownerParts, ...decisionParts, ...suspectParts];
-      const migrationNoticeParts = migrationNotice ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: migrationNotice }] : [];
-      const assemble = () => {
-        const parts = [
-          ...migrationNoticeParts,
-          { kind: "ordinary", contentClass: "chrome", text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
-          ...hazardParts(freshHazards, { fileKeys: [rel], mode: hazardMode }),
-          ...tailParts
-        ];
-        const assembled = assembleDelivery(parts, totalCap);
-        return { text: assembled.text, emittedSubstance: assembled.emittedSubstance, emittedDiscovery: assembled.emittedDiscovery };
-      };
-      const built = assemble();
-      injectPayload = built.text;
-      emittedSubstance = built.emittedSubstance;
-      emittedDiscovery = built.emittedDiscovery;
-    }
+    const totalCap = resolveTotalCap(input2.cwd);
+    const ownerPart = (r) => {
+      const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input2.cwd });
+      const contentClass = isOwnerDiscoveryOnly(r) ? "discovery" : "substance";
+      return { kind: "ordinary", contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
+    };
+    const decisionWiden = `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${freshDecisions.length}`;
+    const ownerParts = freshOwners.map(ownerPart);
+    const suspectParts = [{ kind: "ordinary", contentClass: "chrome", text: joinSuspectBlock(suspectBlock ?? {}) }];
+    const decisionParts = freshDecisions.length ? [decisionPointerPart(rel, freshDecisions, { widen: decisionWiden })] : [];
+    const tailParts = [...ownerParts, ...decisionParts, ...suspectParts];
+    const migrationNoticeParts = migrationNotice ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: migrationNotice }] : [];
+    const parts = [
+      ...migrationNoticeParts,
+      { kind: "ordinary", contentClass: "chrome", text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
+      ...hazardParts(freshHazards, { fileKeys: [rel], mode: hazardMode }),
+      ...tailParts
+    ];
+    const assembled = assembleDelivery(parts, totalCap);
+    const injectPayload = assembled.text;
+    const emittedSubstance = assembled.emittedSubstance;
+    const emittedDiscovery = assembled.emittedDiscovery;
     const recordDelivered = () => {
       markSubstanceDelivered(guard, emittedSubstance);
       markDiscoveryDelivered(guard, emittedDiscovery);
