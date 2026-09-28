@@ -6,6 +6,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, openSync, closeSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { loadConfig } from './common.mjs';
+import { isForeignTree } from './working-tree.mjs';
 
 export function deliveryDir(cwd) {
   return join(cwd, '.sterling', 'transient', 'delivery');
@@ -469,11 +470,11 @@ function flattenToOneLine(text) {
  *  'hooks-suite' at v46). That mattered because these pointers are how a reader
  *  learns which siblings bear on the territory — a false '(not in store)' tells
  *  them the neighbour does not exist, so they neither read it nor reconcile it. */
-function pointerLine(store, kind, slug) {
+function pointerLine(store, kind, slug, root) {
   let head = '(not in store)';
   let annotation = '';
   try {
-    const match = store.articlesBySlug(slug).find((r) => !r.working_tree);
+    const match = store.articlesBySlug(slug).find((r) => !isForeignTree(r, root));
     if (match) {
       head = clip(match.what_it_does, 140);
       annotation = statusAnnotation(match);
@@ -716,7 +717,7 @@ export function renderKnownGapsLines(article, info) {
  *  one-hop pointers; P6 filter-first-capped). `gaps` (optional) is one entry
  *  of budgetKnownGaps's returned Map, keyed by this article's id — inlined
  *  per the known_gaps section above when present. */
-export function renderArticle(store, article, { gaps } = {}) {
+export function renderArticle(store, article, { gaps, root } = {}) {
   // slug/concept_family are clipped (outside-family review, board 725299c8): they
   // are the only unbounded inputs to the digest block below, so without this a
   // pathological slug/family could push the digested block past the ~8192-byte
@@ -795,8 +796,8 @@ export function renderArticle(store, article, { gaps } = {}) {
   const relied = article.dependencies?.relied_by ?? [];
   if (relies.length || relied.length) {
     lines.push('ONE-HOP (follow with knowledge_get/knowledge_query when it matters):');
-    for (const slug of relies) lines.push(pointerLine(store, 'relies_on', slug));
-    for (const slug of relied) lines.push(pointerLine(store, 'relied_by', slug));
+    for (const slug of relies) lines.push(pointerLine(store, 'relies_on', slug, root));
+    for (const slug of relied) lines.push(pointerLine(store, 'relied_by', slug, root));
   }
   lines.push(...gapLines);
   return lines.join('\n');
@@ -868,12 +869,14 @@ export function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes, matchLabel
  *  died) and must still replay the ORIGINAL '+N more' tail rather than deriving
  *  a new one from the survivors it happens to have left. Omitted, both fall back
  *  to today's derivation, so every producer call is byte-identical. */
-export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
+export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, pointerOnly = false } = {}) {
   const shown = cappedHazards(hazards, cap);
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map((ap) =>
-    [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join('\n')
+    pointerOnly
+      ? hazardHeaderLine(ap, { matchLabel })
+      : [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join('\n')
   );
   if (dropped > 0) {
     // `remedy` overrides the widening query for callers whose match was not a
@@ -895,8 +898,9 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
  *  (item 4: Bash now included). The trailing '+N more' disclosure line, if
  *  any, carries no identity and `contentClass:'chrome'`, so it can never earn
  *  a delivery mark for a hazard the reader never actually saw. */
-export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
+export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = 'whole' } = {}) {
   const shown = cappedHazards(hazards, cap);
+  if (mode === 'pointer') return hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   return blocks.map((text, i) =>
     i < shown.length
@@ -911,6 +915,37 @@ export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, 
         }
       : { kind: 'hazard', contentClass: 'chrome', text }
   );
+}
+
+/** The header a READ-ONLY lane's hazard pointers render under (P5: a reader
+ *  must never mistake a pointer for the whole hazard). */
+export const HAZARD_POINTER_HEADER = 'HAZARDS (pointer-only: read-only lane — knowledge_get each before acting on its subject)';
+
+/** POINTER MODE of `hazardParts` (user ruling 2026-09-28, "Revisit for
+ *  read-only lanes"; mode chosen by `hazardLaneMode` in
+ *  lib/hazard-lane-mode.mjs). A lane that holds no file-write tool gets each
+ *  shown hazard as its one `hazardHeaderLine` (title, slug, knowledge_get
+ *  pointer) — no TRIGGER, no RIGHT WAY — under HAZARD_POINTER_HEADER. Same
+ *  `cappedHazards` selection and the same '+N more' disclosure as whole mode;
+ *  credit and disclosure stay one helper's job (anti_pattern
+ *  one-identity-list-for-credit-and-disclosure-of-a-capped-delivery-part). A
+ *  pointer is `contentClass:'discovery'`, never substance, so its callers
+ *  must judge freshness with `isKnownDelivered` — the substance ledger alone
+ *  would re-show the same first three on every touch and starve the rest. */
+function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel }) {
+  if (!shown.length) return [];
+  const lines = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel, pointerOnly: true });
+  return [
+    { kind: 'hazard', contentClass: 'chrome', text: HAZARD_POINTER_HEADER },
+    ...lines.map((text, i) =>
+      i < shown.length
+        ? {
+            kind: 'hazard', contentClass: 'discovery', identity: shown[i].id, revision: recordRevision(shown[i]), name: shown[i].slug || shown[i].title, text,
+            pointer: hazardOverflowPointer(shown[i], matchLabel),
+          }
+        : { kind: 'hazard', contentClass: 'chrome', text }
+    ),
+  ];
 }
 
 /** The degraded notice a hazard renders as when its own whole block cannot

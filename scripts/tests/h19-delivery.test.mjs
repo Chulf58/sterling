@@ -1243,3 +1243,10 @@ test('bash delivery: a malformed or pathless command is a clean no-op', () => {
     cleanup();
   }
 });
+
+// Dome Farmer issue entry 454 (user ruling 2026-09-28 "Code: self-root = own"):
+// a working_tree naming THIS project's own root is the project itself, so H19
+// delivers that owner exactly as it delivers one with no working_tree. A foreign
+// branch-name working_tree still owns nothing here.
+test('self-rooted owner (working_tree = project root) IS delivered for its path; a foreign branch-name tree is still frontier', () => { const {dir,store,cleanup}=makeProject(); try { store.create(article('selfroot',['src/a.mjs'],{working_tree:`${dir}/`})); const own=JSON.parse(runHook('h19-knowledge-delivery.mjs',postRead(dir,'src/a.mjs'),dir).stdout).hookSpecificOutput.additionalContext; assert.match(own,/selfroot/); assert.doesNotMatch(own,/FRONTIER SIGNAL/); store.create(article('foreign',['src/f.mjs'],{working_tree:'chore/retire-knowledge-skills'})); const f=JSON.parse(runHook('h19-knowledge-delivery.mjs',postRead(dir,'src/f.mjs'),dir).stdout).hookSpecificOutput.additionalContext; assert.match(f,/FRONTIER SIGNAL/); assert.doesNotMatch(f,/foreign does the/); } finally {cleanup();} });
+test('one-hop pointer to a self-rooted sibling resolves; a foreign-tree sibling reads (not in store)', () => {const {dir,store,cleanup}=makeProject();try{store.create(article('alpha',['src/a.mjs'],{working_tree:dir}));store.create(article('gamma',['src/g.mjs'],{working_tree:'chore/retire-knowledge-skills'}));store.create(article('beta',['src/b.mjs'],{dependencies:{relies_on:['alpha','gamma'],relied_by:[]}}));const ctx=JSON.parse(runHook('h19-knowledge-delivery.mjs',postRead(dir,'src/b.mjs'),dir).stdout).hookSpecificOutput.additionalContext;assert.match(ctx,/relies_on \[\[alpha\]\]: alpha does the alpha thing/);assert.match(ctx,/relies_on \[\[gamma\]\]: \(not in store\)/);}finally{cleanup();}});

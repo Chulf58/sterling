@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/h19-knowledge-delivery.mjs
 import { statSync as statSync2 } from "node:fs";
-import { join as join4 } from "node:path";
+import { join as join6 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -4091,6 +4091,25 @@ function foldPairForCompare(a, b) {
   const drivePrefixed = /^[A-Za-z]:/.test(a) || /^[A-Za-z]:/.test(b);
   return drivePrefixed ? [a.toLowerCase(), b.toLowerCase()] : [a, b];
 }
+function isAbsolutePathAnyHost(p) {
+  const s2 = String(p ?? "");
+  return /^[A-Za-z]:[\\/]/.test(s2) || s2.startsWith("/") || s2.startsWith("\\");
+}
+function sameLocationAnyHost(a, b) {
+  const drvfs = (p) => {
+    const s2 = String(p ?? "").replace(/\\/g, "/");
+    if (!isAbsolutePathAnyHost(s2))
+      return void 0;
+    const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
+    return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
+  };
+  const x = drvfs(a);
+  const y = drvfs(b);
+  if (x === void 0 || y === void 0)
+    return false;
+  const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
+  return onDrvfs(x) && onDrvfs(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
+}
 function toRepoRelative(absolutePath, repoRoot) {
   const abs = normSep(absolutePath);
   const root = normSep(repoRoot);
@@ -7614,17 +7633,135 @@ function repoRel(toolPath, cwd) {
   }
 }
 
+// scripts/hooks/lib/working-tree.mjs
+function isForeignTree(record, root) {
+  const wt = record?.working_tree;
+  if (!wt) return false;
+  return !(root && sameLocationAnyHost(String(wt), root));
+}
+
+// scripts/hooks/lib/hazard-lane-mode.mjs
+import { readFileSync as readFileSync3 } from "node:fs";
+import { join as join4 } from "node:path";
+
+// scripts/lib/dispatch-register.mjs
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync3, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join3, resolve as resolve2, dirname as dirname3, isAbsolute } from "node:path";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+function registerPath(root) {
+  return join3(root, ".sterling", "transient", "dispatch-register.json");
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync3(p)) return { availability: "absent", arr: [] };
+  let raw;
+  try {
+    raw = readFileSync2(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+var MAX_PROMPT_BYTES = 512 * 1024;
+var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+
+// scripts/hooks/lib/hazard-lane-mode.mjs
+var READ_ONLY_TOOLS = /* @__PURE__ */ new Set(["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "ToolSearch"]);
+var STERLING_READ_SUFFIXES = ["knowledge_query", "knowledge_get", "knowledge_schema", "knowledge_preflight", "board_query", "board_get", "maintenance_query"];
+for (const prefix of ["mcp__sterling__", "mcp__plugin_sterling_sterling__"]) {
+  for (const suffix of STERLING_READ_SUFFIXES) READ_ONLY_TOOLS.add(`${prefix}${suffix}`);
+}
+var TOOL_TOKEN = /^(?:[A-Z][A-Za-z]*|mcp__[A-Za-z0-9_]+)$/;
+var PLAIN_AGENT_NAME = /^[A-Za-z0-9_-]+$/;
+function laneAgentType(input2, root) {
+  if (typeof input2.agent_type === "string" && input2.agent_type) return input2.agent_type;
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return null;
+  const types = new Set(
+    entries.filter((e) => e.agent_id === input2.agent_id && typeof e.agent_type === "string" && e.agent_type).map((e) => e.agent_type)
+  );
+  return types.size === 1 ? [...types][0] : null;
+}
+function frontmatterTools(text) {
+  const lines = text.split(/\r\n|\r|\n/);
+  if (lines[0] !== "---") return null;
+  const end = lines.indexOf("---", 1);
+  if (end === -1) return null;
+  const at = [];
+  for (let i2 = 1; i2 < end; i2++) if (/^tools\s*:/.test(lines[i2])) at.push(i2);
+  if (at.length !== 1) return null;
+  const i = at[0];
+  for (let j = 1; j < end; j++) {
+    if (j === i) continue;
+    if (/^\s*(?:\?|["']?tools["']?\s*:)/.test(lines[j]) || /^[?"']/.test(lines[j])) return null;
+  }
+  if (i + 1 < end && /^\s/.test(lines[i + 1])) return null;
+  const value = lines[i].replace(/^tools\s*:/, "").trim();
+  if (!value || /[#*(\['"]/.test(value)) return null;
+  const tokens = value.split(",").map((t) => t.trim());
+  return tokens.every((t) => TOOL_TOKEN.test(t)) ? tokens : null;
+}
+function hazardLaneMode(input2, root) {
+  try {
+    if (!input2 || typeof input2.agent_id !== "string" || !input2.agent_id) return "whole";
+    const type = laneAgentType(input2, root);
+    if (!type || !PLAIN_AGENT_NAME.test(type)) return "whole";
+    const tools = frontmatterTools(readFileSync3(join4(root, ".claude", "agents", `${type}.md`), "utf8"));
+    if (!tools) return "whole";
+    return tools.every((t) => READ_ONLY_TOOLS.has(t)) ? "pointer" : "whole";
+  } catch {
+    return "whole";
+  }
+}
+
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, renameSync, openSync, closeSync } from "node:fs";
-import { join as join3, dirname as dirname3 } from "node:path";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, existsSync as existsSync4, renameSync as renameSync2, openSync, closeSync } from "node:fs";
+import { join as join5, dirname as dirname4 } from "node:path";
 function deliveryDir(cwd) {
-  return join3(cwd, ".sterling", "transient", "delivery");
+  return join5(cwd, ".sterling", "transient", "delivery");
 }
 function claimLegacyInjectionRungNotice(cwd, rawRung) {
   if (rawRung === "read") return null;
-  const transient = join3(cwd, ".sterling", "transient");
-  const marker = join3(transient, "legacy-injection-rung-noticed");
-  mkdirSync2(transient, { recursive: true });
+  const transient = join5(cwd, ".sterling", "transient");
+  const marker = join5(transient, "legacy-injection-rung-noticed");
+  mkdirSync3(transient, { recursive: true });
   try {
     const fd = openSync(marker, "wx");
     closeSync(fd);
@@ -7656,11 +7793,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join3(deliveryDir(cwd), component);
+  return join5(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join3(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join5(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -7687,6 +7824,9 @@ function isSubstanceDelivered(guard, record) {
 function isDiscoveryDelivered(guard, record) {
   return revisionDelivered(guard.discovery, record);
 }
+function isKnownDelivered(guard, record) {
+  return isSubstanceDelivered(guard, record) || isDiscoveryDelivered(guard, record);
+}
 function markSubstanceDelivered(guard, emittedSubstance) {
   markRevisionDelivered(guard.substance, emittedSubstance);
 }
@@ -7696,8 +7836,8 @@ function markDiscoveryDelivered(guard, emittedDiscovery) {
 function readGuard(path) {
   if (!path) return emptyDeliveryGuard();
   try {
-    if (!existsSync3(path)) return emptyDeliveryGuard();
-    const parsed = JSON.parse(readFileSync2(path, "utf8"));
+    if (!existsSync4(path)) return emptyDeliveryGuard();
+    const parsed = JSON.parse(readFileSync4(path, "utf8"));
     if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
     return { ...emptyDeliveryGuard(), ...parsed };
   } catch {
@@ -7708,10 +7848,10 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync2(dirname3(path), { recursive: true });
+  mkdirSync3(dirname4(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, JSON.stringify(guard));
-  renameSync(tmp, path);
+  writeFileSync2(tmp, JSON.stringify(guard));
+  renameSync2(tmp, path);
 }
 function statusBracket(record) {
   const status = record?.status ?? "unknown";
@@ -7735,11 +7875,11 @@ function clip(text, cap) {
 function normalizeWs(text) {
   return String(text ?? "").replace(/\s+/g, " ").trim();
 }
-function pointerLine(store, kind, slug) {
+function pointerLine(store, kind, slug, root) {
   let head = "(not in store)";
   let annotation = "";
   try {
-    const match = store.articlesBySlug(slug).find((r) => !r.working_tree);
+    const match = store.articlesBySlug(slug).find((r) => !isForeignTree(r, root));
     if (match) {
       head = clip(match.what_it_does, 140);
       annotation = statusAnnotation(match);
@@ -7820,7 +7960,7 @@ function renderKnownGapsLines(article, info) {
   }
   return lines;
 }
-function renderArticle(store, article, { gaps } = {}) {
+function renderArticle(store, article, { gaps, root } = {}) {
   const id8 = String(article.id ?? "").slice(0, 8);
   const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${id8}) (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
   const body = String(article.what_it_does ?? "");
@@ -7855,8 +7995,8 @@ function renderArticle(store, article, { gaps } = {}) {
   const relied = article.dependencies?.relied_by ?? [];
   if (relies.length || relied.length) {
     lines.push("ONE-HOP (follow with knowledge_get/knowledge_query when it matters):");
-    for (const slug of relies) lines.push(pointerLine(store, "relies_on", slug));
-    for (const slug of relied) lines.push(pointerLine(store, "relied_by", slug));
+    for (const slug of relies) lines.push(pointerLine(store, "relies_on", slug, root));
+    for (const slug of relied) lines.push(pointerLine(store, "relied_by", slug, root));
   }
   lines.push(...gapLines);
   return lines.join("\n");
@@ -7874,12 +8014,12 @@ function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes, matchLabel = "for
   const slug = ap?.slug ? typeof clipSlugBytes === "number" ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug : "";
   return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, pointerOnly = false } = {}) {
   const shown = cappedHazards(hazards, cap);
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map(
-    (ap) => [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
+    (ap) => pointerOnly ? hazardHeaderLine(ap, { matchLabel }) : [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
   );
   if (dropped > 0) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
@@ -7888,8 +8028,9 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
   }
   return blocks;
 }
-function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
+function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = "whole" } = {}) {
   const shown = cappedHazards(hazards, cap);
+  if (mode === "pointer") return hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   return blocks.map(
     (text, i) => i < shown.length ? {
@@ -7907,6 +8048,25 @@ function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, 
       pointer: hazardOverflowPointer(shown[i], matchLabel)
     } : { kind: "hazard", contentClass: "chrome", text }
   );
+}
+var HAZARD_POINTER_HEADER = "HAZARDS (pointer-only: read-only lane \u2014 knowledge_get each before acting on its subject)";
+function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel }) {
+  if (!shown.length) return [];
+  const lines = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel, pointerOnly: true });
+  return [
+    { kind: "hazard", contentClass: "chrome", text: HAZARD_POINTER_HEADER },
+    ...lines.map(
+      (text, i) => i < shown.length ? {
+        kind: "hazard",
+        contentClass: "discovery",
+        identity: shown[i].id,
+        revision: recordRevision(shown[i]),
+        name: shown[i].slug || shown[i].title,
+        text,
+        pointer: hazardOverflowPointer(shown[i], matchLabel)
+      } : { kind: "hazard", contentClass: "chrome", text }
+    )
+  ];
 }
 function hazardOverflowPointer(record, matchLabel = "for this path") {
   return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
@@ -8057,7 +8217,7 @@ function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}
     if (suffix) {
       const lines = part.text.split("\n");
       const carriesSuffix = lines[0] === suffix;
-      const render = (candidate) => carriesSuffix ? candidate : `${candidate}
+      const render2 = (candidate) => carriesSuffix ? candidate : `${candidate}
 ${suffix}`;
       let clipped = "";
       let best = "";
@@ -8065,10 +8225,10 @@ ${suffix}`;
       for (const line of lines) {
         const candidate = clipped ? `${clipped}
 ${line}` : line;
-        selected.set(part, { text: render(candidate), full: false });
+        selected.set(part, { text: render2(candidate), full: false });
         if (!fitsFn("excerpt")) break;
         clipped = candidate;
-        best = render(candidate);
+        best = render2(candidate);
         bestLines += 1;
       }
       if (best && bestLines === 1 && lines.length > 1 && part.suffix && part.suffix !== ptr) {
@@ -8130,7 +8290,7 @@ ${line}` : line;
   const ordinaryParts = items.filter((part) => !isHazard(part) && !isChrome(part));
   const baseOmitted = [...omitted];
   const reserved = /* @__PURE__ */ new Map();
-  const placeOrdinary = (disclosure) => {
+  const placeOrdinary = (disclosure2) => {
     for (const part of ordinaryParts) selected.delete(part);
     omitted.length = 0;
     omitted.push(...baseOmitted);
@@ -8147,7 +8307,7 @@ ${line}` : line;
       room -= cost;
     }
     const roomFor = (size) => size > 0 ? Math.max(0, Math.min(room, size + bytes(sep))) : 0;
-    const disclosureRoom = { whole: roomFor(disclosure.ids), excerpt: roomFor(disclosure.named), pointer: 0 };
+    const disclosureRoom = { whole: roomFor(disclosure2.ids), excerpt: roomFor(disclosure2.named), pointer: 0 };
     ordinaryParts.forEach((part, i) => {
       const later = ordinaryParts.slice(i + 1).reduce((sum, next) => sum + (reserved.get(next) ?? 0), 0);
       tryDegradeOrdinary(part, (stage) => {
@@ -8288,12 +8448,13 @@ function main(input2) {
     if (event !== "PostToolUse") return allow();
     const migrationNotice = claimLegacyInjectionRungNotice(input2.cwd, rawRung);
     const mode = "inject";
-    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
+    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, input2.cwd));
     const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
     const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
     const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
     const guard = readGuard(gPath);
-    const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
+    const hazardMode = hazardLaneMode(input2, input2.cwd);
+    const freshHazards = hazards.filter((r) => hazardMode === "pointer" ? !isKnownDelivered(guard, r) : !isSubstanceDelivered(guard, r));
     const freshOwners = owners.filter((r) => isOwnerDiscoveryOnly(r) ? !isDiscoveryDelivered(guard, r) : !isSubstanceDelivered(guard, r));
     const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !isDiscoveryDelivered(guard, r)));
     const bare = owners.length === 0;
@@ -8313,7 +8474,7 @@ function main(input2) {
     let suspectBlock = null;
     let mtimeMs = null;
     try {
-      mtimeMs = statSync2(join4(input2.cwd, rel)).mtimeMs;
+      mtimeMs = statSync2(join6(input2.cwd, rel)).mtimeMs;
     } catch (e) {
       if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") throw e;
     }
@@ -8334,7 +8495,7 @@ function main(input2) {
     const blocks = [
       ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
       ...freshOwners.map(
-        (r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id) })
+        (r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input2.cwd })
       ),
       ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : [],
       // joinSuspectBlock returns '' when no line survives; the filter keeps an
@@ -8348,7 +8509,7 @@ function main(input2) {
     if (mode === "inject") {
       const totalCap = resolveTotalCap(input2.cwd);
       const ownerPart = (r) => {
-        const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id) });
+        const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input2.cwd });
         const contentClass = isOwnerDiscoveryOnly(r) ? "discovery" : "substance";
         return { kind: "ordinary", contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
       };
@@ -8362,7 +8523,7 @@ function main(input2) {
         const parts = [
           ...migrationNoticeParts,
           { kind: "ordinary", contentClass: "chrome", text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
-          ...hazardParts(freshHazards, { fileKeys: [rel] }),
+          ...hazardParts(freshHazards, { fileKeys: [rel], mode: hazardMode }),
           ...tailParts
         ];
         const assembled = assembleDelivery(parts, totalCap);

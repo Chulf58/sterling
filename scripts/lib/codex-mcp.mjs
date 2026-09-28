@@ -67,102 +67,12 @@ export function probeCodex({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_MS, 
   return { ok: true };
 }
 
-// probeCodexWin — the NATIVE-WINDOWS counterpart (board 43051819 slice A). init.mjs
-// runs under WSL node, so a bare spawnSync('codex', ...) would resolve `codex` under
-// WSL's OWN PATH (or find nothing, since a WSL-side install is a different binary from
-// the Windows-side one) — wrong side entirely for native claude on a win32 host, whose
-// plugin MCP config this feeds (sterling-mcp-win.json, its old consumer, is retired —
-// decision native-windows-launcher-retired-wsl2-only). Resolution instead goes through `where.exe codex` (WSL interop reaching
-// the WINDOWS PATH, same mechanism as init.mjs's own whereWin('node')), THEN the
-// resolved path is probed with `login status` exactly like probeCodex above. Same
-// {ok, reason} contract PLUS `command` on success — the exact executable the probe
-// spawned, which is what gets written into the MCP entry (board 4c3a8e59; a bare
-// `codex` entry is not what the probe proved). Same injectable spawnFn/env/timeoutMs seams (one spawnFn
-// serves both the where.exe call and the login-status call — tests dispatch on the
-// first arg to stub each independently).
-export function probeCodexWin({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_MS, env = process.env } = {}) {
-  let codexPath;
-  // STERLING_CODEX_WIN_PATH, when DEFINED (even empty), bypasses where.exe detection —
-  // mirrors STERLING_WIN_NODE's role for init.mjs's native-Windows node resolution: a
-  // path forces that path; '' forces the binary-absent path. Undefined -> auto-detect
-  // via `where.exe codex` through the injected spawnFn (test isolation without needing
-  // a real Windows machine).
-  if (env.STERLING_CODEX_WIN_PATH !== undefined) {
-    codexPath = env.STERLING_CODEX_WIN_PATH || undefined;
-  } else {
-    let whereResult;
-    try {
-      whereResult = spawnFn('where.exe', ['codex'], { encoding: 'utf8', timeout: timeoutMs, env });
-    } catch {
-      whereResult = null;
-    }
-    // Same ordering rationale as the login-status timeout check below: a
-    // timed-out where.exe RESOLUTION must be classified 'timeout', not
-    // folded into the generic miss/error path below (which would misreport
-    // it as 'binary-absent') — and it must never proceed to login status.
-    if (whereResult && (whereResult.signal || whereResult.error?.code === 'ETIMEDOUT')) {
-      return { ok: false, reason: 'timeout' };
-    }
-    if (whereResult && !whereResult.error && whereResult.status === 0) {
-      const lines = String(whereResult.stdout ?? '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-      codexPath = lines.find((l) => l.toLowerCase().endsWith('.exe')) ?? lines[0];
-    }
-  }
-  if (!codexPath) {
-    return { ok: false, reason: 'binary-absent' };
-  }
-  const run = (args) => {
-    try {
-      return spawnFn(codexPath, args, { encoding: 'utf8', timeout: timeoutMs, env });
-    } catch {
-      return null;
-    }
-  };
-  const versionResult = run(['--version']);
-  if (!versionResult) return { ok: false, reason: 'binary-absent' };
-  if (versionResult.signal || versionResult.error?.code === 'ETIMEDOUT') return { ok: false, reason: 'timeout' };
-  if ((versionResult.error && versionResult.status == null) || versionResult.status !== 0) return { ok: false, reason: 'binary-absent' };
-  const version = String(versionResult.stdout ?? '').match(/\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/)?.[0] ?? 'unknown version';
-  const capabilityResult = run(['mcp-server', '--help']);
-  if (!capabilityResult) return { ok: false, reason: 'binary-absent' };
-  if (capabilityResult.signal || capabilityResult.error?.code === 'ETIMEDOUT') return { ok: false, reason: 'timeout' };
-  if (capabilityResult.error && capabilityResult.status == null) return { ok: false, reason: 'binary-absent' };
-  const capabilityHelp = `${capabilityResult.stdout ?? ''}\n${capabilityResult.stderr ?? ''}`;
-  if (capabilityResult.status !== 0 || !/\bcodex\s+mcp-server\b/i.test(capabilityHelp)) {
-    return { ok: false, reason: 'mcp-server-missing', version };
-  }
-  let result;
-  result = run(['login', 'status']);
-  if (!result) {
-    return { ok: false, reason: 'binary-absent' };
-  }
-  // Same ordering rationale as probeCodex: a timeout sets BOTH .error (ETIMEDOUT) AND
-  // .signal, so this check must precede the generic .error branch below.
-  if (result.signal || result.error?.code === 'ETIMEDOUT') {
-    return { ok: false, reason: 'timeout' };
-  }
-  if (result.error && result.status == null) {
-    return { ok: false, reason: 'binary-absent' };
-  }
-  if (result.status !== 0) {
-    return { ok: false, reason: 'not-logged-in' };
-  }
-  // `command: codexPath` — the EXACT executable this probe just spawned successfully
-  // (decision host-native-init-with-dev-machine-escape-hatch, board 4c3a8e59). Returning
-  // only {ok:true} threw the resolution away, so the written entry (bare `codex`) was a
-  // DIFFERENT command from the one the probe proved: on Windows `codex` is typically npm's
-  // codex.cmd, which node cannot spawn shell-lessly, and PATH is a measured-unreliable
-  // oracle on the native host (research_finding native-windows-platform-measurements-2026-08-27).
-  // Persisting the probed path makes probe success actually EVIDENCE for the entry: the
-  // probe spawned this exact string shell-lessly via spawnSync, so the MCP client can too.
-  return { ok: true, command: codexPath };
-}
-
 // The official codex mcp-server stdio subcommand — no wrapper (research_finding foreign_dadf858e).
 // The bare `codex` command is the FALLBACK spelling, used when a probe result carries no
 // resolved path (probeCodex resolves `codex` on PATH by spawning that same bare command,
-// so there its success does prove the entry). A probe that DID resolve an absolute path
-// (probeCodexWin) overrides `command` with it — see codexEntryFor below.
+// so there its success does prove the entry). A probe result that DOES carry an absolute
+// `command` overrides it — see codexEntryFor below. (Its only producer, the native-Windows
+// probe, was retired with the native launcher: decision native-windows-launcher-retired-wsl2-only.)
 export const CODEX_MCP_ENTRY = { command: 'codex', args: ['mcp-server'] };
 
 // The codex entry a given probe result justifies: the probed absolute command when the

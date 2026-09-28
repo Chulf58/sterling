@@ -50,6 +50,7 @@
 // theirs — this hook's own contract requires exit 0 even there), a missing
 // tool_response, an unrecognised tool name, and any internal failure.
 import { readStdin, allow, openStore, repoRel, exitAfterWrite, warnNonBlocking } from './lib/common.mjs';
+import { isForeignTree } from './lib/working-tree.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import {
@@ -147,7 +148,7 @@ try {
     if (rel) {
       const owners = store
         .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
-        .filter((r) => !r.working_tree);
+        .filter((r) => !isForeignTree(r, input.cwd));
       if (owners.length) allow();
     }
   }

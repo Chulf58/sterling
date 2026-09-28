@@ -701,6 +701,55 @@ test('working_tree records are invisible to root-session ownership (comsoft-juic
   }
 });
 
+// Dome Farmer issue entry 454 (user ruling 2026-09-28 "Code: self-root = own"):
+// a working_tree that resolves to THIS project's own root names the project
+// itself, so its records OWN root paths. The Windows drive / WSL /mnt spelling
+// equivalence is pinned in packages/schemas (sameLocationAnyHost) — the fixture
+// root here is a Linux tmpdir, so this pins the hook's WIRING with the root's own
+// spellings, and a foreign branch-name tree as the control.
+test('H10: a working_tree naming the project root itself owns root paths; a foreign working_tree still does not (Dome Farmer 454)', () => {
+  for (const [label, tree, owns] of [
+    ['exact root spelling', (d) => d, true],
+    ['root with trailing slash', (d) => `${d}/`, true],
+    ['foreign branch-name tree', () => 'chore/retire-knowledge-skills', false],
+  ]) {
+    const { dir, store, cleanup } = makeProject();
+    try {
+      store.create({
+        ...envelope('feature_article'),
+        slug: 'self-rooted',
+        title: 'self-rooted',
+        what_it_does: 'x',
+        intended_behavior: 'x',
+        working_tree: tree(dir),
+        files: [{ path: 'src/a.mjs', role: 'impl' }, { path: 'src/b.mjs', role: 'impl' }, { path: 'src/c.mjs', role: 'impl' }],
+        current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+        dependencies: { relies_on: [], relied_by: [] },
+        state: 'active',
+        version: 1,
+        history: [{ date: NOW, event: 'self-rooted article' }],
+        live_test_refs: [],
+      });
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+      for (const f of ['src/a.mjs', 'src/b.mjs', 'src/c.mjs']) writeFileSync(join(dir, f), 'x');
+      writeFileSync(
+        join(dir, '.sterling', 'transient', 'touches.json'),
+        JSON.stringify(['src/a.mjs', 'src/b.mjs', 'src/c.mjs'].map((path) => ({ path, at: NOW })))
+      );
+      const stop = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+      if (owns) {
+        assert.doesNotMatch(stop.stderr, /article demand/i, `${label}: the self-rooted article owns its paths — no article demand. stderr=${stop.stderr}`);
+      } else {
+        assert.equal(stop.code, 2, `${label}: a foreign tree grants no root ownership`);
+        assert.match(stop.stderr, /article demand/i, label);
+      }
+    } finally {
+      cleanup();
+    }
+  }
+});
+
 function referenceDoc(store, title, kind, location) {
   return store.create({
     ...envelope('reference_material'),

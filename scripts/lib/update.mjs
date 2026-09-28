@@ -464,10 +464,14 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // config_drift (decision 256d1059) wrote nothing, so it is not a change; it is
       // relayed verbatim below (the line carries the fix command), never a failure.
       const driftedAgents = statuses.filter((l) => l.startsWith('config_drift: '));
+      // The auto-memory NOTICE (an explicit non-false autoMemoryEnabled, kept; exit 0).
+      // Its status line is hyphenated, so the agent-status filter above never matches it;
+      // relayed from stdout only — the stderr NOTICE: line carries the same text.
+      const autoMemoryNotices = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^auto-memory off: (kept|wrong_type)\b/.test(l));
       const changedAgents = statuses.filter((l) => !l.startsWith('up_to_date') && !l.startsWith('locally_modified_up_to_date') && !l.startsWith('config_drift: '));
       Object.assign(entry, { status: r.status, changed: changedAgents.length, config_drift: driftedAgents.length });
       if (r.status === 2) {
-        log(`  ✗ ${p.name}: agent sync REFUSED (exit 2 — a locally modified agent or an unsafe path). Output verbatim:\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
+        log(`  ✗ ${p.name}: agent sync REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign "agent" in .claude/settings.json, or a .claude/settings.json that is not valid JSON or not a JSON object). Output verbatim:\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
         fail(2);
         failed = true;
       } else if (r.status !== 0) {
@@ -477,6 +481,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       } else {
         log(`  • ${p.name}: ${changedAgents.length ? changedAgents.join(', ') : driftedAgents.length ? 'no agent changes' : 'up to date'}`);
         for (const line of driftedAgents) log(`      ⚠ ${line}`);
+        for (const line of autoMemoryNotices) log(`      ⚠ ${line}`);
       }
       // Handoff projection (decision
       // init-prepares-opencode-portable-agents-and-target-handoff-projections):

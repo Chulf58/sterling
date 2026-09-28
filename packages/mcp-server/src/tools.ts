@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, boardDisplayLabel, normalizeRepoPath, isAbsolutePathAnyHost, parseConfig, configSchema, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -1750,15 +1750,20 @@ export class SterlingTools {
   /**
    * Resolve the working tree a record's file paths live in: no working_tree →
    * the project root; a name mapped in config.working_trees → that path
-   * (absolute, or joined to the project root); an UNMAPPED name → unresolved,
-   * and every consumer abstains LOUD rather than resolving against the wrong
-   * tree (the comsoft-juiced false-deletion class).
+   * (absolute, or joined to the project root); an unmapped value naming THIS
+   * project's own root (either host spelling, see declaresForeignTree) → the
+   * project root; any other UNMAPPED name → unresolved, and every consumer
+   * abstains LOUD rather than resolving against the wrong tree (the
+   * comsoft-juiced false-deletion class).
    */
   private treeRootFor(record: Record<string, unknown>): { root?: string; unresolved: boolean } {
     const name = (record as { working_tree?: string }).working_tree;
     if (!name) return { root: this.repoRoot, unresolved: false };
     const mapped = this.config.working_trees?.[name];
-    if (!mapped) return { root: undefined, unresolved: true };
+    if (!mapped) {
+      if (!this.declaresForeignTree(name)) return { root: this.repoRoot, unresolved: false };
+      return { root: undefined, unresolved: true };
+    }
     // HOST-INDEPENDENT classification (decision windows-linux-parity):
     // config.working_trees maps a name to an absolute-OR-project-relative path
     // (decision foreign_a0fc8743), so this branch decides which. node:path's isAbsolute
@@ -1768,6 +1773,20 @@ export class SterlingTools {
     if (isAbsolutePathAnyHost(mapped)) return { root: mapped, unresolved: false };
     if (!this.repoRoot) return { root: undefined, unresolved: true };
     return { root: join(this.repoRoot, mapped), unresolved: false };
+  }
+
+  /**
+   * Does a record's working_tree name a tree OTHER than this project? A
+   * working_tree that resolves to the project's own root — in its Windows drive
+   * spelling ('C:/Users/x/Proj') or its WSL /mnt spelling, trailing slash or
+   * DrvFs case aside — names the project itself, so the record owns root paths
+   * exactly as one with no working_tree does (Dome Farmer issue entry 454; user
+   * ruling 2026-09-28 "Code: self-root = own"). Mirrors H10's isUnowned, which
+   * asks the same question through the same shared sameLocationAnyHost.
+   */
+  private declaresForeignTree(workingTree: unknown): boolean {
+    if (!workingTree) return false;
+    return !(this.repoRoot && sameLocationAnyHost(String(workingTree), this.repoRoot));
   }
 
   /**
@@ -6569,7 +6588,8 @@ export class SterlingTools {
    * never be able to disagree about what "owned" means, so this asks the same
    * question of the same two types with the same working_tree exclusion
    * (h10-direct-capture.mjs, `isUnowned = (p) => !ownerRows(p).some((r) =>
-   * !r.working_tree)`), and counts first so the read is never a window (the
+   * !foreignTree(r))` — a working_tree naming this project's own root is not
+   * foreign, see declaresForeignTree), and counts first so the read is never a window (the
    * false-demand hazard H10 documents at its own join).
    *
    * HOW THE PROJECT-LOCAL RESTRICTION IS OBTAINED — BY ASKING THE STORAGE
@@ -6612,7 +6632,7 @@ export class SterlingTools {
     if (total === 0) return false;
     return this.store.query({ ...filter, cap: total }).some((r) => {
       const owner = r as unknown as { id: string; working_tree?: unknown };
-      return this.store.projectStoreHolds(owner.id) && !owner.working_tree;
+      return this.store.projectStoreHolds(owner.id) && !this.declaresForeignTree(owner.working_tree);
     });
   }
 
@@ -6880,7 +6900,7 @@ export class SterlingTools {
     // ever existing. Refused BY NAME rather than by silently declining to join,
     // because the caller's next move (own it from a root-scoped article) is not
     // guessable from a generic lane refusal.
-    if (joinedKeys.length > 0 && options?.targetWorkingTree) {
+    if (joinedKeys.length > 0 && this.declaresForeignTree(options?.targetWorkingTree)) {
       throw new Error(
         `resolves: names '${id}' (${SterlingTools.APPEND_JOIN_RESOLVABLE_LANE} lane), but the article this append targets declares ` +
           `working_tree='${String(options?.targetWorkingTree)}' — it owns the copy of ${joinedKeys.join(', ')} in THAT tree, not this ` +

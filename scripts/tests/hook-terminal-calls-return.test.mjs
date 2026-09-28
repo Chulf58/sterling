@@ -133,7 +133,7 @@ function scrubSource(src) {
 // exists for. `emitEnvelope` precedes `emit` in the alternation so
 // `emitEnvelope(` matches once as itself and is never counted twice; the
 // lookbehind rejects a name preceded by an identifier character or `.`, so
-// `environmentDefectDenial(`, `foo.deny(` and `xEmit(` are not terminal calls.
+// `predeny(`, `foo.deny(` and `xEmit(` are not terminal calls.
 const TERMINAL_NAMES = ['finish', 'emitEnvelope', 'emit', 'allow', 'deny', 'warnNonBlocking'];
 const TERMINAL_CALL_RE = new RegExp(String.raw`(?<![A-Za-z0-9_$.])(${TERMINAL_NAMES.join('|')})\s*\(`, 'g');
 

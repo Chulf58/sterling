@@ -41,6 +41,7 @@ import { latestUsage, fillPct } from './lib/transcript.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
+import { isForeignTree } from './lib/working-tree.mjs';
 import { publishNotice } from './lib/delivery.mjs';
 import { readProjectMode } from '../lib/handoff-projection.mjs';
 import { readPrLoop, PR_LOOP_REL } from '../lib/work-pr.mjs';
@@ -1577,6 +1578,11 @@ try {
   // record, never a forced feature article (adjudicated 2026-06-12).
   // A record declaring a working_tree owns files in a DIFFERENT tree — it never
   // grants ownership of this root's same-named path (comsoft-juiced 2026-07-17).
+  // EXCEPT a working_tree that resolves to THIS project's own root, in either its
+  // Windows drive or WSL /mnt spelling: that names the project itself, so the
+  // record owns root paths like one with no working_tree (Dome Farmer issue
+  // entry 454; user ruling 2026-09-28 "Code: self-root = own"). The same
+  // question every hook site asks through lib/working-tree.mjs's isForeignTree.
   // ONE predicate, named because the live recompute below re-asks the SAME
   // question of an already-persisted item's file keys (board ef206eca): the
   // demand and the item it leaves behind must never be able to disagree about
@@ -1601,12 +1607,12 @@ try {
     ownersSeen.set(p, rows);
     return rows;
   };
-  const isUnowned = (p) => !ownerRows(p).some((r) => !r.working_tree);
+  const isUnowned = (p) => !ownerRows(p).some((r) => !isForeignTree(r, input.cwd));
   // What the join actually SAW for one demanded path — so a false demand is
   // diagnosable from the deny text alone instead of by re-running the query by
   // hand. "none" is the ordinary case; a row listed here was matched and then
-  // EXCLUDED (it declares a working_tree, i.e. it owns another tree's copy of
-  // this path), which is precisely the shape that looks like a hook defect.
+  // EXCLUDED (its working_tree names another tree, whose copy of this path it
+  // owns), which is precisely the shape that looks like a hook defect.
   const ownerRowsNote = (p) => {
     const rows = ownerRows(p);
     if (!rows.length) return 'none';
@@ -2400,7 +2406,7 @@ try {
       parts.push(
         `• articles: article demand — ${unowned.length} touched file(s) no owner (feature_article or repo-located reference doc)` +
           `${newUnowned.length ? ` (${newUnowned.length} new)` : ''}: ${capList(unowned)} → knowledge_create type feature_article (reference_material kind doc for a governing document)` +
-          `\n  ownership join (uncapped, types feature_article+reference_material, excluding records that declare a working_tree): ${ownerEvidence.join(' | ')}` +
+          `\n  ownership join (uncapped, types feature_article+reference_material, excluding records whose working_tree names a different tree): ${ownerEvidence.join(' | ')}` +
           `${unowned.length > 5 ? ` | +${unowned.length - 5} more path(s) not detailed` : ''}`
       );
     }

@@ -23,8 +23,7 @@ export const UPDATE_LAUNCHER_NAME = 'sterling-update.bat';
 // (decision foreign_ffe7c416 host-native-init-with-dev-machine-escape-hatch; parity
 // decision foreign_1fe2a5e3; distribution model foreign_e6240afe). The discriminator is the
 // RENDERING host's platform, which is exactly the host-native derivation the
-// ruling asks for: a WSL/Linux session keeps emitting the WSL chain (the
-// authoring machine's dual-context escape hatch), a native-Windows session
+// ruling asks for: a WSL/Linux session keeps emitting the WSL chain, a native-Windows session
 // emits a chain with no wsl.exe in it. The filename, ensure semantics,
 // generated marker and .gitignore entry are identical either way, so no
 // caller (init's manifest, runUpdate's fan-out) changes.

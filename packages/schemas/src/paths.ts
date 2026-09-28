@@ -123,6 +123,34 @@ export function isAbsolutePathAnyHost(p: string): boolean {
   return /^[A-Za-z]:[\\/]/.test(s) || s.startsWith('/') || s.startsWith('\\');
 }
 
+/**
+ * Do two ABSOLUTE paths name the same location across the Windows/WSL host
+ * boundary? A drive path ('C:/x', 'C:\\x') is read as its WSL DrvFs spelling
+ * ('/mnt/c/x'), so a record written from a Windows-side session and a project
+ * root seen under WSL2 compare equal (Dome Farmer issue entry 454: working_tree
+ * 'C:/Users/chulf/Dome Farmer' against root '/mnt/c/Users/chulf/Dome Farmer').
+ * Separator- and trailing-slash-insensitive. Case-insensitive only when BOTH
+ * sides land on DrvFs (/mnt/<drive>), whose default is case-insensitive NTFS;
+ * everywhere else case is significant, as in samePath.
+ *
+ * Does NOT resolve symlinks, '..' segments or the filesystem — a pure string
+ * question. A relative or empty value is never a location and never matches
+ * (a symbolic working_tree name such as a branch is foreign by construction).
+ */
+export function sameLocationAnyHost(a: string, b: string): boolean {
+  const drvfs = (p: string): string | undefined => {
+    const s = String(p ?? '').replace(/\\/g, '/');
+    if (!isAbsolutePathAnyHost(s)) return undefined;
+    const drive = /^([A-Za-z]):\/(.*)$/.exec(s);
+    return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s).replace(/\/+$/, '');
+  };
+  const x = drvfs(a);
+  const y = drvfs(b);
+  if (x === undefined || y === undefined) return false;
+  const onDrvfs = (p: string) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
+  return onDrvfs(x) && onDrvfs(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
+}
+
 /** Helper for callers holding an absolute path plus repo-root context. */
 export function toRepoRelative(absolutePath: string, repoRoot: string): string {
   const abs = normSep(absolutePath);

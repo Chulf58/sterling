@@ -10,6 +10,8 @@
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel, gitIgnored } from './lib/common.mjs';
+import { isForeignTree } from './lib/working-tree.mjs';
+import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
 import {
   guardPath,
   readGuard,
@@ -27,6 +29,7 @@ import {
   renderPayload,
   isSubstanceDelivered,
   isDiscoveryDelivered,
+  isKnownDelivered,
   markSubstanceDelivered,
   markDiscoveryDelivered,
   budgetKnownGaps,
@@ -73,7 +76,7 @@ function main(input) {
 
     const owners = store
       .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
-      .filter((r) => !r.working_tree);
+      .filter((r) => !isForeignTree(r, input.cwd));
 
     // HAZARDS AND RATIONALE FOR THIS PATH (decision foreign_ca23c811). Articles answer
     // "what is this and how must it behave"; they do NOT answer "what must I not
@@ -101,7 +104,12 @@ function main(input) {
     // shown as discovery still qualifies for substance later" — the
     // regression case this closes is an H20 article POINTER suppressing the
     // later full H19 article).
-    const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
+    // READ-ONLY LANE EXCEPTION (user ruling 2026-09-28): a lane holding no
+    // file-write tool gets hazards as discovery POINTERS, so their freshness
+    // reads either ledger — the substance ledger alone would never see a
+    // pointer delivered and would re-show the same first three every touch.
+    const hazardMode = hazardLaneMode(input, input.cwd);
+    const freshHazards = hazards.filter((r) => (hazardMode === 'pointer' ? !isKnownDelivered(guard, r) : !isSubstanceDelivered(guard, r)));
     // OWNERS SPLIT BY WHAT THEY WILL ACTUALLY RENDER AS (fix-round MEDIUM 3):
     // a reference_material or an oversize (digested) article NEVER renders as
     // substance — filtering it against `isSubstanceDelivered` alone means
@@ -220,7 +228,7 @@ function main(input) {
     const blocks = [
       ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
       ...freshOwners.map((r) =>
-        r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id) })
+        r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input.cwd })
       ),
       ...(freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []),
       // joinSuspectBlock returns '' when no line survives; the filter keeps an
@@ -251,7 +259,7 @@ function main(input) {
       // the SAME predicate `freshOwners` above filters against, so the
       // freshness ledger and the rendered contentClass can never disagree.
       const ownerPart = (r) => {
-        const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id) });
+        const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input.cwd });
         const contentClass = isOwnerDiscoveryOnly(r) ? 'discovery' : 'substance';
         return { kind: 'ordinary', contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
       };
@@ -272,7 +280,7 @@ function main(input) {
       const parts = [
         ...migrationNoticeParts,
         { kind: 'ordinary', contentClass: 'chrome', text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
-        ...hazardParts(freshHazards, { fileKeys: [rel] }),
+        ...hazardParts(freshHazards, { fileKeys: [rel], mode: hazardMode }),
         ...tailParts,
       ];
       const assembled = assembleDelivery(parts, totalCap);

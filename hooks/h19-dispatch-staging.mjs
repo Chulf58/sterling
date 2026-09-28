@@ -4086,6 +4086,25 @@ function foldPairForCompare(a, b) {
   const drivePrefixed = /^[A-Za-z]:/.test(a) || /^[A-Za-z]:/.test(b);
   return drivePrefixed ? [a.toLowerCase(), b.toLowerCase()] : [a, b];
 }
+function isAbsolutePathAnyHost(p) {
+  const s2 = String(p ?? "");
+  return /^[A-Za-z]:[\\/]/.test(s2) || s2.startsWith("/") || s2.startsWith("\\");
+}
+function sameLocationAnyHost(a, b) {
+  const drvfs = (p) => {
+    const s2 = String(p ?? "").replace(/\\/g, "/");
+    if (!isAbsolutePathAnyHost(s2))
+      return void 0;
+    const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
+    return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
+  };
+  const x = drvfs(a);
+  const y = drvfs(b);
+  if (x === void 0 || y === void 0)
+    return false;
+  const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
+  return onDrvfs(x) && onDrvfs(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
+}
 function toRepoRelative(absolutePath, repoRoot) {
   const abs = normSep(absolutePath);
   const root = normSep(repoRoot);
@@ -7878,123 +7897,20 @@ function repoRel(toolPath, cwd) {
   }
 }
 
-// scripts/hooks/lib/plan-lock.mjs
-import { closeSync, constants as FS, existsSync as existsSync3, fstatSync, mkdirSync as mkdirSync2, openSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join as join3 } from "node:path";
-var PLAN_MAX_BYTES = 4 * 1024 * 1024;
-var LOCK_MAX_BYTES = 64 * 1024;
-var MARKER_MAX_BYTES = 64 * 1024;
-var LOCK_FILE = "plan-lock.json";
-var HEX64 = /^[0-9a-f]{64}$/i;
-function isAbsolutePlanPath(p) {
-  return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
-}
-function sterlingDirOf(cwd) {
-  return join3(cwd, ".sterling");
-}
-function sanitizeForContext(value, max) {
-  if (typeof value !== "string") return "";
-  let out = "";
-  for (const ch of value) {
-    const code = ch.codePointAt(0);
-    if (code < 32 || code === 127 || code >= 128 && code <= 159) continue;
-    out += ch;
-  }
-  out = out.trim();
-  return out.length > max ? out.slice(0, max) : out;
-}
-function readBounded(path, maxBytes, noun) {
-  if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
-  let fd;
-  try {
-    fd = openSync(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
-  } catch (e) {
-    return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
-  }
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile()) return { unreadable: "is not a regular file (a directory, FIFO, socket or device cannot hold it)", code: "ENOTFILE" };
-    if (st.size > maxBytes) return { unreadable: `is ${st.size} bytes, past the ${maxBytes}-byte bound`, code: "EFBIG" };
-    const buf = Buffer.allocUnsafe(st.size);
-    let read = 0;
-    while (read < st.size) {
-      const n = readSync(fd, buf, read, st.size - read, read);
-      if (n <= 0) break;
-      read += n;
-    }
-    if (read < st.size) return { unreadable: `shrank from ${st.size} to ${read} bytes during the read`, code: "EIO" };
-    const probe = Buffer.allocUnsafe(1);
-    let extra = 0;
-    try {
-      extra = readSync(fd, probe, 0, 1, st.size);
-    } catch {
-      extra = 0;
-    }
-    if (extra > 0) return { unreadable: `grew past its ${st.size}-byte size during the read`, code: "EFBIG" };
-    return { bytes: buf };
-  } catch (e) {
-    return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
-  } finally {
-    try {
-      closeSync(fd);
-    } catch {
-    }
-  }
-}
-function readStoreFileBounded(path, maxBytes) {
-  const read = readBounded(path, maxBytes, "record");
-  if (read.unreadable) return read;
-  return { text: read.bytes.toString("utf8") };
-}
-function invalidReason(l) {
-  if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
-  if (!isAbsolutePlanPath(l.plan_path)) return "plan_path is not an absolute path string";
-  if (typeof l.approved_sha256 !== "string" || !HEX64.test(l.approved_sha256)) return "approved_sha256 is not a 64-character hex digest";
-  if (l.file_sha256_at_approval !== null && (typeof l.file_sha256_at_approval !== "string" || !HEX64.test(l.file_sha256_at_approval))) {
-    return "file_sha256_at_approval is neither null nor a 64-character hex digest";
-  }
-  if (typeof l.approved_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(l.approved_at) || !Number.isFinite(Date.parse(l.approved_at))) {
-    return "approved_at is not an ISO-8601 timestamp";
-  }
-  if (l.source !== "exit_plan_mode" && l.source !== "manual") return `source is ${JSON.stringify(l.source)}, not 'exit_plan_mode' or 'manual'`;
-  if (typeof l.title !== "string") return "title is not a string";
-  for (const key of ["approved_session_id", "approved_branch", "approved_head"]) {
-    if (l[key] !== null && typeof l[key] !== "string") return `${key} is neither null nor a string`;
-  }
-  if (l.text_file_mismatch !== void 0 && typeof l.text_file_mismatch !== "boolean") return "text_file_mismatch is neither absent nor a boolean";
-  if (l.observed_at !== void 0 && typeof l.observed_at !== "string") return "observed_at is neither absent nor a string";
-  if (l.observed_sha256 !== void 0 && l.observed_sha256 !== null && typeof l.observed_sha256 !== "string") return "observed_sha256 is neither absent, null, nor a string";
-  if (l.observed_status !== void 0 && !["present", "missing", "unreadable"].includes(l.observed_status)) {
-    return `observed_status is ${JSON.stringify(l.observed_status)}, not one of 'present' | 'missing' | 'unreadable'`;
-  }
-  return null;
-}
-function readLock(sterlingDir) {
-  const read = readStoreFileBounded(join3(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
-  if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
-  const raw = read.text;
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    return { malformed: `is not valid JSON (${e && e.message || e})`, raw };
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { malformed: "is not a JSON object", raw };
-  const reason = invalidReason(parsed);
-  if (reason) return { malformed: reason, raw };
-  return { lock: parsed, raw };
+// scripts/hooks/lib/working-tree.mjs
+function isForeignTree(record, root) {
+  const wt = record?.working_tree;
+  if (!wt) return false;
+  return !(root && sameLocationAnyHost(String(wt), root));
 }
 
-// scripts/hooks/lib/dispatch-prompt.mjs
-var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
-function extractPathCandidates(text) {
-  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
-  return [...new Set(found)];
-}
+// scripts/hooks/lib/hazard-lane-mode.mjs
+import { readFileSync as readFileSync3 } from "node:fs";
+import { join as join4 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync4, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { join as join4, resolve as resolve2, dirname as dirname3, isAbsolute } from "node:path";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync3, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join3, resolve as resolve2, dirname as dirname3, isAbsolute } from "node:path";
 import { hostname } from "node:os";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash } from "node:crypto";
@@ -8116,10 +8032,10 @@ function render(x) {
 
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
-  return join4(root, ".sterling", "transient", "dispatch-register.json");
+  return join3(root, ".sterling", "transient", "dispatch-register.json");
 }
 function legacyRegisterLockDir(root) {
-  return join4(root, ".sterling", "transient", "dispatch-register.lock");
+  return join3(root, ".sterling", "transient", "dispatch-register.lock");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -8141,7 +8057,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync4(p)) return { availability: "absent", arr: [] };
+  if (!existsSync3(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync2(p, "utf8");
@@ -8182,7 +8098,7 @@ function registerLockRoot() {
   if (typeof xdg === "string" && isAbsolute(xdg)) {
     try {
       const st = lstatSync(xdg);
-      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid) return join4(xdg, "sterling-locks");
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid) return join3(xdg, "sterling-locks");
     } catch (e) {
       if (!["ENOENT", "ENOTDIR", "EACCES"].includes(e?.code)) throw e;
     }
@@ -8191,10 +8107,10 @@ function registerLockRoot() {
 }
 function registerLockPath(root) {
   const hash = createHash("sha256").update(realpathSync2(resolve2(root))).digest("hex");
-  return join4(registerLockRoot(), `${hash}.db`);
+  return join3(registerLockRoot(), `${hash}.db`);
 }
 function ensureLockRoot(dir) {
-  mkdirSync3(dir, { recursive: true, mode: 448 });
+  mkdirSync2(dir, { recursive: true, mode: 448 });
   const st = lstatSync(dir);
   if (!st.isDirectory() || st.isSymbolicLink()) {
     throw new Error(`dispatch-register: ${dir} is not a real directory \u2014 refusing to take the register lock through it`);
@@ -8228,7 +8144,7 @@ function isPidAlive(pid) {
 }
 function readLegacyOwner(legacy) {
   try {
-    return JSON.parse(readFileSync2(join4(legacy, "owner.json"), "utf8"));
+    return JSON.parse(readFileSync2(join3(legacy, "owner.json"), "utf8"));
   } catch (e) {
     if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
     throw e;
@@ -8332,7 +8248,7 @@ function retryBudgetFor(verdict) {
   return verdict === "siblings-retry" ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
 }
 function dispatchStateDir(root) {
-  return join4(root, ".sterling", "transient", "dispatch-state");
+  return join3(root, ".sterling", "transient", "dispatch-state");
 }
 var LIVE_PREFIX = "live-";
 var DONE_PREFIX = "done-";
@@ -8467,7 +8383,7 @@ function checkDispatchStateContainment(root, { create }) {
   } catch (e) {
     if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
     if (!create) return { ok: true, availability: "absent" };
-    mkdirSync3(dir, { recursive: true });
+    mkdirSync2(dir, { recursive: true });
     return { ok: true, availability: "ok" };
   }
   if (st.isSymbolicLink() || !st.isDirectory()) {
@@ -8485,10 +8401,10 @@ function writeRecordAtomic(root, fileName, record) {
       `dispatch-state write refused \u2014 ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"}, never mkdir'd or written through`
     );
   }
-  const file = join4(dir, fileName);
-  const tmp = join4(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
-  writeFileSync2(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
-  renameSync2(tmp, file);
+  const file = join3(dir, fileName);
+  const tmp = join3(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
+  writeFileSync(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
+  renameSync(tmp, file);
 }
 function writeLiveRecord(root, key, record) {
   if (record.terminal) throw new Error(`dispatch-state: a terminal record for ${key} must go through terminalizeLiveRecord, never under a live name`);
@@ -8500,7 +8416,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync(join4(dir, to));
+    lstatSync(join3(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -8510,7 +8426,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync2(join4(dir, from), join4(dir, to));
+    renameSync(join3(dir, from), join3(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -8528,7 +8444,7 @@ function listStateDir(root) {
   }
 }
 function validateNamedRecord(dir, name, parsed) {
-  const classified = classifyRecordFile(join4(dir, name));
+  const classified = classifyRecordFile(join3(dir, name));
   if (!classified.exists || classified.poisoned) return classified;
   const record = classified.record;
   if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
@@ -8571,7 +8487,7 @@ function scanLiveState(root, { repair }) {
       done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
       continue;
     }
-    const classified = classifyRecordFile(join4(dir, name));
+    const classified = classifyRecordFile(join3(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
@@ -8738,11 +8654,174 @@ async function resolveDispatchStart(root, { session_id, agent_id, agent_type }, 
   }
 }
 
+// scripts/hooks/lib/hazard-lane-mode.mjs
+var READ_ONLY_TOOLS = /* @__PURE__ */ new Set(["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "ToolSearch"]);
+var STERLING_READ_SUFFIXES = ["knowledge_query", "knowledge_get", "knowledge_schema", "knowledge_preflight", "board_query", "board_get", "maintenance_query"];
+for (const prefix of ["mcp__sterling__", "mcp__plugin_sterling_sterling__"]) {
+  for (const suffix of STERLING_READ_SUFFIXES) READ_ONLY_TOOLS.add(`${prefix}${suffix}`);
+}
+var TOOL_TOKEN = /^(?:[A-Z][A-Za-z]*|mcp__[A-Za-z0-9_]+)$/;
+var PLAIN_AGENT_NAME = /^[A-Za-z0-9_-]+$/;
+function laneAgentType(input2, root) {
+  if (typeof input2.agent_type === "string" && input2.agent_type) return input2.agent_type;
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return null;
+  const types = new Set(
+    entries.filter((e) => e.agent_id === input2.agent_id && typeof e.agent_type === "string" && e.agent_type).map((e) => e.agent_type)
+  );
+  return types.size === 1 ? [...types][0] : null;
+}
+function frontmatterTools(text) {
+  const lines = text.split(/\r\n|\r|\n/);
+  if (lines[0] !== "---") return null;
+  const end = lines.indexOf("---", 1);
+  if (end === -1) return null;
+  const at = [];
+  for (let i2 = 1; i2 < end; i2++) if (/^tools\s*:/.test(lines[i2])) at.push(i2);
+  if (at.length !== 1) return null;
+  const i = at[0];
+  for (let j = 1; j < end; j++) {
+    if (j === i) continue;
+    if (/^\s*(?:\?|["']?tools["']?\s*:)/.test(lines[j]) || /^[?"']/.test(lines[j])) return null;
+  }
+  if (i + 1 < end && /^\s/.test(lines[i + 1])) return null;
+  const value = lines[i].replace(/^tools\s*:/, "").trim();
+  if (!value || /[#*(\['"]/.test(value)) return null;
+  const tokens = value.split(",").map((t) => t.trim());
+  return tokens.every((t) => TOOL_TOKEN.test(t)) ? tokens : null;
+}
+function hazardLaneMode(input2, root) {
+  try {
+    if (!input2 || typeof input2.agent_id !== "string" || !input2.agent_id) return "whole";
+    const type = laneAgentType(input2, root);
+    if (!type || !PLAIN_AGENT_NAME.test(type)) return "whole";
+    const tools = frontmatterTools(readFileSync3(join4(root, ".claude", "agents", `${type}.md`), "utf8"));
+    if (!tools) return "whole";
+    return tools.every((t) => READ_ONLY_TOOLS.has(t)) ? "pointer" : "whole";
+  } catch {
+    return "whole";
+  }
+}
+
+// scripts/hooks/lib/plan-lock.mjs
+import { closeSync, constants as FS, existsSync as existsSync4, fstatSync, mkdirSync as mkdirSync3, openSync, readSync, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join5 } from "node:path";
+var PLAN_MAX_BYTES = 4 * 1024 * 1024;
+var LOCK_MAX_BYTES = 64 * 1024;
+var MARKER_MAX_BYTES = 64 * 1024;
+var LOCK_FILE = "plan-lock.json";
+var HEX64 = /^[0-9a-f]{64}$/i;
+function isAbsolutePlanPath(p) {
+  return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
+}
+function sterlingDirOf(cwd) {
+  return join5(cwd, ".sterling");
+}
+function sanitizeForContext(value, max) {
+  if (typeof value !== "string") return "";
+  let out = "";
+  for (const ch of value) {
+    const code = ch.codePointAt(0);
+    if (code < 32 || code === 127 || code >= 128 && code <= 159) continue;
+    out += ch;
+  }
+  out = out.trim();
+  return out.length > max ? out.slice(0, max) : out;
+}
+function readBounded(path, maxBytes, noun) {
+  if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
+  let fd;
+  try {
+    fd = openSync(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
+  } catch (e) {
+    return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { unreadable: "is not a regular file (a directory, FIFO, socket or device cannot hold it)", code: "ENOTFILE" };
+    if (st.size > maxBytes) return { unreadable: `is ${st.size} bytes, past the ${maxBytes}-byte bound`, code: "EFBIG" };
+    const buf = Buffer.allocUnsafe(st.size);
+    let read = 0;
+    while (read < st.size) {
+      const n = readSync(fd, buf, read, st.size - read, read);
+      if (n <= 0) break;
+      read += n;
+    }
+    if (read < st.size) return { unreadable: `shrank from ${st.size} to ${read} bytes during the read`, code: "EIO" };
+    const probe = Buffer.allocUnsafe(1);
+    let extra = 0;
+    try {
+      extra = readSync(fd, probe, 0, 1, st.size);
+    } catch {
+      extra = 0;
+    }
+    if (extra > 0) return { unreadable: `grew past its ${st.size}-byte size during the read`, code: "EFBIG" };
+    return { bytes: buf };
+  } catch (e) {
+    return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+    }
+  }
+}
+function readStoreFileBounded(path, maxBytes) {
+  const read = readBounded(path, maxBytes, "record");
+  if (read.unreadable) return read;
+  return { text: read.bytes.toString("utf8") };
+}
+function invalidReason(l) {
+  if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
+  if (!isAbsolutePlanPath(l.plan_path)) return "plan_path is not an absolute path string";
+  if (typeof l.approved_sha256 !== "string" || !HEX64.test(l.approved_sha256)) return "approved_sha256 is not a 64-character hex digest";
+  if (l.file_sha256_at_approval !== null && (typeof l.file_sha256_at_approval !== "string" || !HEX64.test(l.file_sha256_at_approval))) {
+    return "file_sha256_at_approval is neither null nor a 64-character hex digest";
+  }
+  if (typeof l.approved_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(l.approved_at) || !Number.isFinite(Date.parse(l.approved_at))) {
+    return "approved_at is not an ISO-8601 timestamp";
+  }
+  if (l.source !== "exit_plan_mode" && l.source !== "manual") return `source is ${JSON.stringify(l.source)}, not 'exit_plan_mode' or 'manual'`;
+  if (typeof l.title !== "string") return "title is not a string";
+  for (const key of ["approved_session_id", "approved_branch", "approved_head"]) {
+    if (l[key] !== null && typeof l[key] !== "string") return `${key} is neither null nor a string`;
+  }
+  if (l.text_file_mismatch !== void 0 && typeof l.text_file_mismatch !== "boolean") return "text_file_mismatch is neither absent nor a boolean";
+  if (l.observed_at !== void 0 && typeof l.observed_at !== "string") return "observed_at is neither absent nor a string";
+  if (l.observed_sha256 !== void 0 && l.observed_sha256 !== null && typeof l.observed_sha256 !== "string") return "observed_sha256 is neither absent, null, nor a string";
+  if (l.observed_status !== void 0 && !["present", "missing", "unreadable"].includes(l.observed_status)) {
+    return `observed_status is ${JSON.stringify(l.observed_status)}, not one of 'present' | 'missing' | 'unreadable'`;
+  }
+  return null;
+}
+function readLock(sterlingDir) {
+  const read = readStoreFileBounded(join5(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
+  const raw = read.text;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { malformed: `is not valid JSON (${e && e.message || e})`, raw };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { malformed: "is not a JSON object", raw };
+  const reason = invalidReason(parsed);
+  if (reason) return { malformed: reason, raw };
+  return { lock: parsed, raw };
+}
+
+// scripts/hooks/lib/dispatch-prompt.mjs
+var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
+function extractPathCandidates(text) {
+  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
+  return [...new Set(found)];
+}
+
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, renameSync as renameSync3, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
-import { join as join5, dirname as dirname4 } from "node:path";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, renameSync as renameSync3, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
+import { join as join6, dirname as dirname4 } from "node:path";
 function deliveryDir(cwd) {
-  return join5(cwd, ".sterling", "transient", "delivery");
+  return join6(cwd, ".sterling", "transient", "delivery");
 }
 var REVIEW_TERRITORY_LINE_RE = /^[ \t]*REVIEW-TERRITORY:[ \t]*\[[^\n]*\][ \t]*\r?$/gm;
 function stripReviewTerritoryLine(text) {
@@ -8769,11 +8848,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join5(deliveryDir(cwd), component);
+  return join6(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join5(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join6(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -8800,6 +8879,9 @@ function isSubstanceDelivered(guard, record) {
 function isDiscoveryDelivered(guard, record) {
   return revisionDelivered(guard.discovery, record);
 }
+function isKnownDelivered(guard, record) {
+  return isSubstanceDelivered(guard, record) || isDiscoveryDelivered(guard, record);
+}
 function markSubstanceDelivered(guard, emittedSubstance) {
   markRevisionDelivered(guard.substance, emittedSubstance);
 }
@@ -8810,7 +8892,7 @@ function readGuard(path) {
   if (!path) return emptyDeliveryGuard();
   try {
     if (!existsSync5(path)) return emptyDeliveryGuard();
-    const parsed = JSON.parse(readFileSync3(path, "utf8"));
+    const parsed = JSON.parse(readFileSync4(path, "utf8"));
     if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
     return { ...emptyDeliveryGuard(), ...parsed };
   } catch {
@@ -8848,11 +8930,11 @@ function clip(text, cap) {
 function normalizeWs(text) {
   return String(text ?? "").replace(/\s+/g, " ").trim();
 }
-function pointerLine(store, kind, slug) {
+function pointerLine(store, kind, slug, root) {
   let head = "(not in store)";
   let annotation = "";
   try {
-    const match = store.articlesBySlug(slug).find((r) => !r.working_tree);
+    const match = store.articlesBySlug(slug).find((r) => !isForeignTree(r, root));
     if (match) {
       head = clip(match.what_it_does, 140);
       annotation = statusAnnotation(match);
@@ -8903,7 +8985,7 @@ function renderKnownGapsLines(article, info) {
   }
   return lines;
 }
-function renderArticle(store, article, { gaps } = {}) {
+function renderArticle(store, article, { gaps, root } = {}) {
   const id8 = String(article.id ?? "").slice(0, 8);
   const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${id8}) (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
   const body = String(article.what_it_does ?? "");
@@ -8938,8 +9020,8 @@ function renderArticle(store, article, { gaps } = {}) {
   const relied = article.dependencies?.relied_by ?? [];
   if (relies.length || relied.length) {
     lines.push("ONE-HOP (follow with knowledge_get/knowledge_query when it matters):");
-    for (const slug of relies) lines.push(pointerLine(store, "relies_on", slug));
-    for (const slug of relied) lines.push(pointerLine(store, "relied_by", slug));
+    for (const slug of relies) lines.push(pointerLine(store, "relies_on", slug, root));
+    for (const slug of relied) lines.push(pointerLine(store, "relied_by", slug, root));
   }
   lines.push(...gapLines);
   return lines.join("\n");
@@ -8957,12 +9039,12 @@ function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes, matchLabel = "for
   const slug = ap?.slug ? typeof clipSlugBytes === "number" ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug : "";
   return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, pointerOnly = false } = {}) {
   const shown = cappedHazards(hazards, cap);
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map(
-    (ap) => [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
+    (ap) => pointerOnly ? hazardHeaderLine(ap, { matchLabel }) : [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
   );
   if (dropped > 0) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
@@ -8971,8 +9053,9 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
   }
   return blocks;
 }
-function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
+function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = "whole" } = {}) {
   const shown = cappedHazards(hazards, cap);
+  if (mode === "pointer") return hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   return blocks.map(
     (text, i) => i < shown.length ? {
@@ -8990,6 +9073,25 @@ function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, 
       pointer: hazardOverflowPointer(shown[i], matchLabel)
     } : { kind: "hazard", contentClass: "chrome", text }
   );
+}
+var HAZARD_POINTER_HEADER = "HAZARDS (pointer-only: read-only lane \u2014 knowledge_get each before acting on its subject)";
+function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel }) {
+  if (!shown.length) return [];
+  const lines = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel, pointerOnly: true });
+  return [
+    { kind: "hazard", contentClass: "chrome", text: HAZARD_POINTER_HEADER },
+    ...lines.map(
+      (text, i) => i < shown.length ? {
+        kind: "hazard",
+        contentClass: "discovery",
+        identity: shown[i].id,
+        revision: recordRevision(shown[i]),
+        name: shown[i].slug || shown[i].title,
+        text,
+        pointer: hazardOverflowPointer(shown[i], matchLabel)
+      } : { kind: "hazard", contentClass: "chrome", text }
+    )
+  ];
 }
 function hazardOverflowPointer(record, matchLabel = "for this path") {
   return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
@@ -9414,7 +9516,7 @@ async function main(input2) {
     const rels = [...new Set(candidates.map((c) => repoRel(c, input2.cwd)).filter(Boolean))].filter(
       (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/")
     );
-    const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !r.working_tree) : [];
+    const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !isForeignTree(r, input2.cwd)) : [];
     const hazards = rels.length ? store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 }) : [];
     const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }) : [];
     const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
@@ -9441,11 +9543,13 @@ async function main(input2) {
     if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) return finish("");
     const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
     const guard = readGuard(gPath);
-    const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
+    const hazardMode = hazardLaneMode(input2, input2.cwd);
+    const hazardFresh = (r) => hazardMode === "pointer" ? !isKnownDelivered(guard, r) : !isSubstanceDelivered(guard, r);
+    const freshHazards = hazards.filter(hazardFresh);
     const freshOwners = owners.filter((r) => isOwnerDiscoveryOnly(r) ? !isDiscoveryDelivered(guard, r) : !isSubstanceDelivered(guard, r));
     const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !isDiscoveryDelivered(guard, r)));
     const freshSubject = subjectMatches.filter(
-      (x) => x.record.type === "anti_pattern" ? !isSubstanceDelivered(guard, x.record) : !isDiscoveryDelivered(guard, x.record)
+      (x) => x.record.type === "anti_pattern" ? hazardFresh(x.record) : !isDiscoveryDelivered(guard, x.record)
     );
     if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return finish("");
     loadConfig(input2.cwd);
@@ -9463,14 +9567,14 @@ async function main(input2) {
       if (freshOwners.length || freshHazards.length || freshDecisions.length) {
         const decisionWiden = `knowledge_query types:["decision"] file_keys:[${rels.map((r) => `"${r}"`).join(",")}] cap:${freshDecisions.length}`;
         const ownerParts = freshOwners.map((r) => {
-          const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r);
+          const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { root: input2.cwd });
           const contentClass = isOwnerDiscoveryOnly(r) ? "discovery" : "substance";
           return { kind: "ordinary", contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
         });
         const decisionParts = freshDecisions.length ? [decisionPointerPart(rels.join(", "), freshDecisions, { widen: decisionWiden })] : [];
         parts.push(
           { kind: "ordinary", contentClass: "chrome", text: payloadHeaderLine(rels.join(", ")) },
-          ...hazardParts(freshHazards, { fileKeys: rels }),
+          ...hazardParts(freshHazards, { fileKeys: rels, mode: hazardMode }),
           ...ownerParts,
           ...decisionParts
         );
@@ -9488,7 +9592,7 @@ async function main(input2) {
             kind: "ordinary",
             contentClass: "chrome"
           },
-          ...hazardParts(subjectHazards, { remedy, matchLabel: "for this subject" }),
+          ...hazardParts(subjectHazards, { remedy, matchLabel: "for this subject", mode: hazardMode }),
           ...subjectDecisions.length ? [
             decisionPointerPart("(subject match)", subjectDecisions, {
               widen: decisionRemedy,

@@ -29,10 +29,6 @@ import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-// fake Windows node path so the native launcher generates deterministically
-// without a real Windows node on PATH (mirrors init-ensure.test.mjs).
-const WIN_NODE_FAKE = 'C:\\TestNode\\node-v24-win-x64\\node.exe';
-
 const scratchDirs = new Set();
 function scratchDir(prefix) {
   const d = mkdtempSync(join(tmpdir(), prefix));
@@ -46,7 +42,7 @@ after(() => {
 // Spawns `node scripts/init.mjs --target <targetDir> ...args`. Every call
 // gets the SAME containment defaults as init-ensure.test.mjs
 // (STERLING_PLUGIN_ROOT_MATCH pinned to a disposable scratch dir, registry
-// isolated, win-node/codex probes forced absent) so a spawn that reaches the
+// isolated, codex probe forced absent) so a spawn that reaches the
 // real implementation (the control test) never writes into or reads THIS
 // repo's own live .claude-plugin config or fires a real codex/WSL probe — a
 // suite run is not a deployment (anti_pattern
@@ -64,10 +60,8 @@ function spawnInit(targetDir, args = [], extraEnv = {}) {
       env: {
         ...process.env,
         STERLING_REGISTRY_DB: join(registryDir, 'registry.db'),
-        STERLING_WIN_NODE: WIN_NODE_FAKE,
         STERLING_PLUGIN_ROOT_MATCH: pluginRootMatch,
         STERLING_CODEX_PROBE: 'absent',
-        STERLING_CODEX_PROBE_WIN: 'absent',
         ...extraEnv,
       },
     }
