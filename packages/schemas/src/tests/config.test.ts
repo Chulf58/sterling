@@ -18,8 +18,8 @@ test('shipped default config parses and carries the spec defaults (§12, §7.2)'
   // (user-ruled 2026-09-28, replacing implementor-default-model-opus-5-5); Opus 5.5
   // stays available as a per-dispatch pin.
   assert.equal(shipped.models.implementor.model, 'claude-sonnet-5-5');
-  // medium: unchanged effort — only the model id moved (2026-09-28 ruling).
-  assert.equal(shipped.models.implementor.effort, 'medium');
+  // high: user-ruled 2026-09-28 (decision implementor-default-effort-high) — Sonnet 5.5 is cheap to run.
+  assert.equal(shipped.models.implementor.effort, 'high');
   // The schema's per-key defaults are the effective default for every project
   // whose config omits a models key; they must match the shipped file, or a bump
   // to one silently misses projects that inherit from the other.

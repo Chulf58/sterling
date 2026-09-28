@@ -4955,7 +4955,7 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    implementor: modelEffort.default({ model: "claude-sonnet-5-5", effort: "medium" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: modelEffort.default({ model: "claude-sonnet-5-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),

@@ -4970,7 +4970,7 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    implementor: modelEffort.default({ model: "claude-sonnet-5-5", effort: "medium" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: modelEffort.default({ model: "claude-sonnet-5-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
@@ -9322,7 +9322,7 @@ try {
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
   const generatedProjections = loadGeneratedProjections(input.cwd);
-  const releaseBase = git.ok && !git.base_lost ? git.settled ? git.settled.sha : git.next.sha : null;
+  const releaseBase = git.ok && git.settled && !git.base_lost ? git.settled.sha : null;
   const isReleaseMechanics = (p) => generatedProjections.has(p) || VERSION_ONLY_CANDIDATES.includes(p) && !Object.hasOwn(git.settled?.dirty ?? {}, p) && isVersionOnlyInWorkingTree(input.cwd, releaseBase, p);
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t) && !isReleaseMechanics(t.path));
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync7(join11(input.cwd, p)));
