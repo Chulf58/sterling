@@ -554,15 +554,22 @@ function main(input) {
       return `${head} — REFUTED TRAIL${q} — rejected: ${clip(r.rejected_answer, 100)}`;
     };
     const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
-    // Hazards render WHOLE here too (they always have, `renderHazards` at
-    // MAX_SAFE_INTEGER) — a whole hazard IS substance, on every surface that
-    // renders one (decision 92088a62 item 4). Decisions stay pointer-only —
-    // discovery.
+    // Hazards render WHOLE on the dispatch/consult surface (they always have,
+    // `renderHazards` at MAX_SAFE_INTEGER) — a whole hazard IS substance there
+    // (decision 92088a62 item 4). On the AskUserQuestion surface only, they
+    // render as ONE-LINE POINTERS (decision question-surface-gets-hazards-
+    // as-pointers, 6300c1e8 — the second narrowing of 301d8a0a's hazards-whole
+    // rule, after 21e3637e's read-only-lane pointer): no edit happens while
+    // the user answers a question, so the whole right-way text is not needed
+    // there. `hazardParts`' 'question' mode is the SAME cap-and-disclose
+    // renderer as 'whole'/'pointer' mode, never a second one built here.
+    // Decisions stay pointer-only on both surfaces — discovery.
     const hazardBlocks = [
       ...hazardParts(hazards.map((x) => x.record), {
         remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
         // Matched on the prompt's SUBJECT, not a file path (the H19 label).
         matchLabel: 'for this subject',
+        mode: isQuestion ? 'question' : 'whole',
       }),
     ];
     // The question surface keeps the part's identities and disclosure (the SAME
