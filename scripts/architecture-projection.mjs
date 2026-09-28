@@ -7,7 +7,7 @@
 // silently drops (P5). Deterministic: no wall-clock stamps — the version line
 // derives from the articles themselves, so an unchanged store regenerates
 // byte-identical output.
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openProject } from './lib/project.mjs';
 
@@ -80,5 +80,20 @@ the durable store is authoritative; this file is a projection of it.
 ${sections.join('\n')}`;
 
 writeFileSync(join(cwd, 'architecture.md'), md);
+// SELF-REGISTRATION (decision gap-hunt-2026-09-28-rulings, item 1): list
+// architecture.md in config.generated_projections, the way
+// handoff-projection.mjs registers its files, so settlement, H10 and
+// direct-merge treat it as generated even after the key was lost. Appends only
+// when absent (never reorders, so a rerun writes nothing); every other key and
+// entry is kept. rulings-projection.mjs carries the same block for rulings.md.
+const configPath = join(cwd, '.sterling', 'config.json');
+const rawConfig = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
+const parsedConfig = rawConfig ? JSON.parse(rawConfig) : {};
+const registered = Array.isArray(parsedConfig.generated_projections) ? parsedConfig.generated_projections : [];
+if (!registered.includes('architecture.md')) {
+  parsedConfig.generated_projections = [...registered, 'architecture.md'];
+  writeFileSync(configPath, JSON.stringify(parsedConfig, null, 2) + (rawConfig.endsWith('\n') || !rawConfig ? '\n' : ''));
+  console.log('config.generated_projections: registered architecture.md');
+}
 store.close();
 console.log(`architecture.md written (${SETS.length} sets, ${SETS.filter((s) => !bySlug.get(s.article)).length} article gap(s))`);

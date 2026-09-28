@@ -25,7 +25,7 @@
 //   2. TARGET — a baseline-matching item is named on stderr while the merge proceeds.
 //   3. stdout purity — the cleared report never lands on stdout.
 //   4. The report appears on the REFUSAL path too (mixed live + cleared).
-//   5. all_exempt wording — a generated-projection-only item cites the exemption + e1275166.
+//   5. all_exempt wording — a generated-projection-only item states the exemption rule inline.
 //   6. baseline_absent is reported UNVERIFIED, never conflated with a clean/cleared match.
 //   7. FAIL-CLOSED — a dangling feature_link is treated as live, never cleared.
 //   8. FAIL-CLOSED — a deleted governed file is treated as drift, never cleared.
@@ -271,7 +271,7 @@ test('4 [refusal path]: one live item and one cleared item, both covering branch
 // 5. all_exempt wording — generated-projection-only item.
 // =========================================================================
 
-test('5 [all_exempt]: an item whose only file_key is a configured generated projection, genuinely drifted, is reported via the exemption wording and cites e1275166 — sabotage: collapsing every non-live reason (baseline_match, all_exempt, baseline_absent) into one generic "cleared" string, which must flip this red (no "generated projection" text, no e1275166 citation)', () => {
+test('5 [all_exempt]: an item whose only file_key is a configured generated projection, genuinely drifted, is reported via the exemption wording and states the config.generated_projections rule inline — sabotage: collapsing every non-live reason (baseline_match, all_exempt, baseline_absent) into one generic "cleared" string, which must flip this red (no "generated projection" text, no inline rule)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const original = '# generated overview\n';
@@ -295,7 +295,12 @@ test('5 [all_exempt]: an item whose only file_key is a configured generated proj
     const r = runDirectMerge(dir);
     assert.equal(r.status, 0, `an all-exempt item must not block the merge — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
     assert.match(r.stderr, /generated projection/i, 'the exempt reason is worded distinctly, not folded into a generic cleared string');
-    assert.match(r.stderr, /e1275166/, 'the exemption cites the governing ruling');
+    // Updated 2026-09-28 (decision gap-hunt-2026-09-28-rulings, item 10): the
+    // runtime text used to cite ruling foreign_e1275166, which resolves in no store
+    // (decision a-dead-foreign-citation-becomes-a-foreign-id8-provenance-token,
+    // rule 4A: emitted text loses a dead id). It now states the rule inline.
+    assert.match(r.stderr, /config\.generated_projections: regenerated from the store, so exempt from drift/, 'the exemption states its rule inline');
+    assert.doesNotMatch(r.stderr, /e1275166/, 'the emitted text cites no id that resolves in no store');
   } finally {
     cleanup();
   }

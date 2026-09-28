@@ -515,3 +515,118 @@ test('P7 [invalid-UTF-8 masquerade]: branch bumps both manifest versions AND swa
     cleanup();
   }
 });
+
+// =========================================================================
+// P8-P10 — the shared version-only proof (scripts/lib/version-only.mjs,
+// decision gap-hunt-2026-09-28-rulings items 4+5) is LOCKFILE-AWARE:
+// package-lock.json may move its 2 version lines, a real dependency edit
+// still counts; and the generated-only set the version gate skips is read
+// from config.generated_projections (item 1), not a hardcoded list.
+// =========================================================================
+
+function lockContent(version, { dep = '1.0.0', integrity = 'sha512-aaa' } = {}) {
+  return (
+    JSON.stringify(
+      {
+        name: 'fixture',
+        version,
+        lockfileVersion: 3,
+        requires: true,
+        packages: {
+          '': { name: 'fixture', version },
+          'node_modules/dep': { version: dep, resolved: 'https://registry.example/dep.tgz', integrity },
+        },
+      },
+      null,
+      2
+    ) + '\n'
+  );
+}
+
+test('P8 [lockfile positive]: branch bumps both manifests AND package-lock.json version-only; an article owns package-lock.json and an open reconcile_needed item names it — merge SUCCEEDS with the lockfile in the VERSION-ONLY NONBLOCKING report, and the report cites no store id that does not resolve', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    writeManifests(dir, manifestContent('0.1.0'), manifestContent('0.1.0'));
+    const baseLock = lockContent('0.1.0');
+    writeFileSync(join(dir, 'package-lock.json'), baseLock);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'versioned base + lockfile']);
+
+    const store = openStore(dir);
+    const article = articleWithBaseline(store, 'feat-p8-owns-lock', [{ path: 'package-lock.json', content: baseLock }]);
+    const item = reconcileItem(store, { text: 'package-lock.json reconcile owed', file_keys: ['package-lock.json'], article });
+    store.close();
+
+    git(dir, ['checkout', '-b', 'feat/p8-lock-version-only']);
+    writeManifests(dir, manifestContent('0.1.1'), manifestContent('0.1.1'));
+    writeFileSync(join(dir, 'package-lock.json'), lockContent('0.1.1'));
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'release bump incl. lockfile']);
+
+    const r = runDirectMerge(dir);
+    assert.equal(r.status, 0, `a version-only lockfile bump must not block — stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /VERSION-ONLY NONBLOCKING/);
+    assert.ok(r.stderr.includes(item.id), 'the lockfile item is named by its full id');
+    assert.ok(r.stderr.includes('package-lock.json'));
+    assert.doesNotMatch(r.stderr, /h7-co-owner-trap|e1275166/, 'runtime text cites no store id or slug that resolves nowhere');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P9 [lockfile control]: the release bump ALSO edits a dependency in package-lock.json; an article owns the lockfile with a stale baseline — the gate REFUSES on reconcile debt', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    writeManifests(dir, manifestContent('0.1.0'), manifestContent('0.1.0'));
+    const baseLock = lockContent('0.1.0');
+    writeFileSync(join(dir, 'package-lock.json'), baseLock);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'versioned base + lockfile']);
+
+    const store = openStore(dir);
+    articleWithBaseline(store, 'feat-p9-owns-lock', [{ path: 'package-lock.json', content: baseLock }]);
+    store.close();
+
+    git(dir, ['checkout', '-b', 'feat/p9-lock-dep-edit']);
+    writeManifests(dir, manifestContent('0.1.1'), manifestContent('0.1.1'));
+    writeFileSync(join(dir, 'package-lock.json'), lockContent('0.1.1', { dep: '2.0.0', integrity: 'sha512-bbb' }));
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'bump + dependency edit']);
+
+    const r = runDirectMerge(dir);
+    assert.notEqual(r.status, 0, `a dependency edit is a real change — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /reconcile before merging/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('P10 [generated-only from config]: a branch changing ONLY a path listed in config.generated_projections needs no version bump; the same change to an unlisted path still refuses as unbumped', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    writeManifests(dir, manifestContent('0.1.0'), manifestContent('0.1.0'));
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    writeFileSync(join(dir, 'docs', 'generated.md'), 'v1\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'versioned base + a generated doc']);
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ generated_projections: ['docs/generated.md'] }));
+    openStore(dir).close();
+
+    git(dir, ['checkout', '-b', 'feat/p10-regen']);
+    writeFileSync(join(dir, 'docs', 'generated.md'), 'v2\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'regenerate']);
+    const ok = runDirectMerge(dir);
+    assert.equal(ok.status, 0, `a configured generated projection alone needs no bump — stderr=${oneLine(ok.stderr)}`);
+
+    git(dir, ['checkout', '-b', 'feat/p10-unlisted']);
+    writeFileSync(join(dir, 'docs', 'handwritten.md'), 'x\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'hand-written doc']);
+    const refused = runDirectMerge(dir);
+    assert.notEqual(refused.status, 0, 'an unlisted path is substantive');
+    assert.match(refused.stderr, /did not move/);
+  } finally {
+    cleanup();
+  }
+});

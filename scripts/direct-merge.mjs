@@ -15,7 +15,8 @@ import { join } from 'node:path';
 import { arg, fail as baseFail, openProject } from './lib/project.mjs';
 import { isGitRepo, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
 import { defaultExec } from './lib/update.mjs';
-import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/lib/settlement.mjs';
+import { mintSettlementReconcile, explainReconcileDebtLiveness, loadGeneratedProjections } from './hooks/lib/settlement.mjs';
+import { VERSION_ONLY_CANDIDATES, isVersionOnlyBetweenCommits, readVersionAtCommit } from './lib/version-only.mjs';
 import { projectRoot } from './hooks/lib/common.mjs';
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
@@ -177,7 +178,7 @@ if (dirtyLines.length > 0) {
 // -c core.quotePath=false (r-review F3, applied here too for consistency): without
 // it, non-ASCII filenames arrive C-quoted and defeat the plain-string path
 // comparisons further down.
-// SHA RESOLUTION (decision h7-co-owner-trap-verification-discharge-and-version-only-exception):
+// SHA RESOLUTION (decision foreign_5f330fbe, a previous store's ruling):
 // resolve intoTip / branchTip / mergeBase ONCE here, fail closed (fail()) on any
 // resolution error, and reuse these three SHAs everywhere below (the version-only
 // proof, next) — never re-derive them. `git diff --name-only mergeBase branchTip`
@@ -198,121 +199,24 @@ const diff = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--name-onl
 if (diff.status !== 0) fail(`direct-merge: git diff ${mergeBase} ${branchTip} failed: ${(diff.stderr || '').trim()}`);
 const changed = new Set(diff.stdout.split('\n').map((l) => l.trim()).filter(Boolean));
 
-// VERSION-ONLY PROOF (arm A2 of decision h7-co-owner-trap-verification-discharge-and-version-only-exception).
-// Applies to exactly ['.claude-plugin/plugin.json', 'package.json']. Pure,
-// deterministic, fail-closed — no diff/text parsing. qualifiesVersionOnly(path)
-// is true ONLY if ALL of the following hold; any failure returns false, with NO
-// carve-out:
-//   (a) at BOTH mergeBase and branchTip the path is a regular blob (mode
-//       100644 or 100755, type 'blob') — absent / added / deleted / symlink /
-//       type-change all fail here;
-//   (b) both blob contents parse as JSON;
-//   (c) each content contains EXACTLY ONE standalone version-field line (a line
-//       whose entire TRIMMED content is `"version": "<v>"` with an optional
-//       trailing comma) — zero or multiple matches fail;
-//   (d) the two parsed `.version` values differ;
-//   (e) replacing that one matched line's full text with an identical sentinel
-//       in both contents — split on '\n' (so any '\r' stays attached to its
-//       line; no other normalization) — yields byte-identical results.
-// A whole-file CRLF conversion, JSON reformat, key reorder, or ANY other change
-// therefore fails closed.
-function lsTreeEntry(root, sha, path) {
-  const r = spawnSync('git', ['ls-tree', sha, '--', path], { cwd: root, encoding: 'utf8', timeout: 30_000 });
-  if (r.status !== 0) return null;
-  const line = r.stdout.split('\n').map((l) => l.trim()).filter(Boolean)[0];
-  if (!line) return null;
-  const m = line.match(/^(\d+)\s+(\S+)\s+([0-9a-f]+)\t(.+)$/);
-  return m ? { mode: m[1], type: m[2], hash: m[3] } : null;
-}
-// FATAL UTF-8 DECODE (Codex round-2 HIGH): a plain Buffer.toString('utf8')
-// silently replaces invalid byte sequences with U+FFFD, so two DIFFERENT
-// non-version byte sequences can decode to the SAME string and wrongly
-// qualify — the eventual string-equality check in (e) is only byte-equivalent
-// for the remaining, unchanged bytes if the decode itself cannot lose
-// information. `fatal: true` makes a malformed blob throw instead, which this
-// caller turns into a fail-closed `null` (never a qualifying proof).
-function showBlobText(root, sha, path) {
-  const r = spawnSync('git', ['show', `${sha}:${path}`], { cwd: root, encoding: 'buffer', timeout: 30_000 });
-  if (r.status !== 0) return null;
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(r.stdout);
-  } catch {
-    return null;
-  }
-}
-function readManifestVersion(root, sha, path) {
-  const content = showBlobText(root, sha, path);
-  if (content === null) return null;
-  try {
-    return JSON.parse(content)?.version ?? null;
-  } catch {
-    return null;
-  }
-}
-const VERSION_LINE_RE = /^"version"\s*:\s*"[^"]*"\s*,?$/;
-function findSingleVersionLineIndex(lines) {
-  const idx = [];
-  lines.forEach((line, i) => {
-    if (VERSION_LINE_RE.test(line.trim())) idx.push(i);
-  });
-  return idx.length === 1 ? idx[0] : -1;
-}
-function qualifiesVersionOnly(root, mergeBaseSha, branchTipSha, path) {
-  const isRegularBlob = (e) => !!e && e.type === 'blob' && (e.mode === '100644' || e.mode === '100755');
-  const baseEntry = lsTreeEntry(root, mergeBaseSha, path);
-  const tipEntry = lsTreeEntry(root, branchTipSha, path);
-  // MODE MUST MATCH TOO (Codex round-2 MEDIUM): both endpoints being SOME
-  // regular-blob mode is not enough — a chmod bundled with the version bump
-  // (100644 -> 100755 or back) is a real content-adjacent change, not
-  // version-only, and must fail closed rather than qualify.
-  if (!isRegularBlob(baseEntry) || !isRegularBlob(tipEntry) || baseEntry.mode !== tipEntry.mode) return false; // (a)
-
-  const baseContent = showBlobText(root, mergeBaseSha, path);
-  const tipContent = showBlobText(root, branchTipSha, path);
-  if (baseContent === null || tipContent === null) return false;
-
-  let baseJson;
-  let tipJson;
-  try {
-    baseJson = JSON.parse(baseContent);
-    tipJson = JSON.parse(tipContent);
-  } catch {
-    return false; // (b)
-  }
-
-  const baseLines = baseContent.split('\n');
-  const tipLines = tipContent.split('\n');
-  const baseIdx = findSingleVersionLineIndex(baseLines);
-  const tipIdx = findSingleVersionLineIndex(tipLines);
-  if (baseIdx === -1 || tipIdx === -1) return false; // (c)
-
-  const baseVersion = baseJson?.version;
-  const tipVersion = tipJson?.version;
-  // STRING VERSIONS ONLY (Codex round-2 MEDIUM): a duplicate "version" key
-  // elsewhere in the object can make JSON.parse's `.version` an OBJECT — two
-  // distinct objects are ALWAYS !== by reference identity, which would
-  // satisfy "the values differ" vacuously even when nothing meaningful
-  // differs. Require both parsed values to actually be strings.
-  if (typeof baseVersion !== 'string' || typeof tipVersion !== 'string' || baseVersion === tipVersion) return false; // (d)
-
-  const SENTINEL = '"version": "__version-only-sentinel__"';
-  const baseNormalized = [...baseLines];
-  baseNormalized[baseIdx] = SENTINEL;
-  const tipNormalized = [...tipLines];
-  tipNormalized[tipIdx] = SENTINEL;
-  return baseNormalized.join('\n') === tipNormalized.join('\n'); // (e)
-}
-
-const VERSION_ONLY_CANDIDATES = ['.claude-plugin/plugin.json', 'package.json'];
-// Applied to exactly the paths above that this branch's diff actually touched;
+// VERSION-ONLY PROOF (article direct-merge-and-branch-sweep, AC5; decision
+// gap-hunt-2026-09-28-rulings, items 4+5). One implementation, shared with
+// H10's capture duty: scripts/lib/version-only.mjs, which states the full
+// fail-closed rule. It applies to exactly VERSION_ONLY_CANDIDATES
+// (.claude-plugin/plugin.json, package.json, and package-lock.json with its
+// 2 version lines) between mergeBase and branchTip: both regular blobs of the
+// same mode, strict UTF-8, valid JSON, a moved version string, and no other
+// changed byte. A whole-file CRLF conversion, JSON reformat, key reorder, a
+// dependency edit or ANY other change therefore fails closed.
+// Applied to exactly the candidates this branch's diff actually touched;
 // every other consumer below keeps reading the untouched `changed` set.
-const versionOnlyPaths = VERSION_ONLY_CANDIDATES.filter((p) => changed.has(p) && qualifiesVersionOnly(target, mergeBase, branchTip, p));
+const versionOnlyPaths = VERSION_ONLY_CANDIDATES.filter((p) => changed.has(p) && isVersionOnlyBetweenCommits(target, mergeBase, branchTip, p));
 // `changed` stays exactly as-is for every existing consumer (version-field
 // gate, review-receipt checks, board-payment nudge, parked sweep).
 // `reconcileChanged` is `changed` minus the proven version-only paths, used
 // ONLY for settlement minting and the reconcile refusal's covering/liveness
 // scope — a proven version-only path can never block or mint a merge refusal
-// from this exception alone (decision h7-co-owner-trap-verification-discharge-and-version-only-exception, arm A2).
+// from this exception alone (article direct-merge-and-branch-sweep, AC5).
 const reconcileChanged = new Set([...changed].filter((p) => !versionOnlyPaths.includes(p)));
 
 // SETTLEMENT BOUNDARY (b) — the pre-merge HARD BACKSTOP (board c198866d, H7
@@ -372,8 +276,8 @@ try {
       if (!provenHere.length) continue;
       const article = t.feature_link ? settleStore.get(t.feature_link) : null;
       for (const p of provenHere) {
-        const oldV = readManifestVersion(target, mergeBase, p);
-        const newV = readManifestVersion(target, branchTip, p);
+        const oldV = readVersionAtCommit(target, mergeBase, p);
+        const newV = readVersionAtCommit(target, branchTip, p);
         versionOnlyReport.push({
           item: t,
           article,
@@ -416,15 +320,15 @@ if (settlementError) {
 }
 // VERSION-ONLY NONBLOCKING REPORT, printed BEFORE the cleared/refusal output
 // below so it appears on every path — a clean merge, a merge that proceeds
-// past cleared rows, and a merge refused on OTHER, still-live debt (decision
-// h7-co-owner-trap-verification-discharge-and-version-only-exception, arm A2).
+// past cleared rows, and a merge refused on OTHER, still-live debt (article
+// direct-merge-and-branch-sweep, AC5).
 // Nothing here closes anything: the item stays open, unverified, and the
 // exception's whole claim is nonblocking-ness, never verified-clean-ness.
 if (versionOnlyReport.length > 0) {
   console.error(
     [
       '',
-      'direct-merge: VERSION-ONLY NONBLOCKING (decision h7-co-owner-trap-verification-discharge-and-version-only-exception)',
+      'direct-merge: VERSION-ONLY NONBLOCKING (the change to each path below is only its version line(s); it neither blocks nor mints)',
       ...versionOnlyReport.map(({ item, article, path, summary }) => {
         const articleLabel = article ? `${article.slug ?? article.id} (${article.id})` : '(no owning article)';
         return `  - ${item.id}  article ${articleLabel}  path ${path}\n      ${summary}\n      still open; not verified clean; nothing closed by this exception.`;
@@ -444,7 +348,7 @@ if (cleared.length > 0) {
   const why = (v) => {
     switch (v.code) {
       case 'all_exempt':
-        return `every named path is a generated projection (config.generated_projections, ruling e1275166): ${v.exempt_paths.join(', ')}`;
+        return `every named path is a generated projection (listed in config.generated_projections: regenerated from the store, so exempt from drift): ${v.exempt_paths.join(', ')}`;
       case 'baseline_match':
         return `content now MATCHES the owning article's current baseline (already reconciled, edited and reverted, or an attested close re-stamped it, R9): ${v.matched.join(', ')}`;
       case 'baseline_absent':
@@ -499,7 +403,7 @@ if (cleared.length > 0) {
         : []),
       ...(hasExempt
         ? [
-            `  · a generated-projection row: nothing needs re-stamping (ruling e1275166). Settlement no longer mints`,
+            `  · a generated-projection row: nothing needs re-stamping (the file is regenerated from the store). Settlement no longer mints`,
             `    exempt paths and a later widen drops them from a legacy item, so closing it directly is safe.`,
           ]
         : []),
@@ -544,10 +448,10 @@ if (debt.length > 0) {
     noArticleItems.length > 0
       ? `${debt.length} open reconcile_needed item(s) across ${realArticleCount} article(s) (plus ${noArticleItems.length} item(s) with no owning article)`
       : `${debt.length} open reconcile_needed item(s) across ${realArticleCount} article(s)`;
-  // TWO SANCTIONED DISCHARGES (decision h7-co-owner-trap-verification-discharge-and-version-only-exception,
-  // arm A1) — the prior text here ("knowledge_update ... auto-drains its item")
+  // TWO SANCTIONED DISCHARGES (decision foreign_5f330fbe, a previous store's
+  // ruling, arm A1) — the prior text here ("knowledge_update ... auto-drains its item")
   // was FALSE: drain happens ONLY via an explicit `resolves` claim (decision
-  // 68988832), never as a side effect of any write.
+  // foreign_68988832), never as a side effect of any write.
   // WHOLE-ITEM RULE STATED UNCONDITIONALLY (Codex round-2 HIGH): this used to
   // print ONLY inside the out-of-diff NOTE below, so an item whose file_keys
   // happened to sit entirely within this branch's diff never saw the warning
@@ -562,7 +466,7 @@ if (debt.length > 0) {
     '      re-baselines EVERY file the owning article owns, so verify EVERY file_key on the item (and rule out any',
     '      unexplained drift elsewhere in the article\'s owned set) before resolving — never just the paths this branch',
     '      happened to touch —',
-    '      knowledge_append(id:<article>, field:"history", entries:[{date:<ISO>, event:"VERIFIED UNAFFECTED (decision h7-co-owner-trap-verification-discharge-and-version-only-exception): <path(s)> — checked against the diff, no reconcile owed"}], resolves:["<full item id>"])',
+    '      knowledge_append(id:<article>, field:"history", entries:[{date:<ISO>, event:"VERIFIED UNAFFECTED: <path(s)> — checked against the diff, no reconcile owed"}], resolves:["<full item id>"])',
     'Then rerun.',
   ];
   // PER-ITEM NOTE, kept as EMPHASIS (not the sole carrier of the rule anymore)
@@ -588,8 +492,12 @@ if (debt.length > 0) {
 // package.json and plugin.json move in the same commit). Fixture repos and
 // consuming projects have no plugin manifest — skipped loud. --allow-same-version
 // is the deliberate escape for a merge that genuinely deserves no bump.
+// The generated projections are the ONE config list (decision
+// gap-hunt-2026-09-28-rulings, item 1): architecture-projection.mjs and
+// rulings-projection.mjs register their files in config.generated_projections
+// the same way handoff-projection.mjs does, and settlement exempts that list.
 stage('version');
-const GENERATED_ONLY = new Set(['architecture.md', 'rulings.md']);
+const GENERATED_ONLY = loadGeneratedProjections(target);
 const pluginManifestRel = '.claude-plugin/plugin.json';
 if (existsSync(join(target, pluginManifestRel))) {
   const substantive = [...changed].filter((f) => !GENERATED_ONLY.has(f));
