@@ -16,6 +16,7 @@ import { arg, fail as baseFail, openProject } from './lib/project.mjs';
 import { isGitRepo, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
 import { defaultExec } from './lib/update.mjs';
 import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/lib/settlement.mjs';
+import { projectRoot } from './hooks/lib/common.mjs';
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
 import { readProjectMode } from './lib/handoff-projection.mjs';
@@ -333,12 +334,20 @@ const reconcileChanged = new Set([...changed].filter((p) => !versionOnlyPaths.in
 // the close can be deliberate. It still closes NOTHING itself.
 stage('reconcile');
 const { store: settleStore } = openProject(target);
+// Settlement's ROOT is the normalized project root — the same projectRoot()
+// readStdin gives every hook as input.cwd — never the raw --target: settlement
+// decides whether a record's working_tree names THIS project (isForeignTree),
+// and a relative or trailing-slashed --target would read a self-rooted article
+// as a foreign tree and never mint its debt (Dome Farmer 454 fix round).
+// openProject just succeeded on target, so the store is there to be found.
+const settleRoot = projectRoot(target);
+if (!settleRoot) fail(`direct-merge: no Sterling store found at or above '${target}' for reconcile settlement`);
 let debt;
 let cleared;
 let versionOnlyReport;
 let settlementError;
 try {
-  mintSettlementReconcile(settleStore, target, [...reconcileChanged]);
+  mintSettlementReconcile(settleStore, settleRoot, [...reconcileChanged]);
   const covering = settleStore
     .query({ types: ['todo'], cap: 1000 })
     .filter((t) => t.source === 'system' && t.system_reason === 'reconcile_needed' && (t.file_keys ?? []).some((k) => reconcileChanged.has(k)));
@@ -390,7 +399,7 @@ try {
     // nobody acts on at a merge (P1). Stale rows beyond the branch diff are
     // /sterling:drain's lane, which already verifies queue items against HEAD.
     const scopedFiles = (t.file_keys ?? []).filter((k) => reconcileChanged.has(k));
-    const verdict = explainReconcileDebtLiveness(settleStore, target, { ...t, file_keys: scopedFiles });
+    const verdict = explainReconcileDebtLiveness(settleStore, settleRoot, { ...t, file_keys: scopedFiles });
     if (verdict.live) debt.push(t);
     else cleared.push({ item: t, scopedFiles, verdict });
   }

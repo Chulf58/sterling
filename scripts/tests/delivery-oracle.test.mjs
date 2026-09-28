@@ -2479,3 +2479,66 @@ test('T5: every exclusion carries record_ids (ALL claimants, deduped, record_id 
     cleanup();
   }
 });
+
+test('A4b (Dome Farmer 454): an article whose working_tree IS the project root is an owner, not a working_tree exclusion; a foreign tree stays excluded', () => {
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, ids, cleanup } = makeFixtureRepo();
+  try {
+    const self = store.create(articleRecord('self-rooted', ['src/ungoverned.mjs'], { working_tree: `${dir}/` }));
+    const entries = deriveExpected(store, { repoRoot: dir });
+    assert.equal(exclusionFor(entries, 'src/ungoverned.mjs'), undefined, 'a self-rooted owner is not excluded');
+    const c = caseFor(entries, 'src/ungoverned.mjs', 'h19-knowledge-delivery.mjs');
+    assert.ok(c, 'the self-rooted path produces a delivery case');
+    assert.deepEqual(sorted(c.expected.owners), [self.id]);
+    assert.equal(exclusionFor(entries, 'wt/copy.mjs')?.record_id, ids.gamma, 'the foreign working_tree article is still excluded');
+  } finally {
+    cleanup();
+  }
+});
+
+// END-TO-END (pre-commit review finding, Dome Farmer 454 fix round): the
+// expectation is derived against the PROJECT root, but the hooks replay with
+// cwd = the sandbox copy. A self-rooted working_tree ("<project>/") must score
+// exactly like the same project with no working_tree — never an owner in the
+// expectation and a foreign tree in the replay.
+function e2eProject(extra) {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-oracle-e2e-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
+  writeFileSync(join(dir, 'src', 'a.mjs'), '// src/a.mjs\n');
+  writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
+  assert.equal(git(dir, ['init', '-q']).status, 0);
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-qm', 'fixture']);
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  store.create(articleRecord('solo', ['src/a.mjs'], extra(dir)));
+  store.close();
+  return dir;
+}
+
+function e2eScores(dir) {
+  const none = join(dir, 'no-such-dir');
+  const r = spawnSync(process.execPath, [ORACLE, '--project', dir, '--probes', none, '--golden', none, '--json'], { encoding: 'utf8', timeout: 300_000 });
+  assert.ok(r.stdout.trim().startsWith('{'), `oracle printed a JSON report — stderr=${r.stderr}`);
+  const per = JSON.parse(r.stdout).metrics.per_hook;
+  const pick = (h) => ({ rendered: per[h]?.rendered_recall ?? null, precision: per[h]?.precision ?? null });
+  return {
+    knowledge: pick('h19-knowledge-delivery.mjs'),
+    bash: pick('h19-bash-delivery.mjs'),
+    h10: pick('h10-direct-capture.mjs'),
+  };
+}
+
+test('E2E (Dome Farmer 454): a self-rooted working_tree scores exactly like no working_tree — rendered and precision match the baseline', () => {
+  const base = e2eProject(() => ({}));
+  const self = e2eProject((dir) => ({ working_tree: `${dir}/` }));
+  try {
+    const baseline = e2eScores(base);
+    assert.equal(baseline.knowledge.rendered, 1, 'baseline control: the lone owner is delivered');
+    assert.deepEqual(e2eScores(self), baseline);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(self, { recursive: true, force: true });
+  }
+});

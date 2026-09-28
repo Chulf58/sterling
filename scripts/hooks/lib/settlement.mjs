@@ -50,6 +50,7 @@ import { join, dirname } from 'node:path';
 // above (that constraint is about mcp-server specifically; @sterling/store
 // is already a workspace dependency hooks bundle at build time).
 import { buildReconcileText } from '@sterling/store';
+import { isForeignTree } from './working-tree.mjs';
 
 // MUTUAL EXCLUSION around touches.json's read-modify-write (R3 round-4
 // fixer, board c198866d): the earlier attempt to close the H7-vs-H7 race by
@@ -282,7 +283,7 @@ export function mintSettlementReconcile(store, root, candidatePaths, now = new D
   for (const rel of paths) {
     const owners = store
       .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
-      .filter((r) => !r.working_tree);
+      .filter((r) => !isForeignTree(r, root));
     for (const article of owners) {
       if (!byArticle.has(article.id)) byArticle.set(article.id, { article, freshPaths: new Set() });
       byArticle.get(article.id).freshPaths.add(rel);

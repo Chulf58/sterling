@@ -4115,6 +4115,25 @@ function matchesGlob(path, glob) {
   }
   return new RegExp("^" + re + "$").test(path.replace(/\\/g, "/"));
 }
+function isAbsolutePathAnyHost(p) {
+  const s2 = String(p ?? "");
+  return /^[A-Za-z]:[\\/]/.test(s2) || s2.startsWith("/") || s2.startsWith("\\");
+}
+function sameLocationAnyHost(a, b) {
+  const drvfs = (p) => {
+    const s2 = String(p ?? "").replace(/\\/g, "/");
+    if (!isAbsolutePathAnyHost(s2))
+      return void 0;
+    const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
+    return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
+  };
+  const x = drvfs(a);
+  const y = drvfs(b);
+  if (x === void 0 || y === void 0)
+    return false;
+  const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
+  return onDrvfs(x) && onDrvfs(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
+}
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
@@ -8014,6 +8033,15 @@ import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypt
 import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync2, renameSync as renameSync2 } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { join as join4, dirname as dirname4 } from "node:path";
+
+// scripts/hooks/lib/working-tree.mjs
+function isForeignTree(record, root) {
+  const wt = record?.working_tree;
+  if (!wt) return false;
+  return !(root && sameLocationAnyHost(String(wt), root));
+}
+
+// scripts/hooks/lib/settlement.mjs
 var LOCK_DEADLINE_MS = 150;
 var LOCK_STALE_MS = 3e3;
 var LOCK_POLL_MS = 20;
@@ -8131,7 +8159,7 @@ function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE
   if (!paths.length) return [];
   const byArticle = /* @__PURE__ */ new Map();
   for (const rel of paths) {
-    const owners = store2.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
+    const owners = store2.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, root));
     for (const article of owners) {
       if (!byArticle.has(article.id)) byArticle.set(article.id, { article, freshPaths: /* @__PURE__ */ new Set() });
       byArticle.get(article.id).freshPaths.add(rel);
@@ -9261,7 +9289,7 @@ try {
     ownersSeen.set(p, rows);
     return rows;
   };
-  const isUnowned = (p) => !ownerRows(p).some((r) => !r.working_tree);
+  const isUnowned = (p) => !ownerRows(p).some((r) => !isForeignTree(r, input.cwd));
   const ownerRowsNote = (p) => {
     const rows = ownerRows(p);
     if (!rows.length) return "none";
@@ -9556,7 +9584,7 @@ try {
       const ownerEvidence = unowned.slice(0, 5).map((p) => `${p} \u2192 owners seen: ${ownerRowsNote(p)}`);
       parts.push(
         `\u2022 articles: article demand \u2014 ${unowned.length} touched file(s) no owner (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} new)` : ""}: ${capList(unowned)} \u2192 knowledge_create type feature_article (reference_material kind doc for a governing document)
-  ownership join (uncapped, types feature_article+reference_material, excluding records that declare a working_tree): ${ownerEvidence.join(" | ")}${unowned.length > 5 ? ` | +${unowned.length - 5} more path(s) not detailed` : ""}`
+  ownership join (uncapped, types feature_article+reference_material, excluding records whose working_tree names a different tree): ${ownerEvidence.join(" | ")}${unowned.length > 5 ? ` | +${unowned.length - 5} more path(s) not detailed` : ""}`
       );
     }
     if (pressure.level === "soft" || pressure.level === "hard") {

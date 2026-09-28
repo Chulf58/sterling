@@ -36,6 +36,7 @@
 // file's existing try/warnNonBlocking shape — the fold does not change h19's
 // own failure posture.
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel } from './lib/common.mjs';
+import { isForeignTree } from './lib/working-tree.mjs';
 // Plan-lock primitives — ONE implementation, shared with h31-plan-lock.mjs,
 // h1-session-start.mjs and scripts/plan-lock.mjs.
 import { readLock as readPlanLock, sanitizeForContext, sterlingDirOf } from './lib/plan-lock.mjs';
@@ -274,7 +275,7 @@ async function main(input) {
     // below (relevance slice 3, board 8f3141d4) can deliver on a pathless
     // dispatch, which is exactly the case path-scoping is structurally blind to.
     const owners = rels.length
-      ? store.query({ types: ['feature_article', 'reference_material'], file_keys: rels, cap: 100 }).filter((r) => !r.working_tree)
+      ? store.query({ types: ['feature_article', 'reference_material'], file_keys: rels, cap: 100 }).filter((r) => !isForeignTree(r, input.cwd))
       : [];
     const hazards = rels.length ? store.query({ types: ['anti_pattern'], file_keys: rels, cap: 100 }) : [];
     const decisions = rels.length ? store.query({ types: ['decision'], file_keys: rels, cap: 100 }) : [];
@@ -400,7 +401,7 @@ async function main(input) {
       if (freshOwners.length || freshHazards.length || freshDecisions.length) {
         const decisionWiden = `knowledge_query types:["decision"] file_keys:[${rels.map((r) => `"${r}"`).join(',')}] cap:${freshDecisions.length}`;
         const ownerParts = freshOwners.map((r) => {
-          const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r);
+          const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { root: input.cwd });
           const contentClass = isOwnerDiscoveryOnly(r) ? 'discovery' : 'substance';
           return { kind: 'ordinary', contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
         });

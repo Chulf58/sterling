@@ -6,6 +6,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, openSync, closeSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { loadConfig } from './common.mjs';
+import { isForeignTree } from './working-tree.mjs';
 
 export function deliveryDir(cwd) {
   return join(cwd, '.sterling', 'transient', 'delivery');
@@ -469,11 +470,11 @@ function flattenToOneLine(text) {
  *  'hooks-suite' at v46). That mattered because these pointers are how a reader
  *  learns which siblings bear on the territory — a false '(not in store)' tells
  *  them the neighbour does not exist, so they neither read it nor reconcile it. */
-function pointerLine(store, kind, slug) {
+function pointerLine(store, kind, slug, root) {
   let head = '(not in store)';
   let annotation = '';
   try {
-    const match = store.articlesBySlug(slug).find((r) => !r.working_tree);
+    const match = store.articlesBySlug(slug).find((r) => !isForeignTree(r, root));
     if (match) {
       head = clip(match.what_it_does, 140);
       annotation = statusAnnotation(match);
@@ -716,7 +717,7 @@ export function renderKnownGapsLines(article, info) {
  *  one-hop pointers; P6 filter-first-capped). `gaps` (optional) is one entry
  *  of budgetKnownGaps's returned Map, keyed by this article's id — inlined
  *  per the known_gaps section above when present. */
-export function renderArticle(store, article, { gaps } = {}) {
+export function renderArticle(store, article, { gaps, root } = {}) {
   // slug/concept_family are clipped (outside-family review, board 725299c8): they
   // are the only unbounded inputs to the digest block below, so without this a
   // pathological slug/family could push the digested block past the ~8192-byte
@@ -795,8 +796,8 @@ export function renderArticle(store, article, { gaps } = {}) {
   const relied = article.dependencies?.relied_by ?? [];
   if (relies.length || relied.length) {
     lines.push('ONE-HOP (follow with knowledge_get/knowledge_query when it matters):');
-    for (const slug of relies) lines.push(pointerLine(store, 'relies_on', slug));
-    for (const slug of relied) lines.push(pointerLine(store, 'relied_by', slug));
+    for (const slug of relies) lines.push(pointerLine(store, 'relies_on', slug, root));
+    for (const slug of relied) lines.push(pointerLine(store, 'relied_by', slug, root));
   }
   lines.push(...gapLines);
   return lines.join('\n');

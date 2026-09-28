@@ -4091,6 +4091,25 @@ function foldPairForCompare(a, b) {
   const drivePrefixed = /^[A-Za-z]:/.test(a) || /^[A-Za-z]:/.test(b);
   return drivePrefixed ? [a.toLowerCase(), b.toLowerCase()] : [a, b];
 }
+function isAbsolutePathAnyHost(p) {
+  const s2 = String(p ?? "");
+  return /^[A-Za-z]:[\\/]/.test(s2) || s2.startsWith("/") || s2.startsWith("\\");
+}
+function sameLocationAnyHost(a, b) {
+  const drvfs = (p) => {
+    const s2 = String(p ?? "").replace(/\\/g, "/");
+    if (!isAbsolutePathAnyHost(s2))
+      return void 0;
+    const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
+    return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
+  };
+  const x = drvfs(a);
+  const y = drvfs(b);
+  if (x === void 0 || y === void 0)
+    return false;
+  const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
+  return onDrvfs(x) && onDrvfs(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
+}
 function toRepoRelative(absolutePath, repoRoot) {
   const abs = normSep(absolutePath);
   const root = normSep(repoRoot);
@@ -7614,6 +7633,13 @@ function repoRel(toolPath, cwd) {
   }
 }
 
+// scripts/hooks/lib/working-tree.mjs
+function isForeignTree(record, root) {
+  const wt = record?.working_tree;
+  if (!wt) return false;
+  return !(root && sameLocationAnyHost(String(wt), root));
+}
+
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, renameSync, openSync, closeSync } from "node:fs";
 import { join as join3, dirname as dirname3 } from "node:path";
@@ -7735,11 +7761,11 @@ function clip(text, cap) {
 function normalizeWs(text) {
   return String(text ?? "").replace(/\s+/g, " ").trim();
 }
-function pointerLine(store, kind, slug) {
+function pointerLine(store, kind, slug, root) {
   let head = "(not in store)";
   let annotation = "";
   try {
-    const match = store.articlesBySlug(slug).find((r) => !r.working_tree);
+    const match = store.articlesBySlug(slug).find((r) => !isForeignTree(r, root));
     if (match) {
       head = clip(match.what_it_does, 140);
       annotation = statusAnnotation(match);
@@ -7820,7 +7846,7 @@ function renderKnownGapsLines(article, info) {
   }
   return lines;
 }
-function renderArticle(store, article, { gaps } = {}) {
+function renderArticle(store, article, { gaps, root } = {}) {
   const id8 = String(article.id ?? "").slice(0, 8);
   const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${id8}) (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
   const body = String(article.what_it_does ?? "");
@@ -7855,8 +7881,8 @@ function renderArticle(store, article, { gaps } = {}) {
   const relied = article.dependencies?.relied_by ?? [];
   if (relies.length || relied.length) {
     lines.push("ONE-HOP (follow with knowledge_get/knowledge_query when it matters):");
-    for (const slug of relies) lines.push(pointerLine(store, "relies_on", slug));
-    for (const slug of relied) lines.push(pointerLine(store, "relied_by", slug));
+    for (const slug of relies) lines.push(pointerLine(store, "relies_on", slug, root));
+    for (const slug of relied) lines.push(pointerLine(store, "relied_by", slug, root));
   }
   lines.push(...gapLines);
   return lines.join("\n");
@@ -8288,7 +8314,7 @@ function main(input2) {
     if (event !== "PostToolUse") return allow();
     const migrationNotice = claimLegacyInjectionRungNotice(input2.cwd, rawRung);
     const mode = "inject";
-    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
+    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, input2.cwd));
     const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
     const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
     const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
@@ -8334,7 +8360,7 @@ function main(input2) {
     const blocks = [
       ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
       ...freshOwners.map(
-        (r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id) })
+        (r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input2.cwd })
       ),
       ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : [],
       // joinSuspectBlock returns '' when no line survives; the filter keeps an
@@ -8348,7 +8374,7 @@ function main(input2) {
     if (mode === "inject") {
       const totalCap = resolveTotalCap(input2.cwd);
       const ownerPart = (r) => {
-        const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id) });
+        const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input2.cwd });
         const contentClass = isOwnerDiscoveryOnly(r) ? "discovery" : "substance";
         return { kind: "ordinary", contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
       };

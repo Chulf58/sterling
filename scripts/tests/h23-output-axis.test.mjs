@@ -572,3 +572,21 @@ test('S4b (c): a decision WITHOUT authority renders its H23 pointer line with no
     cleanup();
   }
 });
+
+test('self-root (Dome Farmer 454): a file owned by an article whose working_tree IS the project root gates H23 like a root owner — H19 delivers it, so no second block', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const dec = store.create(markedDecision('DEC-SELF'));
+    // CONTROL: the same read of an UNOWNED path fires the decision, so the
+    // silence asserted below is the owner gate and not a decision that never matches.
+    const control = runHook(postRead(dir, 'logs/unowned.txt', CONTENT_SENTENCE), dir);
+    assert.equal(control.code, 0);
+    assert.match(directPayload(control), new RegExp(`knowledge_get ${dec.id}`), 'control: with no owner the decision fires');
+    store.create(article('self-rooted', ['logs/probe.txt'], { working_tree: `${dir}/` }));
+    const r = runHook(postRead(dir, 'logs/probe.txt', CONTENT_SENTENCE), dir);
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, '', 'a self-rooted owner suppresses the output axis exactly as a root owner does');
+  } finally {
+    cleanup();
+  }
+});

@@ -24,6 +24,7 @@
 //     always fires teaches you to ignore it).
 //
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel } from './lib/common.mjs';
+import { isForeignTree } from './lib/working-tree.mjs';
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -90,7 +91,7 @@ function main(input) {
 
     const owners = store
       .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
-      .filter((r) => !r.working_tree);
+      .filter((r) => !isForeignTree(r, input.cwd));
     const hazards = store.query({ types: ['anti_pattern'], file_keys: [rel], cap: 100 });
     // Silent on unowned territory (reason 3 in the header) — and silent when a
     // path carries nothing at all, which is the common case in a wide survey.

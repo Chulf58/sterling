@@ -10,6 +10,7 @@
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel, gitIgnored } from './lib/common.mjs';
+import { isForeignTree } from './lib/working-tree.mjs';
 import {
   guardPath,
   readGuard,
@@ -73,7 +74,7 @@ function main(input) {
 
     const owners = store
       .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
-      .filter((r) => !r.working_tree);
+      .filter((r) => !isForeignTree(r, input.cwd));
 
     // HAZARDS AND RATIONALE FOR THIS PATH (decision foreign_ca23c811). Articles answer
     // "what is this and how must it behave"; they do NOT answer "what must I not
@@ -220,7 +221,7 @@ function main(input) {
     const blocks = [
       ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
       ...freshOwners.map((r) =>
-        r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id) })
+        r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input.cwd })
       ),
       ...(freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []),
       // joinSuspectBlock returns '' when no line survives; the filter keeps an
@@ -251,7 +252,7 @@ function main(input) {
       // the SAME predicate `freshOwners` above filters against, so the
       // freshness ledger and the rendered contentClass can never disagree.
       const ownerPart = (r) => {
-        const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id) });
+        const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id), root: input.cwd });
         const contentClass = isOwnerDiscoveryOnly(r) ? 'discovery' : 'substance';
         return { kind: 'ordinary', contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
       };

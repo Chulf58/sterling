@@ -4086,6 +4086,25 @@ function foldPairForCompare(a, b) {
   const drivePrefixed = /^[A-Za-z]:/.test(a) || /^[A-Za-z]:/.test(b);
   return drivePrefixed ? [a.toLowerCase(), b.toLowerCase()] : [a, b];
 }
+function isAbsolutePathAnyHost(p) {
+  const s2 = String(p ?? "");
+  return /^[A-Za-z]:[\\/]/.test(s2) || s2.startsWith("/") || s2.startsWith("\\");
+}
+function sameLocationAnyHost(a, b) {
+  const drvfs = (p) => {
+    const s2 = String(p ?? "").replace(/\\/g, "/");
+    if (!isAbsolutePathAnyHost(s2))
+      return void 0;
+    const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
+    return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
+  };
+  const x = drvfs(a);
+  const y = drvfs(b);
+  if (x === void 0 || y === void 0)
+    return false;
+  const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
+  return onDrvfs(x) && onDrvfs(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
+}
 function toRepoRelative(absolutePath, repoRoot) {
   const abs = normSep(absolutePath);
   const root = normSep(repoRoot);
@@ -7870,6 +7889,13 @@ function repoRel(toolPath, cwd) {
   }
 }
 
+// scripts/hooks/lib/working-tree.mjs
+function isForeignTree(record, root) {
+  const wt = record?.working_tree;
+  if (!wt) return false;
+  return !(root && sameLocationAnyHost(String(wt), root));
+}
+
 // scripts/hooks/lib/advisory-counter.mjs
 import { appendFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "node:fs";
 import { join as join3 } from "node:path";
@@ -7983,7 +8009,7 @@ try {
     if (rel === ".git" || rel?.startsWith(".git/")) allow();
     if (rel?.startsWith(".sterling/")) allow();
     if (rel) {
-      const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
+      const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, input.cwd));
       if (owners.length) allow();
     }
   }

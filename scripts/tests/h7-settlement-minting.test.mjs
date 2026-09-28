@@ -437,3 +437,45 @@ test('AC6b [direct-merge, target]: a stale reconcile_needed item whose live pred
     cleanup();
   }
 });
+
+// Dome Farmer 454 fix round (pre-commit review): direct-merge hands its --target
+// to mintSettlementReconcile as the root the self-root rule compares against. A
+// RELATIVE --target ('.') must be resolved to the project root first, or a
+// self-rooted article (working_tree = the absolute project root) reads as a
+// foreign tree and its drifted file never mints the reconcile debt that refuses.
+test('direct-merge with a relative --target still mints reconcile debt for a SELF-ROOTED article (working_tree = project root)', () => {
+  const { dir, cleanup } = makeGitProjectNoRun();
+  try {
+    const original = 'export const t = 1;\n';
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    store.create({
+      ...envelope('feature_article'),
+      slug: 'feat-self-rooted',
+      title: 'feat-self-rooted',
+      what_it_does: 'x',
+      intended_behavior: 'x',
+      working_tree: `${dir}/`,
+      files: [{ path: 'src/touched.mjs', role: 'impl' }],
+      file_baselines: { 'src/touched.mjs': sha256hex(original) },
+      current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+      dependencies: { relies_on: [], relied_by: [] },
+      state: 'active',
+      version: 1,
+      history: [{ date: NOW, event: 'originating brief' }],
+      live_test_refs: [],
+    });
+    store.close();
+
+    git(dir, ['checkout', '-b', 'feat/self-rooted']);
+    writeFileSync(join(dir, 'src', 'touched.mjs'), 'export const t = 2;\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'change touched file']);
+
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'direct-merge.mjs'), '--target', '.'], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+    assert.notEqual(r.status, 0, `the self-rooted article's drift must mint debt and refuse — stdout=${r.stdout} stderr=${r.stderr}`);
+    assert.match(r.stderr, /reconcile_needed/);
+    assert.match(r.stderr, /src\/touched\.mjs/);
+  } finally {
+    cleanup();
+  }
+});

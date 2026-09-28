@@ -75,7 +75,7 @@
 // unowned-territory notice and H10 its article demand.
 //
 // The expected set MIRRORS each hook's own predicate (same types, same
-// file_keys, same cap, same !working_tree filter) rather than asking an
+// file_keys, same cap, same isForeignTree filter) rather than asking an
 // independent question — so the oracle measures the hooks, not its own opinion.
 // Excluded paths are accounted for BY NAME (anti_pattern foreign_1b141d1f: a deduping
 // notifier's silence is multiply-caused), never silently dropped.
@@ -97,6 +97,7 @@ import {
 } from '@sterling/store';
 import { arg, hasFlag } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
+import { isForeignTree } from './hooks/lib/working-tree.mjs';
 
 export const ORACLE_VERSION = 1;
 
@@ -224,7 +225,7 @@ function normalizeClaimedPath(p) {
  *  ever reaches run(). Wiring a probe source REQUIRES a cap-aware verdict first:
  *  covered up to the cap, with parseDelivery's per-entry `suppressed_count`
  *  reconciling the remainder. Do not wire probes before that lands. */
-function deriveOutputAxisExpected(store, probe, index) {
+function deriveOutputAxisExpected(store, probe, index, root) {
   const tool = probe?.tool ?? 'Read';
   const rel = probe?.rel ?? null;
   const base = {
@@ -295,7 +296,7 @@ function deriveOutputAxisExpected(store, probe, index) {
     if (rel === '.git' || rel?.startsWith('.git/')) return silent('path_excluded');
     if (rel?.startsWith('.sterling/')) return silent('path_excluded');
     if (rel) {
-      const owners = store.query({ types: OWNER_TYPES, file_keys: [rel], cap: HOOK_CAP }).filter((r) => !r.working_tree);
+      const owners = store.query({ types: OWNER_TYPES, file_keys: [rel], cap: HOOK_CAP }).filter((r) => !isForeignTree(r, root));
       if (owners.length) return silent('owned_suppressed');
     }
   }
@@ -499,7 +500,7 @@ export function deriveExpected(store, { repoRoot: root, outputAxisProbes = [] } 
   }
   for (const rel of rels) {
     const rawOwners = store.query({ types: OWNER_TYPES, file_keys: [rel], cap: HOOK_CAP });
-    const owners = rawOwners.filter((r) => !r.working_tree);
+    const owners = rawOwners.filter((r) => !isForeignTree(r, root));
     const hazards = store.query({ types: ['anti_pattern'], file_keys: [rel], cap: HOOK_CAP });
     const rationale = store.query({ types: ['decision'], file_keys: [rel], cap: HOOK_CAP });
 
@@ -515,7 +516,7 @@ export function deriveExpected(store, { repoRoot: root, outputAxisProbes = [] } 
 
     // A working-tree copy's article is deliberately not delivered against the
     // live tree; each filtered-out claim is named rather than dropped.
-    for (const wt of rawOwners.filter((r) => r.working_tree)) {
+    for (const wt of rawOwners.filter((r) => isForeignTree(r, root))) {
       entries.push({ kind: 'exclusion', rel, record_id: wt.id, reason: 'working_tree_article' });
     }
 
@@ -552,7 +553,7 @@ export function deriveExpected(store, { repoRoot: root, outputAxisProbes = [] } 
   // predicate (deriveOutputAxisExpected above). Backward-compatible: an empty
   // (default) outputAxisProbes list adds nothing, so every pre-existing call
   // site is unchanged.
-  outputAxisProbes.forEach((probe, i) => entries.push(deriveOutputAxisExpected(store, probe, i)));
+  outputAxisProbes.forEach((probe, i) => entries.push(deriveOutputAxisExpected(store, probe, i, root)));
 
   return entries;
 }
@@ -1056,17 +1057,56 @@ function runHook(root, hook, stdin, sandboxDir) {
   return { code: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
 }
 
-function buildSandbox(snapshotDb, config) {
+/** Build the replay sandbox. The hooks replay with cwd = this sandbox, while
+ *  deriveExpected judged ownership against the AUDITED project root — so a
+ *  record whose working_tree names that project root (self-rooted: an OWNER in
+ *  the expectation, Dome Farmer issue entry 454) would read as a FOREIGN tree
+ *  in the replay and score as a false miss. The replay store is therefore a
+ *  copy of the snapshot (`replayDb`) in which every such working_tree is
+ *  REWRITTEN to the sandbox dir — rewritten rather than deleted, so the replay
+ *  still exercises the hooks' self-root branch (isForeignTree matching the
+ *  root) exactly as a live session on the project would, instead of silently
+ *  measuring the no-working_tree branch. Foreign trees are left untouched. The
+ *  snapshot itself (and so the run identity's snapshot digest) never changes. */
+function buildSandbox(snapshotDb, config, { projectRoot, replayDb }) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-delivery-oracle-'));
   mkdirSync(resolveStoreWritePath(dir, '.sterling'), { recursive: true });
   writeFileSync(resolveStoreWritePath(dir, '.sterling', 'config.json'), JSON.stringify(config));
-  writeFileSync(resolveStoreWritePath(dir, '.sterling', 'sterling.db'), readFileSync(snapshotDb));
+  rebaseSelfRootedTrees(snapshotDb, replayDb, projectRoot, dir);
+  writeFileSync(resolveStoreWritePath(dir, '.sterling', 'sterling.db'), readFileSync(replayDb));
   const git = (args) => spawnSync('git', ['-c', 'user.email=oracle@example.invalid', '-c', 'user.name=oracle', ...args], { cwd: dir, encoding: 'utf8' });
   git(['init', '-q']);
   writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
   git(['add', '-A']);
   git(['commit', '-qm', 'oracle sandbox']);
   return dir;
+}
+
+/** Copy `srcDb` to `destDb`, re-pointing every record whose working_tree is
+ *  the same location as `fromRoot` (isForeignTree's own rule) at `toRoot`. A
+ *  fresh VACUUM INTO file, closed before it is copied, so no WAL frame is left
+ *  behind for restoreStore's plain file copy to miss. */
+function rebaseSelfRootedTrees(srcDb, destDb, fromRoot, toRoot) {
+  rmSync(destDb, { force: true });
+  const src = new DatabaseSync(srcDb, { readOnly: true });
+  try {
+    src.exec(`VACUUM INTO '${destDb.replace(/'/g, "''")}'`);
+  } finally {
+    src.close();
+  }
+  const db = new DatabaseSync(destDb);
+  try {
+    const rows = db.prepare("SELECT id, body FROM records WHERE json_extract(body, '$.working_tree') IS NOT NULL").all();
+    const update = db.prepare('UPDATE records SET body = ? WHERE id = ?');
+    for (const row of rows) {
+      const body = JSON.parse(row.body);
+      if (isForeignTree(body, fromRoot)) continue;
+      body.working_tree = toRoot;
+      update.run(JSON.stringify(body), row.id);
+    }
+  } finally {
+    db.close();
+  }
 }
 
 /** Restore the sandbox store from the pristine snapshot. H10 WRITES to the
@@ -1543,7 +1583,7 @@ async function main(argv) {
   // same as the old fallback parameter.
   let projectRoot, probeDir, goldenDir;
   try {
-    projectRoot = arg('--project', argv) ?? process.cwd();
+    projectRoot = resolve(arg('--project', argv) ?? process.cwd());
     probeDir = arg('--probes', argv) ?? join(repoRoot, 'scripts', 'tests', 'fixtures', 'delivery-probes');
     goldenDir = arg('--golden', argv) ?? join(repoRoot, 'scripts', 'tests', 'fixtures', 'delivery-golden');
   } catch (e) {
@@ -1664,7 +1704,11 @@ async function main(argv) {
   const snapshotDigest = sha(readFileSync(snapshotDb)).slice(0, 16);
   const bundle = bundleHash(repoRoot);
 
-  const sandbox = buildSandbox(snapshotDb, config);
+  // The REPLAY store (see buildSandbox): the snapshot with self-rooted
+  // working_trees re-pointed at the sandbox. Every restore below copies THIS,
+  // never the raw snapshot, or the second case onward would replay unrebased.
+  const replayDb = join(snapDir, 'replay.db');
+  const sandbox = buildSandbox(snapshotDb, config, { projectRoot, replayDb });
   const scored = [];
   let golden = [];
   try {
@@ -1696,7 +1740,7 @@ async function main(argv) {
       if (seed_ledger) rmSync(resolveStoreWritePath(sandbox, '.sterling', 'transient'), { recursive: true, force: true });
       const seeded = seed_ledger ? seedPriorDenial(sandbox, probe?.expect_deny_ids) : null;
       resetSandbox(sandbox, { seed_ledger });
-      restoreStore(sandbox, snapshotDb);
+      restoreStore(sandbox, replayDb);
 
       const { stdin, sandbox_writes } = synthesizePayload(payloadCase, { cwd: sandbox, session_id: 'oracle-session' });
       applyWrites(sandbox, sandbox_writes);
@@ -1887,7 +1931,7 @@ async function main(argv) {
     // repoRoot (the CLONE root, where hooks/*.mjs actually live) — NOT
     // projectRoot, which is the audited project and may differ under
     // --project. Same rule runHook already follows for every other case.
-    golden = runGoldenFixtures(goldenFixtures, { sandboxDir: sandbox, snapshotDb, store });
+    golden = runGoldenFixtures(goldenFixtures, { sandboxDir: sandbox, snapshotDb: replayDb, store });
   } finally {
     store.close();
     rmSync(sandbox, { recursive: true, force: true });
