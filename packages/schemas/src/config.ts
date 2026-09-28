@@ -191,14 +191,14 @@ export const configSchema = z.object({
   // key.
   models: z
     .object({
-      implementor: modelEffort.default({ model: 'claude-opus-5-5', effort: 'medium' }),
-      researcher: modelEffort.default({ model: 'claude-sonnet-5', effort: 'medium' }),
-      scout: modelEffort.default({ model: 'claude-sonnet-5', effort: 'low' }),
+      implementor: modelEffort.default({ model: 'claude-sonnet-5-5', effort: 'medium' }),
+      researcher: modelEffort.default({ model: 'claude-sonnet-5-5', effort: 'medium' }),
+      scout: modelEffort.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
       classifiers: modelEffort.default({ model: 'claude-haiku-4-5', effort: 'low' }),
       // librarian is mechanical clerking — cheap model, low effort (P8). The
       // roster is classless (decision agent-roster-is-classless-four-agents), and
       // the debugger role it rejected has no key here.
-      librarian: modelEffort.default({ model: 'claude-sonnet-5', effort: 'low' }),
+      librarian: modelEffort.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
     })
     .default({}),
   // Per-project agent tool extension (decision
