@@ -9,6 +9,8 @@ import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSu
 import { bannerLines } from './banner.js';
 
 export const TABS = ['Tasks', 'Knowledge', 'Queue', 'System'] as const;
+/** the board (user-source todos) — the tab boardEdit's 'e' key operates on */
+export const TASKS_TAB = TABS.indexOf('Tasks');
 /** the knowledge explorer (formerly 'Articles'): a category→source→record tree */
 export const KNOWLEDGE_TAB = TABS.indexOf('Knowledge');
 export const QUEUE_TAB = TABS.indexOf('Queue');
@@ -43,6 +45,13 @@ export interface UiState {
    *  it, ENTER commits (empty commits as "unset"), ESCAPE cancels. Mirrors the
    *  Knowledge tab's always-visible-field idiom, scoped to one row. */
   sparringModelEdit?: string;
+  /** Tasks tab, board item edit-in-progress (user-ruled 2026-09-28, board
+   *  f25e5547 lane J: "Add TUI edit"). Absent → the plain card is shown;
+   *  present → 'e' has opened the selected todo's text for editing — every
+   *  printable key/BACKSPACE feeds `text`, ENTER commits (through the same
+   *  store write path board_update uses), ESCAPE cancels. Mirrors
+   *  sparringModelEdit's always-capture idiom, scoped to one card. */
+  boardEdit?: { id: string; text: string };
 }
 
 /** The System-tab inline selector (run r-f9a7). `key` is the config.models key
@@ -308,6 +317,16 @@ export interface ModeToggleEffect {
   type: 'mode_toggle';
   mode: 'hobby' | 'work';
 }
+/** Tasks tab board-item edit commit (user-ruled 2026-09-28, board f25e5547
+ *  lane J): the TUI's second write surface after the System tab. Carries the
+ *  full replacement text; runEffects executes it through the same store
+ *  write path board_update uses (SterlingStore.updateTodo — same id, same
+ *  slug, version bumped), never the MCP tool surface. */
+export interface BoardEditEffect {
+  type: 'board_edit';
+  id: string;
+  text: string;
+}
 export type Effect =
   | SelectEffect
   | QuitEffect
@@ -315,7 +334,8 @@ export type Effect =
   | SparringToggleEffect
   | SparringModelEffect
   | TddToggleEffect
-  | ModeToggleEffect;
+  | ModeToggleEffect
+  | BoardEditEffect;
 
 export type UiEvent =
   | { kind: 'key'; name: 'LEFT' | 'RIGHT' | 'TAB' | 'UP' | 'DOWN' | 'ENTER' | 'SPACE' | 'QUIT' | 'ESCAPE' | 'BACKSPACE' }
@@ -882,7 +902,19 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
       type = card.type;
       expanded = ui.expanded.includes(card.id);
       const pad = '  '.repeat(depth);
-      if (expanded && knowledge) {
+      if (ui.boardEdit && ui.boardEdit.id === card.id) {
+        // Tasks tab board-item edit in progress (user-ruled 2026-09-28, board
+        // f25e5547 lane J): the live buffer + caret, wrapped like the legacy
+        // card expansion below — takes priority over both expansion styles so
+        // an editor open on an already-expanded card still shows the buffer,
+        // not the stale stored body.
+        const prefix = 2 + pad.length;
+        const wrapWidth = Number.isFinite(width) ? Math.max(1, width - prefix) : width;
+        lines = wrapText(`${ui.boardEdit.text}▌`, wrapWidth).map((text, j) => ({
+          text: (j === 0 ? marker + pad : ' '.repeat(prefix)) + text,
+          kind: j === 0 ? ('title' as const) : ('body' as const),
+        }));
+      } else if (expanded && knowledge) {
         // readable layout (AC4): title line, blank separator, wrapped body
         // lines, dim meta — the title is NEVER replaced by the body.
         const indent = ' '.repeat(2 + pad.length);
@@ -963,7 +995,8 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
         : undefined,
     footer:
       `←/→ or 1-${TABS.length} tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit` +
-      (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears' : ''),
+      (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears' : '') +
+      (ui.tab === TASKS_TAB ? (ui.boardEdit ? ' · enter save · esc cancel' : ' · e edit') : ''),
     searchLine: searchActive ? `search: ${ui.searchQuery}` : undefined,
     queueCompleted,
     queueActivity,
@@ -998,7 +1031,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
 
   // a tab switch resets the cursor + scroll AND dismisses any open selector
   // (and any in-progress sparring-partner model edit, same discard-on-switch rule)
-  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: undefined, notice: undefined, sparringModelEdit: undefined });
+  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: undefined, notice: undefined, sparringModelEdit: undefined, boardEdit: undefined });
 
   // the queue tab has a fixed layout; only the card tabs scroll
   const scrollable = ui.tab !== QUEUE_TAB;
@@ -1064,6 +1097,31 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
 
   switch (event.kind) {
     case 'key':
+      // Tasks tab board-item edit (user-ruled 2026-09-28, board f25e5547 lane
+      // J): while ui.boardEdit is open, ENTER commits, BACKSPACE deletes, and
+      // ESCAPE cancels — every other named key is swallowed (no cursor
+      // movement, no quit) so the editor owns input the same way the System
+      // tab's sparringModelEdit does. Checked first, ahead of the System-tab
+      // selector block below, since the two never overlap (boardEdit is only
+      // ever opened on TASKS_TAB).
+      if (ui.tab === TASKS_TAB && ui.boardEdit) {
+        const be = ui.boardEdit;
+        switch (event.name) {
+          case 'ESCAPE':
+            return { ui: { ...ui, boardEdit: undefined }, effects };
+          case 'BACKSPACE':
+            return { ui: { ...ui, boardEdit: { ...be, text: be.text.slice(0, -1) } }, effects };
+          case 'ENTER': {
+            const trimmed = be.text.trim();
+            // an edit trimmed to empty writes nothing (todoSchema requires
+            // non-empty text) — close the editor rather than let a doomed
+            // write reach the store and throw (P5: refuse loud, not late).
+            if (trimmed) effects.push({ type: 'board_edit', id: be.id, text: trimmed });
+            return { ui: { ...ui, boardEdit: undefined }, effects };
+          }
+        }
+        return { ui, effects };
+      }
       // System tab (run r-f9a7): the inline model/effort selector state machine.
       // Handles roster navigation + open/navigate/confirm/commit/cancel; the
       // tab-switch / quit keys fall through to the generic handler below.
@@ -1226,6 +1284,13 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
       if (ui.tab === SYSTEM_TAB && ui.sparringModelEdit !== undefined) {
         return { ui: { ...ui, sparringModelEdit: ui.sparringModelEdit + ch }, effects };
       }
+      // Tasks tab board-item edit: same always-capture idiom as the two edit
+      // buffers above — every printable key ('e' included) feeds the buffer
+      // while it is open, so typing the letter 'e' into an edit never
+      // re-triggers the open-editor hotkey below.
+      if (ui.tab === TASKS_TAB && ui.boardEdit) {
+        return { ui: { ...ui, boardEdit: { ...ui.boardEdit, text: ui.boardEdit.text + ch } }, effects };
+      }
       // the Knowledge tab is an always-visible search field: EVERY printable key
       // feeds the query — 'q' and digits included (they are not hotkeys here).
       if (ui.tab === KNOWLEDGE_TAB) {
@@ -1244,6 +1309,19 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
         return reduce(store, ui, { kind: 'key', name: 'ENTER' }, viewport, knowledge, roster);
       }
       if (ch === ' ') return { ui: activate(clamp(ui.cursor)), effects };
+      // Tasks tab board-item edit (user-ruled 2026-09-28, board f25e5547 lane
+      // J): 'e' on a selected todo card opens it for editing, prefilled with
+      // its full text (card.body — the raw todo text, not the derived
+      // label). An objective group header has nothing durable to edit (it is
+      // navigation, not a record), so 'e' there is a no-op, matching how
+      // activate() treats it as fold/unfold rather than a selection.
+      if (ch === 'e' && ui.tab === TASKS_TAB) {
+        const node = nodes[clamp(ui.cursor)];
+        if (node && node.kind === 'card' && node.card.type !== 'objective') {
+          return { ui: { ...ui, boardEdit: { id: node.card.id, text: node.card.body } }, effects };
+        }
+        return { ui, effects };
+      }
       if (/^[1-9]$/.test(ch)) {
         const index = Number(ch) - 1;
         if (index < TABS.length) return { ui: switchTab(index), effects };
@@ -1298,6 +1376,20 @@ export function runEffects(store: SterlingStore, effects: Effect[], now: () => s
   for (const e of effects) {
     if (e.type === 'select') store.writeSelection(e.recordType, e.id, now());
     if (e.type === 'quit') quit = true;
+    if (e.type === 'board_edit') {
+      // Same store write path board_update uses (SterlingStore.updateTodo):
+      // the merged candidate carries the old record's id/slug/every other
+      // field unchanged, only `text` and `updated_at` replaced — updateTodo
+      // pins id/type/created_at itself and bumps version, so this is exactly
+      // an in-place edit, never a new record (user-ruled 2026-09-28, board
+      // f25e5547 lane J). No swallowed failure here (P5): if the item
+      // vanished or changed type between the key press and this write,
+      // store.updateTodo throws and propagates to main.ts's uncaughtException
+      // handler the same way every other effect's write does — never a
+      // silent no-op.
+      const old = store.get(e.id);
+      store.updateTodo(e.id, { ...(old as unknown as Record<string, unknown>), text: e.text, updated_at: now() });
+    }
   }
   return quit;
 }
