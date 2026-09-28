@@ -1,3 +1,4 @@
 {
-  "agent": "conductor"
+  "agent": "conductor",
+  "autoMemoryEnabled": false
 }
