@@ -16,7 +16,7 @@
 //
 //   node scripts/init.mjs --target <dir> [--project-name <name>]
 //     [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
-//     [--backup-path <p> | --backup-opt-out]
+//     [--backup-path <p> | --backup-opt-out] [--mode hobby|work]
 //   (stack tags ARE the domain mount manifest — §3.3; no separate domains flag)
 //   (declaration flags are required only when no recorded config exists)
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, unlinkSync, renameSync } from 'node:fs';
@@ -25,12 +25,12 @@ import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseConfig } from '@sterling/schemas';
 import { ProjectRegistry, registryPath } from '@sterling/store';
-import { arg, argAll, fail } from './lib/project.mjs';
+import { arg, argAll, hasFlag, fail } from './lib/project.mjs';
 import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
-import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './lib/handoff-projection.mjs';
+import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL, PROJECT_MODES } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -57,6 +57,19 @@ const projectNameFlag = arg('--project-name');
 const stackTagsFlag = (arg('--stack-tags') ?? '').split(',').filter(Boolean);
 const backupPathFlag = arg('--backup-path');
 const backupOptOutFlag = process.argv.includes('--backup-opt-out');
+// the project mode the /sterling:init SOP asked for on a NEW project (decision
+// project-mode-hobby-work-toggle-decides-flow). It seeds a fresh config only; an
+// existing config's mode is switched in the TUI System tab, never by this flag.
+// A malformed --mode (given twice, or followed by another flag) makes the parser
+// throw; it is a refusal like an invalid value (exit 2), never a stack trace.
+let modeFlagGiven;
+let modeFlag;
+try {
+  modeFlagGiven = hasFlag('--mode');
+  modeFlag = arg('--mode');
+} catch (e) {
+  fail(`init REFUSED: ${e.message}`, 2);
+}
 const declaredToolchains = argAll('--toolchain').map((spec) => {
   const [adapter, globs] = spec.split(':');
   return { adapter, path_globs: (globs ?? '').split(',').filter(Boolean) };
@@ -78,6 +91,9 @@ const canonical = (v) =>
 
 // ---- verify pass: every refusal happens BEFORE any write ----
 if (!existsSync(target)) fail(`init REFUSED: target '${target}' does not exist`, 2);
+if (modeFlagGiven && !PROJECT_MODES.includes(modeFlag)) {
+  fail(`init REFUSED: --mode must be 'hobby' or 'work' — got ${JSON.stringify(modeFlag ?? '')}`, 2);
+}
 const mcpServerEntry = join(pluginRoot, 'packages', 'mcp-server', 'dist', 'main.js');
 if (!existsSync(mcpServerEntry)) fail('init REFUSED: MCP server not built — run `npm run build` in the plugin first', 2);
 // The launchers below bake the TUI bundle path; generating them against a
@@ -166,8 +182,9 @@ const expectedConfig = parseConfig({
   ...(eff.backupPath ? { backup_path: eff.backupPath } : { backup_opt_out: eff.backupOptOut }),
   // the project mode (decision project-mode-hobby-work-toggle-decides-flow) is a
   // recorded declaration like the ones above, switched in the TUI System tab: a
-  // work project's config is not "hand-edited" for carrying it
-  ...(recorded ? { mode: recorded.mode } : {}),
+  // work project's config is not "hand-edited" for carrying it. A fresh config
+  // takes --mode, else the explicit 'hobby' default.
+  mode: recorded ? recorded.mode : (modeFlag ?? 'hobby'),
 });
 if (eff.splitRatio === undefined) eff.splitRatio = expectedConfig.tui_split_ratio;
 
@@ -185,6 +202,22 @@ if (recorded) {
   if (projectNameFlag && recorded.project_name && projectNameFlag !== recorded.project_name) flagDiffs.push('--project-name');
   if (flagDiffs.length) {
     notes.push(`note: ${flagDiffs.join(', ')} differ(s) from the recorded config — NOT applied; edit .sterling/config.json directly if the change is intended`);
+  }
+}
+
+// the summary's mode line: set (a fresh config took --mode), defaulted (a fresh
+// config with no --mode) or kept (an existing config's mode always wins; a
+// differing --mode is a loud notice, never a write)
+const modeLines = [];
+if (!recorded) {
+  modeLines.push(modeFlagGiven
+    ? `mode: ${modeFlag} (set by --mode)`
+    : 'mode: hobby (defaulted — no --mode was given; change it in the TUI System tab)');
+} else {
+  const recordedMode = PROJECT_MODES.includes(recorded.mode) ? recorded.mode : JSON.stringify(recorded.mode);
+  modeLines.push(`mode: ${recordedMode} (kept — the recorded config wins)`);
+  if (modeFlagGiven && modeFlag !== recorded.mode) {
+    modeLines.push(`⚠ --mode ${modeFlag} NOT applied: this project's recorded mode is ${recordedMode} — switch it in the TUI System tab, then rerun init or /sterling:update`);
   }
 }
 
@@ -1173,6 +1206,7 @@ console.log('item'.padEnd(width) + '  ' + 'status'.padEnd(statusWidth) + '  deta
 for (const i of items) {
   console.log(i.item.padEnd(width) + '  ' + i.status.padEnd(statusWidth) + '  ' + i.detail);
 }
+console.log('\n' + modeLines.join('\n'));
 console.log('\ndead-term check: clean');
 for (const line of warns) console.log(line);
 for (const line of notes) console.log(line);
