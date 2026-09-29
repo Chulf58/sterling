@@ -32,7 +32,7 @@
 // A score threshold cannot fix it (see below), so this hook now narrows by
 // record TYPE and command CLASS instead: (1) the header opens with "ADVISORY
 // (not an error)"; (2) Bash/PowerShell calls whose command is VCS or listing
-// output (LISTING_COMMANDS) are skipped; (3) only anti_pattern records are
+// output (lib/listing-command.mjs) are skipped; (3) only anti_pattern records are
 // pointed at — decisions reach the model through H20 and explicit lookups.
 //
 // POINTER, NOT SUBSTANCE — an output match is weaker evidence of relevance
@@ -61,6 +61,7 @@
 import { readStdin, allow, openStore, repoRel, exitAfterWrite, warnNonBlocking } from './lib/common.mjs';
 import { isForeignTree } from './lib/working-tree.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
+import { isListingCommand } from './lib/listing-command.mjs';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import {
   guardPath,
@@ -115,26 +116,6 @@ export const OUTPUT_AXIS_POINTER_CAP = 1;
 //
 // Left to the conductor + an outside-family consult, per the ruling's own
 // fallback clause (FOLD into H19/H20 if noise persists).
-
-/** First command token (basename) whose OUTPUT is VCS or listing output — the
- *  command class the 2026-09-29 ruling (5564361d v2) skips: such output echoes
- *  paths and prose the store is about, so it matched constantly and pointed at
- *  nothing relevant. */
-export const LISTING_COMMANDS = new Set(['git', 'ls', 'find', 'grep', 'rg']);
-
-// One leading prefix that does not change which program produces the output:
-// an env assignment (`FOO=bar `), `sudo `, or a `cd <dir> &&` / `cd <dir>;` step.
-const COMMAND_PREFIX = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+|sudo\s+|cd(?:\s+(?:"[^"]*"|'[^']*'|[^\s;&]+))?\s*(?:&&|;)\s*)/;
-
-/** True when the command's first program, after stripping COMMAND_PREFIX
- *  repeatedly, is one of LISTING_COMMANDS. Only the FIRST program counts: a
- *  listing tool later in a pipe (`cat log | grep x`) does not skip. */
-export function isListingCommand(command) {
-  let rest = String(command ?? '').trim();
-  for (let m = rest.match(COMMAND_PREFIX); m; m = rest.match(COMMAND_PREFIX)) rest = rest.slice(m[0].length);
-  const first = rest.match(/^[^\s;&|]+/)?.[0] ?? '';
-  return LISTING_COMMANDS.has(first.split('/').pop());
-}
 
 /** Title-only clip: this channel renders NO guidance/rationale/statement
  *  prose inline, ever — a pointer line names the record, it never restates

@@ -7944,6 +7944,35 @@ function recordAdvisoryFire(root, hook, sessionId) {
   }
 }
 
+// scripts/hooks/lib/listing-command.mjs
+var LISTING_COMMANDS = /* @__PURE__ */ new Set(["git", "ls", "find", "grep", "rg"]);
+var SEGMENT_SPLIT = /&&|\|\||[;|\n]|(?<![>&])&(?![>&\d])/;
+var SEGMENT_PREFIX = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+|sudo\s+)/;
+var PROGRAM_TOKEN = /^(?:"([^"]*)"|'([^']*)'|(\S+))/;
+var FIND_RUNS_PROGRAM = /\s-(?:exec|execdir|ok|okdir)(?=\s|$)/;
+function programOf(segment) {
+  let rest = segment.trim();
+  for (let m2 = rest.match(SEGMENT_PREFIX); m2; m2 = rest.match(SEGMENT_PREFIX)) rest = rest.slice(m2[0].length);
+  const m = rest.match(PROGRAM_TOKEN);
+  if (!m) return null;
+  const token = m[1] ?? m[2] ?? m[3];
+  const name = token.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
+  return { name, rest };
+}
+function isListingCommand(command) {
+  let listing = 0;
+  for (const segment of String(command ?? "").split(SEGMENT_SPLIT)) {
+    if (segment.trim() === "") continue;
+    const program = programOf(segment);
+    if (!program) return false;
+    if (program.name === "cd") continue;
+    if (!LISTING_COMMANDS.has(program.name)) return false;
+    if (program.name === "find" && FIND_RUNS_PROGRAM.test(program.rest)) return false;
+    listing += 1;
+  }
+  return listing > 0;
+}
+
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, renameSync, openSync, closeSync } from "node:fs";
 import { join as join4, dirname as dirname3 } from "node:path";
@@ -8015,14 +8044,6 @@ function joinPointerBlock({ header, lines = [], tail } = {}) {
 // scripts/hooks/h23-output-axis.mjs
 var OUTPUT_AXIS_CLIP = 16e3;
 var OUTPUT_AXIS_POINTER_CAP = 1;
-var LISTING_COMMANDS = /* @__PURE__ */ new Set(["git", "ls", "find", "grep", "rg"]);
-var COMMAND_PREFIX = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+|sudo\s+|cd(?:\s+(?:"[^"]*"|'[^']*'|[^\s;&]+))?\s*(?:&&|;)\s*)/;
-function isListingCommand(command) {
-  let rest = String(command ?? "").trim();
-  for (let m = rest.match(COMMAND_PREFIX); m; m = rest.match(COMMAND_PREFIX)) rest = rest.slice(m[0].length);
-  const first = rest.match(/^[^\s;&|]+/)?.[0] ?? "";
-  return LISTING_COMMANDS.has(first.split("/").pop());
-}
 function clipTitle(text, cap = 140) {
   const t = String(text ?? "").replace(/\s+/g, " ").trim();
   return t.length <= cap ? t : `${t.slice(0, cap)}\u2026`;
@@ -8078,8 +8099,6 @@ try {
   warnNonBlocking(`H23: output-axis delivery failed: ${e && e.message || e}`);
 }
 export {
-  LISTING_COMMANDS,
   OUTPUT_AXIS_CLIP,
-  OUTPUT_AXIS_POINTER_CAP,
-  isListingCommand
+  OUTPUT_AXIS_POINTER_CAP
 };

@@ -22,6 +22,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { isListingCommand } from '../hooks/lib/listing-command.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -543,6 +544,80 @@ test('AC8: a >64KB tool_response with matching vocabulary inside the first 16,00
     assert.equal(r.code, 0, 'a large tool_response must never crash the hook');
     const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
     assert.match(payload, new RegExp(`knowledge_get ${ap.id}`), 'the match inside the first 16,000 chars still fires');
+  } finally {
+    cleanup();
+  }
+});
+
+test('narrowed: a compound command is skipped only when EVERY segment is a listing program (unit)', () => {
+  const skipped = [
+    'git status | grep foo',
+    'cd a && git log',
+    'git log && git diff',
+    'ls -la; ls src',
+    'grep -rl x . | rg y',
+    'git log 2>&1',
+    'find . -name "*.log" -print',
+    'git.exe status',
+    'C:\\Git\\bin\\git.exe log',
+    '"C:\\Program Files\\Git\\bin\\git.exe" log',
+    'LS',
+    'Git Status',
+    '& git status',
+    "& 'C:\\Git\\bin\\git.exe' log",
+  ];
+  for (const command of skipped) assert.equal(isListingCommand(command), true, `${command} must be skipped`);
+  const fires = [
+    'git log && cat secret.md',
+    'ls; cat notes.txt',
+    'grep -rl x | xargs cat',
+    'find . -exec cat {} \\;',
+    'find . -execdir cat {} +',
+    'ls || cat notes.txt',
+    'ls\ncat notes.txt',
+    'ls & cat notes.txt',
+    'cd a; cat notes.txt',
+    'cd a',
+    'cat run.log | grep breach',
+    'grep -rl x . | sort',
+    'grep "a;b" f',
+    'gitleaks detect',
+    'node find-probe.mjs',
+    'git.bat status',
+    '',
+  ];
+  for (const command of fires) assert.equal(isListingCommand(command), false, `${JSON.stringify(command)} must NOT be skipped`);
+  assert.equal(isListingCommand(undefined), false);
+});
+
+test('narrowed: a compound with a non-listing segment still fires end to end', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
+    for (const [i, command] of ['git log && cat secret.md', 'ls; cat notes.txt', 'grep -rl x | xargs cat', 'find . -exec cat {} \\;'].entries()) {
+      const r = runHook(postBash(dir, command, CONTENT_SENTENCE, { session_id: `compound-${i}` }), dir);
+      assert.match(directPayload(r), new RegExp(`knowledge_get ${ap.id}`), `${command} must fire`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('narrowed: PowerShell `git status` output containing store terms is silent, and Get-Content still fires', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
+    const r = runHook(
+      { hook_event_name: 'PostToolUse', tool_name: 'PowerShell', tool_input: { command: 'git status' }, tool_response: CONTENT_SENTENCE, cwd: dir },
+      dir
+    );
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, '', 'the command-class skip applies to PowerShell exactly as to Bash');
+    const control = runHook(
+      { hook_event_name: 'PostToolUse', tool_name: 'PowerShell', tool_input: { command: 'Get-Content run.log' }, tool_response: CONTENT_SENTENCE, cwd: dir },
+      dir
+    );
+    assert.match(directPayload(control), new RegExp(`knowledge_get ${ap.id}`), 'control: a non-listing PowerShell command still fires');
   } finally {
     cleanup();
   }

@@ -106,6 +106,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { isListingCommand } from '../hooks/lib/listing-command.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ORACLE = join(root, 'scripts', 'delivery-oracle.mjs');
@@ -1588,7 +1589,7 @@ test('K3: tool "Read" synthesizes an ABSOLUTE file_path under the sandbox cwd; t
       { kind: 'case', payload_kind: 'output_axis', tool: 'Bash', rel, tool_response: CONTENT_SENTENCE },
       { cwd: SANDBOX }
     ).stdin.tool_input.command;
-    assert.doesNotMatch(cmd, /^(git|ls|find|grep|rg)\b/, `synthesized command "${cmd}" must not be a listing command H23 skips`);
+    assert.equal(isListingCommand(cmd), false, `synthesized command "${cmd}" must not be a listing command H23 skips`);
   }
 });
 
