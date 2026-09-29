@@ -55,7 +55,7 @@ test('H1 prints the reconcile count and the OLDEST item age on the banner and to
     reconcileItem(p.store, oldest);
     const judged = reconcileItem(p.store, daysAgo(0), "reconcile article 'y' — changed");
     // 'owes prose' lives in the worker's JSONL, keyed by id + current file_keys (never on the item).
-    writeFileSync(join(p.dir, '.sterling', 'maintenance-worker.jsonl'), JSON.stringify({ kind: 'verdict', item_id: judged.id, verdict: 'owes_prose', file_keys: ['src/a.mjs'], reason: 'new flag' }) + '\n');
+    writeFileSync(join(p.dir, '.sterling', 'maintenance-worker.jsonl'), JSON.stringify({ kind: 'verdict', item_id: judged.id, verdict: 'owes_prose', file_keys: ['src/a.mjs'], reason: 'new flag', evidence: true }) + '\n');
     const out = h1(p.dir);
     assert.match(out.systemMessage, /3 maintenance items pending · 3 items in lane reconcile_needed, oldest 3d 2h, worker not running$/);
     const ctx = out.hookSpecificOutput.additionalContext;
@@ -88,6 +88,19 @@ test('H1 stays silent about the backlog when no reconcile item is open', () => {
     const out = h1(p.dir);
     assert.doesNotMatch(out.systemMessage, /reconcile/);
     assert.doesNotMatch(out.hookSpecificOutput.additionalContext, /RECONCILE BACKLOG/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('H1 names a last worker run that made no progress', () => {
+  const p = makeProject();
+  try {
+    reconcileItem(p.store, daysAgo(0, 2));
+    const at = new Date(Date.now() - 60_000).toISOString();
+    writeFileSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify({ spend: {}, last_run: { ok: true, no_progress: true, at } }));
+    const out = h1(p.dir);
+    assert.match(out.systemMessage, new RegExp(`last worker run at ${at.replace(/[.]/g, '\\.')} made NO PROGRESS \\(0 evidence-backed verdicts, 0 closes\\)`));
   } finally {
     p.cleanup();
   }

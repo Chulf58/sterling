@@ -1345,6 +1345,7 @@ if (reconcile.count > 0) {
     const ws = workerStatus(input.cwd);
     if (ws.running) worker = `worker running (pid ${ws.pid}, since ${ws.since})`;
     if (ws.lastRun && ws.lastRun.ok === false) lastRunNote = `; last worker run FAILED at ${ws.lastRun.at}: ${ws.lastRun.error} (log: .sterling/maintenance-worker.log)`;
+    else if (ws.lastRun && ws.lastRun.no_progress === true) lastRunNote = `; last worker run at ${ws.lastRun.at} made NO PROGRESS (0 evidence-backed verdicts, 0 closes)`;
     if (ws.spentToday > 0) lastRunNote += `; worker spend today $${ws.spentToday.toFixed(2)}`;
   } catch (e) {
     worker = `worker state unreadable (${e?.message ?? e})`;

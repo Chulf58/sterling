@@ -33,7 +33,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const WORKER_MODEL = 'claude-sonnet-5-5';
@@ -140,15 +140,16 @@ export function rotateJournal(root, limit = ROTATE_BYTES) {
   const standing = judgedVerdicts(root);
   renameSync(journal, `${journal}.1`);
   const at = new Date().toISOString();
-  const lines = [...standing].map(([item_id, v]) => JSON.stringify({ at, kind: 'verdict', carried: true, item_id, verdict: v.verdict, file_keys: JSON.parse(v.keys), ...(v.head ? { head: v.head } : {}) }));
+  // judgedVerdicts holds evidence-backed verdicts only, so only those carry.
+  const lines = [...standing].map(([item_id, v]) => JSON.stringify({ at, kind: 'verdict', carried: true, item_id, verdict: v.verdict, file_keys: JSON.parse(v.keys), evidence: true, ...(v.head ? { head: v.head } : {}) }));
   if (lines.length) writeFileSync(journal, lines.join('\n') + '\n');
 }
 
 const sortedKeys = (keys) => JSON.stringify([...(keys ?? [])].map(String).sort());
 
-/** item id -> {verdict, keys, head} for its LATEST standing 'owes_prose' or
- *  'refused' verdict, from the JSONL's .1 backup then the JSONL. Any other
- *  later verdict for the id ('closed') clears it. */
+/** item id -> {verdict, keys, head} for its LATEST standing evidence-backed
+ *  'owes_prose' or 'refused' verdict, from the JSONL's .1 backup then the
+ *  JSONL. A later 'closed' verdict for the id clears it. */
 export function judgedVerdicts(root) {
   const { journal } = workerPaths(root);
   const map = new Map();
@@ -169,9 +170,12 @@ export function judgedVerdicts(root) {
         continue; // a torn last line from a killed run judges nothing
       }
       if (!v?.item_id || v.kind !== 'verdict') continue;
-      if ((v.verdict === 'owes_prose' || v.verdict === 'refused') && Array.isArray(v.file_keys)) {
+      // Only an EVIDENCE-BACKED verdict stands (the runner's gate stamps
+      // evidence:true). A legacy or gate-failed owes_prose, and an 'unjudged'
+      // line, judge nothing and never suppress a relaunch; 'closed' clears.
+      if ((v.verdict === 'owes_prose' || v.verdict === 'refused') && v.evidence === true && Array.isArray(v.file_keys)) {
         map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
-      } else map.delete(v.item_id);
+      } else if (v.verdict === 'closed') map.delete(v.item_id);
     }
   }
   return map;
@@ -197,6 +201,12 @@ export function isJudged(item, verdicts, head) {
   const v = verdicts.get(item.id);
   if (!v || v.keys !== sortedKeys(item.file_keys)) return false;
   return v.verdict === 'owes_prose' || (v.verdict === 'refused' && Boolean(head) && v.head === head);
+}
+
+/** The owning article's slug as the reconcile text names it
+ *  ("reconcile article '<slug>' — …"), or null. */
+export function articleSlug(item) {
+  return /^reconcile article '([^']+)'/.exec(String(item?.text ?? ''))?.[1] ?? null;
 }
 
 /** Every open reconcile_needed item, read with the same count-then-capped-query
@@ -445,10 +455,15 @@ export function maybeLaunchMaintenanceWorker(opts) {
     const paths = workerPaths(opts.root);
     const state = readState(opts.root);
     const last = state.last_run;
-    const failedAt = last && last.ok === false ? Date.parse(last.at ?? '') : NaN;
+    // A failed run AND a run that made no progress (no evidence-backed verdict,
+    // no close) both back off: unjudged items stay eligible, so without this a
+    // worker that judges nothing would relaunch at every Stop or commit.
+    const stalled = last && (last.ok === false || last.no_progress === true);
+    const failedAt = stalled ? Date.parse(last.at ?? '') : NaN;
     if (Number.isFinite(failedAt) && nowMs - failedAt < BACKOFF_MS) {
       const until = new Date(failedAt + BACKOFF_MS).toISOString();
-      return { launched: false, reason: 'backoff', line: `⚠ Sterling maintenance worker: last run FAILED at ${last.at} (${last.error}) — backing off, no relaunch before ${until} ${LOG_HINT}.` };
+      const what = last.ok === false ? `last run FAILED at ${last.at} (${last.error})` : `worker made no progress in its last run at ${last.at} (0 evidence-backed verdicts, 0 closes)`;
+      return { launched: false, reason: 'backoff', line: `⚠ Sterling maintenance worker: ${what} — backing off, no relaunch before ${until} ${LOG_HINT}.` };
     }
     const cap = dailyBudget(opts.config);
     const spent = spentOn(state, utcDay(nowMs));
@@ -487,7 +502,7 @@ export function maybeLaunchMaintenanceWorker(opts) {
     if (!token) return { launched: false, reason: 'already_running' };
     writeFileSync(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
     // The child judges ONLY these (PARTIAL 2); the runner checks the token.
-    writeFileSync(paths.eligible, JSON.stringify({ token, head: git.head, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [] })) }));
+    writeFileSync(paths.eligible, JSON.stringify({ token, head: git.head, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
 
     let logFd;
     try {
@@ -504,7 +519,9 @@ export function maybeLaunchMaintenanceWorker(opts) {
       child.on?.('error', () => releaseLock(paths, token));
       child.unref?.();
       writeFileSync(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: 'running', token }));
-      const note = last && last.ok === false ? `ℹ Sterling maintenance worker: the previous run FAILED at ${last.at} (${last.error}); relaunched after the back-off ${LOG_HINT}.` : undefined;
+      const note = stalled
+        ? `ℹ Sterling maintenance worker: the previous run ${last.ok === false ? `FAILED at ${last.at} (${last.error})` : `made no progress at ${last.at}`}; relaunched after the back-off ${LOG_HINT}.`
+        : undefined;
       return { launched: true, reason: 'launched', pid: child.pid, items: eligible.length, ...(note ? { line: note } : {}) };
     } catch (e) {
       releaseLock(paths, token);
@@ -564,15 +581,19 @@ export function parseVerdicts(resultText) {
  * maintenance_remove call with its result as soon as the result arrives (so a
  * killed run still leaves its closes on record) and keeps the final result.
  */
-export function streamJournal(journal) {
+export function streamJournal(journal, observe = () => {}) {
   let buf = '';
   const pending = new Map();
-  const out = { result: null, removes: 0, lines: 0 };
+  const out = { result: null, removes: 0, closedOk: 0, lines: 0 };
   const handle = (e) => {
     out.lines++;
     const content = e?.message?.content;
     if (e?.type === 'assistant' && Array.isArray(content)) {
-      for (const c of content) if (c?.type === 'tool_use' && String(c.name).endsWith('__maintenance_remove')) pending.set(c.id, c.input ?? {});
+      for (const c of content) {
+        if (c?.type !== 'tool_use') continue;
+        observe(String(c.name), c.input ?? {});
+        if (String(c.name).endsWith('__maintenance_remove')) pending.set(c.id, c.input ?? {});
+      }
     } else if (e?.type === 'user' && Array.isArray(content)) {
       for (const c of content) {
         if (c?.type !== 'tool_result' || !pending.has(c.tool_use_id)) continue;
@@ -581,6 +602,7 @@ export function streamJournal(journal) {
         const text = Array.isArray(c.content) ? c.content.map((p) => p?.text ?? '').join('') : String(c.content ?? '');
         journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, is_error: Boolean(c.is_error), result: text.slice(0, 400) });
         out.removes++;
+        if (!c.is_error) out.closedOk++;
       }
     } else if (e?.type === 'result') {
       out.result = e;
@@ -613,6 +635,16 @@ export function streamJournal(journal) {
   };
 }
 
+/** Did the stream show the child read this item's article AND one of its
+ *  files? The article counts by uuid, an 8+ char uuid prefix, or its slug;
+ *  a file counts by Read of it or Grep with it as the path. */
+export function hasEvidence(item, seenArticles, seenFiles, root) {
+  const link = String(item.feature_link ?? '');
+  const article = [...seenArticles].some((id) => (link && (id === link || (id.length >= 8 && link.startsWith(id)))) || (item.slug && id === item.slug));
+  const file = (item.file_keys ?? []).some((k) => seenFiles.has(resolve(root, k)));
+  return article && file;
+}
+
 /**
  * The runner's body: run the child on the launcher's ELIGIBLE items, journal
  * every maintenance_remove call and verdict (a refused close becomes a
@@ -635,6 +667,7 @@ export async function runWorker(opts) {
     const e = readJson(paths.eligible);
     return e && !e.unreadable && e.token === opts.token && Array.isArray(e.items) ? e : null;
   };
+  const abs = (p) => (isAbsolute(String(p)) ? resolve(String(p)) : resolve(opts.root, String(p)));
   const buildArgs = (eligible) =>
     buildWorkerArgs({ prompt: workerPrompt(opts.pluginRoot, opts.root, eligible), mcpConfig: resolveMcpConfig(opts.pluginRoot, opts.root), budgetUsd: budgetOk ? budgetUsd : rawBudget });
   if (opts.dryRun) {
@@ -691,13 +724,24 @@ export async function runWorker(opts) {
     // them changes (an item the server always refuses must not relaunch the
     // worker at every Stop). A permission denial is not a server refusal.
     const byId = new Map((eligible?.items ?? []).map((t) => [t.id, t]));
+    let refusedVerdicts = 0;
     const journalCall = (entry) => {
       journal(entry);
       if (entry.kind === 'tool_call' && entry.is_error === true && byId.has(entry.item_id) && !/permission/i.test(entry.result ?? '')) {
-        journal({ kind: 'verdict', item_id: entry.item_id, verdict: 'refused', file_keys: byId.get(entry.item_id).file_keys, head: eligible.head, reason: String(entry.result ?? '').slice(0, 200) });
+        // The server's refusal IS the evidence for this verdict.
+        journal({ kind: 'verdict', item_id: entry.item_id, verdict: 'refused', file_keys: byId.get(entry.item_id).file_keys, head: eligible.head, evidence: true, reason: String(entry.result ?? '').slice(0, 200) });
+        refusedVerdicts++;
       }
     };
-    const stream = streamJournal(journalCall);
+    // EVIDENCE GATE (P3, not the prompt alone): what the child actually read.
+    const seenArticles = new Set();
+    const seenFiles = new Set();
+    const observe = (name, input) => {
+      if (name.endsWith('__knowledge_get') && input.id) seenArticles.add(String(input.id));
+      else if (name === 'Read' && input.file_path) seenFiles.add(abs(input.file_path));
+      else if (name === 'Grep' && input.path) seenFiles.add(abs(input.path));
+    };
+    const stream = streamJournal(journalCall, observe);
     const timeoutMs = opts.timeoutMs ?? WORKER_TIMEOUT_MS;
     const logCap = opts.logCapBytes ?? LOG_RUN_CAP_BYTES;
     let logged = 0;
@@ -739,13 +783,29 @@ export async function runWorker(opts) {
         resolve({ code: c, spawnError: null, timedOut });
       });
     });
-    const { result, removes } = stream.end();
+    const { result, removes, closedOk } = stream.end();
     if (spawnError) {
       record({ ok: false, at: iso(), error: `could not start ${bin}: ${spawnError.message ?? spawnError}`, charged_usd: 0 });
       return 1;
     }
     const verdicts = parseVerdicts(result?.result);
-    for (const v of verdicts) journal({ kind: 'verdict', ...v });
+    let evidenced = 0;
+    for (const v of verdicts) {
+      if (v.verdict !== 'owes_prose') {
+        journal({ kind: 'verdict', ...v });
+        continue;
+      }
+      // An owes_prose verdict stands only when the stream shows the child
+      // read BOTH the item's article (knowledge_get) AND one of its files
+      // (Read/Grep). Otherwise it is 'unjudged' and suppresses nothing.
+      const item = byId.get(v.item_id);
+      if (item && hasEvidence(item, seenArticles, seenFiles, opts.root)) {
+        journal({ kind: 'verdict', ...v, file_keys: item.file_keys, evidence: true });
+        evidenced++;
+      } else {
+        journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, verdict: 'unjudged', reason: 'no evidence', claimed_reason: v.reason ?? null });
+      }
+    }
     const denials = Array.isArray(result?.permission_denials) ? result.permission_denials.length : 0;
     const problems = [
       timedOut ? `killed after ${Math.round(timeoutMs / 60_000)} min timeout` : null,
@@ -765,6 +825,11 @@ export async function runWorker(opts) {
       verdicts: verdicts.length,
       closed: verdicts.filter((v) => v.verdict === 'closed').length,
       remove_calls: removes,
+      closes_ok: closedOk,
+      evidenced_verdicts: evidenced,
+      // No evidence-backed verdict and no close: back off like a failure.
+      refused_verdicts: refusedVerdicts,
+      no_progress: evidenced === 0 && closedOk === 0 && refusedVerdicts === 0,
       cost_usd: reported ? cost : null,
       charged_usd: reported ? cost : budgetUsd,
     });

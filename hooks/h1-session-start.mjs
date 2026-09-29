@@ -8127,7 +8127,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve3) => setTimeout(resolve3, ms));
+  return new Promise((resolve4) => setTimeout(resolve4, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -8988,7 +8988,7 @@ function writeInitialGitSettled(root, snapshot) {
 
 // scripts/hooks/lib/maintenance-worker.mjs
 import { closeSync as closeSync2, existsSync as existsSync6, mkdirSync as mkdirSync7, openSync as openSync2, readFileSync as readFileSync5, renameSync as renameSync5, rmSync as rmSync3, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync5, appendFileSync } from "node:fs";
-import { dirname as dirname7, join as join8 } from "node:path";
+import { dirname as dirname7, isAbsolute as isAbsolute2, join as join8, resolve as resolve3 } from "node:path";
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;
 var WORKER_TIMEOUT_MS = 20 * 6e4;
@@ -9045,9 +9045,9 @@ function judgedVerdicts(root) {
         continue;
       }
       if (!v?.item_id || v.kind !== "verdict") continue;
-      if ((v.verdict === "owes_prose" || v.verdict === "refused") && Array.isArray(v.file_keys)) {
+      if ((v.verdict === "owes_prose" || v.verdict === "refused") && v.evidence === true && Array.isArray(v.file_keys)) {
         map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
-      } else map.delete(v.item_id);
+      } else if (v.verdict === "closed") map.delete(v.item_id);
     }
   }
   return map;
@@ -9745,6 +9745,7 @@ if (reconcile.count > 0) {
     const ws = workerStatus(input.cwd);
     if (ws.running) worker = `worker running (pid ${ws.pid}, since ${ws.since})`;
     if (ws.lastRun && ws.lastRun.ok === false) lastRunNote = `; last worker run FAILED at ${ws.lastRun.at}: ${ws.lastRun.error} (log: .sterling/maintenance-worker.log)`;
+    else if (ws.lastRun && ws.lastRun.no_progress === true) lastRunNote = `; last worker run at ${ws.lastRun.at} made NO PROGRESS (0 evidence-backed verdicts, 0 closes)`;
     if (ws.spentToday > 0) lastRunNote += `; worker spend today $${ws.spentToday.toFixed(2)}`;
   } catch (e) {
     worker = `worker state unreadable (${e?.message ?? e})`;
