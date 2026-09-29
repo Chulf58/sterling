@@ -7,7 +7,7 @@
 // queue holds an open reconcile_needed item that is clean against HEAD and not
 // yet judged, the hook calls maybeLaunchMaintenanceWorker. That starts ONE
 // detached node runner (scripts/maintenance-worker-run.mjs), which runs a
-// headless `claude -p` librarian on Claude Sonnet 5.5 at LOW effort (decision
+// headless `claude -p` librarian on Claude Sonnet 5.5 at MEDIUM effort (decision
 // point (0)). The child judges each item: already paid -> maintenance_remove
 // (the server's attested close checks HEAD); not paid -> an 'owes_prose'
 // verdict in its final report. The runner streams the child's output, logs
@@ -37,7 +37,7 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const WORKER_MODEL = 'claude-sonnet-5-5';
-export const WORKER_EFFORT = 'low';
+export const WORKER_EFFORT = 'medium';
 export const WORKER_AGENT = 'librarian';
 /** Per-run cap passed to --max-budget-usd (lowered to what is left of the day). */
 export const WORKER_RUN_BUDGET_USD = 2;
