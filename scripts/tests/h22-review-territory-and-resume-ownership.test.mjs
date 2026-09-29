@@ -169,8 +169,8 @@ test('a MALFORMED REVIEW-TERRITORY falls back to free-prose extraction, and says
   }
 });
 
-test('REVIEW-TERRITORY entries that are not canonical repo-relative paths (absolute, parent escape, glob, trailing slash) are malformed, never partially honoured', () => {
-  for (const bad of ['["/abs/game"]', '["../game"]', '["game/**"]', '["game/farm/"]', '{"files":["game"]}', '["game", 3]']) {
+test('REVIEW-TERRITORY entries that are not canonical repo-relative paths (absolute, parent escape, glob, doubled trailing slash) are malformed, never partially honoured', () => {
+  for (const bad of ['["/abs/game"]', '["../game"]', '["game/**"]', '["game/farm//"]', '{"files":["game"]}', '["game", 3]']) {
     const { dir, cleanup } = makeProject();
     try {
       const s = dispatch(dir, { tool_use_id: 'toolu_bad', agent_id: 'lane-bad', prompt: `Lane.\nREVIEW-TERRITORY: ${bad}\nOwn game/x.gd.` });
@@ -178,6 +178,47 @@ test('REVIEW-TERRITORY entries that are not canonical repo-relative paths (absol
       assert.equal(entry.files_source, 'free-prose-malformed-territory', `${bad} is malformed`);
       assert.deepEqual(entry.files, ['game/x.gd'], `${bad}: only the free-prose fallback contributes`);
       assert.match(s.stderr, /\[territory_declaration_malformed\]/, `${bad} disclosed: ${s.stderr}`);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+// USER RULING 2026-09-29 (question form, option "Accept, strip one '/'
+// (Recommended)"): a directory entry written with ONE trailing slash is the
+// directory itself. Dome Farmer declared `game/ui/farm_hud/` and lost its whole
+// territory to the free-prose fallback.
+test('a directory entry with ONE trailing slash is accepted and normalised: ["game/ui/farm_hud/"] owns game/ui/farm_hud', () => {
+  for (const [decl, want] of [
+    ['["game/ui/farm_hud/"]', ['game/ui/farm_hud']],
+    ['["game/farm/", "game/farm"]', ['game/farm']],
+  ]) {
+    const { dir, cleanup } = makeProject();
+    try {
+      const s = dispatch(dir, { tool_use_id: 'toolu_slash', agent_id: 'lane-slash', prompt: `Lane.\nREVIEW-TERRITORY: ${decl}\nOwn game/x.gd.` });
+      const [entry] = roundsFor(dir, 'lane-slash');
+      assert.equal(entry.files_source, 'review-territory', `${decl} is a valid declaration: ${s.stderr}`);
+      assert.deepEqual(entry.files, want, `${decl}: the trailing slash is stripped and duplicates collapse`);
+      assert.doesNotMatch(s.stderr, /territory_declaration_malformed/, `${decl} is not disclosed as malformed`);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+test('a malformed declaration names the failing entry by index and the reason it was refused', () => {
+  for (const [decl, entryRe, reasonRe] of [
+    ['["game/farm", "game/**"]', /entry 1 \("game\/\*\*"\)/, /glob/],
+    ['["game/farm", "../game"]', /entry 1 \("\.\.\/game"\)/, /parent-escaping/],
+    ['["/abs/game"]', /entry 0 \("\/abs\/game"\)/, /absolute/],
+    ['["game", 3]', /entry 1 \(3\)/, /not a string/],
+  ]) {
+    const { dir, cleanup } = makeProject();
+    try {
+      const s = dispatch(dir, { tool_use_id: 'toolu_why', agent_id: 'lane-why', prompt: `Lane.\nREVIEW-TERRITORY: ${decl}\nOwn game/x.gd.` });
+      assert.match(s.stderr, /\[territory_declaration_malformed\]/, `${decl} disclosed: ${s.stderr}`);
+      assert.match(s.stderr, entryRe, `${decl}: the failing entry is named by index and value: ${s.stderr}`);
+      assert.match(s.stderr, reasonRe, `${decl}: the refusal reason is stated: ${s.stderr}`);
     } finally {
       cleanup();
     }

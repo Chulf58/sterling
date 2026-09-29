@@ -5265,14 +5265,19 @@ function extractPathCandidates(text) {
 }
 var REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
 var GLOB_METACHAR_RE = /[*?[\]]/;
-function isRepoRelativePosixShape(p) {
-  if (typeof p !== "string" || p === "") return false;
-  if (GLOB_METACHAR_RE.test(p)) return false;
+function canonicalTerritoryEntry(p) {
+  if (typeof p !== "string") return { reason: "not a string" };
+  if (p === "") return { reason: "empty string" };
+  if (GLOB_METACHAR_RE.test(p)) return { reason: "glob pattern; the declaration names files or directories, never patterns" };
+  const stripped = p.endsWith("/") ? p.slice(0, -1) : p;
+  let normalized;
   try {
-    return normalizeRepoPath(p) === p;
-  } catch {
-    return false;
+    normalized = normalizeRepoPath(stripped);
+  } catch (e) {
+    return { reason: String(e?.message ?? e).replace(/^path invariant violation: /, "") };
   }
+  if (normalized !== stripped) return { reason: `not canonical repo-relative POSIX form (canonical: '${normalized}')` };
+  return { path: normalized };
 }
 function parseReviewTerritory(text) {
   const match = REVIEW_TERRITORY_RE.exec(String(text ?? ""));
@@ -5281,13 +5286,17 @@ function parseReviewTerritory(text) {
   let parsed;
   try {
     parsed = JSON.parse(match[1]);
-  } catch {
-    return { present: true, valid: false, raw };
+  } catch (e) {
+    return { present: true, valid: false, raw, reason: `not valid JSON (${e.message})` };
   }
-  if (!Array.isArray(parsed) || !parsed.every(isRepoRelativePosixShape)) {
-    return { present: true, valid: false, raw };
+  if (!Array.isArray(parsed)) return { present: true, valid: false, raw, reason: "not a JSON array" };
+  const files = [];
+  for (const [i, entry] of parsed.entries()) {
+    const c = canonicalTerritoryEntry(entry);
+    if (c.reason) return { present: true, valid: false, raw, reason: `entry ${i} (${JSON.stringify(entry)}): ${c.reason}` };
+    files.push(c.path);
   }
-  return { present: true, valid: true, files: [...new Set(parsed)] };
+  return { present: true, valid: true, files: [...new Set(files)] };
 }
 
 // scripts/hooks/lib/transcript.mjs
@@ -6840,8 +6849,8 @@ try {
               render(
                 disclosure(
                   "territory_declaration_malformed",
-                  { line: territory.raw },
-                  `H22: malformed REVIEW-TERRITORY declaration ignored, so dispatch '${input.agent_id}' (${input.agent_type}) owns its free-prose paths instead, including any it was told not to write: ${territory.raw}`
+                  { line: territory.raw, reason: territory.reason },
+                  `H22: malformed REVIEW-TERRITORY declaration ignored (${territory.reason}), so dispatch '${input.agent_id}' (${input.agent_type}) owns its free-prose paths instead, including any it was told not to write: ${territory.raw}`
                 )
               )
             );

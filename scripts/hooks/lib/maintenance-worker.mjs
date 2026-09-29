@@ -582,9 +582,14 @@ export function parseVerdicts(resultText) {
  * killed run still leaves its closes on record) and keeps the final result.
  * `observe(name, input)` fires for every OTHER tool call only when its
  * tool_result arrives WITHOUT is_error (paired by tool_use_id), so a call that
- * failed is never evidence.
+ * failed is never evidence. `launchKeys` maps item id -> the file_keys the
+ * runner snapshotted into eligible.json at launch; each maintenance_remove line
+ * carries them as `item_file_keys_at_launch` (the tool's result does not echo
+ * the removed item's own file_keys).
  */
-export function streamJournal(journal, observe = () => {}) {
+export function streamJournal(journal, observe = () => {}, launchKeys = new Map()) {
+  // null means the child removed an item it was not offered (not in eligible.json).
+  const keysAtLaunch = (id) => launchKeys.get(id) ?? null;
   let buf = '';
   const pending = new Map();
   const calls = new Map();
@@ -611,7 +616,7 @@ export function streamJournal(journal, observe = () => {}) {
         const input = pending.get(c.tool_use_id);
         pending.delete(c.tool_use_id);
         const text = Array.isArray(c.content) ? c.content.map((p) => p?.text ?? '').join('') : String(c.content ?? '');
-        journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, is_error: Boolean(c.is_error), result: text.slice(0, 400) });
+        journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error: Boolean(c.is_error), result: text.slice(0, 400) });
         out.removes++;
         if (!c.is_error) out.closedOk++;
       }
@@ -639,7 +644,7 @@ export function streamJournal(journal, observe = () => {}) {
     end() {
       feedLine(buf);
       buf = '';
-      for (const input of pending.values()) journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, is_error: null, result: 'no result before the run ended' });
+      for (const input of pending.values()) journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error: null, result: 'no result before the run ended' });
       pending.clear();
       return out;
     },
@@ -761,7 +766,7 @@ export async function runWorker(opts) {
       else if (name === 'Read' && input.file_path) seenFiles.add(abs(input.file_path));
       else if (name === 'Grep') seenGrepPaths.add(input.path ? abs(input.path) : resolve(opts.root));
     };
-    const stream = streamJournal(journalCall, observe);
+    const stream = streamJournal(journalCall, observe, new Map([...byId].map(([id, t]) => [id, t.file_keys ?? []])));
     const timeoutMs = opts.timeoutMs ?? WORKER_TIMEOUT_MS;
     const logCap = opts.logCapBytes ?? LOG_RUN_CAP_BYTES;
     let logged = 0;

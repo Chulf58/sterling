@@ -9960,7 +9960,11 @@ try {
       }
     })();
     const compact = openLanes.length > 0 && !!priorDutyNag && priorDutyNag.fingerprint === fingerprint;
-    const dutyNagAt = compact ? priorDutyNag.at : now;
+    const laneAnchors = [];
+    if (captureLaneOpen || articleLaneOpen) laneAnchors.push(earliest);
+    if (researchLaneOpen) laneAnchors.push(earliestResearch);
+    if (conceptLaneOpen) for (const family of unmetFamilies) laneAnchors.push(conceptFamilies.get(family));
+    const dutyNagAt = laneAnchors.filter(isValidAt).sort()[0] ?? now;
     const captureToken = "knowledge_create | no_capture --reason | capture_pending";
     const researchToken = "research_finding | no_capture --lane research";
     const conceptToken = "knowledge_create feature_article (concept_family)";
