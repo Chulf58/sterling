@@ -7897,7 +7897,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve6) => setTimeout(resolve6, ms));
+  return new Promise((resolve7) => setTimeout(resolve7, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -8783,7 +8783,7 @@ function readPrLoop(root) {
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync4, existsSync as existsSync7, mkdirSync as mkdirSync7, openSync as openSync4, readFileSync as readFileSync8, renameSync as renameSync5, rmSync as rmSync3, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync5, appendFileSync } from "node:fs";
-import { dirname as dirname7, join as join11 } from "node:path";
+import { dirname as dirname7, isAbsolute as isAbsolute2, join as join11, resolve as resolve6, sep as sep2 } from "node:path";
 import { fileURLToPath } from "node:url";
 var WORKER_RUN_BUDGET_USD = 2;
 var DEFAULT_DAILY_BUDGET_USD = 5;
@@ -8863,9 +8863,9 @@ function judgedVerdicts(root) {
         continue;
       }
       if (!v?.item_id || v.kind !== "verdict") continue;
-      if ((v.verdict === "owes_prose" || v.verdict === "refused") && Array.isArray(v.file_keys)) {
+      if ((v.verdict === "owes_prose" || v.verdict === "refused") && v.evidence === true && Array.isArray(v.file_keys)) {
         map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
-      } else map.delete(v.item_id);
+      } else if (v.verdict === "closed") map.delete(v.item_id);
     }
   }
   return map;
@@ -8874,6 +8874,9 @@ function isJudged(item, verdicts, head) {
   const v = verdicts.get(item.id);
   if (!v || v.keys !== sortedKeys(item.file_keys)) return false;
   return v.verdict === "owes_prose" || v.verdict === "refused" && Boolean(head) && v.head === head;
+}
+function articleSlug(item) {
+  return /^reconcile article '([^']+)'/.exec(String(item?.text ?? ""))?.[1] ?? null;
 }
 function openReconcileItems(store2) {
   const total = store2.count({ types: ["todo"], source: "system" });
@@ -9007,10 +9010,12 @@ function maybeLaunchMaintenanceWorker(opts) {
     const paths = workerPaths(opts.root);
     const state = readState(opts.root);
     const last = state.last_run;
-    const failedAt = last && last.ok === false ? Date.parse(last.at ?? "") : NaN;
+    const stalled = last && (last.ok === false || last.no_progress === true);
+    const failedAt = stalled ? Date.parse(last.at ?? "") : NaN;
     if (Number.isFinite(failedAt) && nowMs - failedAt < BACKOFF_MS) {
       const until = new Date(failedAt + BACKOFF_MS).toISOString();
-      return { launched: false, reason: "backoff", line: `\u26A0 Sterling maintenance worker: last run FAILED at ${last.at} (${last.error}) \u2014 backing off, no relaunch before ${until} ${LOG_HINT}.` };
+      const what = last.ok === false ? `last run FAILED at ${last.at} (${last.error})` : `worker made no progress in its last run at ${last.at} (0 evidence-backed verdicts, 0 closes)`;
+      return { launched: false, reason: "backoff", line: `\u26A0 Sterling maintenance worker: ${what} \u2014 backing off, no relaunch before ${until} ${LOG_HINT}.` };
     }
     const cap = dailyBudget(opts.config);
     const spent = spentOn(state, utcDay(nowMs));
@@ -9038,7 +9043,7 @@ function maybeLaunchMaintenanceWorker(opts) {
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: "already_running" };
     writeFileSync5(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
-    writeFileSync5(paths.eligible, JSON.stringify({ token, head: git.head, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [] })) }));
+    writeFileSync5(paths.eligible, JSON.stringify({ token, head: git.head, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
     let logFd;
     try {
       rotateIfLarge(paths.log);
@@ -9052,7 +9057,7 @@ function maybeLaunchMaintenanceWorker(opts) {
       child.on?.("error", () => releaseLock(paths, token));
       child.unref?.();
       writeFileSync5(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
-      const note = last && last.ok === false ? `\u2139 Sterling maintenance worker: the previous run FAILED at ${last.at} (${last.error}); relaunched after the back-off ${LOG_HINT}.` : void 0;
+      const note = stalled ? `\u2139 Sterling maintenance worker: the previous run ${last.ok === false ? `FAILED at ${last.at} (${last.error})` : `made no progress at ${last.at}`}; relaunched after the back-off ${LOG_HINT}.` : void 0;
       return { launched: true, reason: "launched", pid: child.pid, items: eligible.length, ...note ? { line: note } : {} };
     } catch (e) {
       releaseLock(paths, token);

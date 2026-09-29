@@ -7765,7 +7765,7 @@ import { spawn } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync, existsSync as existsSync4, mkdirSync as mkdirSync3, openSync, readFileSync as readFileSync4, renameSync as renameSync2, rmSync as rmSync2, rmdirSync as rmdirSync2, statSync as statSync2, writeFileSync as writeFileSync2, appendFileSync } from "node:fs";
-import { dirname as dirname4, join as join5 } from "node:path";
+import { dirname as dirname4, isAbsolute as isAbsolute2, join as join5, resolve as resolve3, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 var WORKER_RUN_BUDGET_USD = 2;
 var DEFAULT_DAILY_BUDGET_USD = 5;
@@ -7845,9 +7845,9 @@ function judgedVerdicts(root) {
         continue;
       }
       if (!v?.item_id || v.kind !== "verdict") continue;
-      if ((v.verdict === "owes_prose" || v.verdict === "refused") && Array.isArray(v.file_keys)) {
+      if ((v.verdict === "owes_prose" || v.verdict === "refused") && v.evidence === true && Array.isArray(v.file_keys)) {
         map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
-      } else map.delete(v.item_id);
+      } else if (v.verdict === "closed") map.delete(v.item_id);
     }
   }
   return map;
@@ -7856,6 +7856,9 @@ function isJudged(item, verdicts, head) {
   const v = verdicts.get(item.id);
   if (!v || v.keys !== sortedKeys(item.file_keys)) return false;
   return v.verdict === "owes_prose" || v.verdict === "refused" && Boolean(head) && v.head === head;
+}
+function articleSlug(item) {
+  return /^reconcile article '([^']+)'/.exec(String(item?.text ?? ""))?.[1] ?? null;
 }
 function openReconcileItems(store) {
   const total = store.count({ types: ["todo"], source: "system" });
@@ -7989,10 +7992,12 @@ function maybeLaunchMaintenanceWorker(opts) {
     const paths = workerPaths(opts.root);
     const state = readState(opts.root);
     const last = state.last_run;
-    const failedAt = last && last.ok === false ? Date.parse(last.at ?? "") : NaN;
+    const stalled = last && (last.ok === false || last.no_progress === true);
+    const failedAt = stalled ? Date.parse(last.at ?? "") : NaN;
     if (Number.isFinite(failedAt) && nowMs - failedAt < BACKOFF_MS) {
       const until = new Date(failedAt + BACKOFF_MS).toISOString();
-      return { launched: false, reason: "backoff", line: `\u26A0 Sterling maintenance worker: last run FAILED at ${last.at} (${last.error}) \u2014 backing off, no relaunch before ${until} ${LOG_HINT}.` };
+      const what = last.ok === false ? `last run FAILED at ${last.at} (${last.error})` : `worker made no progress in its last run at ${last.at} (0 evidence-backed verdicts, 0 closes)`;
+      return { launched: false, reason: "backoff", line: `\u26A0 Sterling maintenance worker: ${what} \u2014 backing off, no relaunch before ${until} ${LOG_HINT}.` };
     }
     const cap = dailyBudget(opts.config);
     const spent = spentOn(state, utcDay(nowMs));
@@ -8020,7 +8025,7 @@ function maybeLaunchMaintenanceWorker(opts) {
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: "already_running" };
     writeFileSync2(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
-    writeFileSync2(paths.eligible, JSON.stringify({ token, head: git.head, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [] })) }));
+    writeFileSync2(paths.eligible, JSON.stringify({ token, head: git.head, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
     let logFd;
     try {
       rotateIfLarge(paths.log);
@@ -8034,7 +8039,7 @@ function maybeLaunchMaintenanceWorker(opts) {
       child.on?.("error", () => releaseLock(paths, token));
       child.unref?.();
       writeFileSync2(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
-      const note = last && last.ok === false ? `\u2139 Sterling maintenance worker: the previous run FAILED at ${last.at} (${last.error}); relaunched after the back-off ${LOG_HINT}.` : void 0;
+      const note = stalled ? `\u2139 Sterling maintenance worker: the previous run ${last.ok === false ? `FAILED at ${last.at} (${last.error})` : `made no progress at ${last.at}`}; relaunched after the back-off ${LOG_HINT}.` : void 0;
       return { launched: true, reason: "launched", pid: child.pid, items: eligible.length, ...note ? { line: note } : {} };
     } catch (e) {
       releaseLock(paths, token);
@@ -8383,7 +8388,7 @@ function resolveTotalCap(cwd) {
     return DELIVERY_TOTAL_CAP_DEFAULT;
   }
 }
-function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}) {
+function assembleDelivery(parts, capBytes, { sep: sep2 = "\n\n", aggregateLabel } = {}) {
   const items = (parts ?? []).filter((part) => part && typeof part.text === "string" && part.text).map((part) => ({
     ...part,
     kind: part.kind === "hazard" ? "hazard" : "ordinary",
@@ -8423,7 +8428,7 @@ function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}
   const selected = /* @__PURE__ */ new Map();
   const omitted = [];
   const output = () => items.flatMap((part) => selected.has(part) ? [selected.get(part).text] : []);
-  const totalBytes = () => bytes(output().join(sep));
+  const totalBytes = () => bytes(output().join(sep2));
   const hazardBytesUsed = () => [...selected.entries()].reduce((sum, [part, sel]) => sum + (isHazard(part) ? bytes(sel.text) : 0), 0);
   const ordinaryBytesUsed = () => Math.max(0, totalBytes() - hazardBytesUsed());
   const fitsOrdinaryCap = (extra = 0) => ordinaryBytesUsed() + extra <= ordinaryCeiling;
@@ -8507,7 +8512,7 @@ ${line}` : line;
     const custom2 = aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : Infinity;
     return custom2 <= ordinaryCeiling ? custom2 : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => named ? e : { id8: e.id8 })));
   };
-  const sepCost = (renderedBefore) => renderedBefore > 0 ? bytes(sep) : 0;
+  const sepCost = (renderedBefore) => renderedBefore > 0 ? bytes(sep2) : 0;
   const ordinaryParts = items.filter((part) => !isHazard(part) && !isChrome(part));
   const baseOmitted = [...omitted];
   const reserved = /* @__PURE__ */ new Map();
@@ -8527,7 +8532,7 @@ ${line}` : line;
       rendered += 1;
       room -= cost;
     }
-    const roomFor = (size) => size > 0 ? Math.max(0, Math.min(room, size + bytes(sep))) : 0;
+    const roomFor = (size) => size > 0 ? Math.max(0, Math.min(room, size + bytes(sep2))) : 0;
     const disclosureRoom = { whole: roomFor(disclosure2.ids), excerpt: roomFor(disclosure2.named), pointer: 0 };
     ordinaryParts.forEach((part, i) => {
       const later = ordinaryParts.slice(i + 1).reduce((sum, next) => sum + (reserved.get(next) ?? 0), 0);
@@ -8605,7 +8610,7 @@ ${line}` : line;
   const omittedEntries = dedupeEntries(omitted.flatMap(disclosureIdsOf));
   const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
   return {
-    text: output().join(sep),
+    text: output().join(sep2),
     emittedSubstance,
     emittedDiscovery,
     omitted: omittedEntries,
