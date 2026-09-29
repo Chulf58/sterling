@@ -7,9 +7,9 @@ var __export = (target, all) => {
 
 // scripts/hooks/h1-session-start.mjs
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { readFileSync as readFileSync5, existsSync as existsSync6, mkdirSync as mkdirSync7, readdirSync as readdirSync3, renameSync as renameSync5, statSync as statSync4, writeFileSync as writeFileSync5, rmSync as rmSync3 } from "node:fs";
+import { readFileSync as readFileSync6, existsSync as existsSync7, mkdirSync as mkdirSync8, readdirSync as readdirSync3, renameSync as renameSync6, statSync as statSync5, writeFileSync as writeFileSync6, rmSync as rmSync4 } from "node:fs";
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { basename as basename2, dirname as dirname7, join as join8 } from "node:path";
+import { basename as basename2, dirname as dirname8, join as join9 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/common.mjs
@@ -5014,6 +5014,21 @@ var configSchema = external_exports.object({
   maintenance_queue: external_exports.object({
     deep_threshold: external_exports.number().int().positive().default(15)
   }).default({}),
+  // Background maintenance worker kill switch (decision
+  // maintenance-queue-background-haiku-worker-simple-redesign): when true, H10
+  // (at Stop) and H19's Bash surface (after a git commit) start a detached
+  // headless Claude run that judges open reconcile_needed items and closes the
+  // ones already paid (scripts/hooks/lib/maintenance-worker.mjs). false stops
+  // every launch; the queue then drains by hand with /sterling:drain.
+  // daily_budget_usd caps the worker's spend per UTC day: the runner adds each
+  // run's cost to its state file and the launcher refuses to start once the
+  // day's spend reaches it, with a visible line. Both defaults live here AND
+  // in templates/default-config.json, because install/sync fill an omitted key
+  // from this zod default, not the template.
+  maintenance_worker: external_exports.object({
+    enabled: external_exports.boolean().default(true),
+    daily_budget_usd: external_exports.number().positive().default(5)
+  }).default({}),
   // Board 8390f8fa: a registry-style feature_article can outgrow its own
   // round-trip — knowledge_append responses on mcp-tool-surface (29 history
   // entries) and hooks-suite's what_it_does (26k tokens) both blew the MCP
@@ -8971,11 +8986,126 @@ function writeInitialGitSettled(root, snapshot) {
   return writeGitSettled(root, snapshot, { ifAbsent: true });
 }
 
+// scripts/hooks/lib/maintenance-worker.mjs
+import { closeSync as closeSync2, existsSync as existsSync6, mkdirSync as mkdirSync7, openSync as openSync2, readFileSync as readFileSync5, renameSync as renameSync5, rmSync as rmSync3, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync5, appendFileSync } from "node:fs";
+import { dirname as dirname7, join as join8 } from "node:path";
+var DEBOUNCE_MS = 2 * 6e4;
+var BACKOFF_MS = 30 * 6e4;
+var WORKER_TIMEOUT_MS = 20 * 6e4;
+var LOCK_STALE_MS = 30 * 6e4;
+var SERVER = "sterling";
+var mcp = (name) => `mcp__${SERVER}__${name}`;
+var WORKER_TOOLS = [mcp("maintenance_query"), mcp("knowledge_get"), mcp("maintenance_remove"), "Read", "Grep"];
+var WORKER_DISALLOWED_TOOLS = [
+  ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
+  ...["add", "remove", "update", "edit"].map((v) => mcp(`board_${v}`)),
+  mcp("config_set"),
+  "Write",
+  "Edit",
+  "Bash"
+];
+function workerPaths(root) {
+  const sterling = join8(root, ".sterling");
+  return {
+    lock: join8(sterling, "transient", "maintenance-worker.lock"),
+    takeover: join8(sterling, "transient", "maintenance-worker.lock.takeover"),
+    lastLaunch: join8(sterling, "transient", "maintenance-worker.last-launch"),
+    eligible: join8(sterling, "transient", "maintenance-worker.eligible.json"),
+    state: join8(sterling, "transient", "maintenance-worker.state.json"),
+    log: join8(sterling, "maintenance-worker.log"),
+    journal: join8(sterling, "maintenance-worker.jsonl")
+  };
+}
+function readJson(path) {
+  try {
+    return JSON.parse(readFileSync5(path, "utf8"));
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    return { unreadable: String(e?.message ?? e) };
+  }
+}
+var sortedKeys = (keys) => JSON.stringify([...keys ?? []].map(String).sort());
+function judgedVerdicts(root) {
+  const { journal } = workerPaths(root);
+  const map = /* @__PURE__ */ new Map();
+  for (const path of [`${journal}.1`, journal]) {
+    let text;
+    try {
+      text = readFileSync5(path, "utf8");
+    } catch (e) {
+      if (e?.code === "ENOENT") continue;
+      throw e;
+    }
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      let v;
+      try {
+        v = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!v?.item_id || v.kind !== "verdict") continue;
+      if ((v.verdict === "owes_prose" || v.verdict === "refused") && Array.isArray(v.file_keys)) {
+        map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
+      } else map.delete(v.item_id);
+    }
+  }
+  return map;
+}
+function owesProseVerdicts(root) {
+  const out = /* @__PURE__ */ new Map();
+  for (const [id, v] of judgedVerdicts(root)) if (v.verdict === "owes_prose") out.set(id, v.keys);
+  return out;
+}
+function isJudgedOwesProse(item, verdicts) {
+  return verdicts.get(item.id) === sortedKeys(item.file_keys);
+}
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code === "EPERM";
+  }
+}
+function lockState(lock, nowMs, isAlive = pidAlive) {
+  if (!lock) return "none";
+  const started = Date.parse(lock.started_at ?? "");
+  if (lock.unreadable || !Number.isFinite(started)) return "stale";
+  if (nowMs - started > LOCK_STALE_MS) return "stale";
+  return isAlive(lock.pid) ? "live" : "stale";
+}
+var utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+function readState(root) {
+  const s2 = readJson(workerPaths(root).state);
+  return s2 && !s2.unreadable ? s2 : { spend: {} };
+}
+function spentOn(state, day) {
+  return Number(state?.spend?.[day] ?? 0) || 0;
+}
+function workerStatus(root, nowMs = Date.now(), isAlive = pidAlive) {
+  const paths = workerPaths(root);
+  const lock = readJson(paths.lock);
+  const live = lockState(lock, nowMs, isAlive) === "live";
+  const state = readState(root);
+  return { running: live, pid: live ? lock.pid : null, since: live ? lock.started_at : null, lastRun: state.last_run ?? null, spentToday: spentOn(state, utcDay(nowMs)) };
+}
+function ageText(iso, nowMs = Date.now()) {
+  const ms = nowMs - Date.parse(iso ?? "");
+  if (!Number.isFinite(ms)) return "unknown";
+  const mins = Math.max(0, Math.floor(ms / 6e4));
+  const days = Math.floor(mins / 1440);
+  const hours = Math.floor(mins % 1440 / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  return hours > 0 ? `${hours}h` : `${mins}m`;
+}
+
 // scripts/hooks/h1-session-start.mjs
 async function deleteRegisterUnderLock(cwd) {
-  const transientDir = join8(cwd, ".sterling", "transient");
+  const transientDir = join9(cwd, ".sterling", "transient");
   try {
-    mkdirSync7(transientDir, { recursive: true });
+    mkdirSync8(transientDir, { recursive: true });
     await withRegisterLock(
       cwd,
       () => {
@@ -8984,10 +9114,10 @@ async function deleteRegisterUnderLock(cwd) {
           process.stderr.write(`${sweep.refused}
 `);
         }
-        rmSync3(registerPath(cwd), { force: true });
+        rmSync4(registerPath(cwd), { force: true });
         const registerBasename = basename2(registerPath(cwd));
         for (const f of readdirSync3(transientDir)) {
-          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync3(join8(transientDir, f), { force: true });
+          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync4(join9(transientDir, f), { force: true });
         }
       },
       { retryMs: 1e3, timeoutMs: 1e4 }
@@ -9032,10 +9162,10 @@ function pluginRoot() {
   return process.env.STERLING_PLUGIN_ROOT || null;
 }
 function walkUpPluginRoot() {
-  let dir = dirname7(fileURLToPath(import.meta.url));
+  let dir = dirname8(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
-    if (existsSync6(join8(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname7(dir);
+    if (existsSync7(join9(dir, ".claude-plugin", "plugin.json"))) return dir;
+    dir = dirname8(dir);
   }
   return null;
 }
@@ -9047,7 +9177,7 @@ function pluginVersion() {
   try {
     const root = pluginRoot();
     if (!root) return null;
-    const v = JSON.parse(readFileSync5(join8(root, ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync6(join9(root, ".claude-plugin", "plugin.json"), "utf8")).version;
     return typeof v === "string" && v.length ? v : null;
   } catch {
   }
@@ -9076,21 +9206,21 @@ if (input.source === "startup" || input.source === "clear") {
   } catch {
   }
 }
-var sessionMarkerPath = join8(input.cwd, ".sterling", "transient", "session.json");
-var sessionMarkerTmp = join8(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
+var sessionMarkerPath = join9(input.cwd, ".sterling", "transient", "session.json");
+var sessionMarkerTmp = join9(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
 try {
-  if (existsSync6(join8(input.cwd, ".sterling", "config.json"))) {
-    mkdirSync7(join8(input.cwd, ".sterling", "transient"), { recursive: true });
-    writeFileSync5(
+  if (existsSync7(join9(input.cwd, ".sterling", "config.json"))) {
+    mkdirSync8(join9(input.cwd, ".sterling", "transient"), { recursive: true });
+    writeFileSync6(
       sessionMarkerTmp,
       JSON.stringify({ session_id: input.session_id ?? null, source: input.source ?? null, at: (/* @__PURE__ */ new Date()).toISOString() })
     );
-    renameSync5(sessionMarkerTmp, sessionMarkerPath);
+    renameSync6(sessionMarkerTmp, sessionMarkerPath);
   }
 } catch {
   try {
-    rmSync3(sessionMarkerPath, { recursive: true, force: true });
-    rmSync3(sessionMarkerTmp, { recursive: true, force: true });
+    rmSync4(sessionMarkerPath, { recursive: true, force: true });
+    rmSync4(sessionMarkerTmp, { recursive: true, force: true });
   } catch {
   }
 }
@@ -9188,11 +9318,11 @@ var currencyWarning = "";
 var currencyContext = "";
 try {
   const root = process.env.STERLING_CURRENCY_DISABLE === "1" ? null : pluginRoot();
-  const gitDir = root ? join8(root, ".git") : null;
-  if (gitDir && existsSync6(gitDir) && statSync4(gitDir).isDirectory()) {
+  const gitDir = root ? join9(root, ".git") : null;
+  if (gitDir && existsSync7(gitDir) && statSync5(gitDir).isDirectory()) {
     let role = null;
     try {
-      role = JSON.parse(readFileSync5(join8(root, ".sterling", "config.json"), "utf8")).machine_role;
+      role = JSON.parse(readFileSync6(join9(root, ".sterling", "config.json"), "utf8")).machine_role;
     } catch {
     }
     if (role !== "authoring") {
@@ -9204,17 +9334,17 @@ try {
       const hasOrigin = (git(["remote"]) ?? "").split("\n").includes("origin");
       const defaultBranch = hasOrigin ? (git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]) ?? "").replace(/^origin\//, "") || "main" : null;
       if (hasOrigin && branch && branch === defaultBranch) {
-        const cachePath = join8(gitDir, "sterling-update-check.json");
+        const cachePath = join9(gitDir, "sterling-update-check.json");
         const ttl = Number(process.env.STERLING_CURRENCY_TTL_MS ?? 24 * 60 * 60 * 1e3);
         let fresh = false;
         try {
-          fresh = Date.now() - Date.parse(JSON.parse(readFileSync5(cachePath, "utf8")).checked_at) < ttl;
+          fresh = Date.now() - Date.parse(JSON.parse(readFileSync6(cachePath, "utf8")).checked_at) < ttl;
         } catch {
         }
         if (!fresh) {
           spawnSync4("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
           try {
-            writeFileSync5(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
+            writeFileSync6(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
           } catch {
           }
         }
@@ -9237,8 +9367,8 @@ function planLockSection(ctx) {
   const STALE_DAYS = 14;
   const DAY_MS = 24 * 60 * 60 * 1e3;
   const clean = sanitizeForContext;
-  const sterlingDir = join8(ctx.cwd, ".sterling");
-  const transientDir = join8(sterlingDir, "transient");
+  const sterlingDir = join9(ctx.cwd, ".sterling");
+  const transientDir = join9(sterlingDir, "transient");
   const blocks = [];
   const MARKERS = [
     {
@@ -9258,7 +9388,7 @@ function planLockSection(ctx) {
   for (const marker of MARKERS) {
     let raw = null;
     try {
-      raw = claimMarker(join8(transientDir, marker.file));
+      raw = claimMarker(join9(transientDir, marker.file));
     } catch {
       raw = null;
     }
@@ -9349,10 +9479,10 @@ var NOTE_FIELD_MAX = {
 var rotationContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {
-    const notePath = join8(input.cwd, ".sterling", "transient", "rotation-note.json");
-    if (existsSync6(notePath)) {
-      const note = JSON.parse(readFileSync5(notePath, "utf8"));
-      rmSync3(notePath, { force: true });
+    const notePath = join9(input.cwd, ".sterling", "transient", "rotation-note.json");
+    if (existsSync7(notePath)) {
+      const note = JSON.parse(readFileSync6(notePath, "utf8"));
+      rmSync4(notePath, { force: true });
       const head = (() => {
         try {
           const r = spawnSync4("git", ["rev-parse", "HEAD"], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
@@ -9466,8 +9596,8 @@ Resume from next_slice. The board and knowledge store remain the authorities for
 }
 try {
   if (input.source === "compact" || input.source === "startup" || input.source === "clear") {
-    const conductorLedger = join8(input.cwd, ".sterling", "transient", "conductor-reads.json");
-    rmSync3(conductorLedger, { force: true });
+    const conductorLedger = join9(input.cwd, ".sterling", "transient", "conductor-reads.json");
+    rmSync4(conductorLedger, { force: true });
   }
 } catch {
 }
@@ -9479,16 +9609,16 @@ await deleteRegisterUnderLock(input.cwd);
 var residueContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {
-    const transient = join8(input.cwd, ".sterling", "transient");
-    const regPaths = [join8(transient, "touches.json"), join8(transient, "session-events.json"), join8(transient, "capture-nagged.json")];
+    const transient = join9(input.cwd, ".sterling", "transient");
+    const regPaths = [join9(transient, "touches.json"), join9(transient, "session-events.json"), join9(transient, "capture-nagged.json")];
     const [touchesPath, eventsPath] = regPaths;
-    if (regPaths.some((p) => existsSync6(p))) {
+    if (regPaths.some((p) => existsSync7(p))) {
       let touches = [];
       let events = [];
       let malformed = false;
       try {
-        if (existsSync6(touchesPath)) {
-          const raw = JSON.parse(readFileSync5(touchesPath, "utf8"));
+        if (existsSync7(touchesPath)) {
+          const raw = JSON.parse(readFileSync6(touchesPath, "utf8"));
           if (Array.isArray(raw)) touches = raw;
           else malformed = true;
         }
@@ -9496,8 +9626,8 @@ try {
         malformed = true;
       }
       try {
-        if (existsSync6(eventsPath)) {
-          const raw = JSON.parse(readFileSync5(eventsPath, "utf8"));
+        if (existsSync7(eventsPath)) {
+          const raw = JSON.parse(readFileSync6(eventsPath, "utf8"));
           if (Array.isArray(raw)) events = raw;
           else malformed = true;
         }
@@ -9544,7 +9674,7 @@ SESSION-BOUNDARY RESIDUE (H1): a previous session left unsettled transient regis
           }
         }
       }
-      for (const p of regPaths) rmSync3(p, { force: true });
+      for (const p of regPaths) rmSync4(p, { force: true });
     }
   }
 } catch {
@@ -9554,6 +9684,7 @@ var queueReasons = [];
 var queueReasonEntries = [];
 var drainable = 0;
 var parked = 0;
+var reconcile = { count: 0, owesProse: 0, oldest: null };
 try {
   const userTotal = store.count({ types: ["todo"], source: "user" });
   counts.todos = userTotal;
@@ -9564,6 +9695,15 @@ try {
   const systemTotal = store.count({ types: ["todo"], source: "system" });
   counts.maintenance = systemTotal;
   const system = systemTotal > 0 ? store.query({ types: ["todo"], source: "system", cap: systemTotal }) : [];
+  const reconcileItems = system.filter((t) => t.system_reason === "reconcile_needed");
+  reconcile.count = reconcileItems.length;
+  try {
+    const verdicts = owesProseVerdicts(input.cwd);
+    reconcile.owesProse = reconcileItems.filter((t) => isJudgedOwesProse(t, verdicts)).length;
+  } catch {
+    reconcile.owesProse = null;
+  }
+  reconcile.oldest = reconcileItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
   const drainableItems = system.filter((t) => t.system_reason !== "file_parked");
   drainable = drainableItems.length;
   parked = system.length - drainable;
@@ -9596,14 +9736,34 @@ Drain it with /sterling:drain before taking new work, and expect much of it to b
   }
   queueContext += " This is a persistent visibility count by design \u2014 items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.";
 }
+var reconcileBanner = "";
+var reconcileContext = "";
+if (reconcile.count > 0) {
+  let worker = "worker not running";
+  let lastRunNote = "";
+  try {
+    const ws = workerStatus(input.cwd);
+    if (ws.running) worker = `worker running (pid ${ws.pid}, since ${ws.since})`;
+    if (ws.lastRun && ws.lastRun.ok === false) lastRunNote = `; last worker run FAILED at ${ws.lastRun.at}: ${ws.lastRun.error} (log: .sterling/maintenance-worker.log)`;
+    if (ws.spentToday > 0) lastRunNote += `; worker spend today $${ws.spentToday.toFixed(2)}`;
+  } catch (e) {
+    worker = `worker state unreadable (${e?.message ?? e})`;
+  }
+  const age = ageText(reconcile.oldest);
+  const inLane = (n) => `${n} item${n === 1 ? "" : "s"} in lane reconcile_needed`;
+  reconcileBanner = ` \xB7 ${inLane(reconcile.count)}, oldest ${age}, ${worker}${lastRunNote}`;
+  reconcileContext = `
+
+RECONCILE BACKLOG: ${inLane(reconcile.count)}, the oldest open since ${reconcile.oldest ?? "unknown"} (${age}). ` + (reconcile.owesProse === null ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items owe prose is unknown. ` : `Of these, ${inLane(reconcile.owesProse)} are judged 'owes prose' by the background worker (.sterling/maintenance-worker.jsonl) and wait on you to draft the article change. `) + `${worker}${lastRunNote}.`;
+}
 var registryContext = "";
-if (existsSync6(registryPath())) {
+if (existsSync7(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, "/");
   let registry;
   try {
     registry = new ProjectRegistry(registryPath());
     registry.touchLastSeen(cwdPosix, (/* @__PURE__ */ new Date()).toISOString());
-    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync6(p.repo_path));
+    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync7(p.repo_path));
     if (siblings.length) {
       registryContext = "\n\nSibling Sterling projects on this machine (shared project registry) \u2014 other initialized projects; knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n" + siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(", ") || "(no domains)"}`).join("\n");
     }
@@ -9621,7 +9781,7 @@ function markerWriterAlive(pid) {
   }
   if (process.platform !== "linux") return true;
   try {
-    const cmdline = readFileSync5(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
+    const cmdline = readFileSync6(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
     if (cmdline && !cmdline.includes("mcp-server")) return false;
   } catch (err) {
     if (err?.code === "ENOENT" || err?.code === "ESRCH") return false;
@@ -9631,12 +9791,12 @@ function markerWriterAlive(pid) {
 var staleWarning = "";
 try {
   const root = pluginRoot();
-  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join8(root, "packages", "mcp-server", "dist") : null);
-  const currentBuildId = serverDist && existsSync6(buildIdPath(serverDist)) ? readFileSync5(buildIdPath(serverDist), "utf8").trim() || null : null;
+  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join9(root, "packages", "mcp-server", "dist") : null);
+  const currentBuildId = serverDist && existsSync7(buildIdPath(serverDist)) ? readFileSync6(buildIdPath(serverDist), "utf8").trim() || null : null;
   let marker = null;
-  const markerPath = runtimeMarkerPath(join8(input.cwd, ".sterling", "sterling.db"));
-  if (existsSync6(markerPath)) {
-    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync5(markerPath, "utf8")));
+  const markerPath = runtimeMarkerPath(join9(input.cwd, ".sterling", "sterling.db"));
+  if (existsSync7(markerPath)) {
+    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync6(markerPath, "utf8")));
     if (parsed.success) marker = parsed.data;
   }
   const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerWriterAlive(marker.pid) : null);
@@ -9648,7 +9808,7 @@ try {
 var machineWarning = "";
 var machineContext = "";
 try {
-  const agentsDir = join8(input.cwd, ".claude", "agents");
+  const agentsDir = join9(input.cwd, ".claude", "agents");
   const dead = [];
   const unknown = [];
   let dirEntries = null;
@@ -9664,7 +9824,7 @@ try {
   for (const f of (dirEntries ?? []).filter((n) => n.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync5(join8(agentsDir, f), "utf8");
+      content = readFileSync6(join9(agentsDir, f), "utf8");
     } catch (err) {
       unknown.push(`- ${f} \u2014 activation UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -9677,7 +9837,7 @@ try {
       }
       continue;
     }
-    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync6(p));
+    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync7(p));
     if (unresolved) dead.push({ agent: f, node: unresolved });
   }
   if (dead.length || unknown.length) {
@@ -9691,7 +9851,7 @@ MACHINE-CONTEXT DRIFT (H1): ` + (dead.length ? `${dead.length} inactive (${dead.
 var agentCurrencyWarning = "";
 var agentCurrencyContext = "";
 try {
-  const agentsDir = join8(input.cwd, ".claude", "agents");
+  const agentsDir = join9(input.cwd, ".claude", "agents");
   const installed = [];
   const unknown = [];
   let dirEntries = null;
@@ -9707,7 +9867,7 @@ try {
   for (const n of (dirEntries ?? []).filter((x) => x.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync5(join8(agentsDir, n), "utf8");
+      content = readFileSync6(join9(agentsDir, n), "utf8");
     } catch (err) {
       unknown.push(`- ${n} \u2014 currency UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -9726,11 +9886,11 @@ try {
   const unreadableBeforeClassification = unknown.length;
   if (installed.length || unknown.length) {
     const root = pluginRoot();
-    const templatesDir = root ? join8(root, "agent-templates") : null;
+    const templatesDir = root ? join9(root, "agent-templates") : null;
     let templateFor = null;
     let cloneProblem = null;
     try {
-      templateFor = new Map(loadRegistry(join8(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
+      templateFor = new Map(loadRegistry(join9(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
     } catch (err) {
       cloneProblem = `the clone's agent templates at ${templatesDir ?? "(plugin root unresolved)"} could not be read: ${err?.message ?? err}`;
     }
@@ -9757,7 +9917,7 @@ try {
       }
       let templateContent = null;
       try {
-        templateContent = readFileSync5(join8(templatesDir, templateFile), "utf8");
+        templateContent = readFileSync6(join9(templatesDir, templateFile), "utf8");
       } catch (err) {
         unknown.push(`- ${file} \u2014 currency UNKNOWN: the clone template ${templateFile} could not be read (${err?.code ?? err?.message ?? err})`);
         continue;
@@ -9817,16 +9977,16 @@ ${versionLine}`);
 }
 var conductorActivationContext = "";
 try {
-  const settingsPath = join8(input.cwd, ".claude", "settings.json");
+  const settingsPath = join9(input.cwd, ".claude", "settings.json");
   let settingsAgent;
-  if (existsSync6(settingsPath)) {
+  if (existsSync7(settingsPath)) {
     try {
-      const parsed = JSON.parse(readFileSync5(settingsPath, "utf8"));
+      const parsed = JSON.parse(readFileSync6(settingsPath, "utf8"));
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) settingsAgent = parsed.agent;
     } catch {
     }
   }
-  const conductorFileMissing = !existsSync6(join8(input.cwd, ".claude", "agents", "conductor.md"));
+  const conductorFileMissing = !existsSync7(join9(input.cwd, ".claude", "agents", "conductor.md"));
   let reason = null;
   if (settingsAgent !== "conductor") {
     reason = settingsAgent === void 0 ? "settings key missing" : `settings key is ${JSON.stringify(settingsAgent)}`;
@@ -9844,9 +10004,9 @@ CONDUCTOR NOT ACTIVE: ${reason} \u2014 run \`node ${shq(clone)}/scripts/sync-age
 }
 var conductorActivationWarning = conductorActivationContext ? `\u26A0 ${conductorActivationContext.trim()}. ` : "";
 var output = {
-  systemMessage: `${conductorActivationWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
+  systemMessage: `${conductorActivationWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + undeclaredSourceContext }
 };
 exitAfterWrite(JSON.stringify(output), 0);

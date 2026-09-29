@@ -172,9 +172,13 @@ if (dirtyLines.length > 0) {
   fail(parts.join('\n'));
 }
 
-// Gate precondition (merge.md): every affected article reconciled. Open
-// reconcile_needed debt on files this branch changed refuses the merge — the
-// direct-merge reconciliation requirement (decision foreign_9df61181).
+// Reconcile debt is DISCLOSED, never refused (decision
+// merge-discloses-derived-drift-never-refuses-on-it, applied by decision
+// maintenance-queue-background-haiku-worker-simple-redesign point (4)): open
+// reconcile_needed debt on files this branch changed is printed on stderr with
+// each item's paths and age, and the merge proceeds. The background
+// maintenance worker judges and closes already-paid items; what it leaves open
+// owes article prose from the conductor.
 // -c core.quotePath=false (r-review F3, applied here too for consistency): without
 // it, non-ASCII filenames arrive C-quoted and defeat the plain-string path
 // comparisons further down.
@@ -214,8 +218,8 @@ const versionOnlyPaths = VERSION_ONLY_CANDIDATES.filter((p) => changed.has(p) &&
 // `changed` stays exactly as-is for every existing consumer (version-field
 // gate, review-receipt checks, board-payment nudge, parked sweep).
 // `reconcileChanged` is `changed` minus the proven version-only paths, used
-// ONLY for settlement minting and the reconcile refusal's covering/liveness
-// scope — a proven version-only path can never block or mint a merge refusal
+// ONLY for settlement minting and the reconcile disclosure's covering/liveness
+// scope — a proven version-only path is never disclosed as debt and never mints
 // from this exception alone (article direct-merge-and-branch-sweep, AC5).
 const reconcileChanged = new Set([...changed].filter((p) => !versionOnlyPaths.includes(p)));
 
@@ -225,11 +229,11 @@ const reconcileChanged = new Set([...changed].filter((p) => !versionOnlyPaths.in
 // (h10-direct-capture.mjs) and this gate ever mint it now, so a branch whose
 // session died before reaching Stop-settlement (the design's NAMED HOLE) still
 // gets its debt minted HERE, against every file this branch actually changed,
-// before the refusal below ever reads the queue. Every SURVIVING
+// before the disclosure below ever reads the queue. Every SURVIVING
 // reconcile_needed item covering this branch's files is then re-evaluated
 // against the LIVE predicate (current content vs the owning article's CURRENT
 // baseline) — a stale row (already reconciled since it minted, or an
-// edit-then-revert) must never block the merge on its own authority.
+// edit-then-revert) is reported as cleared, not disclosed as live debt.
 // A row the live predicate CLEARS is NAMED, never silently dropped (board
 // 92f7e826, recurrence 2026-08-25): the exclusion already worked, but it was
 // invisible, so eight no-op items were "closed" with board_remove — which
@@ -318,9 +322,9 @@ try {
 if (settlementError) {
   fail(`direct-merge: settlement mint/live-check failed (${settlementError?.message ?? settlementError}) — refusing rather than merging on an unverified reconcile state`);
 }
-// VERSION-ONLY NONBLOCKING REPORT, printed BEFORE the cleared/refusal output
+// VERSION-ONLY NONBLOCKING REPORT, printed BEFORE the cleared/disclosure output
 // below so it appears on every path — a clean merge, a merge that proceeds
-// past cleared rows, and a merge refused on OTHER, still-live debt (article
+// past cleared rows, and a merge that discloses OTHER, still-live debt (article
 // direct-merge-and-branch-sweep, AC5).
 // Nothing here closes anything: the item stays open, unverified, and the
 // exception's whole claim is nonblocking-ness, never verified-clean-ness.
@@ -340,8 +344,8 @@ if (versionOnlyReport.length > 0) {
 
 // THE CLEARED ROWS, NAMED (board 92f7e826). Printed to STDERR only — stdout is
 // the gate's machine-readable JSON result and stays exactly that. Printed
-// BEFORE the refusal below, so it appears on BOTH paths: a merge that proceeds
-// and a merge refused on OTHER, genuinely-live debt. Nothing is removed or
+// BEFORE the live-debt disclosure below, so it appears whether or not other,
+// genuinely-live debt is disclosed too. Nothing is removed or
 // rewritten here; the remedy text says why board_remove alone is the wrong
 // close, which is the trap this report exists to stop.
 if (cleared.length > 0) {
@@ -411,12 +415,24 @@ if (cleared.length > 0) {
     ].join('\n')
   );
 }
+/** Age of an open item from its created_at, as '<n>d <n>h' (or '<n>h' / '<n>m'
+ *  when younger). An unparseable timestamp prints 'unknown' rather than a
+ *  guessed number. */
+function debtAge(createdAt) {
+  const ms = Date.now() - Date.parse(createdAt);
+  if (!Number.isFinite(ms)) return 'unknown';
+  const mins = Math.max(0, Math.floor(ms / 60_000));
+  const days = Math.floor(mins / 1440);
+  const hours = Math.floor((mins % 1440) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  return hours > 0 ? `${hours}h` : `${mins}m`;
+}
 if (debt.length > 0) {
   // GROUP BY OWNING ARTICLE (N13): one item per touched file is the mint
   // granularity, so a branch touching one heavily-shared file can carry
   // hundreds of near-identical items — measured 207 lines (~40KB) for a
   // single refusal. Group by feature_link (the owning article id H7 stamps)
-  // so the refusal reads as N ARTICLES, not N items; every item id stays
+  // so the disclosure reads as N ARTICLES, not N items; every item id stays
   // listed, nested under its group, so nothing here is lossy — only the
   // presentation is denser. Items with NO feature_link (older/foreign
   // items) all share ONE bucket — keying that bucket per-item (e.g. by
@@ -441,46 +457,38 @@ if (debt.length > 0) {
       // header union loses the item→files association the un-grouped
       // format used to carry — two items in one group touching different
       // files must not read as though either touched both.
-      return `  - ${header}\n` + items.map((t) => `      - ${t.id}  ${t.text}  [${(t.file_keys ?? []).join(', ')}]`).join('\n');
+      return `  - ${header}\n` + items.map((t) => `      - ${t.id}  age ${debtAge(t.created_at)} (open since ${t.created_at})  ${t.text}  [${(t.file_keys ?? []).join(', ')}]`).join('\n');
     })
     .join('\n');
   const headline =
     noArticleItems.length > 0
       ? `${debt.length} open reconcile_needed item(s) across ${realArticleCount} article(s) (plus ${noArticleItems.length} item(s) with no owning article)`
       : `${debt.length} open reconcile_needed item(s) across ${realArticleCount} article(s)`;
-  // TWO SANCTIONED DISCHARGES (decision foreign_5f330fbe, a previous store's
-  // ruling, arm A1) — the prior text here ("knowledge_update ... auto-drains its item")
-  // was FALSE: drain happens ONLY via an explicit `resolves` claim (decision
-  // foreign_68988832), never as a side effect of any write.
-  // WHOLE-ITEM RULE STATED UNCONDITIONALLY (Codex round-2 HIGH): this used to
-  // print ONLY inside the out-of-diff NOTE below, so an item whose file_keys
-  // happened to sit entirely within this branch's diff never saw the warning
-  // at all — but resolves ALWAYS deletes the whole item and re-baselines
-  // EVERY owned file, regardless of diff scope, so discharge (b) states the
-  // rule every time, not conditionally.
+  // DISCLOSE, NEVER REFUSE (decision merge-discloses-derived-drift-never-refuses-on-it;
+  // decision maintenance-queue-background-haiku-worker-simple-redesign point (4)).
+  // The store is local to this machine, so a refusal protected only this
+  // machine's store, and its measured record was mostly false positives (17 of
+  // 18 items already paid). The debt stays visible here, with each item's paths
+  // and age, and in H1; the merge proceeds.
   const remedy = [
     '',
-    'Two sanctioned discharges — close each item with ONE of these (never a bare knowledge_update; drain requires an explicit `resolves` claim):',
+    'This does NOT block the merge. The background maintenance worker judges each item and closes the ones already paid;',
+    'an item it leaves open is logged as owes prose in .sterling/maintenance-worker.jsonl. Close what remains with ONE of the two sanctioned discharges',
+    '(decision foreign_5f330fbe arm A1; drain requires an explicit `resolves` claim, never a bare knowledge_update), or /sterling:drain:',
     '  (a) BEHAVIOR CHANGED: reconcile the article with a real write carrying resolves:[<full item id>].',
-    '  (b) VERIFIED UNAFFECTED: append a verification-history entry — `resolves` deletes the WHOLE item and the write',
-    '      re-baselines EVERY file the owning article owns, so verify EVERY file_key on the item (and rule out any',
-    '      unexplained drift elsewhere in the article\'s owned set) before resolving — never just the paths this branch',
-    '      happened to touch —',
-    '      knowledge_append(id:<article>, field:"history", entries:[{date:<ISO>, event:"VERIFIED UNAFFECTED: <path(s)> — checked against the diff, no reconcile owed"}], resolves:["<full item id>"])',
-    'Then rerun.',
+    '  (b) VERIFIED UNAFFECTED: `resolves` deletes the WHOLE item and re-baselines EVERY file the article owns, so verify every',
+    '      file_key first — knowledge_append(id:<article>, field:"history", entries:[{date:<ISO>, event:"VERIFIED UNAFFECTED: <path(s)> — checked against the diff, no reconcile owed"}], resolves:["<full item id>"])',
   ];
-  // PER-ITEM NOTE, kept as EMPHASIS (not the sole carrier of the rule anymore)
-  // when an item's file_keys reach beyond this branch's diff — those specific
-  // out-of-scope paths are named so they are not missed.
+  // PER-ITEM NOTE when an item's file_keys reach beyond this branch's diff —
+  // resolves deletes the whole item and re-baselines every owned file, so the
+  // out-of-scope paths are named for whoever reconciles it.
   for (const t of debt) {
     const outside = (t.file_keys ?? []).filter((k) => !changed.has(k));
     if (outside.length) {
-      remedy.push(
-        `  NOTE (${t.id}): this item also covers ${outside.join(', ')} beyond this branch — verify those too before resolving (see discharge (b) above; resolves deletes the whole item).`
-      );
+      remedy.push(`  NOTE (${t.id}): this item also covers ${outside.join(', ')} beyond this branch — verify those too before resolving.`);
     }
   }
-  fail(`direct-merge: ${headline} cover files this branch changed — reconcile before merging:\n` + grouped + '\n' + remedy.join('\n'));
+  console.error(`\ndirect-merge: RECONCILE DEBT DISCLOSED — ${headline} cover files this branch changed:\n` + grouped + '\n' + remedy.join('\n') + '\n');
 }
 
 // VERSION MOVES WITH THE MERGE (decision foreign_be9168e8 + user directive 2026-08-05

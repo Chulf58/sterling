@@ -31,6 +31,7 @@ import { ProjectRegistry, registryPath } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths, isLocallyModified, loadRegistry, sha256 } from '../lib/agent-distribution.mjs';
 import { gitTouches, writeInitialGitSettled } from './lib/settlement.mjs';
+import { owesProseVerdicts, isJudgedOwesProse, workerStatus, ageText } from './lib/maintenance-worker.mjs';
 
 // IN-FLIGHT DISPATCH REGISTER DELETION — COOPERATING WRITER (decision
 // register-writers-cooperating-lock, 1e0ba0d0). H1 is a register writer like
@@ -1200,6 +1201,7 @@ let queueReasons = [];
 let queueReasonEntries = [];
 let drainable = 0;
 let parked = 0;
+let reconcile = { count: 0, owesProse: 0, oldest: null };
 try {
   // TRUE totals (AC1): store.count() runs the same §3.4 base filter as
   // query() with no rank/cap applied — it is the count-capable surface, never
@@ -1229,6 +1231,20 @@ try {
   // project: 15 by-design-open file_parked items tripped this every session
   // start). It stays in counts.maintenance (the human's banner shows the true
   // total); only the DRAIN signal excludes it.
+  // RECONCILE BACKLOG AGE (decision maintenance-queue-background-haiku-worker-
+  // simple-redesign point (5)): the count and the oldest created_at, so a
+  // backlog nobody drains shows its age instead of only its size.
+  const reconcileItems = system.filter((t) => t.system_reason === 'reconcile_needed');
+  reconcile.count = reconcileItems.length;
+  // 'owes prose' is judged per (item id, current file_keys) in the worker's
+  // JSONL, never marked on the item itself.
+  try {
+    const verdicts = owesProseVerdicts(input.cwd);
+    reconcile.owesProse = reconcileItems.filter((t) => isJudgedOwesProse(t, verdicts)).length;
+  } catch {
+    reconcile.owesProse = null; // unreadable journal: say so below, never a confident 0
+  }
+  reconcile.oldest = reconcileItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
   const drainableItems = system.filter((t) => t.system_reason !== 'file_parked');
   drainable = drainableItems.length;
   parked = system.length - drainable;
@@ -1313,6 +1329,37 @@ if (drainable >= deepThreshold) {
   // that carries prose, not on the banner's pinned counts-only contract.
   queueContext +=
     ' This is a persistent visibility count by design — items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.';
+}
+
+// RECONCILE BACKLOG LINE: one '·' segment on the human banner (after the
+// maintenance clause, so that clause's text is unchanged) and one line for the
+// conductor, who drafts the prose the worker leaves owed. Silent when there
+// is no reconcile item (P1). Worker state comes from its lockfile; a failed
+// last run is named, never hidden (P5).
+let reconcileBanner = '';
+let reconcileContext = '';
+if (reconcile.count > 0) {
+  let worker = 'worker not running';
+  let lastRunNote = '';
+  try {
+    const ws = workerStatus(input.cwd);
+    if (ws.running) worker = `worker running (pid ${ws.pid}, since ${ws.since})`;
+    if (ws.lastRun && ws.lastRun.ok === false) lastRunNote = `; last worker run FAILED at ${ws.lastRun.at}: ${ws.lastRun.error} (log: .sterling/maintenance-worker.log)`;
+    if (ws.spentToday > 0) lastRunNote += `; worker spend today $${ws.spentToday.toFixed(2)}`;
+  } catch (e) {
+    worker = `worker state unreadable (${e?.message ?? e})`;
+  }
+  const age = ageText(reconcile.oldest);
+  // Counts keep H1's "N item(s) in lane <reason>" shape, so a round number
+  // can never read as a truncated cap (h1-accuracy AC1).
+  const inLane = (n) => `${n} item${n === 1 ? '' : 's'} in lane reconcile_needed`;
+  reconcileBanner = ` · ${inLane(reconcile.count)}, oldest ${age}, ${worker}${lastRunNote}`;
+  reconcileContext =
+    `\n\nRECONCILE BACKLOG: ${inLane(reconcile.count)}, the oldest open since ${reconcile.oldest ?? 'unknown'} (${age}). ` +
+    (reconcile.owesProse === null
+      ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items owe prose is unknown. `
+      : `Of these, ${inLane(reconcile.owesProse)} are judged 'owes prose' by the background worker (.sterling/maintenance-worker.jsonl) and wait on you to draft the article change. `) +
+    `${worker}${lastRunNote}.`;
 }
 
 // shared project registry (decision foreign_8f9e6db2): touch THIS project's last_seen
@@ -1752,10 +1799,10 @@ try {
 const conductorActivationWarning = conductorActivationContext ? `⚠ ${conductorActivationContext.trim()}. ` : '';
 
 const output = {
-  systemMessage: `${conductorActivationWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
+  systemMessage: `${conductorActivationWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the

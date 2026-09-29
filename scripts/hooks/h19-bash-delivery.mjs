@@ -27,6 +27,8 @@ import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfi
 import { isForeignTree } from './lib/working-tree.mjs';
 import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
 import { statSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
 import { join } from 'node:path';
 import {
   guardPath,
@@ -50,6 +52,11 @@ import {
   claimLegacyInjectionRungNotice,
 } from './lib/delivery.mjs';
 
+// `git commit` anywhere in the command (after a `cd … &&`, with -C <dir> or
+// -c k=v options before the subcommand). A false positive costs one guarded
+// launcher call; a miss is caught by the Stop trigger.
+const GIT_COMMIT_RE = /(^|[\s;&|(])git(\s+-[Cc]\s+\S+)*\s+commit\b/;
+
 const input = readStdin();
 function main(input) {
   const command = input.tool_input?.command;
@@ -57,6 +64,25 @@ function main(input) {
 
   const store = openStore(input.cwd);
   if (!store) return allow(); // not a Sterling project — no ceremony (P1)
+
+  // BACKGROUND MAINTENANCE WORKER, commit trigger (decision
+  // maintenance-queue-background-haiku-worker-simple-redesign): this is the
+  // one hook that sees a Bash `git commit`. The launcher is lock- and
+  // debounce-guarded and never throws. Its line (a failed launch, an active
+  // daily cap or back-off, a failed last run) rides this hook's
+  // additionalContext on every exit path below (P5): PostToolUse stderr on
+  // exit 0 is not shown in-session, additionalContext is.
+  let workerLine = '';
+  if (GIT_COMMIT_RE.test(command)) {
+    const launch = maybeLaunchMaintenanceWorker({ root: input.cwd, config: loadConfig(input.cwd), store, trigger: 'commit', spawn });
+    if (launch.line) workerLine = launch.line;
+  }
+  const withWorkerLine = (text) => [workerLine, text].filter(Boolean).join('\n\n');
+  const quietExit = (notice) => {
+    const text = withWorkerLine(notice);
+    if (text) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: text } }), 0);
+    return allow();
+  };
 
   try {
   // Step 2: Bash pointers are always direct on their PostToolUse.
@@ -103,8 +129,7 @@ function main(input) {
   }
 
   if (!entries.length) {
-    if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: migrationNotice } }), 0);
-    return allow();
+    return quietExit(migrationNotice);
   }
 
   // KNOWN_GAPS RE-EMISSION AT THE BASH/PROBE-OUTPUT SEAM (board f1489964,
@@ -185,8 +210,7 @@ function main(input) {
   const hzParts = hazardParts(eligibleHazards, { fileKeys: entries.map((e) => e.rel), mode: hazardMode });
 
   if (!ownerParts.length && !hzParts.length) {
-    if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: migrationNotice } }), 0);
-    return allow();
+    return quietExit(migrationNotice);
   }
 
   const totalCap = resolveTotalCap(input.cwd);
@@ -227,7 +251,7 @@ function main(input) {
   // migrationNotice is already folded into `assembled.text` above (as a
   // leading, charged chrome part — fix-round HIGH 4), so it is not
   // re-prepended here.
-  const payload = assembled.text;
+  const payload = withWorkerLine(assembled.text);
   return exitAfterWrite(
     JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }),
     0,
@@ -236,7 +260,7 @@ function main(input) {
   } catch (e) {
   // Delivery is an aid, never a gate: internal failure is loud but NON-blocking
   // (P5 visibility without an AC7 violation).
-    return warnNonBlocking(`H19: bash pointer delivery failed: ${(e && e.message) || e}`);
+    return warnNonBlocking(`${workerLine ? `${workerLine}\n` : ''}H19: bash pointer delivery failed: ${(e && e.message) || e}`);
   }
 }
 main(input);

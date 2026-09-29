@@ -47,14 +47,15 @@
 //        ONE item carrying both file_keys, not two items.
 //   AC6a (direct-merge, control) — an open reconcile_needed item whose live
 //        predicate is TRUE (current content really does differ from the
-//        owning article's baseline) still refuses the merge — proving the
-//        live re-check is not "never refuse anything now".
+//        owning article's baseline) is DISCLOSED as live debt (the merge
+//        proceeds; decision merge-discloses-derived-drift-never-refuses-on-it)
+//        — proving the live re-check is not "never report anything now".
 //   AC6b (direct-merge, target) — an open reconcile_needed item whose live
 //        predicate is FALSE (the owning article's baseline already matches
-//        current content — a stale row) does NOT block the merge, even
+//        current content — a stale row) is NOT disclosed as live debt, even
 //        though the item itself is still open. Paired with AC6a: together
-//        they pin content-sensitivity rather than "always refuse" (old
-//        behavior, breaks AC6b) or "never refuse" (breaks AC6a).
+//        they pin content-sensitivity rather than "always disclose" (breaks
+//        AC6b) or "never disclose" (breaks AC6a).
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
@@ -338,11 +339,24 @@ function runDirectMerge(dir, extra = []) {
   });
 }
 
+/** The live-debt disclosure block direct-merge prints on stderr (header
+ * through the item list, before the remedy), or '' when absent. Reconcile
+ * debt is disclosed, never refused (decision
+ * merge-discloses-derived-drift-never-refuses-on-it), so liveness is
+ * asserted as membership in this block. */
+function disclosure(stderr) {
+  const s = String(stderr ?? '');
+  const i = s.indexOf('RECONCILE DEBT DISCLOSED');
+  if (i < 0) return '';
+  const j = s.indexOf('This does NOT block the merge', i);
+  return s.slice(i, j < 0 ? undefined : j);
+}
+
 // =========================================================================
-// AC6a — direct-merge, control: live predicate TRUE still refuses
+// AC6a — direct-merge, control: live predicate TRUE is disclosed as live debt
 // =========================================================================
 
-test('AC6a [direct-merge, control]: an open reconcile_needed item whose live predicate is TRUE (content really differs from the owning article baseline) still refuses the merge — sabotage: remove the reconcile_needed refusal check from direct-merge.mjs entirely, which must flip this red (merge succeeds)', () => {
+test('AC6a [direct-merge, control]: an open reconcile_needed item whose live predicate is TRUE (content really differs from the owning article baseline) is DISCLOSED as live debt while the merge proceeds — sabotage: remove the reconcile_needed debt check from direct-merge.mjs entirely, which must flip this red (no disclosure)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const original = 'export const t = 1;\n';
@@ -379,10 +393,11 @@ test('AC6a [direct-merge, control]: an open reconcile_needed item whose live pre
     git(dir, ['commit', '-m', 'change touched file']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `a genuinely-still-drifted article must still refuse the merge — stdout=${r.stdout} stderr=${r.stderr}`);
-    assert.match(r.stderr, /reconcile_needed/);
-    assert.match(r.stderr, /src\/touched\.mjs/);
-    void item;
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${r.stdout} stderr=${r.stderr}`);
+    const disclosed = disclosure(r.stderr);
+    assert.match(disclosed, /reconcile_needed/, `a genuinely-still-drifted article is disclosed as live debt — stderr=${r.stderr}`);
+    assert.match(disclosed, /src\/touched\.mjs/);
+    assert.ok(disclosed.includes(item.id), 'the live item is named by its full id');
   } finally {
     cleanup();
   }
@@ -392,7 +407,7 @@ test('AC6a [direct-merge, control]: an open reconcile_needed item whose live pre
 // AC6b — direct-merge, target: live predicate FALSE does not block (stale row)
 // =========================================================================
 
-test('AC6b [direct-merge, target]: a stale reconcile_needed item whose live predicate is now FALSE (article baseline already matches current content) does NOT block the merge — sabotage: refuse on ANY open reconcile_needed item matching file_keys without re-hashing against current baselines (today\'s behavior), which must flip this red (merge refuses)', () => {
+test('AC6b [direct-merge, target]: a stale reconcile_needed item whose live predicate is now FALSE (article baseline already matches current content) does NOT block the merge — sabotage: refuse on ANY open reconcile_needed item matching file_keys without re-hashing against current baselines (today\'s behavior), which must flip this red (the stale row is disclosed as live debt)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const changed = 'export const t = 2;\n';
@@ -433,6 +448,7 @@ test('AC6b [direct-merge, target]: a stale reconcile_needed item whose live pred
     const r = runDirectMerge(dir);
     assert.equal(r.status, 0, `a stale queue row whose live predicate is false must not block the merge on its own authority — stdout=${r.stdout} stderr=${r.stderr}`);
     assert.equal(JSON.parse(r.stdout).branch_merged, 'feat/live-false');
+    assert.equal(disclosure(r.stderr), '', `a stale row whose live predicate is false is never disclosed as live debt — stderr=${r.stderr}`);
   } finally {
     cleanup();
   }
@@ -442,7 +458,7 @@ test('AC6b [direct-merge, target]: a stale reconcile_needed item whose live pred
 // to mintSettlementReconcile as the root the self-root rule compares against. A
 // RELATIVE --target ('.') must be resolved to the project root first, or a
 // self-rooted article (working_tree = the absolute project root) reads as a
-// foreign tree and its drifted file never mints the reconcile debt that refuses.
+// foreign tree and its drifted file never mints the reconcile debt the merge discloses.
 test('direct-merge with a relative --target still mints reconcile debt for a SELF-ROOTED article (working_tree = project root)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
@@ -472,9 +488,10 @@ test('direct-merge with a relative --target still mints reconcile debt for a SEL
     git(dir, ['commit', '-m', 'change touched file']);
 
     const r = spawnSync(process.execPath, [join(root, 'scripts', 'direct-merge.mjs'), '--target', '.'], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
-    assert.notEqual(r.status, 0, `the self-rooted article's drift must mint debt and refuse — stdout=${r.stdout} stderr=${r.stderr}`);
-    assert.match(r.stderr, /reconcile_needed/);
-    assert.match(r.stderr, /src\/touched\.mjs/);
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${r.stdout} stderr=${r.stderr}`);
+    const disclosed = disclosure(r.stderr);
+    assert.match(disclosed, /reconcile_needed/, `the self-rooted article's drift must mint debt that is disclosed — stderr=${r.stderr}`);
+    assert.match(disclosed, /src\/touched\.mjs/);
   } finally {
     cleanup();
   }

@@ -285,7 +285,7 @@ test('PIN2 [regression net]: a config with NO generated_projections key mints ex
 // PIN3 — isLiveReconcileDebt exemption (direct-merge live-predicate surface)
 // =========================================================================
 
-test('PIN3 [isLiveReconcileDebt exemption, CONTROL — placed first]: an item mixing one exempt path with one drifted UNLISTED path is still live and still refuses the merge — EXPECTED GREEN TODAY AND AFTER THE FIX (proves the exemption cannot blanket-suppress an item merely for containing an exempt path). Sabotage: treat a reconcile_needed item as not-live whenever ANY of its file_keys is exempt, instead of only when ALL of them are — must flip this red (merge succeeds).', async () => {
+test('PIN3 [isLiveReconcileDebt exemption, CONTROL — placed first]: an item mixing one exempt path with one drifted UNLISTED path is still live and is disclosed as live debt at the merge — EXPECTED GREEN TODAY AND AFTER THE FIX (proves the exemption cannot blanket-suppress an item merely for containing an exempt path). Sabotage: treat a reconcile_needed item as not-live whenever ANY of its file_keys is exempt, instead of only when ALL of them are — must flip this red (no disclosure).', async () => {
   const SterlingStore = await getSterlingStore();
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
@@ -326,18 +326,33 @@ test('PIN3 [isLiveReconcileDebt exemption, CONTROL — placed first]: an item mi
     git(dir, ['commit', '-m', 'change both paths']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `an item with a genuinely-drifted UNLISTED path must still refuse the merge — stdout=${r.stdout} stderr=${r.stderr}`);
-    assert.match(r.stderr, /reconcile_needed/);
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${r.stdout} stderr=${r.stderr}`);
+    const disclosed = disclosure(r.stderr);
+    assert.match(disclosed, /reconcile_needed/, `an item with a genuinely-drifted UNLISTED path is still live and disclosed — stderr=${r.stderr}`);
+    assert.match(disclosed, /src\/h\.mjs/);
   } finally {
     cleanup();
   }
 });
 
+/** The live-debt disclosure block direct-merge prints on stderr (header
+ * through the item list, before the remedy), or '' when absent. Reconcile
+ * debt is disclosed, never refused (decision
+ * merge-discloses-derived-drift-never-refuses-on-it), so liveness is
+ * asserted as membership in this block. */
+function disclosure(stderr) {
+  const s = String(stderr ?? '');
+  const i = s.indexOf('RECONCILE DEBT DISCLOSED');
+  if (i < 0) return '';
+  const j = s.indexOf('This does NOT block the merge', i);
+  return s.slice(i, j < 0 ? undefined : j);
+}
+
 // =========================================================================
 // PIN3 — isLiveReconcileDebt exemption, TARGET
 // =========================================================================
 
-test('PIN3 [isLiveReconcileDebt exemption, TARGET]: an open reconcile_needed item whose file_keys are ONLY exempt paths is NOT live and does not block the merge, even though that path is genuinely drifted — EXPECTED RED TODAY (no exemption exists in isLiveReconcileDebt yet; today\'s live predicate sees genuine drift and refuses). Sabotage: omit the generated_projections check from isLiveReconcileDebt entirely — must flip this red (merge refuses).', async () => {
+test('PIN3 [isLiveReconcileDebt exemption, TARGET]: an open reconcile_needed item whose file_keys are ONLY exempt paths is NOT live and is never disclosed as live debt, even though that path is genuinely drifted — EXPECTED RED TODAY (no exemption exists in isLiveReconcileDebt yet; today\'s live predicate sees genuine drift). Sabotage: omit the generated_projections check from isLiveReconcileDebt entirely — must flip this red (the item is disclosed as live debt).', async () => {
   const SterlingStore = await getSterlingStore();
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
@@ -377,6 +392,7 @@ test('PIN3 [isLiveReconcileDebt exemption, TARGET]: an open reconcile_needed ite
     const r = runDirectMerge(dir);
     assert.equal(r.status, 0, `an item whose file_keys are ONLY exempt paths must not block the merge — stdout=${r.stdout} stderr=${r.stderr}`);
     assert.equal(JSON.parse(r.stdout).branch_merged, 'feat/exempt-only');
+    assert.equal(disclosure(r.stderr), '', `an exempt-only item is never disclosed as live debt — stderr=${r.stderr}`);
   } finally {
     cleanup();
   }

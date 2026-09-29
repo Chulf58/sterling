@@ -30,6 +30,10 @@
   "maintenance_queue": {
     "deep_threshold": 15
   },
+  "maintenance_worker": {
+    "enabled": true,
+    "daily_budget_usd": 5
+  },
   "attestation_path_globs": [],
   "undeclared_source_exclude_globs": ["**/*.sh"],
   "store_authority": "primary",

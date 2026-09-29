@@ -5013,6 +5013,21 @@ var configSchema = external_exports.object({
   maintenance_queue: external_exports.object({
     deep_threshold: external_exports.number().int().positive().default(15)
   }).default({}),
+  // Background maintenance worker kill switch (decision
+  // maintenance-queue-background-haiku-worker-simple-redesign): when true, H10
+  // (at Stop) and H19's Bash surface (after a git commit) start a detached
+  // headless Claude run that judges open reconcile_needed items and closes the
+  // ones already paid (scripts/hooks/lib/maintenance-worker.mjs). false stops
+  // every launch; the queue then drains by hand with /sterling:drain.
+  // daily_budget_usd caps the worker's spend per UTC day: the runner adds each
+  // run's cost to its state file and the launcher refuses to start once the
+  // day's spend reaches it, with a visible line. Both defaults live here AND
+  // in templates/default-config.json, because install/sync fill an omitted key
+  // from this zod default, not the template.
+  maintenance_worker: external_exports.object({
+    enabled: external_exports.boolean().default(true),
+    daily_budget_usd: external_exports.number().positive().default(5)
+  }).default({}),
   // Board 8390f8fa: a registry-style feature_article can outgrow its own
   // round-trip — knowledge_append responses on mcp-tool-surface (29 history
   // entries) and hooks-suite's what_it_does (26k tokens) both blew the MCP
@@ -7743,23 +7758,315 @@ function hazardLaneMode(input2, root) {
 }
 
 // scripts/hooks/h19-bash-delivery.mjs
-import { statSync as statSync2 } from "node:fs";
-import { join as join6 } from "node:path";
+import { statSync as statSync3 } from "node:fs";
+import { spawn } from "node:child_process";
+
+// scripts/hooks/lib/maintenance-worker.mjs
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { spawnSync as nodeSpawnSync } from "node:child_process";
+import { closeSync, existsSync as existsSync4, mkdirSync as mkdirSync3, openSync, readFileSync as readFileSync4, renameSync as renameSync2, rmSync as rmSync2, rmdirSync as rmdirSync2, statSync as statSync2, writeFileSync as writeFileSync2, appendFileSync } from "node:fs";
+import { dirname as dirname4, join as join5 } from "node:path";
+import { fileURLToPath } from "node:url";
+var WORKER_RUN_BUDGET_USD = 2;
+var DEFAULT_DAILY_BUDGET_USD = 5;
+var DEBOUNCE_MS = 2 * 6e4;
+var BACKOFF_MS = 30 * 6e4;
+var WORKER_TIMEOUT_MS = 20 * 6e4;
+var LOCK_STALE_MS = 30 * 6e4;
+var TAKEOVER_STALE_MS = 6e4;
+var ROTATE_BYTES = 1e6;
+var MIN_RUN_BUDGET_USD = 0.01;
+var WORKER_ENV_FLAG = "STERLING_MAINTENANCE_WORKER";
+var WORKER_DISABLE_ENV = "STERLING_MAINTENANCE_WORKER_DISABLE";
+var SERVER = "sterling";
+var mcp = (name) => `mcp__${SERVER}__${name}`;
+var WORKER_TOOLS = [mcp("maintenance_query"), mcp("knowledge_get"), mcp("maintenance_remove"), "Read", "Grep"];
+var WORKER_DISALLOWED_TOOLS = [
+  ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
+  ...["add", "remove", "update", "edit"].map((v) => mcp(`board_${v}`)),
+  mcp("config_set"),
+  "Write",
+  "Edit",
+  "Bash"
+];
+function workerPaths(root) {
+  const sterling = join5(root, ".sterling");
+  return {
+    lock: join5(sterling, "transient", "maintenance-worker.lock"),
+    takeover: join5(sterling, "transient", "maintenance-worker.lock.takeover"),
+    lastLaunch: join5(sterling, "transient", "maintenance-worker.last-launch"),
+    eligible: join5(sterling, "transient", "maintenance-worker.eligible.json"),
+    state: join5(sterling, "transient", "maintenance-worker.state.json"),
+    log: join5(sterling, "maintenance-worker.log"),
+    journal: join5(sterling, "maintenance-worker.jsonl")
+  };
+}
+function pluginRootFrom(moduleUrl = import.meta.url) {
+  let dir = dirname4(fileURLToPath(moduleUrl));
+  for (let i = 0; i < 5; i++) {
+    if (existsSync4(join5(dir, ".claude-plugin", "plugin.json"))) return dir;
+    dir = dirname4(dir);
+  }
+  return null;
+}
+function readJson(path) {
+  try {
+    return JSON.parse(readFileSync4(path, "utf8"));
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    return { unreadable: String(e?.message ?? e) };
+  }
+}
+function rotateIfLarge(path, limit = ROTATE_BYTES) {
+  try {
+    if (statSync2(path).size > limit) renameSync2(path, `${path}.1`);
+  } catch (e) {
+    if (e?.code !== "ENOENT") throw e;
+  }
+}
+var sortedKeys = (keys) => JSON.stringify([...keys ?? []].map(String).sort());
+function judgedVerdicts(root) {
+  const { journal } = workerPaths(root);
+  const map = /* @__PURE__ */ new Map();
+  for (const path of [`${journal}.1`, journal]) {
+    let text;
+    try {
+      text = readFileSync4(path, "utf8");
+    } catch (e) {
+      if (e?.code === "ENOENT") continue;
+      throw e;
+    }
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      let v;
+      try {
+        v = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!v?.item_id || v.kind !== "verdict") continue;
+      if ((v.verdict === "owes_prose" || v.verdict === "refused") && Array.isArray(v.file_keys)) {
+        map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
+      } else map.delete(v.item_id);
+    }
+  }
+  return map;
+}
+function isJudged(item, verdicts, head) {
+  const v = verdicts.get(item.id);
+  if (!v || v.keys !== sortedKeys(item.file_keys)) return false;
+  return v.verdict === "owes_prose" || v.verdict === "refused" && Boolean(head) && v.head === head;
+}
+function openReconcileItems(store) {
+  const total = store.count({ types: ["todo"], source: "system" });
+  if (!total) return [];
+  return store.query({ types: ["todo"], source: "system", cap: total }).filter((t) => t.system_reason === "reconcile_needed");
+}
+function gitState(root, spawnSync = nodeSpawnSync) {
+  const r = spawnSync("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
+  if (r.error || r.status !== 0) return null;
+  const [head, prefix = ""] = String(r.stdout ?? "").split("\n");
+  return /^[0-9a-f]{40,64}$/.test(head) ? { head, prefix: prefix.trim() } : null;
+}
+function dirtyPaths(root, paths, spawnSync = nodeSpawnSync, prefix = "") {
+  if (!paths.length) return /* @__PURE__ */ new Set();
+  const r = spawnSync("git", ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
+  if (r.error || r.status !== 0) return null;
+  const dirty = /* @__PURE__ */ new Set();
+  const add = (p) => {
+    if (p && p.startsWith(prefix)) dirty.add(p.slice(prefix.length));
+  };
+  const parts = String(r.stdout ?? "").split("\0");
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i];
+    if (entry.length < 4) continue;
+    add(entry.slice(3));
+    if (entry[0] === "R" || entry[0] === "C") add(parts[++i]);
+  }
+  return dirty;
+}
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code === "EPERM";
+  }
+}
+function lockState(lock, nowMs, isAlive = pidAlive) {
+  if (!lock) return "none";
+  const started = Date.parse(lock.started_at ?? "");
+  if (lock.unreadable || !Number.isFinite(started)) return "stale";
+  if (nowMs - started > LOCK_STALE_MS) return "stale";
+  return isAlive(lock.pid) ? "live" : "stale";
+}
+function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
+  const token = randomUUID2();
+  const body = JSON.stringify({ ...content, token });
+  const tryCreate = () => {
+    try {
+      writeFileSync2(paths.lock, body, { flag: "wx" });
+      return true;
+    } catch (e) {
+      if (e?.code === "EEXIST") return false;
+      throw e;
+    }
+  };
+  if (!tryCreate()) {
+    if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
+    try {
+      mkdirSync3(paths.takeover);
+    } catch (e) {
+      if (e?.code !== "EEXIST") throw e;
+      let age = 0;
+      try {
+        age = Date.now() - statSync2(paths.takeover).mtimeMs;
+      } catch {
+      }
+      if (age > TAKEOVER_STALE_MS) rmdirSync2(paths.takeover);
+      return null;
+    }
+    try {
+      if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
+      rmSync2(paths.lock, { force: true });
+      if (!tryCreate()) return null;
+    } finally {
+      rmdirSync2(paths.takeover);
+    }
+  }
+  return readJson(paths.lock)?.token === token ? token : null;
+}
+function resolveMcpConfig(pluginRoot, projectRoot2) {
+  const path = join5(pluginRoot, ".claude-plugin", "sterling-mcp.json");
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync4(path, "utf8"));
+  } catch (e) {
+    throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 run /sterling:init in the clone`);
+  }
+  const entry = parsed?.mcpServers?.[SERVER];
+  if (!entry || typeof entry.command !== "string" || !Array.isArray(entry.args)) {
+    throw new Error(`${path} has no mcpServers.${SERVER} {command, args} entry`);
+  }
+  const bind = (s2) => String(s2).split("${CLAUDE_PROJECT_DIR}").join(projectRoot2);
+  return JSON.stringify({ mcpServers: { [SERVER]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
+}
+function readWorkerPrompt(pluginRoot) {
+  const path = join5(pluginRoot, "templates", "maintenance-worker-prompt.md");
+  try {
+    return readFileSync4(path, "utf8");
+  } catch (e) {
+    throw new Error(`cannot read the worker prompt ${path} (${e?.code ?? e?.message ?? e})`);
+  }
+}
+var utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+function readState(root) {
+  const s2 = readJson(workerPaths(root).state);
+  return s2 && !s2.unreadable ? s2 : { spend: {} };
+}
+function spentOn(state, day) {
+  return Number(state?.spend?.[day] ?? 0) || 0;
+}
+function dailyBudget(config) {
+  const v = Number(config?.maintenance_worker?.daily_budget_usd);
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_DAILY_BUDGET_USD;
+}
+var LOG_HINT = "(log: .sterling/maintenance-worker.log)";
+function failLine(reason) {
+  return `\u26A0 Sterling maintenance worker: launch FAILED (${reason}) \u2014 reconcile items stay open; it retries on the next commit or Stop, or drain by hand with /sterling:drain.`;
+}
+function maybeLaunchMaintenanceWorker(opts) {
+  try {
+    const env = opts.env ?? process.env;
+    if (env[WORKER_ENV_FLAG] === "1") return { launched: false, reason: "inside_worker" };
+    if (env[WORKER_DISABLE_ENV] === "1") return { launched: false, reason: "disabled_env" };
+    if (opts.config?.maintenance_worker?.enabled === false) return { launched: false, reason: "disabled" };
+    const verdicts = judgedVerdicts(opts.root);
+    const open = (opts.items ?? openReconcileItems(opts.store)).filter((t) => !isJudged(t, verdicts, null));
+    if (open.length === 0) return { launched: false, reason: "queue_empty" };
+    const nowMs = opts.now ?? Date.now();
+    const paths = workerPaths(opts.root);
+    const state = readState(opts.root);
+    const last = state.last_run;
+    const failedAt = last && last.ok === false ? Date.parse(last.at ?? "") : NaN;
+    if (Number.isFinite(failedAt) && nowMs - failedAt < BACKOFF_MS) {
+      const until = new Date(failedAt + BACKOFF_MS).toISOString();
+      return { launched: false, reason: "backoff", line: `\u26A0 Sterling maintenance worker: last run FAILED at ${last.at} (${last.error}) \u2014 backing off, no relaunch before ${until} ${LOG_HINT}.` };
+    }
+    const cap = dailyBudget(opts.config);
+    const spent = spentOn(state, utcDay(nowMs));
+    if (cap - spent < MIN_RUN_BUDGET_USD) {
+      return { launched: false, reason: "daily_cap", line: `\u26A0 Sterling maintenance worker: daily budget reached ($${spent.toFixed(2)} of $${cap.toFixed(2)} spent today, UTC) \u2014 no launch until 00:00 UTC; raise maintenance_worker.daily_budget_usd or drain with /sterling:drain.` };
+    }
+    if (lockState(readJson(paths.lock), nowMs, opts.isAlive) === "live") return { launched: false, reason: "already_running" };
+    const lastLaunch = Number(readJson(paths.lastLaunch)?.at_ms);
+    if (Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: "debounced" };
+    const git = gitState(opts.root, opts.spawnSync);
+    const dirty = git && dirtyPaths(opts.root, [...new Set(open.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
+    if (!dirty) {
+      return { launched: false, reason: "git_failed", line: `\u26A0 Sterling maintenance worker: git could not report HEAD or the working-tree state in ${opts.root}, so every reconcile item counts as dirty and no worker starts; drain with /sterling:drain.` };
+    }
+    const eligible = open.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
+    if (eligible.length === 0) return { launched: false, reason: "none_eligible" };
+    const pluginRoot = opts.pluginRoot ?? pluginRootFrom();
+    if (!pluginRoot) return { launched: false, reason: "error", line: failLine("plugin root not found above the hook") };
+    resolveMcpConfig(pluginRoot, opts.root);
+    readWorkerPrompt(pluginRoot);
+    const runner = join5(pluginRoot, "scripts", "maintenance-worker-run.mjs");
+    if (!existsSync4(runner)) return { launched: false, reason: "error", line: failLine(`runner missing: ${runner}`) };
+    mkdirSync3(dirname4(paths.lock), { recursive: true });
+    const startedAt = new Date(nowMs).toISOString();
+    const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
+    if (!token) return { launched: false, reason: "already_running" };
+    writeFileSync2(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
+    writeFileSync2(paths.eligible, JSON.stringify({ token, head: git.head, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [] })) }));
+    let logFd;
+    try {
+      rotateIfLarge(paths.log);
+      logFd = openSync(paths.log, "a");
+      const budget = Math.min(WORKER_RUN_BUDGET_USD, Math.round((cap - spent) * 100) / 100);
+      const child = opts.spawn(
+        process.execPath,
+        [runner, "--project", opts.root, "--trigger", String(opts.trigger), "--token", token, "--budget-usd", String(budget)],
+        { cwd: opts.root, detached: true, stdio: ["ignore", logFd, logFd], env: { ...env, [WORKER_ENV_FLAG]: "1" } }
+      );
+      child.on?.("error", () => releaseLock(paths, token));
+      child.unref?.();
+      writeFileSync2(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
+      const note = last && last.ok === false ? `\u2139 Sterling maintenance worker: the previous run FAILED at ${last.at} (${last.error}); relaunched after the back-off ${LOG_HINT}.` : void 0;
+      return { launched: true, reason: "launched", pid: child.pid, items: eligible.length, ...note ? { line: note } : {} };
+    } catch (e) {
+      releaseLock(paths, token);
+      return { launched: false, reason: "error", line: failLine(`spawn: ${e?.message ?? e}`) };
+    } finally {
+      if (logFd !== void 0) closeSync(logFd);
+    }
+  } catch (e) {
+    return { launched: false, reason: "error", line: failLine(e?.message ?? String(e)) };
+  }
+}
+function releaseLock(paths, token) {
+  if (readJson(paths.lock)?.token === token) rmSync2(paths.lock, { force: true });
+}
+
+// scripts/hooks/h19-bash-delivery.mjs
+import { join as join7 } from "node:path";
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, existsSync as existsSync4, renameSync as renameSync2, openSync, closeSync } from "node:fs";
-import { join as join5, dirname as dirname4 } from "node:path";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, renameSync as renameSync3, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
+import { join as join6, dirname as dirname5 } from "node:path";
 function deliveryDir(cwd) {
-  return join5(cwd, ".sterling", "transient", "delivery");
+  return join6(cwd, ".sterling", "transient", "delivery");
 }
 function claimLegacyInjectionRungNotice(cwd, rawRung) {
   if (rawRung === "read") return null;
-  const transient = join5(cwd, ".sterling", "transient");
-  const marker = join5(transient, "legacy-injection-rung-noticed");
-  mkdirSync3(transient, { recursive: true });
+  const transient = join6(cwd, ".sterling", "transient");
+  const marker = join6(transient, "legacy-injection-rung-noticed");
+  mkdirSync4(transient, { recursive: true });
   try {
-    const fd = openSync(marker, "wx");
-    closeSync(fd);
+    const fd = openSync2(marker, "wx");
+    closeSync2(fd);
   } catch (error) {
     if (error?.code === "EEXIST") return null;
     throw error;
@@ -7788,11 +8095,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join5(deliveryDir(cwd), component);
+  return join6(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join5(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join6(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -7843,8 +8150,8 @@ function markGapDelivered(guard, records) {
 function readGuard(path) {
   if (!path) return emptyDeliveryGuard();
   try {
-    if (!existsSync4(path)) return emptyDeliveryGuard();
-    const parsed = JSON.parse(readFileSync4(path, "utf8"));
+    if (!existsSync5(path)) return emptyDeliveryGuard();
+    const parsed = JSON.parse(readFileSync5(path, "utf8"));
     if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
     return { ...emptyDeliveryGuard(), ...parsed };
   } catch {
@@ -7855,10 +8162,10 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync3(dirname4(path), { recursive: true });
+  mkdirSync4(dirname5(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync2(tmp, JSON.stringify(guard));
-  renameSync2(tmp, path);
+  writeFileSync3(tmp, JSON.stringify(guard));
+  renameSync3(tmp, path);
 }
 function statusBracket(record) {
   const status = record?.status ?? "unknown";
@@ -8363,12 +8670,24 @@ function bashPointerBlock(entries, { gapsByOwner, includeHazardLines = true } = 
 }
 
 // scripts/hooks/h19-bash-delivery.mjs
+var GIT_COMMIT_RE = /(^|[\s;&|(])git(\s+-[Cc]\s+\S+)*\s+commit\b/;
 var input = readStdin();
 function main(input2) {
   const command = input2.tool_input?.command;
   if (!command) return allow();
   const store = openStore(input2.cwd);
   if (!store) return allow();
+  let workerLine = "";
+  if (GIT_COMMIT_RE.test(command)) {
+    const launch = maybeLaunchMaintenanceWorker({ root: input2.cwd, config: loadConfig(input2.cwd), store, trigger: "commit", spawn });
+    if (launch.line) workerLine = launch.line;
+  }
+  const withWorkerLine = (text) => [workerLine, text].filter(Boolean).join("\n\n");
+  const quietExit = (notice) => {
+    const text = withWorkerLine(notice);
+    if (text) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input2.hook_event_name, additionalContext: text } }), 0);
+    return allow();
+  };
   try {
     const rawRung = loadConfig(input2.cwd)?.delivery?.injection_rung;
     const migrationNotice = claimLegacyInjectionRungNotice(input2.cwd, rawRung);
@@ -8384,7 +8703,7 @@ function main(input2) {
       if (guard.pointer_files.includes(rel)) continue;
       let isFile;
       try {
-        isFile = statSync2(join6(input2.cwd, rel)).isFile();
+        isFile = statSync3(join7(input2.cwd, rel)).isFile();
       } catch (e) {
         if (e?.code === "ENOENT" || e?.code === "ENOTDIR") continue;
         throw e;
@@ -8396,8 +8715,7 @@ function main(input2) {
       entries.push({ rel, owners, hazards });
     }
     if (!entries.length) {
-      if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input2.hook_event_name, additionalContext: migrationNotice } }), 0);
-      return allow();
+      return quietExit(migrationNotice);
     }
     const gapOwners = [];
     const seenGapOwnerIds = /* @__PURE__ */ new Set();
@@ -8440,8 +8758,7 @@ function main(input2) {
     const eligibleHazards = [...hazardById.values()].filter((h) => !alreadyDelivered(h));
     const hzParts = hazardParts(eligibleHazards, { fileKeys: entries.map((e) => e.rel), mode: hazardMode });
     if (!ownerParts.length && !hzParts.length) {
-      if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input2.hook_event_name, additionalContext: migrationNotice } }), 0);
-      return allow();
+      return quietExit(migrationNotice);
     }
     const totalCap = resolveTotalCap(input2.cwd);
     const headerPart = { kind: "ordinary", pinned: true, contentClass: "chrome", text: bashPointerBlock([]).header };
@@ -8463,14 +8780,15 @@ function main(input2) {
       markDiscoveryDelivered(guard, assembled.emittedDiscovery);
       writeGuard(gPath, guard);
     };
-    const payload = assembled.text;
+    const payload = withWorkerLine(assembled.text);
     return exitAfterWrite(
       JSON.stringify({ hookSpecificOutput: { hookEventName: input2.hook_event_name, additionalContext: payload } }),
       0,
       { onWritten: recordDelivered }
     );
   } catch (e) {
-    return warnNonBlocking(`H19: bash pointer delivery failed: ${e && e.message || e}`);
+    return warnNonBlocking(`${workerLine ? `${workerLine}
+` : ""}H19: bash pointer delivery failed: ${e && e.message || e}`);
   }
 }
 main(input);

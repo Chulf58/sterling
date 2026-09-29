@@ -39,6 +39,10 @@ if (!process.env[MARKER]) {
   process.env[MARKER] = root;
   process.env.XDG_RUNTIME_DIR = root;
   process.env.STERLING_REGISTRY_DB = join(root, 'registry.db');
+  // A hook spawned against a fixture store must never start the real
+  // background maintenance worker (a detached headless claude); the launcher
+  // honors this flag (scripts/hooks/lib/maintenance-worker.mjs).
+  process.env.STERLING_MAINTENANCE_WORKER_DISABLE = '1';
   process.on('exit', () => {
     rmSync(root, { recursive: true, force: true });
   });
