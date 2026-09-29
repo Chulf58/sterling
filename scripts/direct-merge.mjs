@@ -428,10 +428,12 @@ function debtAge(createdAt) {
   return hours > 0 ? `${hours}h` : `${mins}m`;
 }
 if (debt.length > 0) {
-  // GROUP BY OWNING ARTICLE (N13): one item per touched file is the mint
-  // granularity, so a branch touching one heavily-shared file can carry
-  // hundreds of near-identical items — measured 207 lines (~40KB) for a
-  // single refusal. Group by feature_link (the owning article id H7 stamps)
+  // GROUP BY OWNING ARTICLE (N13): the store now keeps at most one open
+  // reconcile_needed item per feature_link, with file_keys unioned
+  // (decision reconcile-needed-identity-is-reason-plus-owner-file-keys-unioned),
+  // but items with other reasons or no feature_link are still minted per
+  // path — before that decision one refusal measured 207 lines (~40KB).
+  // Group by feature_link (the owning article id H7 stamps)
   // so the disclosure reads as N ARTICLES, not N items; every item id stays
   // listed, nested under its group, so nothing here is lossy — only the
   // presentation is denser. Items with NO feature_link (older/foreign

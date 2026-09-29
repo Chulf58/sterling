@@ -8825,7 +8825,7 @@ var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 function sha256(text) {
   return createHash3("sha256").update(normalize(text), "utf8").digest("hex");
 }
-var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
+var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=((?:(?!-->)[^\n])+) -->$/m;
 function parseInstalledHeader(content) {
   const m = normalize(content).match(HEADER_RE);
   if (!m) return null;

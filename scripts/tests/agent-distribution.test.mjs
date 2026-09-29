@@ -238,6 +238,74 @@ test('syncAgents covers every status path', () => {
   }
 });
 
+// Dome Farmer 2026-09-29: an intact installed agent whose header carried a
+// Date.toString() installed_at ("Mon Sep 28 2026 23:18:58 GMT+0200 (Central
+// European Summer Time)") failed HEADER_RE's \\S+ and was classed foreign_file,
+// and the refusal then printed the locally-modified "discard your changes" text.
+// installed_at is informational; content_hash is the integrity check.
+const TOSTRING_INSTALLED_AT = 'Mon Sep 28 2026 23:18:58 GMT+0200 (Central European Summer Time)';
+const withInstalledAt = (content, value) => {
+  const header = parseInstalledHeader(content);
+  return content.replace(header.headerLine, header.headerLine.replace(`installed_at=${header.installedAt}`, `installed_at=${value}`));
+};
+
+test('parseInstalledHeader tolerates a non-ISO installed_at but keeps every other field strict', () => {
+  const { installedContent } = renderInstalledAgent(TEMPLATE, 'probe-agent.md', OPTS);
+  const tostring = withInstalledAt(installedContent, TOSTRING_INSTALLED_AT);
+  const header = parseInstalledHeader(tostring);
+  assert.ok(header, 'a Date.toString() installed_at still parses');
+  assert.equal(header.installedAt, TOSTRING_INSTALLED_AT);
+  assert.equal(isLocallyModified(tostring, header), false, 'the body is intact, so it is not locally modified');
+  assert.equal(parseInstalledHeader(tostring.replace(/\n/g, '\r\n')).installedAt, TOSTRING_INSTALLED_AT, 'CRLF does not leak into installed_at');
+  assert.equal(parseInstalledHeader(withInstalledAt(installedContent, 'a --> b')), null, 'installed_at may not contain the comment terminator');
+  const h = parseInstalledHeader(installedContent);
+  assert.equal(parseInstalledHeader(installedContent.replace(`template_hash=${h.templateHash}`, `template_hash=${'g'.repeat(64)}`)), null, 'template_hash stays strict');
+  assert.equal(parseInstalledHeader(installedContent.replace(`content_hash=${h.contentHash}`, 'content_hash=abc')), null, 'content_hash stays strict');
+  assert.equal(parseInstalledHeader(installedContent.replace(`template=${h.template} `, 'template=a b ')), null, 'template stays one token');
+});
+
+test('syncAgents: an intact agent with a non-ISO installed_at syncs; a real edit still refuses as locally modified; a header-less file gets the foreign-file text', () => {
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'probe-agent.md': TEMPLATE });
+    const targetAgentsDir = join(dir, 'project', '.claude', 'agents');
+    const installedPath = join(targetAgentsDir, 'probe-agent.md');
+    syncAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS });
+    writeFileSync(installedPath, withInstalledAt(readFileSync(installedPath, 'utf8'), TOSTRING_INSTALLED_AT));
+
+    let r = syncAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS });
+    assert.deepEqual(r.report.map((x) => x.status), ['up_to_date'], 'template-current + intact -> up_to_date, never foreign_file');
+
+    const v2 = TEMPLATE.replace('line one', 'line one v2');
+    writeFileSync(join(templatesDir, 'probe-agent.md'), v2);
+    r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.2.0', now: T1 });
+    assert.deepEqual(r.report.map((x) => x.status), ['refreshed'], 'template-stale + intact -> refreshed');
+    assert.equal(parseInstalledHeader(readFileSync(installedPath, 'utf8')).installedAt, T1, 'the refresh re-stamps an ISO installed_at');
+
+    // a genuine hash mismatch under a non-ISO installed_at still refuses with the locally-modified text
+    writeFileSync(installedPath, withInstalledAt(readFileSync(installedPath, 'utf8'), TOSTRING_INSTALLED_AT).replace('line one v2', 'local tweak'));
+    writeFileSync(join(templatesDir, 'probe-agent.md'), v2.replace('line one v2', 'line one v3'));
+    r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.3.0', now: T1 });
+    assert.equal(r.report[0].status, 'refused_local_modification');
+    assert.equal(r.report[0].refused, true);
+    assert.match(r.report[0].instruction, /was locally modified after install \(content hash mismatch\)/);
+    assert.match(r.report[0].instruction, /discard your changes/);
+
+    // header-less -> foreign_file, and its text names the unrecognised header, not local changes
+    writeFileSync(installedPath, '---\nname: probe-agent\n---\nhand-written\n');
+    for (const run of [syncAgents, installAgents]) {
+      r = run({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.3.0', now: T1 });
+      assert.equal(r.report[0].status, 'foreign_file');
+      assert.equal(r.report[0].refused, true);
+      assert.match(r.report[0].instruction, /no recognisable Sterling-generated header/);
+      assert.doesNotMatch(r.report[0].instruction, /locally modified|content hash mismatch|discard your changes/);
+      assert.ok(readFileSync(installedPath, 'utf8').includes('hand-written'), 'a foreign file is never overwritten');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('syncAgents repairs header-only drift (in-place edit mirrored in the template) instead of refusing', () => {
   const dir = scratch();
   try {
@@ -1388,7 +1456,23 @@ test('sync-agents CLI reports config_drift loudly, exits 0, and writes nothing',
   }
 });
 
-for (const [label, tamper, status] of [
+test('sync-agents CLI syncs an intact agent whose installed_at is in Date.toString() form (exit 0, up_to_date)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-sync-cli-'));
+  try {
+    const first = runSyncCli(dir);
+    assert.equal(first.status, 0, `clean install must exit 0:\n${first.stdout}${first.stderr}`);
+    const agentPath = join(dir, '.claude', 'agents', 'implementor.md');
+    writeFileSync(agentPath, withInstalledAt(readFileSync(agentPath, 'utf8'), TOSTRING_INSTALLED_AT));
+    const r = runSyncCli(dir);
+    assert.equal(r.status, 0, `an intact agent is not a refusal:\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /^up_to_date: implementor$/m);
+    assert.doesNotMatch(r.stdout + r.stderr, /foreign_file|REFUSED/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+for (const [label, tamper, status, instructionRe] of [
   [
     'a hand-edited registered agent whose template is stale',
     (path) => {
@@ -1398,11 +1482,13 @@ for (const [label, tamper, status] of [
       writeFileSync(path, content.replace(header.headerLine, staleHeader).replace(/\n$/, '\nA hand edit.\n'));
     },
     'refused_local_modification',
+    /was locally modified after install \(content hash mismatch\)/,
   ],
   [
     'a header-less registered agent file',
     (path) => writeFileSync(path, '---\nname: implementor\ndescription: hand-written\n---\nNot Sterling-generated.\n'),
     'foreign_file',
+    /no recognisable Sterling-generated header/,
   ],
 ]) {
   test(`sync-agents CLI exits 2 on ${label} (${status})`, () => {
@@ -1416,6 +1502,7 @@ for (const [label, tamper, status] of [
       const r = runSyncCli(dir);
       assert.match(r.stdout, new RegExp(`^${status}: implementor$`, 'm'));
       assert.equal(r.status, 2, `a sync refusal must exit 2:\n${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, instructionRe, 'the refusal text fits the refusal');
       assert.equal(readFileSync(agentPath, 'utf8'), before, 'refused file must be untouched');
     } finally {
       rmSync(dir, { recursive: true, force: true });
