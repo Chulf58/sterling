@@ -90,8 +90,13 @@ export function findBackslashHookCommands(frontmatter) {
   return bad;
 }
 
+// installed_at is informational, not an integrity field (content_hash is), so it
+// accepts any value short of the comment terminator: an intact agent whose
+// installed_at was stamped in Date.toString() form ("Mon Sep 28 2026 23:18:58
+// GMT+0200 (...)", spaces included) must not read as foreign_file (Dome Farmer
+// 2026-09-29). Every other field stays one strict token.
 export const HEADER_RE =
-  /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
+  /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=((?:(?!-->)[^\n])+) -->$/m;
 
 // Per-agent model/effort resolution (design 98064d77 §a): model:/effort: in the
 // shipped templates are {{MODEL}}/{{EFFORT}} substitution tokens, resolved at
@@ -525,7 +530,7 @@ export function installAgents({ templatesDir, registryPath, targetAgentsDir, plu
       const installed = readFileSync(installedPath, 'utf8');
       const header = parseInstalledHeader(installed);
       if (!header) {
-        report.push({ name: entry.name, status: 'foreign_file', refused: true, instruction: refuseInstruction(entry.name) });
+        report.push({ name: entry.name, status: 'foreign_file', refused: true, instruction: foreignFileInstruction(entry.name) });
         continue;
       }
       if (isLocallyModified(installed, header)) {
@@ -565,6 +570,20 @@ export function refuseInstruction(name) {
   ].join('\n');
 }
 
+// foreign_file: the header is absent or unparsable, so nothing is known about
+// the body's provenance or whether anyone edited it — the locally-modified text
+// ("content hash mismatch", "discard your changes") would be a false claim here.
+export function foreignFileInstruction(name) {
+  return [
+    `REFUSED: .claude/agents/${name}.md has no recognisable Sterling-generated header`,
+    '(the `<!-- sterling-generated ... -->` line after the frontmatter is missing or malformed),',
+    'so Sterling cannot tell whether it wrote this file and will not overwrite it. To resolve:',
+    `  move .claude/agents/${name}.md out of .claude/agents/ and re-run /sterling:sync-agents`,
+    '  to install the fresh version, then compare the moved copy against it and re-apply',
+    '  anything in it you want to keep.',
+  ].join('\n');
+}
+
 // /sterling:sync-agents core (spec §13): header hash compare; refresh clean+stale
 // installs; refuse to overwrite local modification (refuse-and-instruct stub for
 // the three-way review). A "modified" install whose body is byte-identical to
@@ -601,7 +620,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
     const header = parseInstalledHeader(installed);
     if (!header) {
       // Not Sterling-generated: never overwrite a file we did not write.
-      report.push({ name: entry.name, status: 'foreign_file', refused: true, instruction: refuseInstruction(entry.name) });
+      report.push({ name: entry.name, status: 'foreign_file', refused: true, instruction: foreignFileInstruction(entry.name) });
       continue;
     }
     const modified = isLocallyModified(installed, header);
