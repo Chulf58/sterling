@@ -799,3 +799,34 @@ test('C9b: a deferred file is named in the compacted articles segment with its l
     assert.match(line, /articles→[^;]*src\/flood\/deferred\.mjs[^;]*sub-live-1/, `C9b: the deferred file is named with its live dispatch; got ${JSON.stringify(line)}`);
   } finally { cleanup(); }
 });
+
+// ===========================================================================
+// C10 — the "unchanged since HH:MM" label names the CURRENT open stretch.
+// Dome Farmer: the one-liner kept printing the first nag's time after that
+// duty had been paid and settled and later re-armed by new work, because the
+// marker's `at` was carried forward on every fingerprint match. The fixture
+// pins the marker's `at` to T1 (the first nag "happened at 10:00") so a label
+// carried over from the paid stretch is observable against the real clock.
+// ===========================================================================
+
+test('C10: after the duty is paid and settled, a re-armed repeat prints the NEW stretch start (T3), never the paid stretch\'s first nag (T1)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const T3 = '2026-06-10T14:30:00.000Z';
+    touch(dir, [FILE_A], T1);
+    const first = runStop(dir);
+    assertFullForm(first, 'C10', 'the first nag of the session');
+    writeFileSync(dutyNagged(dir), JSON.stringify({ ...readJSON(dutyNagged(dir)), at: T1 }));
+
+    captureDecision(store, CAP1);
+    const release = runStop(dir);
+    assert.equal(release.code, 0, `C10: the satisfied duty settles and releases terminally — out=${out(release)}`);
+
+    touch(dir, [FILE_B], T3);
+    const second = runStop(dir);
+    assertCompactForm(second, 'C10');
+    const [line] = lines(second.stderr);
+    assert.doesNotMatch(line, /unchanged since 10:00/, `C10: the paid stretch's first-nag time is stale once the duty was discharged; got ${JSON.stringify(line)}`);
+    assert.match(line, /unchanged since 14:30/, `C10: the label names the current open stretch, which T3's touch opened; got ${JSON.stringify(line)}`);
+  } finally { cleanup(); }
+});

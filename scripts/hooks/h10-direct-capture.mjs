@@ -2353,7 +2353,18 @@ try {
       }
     })();
     const compact = openLanes.length > 0 && !!priorDutyNag && priorDutyNag.fingerprint === fingerprint;
-    const dutyNagAt = compact ? priorDutyNag.at : now;
+    // The label's time is where the CURRENT open stretch of these duties
+    // began: the earliest window anchor among the open lanes (the same anchors
+    // their satisfaction checks use). It is recomputed every render, never
+    // carried from the marker: the fingerprint is path- and time-free by
+    // design, so a marker `at` survives a paid-and-settled duty and would name
+    // a stretch that already closed (Dome Farmer). The marker keeps recording
+    // it only as the last label shown.
+    const laneAnchors = [];
+    if (captureLaneOpen || articleLaneOpen) laneAnchors.push(earliest);
+    if (researchLaneOpen) laneAnchors.push(earliestResearch);
+    if (conceptLaneOpen) for (const family of unmetFamilies) laneAnchors.push(conceptFamilies.get(family));
+    const dutyNagAt = laneAnchors.filter(isValidAt).sort()[0] ?? now;
 
     const captureToken = 'knowledge_create | no_capture --reason | capture_pending';
     const researchToken = 'research_finding | no_capture --lane research';

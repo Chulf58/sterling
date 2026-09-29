@@ -46,32 +46,41 @@ export function extractPathCandidates(text) {
 // after it is not a declaration at all.
 export const REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
 
-// A declared entry must already be in canonical repo-relative POSIX form:
-// normalizeRepoPath throws on absolute, drive-prefixed and parent-escaping
-// input, and `normalizeRepoPath(p) === p` rejects anything it would have to
-// change (backslashes, './', a trailing '/'). Globs are rejected rather than
-// read literally: the declaration names paths, never patterns.
+// A declared entry must be in canonical repo-relative POSIX form, except that
+// ONE trailing '/' on a directory entry is stripped (user ruling 2026-09-29,
+// option "Accept, strip one '/'"): `game/ui/farm_hud/` IS `game/ui/farm_hud`.
+// After that strip, normalizeRepoPath throws on absolute, drive-prefixed and
+// parent-escaping input, and `normalizeRepoPath(p) === p` rejects anything it
+// would still have to change (backslashes, './', a second trailing '/'). Globs
+// are rejected rather than read literally: the declaration names paths, never
+// patterns. Returns the canonical entry, or the reason it is refused.
 const GLOB_METACHAR_RE = /[*?[\]]/;
 
-function isRepoRelativePosixShape(p) {
-  if (typeof p !== 'string' || p === '') return false;
-  if (GLOB_METACHAR_RE.test(p)) return false;
+function canonicalTerritoryEntry(p) {
+  if (typeof p !== 'string') return { reason: 'not a string' };
+  if (p === '') return { reason: 'empty string' };
+  if (GLOB_METACHAR_RE.test(p)) return { reason: 'glob pattern; the declaration names files or directories, never patterns' };
+  const stripped = p.endsWith('/') ? p.slice(0, -1) : p;
+  let normalized;
   try {
-    return normalizeRepoPath(p) === p;
-  } catch {
-    return false;
+    normalized = normalizeRepoPath(stripped);
+  } catch (e) {
+    return { reason: String(e?.message ?? e).replace(/^path invariant violation: /, '') };
   }
+  if (normalized !== stripped) return { reason: `not canonical repo-relative POSIX form (canonical: '${normalized}')` };
+  return { path: normalized };
 }
 
 /**
  * Parses a prompt's REVIEW-TERRITORY declaration, if any. Returns exactly one of:
  *   { present: false }                              — no marker line
  *   { present: true, valid: true, files: string[] }  — well-formed (possibly [])
- *   { present: true, valid: false, raw: string }     — malformed: unparseable
- *     JSON, JSON that is not an array, or any element that is not a canonical
- *     repo-relative path. `raw` is the matched line, for the caller's loud
- *     disclosure. One bad element makes the whole declaration malformed; it is
- *     never partially honoured.
+ *   { present: true, valid: false, raw: string, reason: string }  — malformed:
+ *     unparseable JSON, JSON that is not an array, or any element that is not
+ *     a canonical repo-relative path (one trailing '/' allowed). `raw` is the
+ *     matched line and `reason` names the first failing entry by index plus why
+ *     it was refused, for the caller's loud disclosure. One bad element makes
+ *     the whole declaration malformed; it is never partially honoured.
  */
 export function parseReviewTerritory(text) {
   const match = REVIEW_TERRITORY_RE.exec(String(text ?? ''));
@@ -80,11 +89,15 @@ export function parseReviewTerritory(text) {
   let parsed;
   try {
     parsed = JSON.parse(match[1]);
-  } catch {
-    return { present: true, valid: false, raw };
+  } catch (e) {
+    return { present: true, valid: false, raw, reason: `not valid JSON (${e.message})` };
   }
-  if (!Array.isArray(parsed) || !parsed.every(isRepoRelativePosixShape)) {
-    return { present: true, valid: false, raw };
+  if (!Array.isArray(parsed)) return { present: true, valid: false, raw, reason: 'not a JSON array' };
+  const files = [];
+  for (const [i, entry] of parsed.entries()) {
+    const c = canonicalTerritoryEntry(entry);
+    if (c.reason) return { present: true, valid: false, raw, reason: `entry ${i} (${JSON.stringify(entry)}): ${c.reason}` };
+    files.push(c.path);
   }
-  return { present: true, valid: true, files: [...new Set(parsed)] };
+  return { present: true, valid: true, files: [...new Set(files)] };
 }

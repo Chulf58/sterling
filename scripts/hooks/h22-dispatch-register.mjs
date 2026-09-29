@@ -326,8 +326,8 @@ try {
               render(
                 disclosure(
                   'territory_declaration_malformed',
-                  { line: territory.raw },
-                  `H22: malformed REVIEW-TERRITORY declaration ignored, so dispatch '${input.agent_id}' (${input.agent_type}) owns its free-prose paths instead, including any it was told not to write: ${territory.raw}`
+                  { line: territory.raw, reason: territory.reason },
+                  `H22: malformed REVIEW-TERRITORY declaration ignored (${territory.reason}), so dispatch '${input.agent_id}' (${input.agent_type}) owns its free-prose paths instead, including any it was told not to write: ${territory.raw}`
                 )
               )
             );
