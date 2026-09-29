@@ -101,6 +101,17 @@ function oneLine(s) {
   return String(s ?? '').replace(/\s+/g, ' ').trim();
 }
 
+/** The live-debt disclosure block (header through the list, before the
+ * remedy), or '' when absent — so a path is asserted as DISCLOSED DEBT, not
+ * merely mentioned by the version-only report or the version gate. */
+function disclosure(stderr) {
+  const s = String(stderr ?? '');
+  const i = s.indexOf('RECONCILE DEBT DISCLOSED');
+  if (i < 0) return '';
+  const j = s.indexOf('This does NOT block the merge', i);
+  return s.slice(i, j < 0 ? undefined : j);
+}
+
 function envelope(type, at = NOW) {
   return {
     id: randomUUID(),
@@ -211,7 +222,7 @@ function writeManifests(dir, pluginContent, pkgContent) {
 // version PLUS an unrelated added line (not version-only).
 // =========================================================================
 
-test('P1 [control]: branch bumps both manifest versions AND adds an npm script line to package.json; an article owns package.json with a stale baseline — the gate still REFUSES with the reconcile message, proving the version-only proof does not pass on a diff wider than the version line — sabotage: a version-only proof that only checks the version VALUES differ (never the surrounding bytes), which must flip this red (merge succeeds, no reconcile refusal, despite the added scripts line)', () => {
+test('P1 [control]: branch bumps both manifest versions AND adds an npm script line to package.json; an article owns package.json with a stale baseline — the gate still DISCLOSES it as reconcile debt, proving the version-only proof does not pass on a diff wider than the version line — sabotage: a version-only proof that only checks the version VALUES differ (never the surrounding bytes), which must flip this red (no reconcile disclosure of package.json, despite the added scripts line)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const basePkg = manifestContent('0.1.0');
@@ -232,8 +243,8 @@ test('P1 [control]: branch bumps both manifest versions AND adds an npm script l
     git(dir, ['commit', '-m', 'bump both + add a script line to package.json']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `a non-version-only package.json change with a co-owning stale-baseline article must refuse — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
-    assert.match(r.stderr, /reconcile before merging/, 'the refusal is attributed to the ordinary reconcile-debt path, not the version-move gate');
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(disclosure(r.stderr).includes('[package.json]'), `a non-version-only package.json change with a co-owning stale-baseline article is DISCLOSED as reconcile debt, not exempted as version-only — stderr=${oneLine(r.stderr)}`);
   } finally {
     cleanup();
   }
@@ -292,7 +303,7 @@ test('P2 [positive]: branch changes both manifests version-only; an article owns
 // version-only even though the version line itself also moved.
 // =========================================================================
 
-test('P3 [masquerade]: branch bumps both manifest versions AND converts package.json wholesale from LF to CRLF line endings; an article owns package.json with a stale baseline — the gate REFUSES, proving the proof is exact-byte, not whitespace/line-ending-insensitive — sabotage: a whitespace-insensitive or JSON-value-level comparison (parsing both sides and comparing structured values, or normalizing line endings before the byte compare), which must flip this red (merge succeeds despite every line in the file having changed bytes)', () => {
+test('P3 [masquerade]: branch bumps both manifest versions AND converts package.json wholesale from LF to CRLF line endings; an article owns package.json with a stale baseline — the gate DISCLOSES it as reconcile debt, proving the proof is exact-byte, not whitespace/line-ending-insensitive — sabotage: a whitespace-insensitive or JSON-value-level comparison (parsing both sides and comparing structured values, or normalizing line endings before the byte compare), which must flip this red (no disclosure despite every line in the file having changed bytes)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const basePkg = manifestContent('0.1.0');
@@ -312,8 +323,8 @@ test('P3 [masquerade]: branch bumps both manifest versions AND converts package.
     git(dir, ['commit', '-m', 'bump both + convert package.json to CRLF wholesale']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `a wholesale CRLF conversion alongside a version bump must still refuse — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
-    assert.match(r.stderr, /reconcile before merging/, 'the refusal is attributed to the ordinary reconcile-debt path, not the version-move gate');
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(disclosure(r.stderr).includes('[package.json]'), `a wholesale CRLF conversion alongside a version bump is still DISCLOSED as reconcile debt — stderr=${oneLine(r.stderr)}`);
   } finally {
     cleanup();
   }
@@ -324,7 +335,7 @@ test('P3 [masquerade]: branch bumps both manifest versions AND converts package.
 // file) prints both sanctioned discharge routes and never the old sentence.
 // =========================================================================
 
-test('P4 [remedy]: manifests are bumped version-only (excluded, non-blocking) but a non-manifest owned file (src/thing.mjs) is genuinely changed with a stale baseline — the refusal names BOTH discharges ("resolves" and a verification-append mention matching /VERIFIED UNAFFECTED/ and /knowledge_append/) and never contains "auto-drains" — sabotage: reverting to the old one-route remedy text, which must flip this red (the verification-discharge mention or "resolves" text is absent, or "auto-drains" reappears)', () => {
+test('P4 [remedy]: manifests are bumped version-only (excluded, non-blocking) but a non-manifest owned file (src/thing.mjs) is genuinely changed with a stale baseline — the disclosure names the co-owner debt (not the manifests), the remedy says it does not block, names BOTH sanctioned discharges ("resolves" and a verification-append mention matching /VERIFIED UNAFFECTED/ and /knowledge_append/) and the worker "owes prose" note, and never contains "auto-drains" — sabotage: reverting to the old refusal remedy text, which must flip this red ("does NOT block", "owes prose" or a discharge mention absent, or "auto-drains" reappears)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const basePkg = manifestContent('0.1.0');
@@ -347,8 +358,12 @@ test('P4 [remedy]: manifests are bumped version-only (excluded, non-blocking) bu
     git(dir, ['commit', '-m', 'bump manifests version-only + change the real co-owned file']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `a genuine co-owner drift on a non-manifest file must still refuse — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(disclosure(r.stderr).includes('[src/thing.mjs]'), 'the genuine co-owner drift on the non-manifest file is disclosed as debt');
+    assert.ok(!disclosure(r.stderr).includes('package.json'), 'the version-only manifests are never disclosed as debt');
+    assert.match(r.stderr, /does NOT block the merge/, 'the remedy says the debt does not block');
     assert.ok(r.stderr.includes('resolves'), 'the remedy names the real-reconcile discharge (resolves: [...])');
+    assert.match(r.stderr, /owes prose/, 'the remedy names what the background worker leaves open');
     assert.match(r.stderr, /VERIFIED UNAFFECTED/, 'the remedy names the verification-discharge event text');
     assert.match(r.stderr, /knowledge_append/, 'the remedy names the verification-discharge call shape');
     assert.doesNotMatch(r.stderr, /auto-drains/, 'the retracted false claim ("the update auto-drains its item") must not reappear');
@@ -362,7 +377,7 @@ test('P4 [remedy]: manifests are bumped version-only (excluded, non-blocking) bu
 // this branch's diff is warned about, not silently discharged.
 // =========================================================================
 
-test("P5 [whole-item warning]: a pre-existing reconcile_needed item groups two files owned by one article — only src/thing.mjs is touched by this branch, src/other-unwatched.mjs is not — the refusal names the item and the out-of-diff path (whole-item discharge scope) — sabotage: computing the remedy from only the immediately-blocking path and never inspecting the item's full file_keys set, which must flip this red (the out-of-diff path never appears in stderr at all)", () => {
+test("P5 [whole-item warning]: a pre-existing reconcile_needed item groups two files owned by one article — only src/thing.mjs is touched by this branch, src/other-unwatched.mjs is not — the disclosure names the item and the out-of-diff path (whole-item discharge scope) — sabotage: computing the remedy from only the immediately-blocking path and never inspecting the item's full file_keys set, which must flip this red (the out-of-diff path never appears in stderr at all)", () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const basePkg = manifestContent('0.1.0');
@@ -396,8 +411,8 @@ test("P5 [whole-item warning]: a pre-existing reconcile_needed item groups two f
     git(dir, ['commit', '-m', 'bump manifests version-only + change only src/thing.mjs']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `live drift on src/thing.mjs must refuse — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
-    assert.ok(r.stderr.includes(item.id), 'the refusal names the grouped item by its FULL id');
+    assert.equal(r.status, 0, `live drift on src/thing.mjs is disclosed, never refused — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(disclosure(r.stderr).includes(item.id), 'the disclosure names the grouped item by its FULL id');
     // Reviewer-tightened (round 1 note 5): a bare includes() on the path was
     // HOLLOW — the per-item listing already prints every file_key, so the
     // named sabotage (never inspecting the full file_keys set) left it green.
@@ -425,7 +440,7 @@ test("P5 [whole-item warning]: a pre-existing reconcile_needed item groups two f
 // regardless of whether the host filesystem honors chmod, so this pin is
 // filesystem-independent.
 
-test('P6 [mode masquerade]: branch bumps both manifest versions AND flips package.json\'s executable bit via `git update-index --chmod=+x` before committing; an article owns package.json with a stale baseline — the gate REFUSES, proving the proof requires IDENTICAL modes at both endpoints, not just identical content bytes outside the version line — sabotage: a proof that accepts any mix of 100644/100755 without requiring mode equality, which must flip this red (merge succeeds despite the mode change)', () => {
+test('P6 [mode masquerade]: branch bumps both manifest versions AND flips package.json\'s executable bit via `git update-index --chmod=+x` before committing; an article owns package.json with a stale baseline — the gate DISCLOSES it as reconcile debt, proving the proof requires IDENTICAL modes at both endpoints, not just identical content bytes outside the version line — sabotage: a proof that accepts any mix of 100644/100755 without requiring mode equality, which must flip this red (no disclosure despite the mode change)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     // fileMode=false: git ignores working-tree mode bits (so the tree stays
@@ -451,8 +466,8 @@ test('P6 [mode masquerade]: branch bumps both manifest versions AND flips packag
     git(dir, ['commit', '-m', 'bump both manifests version-only + flip package.json executable bit']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `a mode-only change alongside a clean version bump must still refuse — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
-    assert.match(r.stderr, /reconcile before merging/, 'the refusal is attributed to the ordinary reconcile-debt path, not the version-move gate');
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(disclosure(r.stderr).includes('[package.json]'), `a mode-only change alongside a clean version bump is still DISCLOSED as reconcile debt — stderr=${oneLine(r.stderr)}`);
   } finally {
     cleanup();
   }
@@ -478,7 +493,7 @@ test('P6 [mode masquerade]: branch bumps both manifest versions AND flips packag
 // refusal path (binary-blob check or fatal-decode check) satisfies this
 // pin, so only the refusal + reconcile message are asserted.
 
-test('P7 [invalid-UTF-8 masquerade]: branch bumps both manifest versions AND swaps one non-version byte in package.json for a DIFFERENT invalid-UTF-8 byte that lossy-decodes to the same replacement character; an article owns package.json with a stale baseline — the gate REFUSES, proving the proof does not rely on lossy UTF-8 decoding — sabotage: lossy Buffer.toString(\'utf8\') decoding that collapses the two distinct invalid bytes into the same U+FFFD text, which must flip this red (merge succeeds despite the bytes genuinely differing)', () => {
+test('P7 [invalid-UTF-8 masquerade]: branch bumps both manifest versions AND swaps one non-version byte in package.json for a DIFFERENT invalid-UTF-8 byte that lossy-decodes to the same replacement character; an article owns package.json with a stale baseline — the gate DISCLOSES it as reconcile debt, proving the proof does not rely on lossy UTF-8 decoding — sabotage: lossy Buffer.toString(\'utf8\') decoding that collapses the two distinct invalid bytes into the same U+FFFD text, which must flip this red (no disclosure despite the bytes genuinely differing)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const basePkgBytes = Buffer.concat([
@@ -509,8 +524,8 @@ test('P7 [invalid-UTF-8 masquerade]: branch bumps both manifest versions AND swa
     git(dir, ['commit', '-m', 'bump both manifests version-only + swap one invalid UTF-8 byte for another']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `two distinct invalid-UTF-8 bytes that lossy-decode identically must still refuse — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
-    assert.match(r.stderr, /reconcile before merging/, 'the refusal is attributed to the ordinary reconcile-debt path, not the version-move gate');
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(disclosure(r.stderr).includes('[package.json]'), `two distinct invalid-UTF-8 bytes that lossy-decode identically are still DISCLOSED as reconcile debt — stderr=${oneLine(r.stderr)}`);
   } finally {
     cleanup();
   }
@@ -574,7 +589,7 @@ test('P8 [lockfile positive]: branch bumps both manifests AND package-lock.json 
   }
 });
 
-test('P9 [lockfile control]: the release bump ALSO edits a dependency in package-lock.json; an article owns the lockfile with a stale baseline — the gate REFUSES on reconcile debt', () => {
+test('P9 [lockfile control]: the release bump ALSO edits a dependency in package-lock.json; an article owns the lockfile with a stale baseline — the gate DISCLOSES it as reconcile debt', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     writeManifests(dir, manifestContent('0.1.0'), manifestContent('0.1.0'));
@@ -594,8 +609,8 @@ test('P9 [lockfile control]: the release bump ALSO edits a dependency in package
     git(dir, ['commit', '-m', 'bump + dependency edit']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `a dependency edit is a real change — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
-    assert.match(r.stderr, /reconcile before merging/);
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(disclosure(r.stderr).includes('[package-lock.json]'), `a dependency edit is a real change, DISCLOSED as reconcile debt — stderr=${oneLine(r.stderr)}`);
   } finally {
     cleanup();
   }

@@ -1,0 +1,506 @@
+// Background maintenance worker launcher and runner core
+// (scripts/hooks/lib/maintenance-worker.mjs; decision
+// maintenance-queue-background-haiku-worker-simple-redesign). Every test
+// injects spawn (and the git probe): nothing here starts a real claude, a real
+// runner, or reads a real repo's status.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  acquireLock,
+  buildWorkerArgs,
+  dirtyPaths,
+  maybeLaunchMaintenanceWorker,
+  owesProseVerdicts,
+  resolveMcpConfig,
+  rotateIfLarge,
+  runWorker,
+  streamJournal,
+  unjudgedReconcileItems,
+  workerPaths,
+  workerPrompt,
+  WORKER_TOOLS,
+  WORKER_DISALLOWED_TOOLS,
+  BACKOFF_MS,
+  DEBOUNCE_MS,
+  LOCK_STALE_MS,
+  ROTATE_BYTES,
+} from '../hooks/lib/maintenance-worker.mjs';
+
+const NOW = Date.parse('2026-09-29T12:00:00.000Z');
+const ITEM = (id, keys = ['src/a.mjs']) => ({ id, system_reason: 'reconcile_needed', text: `reconcile article '${id}'`, file_keys: keys });
+const CLEAN_GIT = () => ({ status: 0, stdout: '' });
+
+function fixture() {
+  const base = mkdtempSync(join(tmpdir(), 'sterling-mworker-'));
+  const plugin = join(base, 'plugin');
+  const project = join(base, 'project');
+  mkdirSync(join(plugin, '.claude-plugin'), { recursive: true });
+  mkdirSync(join(plugin, 'templates'), { recursive: true });
+  mkdirSync(join(plugin, 'scripts'), { recursive: true });
+  writeFileSync(join(plugin, '.claude-plugin', 'plugin.json'), '{"name":"sterling"}');
+  writeFileSync(
+    join(plugin, '.claude-plugin', 'sterling-mcp.json'),
+    JSON.stringify({ mcpServers: { sterling: { command: '/usr/bin/node', args: ['/clone/packages/mcp-server/dist/main.js', '--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db'] } } })
+  );
+  writeFileSync(join(plugin, 'templates', 'maintenance-worker-prompt.md'), 'PROMPT BODY');
+  writeFileSync(join(plugin, 'scripts', 'maintenance-worker-run.mjs'), '// runner stub, never executed by these tests\n');
+  mkdirSync(join(project, '.sterling', 'transient'), { recursive: true });
+  return { plugin, project, paths: workerPaths(join(base, 'project')), cleanup: () => rmSync(base, { recursive: true, force: true }) };
+}
+
+/** A fake spawn recording each call; the returned child is an inert emitter. */
+function fakeSpawn({ pid = 4242, throws = null } = {}) {
+  const calls = [];
+  const fn = (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    if (throws) throw throws;
+    const child = new EventEmitter();
+    child.pid = pid;
+    child.unref = () => {
+      child.unrefed = true;
+    };
+    calls.at(-1).child = child;
+    return child;
+  };
+  return { fn, calls };
+}
+
+function launch(fx, over = {}) {
+  return maybeLaunchMaintenanceWorker({
+    root: fx.project,
+    config: null,
+    items: [ITEM('i1'), ITEM('i2', ['src/b.mjs'])],
+    trigger: 'stop',
+    now: NOW,
+    pluginRoot: fx.plugin,
+    env: {},
+    isAlive: () => false,
+    spawnSync: CLEAN_GIT,
+    ...over,
+  });
+}
+
+const writeState = (fx, state) => writeFileSync(fx.paths.state, JSON.stringify(state));
+const journalLine = (fx, entry) => appendFileSync(fx.paths.journal, JSON.stringify(entry) + '\n');
+
+test('skips when no open reconcile_needed item is unjudged, and never spawns', () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    assert.deepEqual(launch(fx, { items: [], spawn: sp.fn }), { launched: false, reason: 'queue_empty' });
+    assert.equal(sp.calls.length, 0);
+    assert.equal(existsSync(fx.paths.lock), false, 'no lock taken');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[finding 3] an item judged owes_prose in the JSONL for its CURRENT file_keys is not launchable; a re-mint that adds a path makes it launchable again', () => {
+  const fx = fixture();
+  try {
+    journalLine(fx, { kind: 'verdict', item_id: 'a', verdict: 'owes_prose', file_keys: ['src/x.mjs'], reason: 'new flag' });
+    journalLine(fx, { kind: 'verdict', item_id: 'b', verdict: 'owes_prose', file_keys: ['src/y.mjs'], reason: 'r' });
+    appendFileSync(fx.paths.journal, '{"torn line\n');
+    const items = [ITEM('a', ['src/x.mjs']), ITEM('b', ['src/z.mjs', 'src/y.mjs']), ITEM('c')];
+    const seen = [];
+    const store = { count: (f) => (seen.push(['count', f]), items.length), query: (f) => (seen.push(['query', f]), items) };
+    const out = unjudgedReconcileItems(store, fx.project).map((t) => t.id);
+    assert.deepEqual(out, ['b', 'c'], "a is judged for its current keys; b's keys widened since its verdict; c was never judged");
+    assert.deepEqual(seen[1], ['query', { types: ['todo'], source: 'system', cap: 3 }], 'the query cap IS the count, so it cannot truncate');
+    assert.ok(workerPrompt(fx.plugin, fx.project).includes("ALREADY JUDGED 'owes prose'"), 'the child is told which items to skip');
+    assert.ok(workerPrompt(fx.plugin, fx.project).includes('- a file_keys ["src/x.mjs"]'));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('takes the lock, spawns ONE detached runner with log stdio, token and budget, and a second launch is refused while it lives', () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn({ pid: 4242 });
+    const r = launch(fx, { spawn: sp.fn });
+    assert.equal(r.launched, true, JSON.stringify(r));
+    assert.equal(sp.calls.length, 1);
+    const call = sp.calls[0];
+    const lock = JSON.parse(readFileSync(fx.paths.lock, 'utf8'));
+    assert.equal(call.cmd, process.execPath);
+    assert.deepEqual(call.args, [join(fx.plugin, 'scripts', 'maintenance-worker-run.mjs'), '--project', fx.project, '--trigger', 'stop', '--token', lock.token, '--budget-usd', '2']);
+    assert.equal(call.opts.detached, true);
+    assert.equal(call.opts.stdio[0], 'ignore');
+    assert.equal(typeof call.opts.stdio[1], 'number', 'stdout goes to the log fd');
+    assert.equal(call.opts.stdio[1], call.opts.stdio[2], 'stderr goes to the same log fd');
+    assert.equal(call.opts.env.STERLING_MAINTENANCE_WORKER, '1', 'the child is marked so it can never launch another worker');
+    assert.equal(call.child.unrefed, true);
+    assert.equal(lock.pid, 4242);
+
+    const sp2 = fakeSpawn();
+    const again = launch(fx, { spawn: sp2.fn, now: NOW + DEBOUNCE_MS * 10, isAlive: (pid) => pid === 4242 });
+    assert.deepEqual(again, { launched: false, reason: 'already_running' });
+    assert.equal(sp2.calls.length, 0);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('recovers a stale lock: a dead pid, or a live pid older than LOCK_STALE_MS, or unreadable content', () => {
+  const fx = fixture();
+  try {
+    writeFileSync(fx.paths.lock, JSON.stringify({ pid: 999999, started_at: new Date(NOW - 60_000).toISOString(), token: 'old' }));
+    const r = launch(fx, { spawn: fakeSpawn({ pid: 5151 }).fn, isAlive: () => false });
+    assert.equal(r.launched, true, 'a dead pid frees the slot');
+    assert.equal(JSON.parse(readFileSync(fx.paths.lock, 'utf8')).pid, 5151);
+
+    writeFileSync(fx.paths.lock, JSON.stringify({ pid: 5151, started_at: new Date(NOW - LOCK_STALE_MS - 1).toISOString(), token: 'old' }));
+    rmSync(fx.paths.lastLaunch);
+    assert.equal(launch(fx, { spawn: fakeSpawn({ pid: 6262 }).fn, isAlive: () => true }).launched, true, 'an over-age lock is stale even when its pid answers (pid reuse)');
+
+    writeFileSync(fx.paths.lock, 'not json');
+    rmSync(fx.paths.lastLaunch);
+    assert.equal(launch(fx, { spawn: fakeSpawn().fn }).launched, true, 'an unreadable lock is stale');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[finding 5] stale-lock takeover is atomic: while one taker holds the takeover mutex a second gets nothing, and a lock re-judged live inside the mutex is left alone', () => {
+  const fx = fixture();
+  try {
+    const stale = { pid: 1, started_at: new Date(NOW - 60_000).toISOString(), token: 'old' };
+    writeFileSync(fx.paths.lock, JSON.stringify(stale));
+    mkdirSync(fx.paths.takeover); // another hook is mid-takeover
+    assert.equal(acquireLock(fx.paths, { pid: 2, started_at: new Date(NOW).toISOString() }, NOW, () => false), null, 'the second taker backs off');
+    assert.equal(JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token, 'old', 'and removes nothing');
+    rmSync(fx.paths.takeover, { recursive: true });
+
+    // The first taker won: its fresh lock is what a late second taker now sees.
+    const t1 = acquireLock(fx.paths, { pid: 3, started_at: new Date(NOW).toISOString() }, NOW, () => false);
+    assert.ok(t1, 'the stale lock is taken over');
+    assert.equal(JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token, t1, 'the winner verified its own token');
+    assert.equal(existsSync(fx.paths.takeover), false, 'the mutex is released');
+    const t2 = acquireLock(fx.paths, { pid: 4, started_at: new Date(NOW).toISOString() }, NOW, (pid) => pid === 3);
+    assert.equal(t2, null, "a second taker finds the winner's lock live and never removes it");
+    assert.equal(JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token, t1);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('debounce: a burst inside DEBOUNCE_MS starts one worker; after the window a new one may start', () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    assert.equal(launch(fx, { spawn: sp.fn, trigger: 'commit' }).launched, true);
+    rmSync(fx.paths.lock); // the first worker finished quickly
+    assert.deepEqual(launch(fx, { spawn: sp.fn, trigger: 'commit', now: NOW + 1000 }), { launched: false, reason: 'debounced' });
+    assert.deepEqual(launch(fx, { spawn: sp.fn, trigger: 'stop', now: NOW + DEBOUNCE_MS - 1 }), { launched: false, reason: 'debounced' });
+    assert.equal(sp.calls.length, 1);
+    assert.equal(launch(fx, { spawn: sp.fn, now: NOW + DEBOUNCE_MS + 1 }).launched, true);
+    assert.equal(sp.calls.length, 2);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[finding 2a] an item with an uncommitted change to any file_key is not launchable; only clean items count, via ONE git status call without a shell', () => {
+  const fx = fixture();
+  try {
+    const gitCalls = [];
+    const dirtyA = (cmd, args, opts) => (gitCalls.push({ cmd, args, opts }), { status: 0, stdout: ' M src/a.mjs\0R  src/new.mjs\0src/b.mjs\0' });
+    const sp = fakeSpawn();
+    assert.deepEqual(launch(fx, { spawn: sp.fn, spawnSync: dirtyA }), { launched: false, reason: 'all_dirty' }, 'a.mjs is modified and b.mjs is the source of a staged rename');
+    assert.equal(gitCalls.length, 1);
+    assert.equal(gitCalls[0].cmd, 'git');
+    assert.deepEqual(gitCalls[0].args, ['status', '--porcelain', '-z', '--untracked-files=all', '--', 'src/a.mjs', 'src/b.mjs']);
+    assert.equal(gitCalls[0].opts.shell, undefined, 'no shell');
+    assert.equal(sp.calls.length, 0);
+
+    const r = launch(fx, { spawn: sp.fn, items: [ITEM('i1'), ITEM('i3', ['src/c.mjs'])], spawnSync: () => ({ status: 0, stdout: ' M src/a.mjs\0' }) });
+    assert.equal(r.launched, true);
+    assert.equal(r.items, 1, 'only the clean item counts');
+    assert.deepEqual([...dirtyPaths(fx.project, ['x'], () => ({ status: 128, stdout: '' })) ?? ['null']], ['null'], 'a git failure is null, not "clean"');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('builds the probed claude argv: Sonnet 5.5, low effort, librarian, dontAsk, every tool named, every write denied, strict MCP, stream-json + verbose, budget cap', () => {
+  const fx = fixture();
+  try {
+    const mcpConfig = resolveMcpConfig(fx.plugin, fx.project);
+    assert.deepEqual(JSON.parse(mcpConfig), {
+      mcpServers: { sterling: { command: '/usr/bin/node', args: ['/clone/packages/mcp-server/dist/main.js', '--store', `${fx.project}/.sterling/sterling.db`] } },
+    }, "the plugin's own wiring, with ${CLAUDE_PROJECT_DIR} bound to THIS project's store");
+    const args = buildWorkerArgs({ prompt: 'P', mcpConfig });
+    assert.deepEqual(args, [
+      '-p', 'P',
+      '--model', 'claude-sonnet-5-5',
+      '--effort', 'low',
+      '--agent', 'librarian',
+      '--permission-mode', 'dontAsk',
+      '--allowedTools', WORKER_TOOLS.join(','),
+      '--disallowedTools', WORKER_DISALLOWED_TOOLS.join(','),
+      '--mcp-config', mcpConfig,
+      '--strict-mcp-config',
+      '--output-format', 'stream-json',
+      '--verbose',
+      '--max-budget-usd', '2',
+    ]);
+    assert.deepEqual(WORKER_TOOLS, ['mcp__sterling__maintenance_query', 'mcp__sterling__knowledge_get', 'mcp__sterling__maintenance_remove', 'Read', 'Grep'], '[finding 3] no board_update');
+    for (const banned of ['--bare', 'bypassPermissions', '--plugin-dir', '--dangerously-skip-permissions']) {
+      assert.ok(!args.includes(banned), `${banned} is never passed`);
+    }
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[finding 4] --disallowedTools names every store, board and config write plus Write, Edit and Bash, and none is also allowed', () => {
+  const expected = [
+    ...['create', 'update', 'append', 'edit', 'array_remove', 'retire', 'supersede', 'split', 'extract', 'promote', 'link'].map((v) => `mcp__sterling__knowledge_${v}`),
+    ...['add', 'remove', 'update', 'edit'].map((v) => `mcp__sterling__board_${v}`),
+    'mcp__sterling__config_set',
+    'Write',
+    'Edit',
+    'Bash',
+  ];
+  assert.deepEqual(WORKER_DISALLOWED_TOOLS, expected);
+  assert.equal(WORKER_TOOLS.filter((t) => WORKER_DISALLOWED_TOOLS.includes(t)).length, 0);
+});
+
+test('kill switch: maintenance_worker.enabled false, the test-run env flag, and the inside-worker flag each stop the launch', () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    assert.deepEqual(launch(fx, { spawn: sp.fn, config: { maintenance_worker: { enabled: false } } }), { launched: false, reason: 'disabled' });
+    assert.deepEqual(launch(fx, { spawn: sp.fn, env: { STERLING_MAINTENANCE_WORKER_DISABLE: '1' } }), { launched: false, reason: 'disabled_env' });
+    assert.deepEqual(launch(fx, { spawn: sp.fn, env: { STERLING_MAINTENANCE_WORKER: '1' } }), { launched: false, reason: 'inside_worker' });
+    assert.equal(sp.calls.length, 0);
+    assert.equal(launch(fx, { spawn: sp.fn, config: { maintenance_worker: { enabled: true } } }).launched, true, 'enabled true launches');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[finding 1] daily cap: once the UTC day spend reaches maintenance_worker.daily_budget_usd the launch is refused with a visible line; the per-run budget is lowered to what is left', () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    writeState(fx, { spend: { '2026-09-29': 5 } });
+    const capped = launch(fx, { spawn: sp.fn });
+    assert.equal(capped.reason, 'daily_cap');
+    assert.match(capped.line, /daily budget reached \(\$5\.00 of \$5\.00 spent today, UTC\)/);
+    assert.equal(sp.calls.length, 0);
+
+    writeState(fx, { spend: { '2026-09-29': 3.2, '2026-09-28': 99 } });
+    assert.equal(launch(fx, { spawn: sp.fn, config: { maintenance_worker: { daily_budget_usd: 3 } } }).reason, 'daily_cap', 'the configured cap applies');
+    const r = launch(fx, { spawn: sp.fn });
+    assert.equal(r.launched, true, "yesterday's spend does not count today");
+    assert.equal(sp.calls[0].args.at(-1), '1.8', 'the run may spend only what is left of the day');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[finding 1+8] back-off: no relaunch for BACKOFF_MS after a failed run (error_max_budget included), with a visible line; after it, the relaunch names the failure once', () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    const at = new Date(NOW - 60_000).toISOString();
+    writeState(fx, { spend: {}, last_run: { ok: false, at, error: 'error result (error_max_budget_usd)' } });
+    const r = launch(fx, { spawn: sp.fn });
+    assert.equal(r.reason, 'backoff');
+    assert.match(r.line, /last run FAILED at .*error_max_budget_usd.*backing off, no relaunch before/);
+    assert.equal(sp.calls.length, 0);
+    const later = launch(fx, { spawn: sp.fn, now: Date.parse(at) + BACKOFF_MS + 1 });
+    assert.equal(later.launched, true);
+    assert.match(later.line, /previous run FAILED .*relaunched after the back-off/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('a spawn failure yields one loud line, frees the lock, and never throws', () => {
+  const fx = fixture();
+  try {
+    const r = launch(fx, { spawn: fakeSpawn({ throws: new Error('spawn EACCES') }).fn });
+    assert.equal(r.launched, false);
+    assert.equal(r.reason, 'error');
+    assert.match(r.line, /maintenance worker: launch FAILED \(spawn: spawn EACCES\)/);
+    assert.equal(r.line.split('\n').length, 1, 'exactly one line');
+    assert.equal(existsSync(fx.paths.lock), false, 'the slot is freed for the next trigger');
+
+    const broken = launch(fx, { spawn: fakeSpawn().fn, pluginRoot: join(fx.plugin, 'nope'), now: NOW + DEBOUNCE_MS * 2 });
+    assert.match(broken.line, /launch FAILED \(cannot read the plugin MCP wiring/, 'a broken install is loud in the hook, not silent in a detached process');
+
+    const storeFail = launch(fx, { items: undefined, store: { count: () => { throw new Error('db locked'); } }, spawn: fakeSpawn().fn });
+    assert.match(storeFail.line, /launch FAILED \(db locked\)/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// ------------------------------------------------------------ runner core
+
+/** A fake claude child for runWorker: emits stream-json `events`, then closes with `code`. */
+function fakeClaude(events, { code = 0, hang = false } = {}) {
+  const calls = [];
+  const fn = (cmd, args, opts) => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.kill = (sig) => {
+      child.killed = sig;
+      setImmediate(() => child.emit('close', null));
+    };
+    calls.push({ cmd, args, opts, child });
+    setImmediate(() => {
+      const text = events.map((e) => (typeof e === 'string' ? e : JSON.stringify(e))).join('\n') + '\n';
+      child.stdout.emit('data', text.slice(0, 40)); // a line split across chunks
+      child.stdout.emit('data', text.slice(40));
+      if (!hang) child.emit('close', code);
+    });
+    return child;
+  };
+  return { fn, calls };
+}
+
+const removeCall = (toolId, itemId) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id: toolId, name: 'mcp__sterling__maintenance_remove', input: { id: itemId } }] } });
+const removeResult = (toolId, text, isError = false) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: toolId, content: text, is_error: isError }] } });
+const resultEvent = (over) => ({ type: 'result', subtype: 'success', is_error: false, result: '', total_cost_usd: 0.25, permission_denials: [], ...over });
+const readJournal = (fx) => readFileSync(fx.paths.journal, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+const quiet = { log: () => {} };
+
+test('[finding 7] runWorker journals every maintenance_remove call and result from the stream, then the verdicts; spend is added per UTC day; the lock is released', async () => {
+  const fx = fixture();
+  try {
+    const result = [
+      '{"item_id":"11111111-1111-1111-1111-111111111111","article":"a","verdict":"closed","reason":"article already names the new flag"}',
+      '{"item_id":"22222222-2222-2222-2222-222222222222","article":"b","verdict":"owes_prose","file_keys":["src/b.mjs"],"reason":"new refusal not described"}',
+    ].join('\n');
+    const sp = fakeClaude([
+      { type: 'system', subtype: 'init' },
+      removeCall('t1', '11111111-1111-1111-1111-111111111111'),
+      removeResult('t1', 'Closed as ALREADY-PAID'),
+      removeCall('t2', '33333333-3333-3333-3333-333333333333'),
+      removeResult('t2', 'refused: worktree differs from HEAD', true),
+      resultEvent({ result }),
+    ]);
+    writeState(fx, { spend: { '2026-09-29': 1 } });
+    const code = await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: sp.fn, trigger: 'stop', now: () => NOW, ...quiet });
+    assert.equal(code, 0);
+    assert.equal(sp.calls[0].cmd, 'claude');
+    assert.equal(sp.calls[0].args[1], 'PROMPT BODY', 'the shipped prompt file is the -p argument');
+    const lines = readJournal(fx);
+    assert.deepEqual(lines.map((l) => l.kind), ['tool_call', 'tool_call', 'verdict', 'verdict', 'run_summary']);
+    assert.deepEqual([lines[0].item_id, lines[0].is_error, lines[0].result], ['11111111-1111-1111-1111-111111111111', false, 'Closed as ALREADY-PAID']);
+    assert.equal(lines[1].is_error, true, 'a refused close is on record too');
+    assert.equal(lines[3].verdict, 'owes_prose');
+    assert.equal(lines[4].remove_calls, 2);
+    assert.deepEqual([...owesProseVerdicts(fx.project).keys()], ['22222222-2222-2222-2222-222222222222']);
+    const state = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
+    assert.equal(state.spend['2026-09-29'], 1.25);
+    assert.equal(state.last_run.ok, true);
+    assert.equal(existsSync(fx.paths.lock), false, 'the lock is released when the child exits');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('runWorker: a non-zero exit, an error_max_budget result or a permission denial is recorded as a FAILED run, never a silent success', async () => {
+  const fx = fixture();
+  try {
+    const denied = fakeClaude([resultEvent({ permission_denials: [{ tool_name: 'mcp__sterling__maintenance_remove' }] })]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: denied.fn, trigger: 'commit', ...quiet }), 1);
+    assert.match(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.error, /1 permission denial/);
+
+    const budget = fakeClaude([resultEvent({ subtype: 'error_max_budget_usd', is_error: true, total_cost_usd: 2.01 })]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: budget.fn, trigger: 'stop', ...quiet }), 1);
+    const st = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
+    assert.match(st.last_run.error, /error_max_budget_usd/);
+    assert.ok(Object.values(st.spend).some((v) => v >= 2.01), 'a failed run still counts its spend');
+
+    const crashed = fakeClaude(['not json'], { code: 3 });
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: crashed.fn, trigger: 'stop', ...quiet }), 1);
+    const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.match(last.error, /exit 3/);
+    assert.match(last.error, /no stream-json result event/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[finding 6] a hung child is killed after the timeout and recorded as a failed run; its streamed closes stay on record', async () => {
+  const fx = fixture();
+  try {
+    const hung = fakeClaude([removeCall('t1', 'aaaa'), removeResult('t1', 'Closed')], { hang: true });
+    const code = await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: hung.fn, trigger: 'stop', timeoutMs: 30, ...quiet });
+    assert.equal(code, 1);
+    assert.equal(hung.calls[0].child.killed, 'SIGTERM');
+    const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.equal(last.ok, false);
+    assert.match(last.error, /killed after 0 min timeout/);
+    assert.equal(readJournal(fx)[0].item_id, 'aaaa');
+    assert.equal(existsSync(fx.paths.lock), false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[finding 5] the runner refuses to run when the lock token is not its own', async () => {
+  const fx = fixture();
+  try {
+    writeFileSync(fx.paths.lock, JSON.stringify({ pid: 1, started_at: new Date(NOW).toISOString(), token: 'someone-else' }));
+    const sp = fakeClaude([resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: sp.fn, token: 'mine', ...quiet }), 1);
+    assert.equal(sp.calls.length, 0);
+    assert.equal(JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token, 'someone-else', "another worker's lock is never released");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[finding 9] the log and the JSONL rotate to a single .1 backup past ROTATE_BYTES; owes-prose verdicts in the backup still count', () => {
+  const fx = fixture();
+  try {
+    journalLine(fx, { kind: 'verdict', item_id: 'old', verdict: 'owes_prose', file_keys: ['k'] });
+    appendFileSync(fx.paths.journal, 'x'.repeat(ROTATE_BYTES));
+    writeFileSync(`${fx.paths.journal}.1`, 'previous backup');
+    rotateIfLarge(fx.paths.journal);
+    assert.equal(existsSync(fx.paths.journal), false);
+    assert.ok(statSync(`${fx.paths.journal}.1`).size > ROTATE_BYTES, 'the single backup is replaced');
+    assert.deepEqual([...owesProseVerdicts(fx.project).keys()], ['old']);
+    writeFileSync(fx.paths.log, 'small');
+    rotateIfLarge(fx.paths.log);
+    assert.equal(readFileSync(fx.paths.log, 'utf8'), 'small', 'a small file is left alone');
+    rotateIfLarge(join(fx.project, 'missing'));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('streamJournal: a maintenance_remove with no result before the stream ends is still journalled', () => {
+  const entries = [];
+  const s = streamJournal((e) => entries.push(e));
+  s.feed(JSON.stringify(removeCall('t9', 'zzz')) + '\n');
+  s.end();
+  assert.deepEqual(entries, [{ kind: 'tool_call', tool: 'maintenance_remove', item_id: 'zzz', is_error: null, result: 'no result before the run ended' }]);
+});
+
+test('runWorker --dry-run prints the argv and spawns nothing', async () => {
+  const fx = fixture();
+  try {
+    const printed = [];
+    const code = await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: () => assert.fail('dry run must not spawn'), dryRun: true, out: (s) => printed.push(s) });
+    assert.equal(code, 0);
+    const out = JSON.parse(printed[0]);
+    assert.equal(out.dry_run, true);
+    assert.equal(out.command, 'claude');
+    assert.deepEqual(out.argv.slice(2, 6), ['--model', 'claude-sonnet-5-5', '--effort', 'low']);
+    assert.equal(existsSync(fx.paths.lock), false);
+  } finally {
+    fx.cleanup();
+  }
+});

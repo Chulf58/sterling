@@ -5,7 +5,8 @@
 // reconcile_needed items covering the branch's changed files into CLEARED (content now
 // matches the owning article's baseline — a board_remove-only close would silently drop
 // debt, since board_remove never re-stamps the article's file_baselines) vs still-LIVE
-// (genuinely drifted) before deciding whether to refuse the merge. Both partitions are
+// (genuinely drifted). Since decision merge-discloses-derived-drift-never-refuses-on-it the
+// live partition is DISCLOSED and the merge proceeds; it never refuses. Both partitions are
 // reported to stderr; stdout stays pure JSON on success. This file authors tests from
 // THAT SPEC, not from scripts/direct-merge.mjs or scripts/hooks/lib/settlement.mjs, which
 // were not read.
@@ -20,15 +21,15 @@
 //
 // NINE BEHAVIORS, each test names its SABOTAGE in the test title (documented intent —
 // sabotages are never applied in this file):
-//   1. CONTROL (placed first) — a LIVE item still refuses; proves the cleared-report
+//   1. CONTROL (placed first) — a LIVE item is disclosed as live debt; proves the cleared-report
 //      cannot be satisfied by declaring everything cleared.
 //   2. TARGET — a baseline-matching item is named on stderr while the merge proceeds.
 //   3. stdout purity — the cleared report never lands on stdout.
-//   4. The report appears on the REFUSAL path too (mixed live + cleared).
+//   4. The report appears alongside a live-debt disclosure too (mixed live + cleared).
 //   5. all_exempt wording — a generated-projection-only item states the exemption rule inline.
 //   6. baseline_absent is reported UNVERIFIED, never conflated with a clean/cleared match.
-//   7. FAIL-CLOSED — a dangling feature_link is treated as live, never cleared.
-//   8. FAIL-CLOSED — a deleted governed file is treated as drift, never cleared.
+//   7. FAIL-CLOSED — a dangling feature_link is treated as live (disclosed), never cleared.
+//   8. FAIL-CLOSED — a deleted governed file is treated as drift (disclosed), never cleared.
 //   9. Scoping — liveness is computed over file_keys ∩ changed-on-this-branch only.
 
 import { test, before } from 'node:test';
@@ -133,16 +134,27 @@ function runDirectMerge(dir, extra = []) {
   });
 }
 
+/** The live-debt disclosure block (header through the item list, before the
+ * remedy), or '' when absent — so a path is asserted as DISCLOSED LIVE DEBT,
+ * never merely mentioned by the cleared report. */
+function disclosure(stderr) {
+  const s = String(stderr ?? '');
+  const i = s.indexOf('RECONCILE DEBT DISCLOSED');
+  if (i < 0) return '';
+  const j = s.indexOf('This does NOT block the merge', i);
+  return s.slice(i, j < 0 ? undefined : j);
+}
+
 function openStore(dir) {
   return new SterlingStore(join(dir, '.sterling', 'sterling.db'));
 }
 
 // =========================================================================
-// 1. CONTROL — a LIVE item still refuses; the cleared-report cannot be
-//    satisfied by declaring everything cleared.
+// 1. CONTROL — a LIVE item is disclosed as live debt; the cleared-report
+//    cannot be satisfied by declaring everything cleared.
 // =========================================================================
 
-test('1 [control]: a live item (article baseline != committed content) still refuses, and the cleared-report marker is absent — sabotage: pushing every covering item into the cleared partition regardless of the predicate, which must flip this red (exit 0 and/or a cleared marker present)', () => {
+test('1 [control]: a live item (article baseline != committed content) is disclosed as live debt while the merge proceeds, and the cleared-report marker is absent — sabotage: pushing every covering item into the cleared partition regardless of the predicate, which must flip this red (no live-debt disclosure and/or a cleared marker present)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const original = 'export const t = 1;\n';
@@ -158,8 +170,8 @@ test('1 [control]: a live item (article baseline != committed content) still ref
     git(dir, ['commit', '-m', 'change touched file']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `a genuinely-drifted article must still refuse the merge — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
-    assert.match(r.stderr, /reconcile_needed/);
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(disclosure(r.stderr).includes('src/touched.mjs'), `a genuinely-drifted article is disclosed as live reconcile debt — stderr=${oneLine(r.stderr)}`);
     assert.doesNotMatch(r.stderr, /content now MATCHES/, 'a still-live item must never be reported through the cleared-report marker');
   } finally {
     cleanup();
@@ -223,10 +235,10 @@ test('3 [stdout purity]: same fixture as (2) — stdout stays valid, pure JSON d
 });
 
 // =========================================================================
-// 4. Report appears on the REFUSAL path too — mixed live + cleared.
+// 4. Report appears on the LIVE-DEBT path too — mixed live + cleared.
 // =========================================================================
 
-test('4 [refusal path]: one live item and one cleared item, both covering branch-changed files — stderr reports BOTH, exit refuses on the live one — sabotage: moving the cleared-report emission inside an `else` of `if (debt.length > 0)` so it never runs on the refusal path, which must flip this red (cleared line absent on refusal)', () => {
+test('4 [live-debt path]: one live item and one cleared item, both covering branch-changed files — stderr reports BOTH, the live one in the debt disclosure and the cleared one in the cleared report — sabotage: moving the cleared-report emission inside an `else` of `if (debt.length > 0)` so it never runs when live debt is disclosed, which must flip this red (cleared line absent alongside the disclosure)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const originalA = 'export const a = 1;\n';
@@ -257,11 +269,12 @@ test('4 [refusal path]: one live item and one cleared item, both covering branch
     git(dir, ['commit', '-m', 'change a (drift); change b to what its baseline was already stamped to (no drift)']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `article A is genuinely still drifted and must refuse — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
-    assert.match(r.stderr, /reconcile_needed/);
-    assert.ok(r.stderr.includes('src/a.mjs'), 'refusal names the still-live path');
-    assert.ok(r.stderr.includes(itemB.id) || r.stderr.includes('src/b.mjs'), 'the cleared item is still reported on the refusal path');
-    assert.match(r.stderr, /content now MATCHES/, 'the cleared report fires even though the overall merge refuses');
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const disclosed = disclosure(r.stderr);
+    assert.ok(disclosed.includes('src/a.mjs'), 'the disclosure names the still-live path');
+    assert.ok(!disclosed.includes('src/b.mjs'), 'the cleared path is never disclosed as live debt');
+    assert.ok(r.stderr.includes(itemB.id) || r.stderr.includes('src/b.mjs'), 'the cleared item is still reported alongside the live-debt disclosure');
+    assert.match(r.stderr, /content now MATCHES/, 'the cleared report fires even though live debt is disclosed too');
   } finally {
     cleanup();
   }
@@ -341,7 +354,7 @@ test('6 [baseline_absent]: an article with no recorded baseline for the item\'s 
 // 7. FAIL-CLOSED — dangling feature_link.
 // =========================================================================
 
-test('7 [fail-closed, dangling link]: an item whose feature_link resolves to no article, covering a changed file, is treated as live (refuses), never cleared — sabotage: treating article-unresolvable as live:false (cleared) instead of fail-closed live:true, which must flip this red (exit 0 and/or a cleared line for this item)', () => {
+test('7 [fail-closed, dangling link]: an item whose feature_link resolves to no article, covering a changed file, is treated as live (disclosed as debt), never cleared — sabotage: treating article-unresolvable as live:false (cleared) instead of fail-closed live:true, which must flip this red (item absent from the live-debt disclosure and/or a cleared line for this item)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     mkdirSync(join(dir, 'src'), { recursive: true });
@@ -360,9 +373,9 @@ test('7 [fail-closed, dangling link]: an item whose feature_link resolves to no 
     git(dir, ['commit', '-m', 'change r under a dangling reconcile item']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `an unresolvable article must fail closed and refuse — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(disclosure(r.stderr).includes(item.id), `an unresolvable article fails closed: the item is disclosed as LIVE debt — stderr=${oneLine(r.stderr)}`);
     assert.doesNotMatch(r.stderr, /content now MATCHES/, 'a fail-closed dangling-link item is never reported through the cleared marker');
-    void item;
   } finally {
     cleanup();
   }
@@ -372,7 +385,7 @@ test('7 [fail-closed, dangling link]: an item whose feature_link resolves to no 
 // 8. FAIL-CLOSED — deleted governed file.
 // =========================================================================
 
-test('8 [fail-closed, deleted file]: a governed file with a recorded baseline that is DELETED on the branch is treated as drift (refuses) — sabotage: making contentChangedAgainstBaseline return false when the file is unreadable/missing instead of true, which must flip this red (exit 0, deletion silently treated as no drift)', () => {
+test('8 [fail-closed, deleted file]: a governed file with a recorded baseline that is DELETED on the branch is treated as drift (disclosed as live debt) — sabotage: making contentChangedAgainstBaseline return false when the file is unreadable/missing instead of true, which must flip this red (no disclosure, deletion silently treated as no drift)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const original = 'export const p = 1;\n';
@@ -391,8 +404,8 @@ test('8 [fail-closed, deleted file]: a governed file with a recorded baseline th
     git(dir, ['commit', '-m', 'delete governed file p']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `deletion of a governed, baselined file must be treated as drift and refuse — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
-    assert.match(r.stderr, /reconcile_needed/);
+    assert.equal(r.status, 0, `reconcile debt is disclosed, never refused — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(disclosure(r.stderr).includes('src/p.mjs'), `deletion of a governed, baselined file is treated as drift and disclosed — stderr=${oneLine(r.stderr)}`);
   } finally {
     cleanup();
   }

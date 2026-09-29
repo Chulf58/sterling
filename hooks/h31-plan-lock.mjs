@@ -4846,6 +4846,21 @@ var configSchema = external_exports.object({
   maintenance_queue: external_exports.object({
     deep_threshold: external_exports.number().int().positive().default(15)
   }).default({}),
+  // Background maintenance worker kill switch (decision
+  // maintenance-queue-background-haiku-worker-simple-redesign): when true, H10
+  // (at Stop) and H19's Bash surface (after a git commit) start a detached
+  // headless Claude run that judges open reconcile_needed items and closes the
+  // ones already paid (scripts/hooks/lib/maintenance-worker.mjs). false stops
+  // every launch; the queue then drains by hand with /sterling:drain.
+  // daily_budget_usd caps the worker's spend per UTC day: the runner adds each
+  // run's cost to its state file and the launcher refuses to start once the
+  // day's spend reaches it, with a visible line. Both defaults live here AND
+  // in templates/default-config.json, because install/sync fill an omitted key
+  // from this zod default, not the template.
+  maintenance_worker: external_exports.object({
+    enabled: external_exports.boolean().default(true),
+    daily_budget_usd: external_exports.number().positive().default(5)
+  }).default({}),
   // Board 8390f8fa: a registry-style feature_article can outgrow its own
   // round-trip — knowledge_append responses on mcp-tool-surface (29 history
   // entries) and hooks-suite's what_it_does (26k tokens) both blew the MCP

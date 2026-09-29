@@ -140,7 +140,7 @@ test('direct-merge.mjs: merges the current branch and sweeps the merged sibling 
   }
 });
 
-test('direct-merge.mjs: refuses on open reconcile_needed debt covering changed files; unrelated debt does not block; merges once drained (decision foreign_9df61181)', async () => {
+test('direct-merge.mjs: DISCLOSES open reconcile_needed debt covering changed files and merges; unrelated debt is not named; the gate closes nothing (decision merge-discloses-derived-drift-never-refuses-on-it)', async () => {
   const { dir, cleanup } = await makeGitProject();
   try {
     git(dir, ['checkout', '-b', 'feat/debt']);
@@ -160,24 +160,24 @@ test('direct-merge.mjs: refuses on open reconcile_needed debt covering changed f
     });
     store.close();
 
-    const refused = runDirectMerge(dir);
-    assert.notEqual(refused.status, 0, 'open debt on a changed file must refuse the merge');
-    assert.match(refused.stderr, /reconcile_needed/);
-    assert.match(refused.stderr, /src\/touched\.mjs/);
-    assert.doesNotMatch(refused.stderr, /src\/unrelated\.mjs/, 'debt off the branch does not block');
+    const ok = runDirectMerge(dir);
+    assert.equal(ok.status, 0, `open debt on a changed file is disclosed, never refused: ${ok.stderr}`);
+    assert.equal(JSON.parse(ok.stdout).branch_merged, 'feat/debt');
+    assert.match(ok.stderr, /RECONCILE DEBT DISCLOSED/);
+    assert.match(ok.stderr, /reconcile_needed/);
+    assert.match(ok.stderr, /src\/touched\.mjs/);
+    assert.doesNotMatch(ok.stderr, /src\/unrelated\.mjs/, 'debt off the branch is not named at the merge');
 
     const store2 = new Store(join(dir, '.sterling', 'sterling.db'));
-    store2.remove(item.id, NOW);
+    const survived = store2.get(item.id);
     store2.close();
-    const ok = runDirectMerge(dir);
-    assert.equal(ok.status, 0, ok.stderr);
-    assert.equal(JSON.parse(ok.stdout).branch_merged, 'feat/debt');
+    assert.ok(survived, 'the disclosed item stays open — a gate never closes debt on its own authority');
   } finally {
     cleanup();
   }
 });
 
-test('direct-merge.mjs: reconcile refusal GROUPS items by owning article (feature_link) with counts — N articles, not N items (N13)', async () => {
+test('direct-merge.mjs: reconcile disclosure GROUPS items by owning article (feature_link) with counts — N articles, not N items (N13)', async () => {
   const { dir, cleanup } = await makeGitProject();
   try {
     git(dir, ['checkout', '-b', 'feat/many-touches']);
@@ -199,8 +199,9 @@ test('direct-merge.mjs: reconcile refusal GROUPS items by owning article (featur
     store.close();
 
     const refused = runDirectMerge(dir);
-    assert.notEqual(refused.status, 0, 'open debt still refuses the merge');
-    assert.match(refused.stderr, /3 open reconcile_needed item\(s\) across 1 article\(s\)/, 'the refusal reads as 1 article, not 3 items');
+    assert.equal(refused.status, 0, `open debt is disclosed and the merge proceeds: ${refused.stderr}`);
+    assert.match(refused.stderr, /RECONCILE DEBT DISCLOSED/);
+    assert.match(refused.stderr, /3 open reconcile_needed item\(s\) across 1 article\(s\)/, 'the disclosure reads as 1 article, not 3 items');
     assert.match(refused.stderr, new RegExp(`article ${articleId} `), 'the group is headed by its owning article id');
     for (const item of items) {
       assert.match(refused.stderr, new RegExp(item.id), `item ${item.id} is still individually listed under its article group`);
@@ -235,11 +236,44 @@ test('direct-merge.mjs: legacy items with NO feature_link collapse into ONE buck
     store.close();
 
     const refused = runDirectMerge(dir);
-    assert.notEqual(refused.status, 0, 'open debt still refuses the merge');
+    assert.equal(refused.status, 0, `open debt is disclosed and the merge proceeds: ${refused.stderr}`);
+    assert.match(refused.stderr, /RECONCILE DEBT DISCLOSED/);
     assert.match(refused.stderr, /3 open reconcile_needed item\(s\) across 0 article\(s\)/, 'zero REAL articles — all three items are legacy/unlinked');
     assert.match(refused.stderr, /plus 3 item\(s\) with no owning article/, 'the legacy items are named as one group of 3, not 3 groups of 1');
     const headerMatches = refused.stderr.match(/\(no owning article\)/g) ?? [];
     assert.equal(headerMatches.length, 1, 'exactly one shared bucket header for every unlinked item — never one per item');
+  } finally {
+    cleanup();
+  }
+});
+
+test('direct-merge.mjs: reconcile debt is disclosed with paths and age, and the merge proceeds', async () => {
+  const { dir, cleanup } = await makeGitProject();
+  try {
+    git(dir, ['checkout', '-b', 'feat/aged-debt']);
+    writeFileSync(join(dir, 'src', 'aged.mjs'), 'export const aged = 1;\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'touch a file with three-day-old debt']);
+
+    const threeDaysAgo = new Date(Date.now() - (3 * 24 + 2) * 3600_000).toISOString();
+    const Store = await loadStore();
+    const store = new Store(join(dir, '.sterling', 'sterling.db'));
+    const item = store.create({
+      id: randomUUID(), type: 'todo', created_at: threeDaysAgo, updated_at: threeDaysAgo, author: 'system', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      text: "reconcile article 'aged' — owned file changed", source: 'system', system_reason: 'reconcile_needed', file_keys: ['src/aged.mjs'],
+    });
+    store.close();
+
+    const r = runDirectMerge(dir);
+    assert.equal(r.status, 0, `reconcile debt never refuses the merge: ${r.stderr}`);
+    assert.equal(JSON.parse(r.stdout).branch_merged, 'feat/aged-debt');
+    assert.match(r.stderr, /RECONCILE DEBT DISCLOSED/);
+    const line = r.stderr.split('\n').find((l) => l.includes(item.id));
+    assert.ok(line, `the item is listed by its full id: ${r.stderr}`);
+    assert.match(line, /age 3d /, 'the item line states its age from created_at');
+    assert.ok(line.includes(`open since ${threeDaysAgo}`), 'the item line states when it opened');
+    assert.ok(line.includes('src/aged.mjs'), 'the item line names its path');
+    assert.match(r.stderr, /does NOT block the merge/);
   } finally {
     cleanup();
   }

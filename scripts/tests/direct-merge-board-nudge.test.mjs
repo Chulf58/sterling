@@ -362,23 +362,29 @@ test('4 [never-a-gate]: with an intersecting user todo present, the exit code an
 // forward guard against a future refactor hoisting that print above a
 // refusal gate rather than a defect found in the current shape.
 
-test("5 [refusal-silence]: an intersecting open user todo exists (the nudge WOULD print on success) but the merge is independently refused by live reconcile_needed debt — stderr names the reconcile refusal and never the nudge header — sabotage: moving the nudge print above the refusal gates (e.g. computing/printing it before checking mint results), which must flip this red (BOARD-PAYMENT NUDGE present despite a refused merge)", () => {
+test("5 [refusal-silence]: an intersecting open user todo exists (the nudge WOULD print on success) AND live reconcile_needed debt is disclosed, but the merge is independently refused by the unbumped-version gate — stderr names that refusal and never the nudge header — sabotage: moving the nudge print above the refusal gates (e.g. computing/printing it right after the reconcile disclosure, before the version gate), which must flip this red (BOARD-PAYMENT NUDGE present despite a refused merge)", () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const original = 'export const x = 1;\n';
     const changed = 'export const x = 2;\n';
     mkdirSync(join(dir, 'src'), { recursive: true });
     writeFileSync(join(dir, 'src', 'x.mjs'), original);
+    // Both version manifests present at 0.1.0 on the base: a substantive
+    // branch diff that leaves them unmoved is refused by the version gate
+    // (decision merge-keeps-battery-and-version-refusals). Reconcile debt no
+    // longer refuses (decision merge-discloses-derived-drift-never-refuses-on-it),
+    // so the version gate is the refusal this pin now rides on.
+    mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
+    writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), '{\n  "name": "fixture",\n  "version": "0.1.0"\n}\n');
+    writeFileSync(join(dir, 'package.json'), '{\n  "name": "fixture",\n  "version": "0.1.0"\n}\n');
     git(dir, ['add', '-A']);
-    git(dir, ['commit', '-m', 'seed x']);
+    git(dir, ['commit', '-m', 'seed x + manifests']);
 
     const store = openStore(dir);
     // Article baseline is stamped to the ORIGINAL content — the branch below
-    // changes src/x.mjs, so the gate's own settlement minting (no manually
-    // created reconcile_needed item needed) mints live debt against this
-    // owning article at merge time and refuses. This is the exact shape
-    // pin 3 used before its decoupling fix, confirmed live to produce
-    // "1 open reconcile_needed item(s) ... reconcile before merging".
+    // changes src/x.mjs, so the gate's own settlement minting mints live debt
+    // against this owning article, which is DISCLOSED (not refused) before
+    // the version gate runs. The nudge must stay silent through both.
     articleWithBaseline(store, 'feat-refusal-silence', [{ path: 'src/x.mjs', content: original }]);
     // An intersecting open user todo — if the refusal gate did not fire
     // first, this is exactly the shape pin 2 proved produces the nudge.
@@ -388,11 +394,12 @@ test("5 [refusal-silence]: an intersecting open user todo exists (the nudge WOUL
     git(dir, ['checkout', '-b', 'feat/refusal-silence']);
     writeFileSync(join(dir, 'src', 'x.mjs'), changed);
     git(dir, ['add', '-A']);
-    git(dir, ['commit', '-m', 'change x under live reconcile debt']);
+    git(dir, ['commit', '-m', 'change x under live reconcile debt, version unmoved']);
 
     const r = runDirectMerge(dir);
-    assert.notEqual(r.status, 0, `a genuinely-drifted article must refuse the merge — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
-    assert.match(r.stderr, /reconcile before merging/, 'the refusal is attributed to reconcile debt specifically — a control against passing via some unrelated failure');
+    assert.notEqual(r.status, 0, `an unbumped substantive branch must refuse the merge — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /did not move/, 'the refusal is attributed to the version gate specifically — a control against passing via some unrelated failure');
+    assert.match(r.stderr, /RECONCILE DEBT DISCLOSED/, 'the live reconcile debt was disclosed before the refusal');
     assert.doesNotMatch(r.stderr, /BOARD-PAYMENT NUDGE/, 'the nudge must never print on a refused merge, even when an intersecting user todo exists');
   } finally {
     cleanup();

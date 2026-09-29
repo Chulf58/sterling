@@ -30,7 +30,7 @@
 // concept_article_missing item per family on release.
 // All terminal paths clear both registers + the nag marker together (P4).
 import { randomUUID, createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, writeSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { readStdin, deny, allow, exitAfterWrite, openStore, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
@@ -46,6 +46,7 @@ import { isForeignTree } from './lib/working-tree.mjs';
 import { publishNotice } from './lib/delivery.mjs';
 import { readProjectMode } from '../lib/handoff-projection.mjs';
 import { readPrLoop, PR_LOOP_REL } from '../lib/work-pr.mjs';
+import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
 
 /**
  * ARTICLE_MISSING TEXT (shared by the §6 mint and the live-recompute heal —
@@ -436,6 +437,14 @@ try {
   };
 
   const releaseWithPressure = () => {
+    // BACKGROUND MAINTENANCE WORKER (decision
+    // maintenance-queue-background-haiku-worker-simple-redesign): every release
+    // runs after settlement minted this Stop's reconcile items, so a Stop with
+    // an unjudged reconcile_needed item starts one detached worker (lock- and
+    // debounce-guarded). It never throws; a failed launch rides this release's
+    // systemMessage as one loud line (P5).
+    const workerLaunch = maybeLaunchMaintenanceWorker({ root: input.cwd, config, store, trigger: 'stop', spawn });
+    if (workerLaunch.line) disclosureParts.push(workerLaunch.line);
     let advisoryText = '';
     const advisorySpends = [];
     if (!input.stop_hook_active) {

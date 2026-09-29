@@ -6,10 +6,10 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h10-direct-capture.mjs
-import { randomUUID as randomUUID3, createHash as createHash3 } from "node:crypto";
-import { spawnSync as spawnSync6 } from "node:child_process";
-import { readFileSync as readFileSync8, writeFileSync as writeFileSync5, writeSync as writeSync2, rmSync as rmSync3, existsSync as existsSync7, mkdirSync as mkdirSync7, renameSync as renameSync5 } from "node:fs";
-import { join as join11, basename as basename2 } from "node:path";
+import { randomUUID as randomUUID4, createHash as createHash3 } from "node:crypto";
+import { spawn, spawnSync as spawnSync6 } from "node:child_process";
+import { readFileSync as readFileSync9, writeFileSync as writeFileSync6, writeSync as writeSync2, rmSync as rmSync4, existsSync as existsSync8, mkdirSync as mkdirSync8, renameSync as renameSync6 } from "node:fs";
+import { join as join12, basename as basename2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -5033,6 +5033,21 @@ var configSchema = external_exports.object({
   maintenance_queue: external_exports.object({
     deep_threshold: external_exports.number().int().positive().default(15)
   }).default({}),
+  // Background maintenance worker kill switch (decision
+  // maintenance-queue-background-haiku-worker-simple-redesign): when true, H10
+  // (at Stop) and H19's Bash surface (after a git commit) start a detached
+  // headless Claude run that judges open reconcile_needed items and closes the
+  // ones already paid (scripts/hooks/lib/maintenance-worker.mjs). false stops
+  // every launch; the queue then drains by hand with /sterling:drain.
+  // daily_budget_usd caps the worker's spend per UTC day: the runner adds each
+  // run's cost to its state file and the launcher refuses to start once the
+  // day's spend reaches it, with a visible line. Both defaults live here AND
+  // in templates/default-config.json, because install/sync fill an omitted key
+  // from this zod default, not the template.
+  maintenance_worker: external_exports.object({
+    enabled: external_exports.boolean().default(true),
+    daily_budget_usd: external_exports.number().positive().default(5)
+  }).default({}),
   // Board 8390f8fa: a registry-style feature_article can outgrow its own
   // round-trip — knowledge_append responses on mcp-tool-surface (29 history
   // entries) and hooks-suite's what_it_does (26k tokens) both blew the MCP
@@ -8764,6 +8779,276 @@ function readPrLoop(root) {
   return s2;
 }
 
+// scripts/hooks/lib/maintenance-worker.mjs
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { spawnSync as nodeSpawnSync } from "node:child_process";
+import { closeSync as closeSync4, existsSync as existsSync7, mkdirSync as mkdirSync7, openSync as openSync4, readFileSync as readFileSync8, renameSync as renameSync5, rmSync as rmSync3, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync5, appendFileSync } from "node:fs";
+import { dirname as dirname7, join as join11 } from "node:path";
+import { fileURLToPath } from "node:url";
+var WORKER_RUN_BUDGET_USD = 2;
+var DEFAULT_DAILY_BUDGET_USD = 5;
+var DEBOUNCE_MS = 2 * 6e4;
+var BACKOFF_MS = 30 * 6e4;
+var WORKER_TIMEOUT_MS = 20 * 6e4;
+var LOCK_STALE_MS2 = 30 * 6e4;
+var TAKEOVER_STALE_MS = 6e4;
+var ROTATE_BYTES = 1e6;
+var WORKER_ENV_FLAG = "STERLING_MAINTENANCE_WORKER";
+var WORKER_DISABLE_ENV = "STERLING_MAINTENANCE_WORKER_DISABLE";
+var SERVER = "sterling";
+var mcp = (name) => `mcp__${SERVER}__${name}`;
+var WORKER_TOOLS = [mcp("maintenance_query"), mcp("knowledge_get"), mcp("maintenance_remove"), "Read", "Grep"];
+var WORKER_DISALLOWED_TOOLS = [
+  ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
+  ...["add", "remove", "update", "edit"].map((v) => mcp(`board_${v}`)),
+  mcp("config_set"),
+  "Write",
+  "Edit",
+  "Bash"
+];
+function workerPaths(root) {
+  const sterling = join11(root, ".sterling");
+  return {
+    lock: join11(sterling, "transient", "maintenance-worker.lock"),
+    takeover: join11(sterling, "transient", "maintenance-worker.lock.takeover"),
+    lastLaunch: join11(sterling, "transient", "maintenance-worker.last-launch"),
+    state: join11(sterling, "transient", "maintenance-worker.state.json"),
+    log: join11(sterling, "maintenance-worker.log"),
+    journal: join11(sterling, "maintenance-worker.jsonl")
+  };
+}
+function pluginRootFrom(moduleUrl = import.meta.url) {
+  let dir = dirname7(fileURLToPath(moduleUrl));
+  for (let i = 0; i < 5; i++) {
+    if (existsSync7(join11(dir, ".claude-plugin", "plugin.json"))) return dir;
+    dir = dirname7(dir);
+  }
+  return null;
+}
+function readJson(path) {
+  try {
+    return JSON.parse(readFileSync8(path, "utf8"));
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    return { unreadable: String(e?.message ?? e) };
+  }
+}
+function rotateIfLarge(path, limit = ROTATE_BYTES) {
+  try {
+    if (statSync4(path).size > limit) renameSync5(path, `${path}.1`);
+  } catch (e) {
+    if (e?.code !== "ENOENT") throw e;
+  }
+}
+var sortedKeys = (keys) => JSON.stringify([...keys ?? []].map(String).sort());
+function owesProseVerdicts(root) {
+  const { journal } = workerPaths(root);
+  const map = /* @__PURE__ */ new Map();
+  for (const path of [`${journal}.1`, journal]) {
+    let text;
+    try {
+      text = readFileSync8(path, "utf8");
+    } catch (e) {
+      if (e?.code === "ENOENT") continue;
+      throw e;
+    }
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      let v;
+      try {
+        v = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!v?.item_id || v.kind !== "verdict") continue;
+      if (v.verdict === "owes_prose" && Array.isArray(v.file_keys)) map.set(v.item_id, sortedKeys(v.file_keys));
+      else map.delete(v.item_id);
+    }
+  }
+  return map;
+}
+function isJudgedOwesProse(item, verdicts) {
+  return verdicts.get(item.id) === sortedKeys(item.file_keys);
+}
+function unjudgedReconcileItems(store2, root) {
+  const total = store2.count({ types: ["todo"], source: "system" });
+  if (!total) return [];
+  const verdicts = owesProseVerdicts(root);
+  return store2.query({ types: ["todo"], source: "system", cap: total }).filter((t) => t.system_reason === "reconcile_needed" && !isJudgedOwesProse(t, verdicts));
+}
+function dirtyPaths(root, paths, spawnSync7 = nodeSpawnSync) {
+  if (!paths.length) return /* @__PURE__ */ new Set();
+  const r = spawnSync7("git", ["status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { cwd: root, encoding: "utf8", timeout: 3e4 });
+  if (r.error || r.status !== 0) return null;
+  const dirty = /* @__PURE__ */ new Set();
+  const parts = String(r.stdout ?? "").split("\0");
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i];
+    if (entry.length < 4) continue;
+    dirty.add(entry.slice(3));
+    if (entry[0] === "R" || entry[0] === "C") dirty.add(parts[++i]);
+  }
+  return dirty;
+}
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code === "EPERM";
+  }
+}
+function lockState(lock, nowMs, isAlive = pidAlive) {
+  if (!lock) return "none";
+  const started = Date.parse(lock.started_at ?? "");
+  if (lock.unreadable || !Number.isFinite(started)) return "stale";
+  if (nowMs - started > LOCK_STALE_MS2) return "stale";
+  return isAlive(lock.pid) ? "live" : "stale";
+}
+function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
+  const token = randomUUID3();
+  const body = JSON.stringify({ ...content, token });
+  const tryCreate = () => {
+    try {
+      writeFileSync5(paths.lock, body, { flag: "wx" });
+      return true;
+    } catch (e) {
+      if (e?.code === "EEXIST") return false;
+      throw e;
+    }
+  };
+  if (!tryCreate()) {
+    if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
+    try {
+      mkdirSync7(paths.takeover);
+    } catch (e) {
+      if (e?.code !== "EEXIST") throw e;
+      let age = 0;
+      try {
+        age = Date.now() - statSync4(paths.takeover).mtimeMs;
+      } catch {
+      }
+      if (age > TAKEOVER_STALE_MS) rmdirSync2(paths.takeover);
+      return null;
+    }
+    try {
+      if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
+      rmSync3(paths.lock, { force: true });
+      if (!tryCreate()) return null;
+    } finally {
+      rmdirSync2(paths.takeover);
+    }
+  }
+  return readJson(paths.lock)?.token === token ? token : null;
+}
+function resolveMcpConfig(pluginRoot, projectRoot2) {
+  const path = join11(pluginRoot, ".claude-plugin", "sterling-mcp.json");
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync8(path, "utf8"));
+  } catch (e) {
+    throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 run /sterling:init in the clone`);
+  }
+  const entry = parsed?.mcpServers?.[SERVER];
+  if (!entry || typeof entry.command !== "string" || !Array.isArray(entry.args)) {
+    throw new Error(`${path} has no mcpServers.${SERVER} {command, args} entry`);
+  }
+  const bind = (s2) => String(s2).split("${CLAUDE_PROJECT_DIR}").join(projectRoot2);
+  return JSON.stringify({ mcpServers: { [SERVER]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
+}
+function readWorkerPrompt(pluginRoot) {
+  const path = join11(pluginRoot, "templates", "maintenance-worker-prompt.md");
+  try {
+    return readFileSync8(path, "utf8");
+  } catch (e) {
+    throw new Error(`cannot read the worker prompt ${path} (${e?.code ?? e?.message ?? e})`);
+  }
+}
+var utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+function readState(root) {
+  const s2 = readJson(workerPaths(root).state);
+  return s2 && !s2.unreadable ? s2 : { spend: {} };
+}
+function spentOn(state, day) {
+  return Number(state?.spend?.[day] ?? 0) || 0;
+}
+function dailyBudget(config) {
+  const v = Number(config?.maintenance_worker?.daily_budget_usd);
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_DAILY_BUDGET_USD;
+}
+var LOG_HINT = "(log: .sterling/maintenance-worker.log)";
+function failLine(reason) {
+  return `\u26A0 Sterling maintenance worker: launch FAILED (${reason}) \u2014 reconcile items stay open; it retries on the next commit or Stop, or drain by hand with /sterling:drain.`;
+}
+function maybeLaunchMaintenanceWorker(opts) {
+  try {
+    const env = opts.env ?? process.env;
+    if (env[WORKER_ENV_FLAG] === "1") return { launched: false, reason: "inside_worker" };
+    if (env[WORKER_DISABLE_ENV] === "1") return { launched: false, reason: "disabled_env" };
+    if (opts.config?.maintenance_worker?.enabled === false) return { launched: false, reason: "disabled" };
+    const candidates = opts.items ?? unjudgedReconcileItems(opts.store, opts.root);
+    if (candidates.length === 0) return { launched: false, reason: "queue_empty" };
+    const nowMs = opts.now ?? Date.now();
+    const paths = workerPaths(opts.root);
+    const state = readState(opts.root);
+    const last = state.last_run;
+    const failedAt = last && last.ok === false ? Date.parse(last.at ?? "") : NaN;
+    if (Number.isFinite(failedAt) && nowMs - failedAt < BACKOFF_MS) {
+      const until = new Date(failedAt + BACKOFF_MS).toISOString();
+      return { launched: false, reason: "backoff", line: `\u26A0 Sterling maintenance worker: last run FAILED at ${last.at} (${last.error}) \u2014 backing off, no relaunch before ${until} ${LOG_HINT}.` };
+    }
+    const cap = dailyBudget(opts.config);
+    const spent = spentOn(state, utcDay(nowMs));
+    if (spent >= cap) {
+      return { launched: false, reason: "daily_cap", line: `\u26A0 Sterling maintenance worker: daily budget reached ($${spent.toFixed(2)} of $${cap.toFixed(2)} spent today, UTC) \u2014 no launch until 00:00 UTC; raise maintenance_worker.daily_budget_usd or drain with /sterling:drain.` };
+    }
+    if (lockState(readJson(paths.lock), nowMs, opts.isAlive) === "live") return { launched: false, reason: "already_running" };
+    const lastLaunch = Number(readJson(paths.lastLaunch)?.at_ms);
+    if (Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: "debounced" };
+    const dirty = dirtyPaths(opts.root, [...new Set(candidates.flatMap((t) => t.file_keys ?? []))], opts.spawnSync);
+    const clean = dirty ? candidates.filter((t) => !(t.file_keys ?? []).some((k) => dirty.has(k))) : candidates;
+    if (clean.length === 0) return { launched: false, reason: "all_dirty" };
+    const pluginRoot = opts.pluginRoot ?? pluginRootFrom();
+    if (!pluginRoot) return { launched: false, reason: "error", line: failLine("plugin root not found above the hook") };
+    resolveMcpConfig(pluginRoot, opts.root);
+    readWorkerPrompt(pluginRoot);
+    const runner = join11(pluginRoot, "scripts", "maintenance-worker-run.mjs");
+    if (!existsSync7(runner)) return { launched: false, reason: "error", line: failLine(`runner missing: ${runner}`) };
+    mkdirSync7(dirname7(paths.lock), { recursive: true });
+    const startedAt = new Date(nowMs).toISOString();
+    const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
+    if (!token) return { launched: false, reason: "already_running" };
+    writeFileSync5(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
+    let logFd;
+    try {
+      rotateIfLarge(paths.log);
+      logFd = openSync4(paths.log, "a");
+      const budget = Math.min(WORKER_RUN_BUDGET_USD, Math.round((cap - spent) * 100) / 100);
+      const child = opts.spawn(
+        process.execPath,
+        [runner, "--project", opts.root, "--trigger", String(opts.trigger), "--token", token, "--budget-usd", String(budget)],
+        { cwd: opts.root, detached: true, stdio: ["ignore", logFd, logFd], env: { ...env, [WORKER_ENV_FLAG]: "1" } }
+      );
+      child.on?.("error", () => releaseLock(paths, token));
+      child.unref?.();
+      writeFileSync5(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
+      const note = last && last.ok === false ? `\u2139 Sterling maintenance worker: the previous run FAILED at ${last.at} (${last.error}); relaunched after the back-off ${LOG_HINT}.` : void 0;
+      return { launched: true, reason: "launched", pid: child.pid, items: clean.length, ...note ? { line: note } : {} };
+    } catch (e) {
+      releaseLock(paths, token);
+      return { launched: false, reason: "error", line: failLine(`spawn: ${e?.message ?? e}`) };
+    } finally {
+      if (logFd !== void 0) closeSync4(logFd);
+    }
+  } catch (e) {
+    return { launched: false, reason: "error", line: failLine(e?.message ?? String(e)) };
+  }
+}
+function releaseLock(paths, token) {
+  if (readJson(paths.lock)?.token === token) rmSync3(paths.lock, { force: true });
+}
+
 // scripts/hooks/h10-direct-capture.mjs
 function articleMissingText(fileKeys, { newlyCreated = 0 } = {}) {
   return `article missing: ${fileKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newlyCreated ? ` (${newlyCreated} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`;
@@ -8794,7 +9079,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
   }
   if (stampIds.size) {
     try {
-      mkdirSync7(join11(cwd, ".sterling", "transient"), { recursive: true });
+      mkdirSync8(join12(cwd, ".sterling", "transient"), { recursive: true });
       await withRegisterLock(
         cwd,
         () => {
@@ -8805,11 +9090,11 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
               entry.residue_reported_at = nowIso;
             }
           }
-          const transient = join11(cwd, ".sterling", "transient");
-          mkdirSync7(transient, { recursive: true });
-          const tmpPath = join11(transient, `${basename2(registerPath2)}.tmp-${process.pid}`);
-          writeFileSync5(tmpPath, JSON.stringify(fresh));
-          renameSync5(tmpPath, registerPath2);
+          const transient = join12(cwd, ".sterling", "transient");
+          mkdirSync8(transient, { recursive: true });
+          const tmpPath = join12(transient, `${basename2(registerPath2)}.tmp-${process.pid}`);
+          writeFileSync6(tmpPath, JSON.stringify(fresh));
+          renameSync6(tmpPath, registerPath2);
         },
         { retryMs: 1e3, timeoutMs: 1e4 }
       );
@@ -8837,9 +9122,9 @@ if (!store) {
   if (residueLines.length) process.stderr.write(residueLines.join("\n\n"));
   allow();
 }
-var touchesPath = join11(input.cwd, ".sterling", "transient", "touches.json");
-var eventsPath = join11(input.cwd, ".sterling", "transient", "session-events.json");
-var nagMarker = join11(input.cwd, ".sterling", "transient", "capture-nagged.json");
+var touchesPath = join12(input.cwd, ".sterling", "transient", "touches.json");
+var eventsPath = join12(input.cwd, ".sterling", "transient", "session-events.json");
+var nagMarker = join12(input.cwd, ".sterling", "transient", "capture-nagged.json");
 try {
   const config = parseConfig(loadConfig(input.cwd) ?? {});
   const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -8857,7 +9142,7 @@ try {
 `);
     }
   };
-  const pressureMarker = join11(input.cwd, ".sterling", "transient", "pressure-nagged.json");
+  const pressureMarker = join12(input.cwd, ".sterling", "transient", "pressure-nagged.json");
   const pressure = (() => {
     try {
       const cw = config.context_watch;
@@ -8883,8 +9168,8 @@ try {
           sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...usedDefault ? { window_source: "default" } : {}, at: now };
         }
       }
-      mkdirSync7(join11(input.cwd, ".sterling", "transient"), { recursive: true });
-      writeFileSync5(join11(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
+      mkdirSync8(join12(input.cwd, ".sterling", "transient"), { recursive: true });
+      writeFileSync6(join12(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
       return sample;
     } catch (e) {
       try {
@@ -8894,7 +9179,7 @@ try {
       return { session_id: input.session_id, level: "unknown", fill_pct: null, reason: "pressure_failed", at: now };
     }
   })();
-  const dirtyPaths = (() => {
+  const dirtyPaths2 = (() => {
     if (pressure.level !== "soft" && pressure.level !== "hard") return 0;
     try {
       const st = spawnSync6("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
@@ -8911,27 +9196,27 @@ try {
       return 0;
     }
   })();
-  const boundaryLine = () => dirtyPaths > 0 ? ` Tree: ${dirtyPaths} uncommitted path(s) \u2192 commit boundary before new work.` : "";
+  const boundaryLine = () => dirtyPaths2 > 0 ? ` Tree: ${dirtyPaths2} uncommitted path(s) \u2192 commit boundary before new work.` : "";
   const defaultWindowNote = () => pressure.window_source === "default" ? " (window from context_watch.windows.default)" : "";
   const pressurePart = () => pressure.level === "hard" ? `H10 context warning: fill ${pressure.fill_pct.toFixed(1)}% of the ${pressure.window}-tok window is past the ${config.context_watch.conductor.hard_pct}% target \u2192 finish the open work and commit it; delegate reads & mechanical work to subagents (P1).${defaultWindowNote()}${boundaryLine()}` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${defaultWindowNote()}${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
-      const m = JSON.parse(readFileSync8(pressureMarker, "utf8"));
+      const m = JSON.parse(readFileSync9(pressureMarker, "utf8"));
       return m.session_id === input.session_id ? m : null;
     } catch {
       return null;
     }
   };
-  const spendPressureMarker = (level) => writeFileSync5(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
-  const gaugeMarker = join11(input.cwd, ".sterling", "transient", "gauge-warned.json");
+  const spendPressureMarker = (level) => writeFileSync6(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
+  const gaugeMarker = join12(input.cwd, ".sterling", "transient", "gauge-warned.json");
   const gaugeSpent = () => {
     try {
-      return JSON.parse(readFileSync8(gaugeMarker, "utf8")).session_id === input.session_id;
+      return JSON.parse(readFileSync9(gaugeMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
   };
-  const spendGaugeMarker = () => writeFileSync5(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const spendGaugeMarker = () => writeFileSync6(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const gaugePart = () => `H10 window gauge: model '${pressure.unmapped_model}' has no entry in context_watch.windows \u2014 context fill is UNRELIABLE and is not reported. Add context_watch.windows["${pressure.unmapped_model}"] = <window tokens> to .sterling/config.json. (once per session)`;
   const writeThenSpend = (text, spends) => {
     let delivered = false;
@@ -8957,6 +9242,8 @@ try {
     process.exit(2);
   };
   const releaseWithPressure = () => {
+    const workerLaunch = maybeLaunchMaintenanceWorker({ root: input.cwd, config, store, trigger: "stop", spawn });
+    if (workerLaunch.line) disclosureParts.push(workerLaunch.line);
     let advisoryText = "";
     const advisorySpends = [];
     if (!input.stop_hook_active) {
@@ -8965,7 +9252,7 @@ try {
       if (pressure.level === "hard" && (!spent || spent.level !== "hard")) {
         parts.push(pressurePart());
         advisorySpends.push(() => spendPressureMarker("hard"));
-      } else if (pressure.level === "soft" && dirtyPaths > 0 && !spent) {
+      } else if (pressure.level === "soft" && dirtyPaths2 > 0 && !spent) {
         parts.push(`${pressurePart()} (once per session)`);
         advisorySpends.push(() => spendPressureMarker("soft"));
       }
@@ -8999,22 +9286,22 @@ try {
     touchesPath,
     () => {
       let orphanedTouches = [];
-      if (existsSync7(touchesClaimPath)) {
+      if (existsSync8(touchesClaimPath)) {
         try {
-          orphanedTouches = parseTouchesContent(readFileSync8(touchesClaimPath, "utf8"));
+          orphanedTouches = parseTouchesContent(readFileSync9(touchesClaimPath, "utf8"));
         } catch {
           orphanedTouches = [];
         }
       }
       let freshTouches = [];
       try {
-        renameSync5(touchesPath, touchesClaimPath);
-        freshTouches = parseTouchesContent(readFileSync8(touchesClaimPath, "utf8"));
+        renameSync6(touchesPath, touchesClaimPath);
+        freshTouches = parseTouchesContent(readFileSync9(touchesClaimPath, "utf8"));
       } catch (e) {
         if (e && e.code !== "ENOENT") throw e;
       }
       touches = [...orphanedTouches, ...freshTouches];
-      if (orphanedTouches.length) writeFileSync5(touchesClaimPath, JSON.stringify(touches));
+      if (orphanedTouches.length) writeFileSync6(touchesClaimPath, JSON.stringify(touches));
     },
     { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
   );
@@ -9036,7 +9323,7 @@ try {
   const discardTouchesClaim = () => {
     withFileLock(
       touchesPath,
-      () => rmSync3(touchesClaimPath, { force: true }),
+      () => rmSync4(touchesClaimPath, { force: true }),
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
   };
@@ -9044,7 +9331,7 @@ try {
     withFileLock(
       touchesPath,
       () => {
-        if (existsSync7(touchesClaimPath) && !existsSync7(touchesPath)) renameSync5(touchesClaimPath, touchesPath);
+        if (existsSync8(touchesClaimPath) && !existsSync8(touchesPath)) renameSync6(touchesClaimPath, touchesPath);
       },
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
@@ -9052,15 +9339,15 @@ try {
   let settlementFailed = false;
   let sessionEvents = [];
   try {
-    if (existsSync7(eventsPath)) {
-      const raw = JSON.parse(readFileSync8(eventsPath, "utf8"));
+    if (existsSync8(eventsPath)) {
+      const raw = JSON.parse(readFileSync9(eventsPath, "utf8"));
       if (Array.isArray(raw)) sessionEvents = raw;
     }
   } catch {
     sessionEvents = [];
   }
   const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
-    (p) => existsSync7(join11(input.cwd, p))
+    (p) => existsSync8(join12(input.cwd, p))
   );
   const staleMinutes = config.dispatch_register.stale_minutes;
   const nowMs = Date.parse(now);
@@ -9145,11 +9432,11 @@ try {
     (row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => [...touchedKeys].some((k) => entryOwns(joinKey(f), k)))
   );
   const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
-  const dispatchUnknownNotedPath = join11(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
+  const dispatchUnknownNotedPath = join12(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
   const dispatchUnknownNotedKeys = (() => {
     if (!hasSession) return /* @__PURE__ */ new Set();
     try {
-      const raw = JSON.parse(readFileSync8(dispatchUnknownNotedPath, "utf8"));
+      const raw = JSON.parse(readFileSync9(dispatchUnknownNotedPath, "utf8"));
       if (raw.session_id !== input.session_id) return /* @__PURE__ */ new Set();
       if (!Array.isArray(raw.keys) || !raw.keys.every((k) => typeof k === "string")) return /* @__PURE__ */ new Set();
       return new Set(raw.keys);
@@ -9179,7 +9466,7 @@ try {
     try {
       const merged = new Set(dispatchUnknownNotedKeys);
       for (const k of pendingDispatchUnknownKeys) merged.add(k);
-      writeFileSync5(dispatchUnknownNotedPath, JSON.stringify({ session_id: input.session_id, keys: [...merged] }));
+      writeFileSync6(dispatchUnknownNotedPath, JSON.stringify({ session_id: input.session_id, keys: [...merged] }));
     } catch {
     }
   };
@@ -9194,13 +9481,13 @@ try {
       )
     );
   }
-  const prLoopNaggedPath = join11(input.cwd, ".sterling", "transient", "pr-loop-nagged.json");
+  const prLoopNaggedPath = join12(input.cwd, ".sterling", "transient", "pr-loop-nagged.json");
   const prLoop = (() => {
     let mode;
     try {
       mode = readProjectMode(input.cwd);
     } catch (e) {
-      if (existsSync7(join11(input.cwd, PR_LOOP_REL))) {
+      if (existsSync8(join12(input.cwd, PR_LOOP_REL))) {
         disclosureParts.push(
           `\u2022 PR review loop: the project mode is unreadable (${String(e && e.message || e)}) \u2014 ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
         );
@@ -9218,7 +9505,7 @@ try {
     if (!state || state.status !== "owed") return null;
     const spent = (() => {
       try {
-        const m = JSON.parse(readFileSync8(prLoopNaggedPath, "utf8"));
+        const m = JSON.parse(readFileSync9(prLoopNaggedPath, "utf8"));
         return hasSession && m.session_id === input.session_id && m.armed_at === state.armed_at;
       } catch {
         return false;
@@ -9236,7 +9523,7 @@ try {
       text: `\u2022 PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? "?").slice(0, 7)}, armed ${state.armed_at}) \u2014 ${next}`,
       reminder: `PR review loop owed: PR #${state.pr_number} ${state.pr_url} \u2014 next: pr-review-loop skill, then --settle clean|capped|escalated --pr ${state.pr_number}.`,
       spend: () => {
-        writeFileSync5(prLoopNaggedPath, JSON.stringify({ session_id: input.session_id, armed_at: state.armed_at, at: now }));
+        writeFileSync6(prLoopNaggedPath, JSON.stringify({ session_id: input.session_id, armed_at: state.armed_at, at: now }));
       }
     };
   })();
@@ -9251,12 +9538,12 @@ try {
       const pendingDeclarations = preservePendingDeclaration ? sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail) : [];
       const survivors = [...pendingDeclarations, ...retainedCaptureEvents ?? [], ...outstandingResearchEvents];
       if (survivors.length) {
-        writeFileSync5(eventsPath, JSON.stringify(survivors));
+        writeFileSync6(eventsPath, JSON.stringify(survivors));
       } else {
-        rmSync3(eventsPath, { force: true });
+        rmSync4(eventsPath, { force: true });
       }
     }
-    rmSync3(nagMarker, { force: true });
+    rmSync4(nagMarker, { force: true });
   };
   const runSettlement = () => {
     try {
@@ -9264,7 +9551,7 @@ try {
       if (git.ok && git.base_lost) {
         const text = `capture owed: settlement history rewritten \u2014 persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}; duties for commits between them could not be derived. Reconcile them by hand from git log.`;
         const exists = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed" && t.text === text);
-        if (!exists) store.enqueueSystemTodo({ id: randomUUID3(), type: "todo", created_at: now, updated_at: now, author: "system", status: "active", superseded_by: null, links: [], scope: "project", stack_tags: [], text, source: "system", system_reason: "capture_owed", file_keys: [] });
+        if (!exists) store.enqueueSystemTodo({ id: randomUUID4(), type: "todo", created_at: now, updated_at: now, author: "system", status: "active", superseded_by: null, links: [], scope: "project", stack_tags: [], text, source: "system", system_reason: "capture_owed", file_keys: [] });
       }
       if (git.ok && !deferredPaths.length) writeGitSettled(input.cwd, git.next);
     } catch (e) {
@@ -9315,9 +9602,9 @@ try {
   const pendingHeld = Boolean(pendingDetail) && liveDispatches.length > 0;
   const pendingDeclId = (e) => JSON.stringify([e.at ?? null, e.detail]);
   const graceSpentIds = (() => {
-    if (!existsSync7(nagMarker)) return /* @__PURE__ */ new Set();
+    if (!existsSync8(nagMarker)) return /* @__PURE__ */ new Set();
     try {
-      const m = JSON.parse(readFileSync8(nagMarker, "utf8"));
+      const m = JSON.parse(readFileSync9(nagMarker, "utf8"));
       return new Set(Array.isArray(m?.capture_pending_spent) ? m.capture_pending_spent : []);
     } catch {
       return null;
@@ -9325,7 +9612,7 @@ try {
   })();
   const pendingInGrace = graceSpentIds === null ? [] : capturePendingEvents.filter((e) => !graceSpentIds.has(pendingDeclId(e)));
   const pendingLapsed = capturePendingEvents.filter((e) => !pendingInGrace.includes(e));
-  const spendPendingGrace = () => writeFileSync5(nagMarker, JSON.stringify({ at: now, capture_pending_spent: capturePendingEvents.map(pendingDeclId) }));
+  const spendPendingGrace = () => writeFileSync6(nagMarker, JSON.stringify({ at: now, capture_pending_spent: capturePendingEvents.map(pendingDeclId) }));
   const testRepairEvents = sessionEvents.filter((e) => e.kind === "test_repair" && e.detail && isValidAt(e.at));
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
@@ -9333,7 +9620,7 @@ try {
   const releaseBase = git.ok && git.settled && !git.base_lost ? git.settled.sha : null;
   const isReleaseMechanics = (p) => generatedProjections.has(p) || VERSION_ONLY_CANDIDATES.includes(p) && !Object.hasOwn(git.settled?.dirty ?? {}, p) && isVersionOnlyInWorkingTree(input.cwd, releaseBase, p);
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t) && !isReleaseMechanics(t.path));
-  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync7(join11(input.cwd, p)));
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync8(join12(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const dispatchEventReturnAt = (e) => {
     const row = ownRegisterRow(e);
@@ -9370,7 +9657,7 @@ try {
     }
     for (const [target, { detail }] of byTarget) {
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -9466,7 +9753,7 @@ try {
     const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow("article-demand-carried-gitignore", "no_git");
-    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync7(join11(input.cwd, p))));
+    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync8(join12(input.cwd, p))));
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
       const big = new Set(b);
@@ -9577,7 +9864,7 @@ try {
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
     if (pendingHeld) {
-      rmSync3(nagMarker, { force: true });
+      rmSync4(nagMarker, { force: true });
       releaseTouchesClaim();
       releaseWithPressure();
     }
@@ -9602,7 +9889,7 @@ try {
     }
   }
   const H10_HEADER = "H10 \u25B8 act, then Stop again:";
-  if (!input.stop_hook_active && !existsSync7(nagMarker)) {
+  if (!input.stop_hook_active && !existsSync8(nagMarker)) {
     const parts = [...disclosureParts];
     const hasDebug = activeDebugEvents.length > 0;
     const captureLaneOpen = hasCaptureDuty && !captured && !pendingDetail;
@@ -9636,11 +9923,11 @@ try {
         deferral_owners: [...deferredAgents].sort()
       })
     ).digest("hex");
-    const dutyNaggedMarker = join11(input.cwd, ".sterling", "transient", "duty-nagged.json");
+    const dutyNaggedMarker = join12(input.cwd, ".sterling", "transient", "duty-nagged.json");
     const priorDutyNag = (() => {
       if (!input.session_id) return null;
       try {
-        const raw = JSON.parse(readFileSync8(dutyNaggedMarker, "utf8"));
+        const raw = JSON.parse(readFileSync9(dutyNaggedMarker, "utf8"));
         if (raw.session_id !== input.session_id) return null;
         if (typeof raw.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(raw.fingerprint)) return null;
         return raw;
@@ -9706,13 +9993,13 @@ ${parts.join("\n\n")}`;
     writeThenSpend(dutyText, [
       // A nag Stop on which declarations deferred the capture duty (not a hold)
       // IS their grace Stop, so it records them as spent (pendingInGrace).
-      () => hasCaptureDuty && !captured && pendingDetail && !pendingHeld ? spendPendingGrace() : writeFileSync5(nagMarker, JSON.stringify({ at: now })),
+      () => hasCaptureDuty && !captured && pendingDetail && !pendingHeld ? spendPendingGrace() : writeFileSync6(nagMarker, JSON.stringify({ at: now })),
       // FIX 2: never persist a sessionless duty-nagged marker — the reader
       // above (priorDutyNag) already refuses to compact without a session;
       // this is the matching guard on the WRITE side.
       () => {
         if (!hasSession) return;
-        writeFileSync5(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
+        writeFileSync6(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
       },
       spendDispatchUnknownKeys,
       // The PR review loop text rode disclosureParts into this block.
@@ -9726,7 +10013,7 @@ ${parts.join("\n\n")}`;
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!open) {
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -9746,7 +10033,7 @@ ${parts.join("\n\n")}`;
   if (articleDemand) {
     const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
     const demandKeysRaw = overlapping ? overlapping.file_keys ?? [] : unowned;
-    const vanished = demandKeysRaw.filter((p) => !existsSync7(join11(input.cwd, p)));
+    const vanished = demandKeysRaw.filter((p) => !existsSync8(join12(input.cwd, p)));
     let demandKeys = demandKeysRaw;
     if (vanished.length) {
       const known = gitKnowsNow(vanished, input.cwd);
@@ -9755,7 +10042,7 @@ ${parts.join("\n\n")}`;
     }
     if (demandKeys.length) {
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -9775,7 +10062,7 @@ ${parts.join("\n\n")}`;
   if (!conceptSatisfied) {
     for (const family of unmetFamilies) {
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -9796,7 +10083,7 @@ ${parts.join("\n\n")}`;
     if (!open) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join("; ");
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,

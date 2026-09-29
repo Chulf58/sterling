@@ -411,3 +411,28 @@ test('unreadConfigKeys: the Dome Farmer pre-rename models keys are each named, w
     { path: 'models.debugger' },
   ]);
 });
+
+// ------------------- maintenance_worker (decision maintenance-queue-background-haiku-worker-simple-redesign) -------------------
+// The kill switch for the hook-started background worker. Its default lives in
+// TWO places (anti_pattern 85d15143: a template-only default is ignored by
+// install/sync, which fill omitted keys from the zod default), so both are pinned.
+
+test('maintenance_worker.enabled: an absent block parses to enabled true, and the shipped template agrees', () => {
+  assert.equal(parseConfig({}).maintenance_worker.enabled, true, 'the zod default turns the worker on');
+  const shippedRaw = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
+  assert.equal(shippedRaw.maintenance_worker?.enabled, true, 'templates/default-config.json ships maintenance_worker.enabled true');
+  assert.deepEqual(parseConfig(shippedRaw).maintenance_worker, parseConfig({}).maintenance_worker, 'template and zod default agree');
+});
+
+test('maintenance_worker.daily_budget_usd: defaults to 5 in the zod schema AND the shipped template; a non-positive value is refused loud', () => {
+  assert.equal(parseConfig({}).maintenance_worker.daily_budget_usd, 5, 'the zod default caps the worker at $5 per UTC day');
+  const shippedRaw = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
+  assert.equal(shippedRaw.maintenance_worker?.daily_budget_usd, 5, 'templates/default-config.json ships daily_budget_usd 5');
+  assert.equal(parseConfig({ maintenance_worker: { daily_budget_usd: 1.5 } }).maintenance_worker.daily_budget_usd, 1.5);
+  assert.throws(() => parseConfig({ maintenance_worker: { daily_budget_usd: 0 } }), /too_small|greater than|invalid/i);
+});
+
+test('maintenance_worker.enabled: false round-trips, and a non-boolean is refused loud', () => {
+  assert.equal(parseConfig({ maintenance_worker: { enabled: false } }).maintenance_worker.enabled, false);
+  assert.throws(() => parseConfig({ maintenance_worker: { enabled: 'no' } }), /invalid/i);
+});
