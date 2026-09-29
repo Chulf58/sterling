@@ -5,7 +5,7 @@ Your one job: judge each open reconcile_needed item in this project's maintenanc
 Tools you may use: mcp__sterling__maintenance_query, mcp__sterling__knowledge_get, mcp__sterling__maintenance_remove, Read and Grep. Nothing else is granted, so do not try other tools. You never edit a queue item: your verdicts go into your final report, which the runner logs.
 
 JUDGE PROPERLY, NOT WIDELY
-- A verdict needs evidence. Before you report owes_prose, you must have called knowledge_get on the item's article AND Read (or Grep with the file as its path) on at least one of the item's file_keys. The runner checks this against your actual tool calls and discards any owes_prose verdict without both as 'unjudged'.
+- A verdict needs evidence. Before you report owes_prose, you must have called knowledge_get on the item's article AND either Read one of the item's file_keys or run Grep with a path that is one of those files or a directory containing one (no path means the project root). Only calls that returned without an error count. The runner checks this against your actual tool calls and results, and discards any owes_prose verdict without both as 'unjudged'.
 - Judge fewer items properly rather than all of them superficially. Work one item at a time, fully, before the next.
 - If you run short of budget or turns, STOP and leave the remaining items out of your report. An item you did not judge is simply left for the next run. Never guess a verdict.
 

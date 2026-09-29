@@ -8988,7 +8988,7 @@ function writeInitialGitSettled(root, snapshot) {
 
 // scripts/hooks/lib/maintenance-worker.mjs
 import { closeSync as closeSync2, existsSync as existsSync6, mkdirSync as mkdirSync7, openSync as openSync2, readFileSync as readFileSync5, renameSync as renameSync5, rmSync as rmSync3, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync5, appendFileSync } from "node:fs";
-import { dirname as dirname7, isAbsolute as isAbsolute2, join as join8, resolve as resolve3 } from "node:path";
+import { dirname as dirname7, isAbsolute as isAbsolute2, join as join8, resolve as resolve3, sep } from "node:path";
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;
 var WORKER_TIMEOUT_MS = 20 * 6e4;

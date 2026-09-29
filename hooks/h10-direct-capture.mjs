@@ -8783,7 +8783,7 @@ function readPrLoop(root) {
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync4, existsSync as existsSync7, mkdirSync as mkdirSync7, openSync as openSync4, readFileSync as readFileSync8, renameSync as renameSync5, rmSync as rmSync3, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync5, appendFileSync } from "node:fs";
-import { dirname as dirname7, isAbsolute as isAbsolute2, join as join11, resolve as resolve6 } from "node:path";
+import { dirname as dirname7, isAbsolute as isAbsolute2, join as join11, resolve as resolve6, sep as sep2 } from "node:path";
 import { fileURLToPath } from "node:url";
 var WORKER_RUN_BUDGET_USD = 2;
 var DEFAULT_DAILY_BUDGET_USD = 5;

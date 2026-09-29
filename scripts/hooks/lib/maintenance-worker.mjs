@@ -33,7 +33,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const WORKER_MODEL = 'claude-sonnet-5-5';
@@ -580,10 +580,14 @@ export function parseVerdicts(resultText) {
  * A stream-json consumer: feed() it stdout chunks; it journals every
  * maintenance_remove call with its result as soon as the result arrives (so a
  * killed run still leaves its closes on record) and keeps the final result.
+ * `observe(name, input)` fires for every OTHER tool call only when its
+ * tool_result arrives WITHOUT is_error (paired by tool_use_id), so a call that
+ * failed is never evidence.
  */
 export function streamJournal(journal, observe = () => {}) {
   let buf = '';
   const pending = new Map();
+  const calls = new Map();
   const out = { result: null, removes: 0, closedOk: 0, lines: 0 };
   const handle = (e) => {
     out.lines++;
@@ -591,12 +595,19 @@ export function streamJournal(journal, observe = () => {}) {
     if (e?.type === 'assistant' && Array.isArray(content)) {
       for (const c of content) {
         if (c?.type !== 'tool_use') continue;
-        observe(String(c.name), c.input ?? {});
         if (String(c.name).endsWith('__maintenance_remove')) pending.set(c.id, c.input ?? {});
+        else calls.set(c.id, { name: String(c.name), input: c.input ?? {} });
       }
     } else if (e?.type === 'user' && Array.isArray(content)) {
       for (const c of content) {
-        if (c?.type !== 'tool_result' || !pending.has(c.tool_use_id)) continue;
+        if (c?.type !== 'tool_result') continue;
+        if (calls.has(c.tool_use_id)) {
+          const call = calls.get(c.tool_use_id);
+          calls.delete(c.tool_use_id);
+          if (!c.is_error) observe(call.name, call.input);
+          continue;
+        }
+        if (!pending.has(c.tool_use_id)) continue;
         const input = pending.get(c.tool_use_id);
         pending.delete(c.tool_use_id);
         const text = Array.isArray(c.content) ? c.content.map((p) => p?.text ?? '').join('') : String(c.content ?? '');
@@ -635,13 +646,20 @@ export function streamJournal(journal, observe = () => {}) {
   };
 }
 
-/** Did the stream show the child read this item's article AND one of its
- *  files? The article counts by uuid, an 8+ char uuid prefix, or its slug;
- *  a file counts by Read of it or Grep with it as the path. */
-export function hasEvidence(item, seenArticles, seenFiles, root) {
+/** Did the stream show the child SUCCESSFULLY read this item's article AND
+ *  one of its files? The article counts by uuid, an 8+ char uuid prefix, or
+ *  its slug. A file counts by a Read of it (`seenFiles`), or by a Grep whose
+ *  path is that file or a directory containing it (`seenGrepPaths`; a Grep
+ *  with no path searched the project root) — conductor ruling 2026-09-29. */
+export function hasEvidence(item, seenArticles, seenFiles, root, seenGrepPaths = new Set()) {
   const link = String(item.feature_link ?? '');
   const article = [...seenArticles].some((id) => (link && (id === link || (id.length >= 8 && link.startsWith(id)))) || (item.slug && id === item.slug));
-  const file = (item.file_keys ?? []).some((k) => seenFiles.has(resolve(root, k)));
+  const file = (item.file_keys ?? []).some((k) => {
+    const target = resolve(root, k);
+    if (seenFiles.has(target)) return true;
+    for (const g of seenGrepPaths) if (target === g || target.startsWith(g.endsWith(sep) ? g : g + sep)) return true;
+    return false;
+  });
   return article && file;
 }
 
@@ -734,12 +752,14 @@ export async function runWorker(opts) {
       }
     };
     // EVIDENCE GATE (P3, not the prompt alone): what the child actually read.
+    // Fed only by calls whose result came back without an error.
     const seenArticles = new Set();
     const seenFiles = new Set();
+    const seenGrepPaths = new Set();
     const observe = (name, input) => {
       if (name.endsWith('__knowledge_get') && input.id) seenArticles.add(String(input.id));
       else if (name === 'Read' && input.file_path) seenFiles.add(abs(input.file_path));
-      else if (name === 'Grep' && input.path) seenFiles.add(abs(input.path));
+      else if (name === 'Grep') seenGrepPaths.add(input.path ? abs(input.path) : resolve(opts.root));
     };
     const stream = streamJournal(journalCall, observe);
     const timeoutMs = opts.timeoutMs ?? WORKER_TIMEOUT_MS;
@@ -792,14 +812,21 @@ export async function runWorker(opts) {
     let evidenced = 0;
     for (const v of verdicts) {
       if (v.verdict !== 'owes_prose') {
-        journal({ kind: 'verdict', ...v });
+        // Only the allowed fields are copied from the child: evidence, head and
+        // file_keys are the runner's to set. A 'refused' verdict comes only
+        // from the runner's own stream observation, never from the child.
+        if (v.verdict === 'refused') {
+          journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, verdict: 'unjudged', reason: 'a refused verdict is recorded by the runner, not the child', claimed_reason: v.reason ?? null });
+        } else {
+          journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, verdict: v.verdict, reason: v.reason ?? null });
+        }
         continue;
       }
       // An owes_prose verdict stands only when the stream shows the child
       // read BOTH the item's article (knowledge_get) AND one of its files
       // (Read/Grep). Otherwise it is 'unjudged' and suppresses nothing.
       const item = byId.get(v.item_id);
-      if (item && hasEvidence(item, seenArticles, seenFiles, opts.root)) {
+      if (item && hasEvidence(item, seenArticles, seenFiles, opts.root, seenGrepPaths)) {
         journal({ kind: 'verdict', ...v, file_keys: item.file_keys, evidence: true });
         evidenced++;
       } else {
