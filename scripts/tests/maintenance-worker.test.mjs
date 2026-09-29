@@ -425,6 +425,7 @@ test('[finding 7] runWorker journals every maintenance_remove call and result fr
     assert.deepEqual(lines.map((l) => l.kind), ['tool_call', 'tool_call', 'verdict', 'verdict', 'run_summary']);
     assert.deepEqual([lines[0].item_id, lines[0].is_error, lines[0].result], ['11111111-1111-1111-1111-111111111111', false, 'Closed as ALREADY-PAID']);
     assert.equal(lines[1].is_error, true, 'a refused close is on record too');
+    assert.deepEqual([lines[0].item_file_keys_at_launch, lines[1].item_file_keys_at_launch], [null, null], 'ids not in eligible.json journal null');
     assert.equal(lines[3].verdict, 'owes_prose');
     assert.equal(lines[4].remove_calls, 2);
     assert.deepEqual([...owesProseVerdicts(fx.project).keys()], ['22222222-2222-2222-2222-222222222222']);
@@ -514,7 +515,21 @@ test('streamJournal: a maintenance_remove with no result before the stream ends 
   const s = streamJournal((e) => entries.push(e));
   s.feed(JSON.stringify(removeCall('t9', 'zzz')) + '\n');
   s.end();
-  assert.deepEqual(entries, [{ kind: 'tool_call', tool: 'maintenance_remove', item_id: 'zzz', is_error: null, result: 'no result before the run ended' }]);
+  assert.deepEqual(entries, [{ kind: 'tool_call', tool: 'maintenance_remove', item_id: 'zzz', item_file_keys_at_launch: null, is_error: null, result: 'no result before the run ended' }]);
+});
+
+test('streamJournal: a maintenance_remove line carries the launch-time file_keys in full even when result is truncated; null when the id was not offered', () => {
+  const entries = [];
+  const keys = ['src/a.mjs', 'src/b/'.repeat(120)];
+  const s = streamJournal((e) => entries.push(e), () => {}, new Map([['aaa', keys], ['ccc', ['src/c.mjs']]]));
+  const long = JSON.stringify({ removed: 'aaa', artifact_evidence: [{ id: 'x', title: 'y'.repeat(600) }] });
+  s.feed([removeCall('t1', 'aaa'), removeResult('t1', long), removeCall('t2', 'bbb'), removeResult('t2', '{"removed":"bbb"}'), removeCall('t3', 'ccc')].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  s.end();
+  assert.equal(entries[0].result.length, 400, 'result keeps its existing truncation');
+  assert.deepEqual(entries[0].item_file_keys_at_launch, keys, 'file_keys are recorded in full, beyond the truncated result');
+  assert.equal(entries[1].item_file_keys_at_launch, null, 'an id not in eligible.json is null');
+  assert.deepEqual(entries[2].item_file_keys_at_launch, ['src/c.mjs'], 'the no-result line carries them too');
+  assert.equal(entries[2].is_error, null);
 });
 
 test('runWorker --dry-run prints the argv and spawns nothing', async () => {
