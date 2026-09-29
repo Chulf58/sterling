@@ -300,30 +300,34 @@ function deriveOutputAxisExpected(store, probe, index, root) {
       if (owners.length) return silent('owned_suppressed');
     }
   }
-  // CONTENT MATCH (h23-output-axis.mjs:171-193): stringify an object-shaped
+  // COMMAND-CLASS SKIP (h23-output-axis.mjs isListingCommand, ruling
+  // h23-output-axis-hazards-only-skip-listings-advisory-label, 5564361d v2) is
+  // NOT mirrored: a probe carries no command, and synthesizePayload's
+  // output_axis arm always sends a non-listing `cat` command, so the skip can
+  // never fire on an oracle case (pinned by K3).
+  //
+  // CONTENT MATCH (h23-output-axis.mjs STAGE 1/2): stringify an object-shaped
   // tool_response exactly as the hook does, clip to the same window, extract
-  // axis terms, then apply the SAME three floors over the SAME two candidate
-  // types at the SAME per-type cap.
+  // axis terms, then apply the SAME three floors over the SAME candidate type
+  // (anti_pattern only since ruling 5564361d v2) at the SAME cap. `rationale`
+  // stays in the case shape and is always empty.
   const content = typeof raw === 'string' ? raw : JSON.stringify(raw);
   const clipped = content.slice(0, OUTPUT_AXIS_CLIP);
   const terms = extractAxisTerms(clipped, MAX_RANK_TERMS);
   let hazards = [];
-  let rationale = [];
   if (terms.length >= AXIS_MIN_HITS) {
-    const candidates = [
-      ...store.query({ types: ['anti_pattern'], rank_terms: terms, cap: OUTPUT_AXIS_CANDIDATE_CAP }),
-      ...store.query({ types: ['decision'], rank_terms: terms, cap: OUTPUT_AXIS_CANDIDATE_CAP }),
-    ];
-    const scored = candidates
-      .map((r) => ({ record: r, hits: axisHits(r, terms) }))
-      .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, clipped));
-    hazards = scored.filter((x) => x.record.type === 'anti_pattern').map((x) => x.record.id);
-    rationale = scored.filter((x) => x.record.type === 'decision').map((x) => x.record.id);
+    const candidates = store.query({ types: ['anti_pattern'], rank_terms: terms, cap: OUTPUT_AXIS_CANDIDATE_CAP });
+    hazards = candidates
+      .filter((r) => {
+        const hits = axisHits(r, terms);
+        return hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(r, clipped);
+      })
+      .map((r) => r.id);
   }
-  const expected_ids = uniq([...hazards, ...rationale]);
+  const expected_ids = uniq(hazards);
   return {
     ...base,
-    expected: { owners: [], hazards, rationale },
+    expected: { owners: [], hazards, rationale: [] },
     expected_ids,
     // Present ONLY when silent — the LAST of the six derivable silence
     // reasons ('unsupported_tool' | 'agent_id_present' | 'no_tool_response' |
@@ -596,7 +600,7 @@ export function synthesizePayload(caseOrProbe, { cwd, agent_id, session_id } = {
       stdin.tool_name = oaTool;
       stdin.tool_input =
         oaTool === 'Bash' || oaTool === 'PowerShell'
-          ? { command: c.rel ? `grep -n TODO ${c.rel}` : 'grep -rn TODO .' }
+          ? { command: c.rel ? `cat ${c.rel}` : 'cat run.log' } // never a listing command: H23 skips git/ls/find/grep/rg
           : { file_path: join(cwd, c.rel) };
       // The real tool_response shape passes through UNCHANGED: a string is
       // sent byte-for-byte, an OBJECT is sent unstringified — the real hook

@@ -8015,6 +8015,14 @@ function joinPointerBlock({ header, lines = [], tail } = {}) {
 // scripts/hooks/h23-output-axis.mjs
 var OUTPUT_AXIS_CLIP = 16e3;
 var OUTPUT_AXIS_POINTER_CAP = 1;
+var LISTING_COMMANDS = /* @__PURE__ */ new Set(["git", "ls", "find", "grep", "rg"]);
+var COMMAND_PREFIX = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+|sudo\s+|cd(?:\s+(?:"[^"]*"|'[^']*'|[^\s;&]+))?\s*(?:&&|;)\s*)/;
+function isListingCommand(command) {
+  let rest = String(command ?? "").trim();
+  for (let m = rest.match(COMMAND_PREFIX); m; m = rest.match(COMMAND_PREFIX)) rest = rest.slice(m[0].length);
+  const first = rest.match(/^[^\s;&|]+/)?.[0] ?? "";
+  return LISTING_COMMANDS.has(first.split("/").pop());
+}
 function clipTitle(text, cap = 140) {
   const t = String(text ?? "").replace(/\s+/g, " ").trim();
   return t.length <= cap ? t : `${t.slice(0, cap)}\u2026`;
@@ -8025,6 +8033,7 @@ try {
   if (toolName !== "Read" && toolName !== "Bash" && toolName !== "PowerShell") allow();
   const rawResponse = input.tool_response;
   if (rawResponse === void 0 || rawResponse === null) allow();
+  if (toolName !== "Read" && isListingCommand(input.tool_input?.command)) allow();
   const store = openStore(input.cwd);
   if (!store) allow();
   if (toolName === "Read") {
@@ -8040,10 +8049,7 @@ try {
   const clipped = content.slice(0, OUTPUT_AXIS_CLIP);
   const terms = extractAxisTerms(clipped, MAX_RANK_TERMS);
   if (terms.length < AXIS_MIN_HITS) allow();
-  const candidates = [
-    ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
-  ];
+  const candidates = store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 });
   if (!candidates.length) allow();
   const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, clipped)).sort((a, b) => b.hits.length - a.hits.length);
   if (!scored.length) allow();
@@ -8052,17 +8058,12 @@ try {
   const seen = new Set(guard.output_axis ?? []);
   const fresh = scored.filter((x) => !seen.has(x.record.id));
   if (!fresh.length) allow();
-  const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
-  const decisions = fresh.filter((x) => x.record.type === "decision");
-  const ordered = [...hazards, ...decisions];
-  const shown = ordered.slice(0, OUTPUT_AXIS_POINTER_CAP);
-  const remainder = ordered.length - shown.length;
-  const header = "STERLING OUTPUT-AXIS DELIVERY (H23) \u2014 the tool output you just consumed matches governing knowledge. Pointer only, never a block: follow the read below before assuming the answer, never treat this line as the ruling itself.";
+  const shown = fresh.slice(0, OUTPUT_AXIS_POINTER_CAP);
+  const remainder = fresh.length - shown.length;
+  const header = "ADVISORY (not an error) \u2014 STERLING OUTPUT-AXIS DELIVERY (H23): the tool output you just consumed matches a recorded hazard. Pointer only, never a block: follow the read below before assuming the answer, never treat this line as the ruling itself.";
   const pointerLines = shown.map((x) => {
     const r = x.record;
-    const kind = r.type === "anti_pattern" ? "HAZARD anti_pattern" : "DECISION";
-    const authorityMarker = r.authority ? `[${r.authority}] ` : "";
-    return { id: r.id, hazard: r.type === "anti_pattern", line: `  \u2192 ${authorityMarker}${kind} '${clipTitle(r.title)}' \xB7 knowledge_get ${r.id}` };
+    return { id: r.id, hazard: true, line: `  \u2192 HAZARD anti_pattern '${clipTitle(r.title)}' \xB7 knowledge_get ${r.id}` };
   });
   const tail = remainder > 0 ? `  (+${remainder} more matched)` : "";
   recordAdvisoryFire(input.cwd, "h23", input.session_id);
@@ -8077,6 +8078,8 @@ try {
   warnNonBlocking(`H23: output-axis delivery failed: ${e && e.message || e}`);
 }
 export {
+  LISTING_COMMANDS,
   OUTPUT_AXIS_CLIP,
-  OUTPUT_AXIS_POINTER_CAP
+  OUTPUT_AXIS_POINTER_CAP,
+  isListingCommand
 };

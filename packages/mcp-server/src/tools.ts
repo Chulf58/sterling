@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { ZodError, type ZodIssue } from 'zod';
 import { clipName, boardDisplayLabel, normalizeRepoPath, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
 import {
@@ -4602,7 +4603,7 @@ export class SterlingTools {
     selector: string,
     expectedVersion: number,
     resolves?: string[]
-  ): { record: DurableRecord; removed: { selector: string; element: unknown }; warnings: string[]; claims_check?: string } {
+  ): { record: DurableRecord; removed: { selector: string; element: unknown; note?: string }; warnings: string[]; claims_check?: string } {
     // EXACT FULL ID ONLY — checked FIRST, before any lookup, so a prefix is
     // refused on its SHAPE and never gets the chance to resolve to something.
     if (!SterlingTools.FULL_UUID_RE.test(id)) {
@@ -4710,7 +4711,14 @@ export class SterlingTools {
     // real value). A missing key simply matches nothing, so the outcome is
     // zero matches and the refusal below already covers it.
     const hits = arr.filter((el) => elementOwnsScalar(el, key) && String(el[key]) === value);
-    if (hits.length !== 1) {
+    // IDENTICAL DUPLICATES (decision array-remove-identical-duplicates-remove-one):
+    // when 2+ elements match and every one is deep-equal to the first, removing
+    // any one leaves the same array, so the ambiguity the refusal below guards
+    // against does not exist and exactly ONE is removed. isDeepStrictEqual is
+    // key-order independent. Any hit that differs in any field falls through to
+    // the refusal unchanged.
+    const identicalDuplicates = hits.length > 1 && hits.every((h) => isDeepStrictEqual(h, hits[0]));
+    if (hits.length !== 1 && !identicalDuplicates) {
       throw new Error(
         `knowledge_array_remove: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required, ` +
           `nothing was written. ` +
@@ -4764,7 +4772,11 @@ export class SterlingTools {
     // Filter by IDENTITY, not by re-testing the predicate: the surviving
     // elements are the same object references in their original order, so
     // nothing is reordered, renormalised, or re-serialised on the way through.
-    const nextArr = arr.filter((e) => e !== el);
+    // For identical duplicates the FIRST occurrence goes, by index — an
+    // identity filter would drop every occurrence should two slots ever share
+    // one object reference.
+    const removeAt = arr.indexOf(el);
+    const nextArr = arr.filter((_, i) => i !== removeAt);
     // links[] is materialized from record_relations, not from the JSON body.
     // Keep the ordinary update path additive, and pass this one explicit graph
     // deletion through its versioned transaction instead. Crucially, do NOT
@@ -4787,7 +4799,11 @@ export class SterlingTools {
     return {
       record,
       ...(claims_check ? { claims_check } : {}),
-      removed: { selector, element: el },
+      removed: {
+        selector,
+        element: el,
+        ...(identicalDuplicates ? { note: `removed 1 of ${hits.length} identical elements; ${hits.length - 1} identical remain` } : {}),
+      },
       warnings: [...this.articleOversizeWarnings(record), ...this.openReconcileLaneWarnings(this.supersedeChain(old))],
     };
   }

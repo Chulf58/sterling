@@ -6,10 +6,10 @@
 // artifact, a probe's stdout. Registered on PostToolUse Read and Bash
 // (PowerShell too, per the decision) this hook runs H20's three-floor
 // mechanism-axis match (AXIS_MIN_HITS, a discriminating hit, record
-// centrality) over the CONSUMED CONTENT itself against anti_pattern/decision
-// candidates. MEASURED FAILURES this closes (board 5e3d6ff4): 14 rendered
-// plates were sent to the user against a standing gate while path-keyed
-// delivery stayed silent at that exact moment (retro 2026-08-15-1520); an
+// centrality) over the CONSUMED CONTENT itself against anti_pattern candidates
+// (decisions dropped 2026-09-29, see NARROWED below). MEASURED FAILURES this
+// closes (board 5e3d6ff4): 14 rendered plates were sent to the user against a
+// standing gate while path-keyed delivery stayed silent at that exact moment (retro 2026-08-15-1520); an
 // anti_pattern describing the conductor's exact confusion was never delivered
 // because the conductor was reading ungoverned log/txt artifacts, not
 // governed source (retro 2026-08-18).
@@ -25,6 +25,15 @@
 // it portably; the measurements that establish that, and what they imply, sit
 // beside that constant below. A FOLD into H19/H20 stays the ruling's own
 // fallback if noise persists.
+//
+// NARROWED 2026-09-29 (USER RULING h23-output-axis-hazards-only-skip-listings-
+// advisory-label, knowledge_get 5564361d v2): noise persisted after the one-
+// pointer cap, and a consuming project's user read the notice as an error.
+// A score threshold cannot fix it (see below), so this hook now narrows by
+// record TYPE and command CLASS instead: (1) the header opens with "ADVISORY
+// (not an error)"; (2) Bash/PowerShell calls whose command is VCS or listing
+// output (LISTING_COMMANDS) are skipped; (3) only anti_pattern records are
+// pointed at — decisions reach the model through H20 and explicit lookups.
 //
 // POINTER, NOT SUBSTANCE — an output match is weaker evidence of relevance
 // than an explicit file_keys join, so this direct PostToolUse advisory stays a
@@ -107,6 +116,26 @@ export const OUTPUT_AXIS_POINTER_CAP = 1;
 // Left to the conductor + an outside-family consult, per the ruling's own
 // fallback clause (FOLD into H19/H20 if noise persists).
 
+/** First command token (basename) whose OUTPUT is VCS or listing output — the
+ *  command class the 2026-09-29 ruling (5564361d v2) skips: such output echoes
+ *  paths and prose the store is about, so it matched constantly and pointed at
+ *  nothing relevant. */
+export const LISTING_COMMANDS = new Set(['git', 'ls', 'find', 'grep', 'rg']);
+
+// One leading prefix that does not change which program produces the output:
+// an env assignment (`FOO=bar `), `sudo `, or a `cd <dir> &&` / `cd <dir>;` step.
+const COMMAND_PREFIX = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+|sudo\s+|cd(?:\s+(?:"[^"]*"|'[^']*'|[^\s;&]+))?\s*(?:&&|;)\s*)/;
+
+/** True when the command's first program, after stripping COMMAND_PREFIX
+ *  repeatedly, is one of LISTING_COMMANDS. Only the FIRST program counts: a
+ *  listing tool later in a pipe (`cat log | grep x`) does not skip. */
+export function isListingCommand(command) {
+  let rest = String(command ?? '').trim();
+  for (let m = rest.match(COMMAND_PREFIX); m; m = rest.match(COMMAND_PREFIX)) rest = rest.slice(m[0].length);
+  const first = rest.match(/^[^\s;&|]+/)?.[0] ?? '';
+  return LISTING_COMMANDS.has(first.split('/').pop());
+}
+
 /** Title-only clip: this channel renders NO guidance/rationale/statement
  *  prose inline, ever — a pointer line names the record, it never restates
  *  it (pointer-not-substance, same rule as H19's Bash pointers). */
@@ -123,6 +152,9 @@ try {
 
   const rawResponse = input.tool_response;
   if (rawResponse === undefined || rawResponse === null) allow(); // nothing to match against
+
+  // COMMAND-CLASS SKIP (ruling 5564361d v2): VCS/listing output is never matched.
+  if (toolName !== 'Read' && isListingCommand(input.tool_input?.command)) allow();
 
   const store = openStore(input.cwd);
   if (!store) allow(); // not a Sterling project — no ceremony (P1)
@@ -161,11 +193,9 @@ try {
   const terms = extractAxisTerms(clipped, MAX_RANK_TERMS);
   if (terms.length < AXIS_MIN_HITS) allow(); // too little vocabulary to match on
 
-  // STAGE 1 — narrow in the store, same two candidate types H19 serves.
-  const candidates = [
-    ...store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ['decision'], rank_terms: terms, cap: 40 }),
-  ];
+  // STAGE 1 — narrow in the store. anti_pattern ONLY (ruling 5564361d v2):
+  // decisions reach the model through H20 and explicit store lookups.
+  const candidates = store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 });
   if (!candidates.length) allow();
 
   // STAGE 2 — the same three floors H20 proved: enough distinct hits, at
@@ -184,13 +214,9 @@ try {
   const fresh = scored.filter((x) => !seen.has(x.record.id));
   if (!fresh.length) allow(); // already pointed at this session, on this axis
 
-  // Hazards lead, decisions follow — same ordering H19/H20 use everywhere
-  // else in this concept family ("stop me before I repeat a mistake" first).
-  const hazards = fresh.filter((x) => x.record.type === 'anti_pattern');
-  const decisions = fresh.filter((x) => x.record.type === 'decision');
-  const ordered = [...hazards, ...decisions];
-  const shown = ordered.slice(0, OUTPUT_AXIS_POINTER_CAP);
-  const remainder = ordered.length - shown.length;
+  // Every candidate is an anti_pattern, so the remainder counts hazards only.
+  const shown = fresh.slice(0, OUTPUT_AXIS_POINTER_CAP);
+  const remainder = fresh.length - shown.length;
 
   // PER-RECORD LINES, keyed by id (fixer F1): the drain rebuilds this block from
   // the recipe, replaying a still-live record's line verbatim and REPLACING a
@@ -198,13 +224,11 @@ try {
   // same {header, lines, tail} decomposition the recipe carries. `header` and the
   // '(+N more matched)' tail interpolate no record field, so they replay verbatim.
   const header =
-    'STERLING OUTPUT-AXIS DELIVERY (H23) — the tool output you just consumed matches governing knowledge. ' +
+    'ADVISORY (not an error) — STERLING OUTPUT-AXIS DELIVERY (H23): the tool output you just consumed matches a recorded hazard. ' +
     'Pointer only, never a block: follow the read below before assuming the answer, never treat this line as the ruling itself.';
   const pointerLines = shown.map((x) => {
     const r = x.record;
-    const kind = r.type === 'anti_pattern' ? 'HAZARD anti_pattern' : 'DECISION';
-    const authorityMarker = r.authority ? `[${r.authority}] ` : '';
-    return { id: r.id, hazard: r.type === 'anti_pattern', line: `  → ${authorityMarker}${kind} '${clipTitle(r.title)}' · knowledge_get ${r.id}` };
+    return { id: r.id, hazard: true, line: `  → HAZARD anti_pattern '${clipTitle(r.title)}' · knowledge_get ${r.id}` };
   });
   const tail = remainder > 0 ? `  (+${remainder} more matched)` : '';
 

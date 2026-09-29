@@ -210,7 +210,9 @@ const assertNoDelayedDeliveryArtifacts = (dir) => {
 test('H23 CONTROL: tool output naming a specific record subject still delivers a direct pointer', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    const d = store.create(decisionRecord(SPECIFIC_TITLE, SPECIFIC_STATEMENT));
+    // anti_pattern, not decision: H23 points at hazards only since ruling
+    // h23-output-axis-hazards-only-skip-listings-advisory-label (5564361d v2).
+    const d = store.create(antiPattern(SPECIFIC_TITLE, SPECIFIC_STATEMENT));
     const r = runHook('h23-output-axis.mjs', postBash(dir, SPECIFIC_PROMPT), dir);
     const payload = JSON.parse(r.stdout).hookSpecificOutput.additionalContext; // 2026-09-19: direct PostToolUse transport.
     assert.ok(payload.includes(d.id));
@@ -223,7 +225,8 @@ test('H23 CONTROL: tool output naming a specific record subject still delivers a
 test('H23: generic output vocabulary emits no direct pointer and leaves no delayed-delivery artifact', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    store.create(decisionRecord(GENERIC_TITLE, GENERIC_STATEMENT));
+    // anti_pattern so the silence below is the generic floor, not H23's type filter.
+    store.create(antiPattern(GENERIC_TITLE, GENERIC_STATEMENT));
     const r = runHook('h23-output-axis.mjs', postBash(dir, GENERIC_PROMPT), dir);
     assert.equal(r.stdout, '', 'generic vocabulary must emit no direct context');
     assertNoDelayedDeliveryArtifacts(dir);
