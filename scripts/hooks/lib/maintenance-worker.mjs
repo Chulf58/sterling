@@ -55,6 +55,11 @@ export const LOCK_STALE_MS = 30 * 60_000;
 const TAKEOVER_STALE_MS = 60_000;
 /** The log and the JSONL rotate to a single .1 backup past this size. */
 export const ROTATE_BYTES = 1_000_000;
+/** One run's share of maintenance-worker.log; the rest of its stream is
+ *  dropped from the log (the JSONL still journals every tool call). */
+export const LOG_RUN_CAP_BYTES = 1_000_000;
+/** The smallest per-run budget: less than this left today counts as spent. */
+export const MIN_RUN_BUDGET_USD = 0.01;
 /** Set in the runner's and the child's environment so a Sterling hook that
  *  somehow runs inside them never launches a second worker. */
 export const WORKER_ENV_FLAG = 'STERLING_MAINTENANCE_WORKER';
@@ -85,6 +90,7 @@ export function workerPaths(root) {
     lock: join(sterling, 'transient', 'maintenance-worker.lock'),
     takeover: join(sterling, 'transient', 'maintenance-worker.lock.takeover'),
     lastLaunch: join(sterling, 'transient', 'maintenance-worker.last-launch'),
+    eligible: join(sterling, 'transient', 'maintenance-worker.eligible.json'),
     state: join(sterling, 'transient', 'maintenance-worker.state.json'),
     log: join(sterling, 'maintenance-worker.log'),
     journal: join(sterling, 'maintenance-worker.jsonl'),
@@ -120,11 +126,30 @@ export function rotateIfLarge(path, limit = ROTATE_BYTES) {
   }
 }
 
+/** Rotate the JSONL like rotateIfLarge, but carry every still-standing
+ *  owes_prose / refused verdict forward into the new file, so a second
+ *  rotation can never drop a judgment and relaunch work already judged. */
+export function rotateJournal(root, limit = ROTATE_BYTES) {
+  const { journal } = workerPaths(root);
+  try {
+    if (statSync(journal).size <= limit) return;
+  } catch (e) {
+    if (e?.code === 'ENOENT') return;
+    throw e;
+  }
+  const standing = judgedVerdicts(root);
+  renameSync(journal, `${journal}.1`);
+  const at = new Date().toISOString();
+  const lines = [...standing].map(([item_id, v]) => JSON.stringify({ at, kind: 'verdict', carried: true, item_id, verdict: v.verdict, file_keys: JSON.parse(v.keys), ...(v.head ? { head: v.head } : {}) }));
+  if (lines.length) writeFileSync(journal, lines.join('\n') + '\n');
+}
+
 const sortedKeys = (keys) => JSON.stringify([...(keys ?? [])].map(String).sort());
 
-/** item id -> sorted file_keys of its LATEST logged 'owes_prose' verdict, from
- *  the JSONL and its .1 backup. A later 'closed' verdict for the id clears it. */
-export function owesProseVerdicts(root) {
+/** item id -> {verdict, keys, head} for its LATEST standing 'owes_prose' or
+ *  'refused' verdict, from the JSONL's .1 backup then the JSONL. Any other
+ *  later verdict for the id ('closed') clears it. */
+export function judgedVerdicts(root) {
   const { journal } = workerPaths(root);
   const map = new Map();
   for (const path of [`${journal}.1`, journal]) {
@@ -144,11 +169,19 @@ export function owesProseVerdicts(root) {
         continue; // a torn last line from a killed run judges nothing
       }
       if (!v?.item_id || v.kind !== 'verdict') continue;
-      if (v.verdict === 'owes_prose' && Array.isArray(v.file_keys)) map.set(v.item_id, sortedKeys(v.file_keys));
-      else map.delete(v.item_id);
+      if ((v.verdict === 'owes_prose' || v.verdict === 'refused') && Array.isArray(v.file_keys)) {
+        map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
+      } else map.delete(v.item_id);
     }
   }
   return map;
+}
+
+/** item id -> sorted file_keys of its standing 'owes_prose' verdict. */
+export function owesProseVerdicts(root) {
+  const out = new Map();
+  for (const [id, v] of judgedVerdicts(root)) if (v.verdict === 'owes_prose') out.set(id, v.keys);
+  return out;
 }
 
 /** Is this item judged 'owes prose' for exactly its CURRENT file_keys? A
@@ -157,30 +190,60 @@ export function isJudgedOwesProse(item, verdicts) {
   return verdicts.get(item.id) === sortedKeys(item.file_keys);
 }
 
-/** Open reconcile_needed items not yet judged, read with the same
- *  count-then-capped-query H1 uses so it can never truncate. */
-export function unjudgedReconcileItems(store, root) {
-  const total = store.count({ types: ['todo'], source: 'system' });
-  if (!total) return [];
-  const verdicts = owesProseVerdicts(root);
-  return store
-    .query({ types: ['todo'], source: 'system', cap: total })
-    .filter((t) => t.system_reason === 'reconcile_needed' && !isJudgedOwesProse(t, verdicts));
+/** Is this item judged for its CURRENT state? owes_prose: same file_keys.
+ *  refused (a close the server refused): same file_keys AND the same HEAD — a
+ *  new commit may make the close attestable, so it becomes launchable again. */
+export function isJudged(item, verdicts, head) {
+  const v = verdicts.get(item.id);
+  if (!v || v.keys !== sortedKeys(item.file_keys)) return false;
+  return v.verdict === 'owes_prose' || (v.verdict === 'refused' && Boolean(head) && v.head === head);
 }
 
-/** Paths among `paths` with uncommitted changes (one `git status --porcelain
- *  -z` call, no shell), or null when git cannot answer. */
-export function dirtyPaths(root, paths, spawnSync = nodeSpawnSync) {
+/** Every open reconcile_needed item, read with the same count-then-capped-query
+ *  H1 uses so it can never truncate. */
+export function openReconcileItems(store) {
+  const total = store.count({ types: ['todo'], source: 'system' });
+  if (!total) return [];
+  return store.query({ types: ['todo'], source: 'system', cap: total }).filter((t) => t.system_reason === 'reconcile_needed');
+}
+
+/** Open reconcile_needed items not judged for their current state. Without a
+ *  `head`, a refused verdict never counts as judged (the caller has no HEAD to
+ *  compare against). */
+export function unjudgedReconcileItems(store, root, head = null) {
+  const verdicts = judgedVerdicts(root);
+  return openReconcileItems(store).filter((t) => !isJudged(t, verdicts, head));
+}
+
+/** HEAD sha and the project root's prefix inside the git top-level (''
+ *  when the root IS the top-level), or null when git cannot answer. One call,
+ *  no shell. */
+export function gitState(root, spawnSync = nodeSpawnSync) {
+  const r = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD', '--show-prefix'], { encoding: 'utf8', timeout: 30_000 });
+  if (r.error || r.status !== 0) return null;
+  const [head, prefix = ''] = String(r.stdout ?? '').split('\n');
+  return /^[0-9a-f]{40,64}$/.test(head) ? { head, prefix: prefix.trim() } : null;
+}
+
+/** Paths among `paths` (relative to `root`) with uncommitted changes, from
+ *  one `git -C <root> status --porcelain -z` call without a shell, or null when
+ *  git cannot answer (a spawn error such as E2BIG, a timeout, a non-zero
+ *  exit). Porcelain paths are relative to the git top-level, so `prefix` (the
+ *  root's place in it, from gitState) is stripped to match file_keys. */
+export function dirtyPaths(root, paths, spawnSync = nodeSpawnSync, prefix = '') {
   if (!paths.length) return new Set();
-  const r = spawnSync('git', ['status', '--porcelain', '-z', '--untracked-files=all', '--', ...paths], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+  const r = spawnSync('git', ['-C', root, 'status', '--porcelain', '-z', '--untracked-files=all', '--', ...paths], { encoding: 'utf8', timeout: 30_000 });
   if (r.error || r.status !== 0) return null;
   const dirty = new Set();
+  const add = (p) => {
+    if (p && p.startsWith(prefix)) dirty.add(p.slice(prefix.length));
+  };
   const parts = String(r.stdout ?? '').split('\0');
   for (let i = 0; i < parts.length; i++) {
     const entry = parts[i];
     if (entry.length < 4) continue;
-    dirty.add(entry.slice(3));
-    if (entry[0] === 'R' || entry[0] === 'C') dirty.add(parts[++i]); // the rename's source path follows
+    add(entry.slice(3));
+    if (entry[0] === 'R' || entry[0] === 'C') add(parts[++i]); // the rename's source path follows
   }
   return dirty;
 }
@@ -283,14 +346,20 @@ export function readWorkerPrompt(pluginRoot) {
   }
 }
 
-/** The shipped prompt plus the items already judged 'owes prose' (from the
- *  JSONL), so the child skips them unless their file_keys changed since. */
-export function workerPrompt(pluginRoot, root) {
-  const base = readWorkerPrompt(pluginRoot);
-  const judged = [...owesProseVerdicts(root)].map(([id, keys]) => `- ${id} file_keys ${keys}`);
-  return judged.length
-    ? `${base}\nALREADY JUDGED 'owes prose' (skip each unless its current file_keys differ from the ones listed):\n${judged.join('\n')}\n`
-    : base;
+/** The shipped prompt, plus the ELIGIBLE items the launcher chose (clean,
+ *  unjudged) when it passed any, plus every standing judged verdict
+ *  (owes_prose, refused) so the child skips those unless they changed. */
+export function workerPrompt(pluginRoot, root, eligible = null) {
+  let prompt = readWorkerPrompt(pluginRoot);
+  if (eligible) {
+    prompt +=
+      `\nELIGIBLE (judge ONLY these items; every other open item is dirty against HEAD or already judged, so leave it alone):\n` +
+      eligible.items.map((t) => `- ${t.id} file_keys ${sortedKeys(t.file_keys)}`).join('\n') +
+      '\n';
+  }
+  const judged = [...judgedVerdicts(root)].map(([id, v]) => `- ${id} ${v.verdict} file_keys ${v.keys}${v.verdict === 'refused' ? ` at HEAD ${v.head}` : ''}`);
+  if (judged.length) prompt += `\nALREADY JUDGED (skip each unless its current file_keys differ from the ones listed):\n${judged.join('\n')}\n`;
+  return prompt;
 }
 
 /** The probed invocation (finding 611f044b), with stream-json output (the CLI
@@ -353,10 +422,10 @@ function failLine(reason) {
  * back-off, a failed last run) carries `line`, one line the hook shows.
  *   opts.root       project root (the hook's normalized input.cwd)
  *   opts.config     .sterling/config.json (raw or parsed; null = defaults)
- *   opts.store      an open SterlingStore (or opts.items: the candidate items)
+ *   opts.store      an open SterlingStore (or opts.items: the open reconcile items)
  *   opts.trigger    'commit' | 'stop'
  *   opts.spawn      child_process.spawn (injected by tests)
- *   opts.spawnSync  for the git dirty check (injected by tests)
+ *   opts.spawnSync  for the git HEAD and dirty checks (injected by tests)
  *   opts.now        Date.now() override; opts.isAlive pid probe override
  *   opts.pluginRoot override; opts.env process.env override
  */
@@ -366,8 +435,11 @@ export function maybeLaunchMaintenanceWorker(opts) {
     if (env[WORKER_ENV_FLAG] === '1') return { launched: false, reason: 'inside_worker' };
     if (env[WORKER_DISABLE_ENV] === '1') return { launched: false, reason: 'disabled_env' };
     if (opts.config?.maintenance_worker?.enabled === false) return { launched: false, reason: 'disabled' };
-    const candidates = opts.items ?? unjudgedReconcileItems(opts.store, opts.root);
-    if (candidates.length === 0) return { launched: false, reason: 'queue_empty' };
+    // Cheap filter first (no git): items already judged 'owes prose' for their
+    // current file_keys. Refused verdicts need HEAD, checked below.
+    const verdicts = judgedVerdicts(opts.root);
+    const open = (opts.items ?? openReconcileItems(opts.store)).filter((t) => !isJudged(t, verdicts, null));
+    if (open.length === 0) return { launched: false, reason: 'queue_empty' };
 
     const nowMs = opts.now ?? Date.now();
     const paths = workerPaths(opts.root);
@@ -380,19 +452,25 @@ export function maybeLaunchMaintenanceWorker(opts) {
     }
     const cap = dailyBudget(opts.config);
     const spent = spentOn(state, utcDay(nowMs));
-    if (spent >= cap) {
+    // Under a cent left is spent: --max-budget-usd cannot express less.
+    if (cap - spent < MIN_RUN_BUDGET_USD) {
       return { launched: false, reason: 'daily_cap', line: `⚠ Sterling maintenance worker: daily budget reached ($${spent.toFixed(2)} of $${cap.toFixed(2)} spent today, UTC) — no launch until 00:00 UTC; raise maintenance_worker.daily_budget_usd or drain with /sterling:drain.` };
     }
     if (lockState(readJson(paths.lock), nowMs, opts.isAlive) === 'live') return { launched: false, reason: 'already_running' };
     const lastLaunch = Number(readJson(paths.lastLaunch)?.at_ms);
     if (Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: 'debounced' };
 
-    // A close is attested against HEAD, so an item whose files are dirty would
-    // only be refused: launch for clean items only. git unavailable -> no
-    // filter (the server's attestation still refuses a dirty close).
-    const dirty = dirtyPaths(opts.root, [...new Set(candidates.flatMap((t) => t.file_keys ?? []))], opts.spawnSync);
-    const clean = dirty ? candidates.filter((t) => !(t.file_keys ?? []).some((k) => dirty.has(k))) : candidates;
-    if (clean.length === 0) return { launched: false, reason: 'all_dirty' };
+    // A close is attested against HEAD: an item whose files are dirty would only
+    // be refused, and a refused verdict stands until HEAD moves. When git cannot
+    // answer (not a repo, E2BIG, a timeout) every item counts as dirty: fail
+    // closed, never launch blind, and say so.
+    const git = gitState(opts.root, opts.spawnSync);
+    const dirty = git && dirtyPaths(opts.root, [...new Set(open.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
+    if (!dirty) {
+      return { launched: false, reason: 'git_failed', line: `⚠ Sterling maintenance worker: git could not report HEAD or the working-tree state in ${opts.root}, so every reconcile item counts as dirty and no worker starts; drain with /sterling:drain.` };
+    }
+    const eligible = open.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
+    if (eligible.length === 0) return { launched: false, reason: 'none_eligible' };
 
     const pluginRoot = opts.pluginRoot ?? pluginRootFrom();
     if (!pluginRoot) return { launched: false, reason: 'error', line: failLine('plugin root not found above the hook') };
@@ -408,6 +486,8 @@ export function maybeLaunchMaintenanceWorker(opts) {
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: 'launching' }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: 'already_running' };
     writeFileSync(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
+    // The child judges ONLY these (PARTIAL 2); the runner checks the token.
+    writeFileSync(paths.eligible, JSON.stringify({ token, head: git.head, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [] })) }));
 
     let logFd;
     try {
@@ -425,7 +505,7 @@ export function maybeLaunchMaintenanceWorker(opts) {
       child.unref?.();
       writeFileSync(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: 'running', token }));
       const note = last && last.ok === false ? `ℹ Sterling maintenance worker: the previous run FAILED at ${last.at} (${last.error}); relaunched after the back-off ${LOG_HINT}.` : undefined;
-      return { launched: true, reason: 'launched', pid: child.pid, items: clean.length, ...(note ? { line: note } : {}) };
+      return { launched: true, reason: 'launched', pid: child.pid, items: eligible.length, ...(note ? { line: note } : {}) };
     } catch (e) {
       releaseLock(paths, token);
       return { launched: false, reason: 'error', line: failLine(`spawn: ${e?.message ?? e}`) };
@@ -534,54 +614,93 @@ export function streamJournal(journal) {
 }
 
 /**
- * The runner's body: run the child, journal every maintenance_remove and
- * verdict, add the cost to today's spend, record the outcome, release the
- * lock. Returns the process exit code. opts: {root, pluginRoot, spawn, now,
- * dryRun, out, log, trigger, token, budgetUsd, claudeBin, timeoutMs}.
+ * The runner's body: run the child on the launcher's ELIGIBLE items, journal
+ * every maintenance_remove call and verdict (a refused close becomes a
+ * 'refused' verdict keyed by id, file_keys and HEAD), charge the run to
+ * today's spend, record the outcome, release the lock. Returns the process
+ * exit code. opts: {root, pluginRoot, spawn, now, dryRun, out, log, trigger,
+ * token, budgetUsd, claudeBin, timeoutMs, logCapBytes}.
  */
 export async function runWorker(opts) {
   const paths = workerPaths(opts.root);
   const nowMs = () => (opts.now ? opts.now() : Date.now());
   const iso = () => new Date(nowMs()).toISOString();
+  const log = opts.log ?? ((t) => process.stdout.write(t));
   const bin = opts.claudeBin ?? 'claude';
-  const buildArgs = () =>
-    buildWorkerArgs({ prompt: workerPrompt(opts.pluginRoot, opts.root), mcpConfig: resolveMcpConfig(opts.pluginRoot, opts.root), budgetUsd: opts.budgetUsd ?? WORKER_RUN_BUDGET_USD });
+  const rawBudget = opts.budgetUsd ?? WORKER_RUN_BUDGET_USD;
+  const budgetUsd = typeof rawBudget === 'number' ? rawBudget : String(rawBudget).trim() === '' ? NaN : Number(rawBudget);
+  const budgetOk = Number.isFinite(budgetUsd) && budgetUsd >= MIN_RUN_BUDGET_USD;
+  // The eligible list is the launcher's, bound to this run by the lock token.
+  const readEligible = () => {
+    const e = readJson(paths.eligible);
+    return e && !e.unreadable && e.token === opts.token && Array.isArray(e.items) ? e : null;
+  };
+  const buildArgs = (eligible) =>
+    buildWorkerArgs({ prompt: workerPrompt(opts.pluginRoot, opts.root, eligible), mcpConfig: resolveMcpConfig(opts.pluginRoot, opts.root), budgetUsd: budgetOk ? budgetUsd : rawBudget });
   if (opts.dryRun) {
-    (opts.out ?? console.log)(JSON.stringify({ dry_run: true, cwd: opts.root, command: bin, argv: buildArgs() }, null, 2));
+    (opts.out ?? console.log)(JSON.stringify({ dry_run: true, cwd: opts.root, command: bin, argv: buildArgs(opts.token ? readEligible() : null) }, null, 2));
     return 0;
   }
   const token = opts.token ?? randomUUID();
   const lock = readJson(paths.lock);
   if (opts.token && lock?.token !== token) {
-    (opts.log ?? ((t) => process.stdout.write(t)))(`maintenance-worker-run: lock token mismatch — another worker holds the slot; not running\n`);
+    log(`maintenance-worker-run: lock token mismatch — another worker holds the slot; not running\n`);
     return 1;
   }
   const runStartMs = nowMs();
   const runId = new Date(runStartMs).toISOString();
   mkdirSync(dirname(paths.lock), { recursive: true });
   writeFileSync(paths.lock, JSON.stringify({ pid: process.pid, started_at: lock?.started_at ?? runId, trigger: opts.trigger, stage: 'running', token }));
-  rotateIfLarge(paths.journal);
+  rotateJournal(opts.root);
   const journal = (entry) => appendFileSync(paths.journal, JSON.stringify({ at: iso(), run: runId, ...entry }) + '\n');
   const record = (outcome) => {
     const state = readState(opts.root);
     const spend = { ...(state.spend ?? {}) };
     const day = utcDay(runStartMs);
-    if (Number.isFinite(outcome.cost_usd)) spend[day] = Math.round((spentOn(state, day) + outcome.cost_usd) * 1e6) / 1e6;
+    const charged = Number(outcome.charged_usd);
+    if (Number.isFinite(charged) && charged > 0) spend[day] = Math.round((spentOn(state, day) + charged) * 1e6) / 1e6;
     // keep the last 7 days only
     for (const d of Object.keys(spend).sort().slice(0, -7)) delete spend[d];
     writeFileSync(paths.state, JSON.stringify({ ...state, spend, last_run: { run: runId, trigger: opts.trigger, ...outcome } }));
     journal({ kind: 'run_summary', ...outcome });
   };
   try {
-    let args;
-    try {
-      args = buildArgs();
-    } catch (e) {
-      record({ ok: false, at: iso(), error: e?.message ?? String(e) });
+    // A malformed or zero budget is a recorded failure (state written, back-off
+    // armed), never a silent exit: nothing ran, so nothing is charged.
+    if (!budgetOk) {
+      record({ ok: false, at: iso(), error: `invalid --budget-usd '${rawBudget}' (needs a number >= ${MIN_RUN_BUDGET_USD})`, charged_usd: 0 });
       return 1;
     }
-    const stream = streamJournal(journal);
+    let eligible = null;
+    if (opts.token) {
+      eligible = readEligible();
+      if (!eligible) {
+        record({ ok: false, at: iso(), error: 'the eligible-item list is missing or belongs to another launch', charged_usd: 0 });
+        return 1;
+      }
+    }
+    let args;
+    try {
+      args = buildArgs(eligible);
+    } catch (e) {
+      record({ ok: false, at: iso(), error: e?.message ?? String(e), charged_usd: 0 });
+      return 1;
+    }
+    // A refused close on an eligible item is recorded as a 'refused' verdict
+    // keyed by id, file_keys and HEAD, so the launcher skips it until one of
+    // them changes (an item the server always refuses must not relaunch the
+    // worker at every Stop). A permission denial is not a server refusal.
+    const byId = new Map((eligible?.items ?? []).map((t) => [t.id, t]));
+    const journalCall = (entry) => {
+      journal(entry);
+      if (entry.kind === 'tool_call' && entry.is_error === true && byId.has(entry.item_id) && !/permission/i.test(entry.result ?? '')) {
+        journal({ kind: 'verdict', item_id: entry.item_id, verdict: 'refused', file_keys: byId.get(entry.item_id).file_keys, head: eligible.head, reason: String(entry.result ?? '').slice(0, 200) });
+      }
+    };
+    const stream = streamJournal(journalCall);
     const timeoutMs = opts.timeoutMs ?? WORKER_TIMEOUT_MS;
+    const logCap = opts.logCapBytes ?? LOG_RUN_CAP_BYTES;
+    let logged = 0;
     const { code, spawnError, timedOut } = await new Promise((resolve) => {
       let child;
       try {
@@ -600,7 +719,14 @@ export async function runWorker(opts) {
       }, timeoutMs);
       child.stdout.on('data', (d) => {
         const s = String(d);
-        (opts.log ?? ((t) => process.stdout.write(t)))(s);
+        // The log keeps at most logCap bytes of one run's stream; the JSONL
+        // journals every tool call regardless.
+        if (logged < logCap) {
+          const piece = s.slice(0, logCap - logged);
+          log(piece);
+          logged += piece.length;
+          if (logged >= logCap) log(`\n[maintenance-worker-run: log truncated at ${logCap} bytes for this run; the JSONL keeps every tool call]\n`);
+        }
         stream.feed(s);
       });
       child.on('error', (e) => {
@@ -615,7 +741,7 @@ export async function runWorker(opts) {
     });
     const { result, removes } = stream.end();
     if (spawnError) {
-      record({ ok: false, at: iso(), error: `could not start ${bin}: ${spawnError.message ?? spawnError}` });
+      record({ ok: false, at: iso(), error: `could not start ${bin}: ${spawnError.message ?? spawnError}`, charged_usd: 0 });
       return 1;
     }
     const verdicts = parseVerdicts(result?.result);
@@ -629,6 +755,9 @@ export async function runWorker(opts) {
       denials ? `${denials} permission denial(s)` : null,
     ].filter(Boolean);
     const cost = Number(result?.total_cost_usd);
+    // No reported cost (killed, crashed, hung: no result event) is charged the
+    // run's whole budget, never $0 — the daily cap must hold when the CLI dies.
+    const reported = result && Number.isFinite(cost);
     record({
       ok: problems.length === 0,
       at: iso(),
@@ -636,7 +765,8 @@ export async function runWorker(opts) {
       verdicts: verdicts.length,
       closed: verdicts.filter((v) => v.verdict === 'closed').length,
       remove_calls: removes,
-      cost_usd: Number.isFinite(cost) ? cost : null,
+      cost_usd: reported ? cost : null,
+      charged_usd: reported ? cost : budgetUsd,
     });
     return problems.length === 0 ? 0 : 1;
   } finally {

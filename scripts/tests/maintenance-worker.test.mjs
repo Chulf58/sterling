@@ -8,9 +8,14 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { spawnSync as realSpawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
   acquireLock,
+  gitState,
+  judgedVerdicts,
+  rotateJournal,
+  MIN_RUN_BUDGET_USD,
   buildWorkerArgs,
   dirtyPaths,
   maybeLaunchMaintenanceWorker,
@@ -32,7 +37,20 @@ import {
 
 const NOW = Date.parse('2026-09-29T12:00:00.000Z');
 const ITEM = (id, keys = ['src/a.mjs']) => ({ id, system_reason: 'reconcile_needed', text: `reconcile article '${id}'`, file_keys: keys });
-const CLEAN_GIT = () => ({ status: 0, stdout: '' });
+const HEAD = 'a'.repeat(40);
+/** A fake git for the launcher: `rev-parse HEAD --show-prefix` answers HEAD and
+ *  `prefix`; `status` answers `porcelain`. Every call is recorded. */
+function fakeGit({ head = HEAD, prefix = '', porcelain = '', revParse = null, status = null } = {}) {
+  const calls = [];
+  const fn = (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    if (args.includes('rev-parse')) return revParse ?? { status: 0, stdout: `${head}\n${prefix}\n` };
+    return status ?? { status: 0, stdout: porcelain };
+  };
+  fn.calls = calls;
+  return fn;
+}
+const CLEAN_GIT = fakeGit();
 
 function fixture() {
   const base = mkdtempSync(join(tmpdir(), 'sterling-mworker-'));
@@ -111,8 +129,8 @@ test('[finding 3] an item judged owes_prose in the JSONL for its CURRENT file_ke
     const out = unjudgedReconcileItems(store, fx.project).map((t) => t.id);
     assert.deepEqual(out, ['b', 'c'], "a is judged for its current keys; b's keys widened since its verdict; c was never judged");
     assert.deepEqual(seen[1], ['query', { types: ['todo'], source: 'system', cap: 3 }], 'the query cap IS the count, so it cannot truncate');
-    assert.ok(workerPrompt(fx.plugin, fx.project).includes("ALREADY JUDGED 'owes prose'"), 'the child is told which items to skip');
-    assert.ok(workerPrompt(fx.plugin, fx.project).includes('- a file_keys ["src/x.mjs"]'));
+    assert.ok(workerPrompt(fx.plugin, fx.project).includes('ALREADY JUDGED (skip each'), 'the child is told which items to skip');
+    assert.ok(workerPrompt(fx.plugin, fx.project).includes('- a owes_prose file_keys ["src/x.mjs"]'));
   } finally {
     fx.cleanup();
   }
@@ -208,17 +226,17 @@ test('debounce: a burst inside DEBOUNCE_MS starts one worker; after the window a
 test('[finding 2a] an item with an uncommitted change to any file_key is not launchable; only clean items count, via ONE git status call without a shell', () => {
   const fx = fixture();
   try {
-    const gitCalls = [];
-    const dirtyA = (cmd, args, opts) => (gitCalls.push({ cmd, args, opts }), { status: 0, stdout: ' M src/a.mjs\0R  src/new.mjs\0src/b.mjs\0' });
+    const dirtyA = fakeGit({ porcelain: ' M src/a.mjs\0R  src/new.mjs\0src/b.mjs\0' });
     const sp = fakeSpawn();
-    assert.deepEqual(launch(fx, { spawn: sp.fn, spawnSync: dirtyA }), { launched: false, reason: 'all_dirty' }, 'a.mjs is modified and b.mjs is the source of a staged rename');
-    assert.equal(gitCalls.length, 1);
-    assert.equal(gitCalls[0].cmd, 'git');
-    assert.deepEqual(gitCalls[0].args, ['status', '--porcelain', '-z', '--untracked-files=all', '--', 'src/a.mjs', 'src/b.mjs']);
-    assert.equal(gitCalls[0].opts.shell, undefined, 'no shell');
+    assert.deepEqual(launch(fx, { spawn: sp.fn, spawnSync: dirtyA }), { launched: false, reason: 'none_eligible' }, 'a.mjs is modified and b.mjs is the source of a staged rename');
+    const statusCalls = dirtyA.calls.filter((c) => c.args.includes('status'));
+    assert.equal(statusCalls.length, 1, 'ONE status call');
+    assert.equal(statusCalls[0].cmd, 'git');
+    assert.deepEqual(statusCalls[0].args, ['-C', fx.project, 'status', '--porcelain', '-z', '--untracked-files=all', '--', 'src/a.mjs', 'src/b.mjs']);
+    assert.equal(statusCalls[0].opts.shell, undefined, 'no shell');
     assert.equal(sp.calls.length, 0);
 
-    const r = launch(fx, { spawn: sp.fn, items: [ITEM('i1'), ITEM('i3', ['src/c.mjs'])], spawnSync: () => ({ status: 0, stdout: ' M src/a.mjs\0' }) });
+    const r = launch(fx, { spawn: sp.fn, items: [ITEM('i1'), ITEM('i3', ['src/c.mjs'])], spawnSync: fakeGit({ porcelain: ' M src/a.mjs\0' }) });
     assert.equal(r.launched, true);
     assert.equal(r.items, 1, 'only the clean item counts');
     assert.deepEqual([...dirtyPaths(fx.project, ['x'], () => ({ status: 128, stdout: '' })) ?? ['null']], ['null'], 'a git failure is null, not "clean"');
@@ -500,6 +518,215 @@ test('runWorker --dry-run prints the argv and spawns nothing', async () => {
     assert.equal(out.command, 'claude');
     assert.deepEqual(out.argv.slice(2, 6), ['--model', 'claude-sonnet-5-5', '--effort', 'low']);
     assert.equal(existsSync(fx.paths.lock), false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// ------------------------------------------------------------ re-check residuals (N1-N4, PARTIAL 2 and 9)
+
+test('[N1] a run with no result event (crashed, killed, hung) is charged its whole per-run budget, never $0', async () => {
+  const fx = fixture();
+  try {
+    const crashed = fakeClaude(['not json'], { code: 1 });
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: crashed.fn, budgetUsd: 1.5, now: () => NOW, ...quiet }), 1);
+    let st = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
+    assert.equal(st.spend['2026-09-29'], 1.5, 'charged the --budget-usd it was given');
+    assert.equal(st.last_run.cost_usd, null, 'the reported cost stays unknown');
+    assert.equal(st.last_run.charged_usd, 1.5);
+
+    const hung = fakeClaude([], { hang: true });
+    await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: hung.fn, budgetUsd: 2, timeoutMs: 20, now: () => NOW, ...quiet });
+    st = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
+    assert.equal(st.spend['2026-09-29'], 3.5, 'a hung run is charged too');
+
+    const ok = fakeClaude([resultEvent({ total_cost_usd: 0.1 })]);
+    await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: ok.fn, budgetUsd: 2, now: () => NOW, ...quiet });
+    assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).spend['2026-09-29'], 3.6, 'a reported cost is charged as reported');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[N2] a refused close becomes a refused verdict keyed by id, file_keys and HEAD; the item is skipped until one of them changes, and the prompt lists it', async () => {
+  const fx = fixture();
+  try {
+    const refusedId = 'rrrr';
+    const sp = fakeSpawn();
+    assert.equal(launch(fx, { spawn: sp.fn, items: [ITEM(refusedId)] }).launched, true);
+    const token = JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token;
+    const child = fakeClaude([
+      removeCall('t1', refusedId),
+      removeResult('t1', 'maintenance_remove: item names a path the owning record does not claim', true),
+      removeCall('t2', 'not-eligible'),
+      removeResult('t2', 'refused', true),
+      removeCall('t3', 'pppp'),
+      removeResult('t3', 'The user denied permission to use this tool', true),
+      resultEvent({}),
+    ]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, token, budgetUsd: 2, now: () => NOW, ...quiet }), 0);
+    const refused = readJournal(fx).filter((l) => l.kind === 'verdict' && l.verdict === 'refused');
+    assert.deepEqual(refused.map((l) => [l.item_id, l.head, l.file_keys]), [[refusedId, HEAD, ['src/a.mjs']]], 'only the eligible item; a permission denial is not a server refusal');
+    assert.equal(judgedVerdicts(fx.project).get(refusedId).verdict, 'refused');
+
+    const later = NOW + DEBOUNCE_MS * 2;
+    const sp2 = fakeSpawn();
+    assert.deepEqual(launch(fx, { spawn: sp2.fn, items: [ITEM(refusedId)], now: later }), { launched: false, reason: 'none_eligible' }, 'same id, keys and HEAD: skipped');
+    assert.equal(launch(fx, { spawn: sp2.fn, items: [ITEM(refusedId, ['src/a.mjs', 'src/z.mjs'])], now: later }).launched, true, 'new file_keys: launchable');
+    rmSync(fx.paths.lock);
+    rmSync(fx.paths.lastLaunch);
+    assert.equal(launch(fx, { spawn: sp2.fn, items: [ITEM(refusedId)], now: later, spawnSync: fakeGit({ head: 'b'.repeat(40) }) }).launched, true, 'a new HEAD: launchable');
+    assert.match(workerPrompt(fx.plugin, fx.project), new RegExp(`- ${refusedId} refused file_keys \\["src/a.mjs"\\] at HEAD ${HEAD}`));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[N3] under a cent left today is the daily cap (no spawn); the runner records a malformed or zero --budget-usd as a failed run with state written', async () => {
+  const fx = fixture();
+  try {
+    writeState(fx, { spend: { '2026-09-29': 5 - MIN_RUN_BUDGET_USD / 2 } });
+    const sp = fakeSpawn();
+    const r = launch(fx, { spawn: sp.fn });
+    assert.equal(r.reason, 'daily_cap');
+    assert.match(r.line, /daily budget reached/);
+    assert.equal(sp.calls.length, 0);
+
+    for (const bad of ['0', 'abc', '', 0.001]) {
+      rmSync(fx.paths.state, { force: true });
+      const child = fakeClaude([resultEvent({})]);
+      assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, budgetUsd: bad, ...quiet }), 1, `budget ${JSON.stringify(bad)}`);
+      assert.equal(child.calls.length, 0, 'nothing runs');
+      const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+      assert.equal(last.ok, false);
+      assert.match(last.error, /invalid --budget-usd/);
+      assert.equal(existsSync(fx.paths.lock), false);
+    }
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[N4] any git failure (E2BIG, no HEAD, non-zero exit) counts every item dirty: no spawn, and a visible line', () => {
+  const fx = fixture();
+  try {
+    const cases = [
+      fakeGit({ status: { error: Object.assign(new Error('spawnSync git E2BIG'), { code: 'E2BIG' }), status: null } }),
+      fakeGit({ revParse: { status: 128, stdout: '', stderr: 'fatal: ambiguous argument HEAD' } }),
+      fakeGit({ status: { status: 128, stdout: '' } }),
+    ];
+    for (const git of cases) {
+      const sp = fakeSpawn();
+      const r = launch(fx, { spawn: sp.fn, spawnSync: git });
+      assert.equal(r.reason, 'git_failed');
+      assert.match(r.line, /git could not report HEAD or the working-tree state .* every reconcile item counts as dirty and no worker starts/);
+      assert.equal(sp.calls.length, 0);
+      assert.equal(existsSync(fx.paths.lock), false);
+    }
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[N4] a project root in a subdirectory of the git top-level: porcelain paths are matched to file_keys through the prefix (fake and real git)', () => {
+  const fx = fixture();
+  try {
+    const sub = fakeGit({ prefix: 'app/', porcelain: ' M app/src/a.mjs\0 M other/src/b.mjs\0' });
+    const r = launch(fx, { spawn: fakeSpawn().fn, spawnSync: sub });
+    assert.equal(r.launched, true);
+    assert.equal(r.items, 1, 'src/a.mjs (app/src/a.mjs) is dirty; src/b.mjs is clean — other/src/b.mjs is outside the project');
+
+    const top = mkdtempSync(join(tmpdir(), 'sterling-mworker-git-'));
+    try {
+      const g = (args, cwd = top) => {
+        const res = realSpawnSync('git', args, { cwd, encoding: 'utf8' });
+        assert.equal(res.status, 0, res.stderr);
+        return res.stdout;
+      };
+      g(['init', '-q']);
+      g(['config', 'user.email', 't@t']);
+      g(['config', 'user.name', 't']);
+      mkdirSync(join(top, 'app', 'src'), { recursive: true });
+      writeFileSync(join(top, 'app', 'src', 'a.mjs'), '1\n');
+      writeFileSync(join(top, 'app', 'src', 'b.mjs'), '1\n');
+      g(['add', '-A']);
+      g(['commit', '-q', '-m', 'init']);
+      writeFileSync(join(top, 'app', 'src', 'a.mjs'), '2\n');
+      const root = join(top, 'app');
+      const state = gitState(root);
+      assert.equal(state.prefix, 'app/');
+      assert.match(state.head, /^[0-9a-f]{40}$/);
+      assert.deepEqual([...dirtyPaths(root, ['src/a.mjs', 'src/b.mjs'], undefined, state.prefix)], ['src/a.mjs']);
+    } finally {
+      rmSync(top, { recursive: true, force: true });
+    }
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[PARTIAL 2] the child gets ONLY the eligible (clean, unjudged) item ids; the runner refuses an eligible list from another launch', async () => {
+  const fx = fixture();
+  try {
+    journalLine(fx, { kind: 'verdict', item_id: 'judged', verdict: 'owes_prose', file_keys: ['src/j.mjs'] });
+    const items = [ITEM('clean', ['src/c.mjs']), ITEM('dirty', ['src/a.mjs']), ITEM('judged', ['src/j.mjs'])];
+    assert.equal(launch(fx, { spawn: fakeSpawn().fn, items, spawnSync: fakeGit({ porcelain: ' M src/a.mjs\0' }) }).launched, true);
+    const eligible = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    const token = JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token;
+    assert.equal(eligible.token, token);
+    assert.equal(eligible.head, HEAD);
+    assert.deepEqual(eligible.items, [{ id: 'clean', file_keys: ['src/c.mjs'] }]);
+
+    const child = fakeClaude([resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, token, budgetUsd: 2, ...quiet }), 0);
+    const prompt = child.calls[0].args[1];
+    const section = prompt.slice(prompt.indexOf('ELIGIBLE'), prompt.indexOf('ALREADY JUDGED'));
+    assert.match(section, /- clean file_keys/);
+    assert.doesNotMatch(section, /- dirty |- judged /, 'dirty and judged items are not offered');
+
+    writeFileSync(fx.paths.lock, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString(), token: 'second' }));
+    const other = fakeClaude([resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: other.fn, token: 'second', budgetUsd: 2, ...quiet }), 1);
+    assert.equal(other.calls.length, 0);
+    assert.match(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.error, /eligible-item list is missing or belongs to another launch/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[PARTIAL 9] one run writes at most the log cap to maintenance-worker.log, while the JSONL still journals every tool call', async () => {
+  const fx = fixture();
+  try {
+    const events = [];
+    for (let i = 0; i < 20; i++) events.push(removeCall(`t${i}`, `item-${i}`), removeResult(`t${i}`, 'Closed as ALREADY-PAID'));
+    events.push(resultEvent({}));
+    const written = [];
+    const child = fakeClaude(events);
+    await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, budgetUsd: 2, logCapBytes: 500, log: (t) => written.push(t) });
+    const text = written.join('');
+    const note = text.indexOf('[maintenance-worker-run: log truncated at 500 bytes');
+    assert.ok(note > 0, 'the truncation is announced once');
+    assert.equal(note, 501, 'exactly the cap was written before the note');
+    assert.equal(readJournal(fx).filter((l) => l.kind === 'tool_call').length, 20);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[PARTIAL 9] rotating the JSONL carries standing owes_prose and refused verdicts forward, so a second rotation loses none', () => {
+  const fx = fixture();
+  try {
+    journalLine(fx, { kind: 'verdict', item_id: 'o', verdict: 'owes_prose', file_keys: ['a'] });
+    journalLine(fx, { kind: 'verdict', item_id: 'r', verdict: 'refused', file_keys: ['b'], head: HEAD });
+    journalLine(fx, { kind: 'verdict', item_id: 'c', verdict: 'owes_prose', file_keys: ['c'] });
+    journalLine(fx, { kind: 'verdict', item_id: 'c', verdict: 'closed' });
+    appendFileSync(fx.paths.journal, 'x'.repeat(300) + '\n');
+    rotateJournal(fx.project, 200);
+    appendFileSync(fx.paths.journal, 'y'.repeat(300) + '\n');
+    rotateJournal(fx.project, 200);
+    const v = judgedVerdicts(fx.project);
+    assert.deepEqual([...v.keys()].sort(), ['o', 'r'], 'both standing verdicts survive two rotations; the closed one is not resurrected');
+    assert.equal(v.get('r').head, HEAD);
   } finally {
     fx.cleanup();
   }

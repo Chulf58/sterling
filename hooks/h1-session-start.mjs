@@ -9010,6 +9010,7 @@ function workerPaths(root) {
     lock: join8(sterling, "transient", "maintenance-worker.lock"),
     takeover: join8(sterling, "transient", "maintenance-worker.lock.takeover"),
     lastLaunch: join8(sterling, "transient", "maintenance-worker.last-launch"),
+    eligible: join8(sterling, "transient", "maintenance-worker.eligible.json"),
     state: join8(sterling, "transient", "maintenance-worker.state.json"),
     log: join8(sterling, "maintenance-worker.log"),
     journal: join8(sterling, "maintenance-worker.jsonl")
@@ -9024,7 +9025,7 @@ function readJson(path) {
   }
 }
 var sortedKeys = (keys) => JSON.stringify([...keys ?? []].map(String).sort());
-function owesProseVerdicts(root) {
+function judgedVerdicts(root) {
   const { journal } = workerPaths(root);
   const map = /* @__PURE__ */ new Map();
   for (const path of [`${journal}.1`, journal]) {
@@ -9044,11 +9045,17 @@ function owesProseVerdicts(root) {
         continue;
       }
       if (!v?.item_id || v.kind !== "verdict") continue;
-      if (v.verdict === "owes_prose" && Array.isArray(v.file_keys)) map.set(v.item_id, sortedKeys(v.file_keys));
-      else map.delete(v.item_id);
+      if ((v.verdict === "owes_prose" || v.verdict === "refused") && Array.isArray(v.file_keys)) {
+        map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
+      } else map.delete(v.item_id);
     }
   }
   return map;
+}
+function owesProseVerdicts(root) {
+  const out = /* @__PURE__ */ new Map();
+  for (const [id, v] of judgedVerdicts(root)) if (v.verdict === "owes_prose") out.set(id, v.keys);
+  return out;
 }
 function isJudgedOwesProse(item, verdicts) {
   return verdicts.get(item.id) === sortedKeys(item.file_keys);

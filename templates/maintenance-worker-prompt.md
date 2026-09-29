@@ -6,7 +6,7 @@ Tools you may use: mcp__sterling__maintenance_query, mcp__sterling__knowledge_ge
 
 LOOP
 1. Call maintenance_query with system_reason "reconcile_needed" and projection "full". If capped is true, page with cursor = next_cursor until capped is false.
-2. Skip any item listed under ALREADY JUDGED at the end of this prompt whose current file_keys equal the listed ones. It is waiting on the conductor. Also skip any item you already judged in this run, and any item whose close the server refused in this run.
+2. If an ELIGIBLE list is at the end of this prompt, judge ONLY the items it names and leave every other item alone: the others are dirty against HEAD or already judged. Skip any item listed under ALREADY JUDGED whose current file_keys equal the listed ones. Also skip any item you already judged in this run, and any item whose close the server refused in this run.
 3. If no item is left to judge, write your final report and stop. Otherwise judge every remaining item, then go back to step 1, because new items can arrive while you work. There is no item or effort limit. Do not stop early.
 
 JUDGE ONE ITEM
@@ -16,7 +16,7 @@ c. Decide whether the article, as it reads now, still describes what these files
    - PAID: every claim the article makes about these files is still true, and nothing a reader of the article would need is missing. Refactors, comment edits, renamed locals, and tests inside behaviour the article already describes are paid.
    - NOT PAID: a new behaviour, flag, output, refusal, file role, config key or removed behaviour that the article does not mention, or an article claim that is now false.
    - When you are unsure, it is NOT PAID.
-d. PAID: call maintenance_remove with the item's FULL id, never a prefix. If the server REFUSES (for example because the worktree differs from HEAD), do not retry, do not work around it, and record NOTHING for that item: leave it unjudged. A refusal is never an 'owes prose' verdict.
+d. PAID: call maintenance_remove with the item's FULL id, never a prefix. If the server REFUSES (for example because the worktree differs from HEAD), do not retry, do not work around it, and write NOTHING for that item in your report. The runner records the refusal itself. A refusal is never an 'owes prose' verdict.
 e. NOT PAID: call no tool. Put an owes_prose line for it in your final report.
 
 NEVER

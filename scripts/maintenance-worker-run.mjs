@@ -24,7 +24,9 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--project' && args[i + 1]) project = resolve(args[++i]);
   else if (a === '--trigger' && args[i + 1]) trigger = args[++i];
   else if (a === '--token' && args[i + 1]) token = args[++i];
-  else if (a === '--budget-usd' && Number(args[i + 1]) > 0) budgetUsd = Number(args[++i]);
+  // Passed through raw: runWorker records a malformed or zero budget as a
+  // failed run (state written, back-off armed) instead of exiting silently.
+  else if (a === '--budget-usd' && i + 1 < args.length) budgetUsd = args[++i];
   else {
     console.error(`maintenance-worker-run: unrecognized argument '${a}' — usage: maintenance-worker-run.mjs --project <dir> [--trigger <t>] [--token <t>] [--budget-usd <n>] [--dry-run]`);
     process.exit(2);

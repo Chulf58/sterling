@@ -7775,6 +7775,7 @@ var WORKER_TIMEOUT_MS = 20 * 6e4;
 var LOCK_STALE_MS = 30 * 6e4;
 var TAKEOVER_STALE_MS = 6e4;
 var ROTATE_BYTES = 1e6;
+var MIN_RUN_BUDGET_USD = 0.01;
 var WORKER_ENV_FLAG = "STERLING_MAINTENANCE_WORKER";
 var WORKER_DISABLE_ENV = "STERLING_MAINTENANCE_WORKER_DISABLE";
 var SERVER = "sterling";
@@ -7794,6 +7795,7 @@ function workerPaths(root) {
     lock: join5(sterling, "transient", "maintenance-worker.lock"),
     takeover: join5(sterling, "transient", "maintenance-worker.lock.takeover"),
     lastLaunch: join5(sterling, "transient", "maintenance-worker.last-launch"),
+    eligible: join5(sterling, "transient", "maintenance-worker.eligible.json"),
     state: join5(sterling, "transient", "maintenance-worker.state.json"),
     log: join5(sterling, "maintenance-worker.log"),
     journal: join5(sterling, "maintenance-worker.jsonl")
@@ -7823,7 +7825,7 @@ function rotateIfLarge(path, limit = ROTATE_BYTES) {
   }
 }
 var sortedKeys = (keys) => JSON.stringify([...keys ?? []].map(String).sort());
-function owesProseVerdicts(root) {
+function judgedVerdicts(root) {
   const { journal } = workerPaths(root);
   const map = /* @__PURE__ */ new Map();
   for (const path of [`${journal}.1`, journal]) {
@@ -7843,32 +7845,43 @@ function owesProseVerdicts(root) {
         continue;
       }
       if (!v?.item_id || v.kind !== "verdict") continue;
-      if (v.verdict === "owes_prose" && Array.isArray(v.file_keys)) map.set(v.item_id, sortedKeys(v.file_keys));
-      else map.delete(v.item_id);
+      if ((v.verdict === "owes_prose" || v.verdict === "refused") && Array.isArray(v.file_keys)) {
+        map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
+      } else map.delete(v.item_id);
     }
   }
   return map;
 }
-function isJudgedOwesProse(item, verdicts) {
-  return verdicts.get(item.id) === sortedKeys(item.file_keys);
+function isJudged(item, verdicts, head) {
+  const v = verdicts.get(item.id);
+  if (!v || v.keys !== sortedKeys(item.file_keys)) return false;
+  return v.verdict === "owes_prose" || v.verdict === "refused" && Boolean(head) && v.head === head;
 }
-function unjudgedReconcileItems(store, root) {
+function openReconcileItems(store) {
   const total = store.count({ types: ["todo"], source: "system" });
   if (!total) return [];
-  const verdicts = owesProseVerdicts(root);
-  return store.query({ types: ["todo"], source: "system", cap: total }).filter((t) => t.system_reason === "reconcile_needed" && !isJudgedOwesProse(t, verdicts));
+  return store.query({ types: ["todo"], source: "system", cap: total }).filter((t) => t.system_reason === "reconcile_needed");
 }
-function dirtyPaths(root, paths, spawnSync = nodeSpawnSync) {
+function gitState(root, spawnSync = nodeSpawnSync) {
+  const r = spawnSync("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
+  if (r.error || r.status !== 0) return null;
+  const [head, prefix = ""] = String(r.stdout ?? "").split("\n");
+  return /^[0-9a-f]{40,64}$/.test(head) ? { head, prefix: prefix.trim() } : null;
+}
+function dirtyPaths(root, paths, spawnSync = nodeSpawnSync, prefix = "") {
   if (!paths.length) return /* @__PURE__ */ new Set();
-  const r = spawnSync("git", ["status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { cwd: root, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync("git", ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const dirty = /* @__PURE__ */ new Set();
+  const add = (p) => {
+    if (p && p.startsWith(prefix)) dirty.add(p.slice(prefix.length));
+  };
   const parts = String(r.stdout ?? "").split("\0");
   for (let i = 0; i < parts.length; i++) {
     const entry = parts[i];
     if (entry.length < 4) continue;
-    dirty.add(entry.slice(3));
-    if (entry[0] === "R" || entry[0] === "C") dirty.add(parts[++i]);
+    add(entry.slice(3));
+    if (entry[0] === "R" || entry[0] === "C") add(parts[++i]);
   }
   return dirty;
 }
@@ -7969,8 +7982,9 @@ function maybeLaunchMaintenanceWorker(opts) {
     if (env[WORKER_ENV_FLAG] === "1") return { launched: false, reason: "inside_worker" };
     if (env[WORKER_DISABLE_ENV] === "1") return { launched: false, reason: "disabled_env" };
     if (opts.config?.maintenance_worker?.enabled === false) return { launched: false, reason: "disabled" };
-    const candidates = opts.items ?? unjudgedReconcileItems(opts.store, opts.root);
-    if (candidates.length === 0) return { launched: false, reason: "queue_empty" };
+    const verdicts = judgedVerdicts(opts.root);
+    const open = (opts.items ?? openReconcileItems(opts.store)).filter((t) => !isJudged(t, verdicts, null));
+    if (open.length === 0) return { launched: false, reason: "queue_empty" };
     const nowMs = opts.now ?? Date.now();
     const paths = workerPaths(opts.root);
     const state = readState(opts.root);
@@ -7982,15 +7996,19 @@ function maybeLaunchMaintenanceWorker(opts) {
     }
     const cap = dailyBudget(opts.config);
     const spent = spentOn(state, utcDay(nowMs));
-    if (spent >= cap) {
+    if (cap - spent < MIN_RUN_BUDGET_USD) {
       return { launched: false, reason: "daily_cap", line: `\u26A0 Sterling maintenance worker: daily budget reached ($${spent.toFixed(2)} of $${cap.toFixed(2)} spent today, UTC) \u2014 no launch until 00:00 UTC; raise maintenance_worker.daily_budget_usd or drain with /sterling:drain.` };
     }
     if (lockState(readJson(paths.lock), nowMs, opts.isAlive) === "live") return { launched: false, reason: "already_running" };
     const lastLaunch = Number(readJson(paths.lastLaunch)?.at_ms);
     if (Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: "debounced" };
-    const dirty = dirtyPaths(opts.root, [...new Set(candidates.flatMap((t) => t.file_keys ?? []))], opts.spawnSync);
-    const clean = dirty ? candidates.filter((t) => !(t.file_keys ?? []).some((k) => dirty.has(k))) : candidates;
-    if (clean.length === 0) return { launched: false, reason: "all_dirty" };
+    const git = gitState(opts.root, opts.spawnSync);
+    const dirty = git && dirtyPaths(opts.root, [...new Set(open.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
+    if (!dirty) {
+      return { launched: false, reason: "git_failed", line: `\u26A0 Sterling maintenance worker: git could not report HEAD or the working-tree state in ${opts.root}, so every reconcile item counts as dirty and no worker starts; drain with /sterling:drain.` };
+    }
+    const eligible = open.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
+    if (eligible.length === 0) return { launched: false, reason: "none_eligible" };
     const pluginRoot = opts.pluginRoot ?? pluginRootFrom();
     if (!pluginRoot) return { launched: false, reason: "error", line: failLine("plugin root not found above the hook") };
     resolveMcpConfig(pluginRoot, opts.root);
@@ -8002,6 +8020,7 @@ function maybeLaunchMaintenanceWorker(opts) {
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: "already_running" };
     writeFileSync2(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
+    writeFileSync2(paths.eligible, JSON.stringify({ token, head: git.head, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [] })) }));
     let logFd;
     try {
       rotateIfLarge(paths.log);
@@ -8016,7 +8035,7 @@ function maybeLaunchMaintenanceWorker(opts) {
       child.unref?.();
       writeFileSync2(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
       const note = last && last.ok === false ? `\u2139 Sterling maintenance worker: the previous run FAILED at ${last.at} (${last.error}); relaunched after the back-off ${LOG_HINT}.` : void 0;
-      return { launched: true, reason: "launched", pid: child.pid, items: clean.length, ...note ? { line: note } : {} };
+      return { launched: true, reason: "launched", pid: child.pid, items: eligible.length, ...note ? { line: note } : {} };
     } catch (e) {
       releaseLock(paths, token);
       return { launched: false, reason: "error", line: failLine(`spawn: ${e?.message ?? e}`) };
