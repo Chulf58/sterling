@@ -11,14 +11,16 @@
 // point (0)). The child judges each item: already paid -> maintenance_remove
 // (the server's attested close checks HEAD); not paid -> an 'owes_prose'
 // verdict in its final report. The runner streams the child's output, logs
-// every maintenance_remove call and every verdict to a JSONL file, adds the
-// run's cost to a per-UTC-day spend, and releases the lock when the child
+// every maintenance_remove call and every verdict to a JSONL file, records the
+// run's outcome and cost in its state file, and releases the lock when the child
 // exits (or is killed after WORKER_TIMEOUT_MS).
 //
 // WHY A RUNNER BETWEEN THE HOOK AND claude. The child has no Write or Bash
 // grant, so it cannot keep its own log, and a hook cannot wait for it. The
 // runner owns the lock for the child's lifetime and records the outcome, so a
-// failed, capped or backed-off worker is visible (P5), never a silent skip.
+// failed or backed-off worker is on record (P5) in the log, the JSONL journal
+// and the state file. Nothing is printed at Stop or after a commit; H1 shows
+// only a BROKEN last run, once, on its session-start line.
 //
 // WHAT IT DOES NOT DO: author article prose, create records, edit a queue item,
 // or retry a close the server refused. It does not guarantee a verdict is
@@ -39,10 +41,11 @@ import { fileURLToPath } from 'node:url';
 export const WORKER_MODEL = 'claude-sonnet-5-5';
 export const WORKER_EFFORT = 'medium';
 export const WORKER_AGENT = 'librarian';
-/** Per-run cap passed to --max-budget-usd (lowered to what is left of the day). */
+/** Per-run runaway guard passed to --max-budget-usd on every launch. There is
+ *  no daily cap: the worker runs whenever the queue has eligible work (user
+ *  ruling 2026-09-30, decision
+ *  maintenance-worker-notices-session-start-only-and-no-sliver-launch). */
 export const WORKER_RUN_BUDGET_USD = 2;
-/** Default for config maintenance_worker.daily_budget_usd (per UTC day). */
-export const DEFAULT_DAILY_BUDGET_USD = 5;
 /** A burst of commits/Stops inside this window starts one worker, not many. */
 export const DEBOUNCE_MS = 2 * 60_000;
 /** No relaunch this long after a run that failed (error_max_budget included). */
@@ -58,7 +61,8 @@ export const ROTATE_BYTES = 1_000_000;
 /** One run's share of maintenance-worker.log; the rest of its stream is
  *  dropped from the log (the JSONL still journals every tool call). */
 export const LOG_RUN_CAP_BYTES = 1_000_000;
-/** The smallest per-run budget: less than this left today counts as spent. */
+/** The smallest --budget-usd the runner accepts: --max-budget-usd cannot
+ *  express less, so a smaller (or malformed) value is a recorded failed run. */
 export const MIN_RUN_BUDGET_USD = 0.01;
 /** Set in the runner's and the child's environment so a Sterling hook that
  *  somehow runs inside them never launches a second worker. */
@@ -403,33 +407,41 @@ export function buildWorkerArgs({ prompt, mcpConfig, budgetUsd = WORKER_RUN_BUDG
   ];
 }
 
-const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
-
 export function readState(root) {
   const s = readJson(workerPaths(root).state);
-  return s && !s.unreadable ? s : { spend: {} };
+  return s && !s.unreadable ? s : {};
 }
 
-/** USD spent on UTC day `day`, per the runner's state file. */
-export function spentOn(state, day) {
-  return Number(state?.spend?.[day] ?? 0) || 0;
+/** The one state writer: the state file holds the last run only (a legacy
+ *  per-day `spend` map from the removed daily cap is dropped by this rewrite).
+ *  Used by runWorker for a finished run and by the launcher for a failure to
+ *  start, so H1 and the back-off see both the same way. */
+function writeLastRun(root, lastRun) {
+  const { state } = workerPaths(root);
+  mkdirSync(dirname(state), { recursive: true });
+  writeFileSync(state, JSON.stringify({ last_run: lastRun }));
 }
 
-export function dailyBudget(config) {
-  const v = Number(config?.maintenance_worker?.daily_budget_usd);
-  return Number.isFinite(v) && v > 0 ? v : DEFAULT_DAILY_BUDGET_USD;
+/** Append one line about a launcher outcome to maintenance-worker.log. The
+ *  launcher's outcomes are never printed by a hook: this log is where a
+ *  back-off or a failed launch is on record (P5). */
+function logLauncherNote(root, reason, detail) {
+  const { log } = workerPaths(root);
+  mkdirSync(dirname(log), { recursive: true });
+  rotateIfLarge(log);
+  appendFileSync(log, `maintenance-worker: ${new Date().toISOString()} ${reason}: ${detail}\n`);
 }
 
-const LOG_HINT = '(log: .sterling/maintenance-worker.log)';
-
-function failLine(reason) {
-  return `⚠ Sterling maintenance worker: launch FAILED (${reason}) — reconcile items stay open; it retries on the next commit or Stop, or drain by hand with /sterling:drain.`;
+function failDetail(reason) {
+  return `launch FAILED (${reason}) — reconcile items stay open; it retries after the 30-minute back-off, or drain by hand with /sterling:drain.`;
 }
 
 /**
  * Start the worker if one is owed. NEVER throws: every outcome is a result
- * object, and anything the session must see (a failure, an active daily cap or
- * back-off, a failed last run) carries `line`, one line the hook shows.
+ * object. The result carries no text for the hook to show: a back-off, a git
+ * failure or a failed launch has a `detail` string that is appended to
+ * maintenance-worker.log (and returned for tests), and nothing else. If that
+ * log write itself fails, the result says so in `log_error`.
  *   opts.root       project root (the hook's normalized input.cwd)
  *   opts.config     .sterling/config.json (raw or parsed; null = defaults)
  *   opts.store      an open SterlingStore (or opts.items: the open reconcile items)
@@ -440,6 +452,36 @@ function failLine(reason) {
  *   opts.pluginRoot override; opts.env process.env override
  */
 export function maybeLaunchMaintenanceWorker(opts) {
+  const result = launchWorker(opts);
+  if (result.detail) {
+    let logError = null;
+    try {
+      logLauncherNote(opts.root, result.reason, result.detail);
+    } catch (e) {
+      logError = e?.message ?? String(e);
+      result.log_error = logError;
+    }
+    // A failure to START (git cannot answer, a broken install, a spawn error)
+    // is a failed last run: H1 names it (workerBreakage) and the back-off stops
+    // a retry at every Stop. A back-off note is not a new failure. If the log
+    // could not be written, that is folded into the recorded error.
+    if (result.reason === 'git_failed' || result.reason === 'error') {
+      try {
+        writeLastRun(opts.root, {
+          trigger: opts.trigger,
+          ok: false,
+          at: new Date(opts.now ?? Date.now()).toISOString(),
+          error: logError ? `${result.detail}; could not write maintenance-worker.log (${logError})` : result.detail,
+        });
+      } catch (e) {
+        result.log_error = [result.log_error, `could not record last_run: ${e?.message ?? e}`].filter(Boolean).join('; ');
+      }
+    }
+  }
+  return result;
+}
+
+function launchWorker(opts) {
   try {
     const env = opts.env ?? process.env;
     if (env[WORKER_ENV_FLAG] === '1') return { launched: false, reason: 'inside_worker' };
@@ -463,13 +505,7 @@ export function maybeLaunchMaintenanceWorker(opts) {
     if (Number.isFinite(failedAt) && nowMs - failedAt < BACKOFF_MS) {
       const until = new Date(failedAt + BACKOFF_MS).toISOString();
       const what = last.ok === false ? `last run FAILED at ${last.at} (${last.error})` : `worker made no progress in its last run at ${last.at} (0 evidence-backed verdicts, 0 closes)`;
-      return { launched: false, reason: 'backoff', line: `⚠ Sterling maintenance worker: ${what} — backing off, no relaunch before ${until} ${LOG_HINT}.` };
-    }
-    const cap = dailyBudget(opts.config);
-    const spent = spentOn(state, utcDay(nowMs));
-    // Under a cent left is spent: --max-budget-usd cannot express less.
-    if (cap - spent < MIN_RUN_BUDGET_USD) {
-      return { launched: false, reason: 'daily_cap', line: `⚠ Sterling maintenance worker: daily budget reached ($${spent.toFixed(2)} of $${cap.toFixed(2)} spent today, UTC) — no launch until 00:00 UTC; raise maintenance_worker.daily_budget_usd or drain with /sterling:drain.` };
+      return { launched: false, reason: 'backoff', detail: `${what} — backing off, no relaunch before ${until}` };
     }
     if (lockState(readJson(paths.lock), nowMs, opts.isAlive) === 'live') return { launched: false, reason: 'already_running' };
     const lastLaunch = Number(readJson(paths.lastLaunch)?.at_ms);
@@ -482,19 +518,19 @@ export function maybeLaunchMaintenanceWorker(opts) {
     const git = gitState(opts.root, opts.spawnSync);
     const dirty = git && dirtyPaths(opts.root, [...new Set(open.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
     if (!dirty) {
-      return { launched: false, reason: 'git_failed', line: `⚠ Sterling maintenance worker: git could not report HEAD or the working-tree state in ${opts.root}, so every reconcile item counts as dirty and no worker starts; drain with /sterling:drain.` };
+      return { launched: false, reason: 'git_failed', detail: `git could not report HEAD or the working-tree state in ${opts.root}, so every reconcile item counts as dirty and no worker starts; drain with /sterling:drain.` };
     }
     const eligible = open.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
     if (eligible.length === 0) return { launched: false, reason: 'none_eligible' };
 
     const pluginRoot = opts.pluginRoot ?? pluginRootFrom();
-    if (!pluginRoot) return { launched: false, reason: 'error', line: failLine('plugin root not found above the hook') };
+    if (!pluginRoot) return { launched: false, reason: 'error', detail: failDetail('plugin root not found above the hook') };
     // Resolve everything the runner needs NOW, so a broken install fails loud
     // in the hook rather than silently in a detached process.
     resolveMcpConfig(pluginRoot, opts.root);
     readWorkerPrompt(pluginRoot);
     const runner = join(pluginRoot, 'scripts', 'maintenance-worker-run.mjs');
-    if (!existsSync(runner)) return { launched: false, reason: 'error', line: failLine(`runner missing: ${runner}`) };
+    if (!existsSync(runner)) return { launched: false, reason: 'error', detail: failDetail(`runner missing: ${runner}`) };
 
     mkdirSync(dirname(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
@@ -508,10 +544,9 @@ export function maybeLaunchMaintenanceWorker(opts) {
     try {
       rotateIfLarge(paths.log);
       logFd = openSync(paths.log, 'a');
-      const budget = Math.min(WORKER_RUN_BUDGET_USD, Math.round((cap - spent) * 100) / 100);
       const child = opts.spawn(
         process.execPath,
-        [runner, '--project', opts.root, '--trigger', String(opts.trigger), '--token', token, '--budget-usd', String(budget)],
+        [runner, '--project', opts.root, '--trigger', String(opts.trigger), '--token', token, '--budget-usd', String(WORKER_RUN_BUDGET_USD)],
         { cwd: opts.root, detached: true, stdio: ['ignore', logFd, logFd], env: { ...env, [WORKER_ENV_FLAG]: '1' } }
       );
       // An async spawn failure (e.g. ENOENT) arrives as 'error' after the hook
@@ -519,18 +554,15 @@ export function maybeLaunchMaintenanceWorker(opts) {
       child.on?.('error', () => releaseLock(paths, token));
       child.unref?.();
       writeFileSync(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: 'running', token }));
-      const note = stalled
-        ? `ℹ Sterling maintenance worker: the previous run ${last.ok === false ? `FAILED at ${last.at} (${last.error})` : `made no progress at ${last.at}`}; relaunched after the back-off ${LOG_HINT}.`
-        : undefined;
-      return { launched: true, reason: 'launched', pid: child.pid, items: eligible.length, ...(note ? { line: note } : {}) };
+      return { launched: true, reason: 'launched', pid: child.pid, items: eligible.length };
     } catch (e) {
       releaseLock(paths, token);
-      return { launched: false, reason: 'error', line: failLine(`spawn: ${e?.message ?? e}`) };
+      return { launched: false, reason: 'error', detail: failDetail(`spawn: ${e?.message ?? e}`) };
     } finally {
       if (logFd !== undefined) closeSync(logFd);
     }
   } catch (e) {
-    return { launched: false, reason: 'error', line: failLine(e?.message ?? String(e)) };
+    return { launched: false, reason: 'error', detail: failDetail(e?.message ?? String(e)) };
   }
 }
 
@@ -539,13 +571,24 @@ export function releaseLock(paths, token) {
   if (readJson(paths.lock)?.token === token) rmSync(paths.lock, { force: true });
 }
 
-/** For H1: is a worker running, how did the last run end, today's spend. */
+/** For H1: is a worker running, and how did the last run end. */
 export function workerStatus(root, nowMs = Date.now(), isAlive = pidAlive) {
   const paths = workerPaths(root);
   const lock = readJson(paths.lock);
   const live = lockState(lock, nowMs, isAlive) === 'live';
   const state = readState(root);
-  return { running: live, pid: live ? lock.pid : null, since: live ? lock.started_at : null, lastRun: state.last_run ?? null, spentToday: spentOn(state, utcDay(nowMs)) };
+  return { running: live, pid: live ? lock.pid : null, since: live ? lock.started_at : null, lastRun: state.last_run ?? null };
+}
+
+/** The reason a recorded run was BROKEN, or null for a routine run. runWorker
+ *  sets ok:false, with the reasons in `error`, for a non-zero exit, an error
+ *  result (is_error or an error subtype), permission denials, an MCP server
+ *  that is not connected, a timeout, a missing result event and a run that
+ *  could not start. A back-off, nothing eligible and no_progress with no error
+ *  are routine and give null. H1 shows this once; no hook prints it otherwise. */
+export function workerBreakage(lastRun) {
+  if (!lastRun || lastRun.ok !== false) return null;
+  return { at: lastRun.at ?? 'unknown time', reason: lastRun.error ? String(lastRun.error) : 'unknown error' };
 }
 
 /** '<n>d <n>h' / '<n>h' / '<n>m' since an ISO timestamp; 'unknown' when it
@@ -558,6 +601,16 @@ export function ageText(iso, nowMs = Date.now()) {
   const hours = Math.floor((mins % 1440) / 60);
   if (days > 0) return `${days}d ${hours}h`;
   return hours > 0 ? `${hours}h` : `${mins}m`;
+}
+
+/** Is the MCP server status from the init event breakage? Only an explicit
+ *  failed or disconnected status, or any other non-connected status (pending,
+ *  needs-auth, absent from the list) when no sterling tool call succeeded in the
+ *  stream. A 'pending' snapshot at init that the run then used is unknown, not
+ *  broken. null status (never reported) is unknown. */
+export function mcpBroken(status, sterlingOk) {
+  if (status === null || status === 'connected') return false;
+  return status === 'failed' || status === 'disconnected' || sterlingOk === 0;
 }
 
 /** Verdict lines out of the final result text (the child's JSON-lines report). */
@@ -593,7 +646,7 @@ export function streamJournal(journal, observe = () => {}, launchKeys = new Map(
   let buf = '';
   const pending = new Map();
   const calls = new Map();
-  const out = { result: null, removes: 0, closedOk: 0, lines: 0 };
+  const out = { result: null, removes: 0, closedOk: 0, lines: 0, mcpStatus: null, sterlingOk: 0 };
   const handle = (e) => {
     out.lines++;
     const content = e?.message?.content;
@@ -609,7 +662,10 @@ export function streamJournal(journal, observe = () => {}, launchKeys = new Map(
         if (calls.has(c.tool_use_id)) {
           const call = calls.get(c.tool_use_id);
           calls.delete(c.tool_use_id);
-          if (!c.is_error) observe(call.name, call.input);
+          if (!c.is_error) {
+            if (call.name.startsWith(`mcp__${SERVER}__`)) out.sterlingOk++;
+            observe(call.name, call.input);
+          }
           continue;
         }
         if (!pending.has(c.tool_use_id)) continue;
@@ -618,10 +674,17 @@ export function streamJournal(journal, observe = () => {}, launchKeys = new Map(
         const text = Array.isArray(c.content) ? c.content.map((p) => p?.text ?? '').join('') : String(c.content ?? '');
         journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error: Boolean(c.is_error), result: text.slice(0, 400) });
         out.removes++;
-        if (!c.is_error) out.closedOk++;
+        if (!c.is_error) {
+          out.closedOk++;
+          out.sterlingOk++;
+        }
       }
     } else if (e?.type === 'result') {
       out.result = e;
+    } else if (e?.type === 'system' && e.subtype === 'init' && Array.isArray(e.mcp_servers)) {
+      // The init event lists each MCP server's connection status; a listing
+      // without ours means it was never configured or loaded.
+      out.mcpStatus = String(e.mcp_servers.find((m) => m?.name === SERVER)?.status ?? 'missing');
     }
   };
   const feedLine = (line) => {
@@ -710,28 +773,21 @@ export async function runWorker(opts) {
   rotateJournal(opts.root);
   const journal = (entry) => appendFileSync(paths.journal, JSON.stringify({ at: iso(), run: runId, ...entry }) + '\n');
   const record = (outcome) => {
-    const state = readState(opts.root);
-    const spend = { ...(state.spend ?? {}) };
-    const day = utcDay(runStartMs);
-    const charged = Number(outcome.charged_usd);
-    if (Number.isFinite(charged) && charged > 0) spend[day] = Math.round((spentOn(state, day) + charged) * 1e6) / 1e6;
-    // keep the last 7 days only
-    for (const d of Object.keys(spend).sort().slice(0, -7)) delete spend[d];
-    writeFileSync(paths.state, JSON.stringify({ ...state, spend, last_run: { run: runId, trigger: opts.trigger, ...outcome } }));
+    writeLastRun(opts.root, { run: runId, trigger: opts.trigger, ...outcome });
     journal({ kind: 'run_summary', ...outcome });
   };
   try {
     // A malformed or zero budget is a recorded failure (state written, back-off
-    // armed), never a silent exit: nothing ran, so nothing is charged.
+    // armed), never a silent exit.
     if (!budgetOk) {
-      record({ ok: false, at: iso(), error: `invalid --budget-usd '${rawBudget}' (needs a number >= ${MIN_RUN_BUDGET_USD})`, charged_usd: 0 });
+      record({ ok: false, at: iso(), error: `invalid --budget-usd '${rawBudget}' (needs a number >= ${MIN_RUN_BUDGET_USD})` });
       return 1;
     }
     let eligible = null;
     if (opts.token) {
       eligible = readEligible();
       if (!eligible) {
-        record({ ok: false, at: iso(), error: 'the eligible-item list is missing or belongs to another launch', charged_usd: 0 });
+        record({ ok: false, at: iso(), error: 'the eligible-item list is missing or belongs to another launch' });
         return 1;
       }
     }
@@ -739,7 +795,7 @@ export async function runWorker(opts) {
     try {
       args = buildArgs(eligible);
     } catch (e) {
-      record({ ok: false, at: iso(), error: e?.message ?? String(e), charged_usd: 0 });
+      record({ ok: false, at: iso(), error: e?.message ?? String(e) });
       return 1;
     }
     // A refused close on an eligible item is recorded as a 'refused' verdict
@@ -747,13 +803,23 @@ export async function runWorker(opts) {
     // them changes (an item the server always refuses must not relaunch the
     // worker at every Stop). A permission denial is not a server refusal.
     const byId = new Map((eligible?.items ?? []).map((t) => [t.id, t]));
+    // What was already refused for an item's current file_keys BEFORE this run:
+    // refusing it again is not information, so it is not progress (else an item
+    // the server always refuses would relaunch at every new HEAD with no back-off).
+    const standing = judgedVerdicts(opts.root);
+    const repeatRefusal = (id) => {
+      const v = standing.get(id);
+      return Boolean(v) && v.verdict === 'refused' && v.keys === sortedKeys(byId.get(id)?.file_keys);
+    };
     let refusedVerdicts = 0;
+    let newRefusals = 0;
     const journalCall = (entry) => {
       journal(entry);
       if (entry.kind === 'tool_call' && entry.is_error === true && byId.has(entry.item_id) && !/permission/i.test(entry.result ?? '')) {
         // The server's refusal IS the evidence for this verdict.
         journal({ kind: 'verdict', item_id: entry.item_id, verdict: 'refused', file_keys: byId.get(entry.item_id).file_keys, head: eligible.head, evidence: true, reason: String(entry.result ?? '').slice(0, 200) });
         refusedVerdicts++;
+        if (!repeatRefusal(entry.item_id)) newRefusals++;
       }
     };
     // EVIDENCE GATE (P3, not the prompt alone): what the child actually read.
@@ -808,9 +874,9 @@ export async function runWorker(opts) {
         resolve({ code: c, spawnError: null, timedOut });
       });
     });
-    const { result, removes, closedOk } = stream.end();
+    const { result, removes, closedOk, mcpStatus, sterlingOk } = stream.end();
     if (spawnError) {
-      record({ ok: false, at: iso(), error: `could not start ${bin}: ${spawnError.message ?? spawnError}`, charged_usd: 0 });
+      record({ ok: false, at: iso(), error: `could not start ${bin}: ${spawnError.message ?? spawnError}` });
       return 1;
     }
     const verdicts = parseVerdicts(result?.result);
@@ -845,10 +911,11 @@ export async function runWorker(opts) {
       result ? null : 'no stream-json result event',
       result?.is_error || String(result?.subtype ?? '').startsWith('error') ? `error result (${result?.subtype ?? 'unknown'})` : null,
       denials ? `${denials} permission denial(s)` : null,
+      mcpBroken(mcpStatus, sterlingOk) ? `MCP server '${SERVER}' not connected (${mcpStatus}${mcpStatus === 'failed' || mcpStatus === 'disconnected' ? '' : '; no successful sterling tool call'})` : null,
     ].filter(Boolean);
     const cost = Number(result?.total_cost_usd);
-    // No reported cost (killed, crashed, hung: no result event) is charged the
-    // run's whole budget, never $0 — the daily cap must hold when the CLI dies.
+    // No reported cost (killed, crashed, hung: no result event) records null,
+    // never a made-up $0.
     const reported = result && Number.isFinite(cost);
     record({
       ok: problems.length === 0,
@@ -859,11 +926,13 @@ export async function runWorker(opts) {
       remove_calls: removes,
       closes_ok: closedOk,
       evidenced_verdicts: evidenced,
-      // No evidence-backed verdict and no close: back off like a failure.
+      // No evidence-backed verdict, no close and no NEW refusal: back off like a failure.
       refused_verdicts: refusedVerdicts,
-      no_progress: evidenced === 0 && closedOk === 0 && refusedVerdicts === 0,
+      no_progress: evidenced === 0 && closedOk === 0 && newRefusals === 0,
       cost_usd: reported ? cost : null,
-      charged_usd: reported ? cost : budgetUsd,
+      // The MCP server's status from the stream's init event (null: never
+      // reported); mcpBroken says when it counts as breakage.
+      mcp_status: mcpStatus,
     });
     return problems.length === 0 ? 0 : 1;
   } finally {

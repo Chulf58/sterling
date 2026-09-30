@@ -31,8 +31,7 @@
     "deep_threshold": 15
   },
   "maintenance_worker": {
-    "enabled": true,
-    "daily_budget_usd": 5
+    "enabled": true
   },
   "attestation_path_globs": [],
   "undeclared_source_exclude_globs": ["**/*.sh"],

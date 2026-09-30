@@ -68,19 +68,15 @@ function main(input) {
   // BACKGROUND MAINTENANCE WORKER, commit trigger (decision
   // maintenance-queue-background-haiku-worker-simple-redesign): this is the
   // one hook that sees a Bash `git commit`. The launcher is lock- and
-  // debounce-guarded and never throws. Its line (a failed launch, an active
-  // daily cap or back-off, a failed last run) rides this hook's
-  // additionalContext on every exit path below (P5): PostToolUse stderr on
-  // exit 0 is not shown in-session, additionalContext is.
-  let workerLine = '';
+  // debounce-guarded and never throws. It prints nothing through this hook: a
+  // back-off or failed launch goes to .sterling/maintenance-worker.log, and real
+  // breakage shows once on H1's session-start line (decision
+  // maintenance-worker-notices-session-start-only-and-no-sliver-launch).
   if (GIT_COMMIT_RE.test(command)) {
-    const launch = maybeLaunchMaintenanceWorker({ root: input.cwd, config: loadConfig(input.cwd), store, trigger: 'commit', spawn });
-    if (launch.line) workerLine = launch.line;
+    maybeLaunchMaintenanceWorker({ root: input.cwd, config: loadConfig(input.cwd), store, trigger: 'commit', spawn });
   }
-  const withWorkerLine = (text) => [workerLine, text].filter(Boolean).join('\n\n');
   const quietExit = (notice) => {
-    const text = withWorkerLine(notice);
-    if (text) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: text } }), 0);
+    if (notice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: notice } }), 0);
     return allow();
   };
 
@@ -251,16 +247,15 @@ function main(input) {
   // migrationNotice is already folded into `assembled.text` above (as a
   // leading, charged chrome part — fix-round HIGH 4), so it is not
   // re-prepended here.
-  const payload = withWorkerLine(assembled.text);
   return exitAfterWrite(
-    JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }),
+    JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: assembled.text } }),
     0,
     { onWritten: recordDelivered }
   );
   } catch (e) {
   // Delivery is an aid, never a gate: internal failure is loud but NON-blocking
   // (P5 visibility without an AC7 violation).
-    return warnNonBlocking(`${workerLine ? `${workerLine}\n` : ''}H19: bash pointer delivery failed: ${(e && e.message) || e}`);
+    return warnNonBlocking(`H19: bash pointer delivery failed: ${(e && e.message) || e}`);
   }
 }
 main(input);

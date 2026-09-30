@@ -5039,14 +5039,15 @@ var configSchema = external_exports.object({
   // headless Claude run that judges open reconcile_needed items and closes the
   // ones already paid (scripts/hooks/lib/maintenance-worker.mjs). false stops
   // every launch; the queue then drains by hand with /sterling:drain.
-  // daily_budget_usd caps the worker's spend per UTC day: the runner adds each
-  // run's cost to its state file and the launcher refuses to start once the
-  // day's spend reaches it, with a visible line. Both defaults live here AND
-  // in templates/default-config.json, because install/sync fill an omitted key
-  // from this zod default, not the template.
+  // There is no daily budget: the worker runs whenever the queue has eligible
+  // work, capped only per run (decision
+  // maintenance-worker-notices-session-start-only-and-no-sliver-launch). A
+  // daily_budget_usd left in an existing config is stripped by this non-strict
+  // object. The default lives here AND in templates/default-config.json,
+  // because install/sync fill an omitted key from this zod default, not the
+  // template.
   maintenance_worker: external_exports.object({
-    enabled: external_exports.boolean().default(true),
-    daily_budget_usd: external_exports.number().positive().default(5)
+    enabled: external_exports.boolean().default(true)
   }).default({}),
   // Board 8390f8fa: a registry-style feature_article can outgrow its own
   // round-trip — knowledge_append responses on mcp-tool-surface (29 history
@@ -8786,14 +8787,12 @@ import { closeSync as closeSync4, existsSync as existsSync7, mkdirSync as mkdirS
 import { dirname as dirname7, isAbsolute as isAbsolute2, join as join11, resolve as resolve6, sep as sep2 } from "node:path";
 import { fileURLToPath } from "node:url";
 var WORKER_RUN_BUDGET_USD = 2;
-var DEFAULT_DAILY_BUDGET_USD = 5;
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;
 var WORKER_TIMEOUT_MS = 20 * 6e4;
 var LOCK_STALE_MS2 = 30 * 6e4;
 var TAKEOVER_STALE_MS = 6e4;
 var ROTATE_BYTES = 1e6;
-var MIN_RUN_BUDGET_USD = 0.01;
 var WORKER_ENV_FLAG = "STERLING_MAINTENANCE_WORKER";
 var WORKER_DISABLE_ENV = "STERLING_MAINTENANCE_WORKER_DISABLE";
 var SERVER = "sterling";
@@ -8981,23 +8980,51 @@ function readWorkerPrompt(pluginRoot) {
     throw new Error(`cannot read the worker prompt ${path} (${e?.code ?? e?.message ?? e})`);
   }
 }
-var utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 function readState(root) {
   const s2 = readJson(workerPaths(root).state);
-  return s2 && !s2.unreadable ? s2 : { spend: {} };
+  return s2 && !s2.unreadable ? s2 : {};
 }
-function spentOn(state, day) {
-  return Number(state?.spend?.[day] ?? 0) || 0;
+function writeLastRun(root, lastRun) {
+  const { state } = workerPaths(root);
+  mkdirSync7(dirname7(state), { recursive: true });
+  writeFileSync5(state, JSON.stringify({ last_run: lastRun }));
 }
-function dailyBudget(config) {
-  const v = Number(config?.maintenance_worker?.daily_budget_usd);
-  return Number.isFinite(v) && v > 0 ? v : DEFAULT_DAILY_BUDGET_USD;
+function logLauncherNote(root, reason, detail) {
+  const { log } = workerPaths(root);
+  mkdirSync7(dirname7(log), { recursive: true });
+  rotateIfLarge(log);
+  appendFileSync(log, `maintenance-worker: ${(/* @__PURE__ */ new Date()).toISOString()} ${reason}: ${detail}
+`);
 }
-var LOG_HINT = "(log: .sterling/maintenance-worker.log)";
-function failLine(reason) {
-  return `\u26A0 Sterling maintenance worker: launch FAILED (${reason}) \u2014 reconcile items stay open; it retries on the next commit or Stop, or drain by hand with /sterling:drain.`;
+function failDetail(reason) {
+  return `launch FAILED (${reason}) \u2014 reconcile items stay open; it retries after the 30-minute back-off, or drain by hand with /sterling:drain.`;
 }
 function maybeLaunchMaintenanceWorker(opts) {
+  const result = launchWorker(opts);
+  if (result.detail) {
+    let logError = null;
+    try {
+      logLauncherNote(opts.root, result.reason, result.detail);
+    } catch (e) {
+      logError = e?.message ?? String(e);
+      result.log_error = logError;
+    }
+    if (result.reason === "git_failed" || result.reason === "error") {
+      try {
+        writeLastRun(opts.root, {
+          trigger: opts.trigger,
+          ok: false,
+          at: new Date(opts.now ?? Date.now()).toISOString(),
+          error: logError ? `${result.detail}; could not write maintenance-worker.log (${logError})` : result.detail
+        });
+      } catch (e) {
+        result.log_error = [result.log_error, `could not record last_run: ${e?.message ?? e}`].filter(Boolean).join("; ");
+      }
+    }
+  }
+  return result;
+}
+function launchWorker(opts) {
   try {
     const env = opts.env ?? process.env;
     if (env[WORKER_ENV_FLAG] === "1") return { launched: false, reason: "inside_worker" };
@@ -9015,12 +9042,7 @@ function maybeLaunchMaintenanceWorker(opts) {
     if (Number.isFinite(failedAt) && nowMs - failedAt < BACKOFF_MS) {
       const until = new Date(failedAt + BACKOFF_MS).toISOString();
       const what = last.ok === false ? `last run FAILED at ${last.at} (${last.error})` : `worker made no progress in its last run at ${last.at} (0 evidence-backed verdicts, 0 closes)`;
-      return { launched: false, reason: "backoff", line: `\u26A0 Sterling maintenance worker: ${what} \u2014 backing off, no relaunch before ${until} ${LOG_HINT}.` };
-    }
-    const cap = dailyBudget(opts.config);
-    const spent = spentOn(state, utcDay(nowMs));
-    if (cap - spent < MIN_RUN_BUDGET_USD) {
-      return { launched: false, reason: "daily_cap", line: `\u26A0 Sterling maintenance worker: daily budget reached ($${spent.toFixed(2)} of $${cap.toFixed(2)} spent today, UTC) \u2014 no launch until 00:00 UTC; raise maintenance_worker.daily_budget_usd or drain with /sterling:drain.` };
+      return { launched: false, reason: "backoff", detail: `${what} \u2014 backing off, no relaunch before ${until}` };
     }
     if (lockState(readJson(paths.lock), nowMs, opts.isAlive) === "live") return { launched: false, reason: "already_running" };
     const lastLaunch = Number(readJson(paths.lastLaunch)?.at_ms);
@@ -9028,16 +9050,16 @@ function maybeLaunchMaintenanceWorker(opts) {
     const git = gitState(opts.root, opts.spawnSync);
     const dirty = git && dirtyPaths(opts.root, [...new Set(open.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
     if (!dirty) {
-      return { launched: false, reason: "git_failed", line: `\u26A0 Sterling maintenance worker: git could not report HEAD or the working-tree state in ${opts.root}, so every reconcile item counts as dirty and no worker starts; drain with /sterling:drain.` };
+      return { launched: false, reason: "git_failed", detail: `git could not report HEAD or the working-tree state in ${opts.root}, so every reconcile item counts as dirty and no worker starts; drain with /sterling:drain.` };
     }
     const eligible = open.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
     if (eligible.length === 0) return { launched: false, reason: "none_eligible" };
     const pluginRoot = opts.pluginRoot ?? pluginRootFrom();
-    if (!pluginRoot) return { launched: false, reason: "error", line: failLine("plugin root not found above the hook") };
+    if (!pluginRoot) return { launched: false, reason: "error", detail: failDetail("plugin root not found above the hook") };
     resolveMcpConfig(pluginRoot, opts.root);
     readWorkerPrompt(pluginRoot);
     const runner = join11(pluginRoot, "scripts", "maintenance-worker-run.mjs");
-    if (!existsSync7(runner)) return { launched: false, reason: "error", line: failLine(`runner missing: ${runner}`) };
+    if (!existsSync7(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
     mkdirSync7(dirname7(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
@@ -9048,25 +9070,23 @@ function maybeLaunchMaintenanceWorker(opts) {
     try {
       rotateIfLarge(paths.log);
       logFd = openSync4(paths.log, "a");
-      const budget = Math.min(WORKER_RUN_BUDGET_USD, Math.round((cap - spent) * 100) / 100);
       const child = opts.spawn(
         process.execPath,
-        [runner, "--project", opts.root, "--trigger", String(opts.trigger), "--token", token, "--budget-usd", String(budget)],
+        [runner, "--project", opts.root, "--trigger", String(opts.trigger), "--token", token, "--budget-usd", String(WORKER_RUN_BUDGET_USD)],
         { cwd: opts.root, detached: true, stdio: ["ignore", logFd, logFd], env: { ...env, [WORKER_ENV_FLAG]: "1" } }
       );
       child.on?.("error", () => releaseLock(paths, token));
       child.unref?.();
       writeFileSync5(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
-      const note = stalled ? `\u2139 Sterling maintenance worker: the previous run ${last.ok === false ? `FAILED at ${last.at} (${last.error})` : `made no progress at ${last.at}`}; relaunched after the back-off ${LOG_HINT}.` : void 0;
-      return { launched: true, reason: "launched", pid: child.pid, items: eligible.length, ...note ? { line: note } : {} };
+      return { launched: true, reason: "launched", pid: child.pid, items: eligible.length };
     } catch (e) {
       releaseLock(paths, token);
-      return { launched: false, reason: "error", line: failLine(`spawn: ${e?.message ?? e}`) };
+      return { launched: false, reason: "error", detail: failDetail(`spawn: ${e?.message ?? e}`) };
     } finally {
       if (logFd !== void 0) closeSync4(logFd);
     }
   } catch (e) {
-    return { launched: false, reason: "error", line: failLine(e?.message ?? String(e)) };
+    return { launched: false, reason: "error", detail: failDetail(e?.message ?? String(e)) };
   }
 }
 function releaseLock(paths, token) {
@@ -9266,8 +9286,7 @@ try {
     process.exit(2);
   };
   const releaseWithPressure = () => {
-    const workerLaunch = maybeLaunchMaintenanceWorker({ root: input.cwd, config, store, trigger: "stop", spawn });
-    if (workerLaunch.line) disclosureParts.push(workerLaunch.line);
+    maybeLaunchMaintenanceWorker({ root: input.cwd, config, store, trigger: "stop", spawn });
     let advisoryText = "";
     const advisorySpends = [];
     if (!input.stop_hook_active) {

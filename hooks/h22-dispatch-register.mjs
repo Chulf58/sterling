@@ -4866,14 +4866,15 @@ var configSchema = external_exports.object({
   // headless Claude run that judges open reconcile_needed items and closes the
   // ones already paid (scripts/hooks/lib/maintenance-worker.mjs). false stops
   // every launch; the queue then drains by hand with /sterling:drain.
-  // daily_budget_usd caps the worker's spend per UTC day: the runner adds each
-  // run's cost to its state file and the launcher refuses to start once the
-  // day's spend reaches it, with a visible line. Both defaults live here AND
-  // in templates/default-config.json, because install/sync fill an omitted key
-  // from this zod default, not the template.
+  // There is no daily budget: the worker runs whenever the queue has eligible
+  // work, capped only per run (decision
+  // maintenance-worker-notices-session-start-only-and-no-sliver-launch). A
+  // daily_budget_usd left in an existing config is stripped by this non-strict
+  // object. The default lives here AND in templates/default-config.json,
+  // because install/sync fill an omitted key from this zod default, not the
+  // template.
   maintenance_worker: external_exports.object({
-    enabled: external_exports.boolean().default(true),
-    daily_budget_usd: external_exports.number().positive().default(5)
+    enabled: external_exports.boolean().default(true)
   }).default({}),
   // Board 8390f8fa: a registry-style feature_article can outgrow its own
   // round-trip — knowledge_append responses on mcp-tool-surface (29 history

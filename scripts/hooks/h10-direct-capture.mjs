@@ -441,10 +441,11 @@ try {
     // maintenance-queue-background-haiku-worker-simple-redesign): every release
     // runs after settlement minted this Stop's reconcile items, so a Stop with
     // an unjudged reconcile_needed item starts one detached worker (lock- and
-    // debounce-guarded). It never throws; a failed launch rides this release's
-    // systemMessage as one loud line (P5).
-    const workerLaunch = maybeLaunchMaintenanceWorker({ root: input.cwd, config, store, trigger: 'stop', spawn });
-    if (workerLaunch.line) disclosureParts.push(workerLaunch.line);
+    // debounce-guarded). It never throws and prints nothing here: a back-off or
+    // failed launch goes to .sterling/maintenance-worker.log, and real breakage
+    // shows once on H1's session-start line (decision
+    // maintenance-worker-notices-session-start-only-and-no-sliver-launch).
+    maybeLaunchMaintenanceWorker({ root: input.cwd, config, store, trigger: 'stop', spawn });
     let advisoryText = '';
     const advisorySpends = [];
     if (!input.stop_hook_active) {

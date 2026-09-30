@@ -16,7 +16,7 @@ import {
   gitState,
   judgedVerdicts,
   rotateJournal,
-  MIN_RUN_BUDGET_USD,
+  WORKER_RUN_BUDGET_USD,
   buildWorkerArgs,
   dirtyPaths,
   maybeLaunchMaintenanceWorker,
@@ -26,6 +26,7 @@ import {
   runWorker,
   streamJournal,
   unjudgedReconcileItems,
+  workerBreakage,
   workerPaths,
   workerPrompt,
   WORKER_TOOLS,
@@ -304,27 +305,25 @@ test('kill switch: maintenance_worker.enabled false, the test-run env flag, and 
   }
 });
 
-test('[finding 1] daily cap: once the UTC day spend reaches maintenance_worker.daily_budget_usd the launch is refused with a visible line; the per-run budget is lowered to what is left', () => {
+test('[no daily cap] a large prior spend today (even the Dome Farmer 4.874 of 5, or 50 USD) still launches, with the per-run budget of WORKER_RUN_BUDGET_USD; a stale daily_budget_usd in config is ignored (decision maintenance-worker-notices-session-start-only-and-no-sliver-launch, point 3)', () => {
   const fx = fixture();
   try {
-    const sp = fakeSpawn();
-    writeState(fx, { spend: { '2026-09-29': 5 } });
-    const capped = launch(fx, { spawn: sp.fn });
-    assert.equal(capped.reason, 'daily_cap');
-    assert.match(capped.line, /daily budget reached \(\$5\.00 of \$5\.00 spent today, UTC\)/);
-    assert.equal(sp.calls.length, 0);
-
-    writeState(fx, { spend: { '2026-09-29': 3.2, '2026-09-28': 99 } });
-    assert.equal(launch(fx, { spawn: sp.fn, config: { maintenance_worker: { daily_budget_usd: 3 } } }).reason, 'daily_cap', 'the configured cap applies');
-    const r = launch(fx, { spawn: sp.fn });
-    assert.equal(r.launched, true, "yesterday's spend does not count today");
-    assert.equal(sp.calls[0].args.at(-1), '1.8', 'the run may spend only what is left of the day');
+    for (const spend of [4.874, 5, 50]) {
+      const sp = fakeSpawn();
+      rmSync(fx.paths.lastLaunch, { force: true });
+      rmSync(fx.paths.lock, { force: true });
+      writeState(fx, { spend: { '2026-09-29': spend } });
+      const r = launch(fx, { spawn: sp.fn, config: { maintenance_worker: { daily_budget_usd: 3 } } });
+      assert.equal(r.launched, true, `spend ${spend} does not block a launch`);
+      assert.equal(sp.calls[0].args.at(-1), String(WORKER_RUN_BUDGET_USD), 'every launch gets the full per-run cap, never a remainder');
+    }
+    assert.equal(WORKER_RUN_BUDGET_USD, 2);
   } finally {
     fx.cleanup();
   }
 });
 
-test('[finding 1+8] back-off: no relaunch for BACKOFF_MS after a failed run (error_max_budget included), with a visible line; after it, the relaunch names the failure once', () => {
+test('[finding 1+8] back-off: no relaunch for BACKOFF_MS after a failed run (error_max_budget included); the reason goes to the log, never to a hook line; the relaunch after it is silent too', () => {
   const fx = fixture();
   try {
     const sp = fakeSpawn();
@@ -332,31 +331,36 @@ test('[finding 1+8] back-off: no relaunch for BACKOFF_MS after a failed run (err
     writeState(fx, { spend: {}, last_run: { ok: false, at, error: 'error result (error_max_budget_usd)' } });
     const r = launch(fx, { spawn: sp.fn });
     assert.equal(r.reason, 'backoff');
-    assert.match(r.line, /last run FAILED at .*error_max_budget_usd.*backing off, no relaunch before/);
+    assert.equal(r.line, undefined, 'no hook line: the ruling keeps worker status out of Stop and commit output');
+    assert.match(readFileSync(fx.paths.log, 'utf8'), /backoff: last run FAILED at .*error_max_budget_usd.*backing off, no relaunch before/);
     assert.equal(sp.calls.length, 0);
     const later = launch(fx, { spawn: sp.fn, now: Date.parse(at) + BACKOFF_MS + 1 });
     assert.equal(later.launched, true);
-    assert.match(later.line, /previous run FAILED .*relaunched after the back-off/);
+    assert.equal(later.line, undefined, 'a launch after the back-off prints nothing either');
   } finally {
     fx.cleanup();
   }
 });
 
-test('a spawn failure yields one loud line, frees the lock, and never throws', () => {
+test('a spawn failure is logged (never printed), frees the lock, and never throws', () => {
   const fx = fixture();
   try {
     const r = launch(fx, { spawn: fakeSpawn({ throws: new Error('spawn EACCES') }).fn });
     assert.equal(r.launched, false);
     assert.equal(r.reason, 'error');
-    assert.match(r.line, /maintenance worker: launch FAILED \(spawn: spawn EACCES\)/);
-    assert.equal(r.line.split('\n').length, 1, 'exactly one line');
+    assert.equal(r.line, undefined);
+    assert.match(r.detail, /launch FAILED \(spawn: spawn EACCES\)/);
+    assert.equal(r.detail.split('\n').length, 1, 'exactly one line');
+    assert.match(readFileSync(fx.paths.log, 'utf8'), /error: launch FAILED \(spawn: spawn EACCES\)/);
     assert.equal(existsSync(fx.paths.lock), false, 'the slot is freed for the next trigger');
 
+    rmSync(fx.paths.state, { force: true }); // a launcher failure arms the back-off (M2); each case here starts clean
     const broken = launch(fx, { spawn: fakeSpawn().fn, pluginRoot: join(fx.plugin, 'nope'), now: NOW + DEBOUNCE_MS * 2 });
-    assert.match(broken.line, /launch FAILED \(cannot read the plugin MCP wiring/, 'a broken install is loud in the hook, not silent in a detached process');
+    assert.match(broken.detail, /launch FAILED \(cannot read the plugin MCP wiring/, 'a broken install is loud in the hook, not silent in a detached process');
 
+    rmSync(fx.paths.state, { force: true });
     const storeFail = launch(fx, { items: undefined, store: { count: () => { throw new Error('db locked'); } }, spawn: fakeSpawn().fn });
-    assert.match(storeFail.line, /launch FAILED \(db locked\)/);
+    assert.match(storeFail.detail, /launch FAILED \(db locked\)/);
   } finally {
     fx.cleanup();
   }
@@ -395,7 +399,7 @@ const resultEvent = (over) => ({ type: 'result', subtype: 'success', is_error: f
 const readJournal = (fx) => readFileSync(fx.paths.journal, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
 const quiet = { log: () => {} };
 
-test('[finding 7] runWorker journals every maintenance_remove call and result from the stream, then the verdicts; spend is added per UTC day; the lock is released', async () => {
+test('[finding 7] runWorker journals every maintenance_remove call and result from the stream, then the verdicts; the lock is released', async () => {
   const fx = fixture();
   try {
     const result = [
@@ -430,7 +434,8 @@ test('[finding 7] runWorker journals every maintenance_remove call and result fr
     assert.equal(lines[4].remove_calls, 2);
     assert.deepEqual([...owesProseVerdicts(fx.project).keys()], ['22222222-2222-2222-2222-222222222222']);
     const state = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
-    assert.equal(state.spend['2026-09-29'], 1.25);
+    assert.equal(state.spend, undefined, 'no per-day spend accounting: a legacy spend map is dropped, not carried');
+    assert.equal(state.last_run.cost_usd, 0.25, 'the run keeps its own reported cost');
     assert.equal(state.last_run.ok, true);
     assert.equal(existsSync(fx.paths.lock), false, 'the lock is released when the child exits');
   } finally {
@@ -449,7 +454,7 @@ test('runWorker: a non-zero exit, an error_max_budget result or a permission den
     assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: budget.fn, trigger: 'stop', ...quiet }), 1);
     const st = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
     assert.match(st.last_run.error, /error_max_budget_usd/);
-    assert.ok(Object.values(st.spend).some((v) => v >= 2.01), 'a failed run still counts its spend');
+    assert.equal(st.last_run.cost_usd, 2.01, 'a failed run still records its reported cost');
 
     const crashed = fakeClaude(['not json'], { code: 3 });
     assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: crashed.fn, trigger: 'stop', ...quiet }), 1);
@@ -550,24 +555,25 @@ test('runWorker --dry-run prints the argv and spawns nothing', async () => {
 
 // ------------------------------------------------------------ re-check residuals (N1-N4, PARTIAL 2 and 9)
 
-test('[N1] a run with no result event (crashed, killed, hung) is charged its whole per-run budget, never $0', async () => {
+test('[N1] a run with no result event (crashed, killed, hung) records an unknown cost (null), never $0, and no spend map', async () => {
   const fx = fixture();
   try {
     const crashed = fakeClaude(['not json'], { code: 1 });
     assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: crashed.fn, budgetUsd: 1.5, now: () => NOW, ...quiet }), 1);
     let st = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
-    assert.equal(st.spend['2026-09-29'], 1.5, 'charged the --budget-usd it was given');
     assert.equal(st.last_run.cost_usd, null, 'the reported cost stays unknown');
-    assert.equal(st.last_run.charged_usd, 1.5);
+    assert.equal(st.last_run.charged_usd, undefined, 'nothing is charged against a cap that no longer exists');
+    assert.equal(st.spend, undefined);
 
     const hung = fakeClaude([], { hang: true });
     await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: hung.fn, budgetUsd: 2, timeoutMs: 20, now: () => NOW, ...quiet });
     st = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
-    assert.equal(st.spend['2026-09-29'], 3.5, 'a hung run is charged too');
+    assert.equal(st.last_run.ok, false);
+    assert.equal(st.last_run.cost_usd, null);
 
     const ok = fakeClaude([resultEvent({ total_cost_usd: 0.1 })]);
     await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: ok.fn, budgetUsd: 2, now: () => NOW, ...quiet });
-    assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).spend['2026-09-29'], 3.6, 'a reported cost is charged as reported');
+    assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.cost_usd, 0.1, 'a reported cost is recorded as reported');
   } finally {
     fx.cleanup();
   }
@@ -607,16 +613,9 @@ test('[N2] a refused close becomes a refused verdict keyed by id, file_keys and 
   }
 });
 
-test('[N3] under a cent left today is the daily cap (no spawn); the runner records a malformed or zero --budget-usd as a failed run with state written', async () => {
+test('[N3] the runner records a malformed or zero --budget-usd as a failed run with state written', async () => {
   const fx = fixture();
   try {
-    writeState(fx, { spend: { '2026-09-29': 5 - MIN_RUN_BUDGET_USD / 2 } });
-    const sp = fakeSpawn();
-    const r = launch(fx, { spawn: sp.fn });
-    assert.equal(r.reason, 'daily_cap');
-    assert.match(r.line, /daily budget reached/);
-    assert.equal(sp.calls.length, 0);
-
     for (const bad of ['0', 'abc', '', 0.001]) {
       rmSync(fx.paths.state, { force: true });
       const child = fakeClaude([resultEvent({})]);
@@ -632,7 +631,7 @@ test('[N3] under a cent left today is the daily cap (no spawn); the runner recor
   }
 });
 
-test('[N4] any git failure (E2BIG, no HEAD, non-zero exit) counts every item dirty: no spawn, and a visible line', () => {
+test('[N4] any git failure (E2BIG, no HEAD, non-zero exit) counts every item dirty: no spawn, and the reason is logged, not printed', () => {
   const fx = fixture();
   try {
     const cases = [
@@ -641,10 +640,13 @@ test('[N4] any git failure (E2BIG, no HEAD, non-zero exit) counts every item dir
       fakeGit({ status: { status: 128, stdout: '' } }),
     ];
     for (const git of cases) {
+      rmSync(fx.paths.state, { force: true }); // each failure arms the back-off (M2); every case starts clean
       const sp = fakeSpawn();
       const r = launch(fx, { spawn: sp.fn, spawnSync: git });
       assert.equal(r.reason, 'git_failed');
-      assert.match(r.line, /git could not report HEAD or the working-tree state .* every reconcile item counts as dirty and no worker starts/);
+      assert.equal(r.line, undefined);
+      assert.match(r.detail, /git could not report HEAD or the working-tree state .* every reconcile item counts as dirty and no worker starts/);
+      assert.match(readFileSync(fx.paths.log, 'utf8'), /git_failed: git could not report HEAD/);
       assert.equal(sp.calls.length, 0);
       assert.equal(existsSync(fx.paths.lock), false);
     }
@@ -760,9 +762,9 @@ test('[PARTIAL 9] rotating the JSONL carries standing owes_prose and refused ver
 // ------------------------------------------------------------ evidence gate (live run 2026-09-29: 12 guessed owes_prose verdicts)
 
 /** Lock + eligible list for a token-bound runWorker call. */
-function eligibleRun(fx, items, token = 'tok') {
+function eligibleRun(fx, items, token = 'tok', head = HEAD) {
   writeFileSync(fx.paths.lock, JSON.stringify({ pid: process.pid, started_at: new Date(NOW).toISOString(), token }));
-  writeFileSync(fx.paths.eligible, JSON.stringify({ token, head: HEAD, items }));
+  writeFileSync(fx.paths.eligible, JSON.stringify({ token, head, items }));
   return { root: fx.project, pluginRoot: fx.plugin, token, budgetUsd: 2, now: () => NOW, ...quiet };
 }
 const owes = (id, slug) => JSON.stringify({ item_id: id, article: slug, verdict: 'owes_prose', file_keys: ['ignored-by-the-gate'], reason: 'the article does not name the new flag' });
@@ -888,7 +890,7 @@ test('[gate] legacy evidence-less owes_prose verdicts (the live run\'s 12) are i
   }
 });
 
-test('[no progress] a run with 0 evidence-backed verdicts and 0 closes backs off 30 minutes like a failure, with a visible line; a run with a close does not', async () => {
+test('[no progress] a run with 0 evidence-backed verdicts and 0 closes backs off 30 minutes like a failure, silently (log only); a run with a close does not', async () => {
   const fx = fixture();
   try {
     const items = [{ id: 'A', file_keys: ['src/a.mjs'], feature_link: 'aaaaaaaa-1111-2222-3333-444444444444', slug: 'art-a' }];
@@ -901,11 +903,12 @@ test('[no progress] a run with 0 evidence-backed verdicts and 0 closes backs off
     const sp = fakeSpawn();
     const blocked = launch(fx, { spawn: sp.fn, now: Date.parse(last.at) + 60_000 });
     assert.equal(blocked.reason, 'backoff');
-    assert.match(blocked.line, /worker made no progress in its last run at .* \(0 evidence-backed verdicts, 0 closes\) — backing off, no relaunch before/);
+    assert.equal(blocked.line, undefined, 'no hook line for a routine no-progress back-off');
+    assert.match(readFileSync(fx.paths.log, 'utf8'), /backoff: worker made no progress in its last run at .* \(0 evidence-backed verdicts, 0 closes\) — backing off, no relaunch before/);
     assert.equal(sp.calls.length, 0);
     const after = launch(fx, { spawn: sp.fn, now: Date.parse(last.at) + BACKOFF_MS + 1 });
     assert.equal(after.launched, true);
-    assert.match(after.line, /previous run made no progress at .*relaunched after the back-off/);
+    assert.equal(after.line, undefined, 'the relaunch after the back-off prints nothing');
 
     const closing = fakeClaude([removeCall('t1', 'A'), removeResult('t1', 'Closed as ALREADY-PAID'), resultEvent({})]);
     await runWorker({ ...eligibleRun(fx, items, 'tok2'), spawn: closing.fn });
@@ -932,6 +935,172 @@ test('[gate] JSONL rotation carries forward only evidence:true verdicts', () => 
     appendFileSync(fx.paths.journal, 'y'.repeat(300) + '\n');
     rotateJournal(fx.project, 200);
     assert.deepEqual([...judgedVerdicts(fx.project).keys()].sort(), ['gated', 'refused'], 'the legacy verdict is gone after the second rotation, the gated ones survive');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// ------------------------------------------------------------ silence + breakage record
+
+test('[silent] no launcher outcome carries a hook line: launched, queue empty, already running, and backed off', () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    const launched = launch(fx, { spawn: sp.fn });
+    assert.equal(launched.launched, true);
+    assert.equal('line' in launched, false);
+    const empty = launch(fx, { spawn: sp.fn, items: [] });
+    assert.equal(empty.reason, 'queue_empty');
+    const running = launch(fx, { spawn: sp.fn, isAlive: () => true, now: NOW + DEBOUNCE_MS * 2 });
+    assert.equal(running.reason, 'already_running');
+    writeState(fx, { last_run: { ok: false, at: new Date(NOW - 60_000).toISOString(), error: 'exit 1' } });
+    const backedOff = launch(fx, { spawn: sp.fn });
+    assert.equal(backedOff.reason, 'backoff');
+    for (const r of [empty, running, backedOff]) assert.equal('line' in r, false, r.reason);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[breakage] the run summary records the MCP server status from the init event; a server that is not connected fails the run with a named reason, an unreported status does not', async () => {
+  const fx = fixture();
+  try {
+    const down = fakeClaude([{ type: 'system', subtype: 'init', mcp_servers: [{ name: 'sterling', status: 'failed' }] }, resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: down.fn, ...quiet }), 1);
+    let last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.equal(last.ok, false);
+    assert.equal(last.mcp_status, 'failed');
+    assert.match(last.error, /MCP server 'sterling' not connected \(failed\)/);
+    assert.equal(readJournal(fx).at(-1).mcp_status, 'failed', 'the journal summary carries it too');
+
+    const up = fakeClaude([{ type: 'system', subtype: 'init', mcp_servers: [{ name: 'sterling', status: 'connected' }] }, resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: up.fn, ...quiet }), 0);
+    last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.deepEqual([last.ok, last.mcp_status], [true, 'connected']);
+
+    // L3: only an explicit failed/disconnected status, or a non-connected status with no
+    // successful sterling tool call, is breakage. 'pending' is unknown when the stream shows the server worked.
+    const initWith = (status) => ({ type: 'system', subtype: 'init', mcp_servers: [{ name: 'sterling', status }] });
+    const pendingWorked = fakeClaude([initWith('pending'), toolUse('k1', 'mcp__sterling__knowledge_get', { id: 'x' }), toolOk('k1'), resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: pendingWorked.fn, ...quiet }), 0, 'pending + a successful sterling call is not broken');
+    last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.deepEqual([last.ok, last.error, last.mcp_status], [true, null, 'pending']);
+
+    const pendingIdle = fakeClaude([initWith('pending'), resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: pendingIdle.fn, ...quiet }), 1, 'pending and no successful sterling call is broken');
+    assert.match(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.error, /MCP server 'sterling' not connected \(pending/);
+
+    const pendingErrored = fakeClaude([initWith('pending'), toolUse('k1', 'mcp__sterling__knowledge_get', { id: 'x' }), toolErr('k1'), resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: pendingErrored.fn, ...quiet }), 1, 'an errored sterling call is not a success');
+
+    const disconnected = fakeClaude([initWith('disconnected'), toolUse('k1', 'mcp__sterling__knowledge_get', { id: 'x' }), toolOk('k1'), resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: disconnected.fn, ...quiet }), 1, 'an explicit disconnected status is broken');
+
+    const closedWhilePending = fakeClaude([initWith('pending'), removeCall('t1', 'A'), removeResult('t1', 'Closed'), resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: closedWhilePending.fn, ...quiet }), 0, 'a successful maintenance_remove is a successful sterling call');
+
+    const silent = fakeClaude([{ type: 'system', subtype: 'init' }, resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: silent.fn, ...quiet }), 0, 'no mcp_servers in the init event is unknown, not broken');
+    assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.mcp_status, null);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[breakage] workerBreakage names a broken last run (non-zero exit, error result, permission denial, MCP not connected, timeout) and nothing for a routine one', () => {
+  for (const error of ['exit 3', "error result (error_max_budget_usd)", '1 permission denial(s)', "MCP server 'sterling' not connected (failed)", 'killed after 20 min timeout']) {
+    assert.deepEqual(workerBreakage({ ok: false, at: 'T', error }), { at: 'T', reason: error }, error);
+  }
+  assert.deepEqual(workerBreakage({ ok: false, at: 'T', error: null }), { at: 'T', reason: 'unknown error' });
+  for (const routine of [null, undefined, { ok: true, at: 'T', error: null, no_progress: true }, { ok: true, at: 'T', no_progress: false }]) assert.equal(workerBreakage(routine), null);
+});
+
+// ------------------------------------------------------------ review fixes (M1, M2, L4, end to end)
+
+test('[M1] a refusal of an item that already has a refused verdict for the same file_keys is not progress: the second run at a new HEAD is no_progress and arms the back-off', async () => {
+  const fx = fixture();
+  try {
+    const items = [{ id: 'R', file_keys: ['src/a.mjs'], feature_link: null, slug: null }];
+    const refuse = () => fakeClaude([removeCall('t1', 'R'), removeResult('t1', 'refused: the owning record does not claim this path', true), resultEvent({})]);
+    assert.equal(await runWorker({ ...eligibleRun(fx, items, 'tok1', HEAD), spawn: refuse().fn }), 0);
+    let last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.deepEqual([last.no_progress, last.refused_verdicts], [false, 1], 'the first refusal is new information: progress');
+
+    const head2 = 'b'.repeat(40);
+    assert.equal(await runWorker({ ...eligibleRun(fx, items, 'tok2', head2), spawn: refuse().fn }), 0);
+    last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.deepEqual([last.no_progress, last.refused_verdicts], [true, 1], 'the same item refused again for the same file_keys is not progress');
+    assert.equal(judgedVerdicts(fx.project).get('R').head, head2, 'the verdict still moves to the new HEAD');
+
+    const sp = fakeSpawn();
+    const r = launch(fx, { spawn: sp.fn, items: [ITEM('R')], spawnSync: fakeGit({ head: 'c'.repeat(40) }) });
+    assert.equal(r.reason, 'backoff', 'a third commit no longer relaunches at once');
+    assert.equal(sp.calls.length, 0);
+
+    // A refusal for DIFFERENT file_keys than the standing verdict is new information again.
+    const wider = [{ id: 'R', file_keys: ['src/a.mjs', 'src/z.mjs'], feature_link: null, slug: null }];
+    assert.equal(await runWorker({ ...eligibleRun(fx, wider, 'tok3', head2), spawn: refuse().fn }), 0);
+    assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.no_progress, false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[M2] a failure to start (git cannot answer, a broken install) is recorded as a failed last_run: workerBreakage names it and the next launch backs off', () => {
+  for (const [name, over, reason, match] of [
+    ['git failed', { spawnSync: fakeGit({ revParse: { status: 128, stdout: '' } }) }, 'git_failed', /git could not report HEAD/],
+    ['broken install', { pluginRoot: 'nope' }, 'error', /launch FAILED \(cannot read the plugin MCP wiring/],
+  ]) {
+    const fx = fixture();
+    try {
+      const sp = fakeSpawn();
+      const first = launch(fx, { spawn: sp.fn, ...(over.pluginRoot ? { pluginRoot: join(fx.plugin, 'nope') } : over) });
+      assert.equal(first.reason, reason, name);
+      const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+      assert.equal(last.ok, false, name);
+      assert.match(last.error, match, name);
+      assert.equal(last.error, first.detail, 'the recorded error is the launcher detail');
+      assert.deepEqual(workerBreakage(last), { at: last.at, reason: last.error });
+      const next = launch(fx, { spawn: sp.fn, spawnSync: CLEAN_GIT, pluginRoot: fx.plugin, now: NOW + DEBOUNCE_MS * 2 });
+      assert.equal(next.reason, 'backoff', `${name}: the next Stop does not retry at once`);
+      assert.equal(sp.calls.length, 0);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test('[L4] when the launcher cannot write maintenance-worker.log for a failing launch, the log error is folded into last_run.error (and log_error), with no new output channel', () => {
+  const fx = fixture();
+  try {
+    mkdirSync(fx.paths.log); // a directory in the log's place: appendFileSync throws EISDIR
+    const r = launch(fx, { spawn: fakeSpawn().fn, spawnSync: fakeGit({ revParse: { status: 128, stdout: '' } }) });
+    assert.equal(r.reason, 'git_failed');
+    assert.match(r.log_error, /EISDIR/);
+    const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.match(last.error, /git could not report HEAD.*could not write maintenance-worker\.log \(EISDIR/);
+    assert.equal('line' in r, false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[end to end] a crashed run (no result event, non-zero exit) is recorded, and the next launch inside the window backs off, silently', async () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    assert.equal(launch(fx, { spawn: sp.fn }).launched, true);
+    const token = JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token;
+    const crashed = fakeClaude(['not json'], { code: 1 });
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: crashed.fn, token, budgetUsd: 2, now: () => NOW, ...quiet }), 1);
+    const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.equal(last.ok, false);
+    assert.match(last.error, /exit 1.*no stream-json result event/);
+    const later = launch(fx, { spawn: sp.fn, now: NOW + DEBOUNCE_MS * 2 });
+    assert.equal(later.reason, 'backoff');
+    assert.equal('line' in later, false);
+    assert.equal(sp.calls.length, 1, 'only the first launch spawned');
+    assert.equal(launch(fx, { spawn: sp.fn, now: NOW + BACKOFF_MS + 1 }).launched, true, 'after the window it relaunches');
   } finally {
     fx.cleanup();
   }

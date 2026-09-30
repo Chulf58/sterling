@@ -424,12 +424,12 @@ test('maintenance_worker.enabled: an absent block parses to enabled true, and th
   assert.deepEqual(parseConfig(shippedRaw).maintenance_worker, parseConfig({}).maintenance_worker, 'template and zod default agree');
 });
 
-test('maintenance_worker.daily_budget_usd: defaults to 5 in the zod schema AND the shipped template; a non-positive value is refused loud', () => {
-  assert.equal(parseConfig({}).maintenance_worker.daily_budget_usd, 5, 'the zod default caps the worker at $5 per UTC day');
+test('maintenance_worker has no daily budget: the schema and the shipped template omit daily_budget_usd, and one left in an existing config is stripped, not refused', () => {
+  assert.equal('daily_budget_usd' in parseConfig({}).maintenance_worker, false, 'the zod default carries no daily cap');
   const shippedRaw = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
-  assert.equal(shippedRaw.maintenance_worker?.daily_budget_usd, 5, 'templates/default-config.json ships daily_budget_usd 5');
-  assert.equal(parseConfig({ maintenance_worker: { daily_budget_usd: 1.5 } }).maintenance_worker.daily_budget_usd, 1.5);
-  assert.throws(() => parseConfig({ maintenance_worker: { daily_budget_usd: 0 } }), /too_small|greater than|invalid/i);
+  assert.equal('daily_budget_usd' in shippedRaw.maintenance_worker, false, 'templates/default-config.json ships no daily_budget_usd');
+  const legacy = parseConfig({ maintenance_worker: { enabled: false, daily_budget_usd: 1.5 } }).maintenance_worker;
+  assert.deepEqual(legacy, { enabled: false }, 'a legacy key is dropped and the rest survives');
 });
 
 test('maintenance_worker.enabled: false round-trips, and a non-boolean is refused loud', () => {

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { maybeLaunchMaintenanceWorker } from '../hooks/lib/maintenance-worker.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(root, 'scripts', 'hooks', 'h1-session-start.mjs');
@@ -66,17 +67,16 @@ test('H1 prints the reconcile count and the OLDEST item age on the banner and to
   }
 });
 
-test('H1 names a running worker from a live lockfile, and a failed last run loudly', () => {
+test('H1 names a running worker from a live lockfile, and a broken last run once, with its reason and the log path', () => {
   const p = makeProject();
   try {
     reconcileItem(p.store, daysAgo(0, 5));
     const since = new Date(Date.now() - 60_000).toISOString();
     writeFileSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.lock'), JSON.stringify({ pid: process.pid, started_at: since }));
-    const today = new Date().toISOString().slice(0, 10);
-    writeFileSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify({ spend: { [today]: 1.5 }, last_run: { ok: false, at: since, error: 'exit 1' } }));
+    writeFileSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify({ last_run: { ok: false, at: since, error: 'exit 1' } }));
     const out = h1(p.dir);
     assert.match(out.systemMessage, new RegExp(`1 item in lane reconcile_needed, oldest 5h, worker running \\(pid ${process.pid}, since `));
-    assert.match(out.systemMessage, /last worker run FAILED at .*: exit 1 \(log: \.sterling\/maintenance-worker\.log\); worker spend today \$1\.50/);
+    assert.match(out.systemMessage, /last worker run FAILED at .*: exit 1 \(log: \.sterling\/maintenance-worker\.log\)$/);
   } finally {
     p.cleanup();
   }
@@ -93,14 +93,80 @@ test('H1 stays silent about the backlog when no reconcile item is open', () => {
   }
 });
 
-test('H1 names a last worker run that made no progress', () => {
+const BREAKAGE = [
+  ['a non-zero exit', 'exit 3'],
+  ['an error result (is_error)', 'error result (error_max_budget_usd)'],
+  ['permission denials', '2 permission denial(s)'],
+  ['the MCP server not connected', "MCP server 'sterling' not connected (failed)"],
+];
+
+for (const [kind, error] of BREAKAGE) {
+  test(`H1 adds one breakage clause when the last worker run was broken: ${kind}`, () => {
+    const p = makeProject();
+    try {
+      reconcileItem(p.store, daysAgo(0, 2));
+      const at = new Date(Date.now() - 60_000).toISOString();
+      writeFileSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify({ last_run: { ok: false, at, error } }));
+      const out = h1(p.dir);
+      assert.ok(
+        out.systemMessage.endsWith(`worker not running; last worker run FAILED at ${at}: ${error} (log: .sterling/maintenance-worker.log)`),
+        out.systemMessage
+      );
+      assert.equal(out.systemMessage.split('\n').filter((l) => /last worker run/.test(l)).length, 1, 'one line');
+    } finally {
+      p.cleanup();
+    }
+  });
+}
+
+const ROUTINE = [
+  ['a no-progress run', { ok: true, no_progress: true, error: null }],
+  ['a run that closed items', { ok: true, no_progress: false, error: null, closes_ok: 2 }],
+  ['no run recorded yet', null],
+];
+
+for (const [name, lastRun] of ROUTINE) {
+  test(`H1 stays quiet about the worker's last run for a routine state: ${name}`, () => {
+    const p = makeProject();
+    try {
+      reconcileItem(p.store, daysAgo(0, 2));
+      const at = new Date(Date.now() - 60_000).toISOString();
+      writeFileSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify(lastRun ? { last_run: { at, ...lastRun } } : {}));
+      const out = h1(p.dir);
+      assert.match(out.systemMessage, /1 item in lane reconcile_needed, oldest 2h, worker not running$/, 'the line ends at the worker state: no clause');
+      assert.doesNotMatch(out.hookSpecificOutput.additionalContext, /last worker run|NO PROGRESS|FAILED|spend today/);
+    } finally {
+      p.cleanup();
+    }
+  });
+}
+
+test('H1 shows no worker spend even when a legacy state file still carries a spend map (the daily cap and its accounting are gone)', () => {
   const p = makeProject();
   try {
     reconcileItem(p.store, daysAgo(0, 2));
-    const at = new Date(Date.now() - 60_000).toISOString();
-    writeFileSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify({ spend: {}, last_run: { ok: true, no_progress: true, at } }));
+    const today = new Date().toISOString().slice(0, 10);
+    writeFileSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify({ spend: { [today]: 50 } }));
     const out = h1(p.dir);
-    assert.match(out.systemMessage, new RegExp(`last worker run at ${at.replace(/[.]/g, '\\.')} made NO PROGRESS \\(0 evidence-backed verdicts, 0 closes\\)`));
+    assert.match(out.systemMessage, /worker not running$/);
+    assert.doesNotMatch(out.systemMessage, /spend/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('H1 names a failure to START the worker (the launcher recorded it as a failed last run), once, with the reason and the log path', () => {
+  const p = makeProject();
+  try {
+    reconcileItem(p.store, daysAgo(0, 2));
+    const r = maybeLaunchMaintenanceWorker({
+      root: p.dir, config: null, trigger: 'stop', env: {}, now: Date.now(),
+      items: [{ id: 'i1', system_reason: 'reconcile_needed', text: "reconcile article 'x'", file_keys: ['src/a.mjs'] }],
+      spawnSync: () => ({ status: 128, stdout: '' }),
+    });
+    assert.equal(r.reason, 'git_failed');
+    const out = h1(p.dir);
+    assert.match(out.systemMessage, /worker not running; last worker run FAILED at .*: git could not report HEAD .*\(log: \.sterling\/maintenance-worker\.log\)$/);
   } finally {
     p.cleanup();
   }

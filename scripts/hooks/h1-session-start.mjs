@@ -31,7 +31,7 @@ import { ProjectRegistry, registryPath } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths, isLocallyModified, loadRegistry, sha256 } from '../lib/agent-distribution.mjs';
 import { gitTouches, writeInitialGitSettled } from './lib/settlement.mjs';
-import { owesProseVerdicts, isJudgedOwesProse, workerStatus, ageText } from './lib/maintenance-worker.mjs';
+import { owesProseVerdicts, isJudgedOwesProse, workerStatus, workerBreakage, ageText } from './lib/maintenance-worker.mjs';
 
 // IN-FLIGHT DISPATCH REGISTER DELETION — COOPERATING WRITER (decision
 // register-writers-cooperating-lock, 1e0ba0d0). H1 is a register writer like
@@ -1334,8 +1334,12 @@ if (drainable >= deepThreshold) {
 // RECONCILE BACKLOG LINE: one '·' segment on the human banner (after the
 // maintenance clause, so that clause's text is unchanged) and one line for the
 // conductor, who drafts the prose the worker leaves owed. Silent when there
-// is no reconcile item (P1). Worker state comes from its lockfile; a failed
-// last run is named, never hidden (P5).
+// is no reconcile item (P1). Worker state comes from its lockfile. A BROKEN
+// last run (workerBreakage: non-zero exit, error result, permission denials,
+// MCP not connected) adds one clause naming its reason and the log; routine
+// states (back-off, nothing eligible, no progress) add nothing, because the
+// worker's routine status is not the session's business (decision
+// maintenance-worker-notices-session-start-only-and-no-sliver-launch).
 let reconcileBanner = '';
 let reconcileContext = '';
 if (reconcile.count > 0) {
@@ -1344,9 +1348,8 @@ if (reconcile.count > 0) {
   try {
     const ws = workerStatus(input.cwd);
     if (ws.running) worker = `worker running (pid ${ws.pid}, since ${ws.since})`;
-    if (ws.lastRun && ws.lastRun.ok === false) lastRunNote = `; last worker run FAILED at ${ws.lastRun.at}: ${ws.lastRun.error} (log: .sterling/maintenance-worker.log)`;
-    else if (ws.lastRun && ws.lastRun.no_progress === true) lastRunNote = `; last worker run at ${ws.lastRun.at} made NO PROGRESS (0 evidence-backed verdicts, 0 closes)`;
-    if (ws.spentToday > 0) lastRunNote += `; worker spend today $${ws.spentToday.toFixed(2)}`;
+    const broken = workerBreakage(ws.lastRun);
+    if (broken) lastRunNote = `; last worker run FAILED at ${broken.at}: ${broken.reason} (log: .sterling/maintenance-worker.log)`;
   } catch (e) {
     worker = `worker state unreadable (${e?.message ?? e})`;
   }

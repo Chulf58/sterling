@@ -5020,14 +5020,15 @@ var configSchema = external_exports.object({
   // headless Claude run that judges open reconcile_needed items and closes the
   // ones already paid (scripts/hooks/lib/maintenance-worker.mjs). false stops
   // every launch; the queue then drains by hand with /sterling:drain.
-  // daily_budget_usd caps the worker's spend per UTC day: the runner adds each
-  // run's cost to its state file and the launcher refuses to start once the
-  // day's spend reaches it, with a visible line. Both defaults live here AND
-  // in templates/default-config.json, because install/sync fill an omitted key
-  // from this zod default, not the template.
+  // There is no daily budget: the worker runs whenever the queue has eligible
+  // work, capped only per run (decision
+  // maintenance-worker-notices-session-start-only-and-no-sliver-launch). A
+  // daily_budget_usd left in an existing config is stripped by this non-strict
+  // object. The default lives here AND in templates/default-config.json,
+  // because install/sync fill an omitted key from this zod default, not the
+  // template.
   maintenance_worker: external_exports.object({
-    enabled: external_exports.boolean().default(true),
-    daily_budget_usd: external_exports.number().positive().default(5)
+    enabled: external_exports.boolean().default(true)
   }).default({}),
   // Board 8390f8fa: a registry-style feature_article can outgrow its own
   // round-trip — knowledge_append responses on mcp-tool-surface (29 history
@@ -9076,20 +9077,20 @@ function lockState(lock, nowMs, isAlive = pidAlive) {
   if (nowMs - started > LOCK_STALE_MS) return "stale";
   return isAlive(lock.pid) ? "live" : "stale";
 }
-var utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 function readState(root) {
   const s2 = readJson(workerPaths(root).state);
-  return s2 && !s2.unreadable ? s2 : { spend: {} };
-}
-function spentOn(state, day) {
-  return Number(state?.spend?.[day] ?? 0) || 0;
+  return s2 && !s2.unreadable ? s2 : {};
 }
 function workerStatus(root, nowMs = Date.now(), isAlive = pidAlive) {
   const paths = workerPaths(root);
   const lock = readJson(paths.lock);
   const live = lockState(lock, nowMs, isAlive) === "live";
   const state = readState(root);
-  return { running: live, pid: live ? lock.pid : null, since: live ? lock.started_at : null, lastRun: state.last_run ?? null, spentToday: spentOn(state, utcDay(nowMs)) };
+  return { running: live, pid: live ? lock.pid : null, since: live ? lock.started_at : null, lastRun: state.last_run ?? null };
+}
+function workerBreakage(lastRun) {
+  if (!lastRun || lastRun.ok !== false) return null;
+  return { at: lastRun.at ?? "unknown time", reason: lastRun.error ? String(lastRun.error) : "unknown error" };
 }
 function ageText(iso, nowMs = Date.now()) {
   const ms = nowMs - Date.parse(iso ?? "");
@@ -9744,9 +9745,8 @@ if (reconcile.count > 0) {
   try {
     const ws = workerStatus(input.cwd);
     if (ws.running) worker = `worker running (pid ${ws.pid}, since ${ws.since})`;
-    if (ws.lastRun && ws.lastRun.ok === false) lastRunNote = `; last worker run FAILED at ${ws.lastRun.at}: ${ws.lastRun.error} (log: .sterling/maintenance-worker.log)`;
-    else if (ws.lastRun && ws.lastRun.no_progress === true) lastRunNote = `; last worker run at ${ws.lastRun.at} made NO PROGRESS (0 evidence-backed verdicts, 0 closes)`;
-    if (ws.spentToday > 0) lastRunNote += `; worker spend today $${ws.spentToday.toFixed(2)}`;
+    const broken = workerBreakage(ws.lastRun);
+    if (broken) lastRunNote = `; last worker run FAILED at ${broken.at}: ${broken.reason} (log: .sterling/maintenance-worker.log)`;
   } catch (e) {
     worker = `worker state unreadable (${e?.message ?? e})`;
   }
