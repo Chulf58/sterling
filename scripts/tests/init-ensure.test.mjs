@@ -6,8 +6,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, appendFileSync, unlinkSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, dirname, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ProjectRegistry } from '@sterling/store';
 import { findDeadTerms } from '../lib/agent-distribution.mjs';
 
@@ -966,6 +966,44 @@ test('init writes NOTHING into the plugin directory: a consuming init leaves the
     assert.ok(ignore.includes('.claude-plugin/sterling-mcp-win.json'), 'CONTROL: the clone-target branch ran — the retired win config is still ignored');
   } finally {
     for (const d of [plainDir, cloneDir]) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// The pin above watches pluginRootMatch, a scratch dir init uses ONLY for branch
+// selection; a regressed write through join(pluginRoot, ...) would land on the REAL
+// clone and pass it. This one watches the path init actually writes through: every fs
+// write of the spawned init and its node children is witnessed (fs-write-witness.mjs
+// via NODE_OPTIONS), and none may resolve under the real plugin root, `root` here.
+test('init writes NOTHING under its REAL plugin root: every fs write of the spawned init and its node children is witnessed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-nowrite-witness-'));
+  const target = join(dir, 'project');
+  mkdirSync(target);
+  const log = join(dir, 'witness.log');
+  try {
+    writeFileSync(log, '');
+    const witness = pathToFileURL(join(root, 'scripts', 'tests', 'lib', 'fs-write-witness.mjs')).href;
+    const r = init(target, FRESH_FLAGS, { NODE_OPTIONS: `--import=${witness}`, STERLING_FS_WITNESS_LOG: log });
+    assert.equal(r.code, 0, r.stderr);
+    const writes = readFileSync(log, 'utf8').split('\n').filter(Boolean);
+    assert.ok(writes.some((p) => p === join(target, 'CLAUDE.md')), `CONTROL (non-vacuity): the witness saw init write the target's CLAUDE.md — ${writes.length} write(s) recorded`);
+    const underRoot = writes.filter((p) => p === root || p.startsWith(root + sep));
+    assert.deepEqual(underRoot, [], 'no write resolves under the real plugin root');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('init records the plugin version in .sterling/synced-version, so the first session after init does not re-sync', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-synced-version-'));
+  try {
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    const version = JSON.parse(readFileSync(join(root, '.claude-plugin', 'plugin.json'), 'utf8')).version;
+    const marker = join(dir, '.sterling', 'synced-version');
+    assert.ok(existsSync(marker), 'init wrote the marker H1 keys its post-update sync on');
+    assert.equal(readFileSync(marker, 'utf8').trim(), version, 'it carries the version whose agents init just installed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
 

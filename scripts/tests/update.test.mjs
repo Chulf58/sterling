@@ -386,6 +386,31 @@ test('behind: fast-forward then build → check → test, then the project fan-o
   }
 });
 
+// Launchers baked before the plugin layout (sterling.bat, tui.bat, sterling-launch.sh)
+// name packages/tui/bundle/sterling-tui.mjs, which no longer ships; only init re-bakes
+// them per project, so a consumer update says so once.
+test('consumer update: one line tells the user to re-run /sterling:init per project so launchers run tui/sterling-tui.mjs; an authoring clone is not told', async () => {
+  for (const [role, expected] of [[null, 1], ['consumer', 1], ['authoring', 0]]) {
+    const cwd = scratchCwd();
+    try {
+      if (role) {
+        mkdirSync(join(cwd, '.sterling'), { recursive: true });
+        writeFileSync(join(cwd, '.sterling', 'config.json'), JSON.stringify({ machine_role: role }));
+      }
+      const { exec } = fakeExec({ behind: 1, changed: ['scripts/prep.mjs'] });
+      const lines = [];
+      // the authoring branch needs an invoking project and, with --no-projects, does nothing else
+      const extra = role === 'authoring' ? { projectDir: cwd, opts: { projects: false } } : { opts: {} };
+      const report = await runUpdate({ cwd, exec, log: (l) => lines.push(String(l)), projects: [], ...extra });
+      assert.equal(report.exit, 0, lines.join('\n'));
+      const hits = lines.filter((l) => /re-run \/sterling:init/.test(l) && /tui\/sterling-tui\.mjs/.test(l));
+      assert.equal(hits.length, expected, `role ${role}: ${lines.join('\n')}`);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }
+});
+
 // config_drift in the fan-out (decision 256d1059): a report, not a gate and not a
 // change — the project stays exit 0, the drift line reaches the log verbatim
 // (it carries the fix command), and it is not counted as a changed agent.

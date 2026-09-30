@@ -2,7 +2,7 @@
 // design point D): a plugin root without `.git` is a /plugin-installed snapshot.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isInstalledCopy } from '../lib/installed-copy.mjs';
@@ -33,4 +33,47 @@ test('a .git directory (clone) or a .git file (worktree): not an installed copy'
 test('a missing or empty root is a loud TypeError, never a silent "installed"', () => {
   assert.throws(() => isInstalledCopy(null), TypeError);
   assert.throws(() => isInstalledCopy(''), TypeError);
+});
+
+test('a root under <CLAUDE_CONFIG_DIR>/plugins/cache/ is an installed copy EVEN WITH a .git (second, independent signal)', () => {
+  // The no-.git premise is unmeasured for a real /plugin install, so the cache
+  // location is checked too: either signal alone says "installed".
+  const config = mkdtempSync(join(tmpdir(), 'sterling-config-'));
+  try {
+    const cached = join(config, 'plugins', 'cache', 'mkt', 'sterling', '1.0.0');
+    mkdirSync(join(cached, '.git'), { recursive: true });
+    assert.equal(isInstalledCopy(cached, { env: { CLAUDE_CONFIG_DIR: config } }), true);
+    // CONTROL: the same .git-bearing shape outside the cache is a clone
+    const outside = join(config, 'elsewhere', 'sterling');
+    mkdirSync(join(outside, '.git'), { recursive: true });
+    assert.equal(isInstalledCopy(outside, { env: { CLAUDE_CONFIG_DIR: config } }), false);
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test('without CLAUDE_CONFIG_DIR the cache is <home>/.claude/plugins/cache, and a SYMLINK into it resolves by realpath', () => {
+  const home = mkdtempSync(join(tmpdir(), 'sterling-home-'));
+  try {
+    const cached = join(home, '.claude', 'plugins', 'cache', 'mkt', 'sterling', '2.0.0');
+    mkdirSync(join(cached, '.git'), { recursive: true });
+    assert.equal(isInstalledCopy(cached, { env: {}, home }), true);
+    const link = join(home, 'link-to-install');
+    symlinkSync(cached, link, 'dir');
+    assert.equal(isInstalledCopy(link, { env: {}, home }), true, 'a path reaching the cache through a symlink is still under it');
+    assert.equal(isInstalledCopy(cached, { env: { CLAUDE_CONFIG_DIR: join(home, 'other') }, home }), false, 'CLAUDE_CONFIG_DIR replaces ~/.claude, it does not add to it');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a sibling directory whose name merely STARTS with "cache" is not under the cache', () => {
+  const config = mkdtempSync(join(tmpdir(), 'sterling-config-'));
+  try {
+    const lookalike = join(config, 'plugins', 'cache-old', 'sterling');
+    mkdirSync(join(lookalike, '.git'), { recursive: true });
+    assert.equal(isInstalledCopy(lookalike, { env: { CLAUDE_CONFIG_DIR: config } }), false);
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
 });

@@ -6010,11 +6010,11 @@ var init_dist = __esm({
 // packages/store/dist/mounted.js
 import { mkdirSync as mkdirSync2, existsSync as existsSync4 } from "node:fs";
 import { dirname as dirname2, join as join8 } from "node:path";
-import { homedir } from "node:os";
+import { homedir as homedir2 } from "node:os";
 function resolveDomainMounts(config) {
   return config.stack_tags.map((name) => ({
     name,
-    dbPath: config.domain_paths[name] ?? join8(homedir(), ".sterling", "domains", name, "sterling.db")
+    dbPath: config.domain_paths[name] ?? join8(homedir2(), ".sterling", "domains", name, "sterling.db")
   }));
 }
 function open(dbPath) {
@@ -6535,10 +6535,10 @@ var init_mounted = __esm({
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync as mkdirSync3 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
+import { homedir as homedir3 } from "node:os";
 import { dirname as dirname3, join as join9 } from "node:path";
 function registryPath() {
-  return process.env.STERLING_REGISTRY_DB ?? join9(homedir2(), ".sterling", "registry.db");
+  return process.env.STERLING_REGISTRY_DB ?? join9(homedir3(), ".sterling", "registry.db");
 }
 var REGISTRY_DDL, ProjectRegistry;
 var init_registry2 = __esm({
@@ -6943,7 +6943,7 @@ __export(dist_exports2, {
   unrecognizedKeyPaths: () => unrecognizedKeyPaths
 });
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync as mkdirSync4, existsSync as existsSync5, realpathSync as realpathSync2, statSync } from "node:fs";
+import { mkdirSync as mkdirSync4, existsSync as existsSync5, realpathSync as realpathSync3, statSync } from "node:fs";
 import { dirname as dirname4, basename, join as join10, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 function classifyClaimPath(repoRoot, path) {
@@ -7376,7 +7376,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
         this.db = new DatabaseSync2(path);
         let classifiedPath = this.dbPath;
         try {
-          classifiedPath = join10(realpathSync2(dirname4(this.dbPath)), basename(this.dbPath));
+          classifiedPath = join10(realpathSync3(dirname4(this.dbPath)), basename(this.dbPath));
         } catch {
         }
         this.db.exec("PRAGMA busy_timeout=5000");
@@ -9271,13 +9271,13 @@ __export(agent_coverage_exports, {
   normalizeProjectPath: () => normalizeProjectPath,
   scanAgentCoverage: () => scanAgentCoverage
 });
-import { readdirSync as readdirSync2, readFileSync as readFileSync4, realpathSync as realpathSync3, statSync as statSync2 } from "node:fs";
-import { join as join11, resolve as resolve4 } from "node:path";
+import { readdirSync as readdirSync2, readFileSync as readFileSync4, realpathSync as realpathSync4, statSync as statSync2 } from "node:fs";
+import { join as join11, resolve as resolve5 } from "node:path";
 function normalizeProjectPath(p) {
-  const raw = resolve4(String(p));
+  const raw = resolve5(String(p));
   let real = raw;
   try {
-    real = realpathSync3(raw);
+    real = realpathSync4(raw);
   } catch {
   }
   const s2 = real.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -9373,13 +9373,13 @@ var init_agent_coverage = __esm({
 // scripts/update.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync7 } from "node:fs";
-import { dirname as dirname6, join as join13, resolve as resolve5 } from "node:path";
+import { dirname as dirname6, join as join13, resolve as resolve6 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/lib/update.mjs
 import { spawnSync } from "node:child_process";
 import { closeSync as closeSync2, existsSync as existsSync6, mkdirSync as mkdirSync5, openSync as openSync2, readFileSync as readFileSync5, readdirSync as readdirSync3, readSync, writeFileSync as writeFileSync3 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
+import { homedir as homedir4 } from "node:os";
 import { dirname as dirname5, join as join12 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9409,13 +9409,28 @@ function verifyStamp(content, prefix) {
 }
 
 // scripts/lib/installed-copy.mjs
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-function isInstalledCopy(root) {
+import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve, sep } from "node:path";
+function canonical(p) {
+  try {
+    return realpathSync(p);
+  } catch (err) {
+    if (err?.code === "ENOENT") return resolve(p);
+    throw err;
+  }
+}
+function pluginCacheDir({ env = process.env, home = homedir() } = {}) {
+  return join(env.CLAUDE_CONFIG_DIR || join(home, ".claude"), "plugins", "cache");
+}
+function isInstalledCopy(root, { env = process.env, home = homedir() } = {}) {
   if (typeof root !== "string" || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  return !existsSync(join(root, ".git"));
+  if (!existsSync(join(root, ".git"))) return true;
+  const cache = canonical(pluginCacheDir({ env, home }));
+  const real = canonical(root);
+  return real.startsWith(cache + sep);
 }
 
 // scripts/lib/update-launcher.mjs
@@ -9522,15 +9537,15 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
 }
 
 // scripts/lib/handoff-projection.mjs
-import { join as join6, resolve as resolve3 } from "node:path";
+import { join as join6, resolve as resolve4 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
 import { lstatSync as lstatSync2, readFileSync as readFileSync3, readdirSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, constants } from "node:fs";
-import { join as join5, resolve as resolve2 } from "node:path";
+import { join as join5, resolve as resolve3 } from "node:path";
 
 // scripts/lib/store-path.mjs
-import { lstatSync, realpathSync } from "node:fs";
-import { join as join4, resolve, sep } from "node:path";
+import { lstatSync, realpathSync as realpathSync2 } from "node:fs";
+import { join as join4, resolve as resolve2, sep as sep2 } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target: target2 } = {}) {
     super(message);
@@ -9553,8 +9568,8 @@ function resolveStoreWritePath(root, ...segments) {
       );
     }
   }
-  const rootResolved = resolve(root);
-  const target2 = resolve(rootResolved, ...segments);
+  const rootResolved = resolve2(root);
+  const target2 = resolve2(rootResolved, ...segments);
   for (const raw of segments) {
     if (isAbsoluteSegment(raw)) {
       throw new StorePathContainmentError(
@@ -9571,13 +9586,13 @@ function resolveStoreWritePath(root, ...segments) {
       }
     }
   }
-  if (target2 !== rootResolved && !target2.startsWith(rootResolved + sep)) {
+  if (target2 !== rootResolved && !target2.startsWith(rootResolved + sep2)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: '${join4(...segments)}' resolves outside '${rootResolved}' (got '${target2}') \u2014 refusing`,
       { root: rootResolved, target: target2 }
     );
   }
-  const relParts = target2.slice(rootResolved.length).split(sep).filter(Boolean);
+  const relParts = target2.slice(rootResolved.length).split(sep2).filter(Boolean);
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
@@ -9595,13 +9610,13 @@ function resolveStoreWritePath(root, ...segments) {
     if (st.isSymbolicLink()) {
       let resolvedRoot;
       try {
-        resolvedRoot = realpathSync(rootResolved);
+        resolvedRoot = realpathSync2(rootResolved);
       } catch {
         resolvedRoot = rootResolved;
       }
       let resolvedEscape;
       try {
-        resolvedEscape = realpathSync(next);
+        resolvedEscape = realpathSync2(next);
       } catch {
         resolvedEscape = null;
       }
@@ -9615,7 +9630,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   let realRoot;
   try {
-    realRoot = realpathSync(rootResolved);
+    realRoot = realpathSync2(rootResolved);
   } catch (e) {
     if (e && e.code === "ENOENT") {
       realRoot = rootResolved;
@@ -9631,7 +9646,7 @@ function resolveStoreWritePath(root, ...segments) {
     realDeepest = realRoot;
   } else {
     try {
-      realDeepest = realpathSync(deepestExisting);
+      realDeepest = realpathSync2(deepestExisting);
     } catch (e) {
       throw new StorePathContainmentError(
         `resolveStoreWritePath: could not realpath '${deepestExisting}' while walking toward '${target2}' (${e && e.code || e && e.message || e}) \u2014 refusing rather than trusting an unverified ancestor`,
@@ -9639,7 +9654,7 @@ function resolveStoreWritePath(root, ...segments) {
       );
     }
   }
-  if (realDeepest !== realRoot && !realDeepest.startsWith(realRoot + sep)) {
+  if (realDeepest !== realRoot && !realDeepest.startsWith(realRoot + sep2)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: '${deepestExisting}' resolves (via realpath) to '${realDeepest}', outside '${realRoot}' \u2014 refusing`,
       { root: realRoot, target: realDeepest }
@@ -9647,7 +9662,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   const suffix = target2.slice(deepestExisting.length);
   const reconstructed = suffix ? join4(realDeepest, suffix) : realDeepest;
-  if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep)) {
+  if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep2)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target2}') resolves outside the project \u2014 refusing, nothing was written`,
       { root: realRoot, target: reconstructed }
@@ -9674,7 +9689,7 @@ var lstatOrNull = (p) => {
 function containedPath(root, rel, leaf) {
   const segments = rel.split("/").filter(Boolean);
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
-  let cursor = resolve2(root);
+  let cursor = resolve3(root);
   for (const [index, part] of segments.entries()) {
     cursor = join5(cursor, part);
     const st = lstatOrNull(cursor);
@@ -9708,7 +9723,7 @@ var ProjectModeError = class extends Error {
 };
 function readProjectMode(root) {
   const rel = ".sterling/config.json";
-  const where = `${fwd2(resolve3(root))}/${rel}`;
+  const where = `${fwd2(resolve4(root))}/${rel}`;
   if (!existsContained(root, rel, "file")) return "hobby";
   let parsed;
   try {
@@ -9961,7 +9976,7 @@ function ownPluginRoot() {
 var INSTALLED_COPY_REFUSAL = "Sterling is installed as a plugin \u2014 update it with /plugin (Installed tab \u2192 Update) or `claude plugin update sterling@<marketplace>`. /sterling:update serves only a git clone of Sterling.";
 function machineStores(cwd) {
   const stores = [join12(cwd, ".sterling", "sterling.db")];
-  const domains = join12(homedir3(), ".sterling", "domains");
+  const domains = join12(homedir4(), ".sterling", "domains");
   if (existsSync6(domains)) {
     for (const name of readdirSync3(domains).sort()) {
       stores.push(join12(domains, name, "sterling.db"));
@@ -10437,6 +10452,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
     );
   }
   stampConsumerRoleIfAbsent(cwd, log);
+  log("\n\u25B8 launchers \u2014 re-run /sterling:init in each Sterling project so its launchers run tui/sterling-tui.mjs (launchers baked before this version point at packages/tui/bundle/sterling-tui.mjs, which no longer ships).");
   const resolvedList = opts2.projects === false ? [] : await resolveProjects();
   const registryFailed = resolvedList === null;
   const projectList = resolvedList ?? [];
@@ -10520,8 +10536,8 @@ var argOf = (name) => {
   const i = process.argv.indexOf(name);
   return i !== -1 ? process.argv[i + 1] : void 0;
 };
-var pluginRoot = resolve5(dirname6(fileURLToPath2(new URL("../scripts/update.mjs", import.meta.url).href)), "..");
-var target = resolve5(argOf("--target") ?? pluginRoot);
+var pluginRoot = resolve6(dirname6(fileURLToPath2(new URL("../scripts/update.mjs", import.meta.url).href)), "..");
+var target = resolve6(argOf("--target") ?? pluginRoot);
 var opts = {
   check: process.argv.includes("--check"),
   force: process.argv.includes("--force"),

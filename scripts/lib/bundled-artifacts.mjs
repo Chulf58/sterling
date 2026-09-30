@@ -194,15 +194,20 @@ export async function buildMcp({ root, outDir }) {
   return [outFile, buildIdFile];
 }
 
-// The scripts a command (commands/*.md), a skill or H1 invokes through
-// ${CLAUDE_PLUGIN_ROOT}, each bundled to bin/<name>.mjs so it runs from a
+// The scripts a command (commands/*.md), a skill, a generated project artifact or H1
+// invokes through ${CLAUDE_PLUGIN_ROOT}, each bundled to bin/<name>.mjs so it runs from a
 // /plugin install with no node_modules and no packages/*/dist. name → source
 // entry. init bundles init-impl.mjs, not init.mjs: init.mjs is a builtins-only
 // bootstrap whose whole job is to precheck node_modules and packages/*/dist
 // before importing init-impl.mjs, and a bundle has neither to check.
 export const BIN_ENTRIES = {
   'check-agents-visible': 'scripts/check-agents-visible.mjs',
+  // the two checks templates/check-consumer.mjs (the sterling-check.mjs launcher) spawns
+  'check-record-citations': 'scripts/check-record-citations.mjs',
+  'check-stale-claims': 'scripts/check-stale-claims.mjs',
   'cleanup-plan': 'scripts/cleanup-plan.mjs',
+  // the concept_designed no-server fallback templates/target-claude-md.md names
+  'concept-designed': 'scripts/concept-designed.mjs',
   'debug-scope': 'scripts/debug-scope.mjs',
   'direct-merge': 'scripts/direct-merge.mjs',
   'fs-remove': 'scripts/fs-remove.mjs',

@@ -7,7 +7,6 @@ import { DatabaseSync } from "node:sqlite";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join as join2, resolve as resolve2 } from "node:path";
-import { fileURLToPath } from "node:url";
 
 // scripts/lib/store-path.mjs
 import { lstatSync, realpathSync } from "node:fs";
@@ -140,7 +139,7 @@ function resolveStoreWritePath(root, ...segments) {
 // scripts/migrate-stores.mjs
 var TARGET_SCHEMA_VERSION = 2;
 var TOOL = "migrate-stores";
-var SELF_PATH = fileURLToPath(new URL("../scripts/migrate-stores.mjs", import.meta.url).href);
+var SELF_PATH = process.argv[1];
 var V2_IDENTITY_DDL = `
 CREATE TABLE IF NOT EXISTS record_versions (
   record_id TEXT NOT NULL,

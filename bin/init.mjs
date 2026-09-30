@@ -8984,7 +8984,7 @@ init_dist();
 init_dist2();
 import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync10, writeFileSync as writeFileSync4, appendFileSync as appendFileSync3, statSync as statSync4, unlinkSync as unlinkSync3, renameSync as renameSync2 } from "node:fs";
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { join as join17, resolve as resolve4, dirname as dirname7, basename as basename2 } from "node:path";
+import { join as join17, resolve as resolve5, dirname as dirname7, basename as basename2 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 
 // scripts/lib/project.mjs
@@ -10040,13 +10040,28 @@ function verifyStamp(content, prefix) {
 }
 
 // scripts/lib/installed-copy.mjs
-import { existsSync as existsSync5 } from "node:fs";
-import { join as join12 } from "node:path";
-function isInstalledCopy(root) {
+import { existsSync as existsSync5, realpathSync as realpathSync3 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join12, resolve as resolve4, sep as sep2 } from "node:path";
+function canonical(p) {
+  try {
+    return realpathSync3(p);
+  } catch (err) {
+    if (err?.code === "ENOENT") return resolve4(p);
+    throw err;
+  }
+}
+function pluginCacheDir({ env = process.env, home = homedir3() } = {}) {
+  return join12(env.CLAUDE_CONFIG_DIR || join12(home, ".claude"), "plugins", "cache");
+}
+function isInstalledCopy(root, { env = process.env, home = homedir3() } = {}) {
   if (typeof root !== "string" || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  return !existsSync5(join12(root, ".git"));
+  if (!existsSync5(join12(root, ".git"))) return true;
+  const cache = canonical(pluginCacheDir({ env, home }));
+  const real = canonical(root);
+  return real.startsWith(cache + sep2);
 }
 
 // scripts/lib/update-launcher.mjs
@@ -10155,7 +10170,7 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
 // scripts/lib/codex-mcp.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { readFileSync as readFileSync8 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
+import { homedir as homedir4 } from "node:os";
 import { join as join15 } from "node:path";
 var PROBE_TIMEOUT_MS = 5e3;
 function probeCodex({ spawnFn = spawnSync4, timeoutMs = PROBE_TIMEOUT_MS, env = process.env } = {}) {
@@ -10205,7 +10220,7 @@ function codexSkipLine(reason, version) {
   const text = reason === "mcp-server-missing" ? `Codex CLI ${version ?? "unknown version"} does not support \`mcp-server\`; the supported route is a user-scope pinned Codex MCP server (such as Codex 0.153.4)` : REASON_TEXT[reason] ?? reason;
   return `codex mcp: skipped \u2014 ${text}`;
 }
-function userScopeCodexServer({ env = process.env, home = homedir3(), readFile = readFileSync8 } = {}) {
+function userScopeCodexServer({ env = process.env, home = homedir4(), readFile = readFileSync8 } = {}) {
   const path = join15(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
   let raw;
   try {
@@ -10502,9 +10517,9 @@ function computeUndeclaredSourceDisclosure({ cwd, config }) {
 }
 
 // scripts/init-impl.mjs
-var pluginRoot = resolve4(dirname7(fileURLToPath3(new URL("../scripts/init-impl.mjs", import.meta.url).href)), "..");
+var pluginRoot = resolve5(dirname7(fileURLToPath3(new URL("../scripts/init-impl.mjs", import.meta.url).href)), "..");
 var pluginRootMatch = process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot;
-var target = resolve4(arg("--target") ?? process.cwd());
+var target = resolve5(arg("--target") ?? process.cwd());
 var projectNameFlag = arg("--project-name");
 var stackTagsFlag = (arg("--stack-tags") ?? "").split(",").filter(Boolean);
 var backupPathFlag = arg("--backup-path");
@@ -10524,7 +10539,7 @@ var declaredToolchains = argAll("--toolchain").map((spec) => {
 var fwd4 = (p) => p.replace(/\\/g, "/");
 var normalize5 = (s2) => s2.replace(/\r\n/g, "\n");
 var withoutHandoffEntries = (c) => ({ ...c, generated_projections: (c.generated_projections ?? []).filter((p) => !isOwnedExport(target, p)) });
-var canonical = (v) => JSON.stringify(
+var canonical2 = (v) => JSON.stringify(
   v,
   (_, val) => val && typeof val === "object" && !Array.isArray(val) ? Object.fromEntries(Object.keys(val).sort().map((k) => [k, val[k]])) : val
 );
@@ -10578,7 +10593,7 @@ var eff = recorded ? {
   // backupPathForRuntime first rewrites a Windows drive path (C:\.../C:/...)
   // to /mnt form under WSL, so resolve() treats it as absolute instead of as
   // a relative path that lands inside the repo (the r-dd88 junk-dir bug).
-  backupPath: backupPathFlag ? fwd4(resolve4(target, backupPathForRuntime(backupPathFlag))) : void 0,
+  backupPath: backupPathFlag ? fwd4(resolve5(target, backupPathForRuntime(backupPathFlag))) : void 0,
   backupOptOut: backupOptOutFlag,
   projectName: projectNameFlag ?? "project",
   splitRatio: void 0
@@ -10605,9 +10620,9 @@ var notes = [];
 if (recorded) {
   const flagDiffs = [];
   const stripUniversal = (tags) => tags.filter((t) => t !== UNIVERSAL_DOMAIN);
-  if (stackTagsFlag.length && canonical(stripUniversal(stackTagsFlag)) !== canonical(stripUniversal(recorded.stack_tags))) flagDiffs.push("--stack-tags");
-  if (declaredToolchains.length && canonical(declaredToolchains) !== canonical(recorded.toolchains.map((t) => ({ adapter: t.adapter, path_globs: t.path_globs })))) flagDiffs.push("--toolchain");
-  if (backupPathFlag && fwd4(resolve4(target, backupPathForRuntime(backupPathFlag))) !== recorded.backup_path) flagDiffs.push("--backup-path");
+  if (stackTagsFlag.length && canonical2(stripUniversal(stackTagsFlag)) !== canonical2(stripUniversal(recorded.stack_tags))) flagDiffs.push("--stack-tags");
+  if (declaredToolchains.length && canonical2(declaredToolchains) !== canonical2(recorded.toolchains.map((t) => ({ adapter: t.adapter, path_globs: t.path_globs })))) flagDiffs.push("--toolchain");
+  if (backupPathFlag && fwd4(resolve5(target, backupPathForRuntime(backupPathFlag))) !== recorded.backup_path) flagDiffs.push("--backup-path");
   if (backupOptOutFlag && !recorded.backup_opt_out) flagDiffs.push("--backup-opt-out");
   if (projectNameFlag && recorded.project_name && projectNameFlag !== recorded.project_name) flagDiffs.push("--project-name");
   if (flagDiffs.length) {
@@ -10653,7 +10668,7 @@ if (!recorded) {
     parseConfig(mutated);
     writeFileSync4(configPath, JSON.stringify(mutated, null, 2));
     items.push({ item: ".sterling/config.json", status: "refreshed", detail: mutationNotes.join("; ") });
-  } else if (canonical(withoutHandoffEntries(recorded)) === canonical(withoutHandoffEntries(expectedConfig))) {
+  } else if (canonical2(withoutHandoffEntries(recorded)) === canonical2(withoutHandoffEntries(expectedConfig))) {
     items.push({ item: ".sterling/config.json", status: "matches", detail: "defaults + recorded declarations" });
   } else {
     items.push({ item: ".sterling/config.json", status: "differs", detail: "left untouched (tuned or hand-edited) \u2014 declarations were read from it" });
@@ -10938,11 +10953,12 @@ if (existsSync8(nativeLauncherPath)) {
 }
 items.push({ item: UPDATE_LAUNCHER_NAME, ...ensureUpdateLauncher(target, pluginRoot) });
 items.push({ item: CONSUMER_CHECK_LAUNCHER_NAME, ...ensureConsumerCheckLauncher(target, pluginRoot) });
+var installedPluginVersion = JSON.parse(readFileSync10(join17(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
 var { report: agentReport } = syncAgents({
   templatesDir: join17(pluginRoot, "agent-templates"),
   registryPath: join17(pluginRoot, "agent-templates", "registry.json"),
   targetAgentsDir: join17(target, ".claude", "agents"),
-  pluginVersion: JSON.parse(readFileSync10(join17(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version,
+  pluginVersion: installedPluginVersion,
   now: (/* @__PURE__ */ new Date()).toISOString(),
   // config.models is authoritative (98064d77): the config init just wrote/read
   // resolves {{MODEL}}/{{EFFORT}} per agent. `recorded` on a re-run, else the
@@ -10976,6 +10992,11 @@ for (const a of agentReport) {
   if (a.instruction) agentInstructions.push(a.instruction);
 }
 var restartNeeded = agentChangesRequireRestart(agentReport);
+var agentRefused = agentReport.some((a) => items.find((i) => i.item === `.claude/agents/${a.name}.md`)?.status === "refused");
+if (!agentRefused) {
+  writeFileSync4(join17(target, ".sterling", "synced-version"), `${installedPluginVersion}
+`);
+}
 var conductorActivation = ensureConductorActivation(target, agentReport);
 items.push({
   item: ".claude/settings.json (conductor activation)",

@@ -23,7 +23,7 @@
 // copy is left untouched by the ensure pass (§12 semantics) — it is reported
 // as differing, never silently overwritten or silently used.
 import { spawnSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -159,12 +159,20 @@ function run(label, args) {
 // join(), not string interpolation: PLUGIN_DIR may be a Windows-form path
 // (C:\...) on native-Windows node, and concatenating a forward slash onto
 // that would produce a broken mixed-separator path.
+// The bundled bin/<name>.mjs when the plugin ships one (H1's pluginScript rule,
+// decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone):
+// an installed copy has no node_modules, so the scripts/ source, which imports
+// @sterling/*, cannot load there. A clone without bin/ still runs the source.
+function pluginScript(name) {
+  const bundled = join(PLUGIN_DIR, 'bin', name);
+  return existsSync(bundled) ? bundled : join(PLUGIN_DIR, 'scripts', name);
+}
 const citationsStatus = run('record citations', [
-  join(PLUGIN_DIR, 'scripts', 'check-record-citations.mjs'),
+  pluginScript('check-record-citations.mjs'),
   projectRoot,
 ]);
 const staleClaimsStatus = run(`stale-claim scan (--base ${base})`, [
-  join(PLUGIN_DIR, 'scripts', 'check-stale-claims.mjs'),
+  pluginScript('check-stale-claims.mjs'),
   '--target',
   projectRoot,
   '--base',

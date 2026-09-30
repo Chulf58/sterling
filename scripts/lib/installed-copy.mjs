@@ -2,18 +2,43 @@
 // design point D). A /plugin-installed Sterling is a snapshot copied into
 // ~/.claude/plugins/cache/<mkt>/<plugin>/<version>/ with no git metadata; the
 // authoring machine and legacy consumer machines run a git CLONE (a `.git`
-// directory, or a `.git` FILE in a worktree). The presence of `.git` at the
-// plugin root is the whole test — it drives H1's role text and post-update
-// sync, and /sterling:update's refusal on an installed copy.
+// directory, or a `.git` FILE in a worktree). TWO INDEPENDENT SIGNALS, either one
+// sufficient: (1) no `.git` at the plugin root; (2) the root resolves (realpath)
+// under Claude Code's plugin cache, <CLAUDE_CONFIG_DIR or ~/.claude>/plugins/cache/.
+// Signal (1) alone rested on an unmeasured premise (that an install never carries
+// git metadata); signal (2) holds whatever the install copies. The predicate drives
+// H1's role text and post-update sync, and /sterling:update's refusal on an installed
+// copy.
 //
 // Builtins only: hooks bundle this module.
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
 
-/** True when `<root>/.git` does not exist (neither a directory nor a worktree file). */
-export function isInstalledCopy(root) {
+// realpath when the path exists; a path that does not exist cannot be reached
+// through a symlink, so its plain resolved form is its identity.
+function canonical(p) {
+  try {
+    return realpathSync(p);
+  } catch (err) {
+    if (err?.code === 'ENOENT') return resolve(p);
+    throw err;
+  }
+}
+
+/** Claude Code's plugin cache: <CLAUDE_CONFIG_DIR or <home>/.claude>/plugins/cache. */
+export function pluginCacheDir({ env = process.env, home = homedir() } = {}) {
+  return join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache');
+}
+
+/** True when `<root>/.git` does not exist (neither a directory nor a worktree file),
+ *  OR when root resolves under the plugin cache. env/home are injectable for tests. */
+export function isInstalledCopy(root, { env = process.env, home = homedir() } = {}) {
   if (typeof root !== 'string' || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  return !existsSync(join(root, '.git'));
+  if (!existsSync(join(root, '.git'))) return true;
+  const cache = canonical(pluginCacheDir({ env, home }));
+  const real = canonical(root);
+  return real.startsWith(cache + sep);
 }

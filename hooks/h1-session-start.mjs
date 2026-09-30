@@ -8404,7 +8404,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve4) => setTimeout(resolve4, ms));
+  return new Promise((resolve5) => setTimeout(resolve5, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -8559,8 +8559,8 @@ function parseStateFileName(name) {
     const malformed = STATE_KEY_RE.test(parts[0]) ? { kind: "malformed-done", key: parts[0] } : { kind: "malformed-done" };
     if (parts.length !== 2 || !STATE_KEY_RE.test(parts[0])) return malformed;
     const idHashes = parts[1] === EMPTY_IDS ? [] : parts[1].split(ID_SEPARATOR);
-    const canonical = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
-    return canonical ? { kind: "done", key: parts[0], idHashes } : malformed;
+    const canonical2 = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
+    return canonical2 ? { kind: "done", key: parts[0], idHashes } : malformed;
   }
   return STATE_KEY_RE.test(stem) ? { kind: "legacy", key: stem } : { kind: "unknown-json" };
 }
@@ -9186,18 +9186,33 @@ function writeInitialGitSettled(root, snapshot) {
 }
 
 // scripts/lib/installed-copy.mjs
-import { existsSync as existsSync6 } from "node:fs";
-import { join as join8 } from "node:path";
-function isInstalledCopy(root) {
+import { existsSync as existsSync6, realpathSync as realpathSync3 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join8, resolve as resolve3, sep } from "node:path";
+function canonical(p) {
+  try {
+    return realpathSync3(p);
+  } catch (err) {
+    if (err?.code === "ENOENT") return resolve3(p);
+    throw err;
+  }
+}
+function pluginCacheDir({ env = process.env, home = homedir2() } = {}) {
+  return join8(env.CLAUDE_CONFIG_DIR || join8(home, ".claude"), "plugins", "cache");
+}
+function isInstalledCopy(root, { env = process.env, home = homedir2() } = {}) {
   if (typeof root !== "string" || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  return !existsSync6(join8(root, ".git"));
+  if (!existsSync6(join8(root, ".git"))) return true;
+  const cache = canonical(pluginCacheDir({ env, home }));
+  const real = canonical(root);
+  return real.startsWith(cache + sep);
 }
 
 // scripts/lib/update.mjs
 import { closeSync as closeSync3, existsSync as existsSync7, mkdirSync as mkdirSync8, openSync as openSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, readSync as readSync2, writeFileSync as writeFileSync5 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
+import { homedir as homedir3 } from "node:os";
 import { dirname as dirname7, join as join9 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
@@ -9218,7 +9233,7 @@ var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed
 var UPDATE_MARKER_RELATIVE_PATH = join9(".sterling", "update-complete.json");
 function machineStores(cwd) {
   const stores = [join9(cwd, ".sterling", "sterling.db")];
-  const domains = join9(homedir2(), ".sterling", "domains");
+  const domains = join9(homedir3(), ".sterling", "domains");
   if (existsSync7(domains)) {
     for (const name of readdirSync4(domains).sort()) {
       stores.push(join9(domains, name, "sterling.db"));
@@ -9262,7 +9277,7 @@ function probeSchemaVersion(dbPath) {
 
 // scripts/hooks/lib/maintenance-worker.mjs
 import { closeSync as closeSync4, existsSync as existsSync8, mkdirSync as mkdirSync9, openSync as openSync4, readFileSync as readFileSync7, renameSync as renameSync5, rmSync as rmSync3, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync6, appendFileSync } from "node:fs";
-import { dirname as dirname8, isAbsolute as isAbsolute2, join as join10, resolve as resolve3, sep } from "node:path";
+import { dirname as dirname8, isAbsolute as isAbsolute2, join as join10, resolve as resolve4, sep as sep2 } from "node:path";
 var BATCH_MAX_WAIT_MS = 30 * 6e4;
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;

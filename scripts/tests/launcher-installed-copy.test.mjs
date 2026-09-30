@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, chmodSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -178,6 +178,58 @@ test('sterling-check.mjs: authoring bakes the clone path; installed bakes NO pat
     const empty = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, 'nothing-here') }, encoding: 'utf8', timeout: 30_000 });
     assert.equal(empty.status, 3, 'no installed version: exit 3 (the check never ran)');
     assert.match(empty.stderr, /no installed Sterling plugin found/);
+  } finally {
+    rm(home, project);
+  }
+});
+
+test('sterling-check.mjs prefers <plugin>/bin/<check>.mjs over the scripts/ source when the plugin ships it', () => {
+  const installed = renderConsumerCheckLauncher(REPO, { installed: true });
+  const home = tmp('sterling-lic-home-');
+  const project = tmp('sterling-lic-project-');
+  try {
+    const v = join(home, '.claude', 'plugins', 'cache', 'mkt', 'sterling', '3.0.0');
+    for (const s of ['check-record-citations.mjs', 'check-stale-claims.mjs']) {
+      touch(join(v, 'bin', s), `console.log('BIN ' + import.meta.url);\n`);
+      touch(join(v, 'scripts', s), `console.log('SOURCE ' + import.meta.url); process.exit(1);\n`);
+    }
+    writeFileSync(join(project, 'sterling-check.mjs'), installed);
+    const r = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude') }, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /BIN file:.*\/bin\/check-record-citations\.mjs/);
+    assert.match(r.stdout, /BIN file:.*\/bin\/check-stale-claims\.mjs/);
+    assert.doesNotMatch(r.stdout, /SOURCE /, 'the scripts/ source never runs when a bundle exists');
+  } finally {
+    rm(home, project);
+  }
+});
+
+test('sterling-check.mjs on an installed copy runs the REAL bundled checks with no node_modules anywhere', () => {
+  // The stub fixtures above cannot see an import failure. Here the plugin cache holds
+  // the committed bin/ bundles and the scripts/ tree (no node_modules, no packages/*/dist),
+  // exactly what a /plugin install carries, and the checks must load and run.
+  const installed = renderConsumerCheckLauncher(REPO, { installed: true });
+  const home = tmp('sterling-lic-home-');
+  const project = tmp('sterling-lic-project-');
+  try {
+    const v = join(home, '.claude', 'plugins', 'cache', 'mkt', 'sterling', '3.0.0');
+    for (const s of ['check-record-citations.mjs', 'check-stale-claims.mjs']) touch(join(v, 'bin', s), readFileSync(join(REPO, 'bin', s)));
+    cpSync(join(REPO, 'scripts'), join(v, 'scripts'), { recursive: true, filter: (src) => !src.includes(`${join(REPO, 'scripts', 'tests')}`) });
+    cpSync(join(REPO, '.claude-plugin'), join(v, '.claude-plugin'), { recursive: true });
+    const git = (...a) => spawnSync('git', a, { cwd: project, encoding: 'utf8' });
+    git('init', '-q');
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init');
+    writeFileSync(join(project, 'sterling-check.mjs'), installed);
+    const r = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude') }, encoding: 'utf8', timeout: 60_000 });
+    const out = r.stdout + r.stderr;
+    assert.doesNotMatch(out, /ERR_MODULE_NOT_FOUND|Cannot find (package|module)/, `every check loaded: ${out}`);
+    assert.notEqual(r.status, 3, `no check failed to run: ${out}`);
+    // Both REAL checks ran their own logic on this bare project (no store, no declared
+    // toolchain): citations skip for want of a store, and the stale-claim scan skips
+    // loudly as capability_absent, which the launcher reports as exit 2, never 3.
+    assert.match(out, /record citations: skipped \(no store\)/);
+    assert.match(out, /check-stale-claims: SKIPPED LOUDLY — capability_absent/);
+    assert.equal(r.status, 2, out);
   } finally {
     rm(home, project);
   }

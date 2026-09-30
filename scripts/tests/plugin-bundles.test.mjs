@@ -14,6 +14,7 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BIN_ENTRIES } from '../lib/bundled-artifacts.mjs';
 import { checkAdapterRegistry } from '../adapters/resolve.mjs';
+import { ProjectRegistry, SterlingStore } from '@sterling/store';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -146,6 +147,67 @@ test('hook bundle bytes do not depend on the cwd the build ran from (absWorkingD
       built[label] = readFileSync(join(outDir, hook), 'utf8');
     }
     assert.equal(built.elsewhere, built.root, `${hook} built from ${elsewhere} differs from the repo-root build`);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('bin/ bundles the scripts an installed copy spawns: the consumer checks and the concept_designed fallback', () => {
+  // templates/check-consumer.mjs spawns check-record-citations and check-stale-claims,
+  // and templates/target-claude-md.md names concept-designed as the no-server fallback;
+  // each imports @sterling/* through scripts/lib/project.mjs, which an installed copy
+  // (no node_modules) cannot resolve from the scripts/ source.
+  for (const name of ['check-record-citations', 'check-stale-claims', 'concept-designed']) {
+    assert.ok(name in BIN_ENTRIES, `${name} is a BIN_ENTRIES member`);
+    assert.ok(existsSync(join(root, 'bin', `${name}.mjs`)), `bin/${name}.mjs is committed`);
+  }
+  const claudeTemplate = readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8');
+  assert.ok(claudeTemplate.includes('${CLAUDE_PLUGIN_ROOT}/bin/concept-designed.mjs'), 'the template names the bundled fallback');
+  assert.ok(!claudeTemplate.includes('${CLAUDE_PLUGIN_ROOT}/scripts/concept-designed.mjs'), 'and no longer the source that needs node_modules');
+});
+
+test('bin/concept-designed.mjs runs standalone from a tree with no node_modules', () => {
+  const base = mkdtempSync(join(tmpdir(), 'sterling-bin-concept-'));
+  try {
+    mkdirSync(join(base, 'plugin', 'bin'), { recursive: true });
+    const bundle = join(base, 'plugin', 'bin', 'concept-designed.mjs');
+    writeFileSync(bundle, readFileSync(join(root, 'bin', 'concept-designed.mjs')));
+    const project = join(base, 'project');
+    mkdirSync(join(project, '.sterling'), { recursive: true });
+    const r = spawnSync(process.execPath, [bundle, '--family', 'weapons', '--target', project], { encoding: 'utf8', timeout: 30_000 });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('bin/migrate-stores.mjs --all-stores respawns ITSELF, not the scripts/ source it was bundled from', () => {
+  // The source-identity rewrite makes the bundle's import.meta.url name
+  // scripts/migrate-stores.mjs; respawning that path on an installed copy runs a
+  // source that needs @sterling/store. The bundle is copied alone into a tree with
+  // no scripts/ and no node_modules, so only a self-respawn of the bundle can work.
+  const base = mkdtempSync(join(tmpdir(), 'sterling-bin-migrate-'));
+  try {
+    mkdirSync(join(base, 'plugin', 'bin'), { recursive: true });
+    const bundle = join(base, 'plugin', 'bin', 'migrate-stores.mjs');
+    writeFileSync(bundle, readFileSync(join(root, 'bin', 'migrate-stores.mjs')));
+    const domainsRoot = join(base, 'domains');
+    const db = join(domainsRoot, 'alpha', 'sterling.db');
+    mkdirSync(dirname(db), { recursive: true });
+    new SterlingStore(db).close();
+    const registryDb = join(base, 'registry.db');
+    new ProjectRegistry(registryDb).close();
+    const r = spawnSync(process.execPath, [bundle, '--all-stores', '--roots', domainsRoot], {
+      encoding: 'utf8',
+      timeout: 120_000,
+      env: { ...process.env, STERLING_REGISTRY_DB: registryDb, HOME: join(base, 'home') },
+    });
+    const lines = r.stdout.split('\n').filter((l) => l.startsWith('{')).map((l) => JSON.parse(l));
+    const line = lines.find((l) => l.store === db);
+    assert.ok(line, `the domain store is reported: ${r.stdout}${r.stderr}`);
+    assert.doesNotMatch(JSON.stringify(line), /ERR_MODULE_NOT_FOUND|Cannot find/, 'the per-store child loaded');
+    assert.equal(line.ok, true, JSON.stringify(line));
+    assert.equal(r.status, 0, r.stdout + r.stderr);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

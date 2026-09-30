@@ -698,11 +698,12 @@ items.push({ item: CONSUMER_CHECK_LAUNCHER_NAME, ...ensureConsumerCheckLauncher(
 // No machine vars are baked: the only template tokens are {{MODEL}}/{{EFFORT}}, resolved
 // from config below (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-
 // keeps-its-clone, design point C: nothing an installed agent says names a plugin path).
+const installedPluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
 const { report: agentReport } = syncAgents({
   templatesDir: join(pluginRoot, 'agent-templates'),
   registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
   targetAgentsDir: join(target, '.claude', 'agents'),
-  pluginVersion: JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version,
+  pluginVersion: installedPluginVersion,
   now: new Date().toISOString(),
   // config.models is authoritative (98064d77): the config init just wrote/read
   // resolves {{MODEL}}/{{EFFORT}} per agent. `recorded` on a re-run, else the
@@ -738,6 +739,16 @@ for (const a of agentReport) {
   if (a.instruction) agentInstructions.push(a.instruction);
 }
 const restartNeeded = agentChangesRequireRestart(agentReport);
+
+// H1's post-update sync marker (.sterling/synced-version, keyed on plugin.json's
+// version): the agents were just synced at THIS version, so record it and the first
+// session after init does not sync them again. Written only when no agent was
+// refused — the same bar H1 sets before it writes the marker (sync-agents exit 2 is
+// not a sync), so a refusal keeps H1 retrying and surfacing it.
+const agentRefused = agentReport.some((a) => items.find((i) => i.item === `.claude/agents/${a.name}.md`)?.status === 'refused');
+if (!agentRefused) {
+  writeFileSync(join(target, '.sterling', 'synced-version'), `${installedPluginVersion}\n`);
+}
 
 // Route A (decision conductor-instructions-via-main-session-agent-route-a): init installs
 // the conductor like every other agent above, then activates it the same way
