@@ -19,6 +19,7 @@
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
+import { isInstalledCopy } from './installed-copy.mjs';
 
 export const CONSUMER_CHECK_LAUNCHER_NAME = 'sterling-check.mjs';
 
@@ -40,9 +41,16 @@ const fwd = (p) => p.replace(/\\/g, '/');
 // are read as ESCAPE SEQUENCES by the generated file, silently corrupting the
 // path. JSON.stringify produces a correctly escaped, self-quoting literal
 // regardless of the path's separator style.
-export function renderConsumerCheckLauncher(pluginRoot) {
+//
+// INSTALLED COPY (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-
+// keeps-its-clone, ruling point 3): no path into a versioned plugin cache may be baked,
+// since the next plugin update moves it. The placeholder becomes a call to the
+// template's own newestInstalledPluginDir(), which picks the highest-version
+// ~/.claude/plugins/cache/*/sterling/* directory at RUN time.
+export function renderConsumerCheckLauncher(pluginRoot, { installed = isInstalledCopy(pluginRoot) } = {}) {
   const template = readFileSync(join(pluginRoot, 'templates', 'check-consumer.mjs'), 'utf8');
-  const body = template.replace('{{PLUGIN_DIR}}', JSON.stringify(fwd(pluginRoot)));
+  const pluginDirExpr = installed ? 'newestInstalledPluginDir()' : JSON.stringify(fwd(pluginRoot));
+  const body = template.replace('{{PLUGIN_DIR}}', () => pluginDirExpr);
   return stampBody(body, '//');
 }
 
