@@ -7,7 +7,6 @@ sterling.bat
 .claude/agents/
 tui.bat
 sterling-launch.sh
-.claude-plugin/sterling-mcp.json
 sterling-windows.bat
 .claude-plugin/sterling-mcp-win.json
 sterling-update.bat

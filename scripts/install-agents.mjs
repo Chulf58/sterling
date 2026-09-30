@@ -24,21 +24,12 @@ const config = parseConfig(
   JSON.parse(readFileSync(existsSync(configPath) ? configPath : join(pluginRoot, 'templates', 'default-config.json'), 'utf8'))
 );
 
-// machine-detected, forward-slash, quoted (§6 emission rule)
-const vars = {
-  NODE: `"${process.execPath.replace(/\\/g, '/')}"`,
-  HOOKS_DIR: join(pluginRoot, 'hooks').replace(/\\/g, '/'),
-  // the plugin-owned read-only git wrapper, named by absolute path
-  GIT_RO: join(pluginRoot, 'scripts', 'git-ro.mjs').replace(/\\/g, '/'),
-};
-
 const { report, restartInstruction } = installAgents({
   templatesDir: join(pluginRoot, 'agent-templates'),
   registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
   targetAgentsDir: join(targetDir, '.claude', 'agents'),
   pluginVersion,
   now: new Date().toISOString(),
-  vars,
   config,
 });
 

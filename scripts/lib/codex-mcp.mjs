@@ -16,6 +16,9 @@
 // tests can stub the codex binary via PATH or inject a canned spawn result, without
 // depending on the real machine's Codex install/login state.
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 const PROBE_TIMEOUT_MS = 5000;
 
@@ -100,4 +103,53 @@ export function codexSkipLine(reason, version) {
     ? `Codex CLI ${version ?? 'unknown version'} does not support \`mcp-server\`; the supported route is a user-scope pinned Codex MCP server (such as Codex 0.153.4)`
     : (REASON_TEXT[reason] ?? reason);
   return `codex mcp: skipped — ${text}`;
+}
+
+// USER-SCOPE CHECK (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-
+// keeps-its-clone, ruling point 2). The codex server is registered in the user-level
+// Claude config (`claude mcp add --scope user`), which Claude Code keeps in
+// `<CLAUDE_CONFIG_DIR or home>/.claude.json` under a top-level `mcpServers`. init only
+// READS that file: a missing file is "not registered", an unparseable one is reported as
+// unreadable (never guessed at). Pure apart from the read; env/home are injectable.
+export function userScopeCodexServer({ env = process.env, home = homedir(), readFile = readFileSync } = {}) {
+  const path = join(env.CLAUDE_CONFIG_DIR || home, '.claude.json');
+  let raw;
+  try {
+    raw = readFile(path, 'utf8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { found: false, path };
+    return { found: false, path, unreadable: err?.code ?? err?.message ?? String(err) };
+  }
+  try {
+    const servers = JSON.parse(raw)?.mcpServers;
+    const found = Boolean(servers && typeof servers === 'object' && Object.prototype.hasOwnProperty.call(servers, 'codex'));
+    return { found, path };
+  } catch (err) {
+    return { found: false, path, unreadable: `not valid JSON (${err?.message ?? err})` };
+  }
+}
+
+// The registration command for a Codex whose `mcp-server` subcommand the probe proved.
+export const CODEX_USER_ADD_COMMAND = 'claude mcp add --scope user codex -- codex mcp-server';
+
+// The pinned route (finding codex-mcp-bridge-needs-codex-0-153-4-pinned-side-install):
+// 0.153.4 is the last codex-cli with `mcp-server`. The PATH env is required because codex
+// is a `#!/usr/bin/env node` script and a version-manager node is not on the spawn PATH.
+const PINNED_INSTALL = 'npm i -g --prefix ~/.local/codex-mcp-0.153.4 @openai/codex@0.153.4';
+const pinnedAddCommand = (nodeBinDir) =>
+  `claude mcp add --scope user -e PATH=${nodeBinDir}:/usr/local/bin:/usr/bin:/bin codex -- ~/.local/codex-mcp-0.153.4/bin/codex mcp-server`;
+
+// The ONE loud line init prints (P5) when no codex server is in the user-level config.
+// `probe` is probeCodex's result (or the STERLING_CODEX_PROBE forced equivalent) and only
+// selects the remedy: a working `codex mcp-server` gets the plain add command, every
+// failure keeps codexSkipLine's reason text, and an `mcp-server-missing` Codex (0.154+)
+// gets the pinned side-install plus its exact add command.
+export function codexUserScopeLine(probe, { nodeBinDir, unreadable } = {}) {
+  const unread = unreadable ? ` (the user-level Claude config could not be read: ${unreadable})` : '';
+  if (probe.ok) return `codex mcp: no codex server at user scope${unread} — register it with: ${CODEX_USER_ADD_COMMAND}`;
+  const skip = codexSkipLine(probe.reason, probe.version);
+  if (probe.reason === 'mcp-server-missing') {
+    return `${skip}${unread}. Install and register it: ${PINNED_INSTALL} && ${pinnedAddCommand(nodeBinDir ?? '<node bin dir>')}`;
+  }
+  return `${skip}${unread}`;
 }

@@ -31,7 +31,7 @@
 // real `codex` binary is installed or logged in on this machine.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { probeCodex, CODEX_MCP_ENTRY, withCodexEntry, codexSkipLine } from '../lib/codex-mcp.mjs';
+import { probeCodex, CODEX_MCP_ENTRY, withCodexEntry, codexSkipLine, userScopeCodexServer, codexUserScopeLine, CODEX_USER_ADD_COMMAND } from '../lib/codex-mcp.mjs';
 
 function spawnErrorFn() {
   // mirrors a real spawnSync's return on ENOENT: no status, an .error set
@@ -270,3 +270,61 @@ test('probeCodex: every failure path reports its discriminating reason, carries 
 // ('mc-server help succeeds keeps the codex entry', 'empty mcpServers +
 // successful probe yields ONLY the codex key', and the purity/failure-path
 // tests). The command-carrying arm's dedicated tests were removed with it.
+
+// =============================================================================
+// USER-SCOPE CHECK (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-
+// keeps-its-clone, ruling point 2): the codex server is registered in the user-level
+// Claude config, never in the plugin's file. userScopeCodexServer reads it;
+// codexUserScopeLine picks the ONE loud remedy line.
+// =============================================================================
+const enoent = () => Object.assign(new Error('nope'), { code: 'ENOENT' });
+
+test('userScopeCodexServer: found only when a top-level mcpServers.codex key exists; path honours CLAUDE_CONFIG_DIR over home', () => {
+  const read = (body) => () => body;
+  assert.deepEqual(
+    userScopeCodexServer({ env: {}, home: '/h', readFile: read(JSON.stringify({ mcpServers: { codex: { command: 'c' } } })) }),
+    { found: true, path: '/h/.claude.json' },
+  );
+  assert.equal(userScopeCodexServer({ env: {}, home: '/h', readFile: read(JSON.stringify({ mcpServers: { other: {} } })) }).found, false);
+  assert.equal(userScopeCodexServer({ env: {}, home: '/h', readFile: read('{}') }).found, false, 'no mcpServers key at all is not registered');
+  assert.equal(
+    userScopeCodexServer({ env: { CLAUDE_CONFIG_DIR: '/cfg' }, home: '/h', readFile: read('{}') }).path,
+    '/cfg/.claude.json',
+    'CLAUDE_CONFIG_DIR wins over the home directory',
+  );
+});
+
+test('userScopeCodexServer: a missing file is "not registered"; an unreadable or unparseable one says so, never "registered"', () => {
+  const missing = userScopeCodexServer({ env: {}, home: '/h', readFile: () => { throw enoent(); } });
+  assert.deepEqual(missing, { found: false, path: '/h/.claude.json' });
+  const denied = userScopeCodexServer({ env: {}, home: '/h', readFile: () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); } });
+  assert.equal(denied.found, false);
+  assert.equal(denied.unreadable, 'EACCES');
+  const garbage = userScopeCodexServer({ env: {}, home: '/h', readFile: () => '{ nope' });
+  assert.equal(garbage.found, false);
+  assert.match(garbage.unreadable, /not valid JSON/);
+});
+
+test('codexUserScopeLine: a proven `codex mcp-server` gets the plain user-scope add command', () => {
+  const line = codexUserScopeLine({ ok: true });
+  assert.ok(line.includes(CODEX_USER_ADD_COMMAND));
+  assert.equal(CODEX_USER_ADD_COMMAND, 'claude mcp add --scope user codex -- codex mcp-server');
+  assert.ok(!line.includes('\n'), 'one line');
+});
+
+test('codexUserScopeLine: Codex 0.154+ (mcp-server-missing) gets the pinned 0.153.4 side-install and its exact user-scope add command with the node bin on PATH', () => {
+  const line = codexUserScopeLine({ ok: false, reason: 'mcp-server-missing', version: '0.155.1' }, { nodeBinDir: '/n/bin' });
+  assert.match(line, /^codex mcp: skipped — Codex CLI 0\.155\.1 does not support `mcp-server`/, 'the existing skip reason is reused, not reworded');
+  assert.ok(line.includes('npm i -g --prefix ~/.local/codex-mcp-0.153.4 @openai/codex@0.153.4'));
+  assert.ok(line.includes('claude mcp add --scope user -e PATH=/n/bin:/usr/local/bin:/usr/bin:/bin codex -- ~/.local/codex-mcp-0.153.4/bin/codex mcp-server'));
+  assert.ok(!line.includes('\n'), 'one line');
+});
+
+test('codexUserScopeLine: binary-absent, not-logged-in and timeout keep codexSkipLine\'s text and offer no add command; an unreadable config is appended', () => {
+  for (const reason of ['binary-absent', 'not-logged-in', 'timeout']) {
+    const line = codexUserScopeLine({ ok: false, reason });
+    assert.equal(line, codexSkipLine(reason, undefined), `${reason}: exactly the existing skip line`);
+    assert.ok(!line.includes('claude mcp add'), `${reason}: registering a server that cannot run helps nobody`);
+  }
+  assert.match(codexUserScopeLine({ ok: true }, { unreadable: 'EACCES' }), /could not be read: EACCES/);
+});

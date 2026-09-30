@@ -1311,6 +1311,9 @@ const BAT_TEMPLATE = '@echo off\r\nrem updater\r\n"wt.exe" wsl.exe --cd "{{WIN_P
 function cloneWithTemplate() {
   const clone = mkdtempSync(join(tmpdir(), 'sterling-launcher-clone-'));
   mkdirSync(join(clone, 'templates'));
+  // a .git marks an AUTHORING clone; without one the root reads as an installed plugin
+  // copy and ensureUpdateLauncher skips (scripts/lib/installed-copy.mjs)
+  mkdirSync(join(clone, '.git'));
   writeFileSync(join(clone, 'templates', 'update-win.bat'), BAT_TEMPLATE);
   return clone;
 }
