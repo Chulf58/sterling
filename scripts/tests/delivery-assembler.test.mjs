@@ -908,3 +908,30 @@ test('MEDIUM 3: an owner that transitions from discovery (digest) to substance (
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Pinned chrome outlives a hazard's wholeness (H20 header, Dome Farmer session
+// c94bc5f0): the '+N more' disclosure's eviction loop used to drop pinned
+// chrome BEFORE degrading a whole hazard to its pointer, so three whole
+// hazards at the transport ceiling left an unattributed block.
+// ---------------------------------------------------------------------------
+
+test('pinned chrome is never evicted for the disclosure while a whole hazard can fall to its pointer', () => {
+  const body = (head, n) => `${head}\n${'x'.repeat(n)}`;
+  const hazard = (i, n) => ({ kind: 'hazard', contentClass: 'substance', identity: `haz${i}`, revision: 'r1', text: body(`HAZ${i}`, n), pointer: `HAZ${i} POINTER` });
+  // Sized so header + three whole hazards fit the 10000-byte transport ceiling
+  // but the decision's omission disclosure does not (measured window: 3190).
+  const parts = [
+    { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: body('HEADER', 400) },
+    hazard(1, 3190),
+    hazard(2, 3190),
+    hazard(3, 3190),
+    { kind: 'ordinary', contentClass: 'discovery', identities: [{ identity: 'dec1', revision: 'r1' }], text: body('DECISIONS', 500), pointer: 'DECISIONS POINTER' },
+  ];
+  const r = assembleDelivery(parts, 3000);
+  assert.match(r.text.split('\n')[0], /^HEADER/, 'the pinned header survives');
+  assert.ok(Buffer.byteLength(r.text, 'utf8') <= 10000, 'the transport ceiling holds');
+  assert.match(r.text, /HAZ3 POINTER/, 'the last hazard fell to its pointer to make room');
+  assert.match(r.text, /\+1 more records/, 'the omission is still disclosed');
+  assert.equal(r.degraded, true);
+});

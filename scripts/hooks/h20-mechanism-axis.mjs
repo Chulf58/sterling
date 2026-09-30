@@ -692,7 +692,13 @@ function main(input) {
     const pin = modelPin();
     const pinPart = pin?.line ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: pin.line }] : [];
     const blocks = [
-      { kind: 'ordinary', contentClass: 'chrome', text: header },
+      // PINNED (P5): the header attributes the whole block to H20. Unpinned it
+      // was placed AFTER whole hazards, which are exempt from the configured
+      // cap and bound only by the transport ceiling, so three whole hazards at
+      // the ceiling degraded it to nothing and the conductor got an
+      // unattributed block. Pinned chrome is placed first; a hazard that then
+      // no longer fits falls to its pointer (the existing held-back behaviour).
+      { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: header },
       // A prior ANSWER outranks everything on a question-shaped prompt — it is
       // the direct "don't re-derive" signal; on a change-shaped prompt hazards
       // still lead (stop the mistake), answers ride with the article pointers.

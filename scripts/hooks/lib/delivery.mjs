@@ -1729,11 +1729,6 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
         evictable.find((part) => !isChrome(part) && !reserved.has(part)) ??
         evictable.find((part) => !isChrome(part)) ??
         evictable[0];
-      if (last) {
-        selected.delete(last);
-        omitted.push(last);
-        continue;
-      }
       // Only reach for a hazard when the HARD TRANSPORT CEILING itself is
       // what still fails to fit — never for the CONFIGURED cap alone
       // (`fitsOrdinaryCap`, decision 301d8a0a): a pathologically tiny
@@ -1744,6 +1739,16 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
       const degradable = !transportOk
         ? [...items].reverse().find((part) => isHazard(part) && selected.has(part) && selected.get(part).full && pointerFor(part))
         : null;
+      // PINNED CHROME OUTLIVES A HAZARD'S WHOLENESS (P5): the H20 header
+      // attributes the whole block, and whole hazards at the transport ceiling
+      // used to push it out here — the conductor got an unattributed block.
+      // A hazard that can fall to its own pointer goes first; pinned chrome is
+      // evicted only when no hazard can give room.
+      if (last && (!isChrome(last) || !degradable)) {
+        selected.delete(last);
+        omitted.push(last);
+        continue;
+      }
       if (degradable) {
         selected.set(degradable, { text: pointerFor(degradable), full: false });
         continue;

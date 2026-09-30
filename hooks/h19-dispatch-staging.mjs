@@ -9426,12 +9426,12 @@ ${line}` : line;
       selected.delete(aggregatePart);
       const evictable = [...items].reverse().filter((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
       const last = evictable.find((part) => !isChrome(part) && !reserved.has(part)) ?? evictable.find((part) => !isChrome(part)) ?? evictable[0];
-      if (last) {
+      const degradable = !transportOk ? [...items].reverse().find((part) => isHazard(part) && selected.has(part) && selected.get(part).full && pointerFor(part)) : null;
+      if (last && (!isChrome(last) || !degradable)) {
         selected.delete(last);
         omitted.push(last);
         continue;
       }
-      const degradable = !transportOk ? [...items].reverse().find((part) => isHazard(part) && selected.has(part) && selected.get(part).full && pointerFor(part)) : null;
       if (degradable) {
         selected.set(degradable, { text: pointerFor(degradable), full: false });
         continue;

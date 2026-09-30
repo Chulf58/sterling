@@ -9479,6 +9479,12 @@ export class SterlingTools {
     return label ? clipName(label) : '(unnamed board item)';
   }
 
+  /** The ONE compact {id8,type,name} record both evidence surfaces (board_query and the removal receipt) emit. */
+  private static artifactEvidenceRecord(r: DurableRecord): ArtifactEvidenceRecord {
+    const body = r as unknown as Record<string, unknown>;
+    return { id8: String(body.id).slice(0, 8), type: String(body.type), name: SterlingTools.artifactEvidenceName(body) };
+  }
+
   /**
    * A matched EVIDENCE record's human name: slug → title → question → location,
    * first present. Deliberately a fallback LADDER rather than a per-type switch:
@@ -9645,10 +9651,7 @@ export class SterlingTools {
           // able to see that six things were written even when only three fit.
           ...(combined.length > 0
             ? {
-                records: combined.slice(0, ARTIFACT_EVIDENCE_RECORD_CAP).map((r) => {
-                  const body = r as unknown as Record<string, unknown>;
-                  return { id8: String(body.id).slice(0, 8), type: String(body.type), name: SterlingTools.artifactEvidenceName(body) };
-                }),
+                records: combined.slice(0, ARTIFACT_EVIDENCE_RECORD_CAP).map((r) => SterlingTools.artifactEvidenceRecord(r)),
               }
             : {}),
           file_key_check,
@@ -10122,7 +10125,7 @@ export class SterlingTools {
    * item's file_keys written since the item was born. An empty list means the
    * close rides the operator's word, and the receipt says so out loud.
    */
-  private removalArtifactEvidence(item: DurableRecord): { artifact_evidence: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
+  private removalArtifactEvidence(item: DurableRecord): { artifact_evidence: ArtifactEvidenceRecord[]; artifact_evidence_count: number; note?: string; check_skipped?: SkippedCheck[] } {
     const fileKeys = ((item as unknown as { file_keys?: string[] }).file_keys ?? []).filter(Boolean);
     const since = item.created_at;
     // The evidence set is ONE module-level list (ARTIFACT_EVIDENCE_TYPES, which
@@ -10185,11 +10188,17 @@ export class SterlingTools {
       seen.add(r.id);
       combined.push(r);
     }
-    const evidence = combined.slice(0, 25).map((r) => digestRecord(r as unknown as Record<string, unknown>));
+    // The receipt carries board_query's CAPPED compact shape (Dome Farmer,
+    // sterling-issues.md:100-107: ~25 full digests per removal, 11-13KB into the
+    // caller's context): at most ARTIFACT_EVIDENCE_RECORD_CAP {id8,type,name}
+    // records, with the FULL dedup'd total beside them in artifact_evidence_count
+    // so a clipped list never reads as a complete one. Empty stays `[]`.
+    const evidence: ArtifactEvidenceRecord[] = combined.slice(0, ARTIFACT_EVIDENCE_RECORD_CAP).map((r) => SterlingTools.artifactEvidenceRecord(r));
     return {
       artifact_evidence: evidence,
+      artifact_evidence_count: combined.length,
       ...(checkSkipped.length > 0 ? { check_skipped: checkSkipped } : {}),
-      ...(evidence.length === 0
+      ...(combined.length === 0
         ? {
             // FIX M2 (upgrade-polish review, 2026-08-21): disclose the id arm's
             // window honestly — it is a bounded scan of the 200 most-recently-
@@ -10859,7 +10868,9 @@ export class SterlingTools {
    */
   boardRemove(id: string): {
     removed: string;
-    artifact_evidence?: Record<string, unknown>[];
+    artifact_evidence?: ArtifactEvidenceRecord[];
+    /** the FULL dedup'd match count — may exceed artifact_evidence.length (capped like board_query's) */
+    artifact_evidence_count?: number;
   note?: string;
   check_skipped?: SkippedCheck[];
   baseline_attestation?: BaselineAttestationReceipt;
@@ -10912,7 +10923,9 @@ export class SterlingTools {
    */
   maintenanceRemove(id: string): {
     removed: string;
-    artifact_evidence?: Record<string, unknown>[];
+    artifact_evidence?: ArtifactEvidenceRecord[];
+    /** the FULL dedup'd match count — may exceed artifact_evidence.length (capped like board_query's) */
+    artifact_evidence_count?: number;
     note?: string;
     check_skipped?: SkippedCheck[];
   already_drained?: boolean;
