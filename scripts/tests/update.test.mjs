@@ -353,7 +353,9 @@ test('--check never mutates even when behind', async () => {
   }
 });
 
-test('behind: fast-forward then build → build:tui → check → test, then the project fan-out', async () => {
+// build:tui dropped from the sequence (lane S1: tui/sterling-tui.mjs is now a COMMITTED
+// bundle, so a consumer rebuild would dirty the tracked file; check verifies its freshness).
+test('behind: fast-forward then build → check → test, then the project fan-out; the committed TUI bundle is never rebuilt', async () => {
   const cwd = scratchCwd();
   try {
     const { exec, calls } = fakeExec({ behind: 2, changed: ['packages/store/src/index.ts'] });
@@ -367,13 +369,13 @@ test('behind: fast-forward then build → build:tui → check → test, then the
 
     assert.equal(report.exit, 0);
     const order = calls.filter((c) => c.includes('merge --ff-only') || c.startsWith('npm ') || c.includes('sync-agents'));
-    assert.deepEqual(order.slice(0, 5), [
+    assert.deepEqual(order.slice(0, 4), [
       'git merge --ff-only origin/main',
       'npm run build',
-      'npm run build:tui',
       'npm run check',
       'npm test',
     ]);
+    assert.equal(calls.filter((c) => c.includes('build:tui') || c.includes('build:bundles')).length, 0, 'a consumer never rebuilds a committed bundle');
     assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 2);
     assert.deepEqual(report.projects.map((p) => p.name), ['Deepdots', 'comsoft']);
     // no dependency change → npm ci must NOT run (it is the one networked step)
@@ -2067,5 +2069,40 @@ test('disclosures: the Dome Farmer pre-rename models keys are each named by path
     );
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// INSTALLED COPY (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
+// design point D): a /plugin-installed Sterling has no .git at its plugin root, and /plugin owns its
+// updates. /sterling:update refuses before anything else — no git, no npm, no sync, exit 2.
+test('installed copy (no .git at the plugin root): /sterling:update refuses before anything else, exit 2', async () => {
+  const cwd = authoringCwd();
+  const pluginRoot = mkdtempSync(join(tmpdir(), 'sterling-update-installed-'));
+  try {
+    const { exec, calls } = fakeExec({ behind: 2 });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {}, pluginRoot });
+    assert.equal(report.exit, 2);
+    assert.deepEqual(calls, [], 'nothing runs on an installed copy');
+    assert.match(lines.join('\n'), /Sterling is installed as a plugin — update it with \/plugin \(Installed tab → Update\) or `claude plugin update sterling@/);
+    assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(pluginRoot, { recursive: true, force: true });
+  }
+});
+
+test('a clone plugin root (.git present) is not refused: the authoring path runs unchanged', async () => {
+  const cwd = authoringCwd();
+  const pluginRoot = mkdtempSync(join(tmpdir(), 'sterling-update-clone-root-'));
+  try {
+    mkdirSync(join(pluginRoot, '.git'));
+    const { exec, calls } = fakeExec();
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: REG_P, invokingProject: '/tmp/p', opts: {}, pluginRoot });
+    assert.equal(report.exit, 0);
+    assert.deepEqual(calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), ['/tmp/p']);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(pluginRoot, { recursive: true, force: true });
   }
 });
