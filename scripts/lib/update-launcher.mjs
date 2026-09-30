@@ -12,6 +12,7 @@
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
+import { isInstalledCopy } from './installed-copy.mjs';
 
 export const UPDATE_LAUNCHER_NAME = 'sterling-update.bat';
 
@@ -64,6 +65,14 @@ export function renderUpdateLauncher(pluginRoot) {
 export function ensureUpdateLauncher(target, pluginRoot) {
   if (!existsSync(target)) {
     return { status: 'skipped', detail: `target missing: ${target}` };
+  }
+  // An INSTALLED plugin copy has no clone to update: the plugin manager delivers new
+  // versions (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-
+  // its-clone, ruling point 3), and the launcher's `cd` into a versioned cache
+  // directory would break at the next update. Nothing is written, not even the
+  // .gitignore entry.
+  if (isInstalledCopy(pluginRoot)) {
+    return { status: 'skipped', detail: 'installed plugin copy — updates come from the plugin manager, there is no clone to update' };
   }
   // A clone missing the template skips loudly instead of throwing.
   if (!existsSync(join(pluginRoot, 'templates', UPDATE_TEMPLATE_WSL))) {

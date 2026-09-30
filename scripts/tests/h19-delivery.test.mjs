@@ -1097,6 +1097,20 @@ test('bash extractor: keeps real path shapes, drops flags, globs and bare words'
   assert.deepEqual(extract('cat package.json'), ['package.json'], 'extension with no slash still qualifies');
 });
 
+test('bash delivery: a multi-line -m message longer than 255 chars is not a path and never fails the hook', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    const message = `docs(reference): ${'explain the layout '.repeat(16)}\n\nbody line two, see docs/reference`;
+    assert.ok(message.length > 255 && message.includes('\n'));
+    const r = runHook('h19-bash-delivery.mjs', postBash(dir, `git commit -m "${message}"`), dir);
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(r.stdout + r.stderr, /delivery failed|ENAMETOOLONG/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('bash delivery: rung read injects its capped POINTER on this tool call, never queues it', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {

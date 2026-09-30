@@ -13,6 +13,11 @@ import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, S
 import { applyModeToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
 import { bannerLines } from './banner.js';
 import { draw, keyToEvent, mouseToEvent } from './render.js';
+// Static, so esbuild inlines both into tui/sterling-tui.mjs: an installed copy
+// has no node_modules and no packages/*/dist, so a run-time import of the
+// scripts/lib SOURCE (which imports @sterling/schemas) cannot load there.
+import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/lib/agent-distribution.mjs';
+import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
 
 const smoke = process.env.STERLING_TUI_SMOKE === '1';
 if (!process.stdout.isTTY && !smoke) {
@@ -129,25 +134,17 @@ function readInstalledModelEffort(name: string): { model: string; effort: string
 }
 
 // Sparring partner (board a0714d0b, article sparring-partner interaction h):
-// this repo's own plugin manifest, resolved relative to THIS file's own
-// location — same technique as the setInstalledModelEffort dynamic import
-// below, and for the same reason: src/main.ts, dist/main.js, and the esbuild
-// bundle all sit at the same depth under packages/tui/, so one relative
-// offset resolves from any of the three layouts. Presence of a `codex` key
-// under mcpServers = wired on THIS MACHINE (a per-clone fact, not per-project
-// — the manifest lives in the Sterling clone that ships the TUI bundle,
-// regardless of which project's store it is observing).
+// the codex MCP server is registered at USER scope (`claude mcp add --scope
+// user`), in <CLAUDE_CONFIG_DIR or home>/.claude.json — never in the plugin's
+// committed MCP config (decision
+// sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
+// ruling point 2). Presence of a `codex` key under that file's mcpServers =
+// wired on THIS MACHINE (a per-user fact, not per-project). init's own check
+// (scripts/lib/codex-mcp.mjs userScopeCodexServer) is the one reader; a
+// missing or unreadable file reads as "not wired" — never a thrown probe that
+// would crash tab activation (P5: the row marker itself is the visible state).
 function probeCodexWired(): boolean {
-  try {
-    const url = new URL('../../../.claude-plugin/sterling-mcp.json', import.meta.url);
-    const raw = JSON.parse(readFileSync(url, 'utf8')) as { mcpServers?: Record<string, unknown> };
-    return Boolean(raw.mcpServers && Object.prototype.hasOwnProperty.call(raw.mcpServers, 'codex'));
-  } catch {
-    // missing/unparsable manifest reads as "not wired" — never a thrown probe
-    // failure that would crash tab activation (P5: degrade loud via the row
-    // marker itself, not a notice — the absence IS the visible state here).
-    return false;
-  }
+  return userScopeCodexServer().found;
 }
 
 /** Build the AgentRosterSnapshot at tab activation: installed frontmatter +
@@ -236,8 +233,9 @@ function applySparringModel(e: SparringModelEffect): void {
  *  (authoritative) → surgical setInstalledModelEffort on each governed installed
  *  file (machine vars untouched, d53dc92c) → a durable swap decision (AC5). A
  *  partial projection is not silent — it surfaces as the next activation's drift
- *  marker (P5). setInstalledModelEffort/parseInstalledHeader are loaded at
- *  runtime from scripts/lib (outside the tui tsc rootDir). */
+ *  marker (P5). setInstalledModelEffort/parseInstalledHeader are imported
+ *  statically from scripts/lib (typed by agent-distribution.d.mts) so the
+ *  bundle carries them. */
 async function applySwap(e: ModelSwapEffect): Promise<void> {
   const nowISO = new Date().toISOString();
   try {
@@ -248,16 +246,14 @@ async function applySwap(e: ModelSwapEffect): Promise<void> {
     writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
 
     // 2. surgical installed-frontmatter projection on each governed agent file
-    const distUrl = new URL('../../../scripts/lib/agent-distribution.mjs', import.meta.url).href;
-    const dist = await import(distUrl);
     for (const name of e.agents) {
       const p = join(agentsDir, `${name}.md`);
       if (!existsSync(p)) continue;
       const content = readFileSync(p, 'utf8');
-      const hdr = dist.parseInstalledHeader(content);
+      const hdr = parseInstalledHeader(content);
       writeFileSync(
         p,
-        dist.setInstalledModelEffort(content, {
+        setInstalledModelEffort(content, {
           model: e.to.model,
           effort: e.to.effort,
           pluginVersion: hdr?.pluginVersion ?? '0.0.0',

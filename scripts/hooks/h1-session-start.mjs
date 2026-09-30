@@ -27,10 +27,12 @@ import { withRegisterLock, readRegister, registerPath, sessionBoundarySweep } fr
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
-import { ProjectRegistry, registryPath } from '@sterling/store';
+import { ProjectRegistry, registryPath, SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths, isLocallyModified, loadRegistry, sha256 } from '../lib/agent-distribution.mjs';
 import { gitTouches, writeInitialGitSettled } from './lib/settlement.mjs';
+import { isInstalledCopy } from '../lib/installed-copy.mjs';
+import { machineStores, probeSchemaVersion } from '../lib/update.mjs';
 import { owesProseVerdicts, isJudgedOwesProse, workerStatus, workerBreakage, ageText } from './lib/maintenance-worker.mjs';
 
 // IN-FLIGHT DISPATCH REGISTER DELETION — COOPERATING WRITER (decision
@@ -196,6 +198,55 @@ function pluginVersion() {
   return null;
 }
 
+/** POSIX single-quoted shell argument, so a printed path with a space pastes as ONE argument. */
+function shellQuote(value) {
+  return `'${String(value).split("'").join(`'\\''`)}'`;
+}
+
+/** A script H1 spawns or prints: the bundled bin/ entry when the plugin ships
+ *  one (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
+ *  design A), else the clone's scripts/ source. */
+function pluginScript(root, name) {
+  const bundled = join(root, 'bin', name);
+  return existsSync(bundled) ? bundled : join(root, 'scripts', name);
+}
+
+// Each post-update step is bounded well inside H1's hooks.json timeout (180s):
+// two steps at 60s leave room for the rest of SessionStart.
+const POST_UPDATE_STEP_TIMEOUT_MS = 60_000;
+
+/**
+ * POST-UPDATE SYNC for ONE project (decision
+ * sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, design B): the
+ * same two steps /sterling:update's authoring branch runs for its invoking project —
+ * sync-agents --target <project>, then a stamp-contract DRY RUN scoped to it — with the
+ * same verdicts: sync-agents exit 2 is a refusal and any other non-zero a failure;
+ * stamp-contract exit 2 is tolerated drift, and a green "0 project(s) processed" checked
+ * nothing, which is a failure (P5). Returns { ok, detail } or { ok, restart, drift, driftOut }.
+ */
+function runPostUpdateSync(root, project) {
+  const run = (name, args) => {
+    const r = spawnSync(process.execPath, [pluginScript(root, name), ...args], { cwd: root, encoding: 'utf8', timeout: POST_UPDATE_STEP_TIMEOUT_MS });
+    const error = r.error ? r.error.message : r.signal ? `killed by ${r.signal}` : null;
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
+    return { status: error ? null : r.status, error, out, tail: out.split('\n').slice(-8).join(' | ') };
+  };
+  const sync = run('sync-agents.mjs', ['--target', project]);
+  if (sync.error) return { ok: false, detail: `sync-agents did not run (${sync.error})` };
+  if (sync.status === 2) return { ok: false, detail: `sync-agents REFUSED (exit 2 — a locally modified agent, an unsafe path, or a foreign or malformed .claude/settings.json): ${sync.tail}` };
+  if (sync.status !== 0) return { ok: false, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
+  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
+  // From here sync-agents has already run: a later failure still carries `restart`,
+  // so the user is told agents changed even though the step as a whole failed.
+  const contract = run('stamp-contract.mjs', ['--project', project]);
+  if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
+  if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
+  if (contract.status === 0 && /—\s*0 project\(s\) processed/.test(contract.out)) {
+    return { ok: false, restart, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) — the project is not reachable through the project registry; run /sterling:init here to register it` };
+  }
+  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail };
+}
+
 /**
  * DEAD-DISPATCH RESIDUE AT THE SESSION BOUNDARY (SPEC A items 2/3b, boards
  * 03ed9d35/31565253; shared lib scripts/hooks/lib/dispatch-residue.mjs). A
@@ -329,20 +380,132 @@ try {
   // fail-open — a broken plan lock costs its own section, never the rest of H1
 }
 
-const store = openStore(input.cwd);
+// STORE-VERSION PROBE (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
+// ruling point 1 'Explicit command'): read the SQLite header user_version of the project
+// store and every ~/.sterling/domains/*/sterling.db — no connection opened — and on a
+// mismatch print the paste-ready migrate command. It NEVER migrates: a migration is the
+// one irreversible step and runs only on the human's word. Runs BEFORE openStore because
+// opening a NEWER-schema (or unreadable) store throws: such a PROJECT store takes the
+// no-store exit below with this line instead of crashing SessionStart. An OLDER store
+// opens read-only (packages/store's refuse-until-migrated), so H1 carries on with it.
+let storeVersionWarning = '';
+let storeVersionContext = '';
+let projectStoreBlocked = false;
+try {
+  const projectDb = join(input.cwd, '.sterling', 'sterling.db');
+  const behind = [];
+  const other = [];
+  for (const db of machineStores(input.cwd)) {
+    let found;
+    try {
+      found = probeSchemaVersion(db);
+    } catch (err) {
+      other.push(`${db} (header unreadable: ${err?.message ?? err})`);
+      if (db === projectDb) projectStoreBlocked = true;
+      continue;
+    }
+    if (found === SUPPORTED_SCHEMA_VERSION) continue;
+    if (found < SUPPORTED_SCHEMA_VERSION) {
+      behind.push({ db, found });
+      continue;
+    }
+    if (db === projectDb) projectStoreBlocked = true;
+    other.push(`${db} (v${found}, NEWER than this Sterling's v${SUPPORTED_SCHEMA_VERSION} — update the plugin)`);
+  }
+  if (behind.length || other.length) {
+    const root = pluginRoot();
+    const migrate = root ? pluginScript(root, 'migrate-stores.mjs') : '<sterling>/scripts/migrate-stores.mjs';
+    const parts = [];
+    if (behind.length) {
+      parts.push(
+        `${behind.map((b) => `${b.db} is v${b.found}`).join(', ')}; this Sterling expects v${SUPPORTED_SCHEMA_VERSION} — run: ` +
+          behind.map((b) => `node ${shellQuote(migrate)} --db ${shellQuote(b.db)}`).join(' && ')
+      );
+    }
+    if (other.length) parts.push(`also: ${other.join(', ')}`);
+    storeVersionWarning = `⚠ Sterling store schema mismatch: ${parts.join('; ')} — then EXIT AND RELAUNCH. `;
+    storeVersionContext = `\n\nSTORE SCHEMA MISMATCH (H1): ${parts.join('; ')}. Nothing was migrated — a migration runs only on the user's word; tell them, then EXIT AND RELAUNCH after it.`;
+  }
+} catch (err) {
+  storeVersionWarning = `⚠ Sterling store schema probe FAILED (${err?.message ?? err}) — store versions unknown. `;
+}
+
+// POST-UPDATE SYNC (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
+// design B, slice S5). /plugin updates the plugin but runs none of Sterling's post-update
+// steps, so the first session after a version change syncs THIS project's agents and checks
+// its contract, keyed on plugin.json's version against <project>/.sterling/synced-version.
+// INSTALLED COPIES ONLY: on a git clone (the authoring machine, a legacy consumer clone)
+// /sterling:update owns these steps, and plugin.json's version moves only at release there,
+// so it would miss every template change between releases anyway. The marker is written
+// only after both steps succeed — a failure is loud and leaves it, so the next session
+// retries. Runs before the agent-currency block, which then sees the synced agents.
+let postUpdateWarning = '';
+let postUpdateContext = '';
+try {
+  const root = pluginRoot();
+  // A session whose cwd IS the plugin root is working in Sterling itself, never a
+  // project to sync into (and an installed copy's cache dir hosts no sessions).
+  if (root && !samePath(input.cwd, root) && isInstalledCopy(root) && existsSync(join(input.cwd, '.sterling', 'config.json'))) {
+    const current = pluginVersion();
+    const markerPath = join(input.cwd, '.sterling', 'synced-version');
+    let previous = null;
+    try {
+      previous = readFileSync(markerPath, 'utf8').trim() || null;
+    } catch {
+      // absent or unreadable — treated as never synced; the sync is idempotent
+    }
+    if (!current) {
+      postUpdateWarning = `⚠ Sterling post-update sync SKIPPED — the installed plugin's version is unreadable (${join(root, '.claude-plugin', 'plugin.json')}). `;
+      postUpdateContext = `\n\nPOST-UPDATE SYNC (H1): SKIPPED — ${join(root, '.claude-plugin', 'plugin.json')} carries no readable version, so this project's agents cannot be known current.`;
+    } else if (current !== previous) {
+      const hop = `Sterling ${previous ?? '(never synced)'}→${current}`;
+      const result = runPostUpdateSync(root, input.cwd);
+      if (!result.ok) {
+        // sync-agents may have refreshed agents before a later step failed: the
+        // restart is owed regardless, so it is never hidden behind the failure.
+        const restartOwed = result.restart ? ' agents synced — RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough).' : '';
+        postUpdateWarning = `✗ ${hop}: post-update sync FAILED — ${result.detail}.${restartOwed} `;
+        postUpdateContext =
+          `\n\nPOST-UPDATE SYNC FAILED (H1): ${hop} — ${result.detail}. No marker was written, so it retries at the next session start; tell the user and fix the cause.` +
+          (result.restart ? ' sync-agents DID refresh agents before the failure: RESTART REQUIRED — project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent.' : '');
+      } else {
+        try {
+          writeFileSync(markerPath, `${current}\n`);
+        } catch (err) {
+          postUpdateWarning = `✗ ${hop}: agents synced, but ${markerPath} could not be written (${err?.code ?? err?.message ?? err}) — the sync re-runs every session until it can. `;
+        }
+        const restartLine = result.restart ? 'agents synced — RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough)' : 'agents synced, none changed';
+        postUpdateWarning ||= `⚠ ${hop}: ${restartLine}. `;
+        postUpdateContext =
+          `\n\nPOST-UPDATE SYNC (H1): ${hop} — ${restartLine}.` +
+          (result.restart ? ' RESTART REQUIRED — project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent.' : '') +
+          (result.drift ? ` Contract drift in this project (stamp-contract dry run, tolerated): ${result.driftOut}` : '');
+      }
+    }
+  }
+} catch (err) {
+  postUpdateWarning = `✗ Sterling post-update sync FAILED (${err?.message ?? err}) — no marker written; it retries at the next session start. `;
+}
+
+const store = projectStoreBlocked ? null : openStore(input.cwd);
 if (!store) {
+  // The store-version probe and the post-update sync ride this exit too: a project
+  // whose store is at another schema version lands here, and its migrate line is
+  // the one thing the human must see.
+  const earlyWarning = storeVersionWarning + postUpdateWarning;
   // The receipt report rides this early exit too: H22's ledger gate is
   // .sterling/config.json (not sterling.db), so a project with a config but no
   // The PLAN LOCK section rides this early exit too, leading as it does on the
   // main path: a project can hold an approved plan before its store exists, and
   // a section computed but never emitted would consume its one-shot markers
   // silently — disclosing nothing while spending the disclosure.
-  if (planLockContext || dispatchResidueLines.length) {
+  if (planLockContext || dispatchResidueLines.length || earlyWarning) {
     process.stdout.write(
       JSON.stringify({
+        ...(earlyWarning ? { systemMessage: earlyWarning.trim() } : {}),
         hookSpecificOutput: {
           hookEventName: 'SessionStart',
-          additionalContext: planLockContext + dispatchResidueLines.join('\n\n'),
+          additionalContext: planLockContext + dispatchResidueLines.join('\n\n') + storeVersionContext + postUpdateContext,
         },
       })
     );
@@ -416,7 +579,13 @@ if (config !== null && (typeof config !== 'object' || Array.isArray(config))) {
 let roleContext = '';
 try {
   const root = pluginRoot();
-  if (root && samePath(input.cwd, root)) {
+  if (root && !samePath(input.cwd, root) && isInstalledCopy(root)) {
+    // An installed copy (no .git — decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
+    // design D) is never a project's cwd, so the line is stated in EVERY project: it is the
+    // only place a session learns that /plugin, not /sterling:update, moves this machine.
+    roleContext =
+      '\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.';
+  } else if (root && samePath(input.cwd, root)) {
     const role = config?.machine_role;
     if (role === 'authoring') {
       roleContext =
@@ -1429,10 +1598,14 @@ function markerWriterAlive(pid) {
 // build-id the server recorded at boot to the current built id; warn the human
 // loudly to restart. Fail-open: a missing marker or build-id is 'unknown', never
 // a false alarm (P1). STERLING_SERVER_DIST overrides the dist lookup for tests.
+// The server ships as the bundle mcp/sterling-mcp.mjs with its .build-id beside it
+// (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
+// design A); a tree without mcp/ still runs packages/mcp-server/dist.
 let staleWarning = '';
 try {
   const root = pluginRoot();
-  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join(root, 'packages', 'mcp-server', 'dist') : null);
+  const serverDist =
+    process.env.STERLING_SERVER_DIST ?? (root ? (existsSync(join(root, 'mcp')) ? join(root, 'mcp') : join(root, 'packages', 'mcp-server', 'dist')) : null);
   const currentBuildId = serverDist && existsSync(buildIdPath(serverDist)) ? readFileSync(buildIdPath(serverDist), 'utf8').trim() || null : null;
   let marker = null;
   const markerPath = runtimeMarkerPath(join(input.cwd, '.sterling', 'sterling.db'));
@@ -1785,12 +1958,16 @@ try {
     reason = '.claude/agents/conductor.md missing';
   }
   if (reason !== null) {
-    const clone = pluginRoot() ?? '<clone>';
+    const root = pluginRoot();
+    const clone = root ?? '<clone>';
+    // The bundled bin/ entry on a plugin that ships one (an installed copy has no
+    // scripts/ sources to run), else the clone's scripts/ source.
+    const syncScript = root && existsSync(join(root, 'bin', 'sync-agents.mjs')) ? 'bin/sync-agents.mjs' : 'scripts/sync-agents.mjs';
     // POSIX single-quoted shell arguments (same idiom as scripts/lib/update.mjs's
     // shellQuote / packages/store's shellQuoteSingle): a clone or project path
     // containing a space must still paste as ONE argument, copy-paste safe.
     const shq = (value) => `'${String(value).split("'").join(`'\\''`)}'`;
-    conductorActivationContext = `\n\nCONDUCTOR NOT ACTIVE: ${reason} — run \`node ${shq(clone)}/scripts/sync-agents.mjs --target ${shq(input.cwd)}\` then EXIT AND RELAUNCH`;
+    conductorActivationContext = `\n\nCONDUCTOR NOT ACTIVE: ${reason} — run \`node ${shq(clone)}/${syncScript} --target ${shq(input.cwd)}\` then EXIT AND RELAUNCH`;
   }
 } catch {
   // fail-open (P1): this diagnostic must never break SessionStart
@@ -1803,10 +1980,10 @@ try {
 const conductorActivationWarning = conductorActivationContext ? `⚠ ${conductorActivationContext.trim()}. ` : '';
 
 const output = {
-  systemMessage: `${conductorActivationWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${reconcileBanner}`,
+  systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the

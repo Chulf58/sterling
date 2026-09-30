@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1724,4 +1724,17 @@ test('extra_tools: the Sterling-prefix ban is case-insensitive', () => {
       `entry ${bad} must be refused`,
     );
   }
+});
+
+// Decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
+// design point C: no agent template bakes a machine path, so init/sync/install pass no
+// {{NODE}}/{{HOOKS_DIR}}/{{GIT_RO}} vars. The only substitution tokens left are the
+// config-resolved {{MODEL}}/{{EFFORT}}; a new token here would ship as a literal.
+test('agent templates carry only the {{MODEL}}/{{EFFORT}} tokens — no baked machine-path variables', () => {
+  const dir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'agent-templates');
+  const tokens = new Set();
+  for (const f of readdirSync(dir).filter((n) => n.endsWith('.md'))) {
+    for (const m of readFileSync(join(dir, f), 'utf8').matchAll(/\{\{([A-Z_]+)\}\}/g)) tokens.add(m[1]);
+  }
+  assert.deepEqual([...tokens].sort(), ['EFFORT', 'MODEL']);
 });

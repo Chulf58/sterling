@@ -14,8 +14,7 @@ MODE="${1:-up}"
 SESSION="{{SESSION}}"   # per-project: multiple projects at once, never one twice
 
 # --- generated paths (machine-detected by init) ---
-PLUGIN_DIR="{{PLUGIN_DIR}}"
-TUI_BUNDLE="{{TUI_BUNDLE}}"
+{{PLUGIN_PATHS}}
 SPLIT_RATIO={{SPLIT_RATIO}}   # right-pane width, percent
 
 # node/claude resolved at runtime (PATH first, then the ~/.local tarball install)
@@ -29,7 +28,7 @@ STORE="$WORKDIR/.sterling/sterling.db"
 # --- fail loud on missing inputs (P5) ---
 [ -n "$NODE_BIN" ] || { echo "sterling-launch: 'node' not found on PATH (set NODE_BIN)" >&2; exit 1; }
 command -v tmux >/dev/null || { echo "sterling-launch: 'tmux' not installed" >&2; exit 1; }
-[ -f "$TUI_BUNDLE" ] || { echo "sterling-launch: TUI bundle missing: $TUI_BUNDLE" >&2; exit 1; }
+[ -n "$TUI_BUNDLE" ] && [ -f "$TUI_BUNDLE" ] || { echo "sterling-launch: TUI bundle missing: ${TUI_BUNDLE:-none installed under the Claude plugin cache}" >&2; exit 1; }
 [ -f "$STORE" ]      || { echo "sterling-launch: store missing: $STORE (run from a project root)" >&2; exit 1; }
 
 # Re-split the TUI as a right pane in the session's active window.
@@ -57,7 +56,7 @@ case "$MODE" in
       tmux set-option -t "$SESSION" mouse on
       exec tmux attach-session -t "$SESSION"
     fi
-    tmux new-session -d -s "$SESSION" -c "$WORKDIR" "$CLAUDE_BIN" --plugin-dir "$PLUGIN_DIR"
+    tmux new-session -d -s "$SESSION" -c "$WORKDIR" "$CLAUDE_BIN"{{CLAUDE_PLUGIN_FLAG}}
     # Session-scoped (not -g): click-to-focus a pane; Shift+drag still selects
     # plain terminal text in the claude pane.
     tmux set-option -t "$SESSION" mouse on

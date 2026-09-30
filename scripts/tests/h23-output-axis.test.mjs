@@ -395,6 +395,20 @@ test('AC3: Read of a file with no owning article, whose content matches a govern
   }
 });
 
+test('an over-long [a-z0-9_] token in the output is skipped, never a rank_terms validation failure', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(markedAntiPattern('AP-ALPHA'));
+    const longToken = 'a1_'.repeat(34).slice(0, 100);
+    assert.equal(longToken.length, 100);
+    const r = runHook(postRead(dir, 'logs/probe.txt', `${CONTENT_SENTENCE} ${longToken}`), dir);
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(r.stdout + r.stderr, /delivery failed/, 'the long token must not reach the rank_terms validator');
+  } finally {
+    cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // AC4 — the silence floor
 // ---------------------------------------------------------------------------

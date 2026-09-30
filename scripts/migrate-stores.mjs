@@ -124,7 +124,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 // Dependency-free like this script itself (node builtins only) — see
 // scripts/lib/store-path.mjs's own header. Safe to import here: unlike
 // scripts/lib/project.mjs (which pulls in @sterling/schemas + @sterling/store
@@ -138,8 +137,12 @@ const TARGET_SCHEMA_VERSION = 2;
 const TOOL = 'migrate-stores';
 // --all-stores self-spawns THIS exact file, once per enumerated store — see
 // the --ALL-STORES header note for why (byte-identical --db path, per-store
-// process isolation).
-const SELF_PATH = fileURLToPath(import.meta.url);
+// process isolation). process.argv[1], the entry node was actually launched
+// with, not import.meta.url: bundled into bin/migrate-stores.mjs, this module's
+// import.meta.url is rewritten to name the scripts/ SOURCE (source-location
+// identity, scripts/lib/bundled-artifacts.mjs), which needs @sterling/store and
+// cannot load on an installed copy with no node_modules.
+const SELF_PATH = process.argv[1];
 
 // Verbatim from packages/store/src/index.ts's DDL (schema v2 identity tables).
 // The `records` v2 COLUMNS (lifecycle/freshness/version) are added by

@@ -9032,7 +9032,7 @@ export class SterlingTools {
   private appendSessionEvents(entries: { kind: SessionEvent['kind']; detail: string; lane?: NoCaptureLane; target?: string }[]): { at: string } {
     if (!this.repoRoot) {
       throw new Error(
-        'session-event write: no project root is known to this server, so the transient register location cannot be resolved — use the script fallback (scripts/no-capture.mjs / scripts/concept-designed.mjs in the plugin clone)'
+        'session-event write: no project root is known to this server, so the transient register location cannot be resolved — use the script fallback (bin/no-capture.mjs / bin/concept-designed.mjs under ${CLAUDE_PLUGIN_ROOT})'
       );
     }
     const eventsPath = join(this.repoRoot, '.sterling', 'transient', 'session-events.json');

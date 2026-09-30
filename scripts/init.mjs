@@ -34,7 +34,7 @@ if (!nodeModulesOk) {
   process.exit(2);
 }
 if (!schemasDistOk || !storeDistOk) {
-  console.error(`init REFUSED: workspace build output is missing — run \`npm run build && npm run build:tui\` in ${precheckRoot}`);
+  console.error(`init REFUSED: workspace build output is missing — run \`npm run build\` in ${precheckRoot}`);
   process.exit(2);
 }
 

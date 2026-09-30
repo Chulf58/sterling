@@ -12,7 +12,7 @@ Run the setup questions, ONE question at a time (ask, don't guess; recommend whe
 Then execute the manifest:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/scripts/init.mjs" --target "<project dir>" --project-name "<name>" --stack-tags <a,b> --toolchain <adapter>:<glob,glob> (--backup-path <p> | --backup-opt-out) [--mode <hobby|work>]
+node "${CLAUDE_PLUGIN_ROOT}/bin/init.mjs" --target "<project dir>" --project-name "<name>" --stack-tags <a,b> --toolchain <adapter>:<glob,glob> (--backup-path <p> | --backup-opt-out) [--mode <hobby|work>]
 ```
 
 `--mode` is for NEW projects only: pass the Mode answer on a first init, and never on a re-init or ensure.
@@ -25,4 +25,4 @@ In WORK mode, init also prepares the project for engineers who do not have Sterl
 
 **Project mode is per machine.** `mode` (`hobby` | `work`, missing = hobby) lives in `.sterling/config.json`, which is untracked, so it is NOT carried by git: set it on EVERY machine that works on the project — the work machine included — in the TUI System tab, then run `/sterling:update` (or init) to write the OpenCode agents and handoff files; `sync-agents` alone refreshes only the agents. `machine_role` (does this clone author or consume Sterling), `mode` (which flow this project uses) and `store_authority` (is this store the primary one) are independent: a work machine that CONSUMES Sterling may still hold the PRIMARY store for its work project.
 
-Relay the per-item report table. A restart is required only when init says so: it prints the RESTART REQUIRED block when an agent was `installed`, `refreshed`, `header_repaired`, `machine_rebaked` or `retired`, or the conductor activation was newly written (then also `EXIT AND RELAUNCH`); otherwise it prints `no agent changes — no restart required`. When a restart is required, relay it prominently — a newly installed or synced agent is not visible to a session that was already running, so dispatch nothing until the session restarts (verify with `node "${CLAUDE_PLUGIN_ROOT}/scripts/check-agents-visible.mjs" --target <dir> --session-started <iso>` if unsure).
+Relay the per-item report table. A restart is required only when init says so: it prints the RESTART REQUIRED block when an agent was `installed`, `refreshed`, `header_repaired`, `machine_rebaked` or `retired`, or the conductor activation was newly written (then also `EXIT AND RELAUNCH`); otherwise it prints `no agent changes — no restart required`. When a restart is required, relay it prominently — a newly installed or synced agent is not visible to a session that was already running, so dispatch nothing until the session restarts (verify with `node "${CLAUDE_PLUGIN_ROOT}/bin/check-agents-visible.mjs" --target <dir> --session-started <iso>` if unsure).

@@ -92,6 +92,10 @@ function main(input) {
   const entries = [];
   for (const candidate of extractCommandPathCandidates(command)) {
     if (entries.length >= BASH_POINTER_PATH_CAP) break;
+    // A multi-line `git commit -m "..."` message is one quoted token that can
+    // look like a path. No path carries a newline or exceeds a filesystem name
+    // (255), so such a candidate is prose, not a path.
+    if (candidate.length > 255 || candidate.includes('\n')) continue;
     const rel = repoRel(candidate, input.cwd);
     if (!rel) continue; // outside the repo: no delivery jurisdiction
     if (rel === '.git' || rel.startsWith('.git/')) continue; // machinery internals (H7 precedent)
@@ -108,7 +112,8 @@ function main(input) {
       isFile = statSync(join(input.cwd, rel)).isFile();
     } catch (e) {
       // The candidate can vanish or have an ancestor replaced during the scan.
-      if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') continue;
+      // ENAMETOOLONG: a component over the filesystem limit is not a path.
+      if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR' || e?.code === 'ENAMETOOLONG') continue;
       throw e;
     }
     if (!isFile) continue;

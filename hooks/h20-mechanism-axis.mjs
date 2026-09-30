@@ -5354,6 +5354,7 @@ var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
   "else"
 ]);
 var AXIS_MIN_TERM_LEN = 4;
+var AXIS_MAX_TERM_LEN = 64;
 var AXIS_MIN_HITS = 2;
 function extractAxisTerms(text, maxTerms) {
   return rankedAxisTerms(text).slice(0, Math.max(0, maxTerms));
@@ -5361,7 +5362,7 @@ function extractAxisTerms(text, maxTerms) {
 function rankedAxisTerms(text) {
   const counts = /* @__PURE__ */ new Map();
   for (const raw of String(text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
-    if (raw.length < AXIS_MIN_TERM_LEN)
+    if (raw.length < AXIS_MIN_TERM_LEN || raw.length > AXIS_MAX_TERM_LEN)
       continue;
     if (AXIS_STOPWORDS.has(raw))
       continue;
@@ -5686,7 +5687,7 @@ function rankTermDedupeKey(term) {
   const key = folded.length > 0 ? folded : base2;
   return isPrefix ? `${key}*` : key;
 }
-var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).transform((terms) => {
+var rankTerms = external_exports.array(external_exports.string().regex(new RegExp(`^\\S{1,${AXIS_MAX_TERM_LEN}}$`), `rank_terms must be single keywords (no whitespace, \u2264${AXIS_MAX_TERM_LEN} chars)`)).transform((terms) => {
   const seen = /* @__PURE__ */ new Set();
   const deduped = [];
   for (const term of terms) {

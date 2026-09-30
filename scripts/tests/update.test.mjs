@@ -13,7 +13,8 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH, preScaleDownMarkers, reexecArgs, UPDATE_REEXEC_ENV, UPDATE_REEXEC_FROM_ENV } from '../lib/update.mjs';
+import { readCurrency, refusalFor, isGeneratedTrackedPath, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH, preScaleDownMarkers, reexecArgs, UPDATE_REEXEC_ENV, UPDATE_REEXEC_FROM_ENV } from '../lib/update.mjs';
+import { BUNDLED_ARTIFACTS } from '../lib/bundled-artifacts.mjs';
 import { ensureUpdateLauncher, renderUpdateLauncher, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
 
 const GIT_ID = ['-c', 'user.email=t@sterling.test', '-c', 'user.name=sterling test'];
@@ -353,7 +354,9 @@ test('--check never mutates even when behind', async () => {
   }
 });
 
-test('behind: fast-forward then build → build:tui → check → test, then the project fan-out', async () => {
+// build:tui dropped from the sequence (lane S1: tui/sterling-tui.mjs is now a COMMITTED
+// bundle, so a consumer rebuild would dirty the tracked file; check verifies its freshness).
+test('behind: fast-forward then build → check → test, then the project fan-out; the committed TUI bundle is never rebuilt', async () => {
   const cwd = scratchCwd();
   try {
     const { exec, calls } = fakeExec({ behind: 2, changed: ['packages/store/src/index.ts'] });
@@ -367,19 +370,44 @@ test('behind: fast-forward then build → build:tui → check → test, then the
 
     assert.equal(report.exit, 0);
     const order = calls.filter((c) => c.includes('merge --ff-only') || c.startsWith('npm ') || c.includes('sync-agents'));
-    assert.deepEqual(order.slice(0, 5), [
+    assert.deepEqual(order.slice(0, 4), [
       'git merge --ff-only origin/main',
       'npm run build',
-      'npm run build:tui',
       'npm run check',
       'npm test',
     ]);
+    assert.equal(calls.filter((c) => c.includes('build:tui') || c.includes('build:bundles')).length, 0, 'a consumer never rebuilds a committed bundle');
     assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 2);
     assert.deepEqual(report.projects.map((p) => p.name), ['Deepdots', 'comsoft']);
     // no dependency change → npm ci must NOT run (it is the one networked step)
     assert.equal(calls.filter((c) => c === 'npm ci').length, 0);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// Launchers baked before the plugin layout (sterling.bat, tui.bat, sterling-launch.sh)
+// name packages/tui/bundle/sterling-tui.mjs, which no longer ships; only init re-bakes
+// them per project, so a consumer update says so once.
+test('consumer update: one line tells the user to re-run /sterling:init per project so launchers run tui/sterling-tui.mjs; an authoring clone is not told', async () => {
+  for (const [role, expected] of [[null, 1], ['consumer', 1], ['authoring', 0]]) {
+    const cwd = scratchCwd();
+    try {
+      if (role) {
+        mkdirSync(join(cwd, '.sterling'), { recursive: true });
+        writeFileSync(join(cwd, '.sterling', 'config.json'), JSON.stringify({ machine_role: role }));
+      }
+      const { exec } = fakeExec({ behind: 1, changed: ['scripts/prep.mjs'] });
+      const lines = [];
+      // the authoring branch needs an invoking project and, with --no-projects, does nothing else
+      const extra = role === 'authoring' ? { projectDir: cwd, opts: { projects: false } } : { opts: {} };
+      const report = await runUpdate({ cwd, exec, log: (l) => lines.push(String(l)), projects: [], ...extra });
+      assert.equal(report.exit, 0, lines.join('\n'));
+      const hits = lines.filter((l) => /re-run \/sterling:init/.test(l) && /tui\/sterling-tui\.mjs/.test(l));
+      assert.equal(hits.length, expected, `role ${role}: ${lines.join('\n')}`);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   }
 });
 
@@ -1211,6 +1239,32 @@ test('the dirty refusal splits committed BUILD OUTPUTS from source and gives eac
 // decision foreign_a9b98b7d (the original hooks/architecture.md split this extends).
 // -----------------------------------------------------------------------------
 
+test('every tracked file under every registered bundle family (hooks, bin, mcp, tui) gets the discard remedy, never SOURCE CHANGES', () => {
+  // The plugin ships bin/, mcp/ and tui/ bundles committed beside hooks/; a dirty
+  // one on a consumer clone must draw "discard", exactly like a hook bundle.
+  // Iterates the REGISTRY and git's own file list, so a new family fails here
+  // until GENERATED_TRACKED covers it.
+  const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  assert.deepEqual(BUNDLED_ARTIFACTS.map((a) => a.name).sort(), ['bin', 'hooks', 'mcp', 'tui']);
+  for (const a of BUNDLED_ARTIFACTS) {
+    const r = spawnSync('git', ['ls-files', '--', a.shipped], { cwd: repo, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const files = r.stdout.split('\n').filter(Boolean)
+      // hooks/ also holds AUTHORED files (hooks.json, the registry; README.md) — only its .mjs are bundles
+      .filter((f) => !(a.name === 'hooks' && !f.endsWith('.mjs')));
+    assert.ok(files.length > 0, `${a.name}: tracked files under ${a.shipped}`);
+    for (const f of files) {
+      assert.ok(isGeneratedTrackedPath(f), `${a.name}: ${f} is classified as a generated build output`);
+      const c = refusalFor({ ...cleanCurrency(), dirty_tracked: [` M ${f}`] });
+      assert.match(c, /COMMITTED BUILD OUTPUTS — discard these, always/, f);
+      assert.doesNotMatch(c, /SOURCE CHANGES/, f);
+    }
+  }
+  assert.equal(isGeneratedTrackedPath('hooks/hooks.json'), false, 'the hand-maintained hook registry stays source');
+  assert.equal(isGeneratedTrackedPath('hooks/README.md'), false, 'authored hooks/ prose stays source');
+  assert.equal(isGeneratedTrackedPath('.claude-plugin/sterling-mcp.json'), false, 'the committed MCP config is authored, not generated');
+});
+
 test('CONTROL, placed first: a genuine SOURCE change (hooks/hooks.json) reads as SOURCE CHANGES, never a build output', () => {
   const c = refusalFor({ ...cleanCurrency(), dirty_tracked: [' M hooks/hooks.json'] });
   assert.match(c, /SOURCE CHANGES/);
@@ -1309,6 +1363,9 @@ const BAT_TEMPLATE = '@echo off\r\nrem updater\r\n"wt.exe" wsl.exe --cd "{{WIN_P
 function cloneWithTemplate() {
   const clone = mkdtempSync(join(tmpdir(), 'sterling-launcher-clone-'));
   mkdirSync(join(clone, 'templates'));
+  // a .git marks an AUTHORING clone; without one the root reads as an installed plugin
+  // copy and ensureUpdateLauncher skips (scripts/lib/installed-copy.mjs)
+  mkdirSync(join(clone, '.git'));
   writeFileSync(join(clone, 'templates', 'update-win.bat'), BAT_TEMPLATE);
   return clone;
 }
@@ -2067,5 +2124,40 @@ test('disclosures: the Dome Farmer pre-rename models keys are each named by path
     );
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// INSTALLED COPY (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
+// design point D): a /plugin-installed Sterling has no .git at its plugin root, and /plugin owns its
+// updates. /sterling:update refuses before anything else — no git, no npm, no sync, exit 2.
+test('installed copy (no .git at the plugin root): /sterling:update refuses before anything else, exit 2', async () => {
+  const cwd = authoringCwd();
+  const pluginRoot = mkdtempSync(join(tmpdir(), 'sterling-update-installed-'));
+  try {
+    const { exec, calls } = fakeExec({ behind: 2 });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {}, pluginRoot });
+    assert.equal(report.exit, 2);
+    assert.deepEqual(calls, [], 'nothing runs on an installed copy');
+    assert.match(lines.join('\n'), /Sterling is installed as a plugin — update it with \/plugin \(Installed tab → Update\) or `claude plugin update sterling@/);
+    assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(pluginRoot, { recursive: true, force: true });
+  }
+});
+
+test('a clone plugin root (.git present) is not refused: the authoring path runs unchanged', async () => {
+  const cwd = authoringCwd();
+  const pluginRoot = mkdtempSync(join(tmpdir(), 'sterling-update-clone-root-'));
+  try {
+    mkdirSync(join(pluginRoot, '.git'));
+    const { exec, calls } = fakeExec();
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: REG_P, invokingProject: '/tmp/p', opts: {}, pluginRoot });
+    assert.equal(report.exit, 0);
+    assert.deepEqual(calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), ['/tmp/p']);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(pluginRoot, { recursive: true, force: true });
   }
 });

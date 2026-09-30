@@ -605,8 +605,15 @@ test('C3 (board fb7c43fb N-3, expect RED today): the stale-server guard reads .b
   // the CURRENT side only, and strengthened by reading the REAL clone's
   // current build-id at test runtime (never hardcoded) so the assertion
   // states what the CURRENT side must equal, not just what it must not.
-  const REAL_BUILD_ID = readFileSync(join(root, 'packages', 'mcp-server', 'dist', '.build-id'), 'utf8').trim();
-  assert.ok(REAL_BUILD_ID.length > 0, 'fixture precondition: could not read this repo\'s own packages/mcp-server/dist/.build-id — C3 cannot state its target claim without a known real build-id to compare against');
+  // CHANGED (plugin-marketplace integration): the server now ships as the committed
+  // bundle mcp/sterling-mcp.mjs with its own mcp/.build-id, and H1's guard reads THAT
+  // when the walk-up root has mcp/ (packages/mcp-server/dist only for a tree without
+  // it). The oracle mirrors that resolution; what it proves is unchanged — the CURRENT
+  // side comes from the WALK-UP root, never the planted tree (which has no mcp/, so a
+  // planted read would yield the planted literal and a silent FRESH verdict).
+  const realServerDist = existsSync(join(root, 'mcp')) ? join(root, 'mcp') : join(root, 'packages', 'mcp-server', 'dist');
+  const REAL_BUILD_ID = readFileSync(join(realServerDist, '.build-id'), 'utf8').trim();
+  assert.ok(REAL_BUILD_ID.length > 0, `fixture precondition: could not read this repo's own ${realServerDist}/.build-id — C3 cannot state its target claim without a known real build-id to compare against`);
   const base = mkdtempSync(join(tmpdir(), 'sterling-h1-serverdist-'));
   const planted = makePlantedServerDistRoot(base, PLANTED_BUILD_ID);
   const { dir: project, cleanup: cleanupProject } = makeH1Project();
@@ -631,7 +638,7 @@ test('C3 (board fb7c43fb N-3, expect RED today): the stale-server guard reads .b
     );
     assert.ok(
       r.combined.includes(REAL_BUILD_ID),
-      `the reported CURRENT build-id must be the REAL clone's actual .build-id (${REAL_BUILD_ID}, read at test runtime from packages/mcp-server/dist/.build-id — never hardcoded), proving the guard's server-dist resolution walked up rather than reading the planted tree. combined=${flat(r.combined)}`
+      `the reported CURRENT build-id must be the REAL clone's actual .build-id (${REAL_BUILD_ID}, read at test runtime from the walk-up root's server dist — never hardcoded), proving the guard's server-dist resolution walked up rather than reading the planted tree. combined=${flat(r.combined)}`
     );
     assert.match(
       r.combined,

@@ -34,21 +34,20 @@ import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readProjectMode, ProjectM
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
-import { probeCodex, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
+import { probeCodex, userScopeCodexServer, codexUserScopeLine } from './lib/codex-mcp.mjs';
+import { renderTmuxLauncher } from './lib/launcher-tmux.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // Test-isolation seam (mirrors STERLING_REGISTRY_DB): the
-// plugin-repo branch below (codex probe + .claude-plugin/sterling-mcp*.json
-// ensure) only fires when target === pluginRoot — running init with
-// --target <the real pluginRoot> for real would write into THIS live repo's
-// generated, gitignored MCP config (the one this very session's connection
-// may be using), which is unsafe to exercise from an automated test. A test
-// instead sets STERLING_PLUGIN_ROOT_MATCH to its own --target temp dir, so
-// the branch's ensure logic runs against a disposable directory while every
-// OTHER pluginRoot-derived path (templates, dist, hooks) still resolves to
-// the REAL plugin root. Unset in every real run — behavior is unchanged.
+// plugin-repo branch below (the root .mcp.json cleanup, the plugin-repo-only
+// .gitignore entries and the retired sterling-mcp-win.json report) only fires when
+// target === pluginRoot. A test instead sets STERLING_PLUGIN_ROOT_MATCH to its own
+// --target temp dir, so the branch's logic runs against a disposable directory while
+// every OTHER pluginRoot-derived path (templates, hooks) still resolves to the REAL
+// plugin root. Init writes nothing into the plugin directory (slice S2), so this
+// seam is about branch selection, not containment. Unset in every real run.
 // '' must behave as unset too (matches STERLING_CODEX_PROBE's falsy convention) —
 // ?? alone would let '' survive and silently disable the plugin-repo branch.
 const pluginRootMatch = process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot;
@@ -94,14 +93,15 @@ if (!existsSync(target)) fail(`init REFUSED: target '${target}' does not exist`,
 if (modeFlagGiven && !PROJECT_MODES.includes(modeFlag)) {
   fail(`init REFUSED: --mode must be 'hobby' or 'work' — got ${JSON.stringify(modeFlag ?? '')}`, 2);
 }
+// The runtime server and the TUI are COMMITTED bundles (gated by check-bundles-fresh), so
+// nothing is built on an installed copy; a missing one is a broken checkout and refuses
+// here, before any write (the launchers point at the TUI bundle — board 16783088).
+if (!existsSync(join(pluginRoot, 'mcp', 'sterling-mcp.mjs'))) fail('init REFUSED: MCP server bundle missing (mcp/sterling-mcp.mjs) — the plugin checkout is incomplete; on the authoring clone run `npm run build:bundles`', 2);
+if (!existsSync(join(pluginRoot, 'tui', 'sterling-tui.mjs'))) fail('init REFUSED: TUI bundle missing (tui/sterling-tui.mjs) — the plugin checkout is incomplete; on the authoring clone run `npm run build:bundles`', 2);
+// The LEGACY per-project server entry an earlier init wrote into a project's .mcp.json
+// (command = this node, args[0] = the clone's built server). It is only a recognizer for
+// the stale-entry cleanup below.
 const mcpServerEntry = join(pluginRoot, 'packages', 'mcp-server', 'dist', 'main.js');
-if (!existsSync(mcpServerEntry)) fail('init REFUSED: MCP server not built — run `npm run build` in the plugin first', 2);
-// The launchers below bake the TUI bundle path; generating them against a
-// missing bundle ships a launcher that dies on double-click (board 16783088,
-// outside-family review 2026-08-29 — this check existed for the MCP entry but
-// not for the second shipped executable).
-const tuiBundleEntry = join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs');
-if (!existsSync(tuiBundleEntry)) fail('init REFUSED: TUI bundle not built — run `npm run build:tui` in the plugin first', 2);
 // .opencode, .opencode/agents and the handoff projection's directories joined the
 // list with the OpenCode handoff (Sol review): a file sitting where one must be
 // is refused here, before anything is written, not half-way through init.
@@ -613,19 +613,16 @@ const sanitizeSession = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').repla
 const winProjectDir = toWindowsPath(fwd(target));
 const sessionName = `sterling-${sanitizeSession(basename(target))}`;
 const splitPercent = Math.round(eff.splitRatio * 100);
-const tuiBundle = fwd(join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs'));
 // the .sh is bash — ALWAYS LF (a CRLF shebang/line breaks bash); the .bat files
 // are ALWAYS CRLF (cmd.exe misparses LF-only batch files), regardless of eol config
 const lf = (s) => s.replace(/\r\n/g, '\n');
 const crlf = (s) => s.replace(/\r?\n/g, '\r\n');
 
 // (1) the tmux launcher — the actual split lives here; both .bat files call it
+// (an installed plugin copy gets NO --plugin-dir and resolves the TUI at run time;
+// the authoring clone keeps both — see scripts/lib/launcher-tmux.mjs)
 const expectedTmuxLauncher = assertNoDeadTerms('sterling-launch.sh', lf(
-  readFileSync(join(pluginRoot, 'templates', 'launcher-tmux.sh'), 'utf8')
-    .replaceAll('{{SESSION}}', sessionName)
-    .replaceAll('{{PLUGIN_DIR}}', fwd(pluginRoot))
-    .replaceAll('{{TUI_BUNDLE}}', tuiBundle)
-    .replaceAll('{{SPLIT_RATIO}}', String(splitPercent))
+  renderTmuxLauncher(pluginRoot, { session: sessionName, splitPercent })
 ));
 const tmuxLauncherPath = join(target, 'sterling-launch.sh');
 if (!existsSync(tmuxLauncherPath)) {
@@ -698,22 +695,16 @@ items.push({ item: CONSUMER_CHECK_LAUNCHER_NAME, ...ensureConsumerCheckLauncher(
 
 // agent installation (§2.2) via the §13 sync semantics: installed | refreshed |
 // up_to_date | locally-modified left | refuse-on-local-modification
-// GIT_RO is the plugin-owned read-only git wrapper, baked as an absolute
-// forward-slash path exactly like HOOKS_DIR: H14 grants ONLY that exact file
-// identity, so a template must name it absolutely (decision
-// `git-ro-wrapper-fixed-recipes-no-caller-flags`).
-const vars = {
-  NODE: `"${fwd(process.execPath)}"`,
-  HOOKS_DIR: fwd(join(pluginRoot, 'hooks')),
-  GIT_RO: fwd(join(pluginRoot, 'scripts', 'git-ro.mjs')),
-};
+// No machine vars are baked: the only template tokens are {{MODEL}}/{{EFFORT}}, resolved
+// from config below (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-
+// keeps-its-clone, design point C: nothing an installed agent says names a plugin path).
+const installedPluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
 const { report: agentReport } = syncAgents({
   templatesDir: join(pluginRoot, 'agent-templates'),
   registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
   targetAgentsDir: join(target, '.claude', 'agents'),
-  pluginVersion: JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version,
+  pluginVersion: installedPluginVersion,
   now: new Date().toISOString(),
-  vars,
   // config.models is authoritative (98064d77): the config init just wrote/read
   // resolves {{MODEL}}/{{EFFORT}} per agent. `recorded` on a re-run, else the
   // freshly written `expectedConfig` — both are parsed SterlingConfig with .models.
@@ -748,6 +739,16 @@ for (const a of agentReport) {
   if (a.instruction) agentInstructions.push(a.instruction);
 }
 const restartNeeded = agentChangesRequireRestart(agentReport);
+
+// H1's post-update sync marker (.sterling/synced-version, keyed on plugin.json's
+// version): the agents were just synced at THIS version, so record it and the first
+// session after init does not sync them again. Written only when no agent was
+// refused — the same bar H1 sets before it writes the marker (sync-agents exit 2 is
+// not a sync), so a refusal keeps H1 retrying and surfacing it.
+const agentRefused = agentReport.some((a) => items.find((i) => i.item === `.claude/agents/${a.name}.md`)?.status === 'refused');
+if (!agentRefused) {
+  writeFileSync(join(target, '.sterling', 'synced-version'), `${installedPluginVersion}\n`);
+}
 
 // Route A (decision conductor-instructions-via-main-session-agent-route-a): init installs
 // the conductor like every other agent above, then activates it the same way
@@ -825,7 +826,11 @@ if (handoffCloneTarget === true) {
     items.push({ item: `${OPENCODE_AGENTS_DIR}/${r.name}.md`, status, detail });
     if (r.instruction) agentInstructions.push(r.instruction);
   }
-  const handoff = spawnSync(process.execPath, [join(pluginRoot, 'scripts', 'handoff-projection.mjs'), target], { cwd: target, encoding: 'utf8' });
+  // the committed bundle runs without node_modules (an installed plugin copy has none);
+  // the source script is the fallback for a tree where the bundle is absent
+  const handoffBundle = join(pluginRoot, 'bin', 'handoff-projection.mjs');
+  const handoffScript = existsSync(handoffBundle) ? handoffBundle : join(pluginRoot, 'scripts', 'handoff-projection.mjs');
+  const handoff = spawnSync(process.execPath, [handoffScript, target], { cwd: target, encoding: 'utf8' });
   const handoffOut = `${handoff.stdout ?? ''}${handoff.stderr ?? ''}${handoff.error ? handoff.error.message : ''}`.trim();
   const handoffLine = handoffOut.split('\n')[0].replace(/^handoff projection: /, '');
   const handoffStatus = handoff.status === 0
@@ -844,27 +849,21 @@ if (handoffCloneTarget === true) {
 // (the dual-role), and bare ${CLAUDE_PROJECT_DIR} does not substitute in project scope
 // → a second, empty-store server. Instead the plugin manifest (.claude-plugin/plugin.json
 // mcpServers) references .claude-plugin/sterling-mcp.json, read ONLY through the manifest
-// and never as a project config — so the dual-role cannot exist. The store stays
-// ${CLAUDE_PROJECT_DIR}/.sterling/sterling.db, substituted at server spawn to EACH
-// consuming project's own store. command + server entry are absolute (machine-detected)
-// → that file is gitignored + regenerable; the manifest reference is portable + committed.
-// A consuming project still gets NO .mcp.json (the plugin carries the declaration).
+// and never as a project config — so the dual-role cannot exist. That file is COMMITTED
+// and machine-independent (decision sterling-ships-as-a-marketplace-plugin-authoring-
+// machine-keeps-its-clone, slice S2): it names the bundled server through
+// ${CLAUDE_PLUGIN_ROOT} and the store through ${CLAUDE_PROJECT_DIR}, both substituted by
+// Claude Code at spawn, so init NEVER writes into the plugin directory any more — a run
+// from a consuming project touches nothing outside --target. A consuming project still
+// gets NO .mcp.json (the plugin carries the declaration).
 const mcpPath = join(target, '.mcp.json');
-// WHERE THE PLUGIN-LOCAL ARTIFACTS LIVE vs WHAT THIS RUN'S --target IS: two different
-// questions since board 2a6b45c2. `initIsPluginRepo` still answers "is --target the
-// clone itself" (it governs the clone's OWN project-shaped artifacts: the root
-// .mcp.json cleanup and the plugin-repo-only .gitignore entries). `pluginArtifactRoot`
-// answers "which directory holds .claude-plugin/" — always the clone, whatever
-// --target says. It resolves through pluginRootMatch, not pluginRoot, because that env
-// seam's purpose is exactly this: point the plugin-local ensure at a disposable
-// directory so a test never writes into the live clone (see its comment at the top).
+// `initIsPluginRepo` answers "is --target the clone itself" (it governs the clone's OWN
+// project-shaped artifacts: the root .mcp.json cleanup and the plugin-repo-only
+// .gitignore entries). `pluginArtifactRoot` answers "which directory holds
+// .claude-plugin/"; it resolves through pluginRootMatch, the env seam that lets a test
+// point the retired-artifact report at a disposable directory.
 const initIsPluginRepo = fwd(target) === fwd(pluginRootMatch);
 const pluginArtifactRoot = pluginRootMatch;
-const pluginMcpConfigPath = join(pluginArtifactRoot, '.claude-plugin', 'sterling-mcp.json');
-const pluginMcpEntry = {
-  command: process.execPath,
-  args: [fwd(mcpServerEntry), '--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db'],
-};
 const isOurMcpEntry = (e) =>
   e && typeof e === 'object' && e.command === process.execPath && Array.isArray(e.args) && e.args[0] === fwd(mcpServerEntry);
 const readMcp = () => {
@@ -876,44 +875,21 @@ const readMcp = () => {
     return undefined;
   }
 };
-// THE CLONE'S PLUGIN MCP CONFIG — ENSURED ON EVERY RUN, WHATEVER --target SAYS
-// (board 2a6b45c2). It used to be generated ONLY when --target was the clone itself,
-// while /sterling:init is documented (commands/init.md) to run with the CONSUMING
-// project as --target — so a fresh clone carried a TRACKED plugin.json whose
-// `mcpServers` pointed at a GITIGNORED file nothing ever created, on both platforms,
-// and the updater's re-bake could only repair a clone that was already repaired.
-// The file is PER-CLONE MACHINE TRUTH, not per-project: it names THIS clone's
-// packages/mcp-server/dist/main.js and THIS machine's interpreter, and
-// ${CLAUDE_PROJECT_DIR} already binds the store per-project at server spawn. So its
-// home is the clone and its write moment is every init.
-// SIDE EFFECT, DISCLOSED, NEVER SILENT (the note pushed after this block): an init run
-// from a consuming project writes into the plugin directory. That is a real reach
-// outside --target; it is machine-local, gitignored and regenerable, and the ensure
-// semantics are exactly as before — created / matches / refreshed / differs, never
-// clobbering content init cannot prove it generated.
-//
-// WHO OWNS THE CODEX KEY (sparring-partner auto-wire, decision
-// sparring-partner-partnership-shape). The probe — official codex mcp-server, binary on
-// PATH + `codex login status` exit 0 — is machine truth, so its result belongs in this
-// gitignored file and never in committed config. But a CONSUMING-project init has no
-// business rewriting that key: it would spawn `codex login status` on every unrelated
-// init, making an ordinary project's init depend on this machine's Codex login state,
-// and never-clobber gives it no evidence to change a key it did not just verify. So a
-// consuming run ensures the STERLING entry and INHERITS whatever codex entry is on disk.
-// TWO EXCEPTIONS, and they are the point of this whole section: when the file does not
-// exist yet, THIS run is the bootstrap — nothing else generates it any more — and when
-// the file exists but carries NO codex key, so there is nothing to re-confirm and the
-// entry is still owed (see the third-arm comment at the gate below). In both the probe
-// runs and codex is wired exactly as an init against the clone would wire it. On probe failure
-// (binary absent, not logged in, timeout) a loud skip line and nothing wired, never
-// blocking the rest of init (P5 degraded-loud). The native-Windows sterling-mcp-win.json
-// is retired (decision native-windows-launcher-retired-wsl2-only) and init no longer writes it.
-// STERLING_CODEX_PROBE: test-isolation seam — honored at THIS call site (not
-// inside probeCodex).
-// unset/'' -> real probe; 'ok' -> force success; 'absent' -> force binary-absent;
-// 'not-logged-in' -> force not-logged-in. Any other value fails loud (unknown
-// signals halt, P5) rather than silently falling back to a real probe — and it is
-// validated EAGERLY, even on a run that will not probe, so an unknown signal still halts.
+
+// CODEX MCP LIVES AT USER SCOPE (decision sterling-ships-as-a-marketplace-plugin-
+// authoring-machine-keeps-its-clone, ruling point 2; finding
+// codex-mcp-bridge-needs-codex-0-153-4-pinned-side-install): the codex server is
+// machine truth, so it is registered in the user-level Claude config, never in the
+// plugin's committed file. Init only CHECKS for it and, when it is missing, prints ONE
+// loud line carrying the exact `claude mcp add --scope user ...` command — never
+// blocking the rest of init (P5 degraded-loud). The probe (binary on PATH, the
+// `codex mcp-server --help` capability check, `codex login status`) only chooses WHICH
+// line to print, so it runs solely when the server is missing: an unrelated init
+// never spawns `codex` on a machine that is already wired.
+// STERLING_CODEX_PROBE: test-isolation seam — honored at THIS call site (not inside
+// probeCodex). unset/'' -> real probe; 'ok' -> force success; 'absent' -> force
+// binary-absent; 'not-logged-in' -> force not-logged-in. Any other value fails loud
+// (unknown signals halt, P5) — validated EAGERLY, even on a run that will not probe.
 const codexProbeOverride = process.env.STERLING_CODEX_PROBE;
 const forcedCodexProbe = !codexProbeOverride
   ? undefined
@@ -924,176 +900,13 @@ const forcedCodexProbe = !codexProbeOverride
       : codexProbeOverride === 'not-logged-in'
         ? { ok: false, reason: 'not-logged-in' }
         : fail(`STERLING_CODEX_PROBE must be 'ok', 'absent', or 'not-logged-in' (got '${codexProbeOverride}')`, 2);
-const pluginMcpExists = existsSync(pluginMcpConfigPath);
-let existingPluginMcp;
-if (pluginMcpExists) {
-  try { existingPluginMcp = JSON.parse(readFileSync(pluginMcpConfigPath, 'utf8')); } catch { existingPluginMcp = undefined; }
-}
-const existingPluginMcpServers =
-  existingPluginMcp && typeof existingPluginMcp === 'object' && existingPluginMcp.mcpServers && typeof existingPluginMcp.mcpServers === 'object'
-    ? existingPluginMcp.mcpServers
-    : undefined;
-const inheritedCodex = existingPluginMcpServers ? existingPluginMcpServers.codex : undefined;
-// THE THIRD ARM — A FILE THAT EXISTS BUT CARRIES NO CODEX KEY IS STILL THIS RUN'S
-// CONCERN (final-review defect 1 on decision host-native-init-with-dev-machine-escape-hatch).
-// The two-arm gate (`clone target || file absent`) made the codex entry a ONE-SHOT
-// BOOTSTRAP: on a consumer machine --target is never the clone, so the first consuming
-// init that ran while codex was missing or logged out wrote a sterling-only file, and
-// every later init saw the file present, skipped the probe, inherited the absence and
-// reported `matches`. The recovery path the skip line itself prescribes — install codex,
-// `codex login`, re-run init — was DEAD, because `codexProbe` stayed undefined and the
-// managed codex ADD below is gated on `codexProbe?.ok`. The default independent reviewer
-// (decision codex-preferred-for-read-shaped-analysis) stayed permanently unwired with
-// nothing disclosing it. So: re-probe on every run where the key is ABSENT, which makes
-// the managed add reachable from a consuming init and lets a user who followed the
-// warning get wired on their very next init.
-// THE GATE'S ORIGINAL REASON STILL HOLDS AND IS WHY THIS IS NOT "always": an unrelated
-// consuming init must not spawn `codex login status` merely to re-confirm a codex entry
-// that is already on disk. Key PRESENT -> no probe, inherit, exactly as before. Only the
-// absent-key case, which is monotone (it stops probing the moment it succeeds) and is
-// readable off disk with no spawn, is added. A file that does not PARSE also has no
-// readable codex key and therefore probes: it is a broken state that reports `differs`
-// either way, and the probe result is what makes the eventual delete-and-re-run wire codex.
-const existingHasCodexKey = existingPluginMcpServers ? 'codex' in existingPluginMcpServers : false;
-const codexIsThisRunsConcern = initIsPluginRepo || !pluginMcpExists || !existingHasCodexKey;
-// Sterling runs only under WSL2 (decision native-windows-launcher-retired-wsl2-only),
-// so the entry is always spawned by the Linux-side claude and probed there.
-const codexProbe = !codexIsThisRunsConcern ? undefined : (forcedCodexProbe ?? probeCodex());
-if (codexProbe && !codexProbe.ok) warns.push(codexSkipLine(codexProbe.reason, codexProbe.version));
-const desired = {
-  mcpServers: codexProbe
-    ? withCodexEntry({ sterling: pluginMcpEntry }, codexProbe)
-    : { sterling: pluginMcpEntry, ...(inheritedCodex !== undefined ? { codex: inheritedCodex } : {}) },
-};
-// GUARDED WRITE — THIS PATH REACHES OUTSIDE --target (final-review defect 2 on decision
-// host-native-init-with-dev-machine-escape-hatch). Before board 2a6b45c2 a consuming init
-// never touched the clone at all; now every consuming init ensures a file in it. A clone
-// on a read-only mount, or owned by another user, would therefore turn an UNRELATED
-// project's init into an uncaught EACCES abort — a failure with nothing to do with the
-// project being initialized. So the write degrades LOUDLY instead of throwing: the item
-// reports `differs` (nothing of ours is on disk / nothing was changed) and a warning names
-// the clone path and the errno. P5 — loud, never silent, and never fatal to work that
-// would otherwise succeed. Returns the error (falsy on success) so each call site can say
-// what it failed to do.
-const writePluginMcpConfig = () => {
-  try {
-    mkdirSync(dirname(pluginMcpConfigPath), { recursive: true });
-    writeFileSync(pluginMcpConfigPath, JSON.stringify(desired, null, 2));
-    return undefined;
-  } catch (err) {
-    warns.push(
-      `warn: could NOT write the plugin MCP config at ${fwd(pluginMcpConfigPath)} (${err?.code ?? err?.message ?? String(err)}) — nothing was changed there and the rest of this init completed. ` +
-        (initIsPluginRepo
-          ? ''
-          : 'That path is the Sterling CLONE, OUTSIDE this --target: this project is initialized correctly regardless. ') +
-        'A read-only mount or a clone owned by another user is the usual cause. Until it is writable, Sterling MCP (and codex, if a probe wired one) comes from whatever that file already says — fix the permissions and re-run init to bring it back under management.',
-    );
-    return err;
-  }
-};
-if (!pluginMcpExists) {
-  const writeErr = writePluginMcpConfig();
-  items.push(
-    writeErr
-      ? {
-          item: '.claude-plugin/sterling-mcp.json',
-          status: 'differs',
-          detail: `NOT generated — the write into the Sterling clone failed (${writeErr?.code ?? 'write error'}); no file was created and nothing was changed (see the warning naming the path)`,
-        }
-      : {
-          item: '.claude-plugin/sterling-mcp.json',
-          status: 'created',
-          detail: `plugin MCP config (referenced by plugin.json mcpServers) — binds each project to its own store via \${CLAUDE_PROJECT_DIR}${codexProbe?.ok ? '; codex mcp-server wired (probe succeeded)' : ''}`,
-        },
-  );
+const codexUserScope = userScopeCodexServer();
+if (codexUserScope.found) {
+  items.push({ item: 'codex MCP (user scope)', status: 'matches', detail: `a codex server is registered in ${fwd(codexUserScope.path)}` });
 } else {
-  const existing = existingPluginMcp;
-  if (existing && canonical(existing) === canonical(desired)) {
-    items.push({ item: '.claude-plugin/sterling-mcp.json', status: 'matches', detail: 'plugin MCP config as generated' });
-  } else {
-    // Managed refresh (mirrors sterling-init's universal-stack-tag re-init add):
-    // an EXISTING config whose sterling entry — and every OTHER key — already
-    // matches what init would generate, missing ONLY the codex entry this probe
-    // just proved wire-eligible, is a pure ADDITIVE delta. Never-overwrite guards
-    // against clobbering content init cannot prove it generated, not against
-    // adding a key init just verified is its own. Any OTHER difference (a
-    // hand-edited sterling entry, unknown keys, a missing sterling entry) still
-    // reports 'differs — left untouched'.
-    const desiredMinusCodex = {
-      mcpServers: Object.fromEntries(Object.entries(desired.mcpServers).filter(([k]) => k !== 'codex')),
-    };
-    // STALE-COMMAND REFRESH (decision host-native-init-with-dev-machine-escape-hatch).
-    // The second managed-delta case, and the one the ruling made load-bearing: an
-    // entry whose args[0] is OUR generated server entry but whose `command` is a
-    // DIFFERENT interpreter is still provably ours — nobody else writes a config
-    // naming this clone's dist/main.js — it is just pointing at a node that moved
-    // (an nvm upgrade, a runtime relocation). This file is the only thing that
-    // gives claude the Sterling MCP server, so `differs — left untouched` would
-    // strand the user with a deleted node and NO repair path short of deleting the
-    // file by hand.
-    // THE BOUNDARY IS args[0], NOT command: a hand-written entry pointing at some
-    // OTHER server is not ours and is still left alone. Only the command is rebased;
-    // every other key must already equal what init would generate.
-    const existingSterling = existing && typeof existing === 'object' && existing.mcpServers && existing.mcpServers.sterling;
-    const isOurServerEntryPath =
-      existingSterling &&
-      typeof existingSterling === 'object' &&
-      Array.isArray(existingSterling.args) &&
-      existingSterling.args[0] === fwd(mcpServerEntry);
-    const staleCommand = isOurServerEntryPath && existingSterling.command !== process.execPath ? existingSterling.command : undefined;
-    const rebased =
-      staleCommand === undefined
-        ? existing
-        : { ...existing, mcpServers: { ...existing.mcpServers, sterling: { ...existingSterling, command: process.execPath } } };
-    // `codexProbe?.ok` — a consuming run does not probe, so it can never perform the
-    // codex ADD (it inherits the key instead, see the section comment). The COMMAND
-    // refresh below is probe-independent and stays available to every run: it is what
-    // repairs a clone whose node moved, and after board 2a6b45c2 a consuming init is
-    // the only run that reliably happens on a consumer machine.
-    const isManagedCodexAdd =
-      codexProbe?.ok &&
-      existing &&
-      typeof existing === 'object' &&
-      existing.mcpServers &&
-      !('codex' in existing.mcpServers) &&
-      canonical(rebased) === canonical(desiredMinusCodex);
-    const isManagedCommandRefresh = staleCommand !== undefined && canonical(rebased) === canonical(desired);
-    if (isManagedCodexAdd || isManagedCommandRefresh) {
-      const reasons = [
-        ...(staleCommand !== undefined ? [`repointed the sterling command at this interpreter (was '${staleCommand}' — a moved or upgraded node; args[0] still names this clone's server entry, so the entry is ours)`] : []),
-        ...(isManagedCodexAdd ? ['added generated codex entry (probe succeeded)'] : []),
-      ];
-      // Same guarded write as the create path above — the managed refresh reaches into
-      // the clone from a consuming init too, so an unwritable clone degrades loudly here
-      // rather than aborting an otherwise-successful init (P5).
-      const writeErr = writePluginMcpConfig();
-      items.push(
-        writeErr
-          ? {
-              item: '.claude-plugin/sterling-mcp.json',
-              status: 'differs',
-              detail: `refresh NOT applied — the write into the Sterling clone failed (${writeErr?.code ?? 'write error'}); the file is unchanged (would have ${reasons.join('; ')})`,
-            }
-          : {
-              item: '.claude-plugin/sterling-mcp.json',
-              status: 'refreshed',
-              detail: `refreshed — ${reasons.join('; ')}; all other keys unchanged`,
-            },
-      );
-    } else {
-      items.push({ item: '.claude-plugin/sterling-mcp.json', status: 'differs', detail: 'differs from generated — left untouched (delete to regenerate)' });
-    }
-  }
-}
-// THE SIDE-EFFECT DISCLOSURE (board 2a6b45c2). A run whose --target is a consuming
-// project just ensured a file in ANOTHER directory — the Sterling clone. Machine-local,
-// gitignored and regenerable, but a reach outside --target is never something the reader
-// should have to infer from an item name (P5). Named unconditionally on such runs, not
-// only when something was written: "matches" is also information about the clone.
-if (!initIsPluginRepo) {
-  notes.push(
-    `note: .claude-plugin/sterling-mcp.json is PER-CLONE machine truth, so this run ensured it in the Sterling clone at ${fwd(pluginArtifactRoot)} — a write OUTSIDE this --target (gitignored, machine-local, regenerable; its status line above says what this run actually did to it). This is what gives a freshly cloned Sterling a working MCP server without a separate bootstrap step.`,
-  );
+  const codexProbe = forcedCodexProbe ?? probeCodex();
+  warns.push(codexUserScopeLine(codexProbe, { nodeBinDir: fwd(dirname(process.execPath)), unreadable: codexUserScope.unreadable }));
+  items.push({ item: 'codex MCP (user scope)', status: 'skipped', detail: 'no codex server in the user-level Claude config — see the codex mcp line below for the command' });
 }
 
 if (initIsPluginRepo) {
@@ -1155,7 +968,7 @@ const entries = ['.sterling/', 'sterling.bat', 'sterling-windows.bat', 'tui.bat'
 // (still keyed on --target: this ensures the TARGET's .gitignore, and a consuming
 // project must not gain ignore entries for a directory it does not contain. The
 // clone's own .gitignore already carries both, committed.)
-if (initIsPluginRepo) entries.push('.claude-plugin/sterling-mcp.json', '.claude-plugin/sterling-mcp-win.json');
+if (initIsPluginRepo) entries.push('.claude-plugin/sterling-mcp-win.json');
 if (eff.backupPath) {
   const root = fwd(target);
   if (eff.backupPath === root || eff.backupPath.startsWith(root + '/')) {

@@ -283,6 +283,36 @@ test('builds the probed claude argv: Sonnet 5.5, low effort, librarian, dontAsk,
   }
 });
 
+test("the COMMITTED plugin wiring resolves with no placeholder left: ${CLAUDE_PLUGIN_ROOT} binds to the plugin root, ${CLAUDE_PROJECT_DIR} to the project", () => {
+  // The committed .claude-plugin/sterling-mcp.json names the bundle through
+  // ${CLAUDE_PLUGIN_ROOT}; Claude Code expands that only for a plugin's own MCP
+  // config, so an unbound placeholder handed to the headless child via
+  // --mcp-config would start no server at all.
+  const fx = fixture();
+  try {
+    const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+    writeFileSync(join(fx.plugin, '.claude-plugin', 'sterling-mcp.json'), readFileSync(join(repoRoot, '.claude-plugin', 'sterling-mcp.json'), 'utf8'));
+    const resolved = resolveMcpConfig(fx.plugin, fx.project);
+    assert.doesNotMatch(resolved, /\$\{CLAUDE_[A-Z_]+\}/, 'every placeholder is bound');
+    const entry = JSON.parse(resolved).mcpServers.sterling;
+    assert.equal(entry.command, 'node');
+    assert.ok(entry.args.includes(`${fx.plugin}/mcp/sterling-mcp.mjs`), `the bundle resolves under the plugin root: ${entry.args}`);
+    assert.ok(entry.args.includes(`${fx.project}/.sterling/sterling.db`), `the store resolves under the project: ${entry.args}`);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('a missing plugin wiring names the plugin tree as incomplete, never "run /sterling:init in the clone"', () => {
+  const fx = fixture();
+  try {
+    rmSync(join(fx.plugin, '.claude-plugin', 'sterling-mcp.json'));
+    assert.throws(() => resolveMcpConfig(fx.plugin, fx.project), (e) => /cannot read the plugin MCP wiring/.test(e.message) && /reinstall the plugin/.test(e.message) && !/sterling:init/.test(e.message));
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test('[finding 4] --disallowedTools names every store, board and config write plus Write, Edit and Bash, and none is also allowed', () => {
   const expected = [
     ...['create', 'update', 'append', 'edit', 'array_remove', 'retire', 'supersede', 'split', 'extract', 'promote', 'link'].map((v) => `mcp__sterling__knowledge_${v}`),

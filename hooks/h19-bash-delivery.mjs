@@ -5254,6 +5254,9 @@ import { randomUUID } from "node:crypto";
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 
+// packages/store/dist/axis.js
+var AXIS_MAX_TERM_LEN = 64;
+
 // packages/store/dist/index.js
 function decodeLiveRecordRow(op, row) {
   const record = JSON.parse(row.body);
@@ -5434,7 +5437,7 @@ function rankTermDedupeKey(term) {
   const key = folded.length > 0 ? folded : base2;
   return isPrefix ? `${key}*` : key;
 }
-var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).transform((terms) => {
+var rankTerms = external_exports.array(external_exports.string().regex(new RegExp(`^\\S{1,${AXIS_MAX_TERM_LEN}}$`), `rank_terms must be single keywords (no whitespace, \u2264${AXIS_MAX_TERM_LEN} chars)`)).transform((terms) => {
   const seen = /* @__PURE__ */ new Set();
   const deduped = [];
   for (const term of terms) {
@@ -7948,13 +7951,13 @@ function resolveMcpConfig(pluginRoot, projectRoot2) {
   try {
     parsed = JSON.parse(readFileSync4(path, "utf8"));
   } catch (e) {
-    throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 run /sterling:init in the clone`);
+    throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 it ships committed with the plugin, so this plugin tree is incomplete: restore it (git checkout -- .claude-plugin/sterling-mcp.json in a clone) or reinstall the plugin`);
   }
   const entry = parsed?.mcpServers?.[SERVER];
   if (!entry || typeof entry.command !== "string" || !Array.isArray(entry.args)) {
     throw new Error(`${path} has no mcpServers.${SERVER} {command, args} entry`);
   }
-  const bind = (s2) => String(s2).split("${CLAUDE_PROJECT_DIR}").join(projectRoot2);
+  const bind = (s2) => String(s2).split("${CLAUDE_PLUGIN_ROOT}").join(pluginRoot).split("${CLAUDE_PROJECT_DIR}").join(projectRoot2);
   return JSON.stringify({ mcpServers: { [SERVER]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
 }
 function readWorkerPrompt(pluginRoot) {
@@ -8780,6 +8783,7 @@ function main(input2) {
     const entries = [];
     for (const candidate of extractCommandPathCandidates(command)) {
       if (entries.length >= BASH_POINTER_PATH_CAP) break;
+      if (candidate.length > 255 || candidate.includes("\n")) continue;
       const rel = repoRel(candidate, input2.cwd);
       if (!rel) continue;
       if (rel === ".git" || rel.startsWith(".git/")) continue;
@@ -8789,7 +8793,7 @@ function main(input2) {
       try {
         isFile = statSync3(join7(input2.cwd, rel)).isFile();
       } catch (e) {
-        if (e?.code === "ENOENT" || e?.code === "ENOTDIR") continue;
+        if (e?.code === "ENOENT" || e?.code === "ENOTDIR" || e?.code === "ENAMETOOLONG") continue;
         throw e;
       }
       if (!isFile) continue;

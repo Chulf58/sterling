@@ -355,22 +355,28 @@ export function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
 }
 
 /** The Sterling MCP server entry from the plugin's own wiring
- *  (.claude-plugin/sterling-mcp.json, written by init with this machine's node
- *  and clone paths), with ${CLAUDE_PROJECT_DIR} bound to THIS project so the
- *  child reads and writes this project's store — also in a sibling project. */
+ *  (.claude-plugin/sterling-mcp.json, COMMITTED with the plugin: a bare `node`
+ *  and ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PROJECT_DIR} placeholders; decision
+ *  sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone).
+ *  Claude Code expands those placeholders only for a PLUGIN's MCP config, never
+ *  for an --mcp-config handed to a headless child, so both are bound here:
+ *  ${CLAUDE_PLUGIN_ROOT} to THIS plugin root (clone or installed copy), and
+ *  ${CLAUDE_PROJECT_DIR} to THIS project so the child reads and writes this
+ *  project's store — also in a sibling project. The bare `node` resolves on the
+ *  child's PATH, which it inherits from the session that launched the hook. */
 export function resolveMcpConfig(pluginRoot, projectRoot) {
   const path = join(pluginRoot, '.claude-plugin', 'sterling-mcp.json');
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch (e) {
-    throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) — run /sterling:init in the clone`);
+    throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) — it ships committed with the plugin, so this plugin tree is incomplete: restore it (git checkout -- .claude-plugin/sterling-mcp.json in a clone) or reinstall the plugin`);
   }
   const entry = parsed?.mcpServers?.[SERVER];
   if (!entry || typeof entry.command !== 'string' || !Array.isArray(entry.args)) {
     throw new Error(`${path} has no mcpServers.${SERVER} {command, args} entry`);
   }
-  const bind = (s) => String(s).split('${CLAUDE_PROJECT_DIR}').join(projectRoot);
+  const bind = (s) => String(s).split('${CLAUDE_PLUGIN_ROOT}').join(pluginRoot).split('${CLAUDE_PROJECT_DIR}').join(projectRoot);
   return JSON.stringify({ mcpServers: { [SERVER]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
 }
 

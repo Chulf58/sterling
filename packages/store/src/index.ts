@@ -27,6 +27,7 @@ import {
 export { MountedStores, type DomainMount, resolveDomainMounts } from './mounted.js';
 export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
 export * from './axis.js';
+import { AXIS_MAX_TERM_LEN } from './axis.js';
 
 /** The verdict on ONE claimed repo-relative path (decision
  *  [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]). */
@@ -394,7 +395,11 @@ export function rankTermDedupeKey(term: string): string {
 }
 
 export const rankTerms = z
-  .array(z.string().regex(/^\S{1,64}$/, 'rank_terms must be single keywords (no whitespace, ≤64 chars)'))
+  .array(
+    z
+      .string()
+      .regex(new RegExp(`^\\S{1,${AXIS_MAX_TERM_LEN}}$`), `rank_terms must be single keywords (no whitespace, ≤${AXIS_MAX_TERM_LEN} chars)`),
+  )
   // Dedupe BEFORE the cap, on rankTermDedupeKey, first occurrence wins,
   // original order otherwise preserved — the ORIGINAL term text is what is
   // kept and sent to FTS, only the comparison is folded. This is the ONE
