@@ -10191,7 +10191,7 @@ export class SterlingTools {
     // The receipt carries board_query's CAPPED compact shape (Dome Farmer,
     // sterling-issues.md:100-107: ~25 full digests per removal, 11-13KB into the
     // caller's context): at most ARTIFACT_EVIDENCE_RECORD_CAP {id8,type,name}
-    // records, with the FULL dedup'd total beside them in artifact_evidence_count
+    // records, with the dedup'd match count within the two 200-record scan windows beside them in artifact_evidence_count
     // so a clipped list never reads as a complete one. Empty stays `[]`.
     const evidence: ArtifactEvidenceRecord[] = combined.slice(0, ARTIFACT_EVIDENCE_RECORD_CAP).map((r) => SterlingTools.artifactEvidenceRecord(r));
     return {

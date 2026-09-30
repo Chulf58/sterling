@@ -8368,9 +8368,10 @@ function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, supp
         identity: shown[i].id,
         revision: recordRevision(shown[i]),
         name: shown[i].slug || shown[i].title,
-        text,
-        pointer: hazardOverflowPointer(shown[i], matchLabel),
-        pointerWhenFull: hazardPackageFullPointer(shown[i], matchLabel)
+        text
+        // No pointer: a line IS its pointer. One that does not fit is
+        // omitted and named in the '+N more' disclosure, never turned
+        // into a degrade notice for a record that was never whole.
       } : { kind: "hazard", contentClass: "chrome", text }
     )
   ];
@@ -8400,9 +8401,10 @@ function hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, sup
         identity: shown[i].id,
         revision: recordRevision(shown[i]),
         name: shown[i].slug || shown[i].title,
-        text,
-        pointer: hazardOverflowPointer(shown[i], matchLabel),
-        pointerWhenFull: hazardPackageFullPointer(shown[i], matchLabel)
+        text
+        // No pointer: a line IS its pointer. One that does not fit is
+        // omitted and named in the '+N more' disclosure, never turned
+        // into a degrade notice for a record that was never whole.
       } : { kind: "hazard", contentClass: "chrome", text }
     )
   ];
@@ -8415,14 +8417,13 @@ function hazardLeadParts(hazards, shown, { cap, fileKeys, remedy, total, suppres
     parts.push(
       { kind: "hazard", contentClass: "chrome", text: `\u25B8 ${rest.length} MORE HAZARD(S) ${matchLabel} \u2014 one line each, not the whole record; knowledge_get the id for its right way.` },
       ...rest.map((ap) => ({
+        // No pointer: a line IS its pointer (see hazardQuestionParts).
         kind: "hazard",
         contentClass: "discovery",
         identity: ap.id,
         revision: recordRevision(ap),
         name: ap.slug || ap.title,
-        text: hazardQuestionLine(ap),
-        pointer: hazardOverflowPointer(ap, matchLabel),
-        pointerWhenFull: hazardPackageFullPointer(ap, matchLabel)
+        text: hazardQuestionLine(ap)
       }))
     );
   }

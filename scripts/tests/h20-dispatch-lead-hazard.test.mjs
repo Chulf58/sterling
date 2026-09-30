@@ -189,6 +189,21 @@ test('dispatch: a slug that is only a prefix of a longer cited slug does not cou
   }
 });
 
+test('dispatch: an id8 inside a longer hex run (a 40-char commit SHA) is not a citation', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const [lead] = seed(store, 1);
+    const inside = `0123abcd${id8(lead)}${'e'.repeat(24)}`;
+    const leading = `${id8(lead)}${'f'.repeat(32)}`;
+    assert.equal(inside.length, 40);
+    assert.equal(leading.length, 40);
+    const ctx = ctxOf(runHook(dispatch(dir, `${PROMPT} Regressed in commit ${inside}; reverted by ${leading}.`), dir));
+    assert.ok(ctx.includes('RIGHT_WAY_BODY_1'), `a SHA that contains the id8 does not suppress the hazard:\n${ctx}`);
+  } finally {
+    cleanup();
+  }
+});
+
 test('dispatch: a second dispatch in the same session does not re-show the line-rendered hazards', () => {
   const { dir, store, cleanup } = makeProject();
   try {

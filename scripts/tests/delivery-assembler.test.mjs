@@ -994,3 +994,33 @@ test('assembler: the disclosure-eviction path degrades a whole hazard with its p
   assert.doesNotMatch(r.text, /TOO LARGE/, 'none of these hazards is oversized on its own');
   assert.match(r.text, /\+1 more records/);
 });
+
+// A LINE is its own pointer. Line-shaped hazard parts (lead-mode trigger
+// lines, question lines, read-only-lane pointers) used to carry a degrade
+// notice, so under transport pressure a ~180B line became a "not shown whole"
+// notice for a record that was never going to be whole. A line that does not
+// fit is omitted and named in the '+N more' disclosure instead.
+test('assembler: lead-mode trigger lines never degrade to a notice — they are shown, or omitted and disclosed', () => {
+  for (let n = 9000; n <= 9900; n += 50) {
+    const lead = antiPattern(`lead-${n}`, ['src/a.mjs'], { severity: 'block', trigger: 'T'.repeat(n), right_way: 'short' });
+    const lines = [1, 2].map((i) => antiPattern(`line-${i}`, ['src/a.mjs'], { slug: `line-hazard-${i}` }));
+    const r = assembleDelivery(hazardParts([lead, ...lines], { mode: 'lead' }), 0);
+    assert.ok(Buffer.byteLength(r.text, 'utf8') <= 10000, `the ceiling holds at ${n}`);
+    for (const ap of lines) {
+      assert.doesNotMatch(r.text, new RegExp(`(delivery full|TOO LARGE)[^\\n]*${ap.id}`), `line ${ap.slug} is never turned into a degrade notice (lead ${n})`);
+      const shown = r.emittedDiscovery.some((e) => e.identity === ap.id);
+      const disclosed = r.omitted.some((e) => e.identity === ap.id);
+      assert.ok(shown !== disclosed, `line ${ap.slug} is either shown whole or omitted-and-disclosed (lead ${n})`);
+    }
+  }
+});
+
+test('assembler: question-mode and pointer-mode lines carry no degrade notice either', () => {
+  const hazards = [1, 2, 3].map((i) => antiPattern(`q-${i}`, ['src/a.mjs']));
+  for (const mode of ['question', 'pointer']) {
+    for (const part of hazardParts(hazards, { mode })) {
+      assert.equal(part.pointer, undefined, `${mode} part has no pointer: ${part.text}`);
+      assert.equal(part.pointerWhenFull, undefined, `${mode} part has no package-full notice`);
+    }
+  }
+});

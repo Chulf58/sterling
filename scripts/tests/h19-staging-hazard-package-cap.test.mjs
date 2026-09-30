@@ -22,7 +22,7 @@ before(async () => {
   ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
 });
 
-function antiPattern(title, trigger, paths, tag) {
+function antiPattern(title, trigger, paths, tag, extra = {}) {
   return {
     id: randomUUID(),
     type: 'anti_pattern',
@@ -42,6 +42,15 @@ function antiPattern(title, trigger, paths, tag) {
     source_evidence: 'evidence',
     basis: 'codebase',
     file_keys: paths,
+    ...extra,
+  };
+}
+
+function decision(title, statement, paths) {
+  return {
+    id: randomUUID(), type: 'decision', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null,
+    links: [], scope: 'project', stack_tags: [], title, statement,
+    alternatives_rejected: [{ option: 'another way', reason: 'worse' }], rationale: 'rationale', file_keys: paths,
   };
 }
 
@@ -136,6 +145,81 @@ test('staging: 1 path hazard leaves room for 2 subject hazards, and the third is
     assert.ok(ctx.includes('PATH_RW_0'));
     assert.equal([0, 1, 2].filter((i) => ctx.includes(`SUBJECT_RW_${i}`)).length, 2, 'two subject hazards fill the remaining room');
     assert.match(ctx, /1 more hazard\(s\) NOT shown/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('staging: the shared cap ranks BOTH channels by severity — a block subject hazard beats warn path hazards', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seed(store, 3, 0);
+    const block = store.create(
+      antiPattern('Boolean modifier mesh manifold topology solver stability failure block', SUBJECT_TRIGGER, [], 'SUBJECT_RW_BLOCK', { severity: 'block' })
+    );
+    const ctx = stageAndStart(dir, `Go work on src/a.mjs. ${SUBJECT_PROMPT}`);
+    assert.equal(wholeCount(ctx), 3, ctx);
+    assert.ok(ctx.includes('SUBJECT_RW_BLOCK'), `the block-severity subject hazard is whole, not merely disclosed:\n${ctx}`);
+    assert.equal([0, 1, 2].filter((i) => ctx.includes(`PATH_RW_${i}`)).length, 2, 'two warn path hazards fill the rest');
+    assert.match(ctx, /1 more hazard\(s\) NOT shown/, 'the third path hazard is disclosed');
+    assert.ok(guardOf(dir).substance.some((e) => e.id === block.id));
+  } finally {
+    cleanup();
+  }
+});
+
+// The staging headers are PINNED chrome (same class as the H20 header, commit
+// e2d41d6): under disclosure pressure at the transport ceiling a whole hazard
+// falls to its pointer before a header is evicted, so the lane never gets
+// unattributed hazards. Swept because the defect lives in a narrow byte window.
+for (const size of [2850, 2900, 2950, 3000, 3100, 3200]) {
+  test(`staging: a write lane with three ~${size}B path hazards plus overflow keeps its header (P5: never unattributed)`, () => {
+    const { dir, store, cleanup } = makeProject();
+    try {
+      for (let i = 0; i < 3; i++) {
+        store.create(antiPattern(`Path hazard ${i} for the staged file`, `editing the staged file path case ${i}`, ['src/a.mjs'], `PATH_RW_${i} ${'r'.repeat(size)}`));
+      }
+      for (let i = 0; i < 4; i++) store.create(decision(`Staged file ruling ${i}`, `Ruling ${i} about the staged file. ${'s'.repeat(300)}`, ['src/a.mjs']));
+      const ctx = stageAndStart(dir, 'Go work on src/a.mjs and report back.');
+      assert.ok(Buffer.byteLength(ctx, 'utf8') <= 10000, `the transport ceiling holds (${Buffer.byteLength(ctx, 'utf8')})`);
+      assert.match(ctx, /⚠ ANTI-PATTERN/, 'hazards are delivered');
+      assert.match(ctx.split('\n')[0], /^STERLING KNOWLEDGE DELIVERY \(H19\) — owning knowledge for 'src\/a\.mjs'/, `the header is the first line:\n${ctx.slice(0, 300)}`);
+    } finally {
+      cleanup();
+    }
+  });
+}
+
+for (const size of [2600, 2650, 2700, 2750, 2800, 2850]) {
+  test(`staging: a write lane with three ~${size}B subject hazards plus overflow keeps the MECHANISM-AXIS STAGING header`, () => {
+    const { dir, store, cleanup } = makeProject();
+    try {
+      for (let i = 0; i < 3; i++) {
+        store.create(antiPattern(`Boolean modifier mesh manifold topology solver stability failure ${i}`, SUBJECT_TRIGGER, [], `SUBJECT_RW_${i} ${'r'.repeat(size)}`));
+      }
+      for (let i = 0; i < 4; i++) {
+        store.create(decision(`Boolean modifier mesh manifold topology solver ruling ${i}`, `${SUBJECT_TRIGGER} ruling ${i} ${'s'.repeat(300)}`, []));
+      }
+      const ctx = stageAndStart(dir, SUBJECT_PROMPT);
+      assert.ok(Buffer.byteLength(ctx, 'utf8') <= 10000, `the transport ceiling holds (${Buffer.byteLength(ctx, 'utf8')})`);
+      assert.match(ctx, /⚠ ANTI-PATTERN/, 'hazards are delivered');
+      assert.match(ctx, /^STERLING MECHANISM-AXIS STAGING \(H19\)/m, 'the subject header survives');
+    } finally {
+      cleanup();
+    }
+  });
+}
+
+test('staging: a read-only lane keeps per-channel POINTER caps (decision 21e3637e, current behaviour)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
+    writeFileSync(join(dir, '.claude', 'agents', 'researcher.md'), ['---', 'name: researcher', 'tools: Read, Grep, Glob', '---', '# researcher', ''].join('\n'));
+    seed(store, 3, 3);
+    const ctx = stageAndStart(dir, `Go work on src/a.mjs. ${SUBJECT_PROMPT}`, 'researcher');
+    assert.equal(wholeCount(ctx), 0, 'a read-only lane gets no whole hazard');
+    assert.equal((ctx.match(/^⚠ ANTI-PATTERN \[WARN\] for this (path|subject) — '/gm) ?? []).length, 6, `three pointers per channel:\n${ctx}`);
+    assert.doesNotMatch(ctx, /NOT shown/, 'nothing is withheld by a shared cap in pointer mode');
   } finally {
     cleanup();
   }

@@ -9121,9 +9121,10 @@ function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, supp
         identity: shown[i].id,
         revision: recordRevision(shown[i]),
         name: shown[i].slug || shown[i].title,
-        text,
-        pointer: hazardOverflowPointer(shown[i], matchLabel),
-        pointerWhenFull: hazardPackageFullPointer(shown[i], matchLabel)
+        text
+        // No pointer: a line IS its pointer. One that does not fit is
+        // omitted and named in the '+N more' disclosure, never turned
+        // into a degrade notice for a record that was never whole.
       } : { kind: "hazard", contentClass: "chrome", text }
     )
   ];
@@ -9153,9 +9154,10 @@ function hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, sup
         identity: shown[i].id,
         revision: recordRevision(shown[i]),
         name: shown[i].slug || shown[i].title,
-        text,
-        pointer: hazardOverflowPointer(shown[i], matchLabel),
-        pointerWhenFull: hazardPackageFullPointer(shown[i], matchLabel)
+        text
+        // No pointer: a line IS its pointer. One that does not fit is
+        // omitted and named in the '+N more' disclosure, never turned
+        // into a degrade notice for a record that was never whole.
       } : { kind: "hazard", contentClass: "chrome", text }
     )
   ];
@@ -9168,14 +9170,13 @@ function hazardLeadParts(hazards, shown, { cap, fileKeys, remedy, total, suppres
     parts.push(
       { kind: "hazard", contentClass: "chrome", text: `\u25B8 ${rest.length} MORE HAZARD(S) ${matchLabel} \u2014 one line each, not the whole record; knowledge_get the id for its right way.` },
       ...rest.map((ap) => ({
+        // No pointer: a line IS its pointer (see hazardQuestionParts).
         kind: "hazard",
         contentClass: "discovery",
         identity: ap.id,
         revision: recordRevision(ap),
         name: ap.slug || ap.title,
-        text: hazardQuestionLine(ap),
-        pointer: hazardOverflowPointer(ap, matchLabel),
-        pointerWhenFull: hazardPackageFullPointer(ap, matchLabel)
+        text: hazardQuestionLine(ap)
       }))
     );
   }
@@ -9656,7 +9657,11 @@ async function main(input2) {
       ...unattributableLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: unattributableLine }] : [],
       ...!EXEMPT_AGENT_TYPES.has(input2.agent_type) ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: RETURN_CONTRACT }] : []
     ];
-    const subjectHazardCap = hazardMode === "whole" ? Math.max(0, HAZARD_CAP - cappedHazards(freshHazards).length) : HAZARD_CAP;
+    const packageHazards = hazardMode === "whole" ? cappedHazards([...freshHazards, ...subjectHazards]) : null;
+    const channelCap = (list) => packageHazards ? packageHazards.filter((r) => list.includes(r)).length : HAZARD_CAP;
+    const channelCapLabel = (cap) => cap < HAZARD_CAP ? `cap ${HAZARD_CAP} per package, shared across the path and subject channels` : void 0;
+    const pathHazardCap = channelCap(freshHazards);
+    const subjectHazardCap = channelCap(subjectHazards);
     const assemble = () => {
       const parts = [];
       if (freshOwners.length || freshHazards.length || freshDecisions.length) {
@@ -9668,8 +9673,11 @@ async function main(input2) {
         });
         const decisionParts = freshDecisions.length ? [decisionPointerPart(rels.join(", "), freshDecisions, { widen: decisionWiden })] : [];
         parts.push(
-          { kind: "ordinary", contentClass: "chrome", text: payloadHeaderLine(rels.join(", ")) },
-          ...hazardParts(freshHazards, { fileKeys: rels, mode: hazardMode }),
+          // PINNED (P5), like H20's header: under disclosure pressure at the
+          // transport ceiling a whole hazard falls to its pointer before a
+          // pinned header is evicted, so the lane never gets unattributed hazards.
+          { kind: "ordinary", pinned: true, contentClass: "chrome", text: payloadHeaderLine(rels.join(", ")) },
+          ...hazardParts(freshHazards, { fileKeys: rels, mode: hazardMode, cap: pathHazardCap, capLabel: channelCapLabel(pathHazardCap) }),
           ...ownerParts,
           ...decisionParts
         );
@@ -9685,6 +9693,8 @@ async function main(input2) {
           {
             text: `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching ${subjectLabel} (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`,
             kind: "ordinary",
+            pinned: true,
+            // P5, as the path header above
             contentClass: "chrome"
           },
           ...hazardParts(subjectHazards, {
@@ -9692,7 +9702,7 @@ async function main(input2) {
             matchLabel: "for this subject",
             mode: hazardMode,
             cap: subjectHazardCap,
-            capLabel: subjectHazardCap < HAZARD_CAP ? `cap ${HAZARD_CAP} per package, shared with the path channel` : void 0
+            capLabel: channelCapLabel(subjectHazardCap)
           }),
           ...subjectDecisions.length ? [
             decisionPointerPart("(subject match)", subjectDecisions, {

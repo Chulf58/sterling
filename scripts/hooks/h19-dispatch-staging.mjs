@@ -408,12 +408,19 @@ async function main(input) {
     ];
     // ONE HAZARD CAP PER PACKAGE (decision 92088a62: "HAZARDS: at most 3 per
     // package"). Each channel used to cap at HAZARD_CAP on its own, so a
-    // package could carry six whole hazards. The path channel fills the cap
-    // first and the subject channel gets what is left; its overflow is
-    // disclosed by its own '+N more' line. Read-only lanes keep per-channel
-    // pointer caps (decision 21e3637e): a pointer line is not a whole hazard.
-    const subjectHazardCap =
-      hazardMode === 'whole' ? Math.max(0, HAZARD_CAP - cappedHazards(freshHazards).length) : HAZARD_CAP;
+    // package could carry six whole hazards. The union is ranked ONCE by
+    // cappedHazards (severity first; the path channel is listed first, so it
+    // wins ties) and the top HAZARD_CAP are split back into the two labelled
+    // channels. A stable sort keeps each channel's members in its own order,
+    // so each channel's share is exactly the top-k of its own list, and
+    // hazardParts at cap k renders those and discloses the rest.
+    // Read-only lanes keep per-channel pointer caps (decision 21e3637e): a
+    // pointer line is not a whole hazard.
+    const packageHazards = hazardMode === 'whole' ? cappedHazards([...freshHazards, ...subjectHazards]) : null;
+    const channelCap = (list) => (packageHazards ? packageHazards.filter((r) => list.includes(r)).length : HAZARD_CAP);
+    const channelCapLabel = (cap) => (cap < HAZARD_CAP ? `cap ${HAZARD_CAP} per package, shared across the path and subject channels` : undefined);
+    const pathHazardCap = channelCap(freshHazards);
+    const subjectHazardCap = channelCap(subjectHazards);
     const assemble = () => {
       const parts = [];
       if (freshOwners.length || freshHazards.length || freshDecisions.length) {
@@ -425,8 +432,11 @@ async function main(input) {
         });
         const decisionParts = freshDecisions.length ? [decisionPointerPart(rels.join(', '), freshDecisions, { widen: decisionWiden })] : [];
         parts.push(
-          { kind: 'ordinary', contentClass: 'chrome', text: payloadHeaderLine(rels.join(', ')) },
-          ...hazardParts(freshHazards, { fileKeys: rels, mode: hazardMode }),
+          // PINNED (P5), like H20's header: under disclosure pressure at the
+          // transport ceiling a whole hazard falls to its pointer before a
+          // pinned header is evicted, so the lane never gets unattributed hazards.
+          { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: payloadHeaderLine(rels.join(', ')) },
+          ...hazardParts(freshHazards, { fileKeys: rels, mode: hazardMode, cap: pathHazardCap, capLabel: channelCapLabel(pathHazardCap) }),
           ...ownerParts,
           ...decisionParts
         );
@@ -445,12 +455,12 @@ async function main(input) {
               `(matched on: ${matched}; central to the record: ${central}), beyond any file the task names. ` +
               `Path-scoped delivery cannot find these — consult them before acting on the premise they govern.`,
             kind: 'ordinary',
+            pinned: true, // P5, as the path header above
             contentClass: 'chrome',
           },
           // Matched on the task's SUBJECT, not a file path.
           ...hazardParts(subjectHazards, {
-            remedy, matchLabel: 'for this subject', mode: hazardMode, cap: subjectHazardCap,
-            capLabel: subjectHazardCap < HAZARD_CAP ? `cap ${HAZARD_CAP} per package, shared with the path channel` : undefined,
+            remedy, matchLabel: 'for this subject', mode: hazardMode, cap: subjectHazardCap, capLabel: channelCapLabel(subjectHazardCap),
           }),
           ...(subjectDecisions.length
             ? [
