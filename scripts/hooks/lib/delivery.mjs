@@ -36,13 +36,18 @@ export function claimLegacyInjectionRungNotice(cwd, rawRung) {
   return `ⓘ STERLING: delivery.injection_rung ${configured} is obsolete and now behaves as 'read'.`;
 }
 
-export function publishNotice(cwd, text) {
+/** `sessionId` keys a notice that is stale outside the session that wrote it
+ * (H10's fan-out deferral): notices are not pruned at session start, so the
+ * drain discards a keyed notice whose session is not the prompt's. An unkeyed
+ * notice drains in whichever session prompts next. */
+export function publishNotice(cwd, text, { sessionId } = {}) {
   const dir = noticesDir(cwd);
   mkdirSync(dir, { recursive: true });
   const name = `h10-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
   const target = join(dir, name);
   const tmp = `${target}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ text: String(text) }), { flag: 'wx' });
+  const body = typeof sessionId === 'string' && sessionId ? { text: String(text), session_id: sessionId } : { text: String(text) };
+  writeFileSync(tmp, JSON.stringify(body), { flag: 'wx' });
   renameSync(tmp, target);
   return target;
 }
