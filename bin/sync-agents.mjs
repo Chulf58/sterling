@@ -6047,12 +6047,6 @@ var { report, restartInstruction } = syncAgents({
   targetAgentsDir: join6(targetDir, ".claude", "agents"),
   pluginVersion,
   now: (/* @__PURE__ */ new Date()).toISOString(),
-  vars: {
-    NODE: `"${process.execPath.replace(/\\/g, "/")}"`,
-    HOOKS_DIR: join6(pluginRoot, "hooks").replace(/\\/g, "/"),
-    // the plugin-owned read-only git wrapper, named by absolute path
-    GIT_RO: join6(pluginRoot, "scripts", "git-ro.mjs").replace(/\\/g, "/")
-  },
   config
 });
 var refused = 0;

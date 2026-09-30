@@ -5250,8 +5250,8 @@ function appendExtraTools(frontmatter, name, label, config2) {
   lines[idx] = `tools: ${tools.join(", ")}`;
   return lines.join("\n");
 }
-function renderInstalledAgent(templateContent, label, { pluginVersion: pluginVersion2, now, vars: vars2 = {}, config: config2 } = {}) {
-  const allVars = { ...vars2, ...resolveModelVars(templateContent, label, config2) };
+function renderInstalledAgent(templateContent, label, { pluginVersion: pluginVersion2, now, vars = {}, config: config2 } = {}) {
+  const allVars = { ...vars, ...resolveModelVars(templateContent, label, config2) };
   let substituted = renderClaudeText(templateContent, label);
   for (const [key, value] of Object.entries(allVars)) {
     substituted = substituted.split(`{{${key}}}`).join(value);
@@ -5349,7 +5349,7 @@ var RESTART_INSTRUCTION = [
 function agentChangesRequireRestart(report2) {
   return report2.some((entry) => ["installed", "refreshed", "header_repaired", "machine_rebaked", "retired"].includes(entry.status));
 }
-function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion: pluginVersion2, now, vars: vars2, config: config2 }) {
+function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion: pluginVersion2, now, vars, config: config2 }) {
   const registry = loadRegistry(registryPath);
   const registered = new Set(registry.agents.map((entry) => entry.name));
   for (const key of Object.keys(config2?.agents ?? {})) {
@@ -5359,7 +5359,7 @@ function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion: pl
   }
   return registry.agents.map((entry) => {
     const templateContent = readFileSync(join(templatesDir, entry.file), "utf8");
-    const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion: pluginVersion2, now, vars: vars2, config: config2 });
+    const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion: pluginVersion2, now, vars, config: config2 });
     if (name !== entry.name) {
       throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name}'`);
     }
@@ -5463,8 +5463,8 @@ Unable to retire safely (${err?.code ?? err?.message ?? err}); ${restored ? "the
   }
   return report2;
 }
-function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: pluginVersion2, now, vars: vars2 = {}, config: config2, retirementFs }) {
-  const prepared = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion: pluginVersion2, now, vars: vars2, config: config2 });
+function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: pluginVersion2, now, vars = {}, config: config2, retirementFs }) {
+  const prepared = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion: pluginVersion2, now, vars, config: config2 });
   mkdirSync(targetAgentsDir, { recursive: true });
   const report2 = [];
   for (const entry of prepared) {
@@ -5599,19 +5599,12 @@ var configPath = join2(targetDir, ".sterling", "config.json");
 var config = parseConfig(
   JSON.parse(readFileSync2(existsSync2(configPath) ? configPath : join2(pluginRoot, "templates", "default-config.json"), "utf8"))
 );
-var vars = {
-  NODE: `"${process.execPath.replace(/\\/g, "/")}"`,
-  HOOKS_DIR: join2(pluginRoot, "hooks").replace(/\\/g, "/"),
-  // the plugin-owned read-only git wrapper, named by absolute path
-  GIT_RO: join2(pluginRoot, "scripts", "git-ro.mjs").replace(/\\/g, "/")
-};
 var { report, restartInstruction } = installAgents({
   templatesDir: join2(pluginRoot, "agent-templates"),
   registryPath: join2(pluginRoot, "agent-templates", "registry.json"),
   targetAgentsDir: join2(targetDir, ".claude", "agents"),
   pluginVersion,
   now: (/* @__PURE__ */ new Date()).toISOString(),
-  vars,
   config
 });
 var refused = 0;

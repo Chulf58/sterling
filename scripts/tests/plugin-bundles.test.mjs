@@ -126,3 +126,27 @@ test('adapter registry: a module that is not a .mjs file is refused as unloadabl
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('hook bundle bytes do not depend on the cwd the build ran from (absWorkingDir pinned to the repo root)', () => {
+  // esbuild writes module paths into the bundle relative to absWorkingDir,
+  // which defaults to process.cwd(); unpinned, check-bundles-fresh run from
+  // anywhere but the repo root reported every committed hook bundle stale.
+  const hook = readdirSync(join(root, 'scripts', 'hooks')).find((f) => f.startsWith('h') && f.endsWith('.mjs'));
+  const base = mkdtempSync(join(tmpdir(), 'sterling-hook-cwd-'));
+  const elsewhere = join(base, 'elsewhere');
+  mkdirSync(elsewhere);
+  const lib = JSON.stringify(join(root, 'scripts', 'lib', 'bundled-artifacts.mjs'));
+  try {
+    const built = {};
+    for (const [label, cwd] of [['root', root], ['elsewhere', elsewhere]]) {
+      const outDir = join(base, `out-${label}`);
+      const code = `const { buildHooks } = await import(${lib}); await buildHooks({ root: ${JSON.stringify(root)}, srcDir: ${JSON.stringify(join(root, 'scripts', 'hooks'))}, outDir: ${JSON.stringify(outDir)}, only: [${JSON.stringify(hook)}] });`;
+      const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { cwd, encoding: 'utf8', timeout: 120_000 });
+      assert.equal(r.status, 0, r.stderr);
+      built[label] = readFileSync(join(outDir, hook), 'utf8');
+    }
+    assert.equal(built.elsewhere, built.root, `${hook} built from ${elsewhere} differs from the repo-root build`);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});

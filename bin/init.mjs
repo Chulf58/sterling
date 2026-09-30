@@ -4123,15 +4123,15 @@ var init_zod = __esm({
 
 // packages/schemas/dist/paths.js
 function normalizeRepoPath(input) {
-  const fwd4 = input.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(fwd4)) {
+  const fwd5 = input.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(fwd5)) {
     throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
   }
-  if (fwd4.startsWith("/")) {
+  if (fwd5.startsWith("/")) {
     throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
   }
   const parts = [];
-  for (const seg of fwd4.split("/")) {
+  for (const seg of fwd5.split("/")) {
     if (seg === "" || seg === ".")
       continue;
     if (seg === "..") {
@@ -8982,9 +8982,9 @@ var init_resolve = __esm({
 // scripts/init-impl.mjs
 init_dist();
 init_dist2();
-import { existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync4, appendFileSync as appendFileSync3, statSync as statSync4, unlinkSync as unlinkSync3, renameSync as renameSync2 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync10, writeFileSync as writeFileSync4, appendFileSync as appendFileSync3, statSync as statSync4, unlinkSync as unlinkSync3, renameSync as renameSync2 } from "node:fs";
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { join as join14, resolve as resolve4, dirname as dirname7, basename as basename2 } from "node:path";
+import { join as join17, resolve as resolve4, dirname as dirname7, basename as basename2 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 
 // scripts/lib/project.mjs
@@ -9363,8 +9363,8 @@ function appendExtraTools(frontmatter, name4, label, config) {
   lines[idx] = `tools: ${tools.join(", ")}`;
   return lines.join("\n");
 }
-function renderInstalledAgent(templateContent, label, { pluginVersion, now, vars: vars2 = {}, config } = {}) {
-  const allVars = { ...vars2, ...resolveModelVars(templateContent, label, config) };
+function renderInstalledAgent(templateContent, label, { pluginVersion, now, vars = {}, config } = {}) {
+  const allVars = { ...vars, ...resolveModelVars(templateContent, label, config) };
   let substituted = renderClaudeText(templateContent, label);
   for (const [key, value] of Object.entries(allVars)) {
     substituted = substituted.split(`{{${key}}}`).join(value);
@@ -9496,7 +9496,7 @@ var RESTART_INSTRUCTION = [
 function agentChangesRequireRestart(report) {
   return report.some((entry) => ["installed", "refreshed", "header_repaired", "machine_rebaked", "retired"].includes(entry.status));
 }
-function prepareRegisteredAgents({ templatesDir, registryPath: registryPath2, pluginVersion, now, vars: vars2, config }) {
+function prepareRegisteredAgents({ templatesDir, registryPath: registryPath2, pluginVersion, now, vars, config }) {
   const registry2 = loadRegistry(registryPath2);
   const registered = new Set(registry2.agents.map((entry) => entry.name));
   for (const key of Object.keys(config?.agents ?? {})) {
@@ -9506,7 +9506,7 @@ function prepareRegisteredAgents({ templatesDir, registryPath: registryPath2, pl
   }
   return registry2.agents.map((entry) => {
     const templateContent = readFileSync3(join8(templatesDir, entry.file), "utf8");
-    const { name: name4, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars: vars2, config });
+    const { name: name4, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars, config });
     if (name4 !== entry.name) {
       throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name4}'`);
     }
@@ -9633,8 +9633,8 @@ function foreignFileInstruction(name4) {
     "  anything in it you want to keep."
   ].join("\n");
 }
-function syncAgents({ templatesDir, registryPath: registryPath2, targetAgentsDir, pluginVersion, now, vars: vars2 = {}, config, retirementFs }) {
-  const prepared = prepareRegisteredAgents({ templatesDir, registryPath: registryPath2, pluginVersion, now, vars: vars2, config });
+function syncAgents({ templatesDir, registryPath: registryPath2, targetAgentsDir, pluginVersion, now, vars = {}, config, retirementFs }) {
+  const prepared = prepareRegisteredAgents({ templatesDir, registryPath: registryPath2, pluginVersion, now, vars, config });
   mkdirSync4(targetAgentsDir, { recursive: true });
   const report = [];
   for (const entry of prepared) {
@@ -10015,8 +10015,8 @@ function isOwnedExport(root, rel) {
 }
 
 // scripts/lib/update-launcher.mjs
-import { existsSync as existsSync5, readFileSync as readFileSync6, writeFileSync as writeFileSync2, appendFileSync } from "node:fs";
-import { join as join12 } from "node:path";
+import { existsSync as existsSync6, readFileSync as readFileSync6, writeFileSync as writeFileSync2, appendFileSync } from "node:fs";
+import { join as join13 } from "node:path";
 
 // scripts/lib/generated-marker.mjs
 import { createHash as createHash2 } from "node:crypto";
@@ -10039,6 +10039,16 @@ function verifyStamp(content, prefix) {
   return { unmodified: sha2562(rebuilt) === m[1] };
 }
 
+// scripts/lib/installed-copy.mjs
+import { existsSync as existsSync5 } from "node:fs";
+import { join as join12 } from "node:path";
+function isInstalledCopy(root) {
+  if (typeof root !== "string" || root.length === 0) {
+    throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
+  }
+  return !existsSync5(join12(root, ".git"));
+}
+
 // scripts/lib/update-launcher.mjs
 var UPDATE_LAUNCHER_NAME = "sterling-update.bat";
 var UPDATE_TEMPLATE_WSL = "update-win.bat";
@@ -10049,23 +10059,26 @@ var toWindowsPath = (p) => {
 var crlf = (s2) => s2.replace(/\r?\n/g, "\r\n");
 var normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
 function renderUpdateLauncher(pluginRoot2) {
-  const template = readFileSync6(join12(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL), "utf8");
+  const template = readFileSync6(join13(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL), "utf8");
   const posix = pluginRoot2.replace(/\\/g, "/");
   const cdPath = /^\/mnt\/[a-z](\/|$)/.test(posix) || !posix.startsWith("/") ? toWindowsPath(posix) : posix;
   const body = template.replaceAll("{{WIN_PLUGIN_DIR}}", cdPath);
   return crlf(stampBody(body, "rem"));
 }
 function ensureUpdateLauncher(target2, pluginRoot2) {
-  if (!existsSync5(target2)) {
+  if (!existsSync6(target2)) {
     return { status: "skipped", detail: `target missing: ${target2}` };
   }
-  if (!existsSync5(join12(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL))) {
+  if (isInstalledCopy(pluginRoot2)) {
+    return { status: "skipped", detail: "installed plugin copy \u2014 updates come from the plugin manager, there is no clone to update" };
+  }
+  if (!existsSync6(join13(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL))) {
     return { status: "skipped", detail: `templates/${UPDATE_TEMPLATE_WSL} missing in the clone` };
   }
   const expected = renderUpdateLauncher(pluginRoot2);
-  const launcherPath2 = join12(target2, UPDATE_LAUNCHER_NAME);
+  const launcherPath2 = join13(target2, UPDATE_LAUNCHER_NAME);
   let result;
-  if (!existsSync5(launcherPath2)) {
+  if (!existsSync6(launcherPath2)) {
     writeFileSync2(launcherPath2, expected);
     result = { status: "created", detail: "double-click -> update the Sterling clone (no session in the loop)" };
   } else {
@@ -10082,8 +10095,8 @@ function ensureUpdateLauncher(target2, pluginRoot2) {
       }
     }
   }
-  const gitignorePath2 = join12(target2, ".gitignore");
-  const existing = existsSync5(gitignorePath2) ? readFileSync6(gitignorePath2, "utf8") : "";
+  const gitignorePath2 = join13(target2, ".gitignore");
+  const existing = existsSync6(gitignorePath2) ? readFileSync6(gitignorePath2, "utf8") : "";
   if (!existing.split(/\r?\n/).includes(UPDATE_LAUNCHER_NAME)) {
     appendFileSync(gitignorePath2, `${existing && !existing.endsWith("\n") ? "\n" : ""}${UPDATE_LAUNCHER_NAME}
 `);
@@ -10092,27 +10105,28 @@ function ensureUpdateLauncher(target2, pluginRoot2) {
 }
 
 // scripts/lib/consumer-checks.mjs
-import { existsSync as existsSync6, readFileSync as readFileSync7, writeFileSync as writeFileSync3, appendFileSync as appendFileSync2 } from "node:fs";
-import { join as join13 } from "node:path";
+import { existsSync as existsSync7, readFileSync as readFileSync7, writeFileSync as writeFileSync3, appendFileSync as appendFileSync2 } from "node:fs";
+import { join as join14 } from "node:path";
 var CONSUMER_CHECK_LAUNCHER_NAME = "sterling-check.mjs";
 var normalize4 = (s2) => s2.replace(/\r\n/g, "\n");
 var fwd2 = (p) => p.replace(/\\/g, "/");
-function renderConsumerCheckLauncher(pluginRoot2) {
-  const template = readFileSync7(join13(pluginRoot2, "templates", "check-consumer.mjs"), "utf8");
-  const body = template.replace("{{PLUGIN_DIR}}", JSON.stringify(fwd2(pluginRoot2)));
+function renderConsumerCheckLauncher(pluginRoot2, { installed = isInstalledCopy(pluginRoot2) } = {}) {
+  const template = readFileSync7(join14(pluginRoot2, "templates", "check-consumer.mjs"), "utf8");
+  const pluginDirExpr = installed ? "newestInstalledPluginDir()" : JSON.stringify(fwd2(pluginRoot2));
+  const body = template.replace("{{PLUGIN_DIR}}", () => pluginDirExpr);
   return stampBody(body, "//");
 }
 function ensureConsumerCheckLauncher(target2, pluginRoot2) {
-  if (!existsSync6(target2)) {
+  if (!existsSync7(target2)) {
     return { status: "skipped", detail: `target missing: ${target2}` };
   }
-  if (!existsSync6(join13(pluginRoot2, "templates", "check-consumer.mjs"))) {
+  if (!existsSync7(join14(pluginRoot2, "templates", "check-consumer.mjs"))) {
     return { status: "skipped", detail: "templates/check-consumer.mjs missing in the clone" };
   }
   const expected = renderConsumerCheckLauncher(pluginRoot2);
-  const launcherPath2 = join13(target2, CONSUMER_CHECK_LAUNCHER_NAME);
+  const launcherPath2 = join14(target2, CONSUMER_CHECK_LAUNCHER_NAME);
   let result;
-  if (!existsSync6(launcherPath2)) {
+  if (!existsSync7(launcherPath2)) {
     writeFileSync3(launcherPath2, expected);
     result = { status: "created", detail: "node sterling-check.mjs \u2014 runs record-citations + stale-claim checks against this project" };
   } else {
@@ -10129,8 +10143,8 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
       }
     }
   }
-  const gitignorePath2 = join13(target2, ".gitignore");
-  const existing = existsSync6(gitignorePath2) ? readFileSync7(gitignorePath2, "utf8") : "";
+  const gitignorePath2 = join14(target2, ".gitignore");
+  const existing = existsSync7(gitignorePath2) ? readFileSync7(gitignorePath2, "utf8") : "";
   if (!existing.split(/\r?\n/).includes(CONSUMER_CHECK_LAUNCHER_NAME)) {
     appendFileSync2(gitignorePath2, `${existing && !existing.endsWith("\n") ? "\n" : ""}${CONSUMER_CHECK_LAUNCHER_NAME}
 `);
@@ -10140,6 +10154,9 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
 
 // scripts/lib/codex-mcp.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
+import { readFileSync as readFileSync8 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join15 } from "node:path";
 var PROBE_TIMEOUT_MS = 5e3;
 function probeCodex({ spawnFn = spawnSync4, timeoutMs = PROBE_TIMEOUT_MS, env = process.env } = {}) {
   const run = (args) => {
@@ -10179,10 +10196,6 @@ ${capabilityResult.stderr ?? ""}`;
   }
   return { ok: true };
 }
-var CODEX_MCP_ENTRY = { command: "codex", args: ["mcp-server"] };
-function withCodexEntry(mcpServers, probeResult) {
-  return probeResult.ok ? { ...mcpServers, codex: CODEX_MCP_ENTRY } : { ...mcpServers };
-}
 var REASON_TEXT = {
   "binary-absent": "`codex` binary not found on PATH (install the Codex CLI: npm i -g @openai/codex)",
   "not-logged-in": "not logged in to ChatGPT (run `codex login`)",
@@ -10191,6 +10204,55 @@ var REASON_TEXT = {
 function codexSkipLine(reason, version) {
   const text = reason === "mcp-server-missing" ? `Codex CLI ${version ?? "unknown version"} does not support \`mcp-server\`; the supported route is a user-scope pinned Codex MCP server (such as Codex 0.153.4)` : REASON_TEXT[reason] ?? reason;
   return `codex mcp: skipped \u2014 ${text}`;
+}
+function userScopeCodexServer({ env = process.env, home = homedir3(), readFile = readFileSync8 } = {}) {
+  const path = join15(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+  let raw;
+  try {
+    raw = readFile(path, "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT") return { found: false, path };
+    return { found: false, path, unreadable: err?.code ?? err?.message ?? String(err) };
+  }
+  try {
+    const servers = JSON.parse(raw)?.mcpServers;
+    const found = Boolean(servers && typeof servers === "object" && Object.prototype.hasOwnProperty.call(servers, "codex"));
+    return { found, path };
+  } catch (err) {
+    return { found: false, path, unreadable: `not valid JSON (${err?.message ?? err})` };
+  }
+}
+var CODEX_USER_ADD_COMMAND = "claude mcp add --scope user codex -- codex mcp-server";
+var PINNED_INSTALL = "npm i -g --prefix ~/.local/codex-mcp-0.153.4 @openai/codex@0.153.4";
+var pinnedAddCommand = (nodeBinDir) => `claude mcp add --scope user -e PATH=${nodeBinDir}:/usr/local/bin:/usr/bin:/bin codex -- ~/.local/codex-mcp-0.153.4/bin/codex mcp-server`;
+function codexUserScopeLine(probe, { nodeBinDir, unreadable } = {}) {
+  const unread = unreadable ? ` (the user-level Claude config could not be read: ${unreadable})` : "";
+  if (probe.ok) return `codex mcp: no codex server at user scope${unread} \u2014 register it with: ${CODEX_USER_ADD_COMMAND}`;
+  const skip = codexSkipLine(probe.reason, probe.version);
+  if (probe.reason === "mcp-server-missing") {
+    return `${skip}${unread}. Install and register it: ${PINNED_INSTALL} && ${pinnedAddCommand(nodeBinDir ?? "<node bin dir>")}`;
+  }
+  return `${skip}${unread}`;
+}
+
+// scripts/lib/launcher-tmux.mjs
+import { readFileSync as readFileSync9 } from "node:fs";
+import { join as join16 } from "node:path";
+var fwd3 = (p) => p.replace(/\\/g, "/");
+var AUTHORING_PATHS = (pluginRoot2) => [`PLUGIN_DIR="${fwd3(pluginRoot2)}"`, `TUI_BUNDLE="${fwd3(pluginRoot2)}/tui/sterling-tui.mjs"`].join("\n");
+var INSTALLED_PATHS = [
+  "# installed plugin copy: nothing below names a versioned cache directory",
+  'PLUGIN_CACHE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache"',
+  'TUI_BUNDLE="$(',
+  '  for f in "$PLUGIN_CACHE"/*/sterling/*/tui/sterling-tui.mjs; do',
+  '    [ -f "$f" ] || continue',
+  '    v="${f%/tui/sterling-tui.mjs}"',
+  `    printf '%s\\t%s\\n' "\${v##*/}" "$f"`,
+  `  done | sort -t "$(printf '\\t')" -k1,1V | tail -n 1 | cut -f2`,
+  ')"'
+].join("\n");
+function renderTmuxLauncher(pluginRoot2, { session, splitPercent: splitPercent2, installed = isInstalledCopy(pluginRoot2) }) {
+  return readFileSync9(join16(pluginRoot2, "templates", "launcher-tmux.sh"), "utf8").replaceAll("{{SESSION}}", () => session).replaceAll("{{PLUGIN_PATHS}}", () => installed ? INSTALLED_PATHS : AUTHORING_PATHS(pluginRoot2)).replaceAll("{{CLAUDE_PLUGIN_FLAG}}", () => installed ? "" : ' --plugin-dir "$PLUGIN_DIR"').replaceAll("{{SPLIT_RATIO}}", () => String(splitPercent2));
 }
 
 // scripts/hooks/lib/undeclared-source.mjs
@@ -10459,33 +10521,32 @@ var declaredToolchains = argAll("--toolchain").map((spec) => {
   const [adapter, globs] = spec.split(":");
   return { adapter, path_globs: (globs ?? "").split(",").filter(Boolean) };
 });
-var fwd3 = (p) => p.replace(/\\/g, "/");
+var fwd4 = (p) => p.replace(/\\/g, "/");
 var normalize5 = (s2) => s2.replace(/\r\n/g, "\n");
 var withoutHandoffEntries = (c) => ({ ...c, generated_projections: (c.generated_projections ?? []).filter((p) => !isOwnedExport(target, p)) });
 var canonical = (v) => JSON.stringify(
   v,
   (_, val) => val && typeof val === "object" && !Array.isArray(val) ? Object.fromEntries(Object.keys(val).sort().map((k) => [k, val[k]])) : val
 );
-if (!existsSync7(target)) fail(`init REFUSED: target '${target}' does not exist`, 2);
+if (!existsSync8(target)) fail(`init REFUSED: target '${target}' does not exist`, 2);
 if (modeFlagGiven && !PROJECT_MODES.includes(modeFlag)) {
   fail(`init REFUSED: --mode must be 'hobby' or 'work' \u2014 got ${JSON.stringify(modeFlag ?? "")}`, 2);
 }
-var mcpServerEntry = join14(pluginRoot, "packages", "mcp-server", "dist", "main.js");
-if (!existsSync7(mcpServerEntry)) fail("init REFUSED: MCP server not built \u2014 run `npm run build` in the plugin first", 2);
-var tuiBundleEntry = join14(pluginRoot, "packages", "tui", "bundle", "sterling-tui.mjs");
-if (!existsSync7(tuiBundleEntry)) fail("init REFUSED: TUI bundle not built \u2014 run `npm run build:tui` in the plugin first", 2);
+if (!existsSync8(join17(pluginRoot, "mcp", "sterling-mcp.mjs"))) fail("init REFUSED: MCP server bundle missing (mcp/sterling-mcp.mjs) \u2014 the plugin checkout is incomplete; on the authoring clone run `npm run build:bundles`", 2);
+if (!existsSync8(join17(pluginRoot, "tui", "sterling-tui.mjs"))) fail("init REFUSED: TUI bundle missing (tui/sterling-tui.mjs) \u2014 the plugin checkout is incomplete; on the authoring clone run `npm run build:bundles`", 2);
+var mcpServerEntry = join17(pluginRoot, "packages", "mcp-server", "dist", "main.js");
 for (const rel of [".sterling", ".sterling/runs", "docs", "docs/briefs", ".claude", ".claude/agents", ".opencode", OPENCODE_AGENTS_DIR, ...HANDOFF_DIRS]) {
-  const p = join14(target, rel);
-  if (existsSync7(p) && !statSync4(p).isDirectory()) {
+  const p = join17(target, rel);
+  if (existsSync8(p) && !statSync4(p).isDirectory()) {
     fail(`init REFUSED (destructive): '${rel}' exists as a file but the manifest requires a directory \u2014 refusing to replace it`, 2);
   }
 }
-var configPath = join14(target, ".sterling", "config.json");
+var configPath = join17(target, ".sterling", "config.json");
 var recorded;
 var rawRecorded;
-if (existsSync7(configPath)) {
+if (existsSync8(configPath)) {
   try {
-    rawRecorded = JSON.parse(readFileSync8(configPath, "utf8"));
+    rawRecorded = JSON.parse(readFileSync10(configPath, "utf8"));
     recorded = parseConfig(rawRecorded);
   } catch (e) {
     fail(`init REFUSED (destructive to fix): .sterling/config.json exists but does not validate \u2014 cannot verify, will not overwrite. Repair or delete it first. ${e.message}`, 2);
@@ -10517,7 +10578,7 @@ var eff = recorded ? {
   // backupPathForRuntime first rewrites a Windows drive path (C:\.../C:/...)
   // to /mnt form under WSL, so resolve() treats it as absolute instead of as
   // a relative path that lands inside the repo (the r-dd88 junk-dir bug).
-  backupPath: backupPathFlag ? fwd3(resolve4(target, backupPathForRuntime(backupPathFlag))) : void 0,
+  backupPath: backupPathFlag ? fwd4(resolve4(target, backupPathForRuntime(backupPathFlag))) : void 0,
   backupOptOut: backupOptOutFlag,
   projectName: projectNameFlag ?? "project",
   splitRatio: void 0
@@ -10526,7 +10587,7 @@ var eff = recorded ? {
 var UNIVERSAL_DOMAIN = "sterling";
 eff.stackTags = [...eff.stackTags.filter((t) => t !== UNIVERSAL_DOMAIN), UNIVERSAL_DOMAIN];
 var expectedConfig = parseConfig({
-  ...JSON.parse(readFileSync8(join14(pluginRoot, "templates", "default-config.json"), "utf8")),
+  ...JSON.parse(readFileSync10(join17(pluginRoot, "templates", "default-config.json"), "utf8")),
   toolchains: baked,
   stack_tags: eff.stackTags,
   domain_paths: eff.domainPaths,
@@ -10546,7 +10607,7 @@ if (recorded) {
   const stripUniversal = (tags) => tags.filter((t) => t !== UNIVERSAL_DOMAIN);
   if (stackTagsFlag.length && canonical(stripUniversal(stackTagsFlag)) !== canonical(stripUniversal(recorded.stack_tags))) flagDiffs.push("--stack-tags");
   if (declaredToolchains.length && canonical(declaredToolchains) !== canonical(recorded.toolchains.map((t) => ({ adapter: t.adapter, path_globs: t.path_globs })))) flagDiffs.push("--toolchain");
-  if (backupPathFlag && fwd3(resolve4(target, backupPathForRuntime(backupPathFlag))) !== recorded.backup_path) flagDiffs.push("--backup-path");
+  if (backupPathFlag && fwd4(resolve4(target, backupPathForRuntime(backupPathFlag))) !== recorded.backup_path) flagDiffs.push("--backup-path");
   if (backupOptOutFlag && !recorded.backup_opt_out) flagDiffs.push("--backup-opt-out");
   if (projectNameFlag && recorded.project_name && projectNameFlag !== recorded.project_name) flagDiffs.push("--project-name");
   if (flagDiffs.length) {
@@ -10568,8 +10629,8 @@ if (!recorded) {
 var items = [];
 var warns = [];
 for (const [label, leaf] of [[".sterling/ (+runs/)", ".sterling/runs"], ["docs/briefs/", "docs/briefs"]]) {
-  const existed = existsSync7(join14(target, leaf));
-  mkdirSync6(join14(target, leaf), { recursive: true });
+  const existed = existsSync8(join17(target, leaf));
+  mkdirSync6(join17(target, leaf), { recursive: true });
   items.push({ item: label, status: existed ? "exists" : "created", detail: "" });
 }
 var backupDetail = eff.backupPath ? eff.backupPath : "OPTED OUT (recorded; snapshots will skip loudly)";
@@ -10598,8 +10659,8 @@ if (!recorded) {
     items.push({ item: ".sterling/config.json", status: "differs", detail: "left untouched (tuned or hand-edited) \u2014 declarations were read from it" });
   }
 }
-var dbPath = join14(target, ".sterling", "sterling.db");
-if (existsSync7(dbPath)) {
+var dbPath = join17(target, ".sterling", "sterling.db");
+if (existsSync8(dbPath)) {
   items.push({ item: ".sterling/sterling.db", status: "exists", detail: "data store \u2014 left as-is, never recreated" });
 } else {
   const { SterlingStore: SterlingStore2 } = await Promise.resolve().then(() => (init_dist2(), dist_exports));
@@ -10611,7 +10672,7 @@ var assertNoDeadTerms = (label, content) => {
   if (hits.length) fail(`init dead-term check FAILED in generated ${label}: ${hits.map((h) => h.match).join(", ")}`, 1);
   return content;
 };
-var agentsMdTemplateRaw = readFileSync8(join14(pluginRoot, "templates", "target-agents-md.md"), "utf8").replaceAll("{{PROJECT_NAME}}", eff.projectName).replaceAll("{{STACK_TAGS}}", eff.stackTags.join(", ")).replaceAll("{{TOOLCHAINS}}", baked.map((t) => `${t.adapter} (${t.path_globs.join(", ")})`).join("; ")).replaceAll("{{DOMAINS}}", eff.stackTags.length ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(", ") + " \u2014 created lazily on first need (\xA72.3)" : "(none \u2014 declare stack tags to mount domain stores)").replaceAll("{{BACKUP_PATH}}", eff.backupPath ? "configured \u2014 see `.sterling/config.json` \u2192 `backup_path` (machine-local, deliberately not restated here)" : "(opted out \u2014 recorded)");
+var agentsMdTemplateRaw = readFileSync10(join17(pluginRoot, "templates", "target-agents-md.md"), "utf8").replaceAll("{{PROJECT_NAME}}", eff.projectName).replaceAll("{{STACK_TAGS}}", eff.stackTags.join(", ")).replaceAll("{{TOOLCHAINS}}", baked.map((t) => `${t.adapter} (${t.path_globs.join(", ")})`).join("; ")).replaceAll("{{DOMAINS}}", eff.stackTags.length ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(", ") + " \u2014 created lazily on first need (\xA72.3)" : "(none \u2014 declare stack tags to mount domain stores)").replaceAll("{{BACKUP_PATH}}", eff.backupPath ? "configured \u2014 see `.sterling/config.json` \u2192 `backup_path` (machine-local, deliberately not restated here)" : "(opted out \u2014 recorded)");
 var CONVENTIONS_TOKEN = "{{CONVENTIONS_SECTION}}";
 var agentsMdConventionsIdx = agentsMdTemplateRaw.indexOf(CONVENTIONS_TOKEN);
 if (agentsMdConventionsIdx === -1) fail("templates/target-agents-md.md lost its {{CONVENTIONS_SECTION}} placeholder \u2014 refusing (P5)", 1);
@@ -10622,9 +10683,9 @@ assertNoDeadTerms(
 var renderAgentsMd = (conventionsSection) => agentsMdTemplateRaw.replace(CONVENTIONS_TOKEN, conventionsSection);
 var DEFAULT_CONVENTIONS = "(grows only via architecture-altering decision records \u2014 nothing yet)";
 var expectedAgentsMd = renderAgentsMd(DEFAULT_CONVENTIONS);
-var expectedClaudeMd = assertNoDeadTerms("CLAUDE.md", readFileSync8(join14(pluginRoot, "templates", "target-claude-md.md"), "utf8").replaceAll("{{PROJECT_NAME}}", eff.projectName));
-var agentsMdPath = join14(target, "AGENTS.md");
-var claudeMdPath = join14(target, "CLAUDE.md");
+var expectedClaudeMd = assertNoDeadTerms("CLAUDE.md", readFileSync10(join17(pluginRoot, "templates", "target-claude-md.md"), "utf8").replaceAll("{{PROJECT_NAME}}", eff.projectName));
+var agentsMdPath = join17(target, "AGENTS.md");
+var claudeMdPath = join17(target, "CLAUDE.md");
 var writeAtomic = (p, content) => {
   const tmp = `${p}.tmp-${process.pid}`;
   writeFileSync4(tmp, content);
@@ -10722,9 +10783,9 @@ function historicalHeadSegmentSets() {
   return { segmentSets, unavailableReason: null };
 }
 function writeMigrationPreview(rawClaudeText, tailForPreview) {
-  mkdirSync6(join14(target, ".sterling"), { recursive: true });
-  const previewRel = join14(".sterling", "agents-md-migration-preview.diff");
-  const previewPath = join14(target, previewRel);
+  mkdirSync6(join17(target, ".sterling"), { recursive: true });
+  const previewRel = join17(".sterling", "agents-md-migration-preview.diff");
+  const previewPath = join17(target, previewRel);
   const oldTmp = `${previewPath}.old.tmp`;
   const newTmp = `${previewPath}.new.tmp`;
   writeFileSync4(oldTmp, rawClaudeText);
@@ -10776,12 +10837,12 @@ function computeMigration(rawText) {
     claudeMd: withEol(expectedClaudeMd, eol)
   };
 }
-var agentsMdExists = existsSync7(agentsMdPath);
-var claudeMdExists = existsSync7(claudeMdPath);
-var claudeMdRaw = claudeMdExists ? readFileSync8(claudeMdPath, "utf8") : "";
+var agentsMdExists = existsSync8(agentsMdPath);
+var claudeMdExists = existsSync8(claudeMdPath);
+var claudeMdRaw = claudeMdExists ? readFileSync10(claudeMdPath, "utf8") : "";
 var claudeMdIsStub = claudeMdExists && claudeMdRaw.split(/\r?\n/, 1)[0] === "@AGENTS.md";
 if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
-  const agentsMdRaw = readFileSync8(agentsMdPath, "utf8");
+  const agentsMdRaw = readFileSync10(agentsMdPath, "utf8");
   const result = computeMigration(claudeMdRaw);
   if (result.matched && result.agentsMd === agentsMdRaw) {
     writeAtomic(claudeMdPath, result.claudeMd);
@@ -10826,50 +10887,49 @@ var toWindowsPath2 = (p) => {
   return m ? `${m[1].toUpperCase()}:${(m[2] ?? "/").replace(/\//g, "\\")}` : p.replace(/\//g, "\\");
 };
 var sanitizeSession = (s2) => s2.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
-var winProjectDir = toWindowsPath2(fwd3(target));
+var winProjectDir = toWindowsPath2(fwd4(target));
 var sessionName = `sterling-${sanitizeSession(basename2(target))}`;
 var splitPercent = Math.round(eff.splitRatio * 100);
-var tuiBundle = fwd3(join14(pluginRoot, "packages", "tui", "bundle", "sterling-tui.mjs"));
 var lf = (s2) => s2.replace(/\r\n/g, "\n");
 var crlf2 = (s2) => s2.replace(/\r?\n/g, "\r\n");
 var expectedTmuxLauncher = assertNoDeadTerms("sterling-launch.sh", lf(
-  readFileSync8(join14(pluginRoot, "templates", "launcher-tmux.sh"), "utf8").replaceAll("{{SESSION}}", sessionName).replaceAll("{{PLUGIN_DIR}}", fwd3(pluginRoot)).replaceAll("{{TUI_BUNDLE}}", tuiBundle).replaceAll("{{SPLIT_RATIO}}", String(splitPercent))
+  renderTmuxLauncher(pluginRoot, { session: sessionName, splitPercent })
 ));
-var tmuxLauncherPath = join14(target, "sterling-launch.sh");
-if (!existsSync7(tmuxLauncherPath)) {
+var tmuxLauncherPath = join17(target, "sterling-launch.sh");
+if (!existsSync8(tmuxLauncherPath)) {
   writeFileSync4(tmuxLauncherPath, expectedTmuxLauncher);
   items.push({ item: "sterling-launch.sh", status: "created", detail: `tmux session ${sessionName}, ${splitPercent}% TUI pane` });
-} else if (normalize5(readFileSync8(tmuxLauncherPath, "utf8")) === normalize5(expectedTmuxLauncher)) {
+} else if (normalize5(readFileSync10(tmuxLauncherPath, "utf8")) === normalize5(expectedTmuxLauncher)) {
   items.push({ item: "sterling-launch.sh", status: "matches", detail: "generated content unchanged" });
 } else {
   items.push({ item: "sterling-launch.sh", status: "differs", detail: "left untouched (hand-edited or other machine) \u2014 delete and re-run init to regenerate" });
 }
 var expectedLauncher = assertNoDeadTerms("sterling.bat", crlf2(
-  readFileSync8(join14(pluginRoot, "templates", "launcher-win.bat"), "utf8").replaceAll("{{WIN_PROJECT_DIR}}", winProjectDir)
+  readFileSync10(join17(pluginRoot, "templates", "launcher-win.bat"), "utf8").replaceAll("{{WIN_PROJECT_DIR}}", winProjectDir)
 ));
-var launcherPath = join14(target, "sterling.bat");
-if (!existsSync7(launcherPath)) {
+var launcherPath = join17(target, "sterling.bat");
+if (!existsSync8(launcherPath)) {
   writeFileSync4(launcherPath, expectedLauncher);
   items.push({ item: "sterling.bat", status: "created", detail: `double-click -> wsl ${winProjectDir}` });
-} else if (normalize5(readFileSync8(launcherPath, "utf8")) === normalize5(expectedLauncher)) {
+} else if (normalize5(readFileSync10(launcherPath, "utf8")) === normalize5(expectedLauncher)) {
   items.push({ item: "sterling.bat", status: "matches", detail: "unchanged" });
 } else {
   items.push({ item: "sterling.bat", status: "differs", detail: "left untouched (hand-edited or other machine) \u2014 delete and re-run init to regenerate" });
 }
 var expectedTuiLauncher = assertNoDeadTerms("tui.bat", crlf2(
-  readFileSync8(join14(pluginRoot, "templates", "tui-win.bat"), "utf8").replaceAll("{{WIN_PROJECT_DIR}}", winProjectDir)
+  readFileSync10(join17(pluginRoot, "templates", "tui-win.bat"), "utf8").replaceAll("{{WIN_PROJECT_DIR}}", winProjectDir)
 ));
-var tuiLauncherPath = join14(target, "tui.bat");
-if (!existsSync7(tuiLauncherPath)) {
+var tuiLauncherPath = join17(target, "tui.bat");
+if (!existsSync8(tuiLauncherPath)) {
   writeFileSync4(tuiLauncherPath, expectedTuiLauncher);
   items.push({ item: "tui.bat", status: "created", detail: "double-click -> ./sterling-launch.sh tui" });
-} else if (normalize5(readFileSync8(tuiLauncherPath, "utf8")) === normalize5(expectedTuiLauncher)) {
+} else if (normalize5(readFileSync10(tuiLauncherPath, "utf8")) === normalize5(expectedTuiLauncher)) {
   items.push({ item: "tui.bat", status: "matches", detail: "unchanged" });
 } else {
   items.push({ item: "tui.bat", status: "differs", detail: "left untouched (hand-edited or other machine) \u2014 delete and re-run init to regenerate" });
 }
-var nativeLauncherPath = join14(target, "sterling-windows.bat");
-if (existsSync7(nativeLauncherPath)) {
+var nativeLauncherPath = join17(target, "sterling-windows.bat");
+if (existsSync8(nativeLauncherPath)) {
   items.push({
     item: "sterling-windows.bat",
     status: "stale",
@@ -10878,18 +10938,12 @@ if (existsSync7(nativeLauncherPath)) {
 }
 items.push({ item: UPDATE_LAUNCHER_NAME, ...ensureUpdateLauncher(target, pluginRoot) });
 items.push({ item: CONSUMER_CHECK_LAUNCHER_NAME, ...ensureConsumerCheckLauncher(target, pluginRoot) });
-var vars = {
-  NODE: `"${fwd3(process.execPath)}"`,
-  HOOKS_DIR: fwd3(join14(pluginRoot, "hooks")),
-  GIT_RO: fwd3(join14(pluginRoot, "scripts", "git-ro.mjs"))
-};
 var { report: agentReport } = syncAgents({
-  templatesDir: join14(pluginRoot, "agent-templates"),
-  registryPath: join14(pluginRoot, "agent-templates", "registry.json"),
-  targetAgentsDir: join14(target, ".claude", "agents"),
-  pluginVersion: JSON.parse(readFileSync8(join14(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version,
+  templatesDir: join17(pluginRoot, "agent-templates"),
+  registryPath: join17(pluginRoot, "agent-templates", "registry.json"),
+  targetAgentsDir: join17(target, ".claude", "agents"),
+  pluginVersion: JSON.parse(readFileSync10(join17(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version,
   now: (/* @__PURE__ */ new Date()).toISOString(),
-  vars,
   // config.models is authoritative (98064d77): the config init just wrote/read
   // resolves {{MODEL}}/{{EFFORT}} per agent. `recorded` on a re-run, else the
   // freshly written `expectedConfig` — both are parsed SterlingConfig with .models.
@@ -10960,8 +11014,8 @@ if (handoffCloneTarget === true) {
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: "skipped", detail: HOBBY_SKIP_DETAIL });
 } else if (handoffMode === "work") {
   const { report: opencodeReport } = syncOpenCodeAgents({
-    templatesDir: join14(pluginRoot, "agent-templates"),
-    registryPath: join14(pluginRoot, "agent-templates", "registry.json"),
+    templatesDir: join17(pluginRoot, "agent-templates"),
+    registryPath: join17(pluginRoot, "agent-templates", "registry.json"),
     targetDir: target
   });
   const opencodeRows = {
@@ -10980,7 +11034,9 @@ if (handoffCloneTarget === true) {
     items.push({ item: `${OPENCODE_AGENTS_DIR}/${r.name}.md`, status, detail });
     if (r.instruction) agentInstructions.push(r.instruction);
   }
-  const handoff = spawnSync6(process.execPath, [join14(pluginRoot, "scripts", "handoff-projection.mjs"), target], { cwd: target, encoding: "utf8" });
+  const handoffBundle = join17(pluginRoot, "bin", "handoff-projection.mjs");
+  const handoffScript = existsSync8(handoffBundle) ? handoffBundle : join17(pluginRoot, "scripts", "handoff-projection.mjs");
+  const handoff = spawnSync6(process.execPath, [handoffScript, target], { cwd: target, encoding: "utf8" });
   const handoffOut = `${handoff.stdout ?? ""}${handoff.stderr ?? ""}${handoff.error ? handoff.error.message : ""}`.trim();
   const handoffLine = handoffOut.split("\n")[0].replace(/^handoff projection: /, "");
   const handoffStatus = handoff.status === 0 ? handoffLine.startsWith("unchanged") ? "matches" : handoffLine.startsWith("SKIPPED") ? "skipped" : "refreshed" : handoff.status === 2 || handoff.status === 3 ? "refused" : "failed";
@@ -10992,18 +11048,13 @@ ${handoffOut}`);
     process.exitCode = 1;
   }
 }
-var mcpPath = join14(target, ".mcp.json");
-var initIsPluginRepo = fwd3(target) === fwd3(pluginRootMatch);
+var mcpPath = join17(target, ".mcp.json");
+var initIsPluginRepo = fwd4(target) === fwd4(pluginRootMatch);
 var pluginArtifactRoot = pluginRootMatch;
-var pluginMcpConfigPath = join14(pluginArtifactRoot, ".claude-plugin", "sterling-mcp.json");
-var pluginMcpEntry = {
-  command: process.execPath,
-  args: [fwd3(mcpServerEntry), "--store", "${CLAUDE_PROJECT_DIR}/.sterling/sterling.db"]
-};
-var isOurMcpEntry = (e) => e && typeof e === "object" && e.command === process.execPath && Array.isArray(e.args) && e.args[0] === fwd3(mcpServerEntry);
+var isOurMcpEntry = (e) => e && typeof e === "object" && e.command === process.execPath && Array.isArray(e.args) && e.args[0] === fwd4(mcpServerEntry);
 var readMcp = () => {
   try {
-    const m = JSON.parse(readFileSync8(mcpPath, "utf8"));
+    const m = JSON.parse(readFileSync10(mcpPath, "utf8"));
     if (m === null || typeof m !== "object" || Array.isArray(m)) throw new Error("not an object");
     return m;
   } catch {
@@ -11012,100 +11063,24 @@ var readMcp = () => {
 };
 var codexProbeOverride = process.env.STERLING_CODEX_PROBE;
 var forcedCodexProbe = !codexProbeOverride ? void 0 : codexProbeOverride === "ok" ? { ok: true } : codexProbeOverride === "absent" ? { ok: false, reason: "binary-absent" } : codexProbeOverride === "not-logged-in" ? { ok: false, reason: "not-logged-in" } : fail(`STERLING_CODEX_PROBE must be 'ok', 'absent', or 'not-logged-in' (got '${codexProbeOverride}')`, 2);
-var pluginMcpExists = existsSync7(pluginMcpConfigPath);
-var existingPluginMcp;
-if (pluginMcpExists) {
-  try {
-    existingPluginMcp = JSON.parse(readFileSync8(pluginMcpConfigPath, "utf8"));
-  } catch {
-    existingPluginMcp = void 0;
-  }
-}
-var existingPluginMcpServers = existingPluginMcp && typeof existingPluginMcp === "object" && existingPluginMcp.mcpServers && typeof existingPluginMcp.mcpServers === "object" ? existingPluginMcp.mcpServers : void 0;
-var inheritedCodex = existingPluginMcpServers ? existingPluginMcpServers.codex : void 0;
-var existingHasCodexKey = existingPluginMcpServers ? "codex" in existingPluginMcpServers : false;
-var codexIsThisRunsConcern = initIsPluginRepo || !pluginMcpExists || !existingHasCodexKey;
-var codexProbe = !codexIsThisRunsConcern ? void 0 : forcedCodexProbe ?? probeCodex();
-if (codexProbe && !codexProbe.ok) warns.push(codexSkipLine(codexProbe.reason, codexProbe.version));
-var desired = {
-  mcpServers: codexProbe ? withCodexEntry({ sterling: pluginMcpEntry }, codexProbe) : { sterling: pluginMcpEntry, ...inheritedCodex !== void 0 ? { codex: inheritedCodex } : {} }
-};
-var writePluginMcpConfig = () => {
-  try {
-    mkdirSync6(dirname7(pluginMcpConfigPath), { recursive: true });
-    writeFileSync4(pluginMcpConfigPath, JSON.stringify(desired, null, 2));
-    return void 0;
-  } catch (err) {
-    warns.push(
-      `warn: could NOT write the plugin MCP config at ${fwd3(pluginMcpConfigPath)} (${err?.code ?? err?.message ?? String(err)}) \u2014 nothing was changed there and the rest of this init completed. ` + (initIsPluginRepo ? "" : "That path is the Sterling CLONE, OUTSIDE this --target: this project is initialized correctly regardless. ") + "A read-only mount or a clone owned by another user is the usual cause. Until it is writable, Sterling MCP (and codex, if a probe wired one) comes from whatever that file already says \u2014 fix the permissions and re-run init to bring it back under management."
-    );
-    return err;
-  }
-};
-if (!pluginMcpExists) {
-  const writeErr = writePluginMcpConfig();
-  items.push(
-    writeErr ? {
-      item: ".claude-plugin/sterling-mcp.json",
-      status: "differs",
-      detail: `NOT generated \u2014 the write into the Sterling clone failed (${writeErr?.code ?? "write error"}); no file was created and nothing was changed (see the warning naming the path)`
-    } : {
-      item: ".claude-plugin/sterling-mcp.json",
-      status: "created",
-      detail: `plugin MCP config (referenced by plugin.json mcpServers) \u2014 binds each project to its own store via \${CLAUDE_PROJECT_DIR}${codexProbe?.ok ? "; codex mcp-server wired (probe succeeded)" : ""}`
-    }
-  );
+var codexUserScope = userScopeCodexServer();
+if (codexUserScope.found) {
+  items.push({ item: "codex MCP (user scope)", status: "matches", detail: `a codex server is registered in ${fwd4(codexUserScope.path)}` });
 } else {
-  const existing = existingPluginMcp;
-  if (existing && canonical(existing) === canonical(desired)) {
-    items.push({ item: ".claude-plugin/sterling-mcp.json", status: "matches", detail: "plugin MCP config as generated" });
-  } else {
-    const desiredMinusCodex = {
-      mcpServers: Object.fromEntries(Object.entries(desired.mcpServers).filter(([k]) => k !== "codex"))
-    };
-    const existingSterling = existing && typeof existing === "object" && existing.mcpServers && existing.mcpServers.sterling;
-    const isOurServerEntryPath = existingSterling && typeof existingSterling === "object" && Array.isArray(existingSterling.args) && existingSterling.args[0] === fwd3(mcpServerEntry);
-    const staleCommand = isOurServerEntryPath && existingSterling.command !== process.execPath ? existingSterling.command : void 0;
-    const rebased = staleCommand === void 0 ? existing : { ...existing, mcpServers: { ...existing.mcpServers, sterling: { ...existingSterling, command: process.execPath } } };
-    const isManagedCodexAdd = codexProbe?.ok && existing && typeof existing === "object" && existing.mcpServers && !("codex" in existing.mcpServers) && canonical(rebased) === canonical(desiredMinusCodex);
-    const isManagedCommandRefresh = staleCommand !== void 0 && canonical(rebased) === canonical(desired);
-    if (isManagedCodexAdd || isManagedCommandRefresh) {
-      const reasons = [
-        ...staleCommand !== void 0 ? [`repointed the sterling command at this interpreter (was '${staleCommand}' \u2014 a moved or upgraded node; args[0] still names this clone's server entry, so the entry is ours)`] : [],
-        ...isManagedCodexAdd ? ["added generated codex entry (probe succeeded)"] : []
-      ];
-      const writeErr = writePluginMcpConfig();
-      items.push(
-        writeErr ? {
-          item: ".claude-plugin/sterling-mcp.json",
-          status: "differs",
-          detail: `refresh NOT applied \u2014 the write into the Sterling clone failed (${writeErr?.code ?? "write error"}); the file is unchanged (would have ${reasons.join("; ")})`
-        } : {
-          item: ".claude-plugin/sterling-mcp.json",
-          status: "refreshed",
-          detail: `refreshed \u2014 ${reasons.join("; ")}; all other keys unchanged`
-        }
-      );
-    } else {
-      items.push({ item: ".claude-plugin/sterling-mcp.json", status: "differs", detail: "differs from generated \u2014 left untouched (delete to regenerate)" });
-    }
-  }
-}
-if (!initIsPluginRepo) {
-  notes.push(
-    `note: .claude-plugin/sterling-mcp.json is PER-CLONE machine truth, so this run ensured it in the Sterling clone at ${fwd3(pluginArtifactRoot)} \u2014 a write OUTSIDE this --target (gitignored, machine-local, regenerable; its status line above says what this run actually did to it). This is what gives a freshly cloned Sterling a working MCP server without a separate bootstrap step.`
-  );
+  const codexProbe = forcedCodexProbe ?? probeCodex();
+  warns.push(codexUserScopeLine(codexProbe, { nodeBinDir: fwd4(dirname7(process.execPath)), unreadable: codexUserScope.unreadable }));
+  items.push({ item: "codex MCP (user scope)", status: "skipped", detail: "no codex server in the user-level Claude config \u2014 see the codex mcp line below for the command" });
 }
 if (initIsPluginRepo) {
-  const winMcpConfigPath = join14(pluginArtifactRoot, ".claude-plugin", "sterling-mcp-win.json");
-  if (existsSync7(winMcpConfigPath)) {
+  const winMcpConfigPath = join17(pluginArtifactRoot, ".claude-plugin", "sterling-mcp-win.json");
+  if (existsSync8(winMcpConfigPath)) {
     items.push({
       item: ".claude-plugin/sterling-mcp-win.json",
       status: "stale",
       detail: "retired (decision native-windows-launcher-retired-wsl2-only) \u2014 its only reader was the retired sterling-windows.bat; init no longer generates or maintains it. Left on disk untouched: delete it yourself when you no longer want it"
     });
   }
-  if (existsSync7(mcpPath)) {
+  if (existsSync8(mcpPath)) {
     const mcp = readMcp();
     if (mcp && mcp.mcpServers && isOurMcpEntry(mcp.mcpServers.sterling) && Object.keys(mcp.mcpServers).length === 1) {
       unlinkSync3(mcpPath);
@@ -11115,8 +11090,8 @@ if (initIsPluginRepo) {
     }
   }
 } else {
-  const mcp = existsSync7(mcpPath) ? readMcp() : void 0;
-  if (!existsSync7(mcpPath)) {
+  const mcp = existsSync8(mcpPath) ? readMcp() : void 0;
+  if (!existsSync8(mcpPath)) {
     items.push({ item: ".mcp.json", status: "matches", detail: "not written \u2014 the plugin declares sterling, bound to this project via ${CLAUDE_PROJECT_DIR}" });
   } else if (!mcp) {
     items.push({ item: ".mcp.json", status: "differs", detail: "exists but is not a parseable object \u2014 left untouched" });
@@ -11131,12 +11106,12 @@ if (initIsPluginRepo) {
   }
 }
 items.push({ item: "hooks (\xA76 set)", status: "matches", detail: "active via the plugin (hooks/hooks.json) \u2014 not duplicated into the project" });
-var gitignorePath = join14(target, ".gitignore");
-var existingIgnore = existsSync7(gitignorePath) ? readFileSync8(gitignorePath, "utf8") : "";
+var gitignorePath = join17(target, ".gitignore");
+var existingIgnore = existsSync8(gitignorePath) ? readFileSync10(gitignorePath, "utf8") : "";
 var entries = [".sterling/", "sterling.bat", "sterling-windows.bat", "tui.bat", "sterling-launch.sh", UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, ".claude/agents/"];
-if (initIsPluginRepo) entries.push(".claude-plugin/sterling-mcp.json", ".claude-plugin/sterling-mcp-win.json");
+if (initIsPluginRepo) entries.push(".claude-plugin/sterling-mcp-win.json");
 if (eff.backupPath) {
-  const root = fwd3(target);
+  const root = fwd4(target);
   if (eff.backupPath === root || eff.backupPath.startsWith(root + "/")) {
     entries.push(eff.backupPath === root ? "/" : eff.backupPath.slice(root.length + 1) + "/");
   }
@@ -11150,23 +11125,23 @@ if (missing.length) {
 }
 var pluginPkg = (() => {
   try {
-    return JSON.parse(readFileSync8(join14(pluginRoot, ".claude-plugin", "plugin.json"), "utf8"));
+    return JSON.parse(readFileSync10(join17(pluginRoot, ".claude-plugin", "plugin.json"), "utf8"));
   } catch {
     return {};
   }
 })();
 var registry = new ProjectRegistry(registryPath());
 try {
-  const already = registry.list().some((p) => p.repo_path === fwd3(target));
+  const already = registry.list().some((p) => p.repo_path === fwd4(target));
   registry.register({
-    repo_path: fwd3(target),
+    repo_path: fwd4(target),
     name: eff.projectName,
     stack_tags: eff.stackTags,
     toolchains: baked.map((t) => t.adapter),
     sterling_version: typeof pluginPkg.version === "string" ? pluginPkg.version : null,
     at: (/* @__PURE__ */ new Date()).toISOString()
   });
-  const siblings = registry.list().filter((p) => p.repo_path !== fwd3(target)).length;
+  const siblings = registry.list().filter((p) => p.repo_path !== fwd4(target)).length;
   items.push({
     item: "project registry",
     status: already ? "refreshed" : "created",

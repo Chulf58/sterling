@@ -13,7 +13,8 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH, preScaleDownMarkers, reexecArgs, UPDATE_REEXEC_ENV, UPDATE_REEXEC_FROM_ENV } from '../lib/update.mjs';
+import { readCurrency, refusalFor, isGeneratedTrackedPath, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH, preScaleDownMarkers, reexecArgs, UPDATE_REEXEC_ENV, UPDATE_REEXEC_FROM_ENV } from '../lib/update.mjs';
+import { BUNDLED_ARTIFACTS } from '../lib/bundled-artifacts.mjs';
 import { ensureUpdateLauncher, renderUpdateLauncher, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
 
 const GIT_ID = ['-c', 'user.email=t@sterling.test', '-c', 'user.name=sterling test'];
@@ -1212,6 +1213,32 @@ test('the dirty refusal splits committed BUILD OUTPUTS from source and gives eac
 // against this file's existing cleanCurrency()/refusalFor conventions and
 // decision foreign_a9b98b7d (the original hooks/architecture.md split this extends).
 // -----------------------------------------------------------------------------
+
+test('every tracked file under every registered bundle family (hooks, bin, mcp, tui) gets the discard remedy, never SOURCE CHANGES', () => {
+  // The plugin ships bin/, mcp/ and tui/ bundles committed beside hooks/; a dirty
+  // one on a consumer clone must draw "discard", exactly like a hook bundle.
+  // Iterates the REGISTRY and git's own file list, so a new family fails here
+  // until GENERATED_TRACKED covers it.
+  const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  assert.deepEqual(BUNDLED_ARTIFACTS.map((a) => a.name).sort(), ['bin', 'hooks', 'mcp', 'tui']);
+  for (const a of BUNDLED_ARTIFACTS) {
+    const r = spawnSync('git', ['ls-files', '--', a.shipped], { cwd: repo, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const files = r.stdout.split('\n').filter(Boolean)
+      // hooks/ also holds AUTHORED files (hooks.json, the registry; README.md) — only its .mjs are bundles
+      .filter((f) => !(a.name === 'hooks' && !f.endsWith('.mjs')));
+    assert.ok(files.length > 0, `${a.name}: tracked files under ${a.shipped}`);
+    for (const f of files) {
+      assert.ok(isGeneratedTrackedPath(f), `${a.name}: ${f} is classified as a generated build output`);
+      const c = refusalFor({ ...cleanCurrency(), dirty_tracked: [` M ${f}`] });
+      assert.match(c, /COMMITTED BUILD OUTPUTS — discard these, always/, f);
+      assert.doesNotMatch(c, /SOURCE CHANGES/, f);
+    }
+  }
+  assert.equal(isGeneratedTrackedPath('hooks/hooks.json'), false, 'the hand-maintained hook registry stays source');
+  assert.equal(isGeneratedTrackedPath('hooks/README.md'), false, 'authored hooks/ prose stays source');
+  assert.equal(isGeneratedTrackedPath('.claude-plugin/sterling-mcp.json'), false, 'the committed MCP config is authored, not generated');
+});
 
 test('CONTROL, placed first: a genuine SOURCE change (hooks/hooks.json) reads as SOURCE CHANGES, never a build output', () => {
   const c = refusalFor({ ...cleanCurrency(), dirty_tracked: [' M hooks/hooks.json'] });

@@ -8966,13 +8966,13 @@ function resolveMcpConfig(pluginRoot, projectRoot2) {
   try {
     parsed = JSON.parse(readFileSync8(path, "utf8"));
   } catch (e) {
-    throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 run /sterling:init in the clone`);
+    throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 it ships committed with the plugin, so this plugin tree is incomplete: restore it (git checkout -- .claude-plugin/sterling-mcp.json in a clone) or reinstall the plugin`);
   }
   const entry = parsed?.mcpServers?.[SERVER];
   if (!entry || typeof entry.command !== "string" || !Array.isArray(entry.args)) {
     throw new Error(`${path} has no mcpServers.${SERVER} {command, args} entry`);
   }
-  const bind = (s2) => String(s2).split("${CLAUDE_PROJECT_DIR}").join(projectRoot2);
+  const bind = (s2) => String(s2).split("${CLAUDE_PLUGIN_ROOT}").join(pluginRoot).split("${CLAUDE_PROJECT_DIR}").join(projectRoot2);
   return JSON.stringify({ mcpServers: { [SERVER]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
 }
 function readWorkerPrompt(pluginRoot) {

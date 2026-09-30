@@ -17,8 +17,12 @@
 //   present but a required dist file missing -> exit 2, stderr names
 //   `npm run build`. Preflight passing -> the real implementation runs in the
 //   same process with argv intact, its own refusals unchanged. package.json
-//   carries scripts.prepare === "npm run build && npm run build:tui" and an
-//   engines.node field.
+//   carries scripts.prepare === "npm run build" and an engines.node field.
+//   (CHANGED: prepare was "npm run build && npm run build:tui" until the TUI
+//   bundle became committed — decision
+//   sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone —
+//   after which an in-place build:tui at npm-install time dirties a tracked
+//   file, the reason prepare never ran build:hooks.)
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -168,19 +172,21 @@ test('T2b: node_modules present, packages/schemas/dist/index.js present, ONLY pa
 // =============================================================================
 // T4 — package.json declares the postclone build step and a node engine.
 // =============================================================================
-test('T4: package.json declares scripts.prepare = "npm run build && npm run build:tui" (no build:hooks) and pins engines.node to ">=24"', () => {
+test('T4: package.json declares scripts.prepare = "npm run build" (no in-place rebuild of any committed bundle) and pins engines.node to ">=24"', () => {
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   assert.equal(
     pkg.scripts?.prepare,
-    'npm run build && npm run build:tui',
-    'scripts.prepare runs both builds on a fresh clone / npm install (npm lifecycle hook)'
+    'npm run build',
+    'scripts.prepare builds the gitignored workspace dist on a fresh clone / npm install (npm lifecycle hook)'
   );
-  assert.ok(!String(pkg.scripts?.prepare).includes('build:hooks'), 'prepare does not fold in a build:hooks step');
+  for (const bundleBuild of ['build:hooks', 'build:tui', 'build:mcp', 'build:bin', 'build:bundles']) {
+    assert.ok(!String(pkg.scripts?.prepare).includes(bundleBuild), `prepare does not fold in a ${bundleBuild} step — that bundle is committed`);
+  }
   assert.equal(pkg.engines?.node, '>=24', 'engines.node is pinned to exactly >=24');
 });
-// SABOTAGE: change scripts.prepare to just "npm run build" (drop
-// build:tui) — the equal() on scripts.prepare goes red. SABOTAGE: widen
-// prepare to "npm run build && npm run build:tui && npm run build:hooks" —
-// the build:hooks negative assertion goes red. SABOTAGE: change engines.node
+// SABOTAGE: drop scripts.prepare or change it to anything but "npm run build"
+// — the equal() goes red. SABOTAGE: widen prepare with any committed-bundle
+// build (build:hooks, build:tui, build:mcp, build:bin, build:bundles) — the
+// negative assertion for that step goes red. SABOTAGE: change engines.node
 // to '>=18', '', or remove the field — the exact-equal assertion goes red
 // (a merely-non-empty check would have passed all three).

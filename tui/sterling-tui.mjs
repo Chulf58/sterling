@@ -39067,9 +39067,9 @@ var require_termkit_no_lazy_require = __commonJS({
 });
 
 // packages/tui/dist/main.js
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, existsSync as existsSync3 } from "node:fs";
-import { basename as basename2, dirname as dirname4, join as join4 } from "node:path";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, existsSync as existsSync3 } from "node:fs";
+import { basename as basename2, dirname as dirname4, join as join5 } from "node:path";
+import { randomUUID as randomUUID3 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
 // packages/store/dist/index.js
@@ -48409,6 +48409,84 @@ function mouseToEvent(name, data) {
   }
 }
 
+// scripts/lib/agent-distribution.mjs
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+
+// scripts/lib/agent-fences.mjs
+var FENCE_KINDS = {
+  "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
+  "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" }
+};
+var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open: open2, close }) => [open2, close]));
+
+// scripts/lib/agent-distribution.mjs
+var normalize = (s2) => s2.replace(/\r\n/g, "\n");
+function sha256(text) {
+  return createHash("sha256").update(normalize(text), "utf8").digest("hex");
+}
+var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=((?:(?!-->)[^\n])+) -->$/m;
+function parseInstalledHeader(content) {
+  const m = normalize(content).match(HEADER_RE);
+  if (!m) return null;
+  const [line, pluginVersion, template, templateHash, contentHash, installedAt] = m;
+  return { headerLine: line, pluginVersion, template, templateHash, contentHash, installedAt };
+}
+function setInstalledModelEffort(installedContent, { model, effort, pluginVersion, now }) {
+  const normalized = normalize(installedContent);
+  const header = parseInstalledHeader(normalized);
+  if (!header) {
+    throw new Error("setInstalledModelEffort: no sterling-generated header \u2014 refusing to swap a file this module did not generate");
+  }
+  const m = normalized.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!m) throw new Error("setInstalledModelEffort: missing frontmatter block");
+  const frontmatter = m[1].split("\n").map((line) => {
+    if (/^model:\s/.test(line)) return `model: ${model}`;
+    if (/^effort:\s/.test(line)) return `effort: ${effort}`;
+    return line;
+  }).join("\n");
+  const body = m[2].replace(header.headerLine + "\n", "");
+  const withoutHeader = `---
+${frontmatter}
+---
+${body}`;
+  const newHeader = `<!-- sterling-generated v=${pluginVersion} template=${header.template} template_hash=${header.templateHash} content_hash=${sha256(withoutHeader)} installed_at=${now} -->`;
+  return `---
+${frontmatter}
+---
+${newHeader}
+${body}`;
+}
+var RESTART_INSTRUCTION = [
+  "================================================================",
+  "RESTART REQUIRED \u2014 project subagents load at session start.",
+  "Agents installed into .claude/agents/ are NOT visible to a",
+  "session that was already running. Restart Claude Code in this",
+  "project before dispatching any of the agents above.",
+  "================================================================"
+].join("\n");
+
+// scripts/lib/codex-mcp.mjs
+import { readFileSync as readFileSync3 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join4 } from "node:path";
+function userScopeCodexServer({ env = process.env, home = homedir2(), readFile = readFileSync3 } = {}) {
+  const path = join4(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+  let raw;
+  try {
+    raw = readFile(path, "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT") return { found: false, path };
+    return { found: false, path, unreadable: err?.code ?? err?.message ?? String(err) };
+  }
+  try {
+    const servers = JSON.parse(raw)?.mcpServers;
+    const found = Boolean(servers && typeof servers === "object" && Object.prototype.hasOwnProperty.call(servers, "codex"));
+    return { found, path };
+  } catch (err) {
+    return { found: false, path, unreadable: `not valid JSON (${err?.message ?? err})` };
+  }
+}
+
 // packages/tui/dist/main.js
 var smoke = process.env.STERLING_TUI_SMOKE === "1";
 if (!process.stdout.isTTY && !smoke) {
@@ -48422,9 +48500,9 @@ if (storeIdx === -1 || !args[storeIdx + 1]) {
   process.exit(2);
 }
 var storePath = args[storeIdx + 1];
-var configPath2 = join4(dirname4(storePath), "config.json");
+var configPath2 = join5(dirname4(storePath), "config.json");
 var projectRoot = dirname4(dirname4(storePath));
-var agentsDir = join4(projectRoot, ".claude", "agents");
+var agentsDir = join5(projectRoot, ".claude", "agents");
 function resolveProjectHeadSha() {
   try {
     const sha = execFileSync2("git", ["rev-parse", "HEAD"], {
@@ -48443,7 +48521,7 @@ if (smoke) {
   console.error(`sterling-tui smoke: terminal stack loaded (${term.width}x${term.height})`);
   process.exit(0);
 }
-var lockPath = join4(dirname4(storePath), "transient", "tui.lock");
+var lockPath = join5(dirname4(storePath), "transient", "tui.lock");
 var owner = acquireTuiLock(lockPath, process.pid);
 if (owner !== null) {
   console.error(`sterling-tui: already running (pid ${owner}) for this store \u2014 exiting politely (\xA711)`);
@@ -48452,7 +48530,7 @@ if (owner !== null) {
 var mounts = [];
 var domainsAvailable = true;
 try {
-  const config = parseConfig(JSON.parse(readFileSync3(configPath2, "utf8")));
+  const config = parseConfig(JSON.parse(readFileSync4(configPath2, "utf8")));
   mounts = resolveDomainMounts(config);
 } catch {
   mounts = [];
@@ -48466,7 +48544,7 @@ var ui = initialUi;
 var roster;
 function readInstalledModelEffort(name) {
   try {
-    const content = readFileSync3(join4(agentsDir, `${name}.md`), "utf8");
+    const content = readFileSync4(join5(agentsDir, `${name}.md`), "utf8");
     const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
     const block = fm ? fm[1] : "";
     return {
@@ -48478,19 +48556,13 @@ function readInstalledModelEffort(name) {
   }
 }
 function probeCodexWired() {
-  try {
-    const url = new URL("../../../.claude-plugin/sterling-mcp.json", new URL("../packages/tui/dist/main.js", import.meta.url).href);
-    const raw = JSON.parse(readFileSync3(url, "utf8"));
-    return Boolean(raw.mcpServers && Object.prototype.hasOwnProperty.call(raw.mcpServers, "codex"));
-  } catch {
-    return false;
-  }
+  return userScopeCodexServer().found;
 }
 function loadRoster() {
   const nowISO = (/* @__PURE__ */ new Date()).toISOString();
   let config;
   try {
-    config = parseConfig(JSON.parse(readFileSync3(configPath2, "utf8")));
+    config = parseConfig(JSON.parse(readFileSync4(configPath2, "utf8")));
   } catch {
     config = { models: {}, models_catalog: { staleness_days: 45 } };
   }
@@ -48500,7 +48572,7 @@ function loadRoster() {
   const tdd = { enabled: cfg.tdd?.enabled ?? true };
   const mode = readRawMode();
   const codexWired = probeCodexWired();
-  const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync3(join4(agentsDir, `${name}.md`))).map((name) => {
+  const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync3(join5(agentsDir, `${name}.md`))).map((name) => {
     const v = readInstalledModelEffort(name);
     return { name, installedModel: v.model, installedEffort: v.effort };
   });
@@ -48525,7 +48597,7 @@ function loadRoster() {
 }
 function readRawMode() {
   try {
-    const raw = JSON.parse(readFileSync3(configPath2, "utf8"));
+    const raw = JSON.parse(readFileSync4(configPath2, "utf8"));
     return raw.mode === void 0 ? void 0 : typeof raw.mode === "string" ? raw.mode : JSON.stringify(raw.mode);
   } catch (err) {
     ui = { ...ui, notice: `project mode unknown \u2014 config unreadable: ${err.message}` };
@@ -48534,7 +48606,7 @@ function readRawMode() {
 }
 function applySparringModel(e) {
   try {
-    const raw = JSON.parse(readFileSync3(configPath2, "utf8"));
+    const raw = JSON.parse(readFileSync4(configPath2, "utf8"));
     const sp = { ...raw.sparring_partner };
     if (e.model)
       sp.model = e.model;
@@ -48549,19 +48621,17 @@ function applySparringModel(e) {
 async function applySwap(e) {
   const nowISO = (/* @__PURE__ */ new Date()).toISOString();
   try {
-    const raw = JSON.parse(readFileSync3(configPath2, "utf8"));
+    const raw = JSON.parse(readFileSync4(configPath2, "utf8"));
     raw.models = raw.models ?? {};
     raw.models[e.key] = { model: e.to.model, effort: e.to.effort };
     writeFileSync3(configPath2, JSON.stringify(raw, null, 2) + "\n");
-    const distUrl = new URL("../../../scripts/lib/agent-distribution.mjs", new URL("../packages/tui/dist/main.js", import.meta.url).href).href;
-    const dist = await import(distUrl);
     for (const name of e.agents) {
-      const p = join4(agentsDir, `${name}.md`);
+      const p = join5(agentsDir, `${name}.md`);
       if (!existsSync3(p))
         continue;
-      const content = readFileSync3(p, "utf8");
-      const hdr = dist.parseInstalledHeader(content);
-      writeFileSync3(p, dist.setInstalledModelEffort(content, {
+      const content = readFileSync4(p, "utf8");
+      const hdr = parseInstalledHeader(content);
+      writeFileSync3(p, setInstalledModelEffort(content, {
         model: e.to.model,
         effort: e.to.effort,
         pluginVersion: hdr?.pluginVersion ?? "0.0.0",
@@ -48569,7 +48639,7 @@ async function applySwap(e) {
       }));
     }
     store.create({
-      id: randomUUID2(),
+      id: randomUUID3(),
       type: "decision",
       created_at: nowISO,
       updated_at: nowISO,

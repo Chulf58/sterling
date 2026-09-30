@@ -5898,12 +5898,12 @@ var init_registry = __esm({
 });
 
 // packages/schemas/dist/staleness.js
-import { dirname, join as join6 } from "node:path";
+import { dirname, join as join7 } from "node:path";
 function buildIdPath(serverDir) {
-  return join6(serverDir, BUILD_ID_FILE);
+  return join7(serverDir, BUILD_ID_FILE);
 }
 function runtimeMarkerPath(storePath) {
-  return join6(dirname(storePath), "transient", "mcp-runtime.json");
+  return join7(dirname(storePath), "transient", "mcp-runtime.json");
 }
 function stalenessVerdict(currentBuildId, marker, markerPidAlive = null) {
   if (!currentBuildId || !marker)
@@ -6008,13 +6008,13 @@ var init_dist = __esm({
 });
 
 // packages/store/dist/mounted.js
-import { mkdirSync as mkdirSync2, existsSync as existsSync3 } from "node:fs";
-import { dirname as dirname2, join as join7 } from "node:path";
+import { mkdirSync as mkdirSync2, existsSync as existsSync4 } from "node:fs";
+import { dirname as dirname2, join as join8 } from "node:path";
 import { homedir } from "node:os";
 function resolveDomainMounts(config) {
   return config.stack_tags.map((name) => ({
     name,
-    dbPath: config.domain_paths[name] ?? join7(homedir(), ".sterling", "domains", name, "sterling.db")
+    dbPath: config.domain_paths[name] ?? join8(homedir(), ".sterling", "domains", name, "sterling.db")
   }));
 }
 function open(dbPath) {
@@ -6071,7 +6071,7 @@ var init_mounted = __esm({
       constructor(projectDbPath, mounts = [], options) {
         this.project = open(projectDbPath);
         for (const m of mounts) {
-          if (options?.skipMissing && !existsSync3(m.dbPath))
+          if (options?.skipMissing && !existsSync4(m.dbPath))
             continue;
           this.domains.set(m.name, open(m.dbPath));
         }
@@ -6536,9 +6536,9 @@ var init_mounted = __esm({
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync as mkdirSync3 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname3, join as join8 } from "node:path";
+import { dirname as dirname3, join as join9 } from "node:path";
 function registryPath() {
-  return process.env.STERLING_REGISTRY_DB ?? join8(homedir2(), ".sterling", "registry.db");
+  return process.env.STERLING_REGISTRY_DB ?? join9(homedir2(), ".sterling", "registry.db");
 }
 var REGISTRY_DDL, ProjectRegistry;
 var init_registry2 = __esm({
@@ -6943,12 +6943,12 @@ __export(dist_exports2, {
   unrecognizedKeyPaths: () => unrecognizedKeyPaths
 });
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync as mkdirSync4, existsSync as existsSync4, realpathSync as realpathSync2, statSync } from "node:fs";
-import { dirname as dirname4, basename, join as join9, resolve as resolvePath } from "node:path";
+import { mkdirSync as mkdirSync4, existsSync as existsSync5, realpathSync as realpathSync2, statSync } from "node:fs";
+import { dirname as dirname4, basename, join as join10, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 function classifyClaimPath(repoRoot, path) {
   try {
-    return statSync(join9(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
+    return statSync(join10(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
   } catch (err) {
     const code = err?.code;
     if (code === "ENOENT")
@@ -7376,7 +7376,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
         this.db = new DatabaseSync2(path);
         let classifiedPath = this.dbPath;
         try {
-          classifiedPath = join9(realpathSync2(dirname4(this.dbPath)), basename(this.dbPath));
+          classifiedPath = join10(realpathSync2(dirname4(this.dbPath)), basename(this.dbPath));
         } catch {
         }
         this.db.exec("PRAGMA busy_timeout=5000");
@@ -8903,7 +8903,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
       /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */
       snapshot(targetPath) {
         const target2 = targetPath.replace(/\\/g, "/");
-        if (existsSync4(target2)) {
+        if (existsSync5(target2)) {
           throw new Error(`snapshot: target already exists, refusing to overwrite: '${target2}'`);
         }
         mkdirSync4(dirname4(target2), { recursive: true });
@@ -9272,7 +9272,7 @@ __export(agent_coverage_exports, {
   scanAgentCoverage: () => scanAgentCoverage
 });
 import { readdirSync as readdirSync2, readFileSync as readFileSync4, realpathSync as realpathSync3, statSync as statSync2 } from "node:fs";
-import { join as join10, resolve as resolve4 } from "node:path";
+import { join as join11, resolve as resolve4 } from "node:path";
 function normalizeProjectPath(p) {
   const raw = resolve4(String(p));
   let real = raw;
@@ -9304,7 +9304,7 @@ function sterlingAgentsIn(agentsDir) {
     if (!f.endsWith(".md")) continue;
     let content;
     try {
-      content = readFileSync4(join10(agentsDir, f), "utf8");
+      content = readFileSync4(join11(agentsDir, f), "utf8");
     } catch (err) {
       damaged.push(`${f} (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -9335,8 +9335,8 @@ function scanAgentCoverage({ roots = [], registeredProjects = [] } = {}) {
       continue;
     }
     for (const name of entries) {
-      const projectDir = join10(root, name);
-      const agentsDir = join10(projectDir, ".claude", "agents");
+      const projectDir = join11(root, name);
+      const agentsDir = join11(projectDir, ".claude", "agents");
       try {
         if (!statSync2(agentsDir).isDirectory()) continue;
       } catch (err) {
@@ -9372,19 +9372,20 @@ var init_agent_coverage = __esm({
 
 // scripts/update.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync6 } from "node:fs";
-import { dirname as dirname6, join as join12, resolve as resolve5 } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync as existsSync7 } from "node:fs";
+import { dirname as dirname6, join as join13, resolve as resolve5 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/lib/update.mjs
 import { spawnSync } from "node:child_process";
-import { closeSync as closeSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, openSync as openSync2, readFileSync as readFileSync5, readdirSync as readdirSync3, readSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { closeSync as closeSync2, existsSync as existsSync6, mkdirSync as mkdirSync5, openSync as openSync2, readFileSync as readFileSync5, readdirSync as readdirSync3, readSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname5, join as join11 } from "node:path";
+import { dirname as dirname5, join as join12 } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // scripts/lib/update-launcher.mjs
-import { existsSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync as existsSync2, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { join as join2 } from "node:path";
 
 // scripts/lib/generated-marker.mjs
 import { createHash } from "node:crypto";
@@ -9407,6 +9408,16 @@ function verifyStamp(content, prefix) {
   return { unmodified: sha256(rebuilt) === m[1] };
 }
 
+// scripts/lib/installed-copy.mjs
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+function isInstalledCopy(root) {
+  if (typeof root !== "string" || root.length === 0) {
+    throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
+  }
+  return !existsSync(join(root, ".git"));
+}
+
 // scripts/lib/update-launcher.mjs
 var UPDATE_LAUNCHER_NAME = "sterling-update.bat";
 var UPDATE_TEMPLATE_WSL = "update-win.bat";
@@ -9417,23 +9428,26 @@ var toWindowsPath = (p) => {
 var crlf = (s2) => s2.replace(/\r?\n/g, "\r\n");
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 function renderUpdateLauncher(pluginRoot2) {
-  const template = readFileSync(join(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL), "utf8");
+  const template = readFileSync(join2(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL), "utf8");
   const posix = pluginRoot2.replace(/\\/g, "/");
   const cdPath = /^\/mnt\/[a-z](\/|$)/.test(posix) || !posix.startsWith("/") ? toWindowsPath(posix) : posix;
   const body = template.replaceAll("{{WIN_PLUGIN_DIR}}", cdPath);
   return crlf(stampBody(body, "rem"));
 }
 function ensureUpdateLauncher(target2, pluginRoot2) {
-  if (!existsSync(target2)) {
+  if (!existsSync2(target2)) {
     return { status: "skipped", detail: `target missing: ${target2}` };
   }
-  if (!existsSync(join(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL))) {
+  if (isInstalledCopy(pluginRoot2)) {
+    return { status: "skipped", detail: "installed plugin copy \u2014 updates come from the plugin manager, there is no clone to update" };
+  }
+  if (!existsSync2(join2(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL))) {
     return { status: "skipped", detail: `templates/${UPDATE_TEMPLATE_WSL} missing in the clone` };
   }
   const expected = renderUpdateLauncher(pluginRoot2);
-  const launcherPath = join(target2, UPDATE_LAUNCHER_NAME);
+  const launcherPath = join2(target2, UPDATE_LAUNCHER_NAME);
   let result;
-  if (!existsSync(launcherPath)) {
+  if (!existsSync2(launcherPath)) {
     writeFileSync(launcherPath, expected);
     result = { status: "created", detail: "double-click -> update the Sterling clone (no session in the loop)" };
   } else {
@@ -9450,8 +9464,8 @@ function ensureUpdateLauncher(target2, pluginRoot2) {
       }
     }
   }
-  const gitignorePath = join(target2, ".gitignore");
-  const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
+  const gitignorePath = join2(target2, ".gitignore");
+  const existing = existsSync2(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
   if (!existing.split(/\r?\n/).includes(UPDATE_LAUNCHER_NAME)) {
     appendFileSync(gitignorePath, `${existing && !existing.endsWith("\n") ? "\n" : ""}${UPDATE_LAUNCHER_NAME}
 `);
@@ -9460,27 +9474,28 @@ function ensureUpdateLauncher(target2, pluginRoot2) {
 }
 
 // scripts/lib/consumer-checks.mjs
-import { existsSync as existsSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2, appendFileSync as appendFileSync2 } from "node:fs";
-import { join as join2 } from "node:path";
+import { existsSync as existsSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2, appendFileSync as appendFileSync2 } from "node:fs";
+import { join as join3 } from "node:path";
 var CONSUMER_CHECK_LAUNCHER_NAME = "sterling-check.mjs";
 var normalize2 = (s2) => s2.replace(/\r\n/g, "\n");
 var fwd = (p) => p.replace(/\\/g, "/");
-function renderConsumerCheckLauncher(pluginRoot2) {
-  const template = readFileSync2(join2(pluginRoot2, "templates", "check-consumer.mjs"), "utf8");
-  const body = template.replace("{{PLUGIN_DIR}}", JSON.stringify(fwd(pluginRoot2)));
+function renderConsumerCheckLauncher(pluginRoot2, { installed = isInstalledCopy(pluginRoot2) } = {}) {
+  const template = readFileSync2(join3(pluginRoot2, "templates", "check-consumer.mjs"), "utf8");
+  const pluginDirExpr = installed ? "newestInstalledPluginDir()" : JSON.stringify(fwd(pluginRoot2));
+  const body = template.replace("{{PLUGIN_DIR}}", () => pluginDirExpr);
   return stampBody(body, "//");
 }
 function ensureConsumerCheckLauncher(target2, pluginRoot2) {
-  if (!existsSync2(target2)) {
+  if (!existsSync3(target2)) {
     return { status: "skipped", detail: `target missing: ${target2}` };
   }
-  if (!existsSync2(join2(pluginRoot2, "templates", "check-consumer.mjs"))) {
+  if (!existsSync3(join3(pluginRoot2, "templates", "check-consumer.mjs"))) {
     return { status: "skipped", detail: "templates/check-consumer.mjs missing in the clone" };
   }
   const expected = renderConsumerCheckLauncher(pluginRoot2);
-  const launcherPath = join2(target2, CONSUMER_CHECK_LAUNCHER_NAME);
+  const launcherPath = join3(target2, CONSUMER_CHECK_LAUNCHER_NAME);
   let result;
-  if (!existsSync2(launcherPath)) {
+  if (!existsSync3(launcherPath)) {
     writeFileSync2(launcherPath, expected);
     result = { status: "created", detail: "node sterling-check.mjs \u2014 runs record-citations + stale-claim checks against this project" };
   } else {
@@ -9497,8 +9512,8 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
       }
     }
   }
-  const gitignorePath = join2(target2, ".gitignore");
-  const existing = existsSync2(gitignorePath) ? readFileSync2(gitignorePath, "utf8") : "";
+  const gitignorePath = join3(target2, ".gitignore");
+  const existing = existsSync3(gitignorePath) ? readFileSync2(gitignorePath, "utf8") : "";
   if (!existing.split(/\r?\n/).includes(CONSUMER_CHECK_LAUNCHER_NAME)) {
     appendFileSync2(gitignorePath, `${existing && !existing.endsWith("\n") ? "\n" : ""}${CONSUMER_CHECK_LAUNCHER_NAME}
 `);
@@ -9507,15 +9522,15 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
 }
 
 // scripts/lib/handoff-projection.mjs
-import { join as join5, resolve as resolve3 } from "node:path";
+import { join as join6, resolve as resolve3 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
 import { lstatSync as lstatSync2, readFileSync as readFileSync3, readdirSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, constants } from "node:fs";
-import { join as join4, resolve as resolve2 } from "node:path";
+import { join as join5, resolve as resolve2 } from "node:path";
 
 // scripts/lib/store-path.mjs
 import { lstatSync, realpathSync } from "node:fs";
-import { join as join3, resolve, sep } from "node:path";
+import { join as join4, resolve, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target: target2 } = {}) {
     super(message);
@@ -9558,7 +9573,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   if (target2 !== rootResolved && !target2.startsWith(rootResolved + sep)) {
     throw new StorePathContainmentError(
-      `resolveStoreWritePath: '${join3(...segments)}' resolves outside '${rootResolved}' (got '${target2}') \u2014 refusing`,
+      `resolveStoreWritePath: '${join4(...segments)}' resolves outside '${rootResolved}' (got '${target2}') \u2014 refusing`,
       { root: rootResolved, target: target2 }
     );
   }
@@ -9566,7 +9581,7 @@ function resolveStoreWritePath(root, ...segments) {
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
-    const next = join3(cursor, part);
+    const next = join4(cursor, part);
     let st;
     try {
       st = lstatSync(next);
@@ -9631,7 +9646,7 @@ function resolveStoreWritePath(root, ...segments) {
     );
   }
   const suffix = target2.slice(deepestExisting.length);
-  const reconstructed = suffix ? join3(realDeepest, suffix) : realDeepest;
+  const reconstructed = suffix ? join4(realDeepest, suffix) : realDeepest;
   if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target2}') resolves outside the project \u2014 refusing, nothing was written`,
@@ -9661,7 +9676,7 @@ function containedPath(root, rel, leaf) {
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
   let cursor = resolve2(root);
   for (const [index, part] of segments.entries()) {
-    cursor = join4(cursor, part);
+    cursor = join5(cursor, part);
     const st = lstatOrNull(cursor);
     if (!st) break;
     const isLeaf = index === segments.length - 1;
@@ -9778,15 +9793,25 @@ function readCurrency({ git }) {
     untracked: lines.filter((l) => l.startsWith("??"))
   };
 }
-var GENERATED_TRACKED = [/^hooks\/[^/]+\.mjs$/, /^architecture\.md$/, /^rulings\.md$/];
+var GENERATED_TRACKED = [
+  /^hooks\/[^/]+\.mjs$/,
+  /^bin\/[^/]+\.mjs$/,
+  /^mcp\/sterling-mcp\.mjs$/,
+  /^mcp\/\.build-id$/,
+  /^tui\/sterling-tui\.mjs$/,
+  /^architecture\.md$/,
+  /^rulings\.md$/
+];
+function isGeneratedTrackedPath(p) {
+  return GENERATED_TRACKED.some((re) => re.test(p));
+}
 function porcelainPath(line) {
   const raw = line.slice(3).trim();
   const arrow = raw.lastIndexOf(" -> ");
   return (arrow === -1 ? raw : raw.slice(arrow + 4)).replace(/^"|"$/g, "");
 }
 function isGeneratedTracked(line) {
-  const p = porcelainPath(line);
-  return GENERATED_TRACKED.some((re) => re.test(p));
+  return isGeneratedTrackedPath(porcelainPath(line));
 }
 function generatedPaths(lines) {
   return [...new Set(lines.map(porcelainPath))];
@@ -9819,7 +9844,7 @@ function refusalFor(c) {
     if (generated.length) {
       parts.push(
         `COMMITTED BUILD OUTPUTS \u2014 discard these, always. They are tracked only so git protects them; none of them is authored on a consumer, and none is ever pushed from one. TWO FAMILIES, discardable for different reasons:
-  \xB7 hooks/*.mjs are esbuild bundles the update deliberately does NOT rebuild. A local rebuild here is not work worth keeping, and discarding cannot hide a defect: \`npm run check\` rebuilds every hook source into a temp dir and byte-compares it against the committed bundle, so a genuinely wrong bundle fails at the check step instead.
+  \xB7 hooks/*.mjs, bin/*.mjs, mcp/sterling-mcp.mjs (with mcp/.build-id) and tui/sterling-tui.mjs are esbuild bundles the update deliberately does NOT rebuild. A local rebuild here is not work worth keeping, and discarding cannot hide a defect: \`npm run check\` rebuilds every bundle from source into a temp dir and byte-compares it against the committed one, so a genuinely wrong bundle fails at the check step instead.
   \xB7 architecture.md and rulings.md are read-only PROJECTIONS of the knowledge store, regenerated by scripts/architecture-projection.mjs / scripts/rulings-projection.mjs. A consumer clone has no store to project from, so a local modification there is drift, never work \u2014 and its freshness is checked where the store lives, not here.
   Run: git checkout -- ${generatedPaths(generated).map(shellQuote).join(" ")}
   \u2026or, if any of them is STAGED: git restore --staged --worktree -- ${generatedPaths(generated).map(shellQuote).join(" ")}
@@ -9841,8 +9866,8 @@ function refusalFor(c) {
   return null;
 }
 function stampConsumerRoleIfAbsent(cwd, log) {
-  const configPath = join11(cwd, ".sterling", "config.json");
-  if (!existsSync5(configPath)) {
+  const configPath = join12(cwd, ".sterling", "config.json");
+  if (!existsSync6(configPath)) {
     log(
       "\n\u25B8 machine-role stamp \u2014 SKIPPED: no .sterling/config.json in the clone. Normal for a consumer machine (the clone is not init'd as a project). H1 reports MACHINE ROLE: UNDECLARED, which is treated as CONSUMER \u2014 declare machine_role explicitly only on the authoring machine."
     );
@@ -9865,7 +9890,7 @@ function stampConsumerRoleIfAbsent(cwd, log) {
 }
 function readMachineRole(cwd) {
   try {
-    const role = JSON.parse(readFileSync5(join11(cwd, ".sterling", "config.json"), "utf8")).machine_role;
+    const role = JSON.parse(readFileSync5(join12(cwd, ".sterling", "config.json"), "utf8")).machine_role;
     return typeof role === "string" ? role : null;
   } catch {
     return null;
@@ -9901,10 +9926,10 @@ var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed
 function preScaleDownMarkers(text) {
   return PRE_SCALE_DOWN_MARKERS.filter((m) => text.includes(m));
 }
-var UPDATE_MARKER_RELATIVE_PATH = join11(".sterling", "update-complete.json");
+var UPDATE_MARKER_RELATIVE_PATH = join12(".sterling", "update-complete.json");
 function readUpdateMarker(cwd, log) {
-  const p = join11(cwd, UPDATE_MARKER_RELATIVE_PATH);
-  if (!existsSync5(p)) return null;
+  const p = join12(cwd, UPDATE_MARKER_RELATIVE_PATH);
+  if (!existsSync6(p)) return null;
   try {
     const parsed = JSON.parse(readFileSync5(p, "utf8"));
     if (typeof parsed?.sha !== "string" || !parsed.sha) throw new Error('missing or invalid "sha" field');
@@ -9916,7 +9941,7 @@ function readUpdateMarker(cwd, log) {
   }
 }
 function writeUpdateMarker(cwd, sha) {
-  const p = join11(cwd, UPDATE_MARKER_RELATIVE_PATH);
+  const p = join12(cwd, UPDATE_MARKER_RELATIVE_PATH);
   mkdirSync5(dirname5(p), { recursive: true });
   writeFileSync3(p, JSON.stringify({ sha, completed_at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2) + "\n");
 }
@@ -9925,15 +9950,43 @@ var isProjectReadRefusal = (err) => err instanceof ProjectModeError || err insta
 function handoffRefusalRemedy(repoPath2) {
   return `fix it in ${repoPath2} and rerun /sterling:update (every registered project is refreshed on every run). If it cannot be repaired: retire it (move or delete the project, then \`node scripts/list-projects.mjs --prune-missing\` unregisters it), or set "store_authority": "secondary" in its .sterling/config.json so the refusal becomes a standing one.`;
 }
+function ownPluginRoot() {
+  let dir = dirname5(fileURLToPath(new URL("../scripts/lib/update.mjs", import.meta.url).href));
+  for (let i = 0; i < 4; i++) {
+    if (existsSync6(join12(dir, ".claude-plugin", "plugin.json"))) return dir;
+    dir = dirname5(dir);
+  }
+  return null;
+}
+var INSTALLED_COPY_REFUSAL = "Sterling is installed as a plugin \u2014 update it with /plugin (Installed tab \u2192 Update) or `claude plugin update sterling@<marketplace>`. /sterling:update serves only a git clone of Sterling.";
 function machineStores(cwd) {
-  const stores = [join11(cwd, ".sterling", "sterling.db")];
-  const domains = join11(homedir3(), ".sterling", "domains");
-  if (existsSync5(domains)) {
+  const stores = [join12(cwd, ".sterling", "sterling.db")];
+  const domains = join12(homedir3(), ".sterling", "domains");
+  if (existsSync6(domains)) {
     for (const name of readdirSync3(domains).sort()) {
-      stores.push(join11(domains, name, "sterling.db"));
+      stores.push(join12(domains, name, "sterling.db"));
     }
   }
-  return stores.filter((store) => existsSync5(store));
+  return stores.filter((store) => existsSync6(store));
+}
+function walUserVersion(dbPath) {
+  const walPath = `${dbPath}-wal`;
+  if (!existsSync6(walPath)) return null;
+  const wal = readFileSync5(walPath);
+  if (wal.length < 32) return null;
+  const magic = wal.readUInt32BE(0);
+  if (magic !== 931071618 && magic !== 931071619) return null;
+  const pageSize = wal.readUInt32BE(8);
+  const salt1 = wal.readUInt32BE(16);
+  const salt2 = wal.readUInt32BE(20);
+  let pending = null;
+  let committed = null;
+  for (let off = 32; off + 24 + pageSize <= wal.length; off += 24 + pageSize) {
+    if (wal.readUInt32BE(off + 8) !== salt1 || wal.readUInt32BE(off + 12) !== salt2) break;
+    if (wal.readUInt32BE(off) === 1) pending = wal.readUInt32BE(off + 24 + 60);
+    if (wal.readUInt32BE(off + 4) !== 0 && pending !== null) committed = pending;
+  }
+  return committed;
 }
 function probeSchemaVersion(dbPath) {
   const fd = openSync2(dbPath, "r");
@@ -9947,9 +10000,14 @@ function probeSchemaVersion(dbPath) {
   if (bytesRead < header.length || header.subarray(0, 16).toString("latin1") !== "SQLite format 3\0") {
     throw new Error(`'${dbPath}' is not a valid SQLite database file`);
   }
-  return header.readUInt32BE(60);
+  return walUserVersion(dbPath) ?? header.readUInt32BE(60);
 }
-async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts: opts2 = {}, reexec: reexec2 = null, invokingProject = null, projectDir = null }) {
+async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts: opts2 = {}, reexec: reexec2 = null, invokingProject = null, projectDir = null, pluginRoot: pluginRoot2 = ownPluginRoot() }) {
+  if (pluginRoot2 && isInstalledCopy(pluginRoot2)) {
+    log(`
+\u2717 ${INSTALLED_COPY_REFUSAL}`);
+    return { exit: 2, currency: null, steps: [], projects: [], migrations: [], refusal: INSTALLED_COPY_REFUSAL };
+  }
   const git = gitFrom(exec, cwd);
   const nodeBin = opts2.nodeBin ?? process.execPath;
   const report2 = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null };
@@ -9991,7 +10049,7 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         continue;
       }
       let failed = false;
-      const r = exec(nodeBin, [join11(cwd, "scripts", "sync-agents.mjs"), "--target", p.repo_path], { cwd });
+      const r = exec(nodeBin, [join12(cwd, "scripts", "sync-agents.mjs"), "--target", p.repo_path], { cwd });
       const out = `${r.stdout}${r.stderr}`.trim();
       const statuses = r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^[a-z_]+: /.test(l));
       const driftedAgents = statuses.filter((l) => l.startsWith("config_drift: "));
@@ -10019,7 +10077,7 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         log(`      skipped \u2014 ${HOBBY_SKIP_DETAIL}`);
         entry.handoff = "skipped";
       } else {
-        const handoff = exec(nodeBin, [join11(cwd, "scripts", "handoff-projection.mjs"), p.repo_path], { cwd });
+        const handoff = exec(nodeBin, [join12(cwd, "scripts", "handoff-projection.mjs"), p.repo_path], { cwd });
         const handoffOut = `${handoff.stdout}${handoff.stderr}`.trim();
         const handoffLine = handoffOut.split("\n")[0];
         entry.handoff = handoff.status;
@@ -10115,8 +10173,8 @@ AUTHORING clone \u2014 nothing to pull; syncing ${project.repo_path} only`);
     refreshProjects([project], { launchers: false, handoff: false });
     if (normPath(project.repo_path) === normPath(cwd)) {
       log("\u25B8 the clone's contract files are hand-maintained \u2014 not checked");
-    } else if (existsSync5(join11(cwd, "scripts", "stamp-contract.mjs"))) {
-      const contract = step("contract drift in the invoking project (stamp-contract, dry run)", nodeBin, [join11(cwd, "scripts", "stamp-contract.mjs"), "--project", project.repo_path], {
+    } else if (existsSync6(join12(cwd, "scripts", "stamp-contract.mjs"))) {
+      const contract = step("contract drift in the invoking project (stamp-contract, dry run)", nodeBin, [join12(cwd, "scripts", "stamp-contract.mjs"), "--project", project.repo_path], {
         show: true,
         tolerate: true
       });
@@ -10190,7 +10248,7 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
           `  \u26A0 ${coverage.unregistered.length} project(s) carry Sterling agents but are NOT in the shared project registry, so the agent sync never visits them \u2014 their agents are frozen at install date:
 ` + coverage.unregistered.map((u) => `      ${u.path} (${u.agents.join(", ")})`).join("\n") + `
     Register each by running /sterling:init in that project, or refresh one now:
-      node ${join11(cwd, "scripts", "sync-agents.mjs")} --target <path>   (then restart Claude Code there \u2014 subagents load at session start)`
+      node ${join12(cwd, "scripts", "sync-agents.mjs")} --target <path>   (then restart Claude Code there \u2014 subagents load at session start)`
         );
       } else if (incomplete) {
         log(`  \u26A0 PARTIAL \u2014 nothing unregistered was found in what could be read, but ${incomplete} item(s) above could NOT be inspected, so coverage under these known roots is UNKNOWN, not clean`);
@@ -10218,9 +10276,9 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
     const lines = [];
     for (const p of [{ name: "Sterling clone", repo_path: cwd, clone: true }, ...list]) {
       if (!p.clone) {
-        const claudePath = join11(p.repo_path, "CLAUDE.md");
+        const claudePath = join12(p.repo_path, "CLAUDE.md");
         try {
-          if (existsSync5(claudePath)) {
+          if (existsSync6(claudePath)) {
             const markers = preScaleDownMarkers(readFileSync5(claudePath, "utf8"));
             if (markers.length) lines.push(`  \u26A0 ${p.name}: CLAUDE.md predates the scale-down (mentions ${markers.join(", ")}) \u2014 run /sterling:init there (${p.repo_path}) to migrate it`);
           }
@@ -10229,8 +10287,8 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
         }
       }
       if (!describe) continue;
-      const configPath = join11(p.repo_path, ".sterling", "config.json");
-      if (!existsSync5(configPath)) continue;
+      const configPath = join12(p.repo_path, ".sterling", "config.json");
+      if (!existsSync6(configPath)) continue;
       let raw;
       try {
         raw = JSON.parse(readFileSync5(configPath, "utf8"));
@@ -10284,14 +10342,14 @@ Already current \u2014 nothing to do for the core update at ${before.head_short}
       return report2;
     }
     if (reexec2) {
-      const script = join11(cwd, "scripts", "update.mjs");
+      const script = join12(cwd, "scripts", "update.mjs");
       const failed = (why) => {
         log(`
 \u2717 RE-EXEC of the updated updater FAILED \u2014 ${why}. The fast-forward stands and nothing after it ran; rerun /sterling:update to finish (it resumes from the build step).`);
         report2.exit = 1;
         return report2;
       };
-      if (!existsSync5(script)) return failed(`${script} not found after the fast-forward`);
+      if (!existsSync6(script)) return failed(`${script} not found after the fast-forward`);
       log(`
 \u25B8 re-running the UPDATED updater (${script}) so the rest of this update runs the code just pulled`);
       const r = await reexec2(script, { from: before.head });
@@ -10331,7 +10389,6 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
     if (!step("dependencies moved \u2014 npm ci", "npm", ["ci"]).ok) return report2;
   }
   if (!step("build server + packages (npm run build)", "npm", ["run", "build"]).ok) return report2;
-  if (!step("build TUI bundle (npm run build:tui)", "npm", ["run", "build:tui"]).ok) return report2;
   if (!step("consistency checks (npm run check)", "npm", ["run", "check"], { show: true }).ok) return report2;
   let testFailed = false;
   if (opts2.test !== false) {
@@ -10365,18 +10422,18 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
         return report2;
       }
       if (version < 2) {
-        if (!step(`migrate store schema v${version} \u2192 v2 (${store})`, nodeBin, [join11(cwd, "scripts", "migrate-stores.mjs"), "--db", store, "--invoked-by", "update-sweep"], { show: true }).ok) return report2;
+        if (!step(`migrate store schema v${version} \u2192 v2 (${store})`, nodeBin, [join12(cwd, "scripts", "migrate-stores.mjs"), "--db", store, "--invoked-by", "update-sweep"], { show: true }).ok) return report2;
         log(`  \u25B8 migrated: any Sterling session already open on this store must EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough \u2014 MCP servers survive it) before it can write again`);
       }
     }
   } else {
     log("\n\u25B8 store migration (this clone) \u2014 SKIPPED (red test battery)");
   }
-  if (existsSync5(join11(cwd, ".sterling", "config.json"))) {
-    step("re-bake machine artifacts (init ensure pass)", nodeBin, [join11(cwd, "scripts", "init.mjs"), "--target", cwd], { show: true, tolerate: true });
+  if (existsSync6(join12(cwd, ".sterling", "config.json"))) {
+    step("re-bake machine artifacts (init ensure pass)", nodeBin, [join12(cwd, "scripts", "init.mjs"), "--target", cwd], { show: true, tolerate: true });
   } else {
     log(
-      "\n\u25B8 re-bake machine artifacts \u2014 SKIPPED: no .sterling/config.json in the Sterling clone. That is the NORMAL consumer shape and nothing is missing: the clone-as-project artifacts (its own launchers/CLAUDE.md/agents) are what this step bakes, and the plugin MCP config plugin.json points at is ensured in this clone by every /sterling:init run in ANY project (board 2a6b45c2). Run /sterling:init in a project \u2014 not here \u2014 if this machine has never done so."
+      "\n\u25B8 re-bake machine artifacts \u2014 SKIPPED: no .sterling/config.json in the Sterling clone. That is the NORMAL consumer shape and nothing is missing: the clone-as-project artifacts (its own launchers/CLAUDE.md/agents) are what this step bakes, and the plugin MCP config plugin.json points at is committed and arrived with the fast-forward. Run /sterling:init in a project \u2014 not here \u2014 if this machine has never done so."
     );
   }
   stampConsumerRoleIfAbsent(cwd, log);
@@ -10389,8 +10446,8 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
     }
   } else if (opts2.projects !== false && projectList.length) {
     for (const p of projectList) {
-      const projStore = join11(p.repo_path, ".sterling", "sterling.db");
-      if (!existsSync5(projStore)) continue;
+      const projStore = join12(p.repo_path, ".sterling", "sterling.db");
+      if (!existsSync6(projStore)) continue;
       let projVersion;
       try {
         projVersion = probeSchemaVersion(projStore);
@@ -10402,7 +10459,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
         continue;
       }
       if (projVersion < 2) {
-        const migrated = step(`migrate store schema v${projVersion} \u2192 v2 (${projStore})`, nodeBin, [join11(cwd, "scripts", "migrate-stores.mjs"), "--db", projStore, "--invoked-by", "update-sweep"], { show: true, tolerate: true });
+        const migrated = step(`migrate store schema v${projVersion} \u2192 v2 (${projStore})`, nodeBin, [join12(cwd, "scripts", "migrate-stores.mjs"), "--db", projStore, "--invoked-by", "update-sweep"], { show: true, tolerate: true });
         if (!migrated.ok) {
           log(`  \u2717 ${p.name}: store migration FAILED \u2014 this project's store stays unmigrated; continuing with the remaining projects and the agent-sync fan-out below.`);
           report2.migrations.push({ name: p.name, repo_path: p.repo_path, ok: false });
@@ -10426,8 +10483,8 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   }
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
-  if (opts2.projects !== false && existsSync5(join11(cwd, "scripts", "stamp-contract.mjs"))) {
-    const contract = step("contract drift in sibling projects (stamp-contract, dry run)", nodeBin, [join11(cwd, "scripts", "stamp-contract.mjs")], {
+  if (opts2.projects !== false && existsSync6(join12(cwd, "scripts", "stamp-contract.mjs"))) {
+    const contract = step("contract drift in sibling projects (stamp-contract, dry run)", nodeBin, [join12(cwd, "scripts", "stamp-contract.mjs")], {
       show: true,
       tolerate: true
     });
@@ -10463,7 +10520,7 @@ var argOf = (name) => {
   const i = process.argv.indexOf(name);
   return i !== -1 ? process.argv[i + 1] : void 0;
 };
-var pluginRoot = resolve5(dirname6(fileURLToPath(new URL("../scripts/update.mjs", import.meta.url).href)), "..");
+var pluginRoot = resolve5(dirname6(fileURLToPath2(new URL("../scripts/update.mjs", import.meta.url).href)), "..");
 var target = resolve5(argOf("--target") ?? pluginRoot);
 var opts = {
   check: process.argv.includes("--check"),
@@ -10487,7 +10544,7 @@ async function loadProjects({ includeClone = false } = {}) {
   const store = await loadStoreModule();
   const registry = new store.ProjectRegistry(store.registryPath());
   try {
-    return registry.list().filter((p) => existsSync6(p.repo_path) && (includeClone || norm(p.repo_path) !== norm(target))).map((p) => ({ name: p.name, repo_path: p.repo_path }));
+    return registry.list().filter((p) => existsSync7(p.repo_path) && (includeClone || norm(p.repo_path) !== norm(target))).map((p) => ({ name: p.name, repo_path: p.repo_path }));
   } finally {
     registry.close();
   }
