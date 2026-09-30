@@ -1,14 +1,17 @@
-// [finding 8] A worker failure, back-off or daily cap reaches the SESSION, not
-// only a log: H10 carries the launcher's line in its Stop systemMessage and
-// H19 carries it in its Bash PostToolUse additionalContext (decision
-// maintenance-queue-background-haiku-worker-simple-redesign; P5).
-// Safety: every case here stops at the back-off/cap check, before any spawn,
-// and PATH excludes the claude binary as a second guard.
+// The worker's routine states never reach the session: H10 at Stop and H19 on a
+// Bash `git commit` print NOTHING about a back-off (failed or no-progress run)
+// or a large prior spend, and no worker starts under back-off; the reason is
+// only in .sterling/maintenance-worker.log (user ruling 2026-09-30, decision
+// maintenance-worker-notices-session-start-only-and-no-sliver-launch). Real
+// breakage surfaces on H1's session-start line (h1-reconcile-backlog.test.mjs).
+// Safety: every launch-refusing case here stops at the back-off check, before
+// any spawn; the no-daily-cap case is covered with an injected spawn in
+// maintenance-worker.test.mjs. PATH excludes the claude binary as a second guard.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -55,34 +58,48 @@ function run(script, dir, input) {
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
-const failedRecently = () => ({ spend: {}, last_run: { ok: false, at: new Date(Date.now() - 60_000).toISOString(), error: 'error result (error_max_budget_usd)' } });
+const failedRecently = () => ({ last_run: { ok: false, at: new Date(Date.now() - 60_000).toISOString(), error: 'error result (error_max_budget_usd)' } });
+const noProgressRecently = () => ({ last_run: { ok: true, no_progress: true, at: new Date(Date.now() - 60_000).toISOString(), error: null } });
 
-test('H10 Stop: an active back-off after a failed run is shown in the systemMessage, and no worker starts', () => {
-  const p = project(failedRecently());
-  try {
-    const r = run('h10-direct-capture.mjs', p.dir, { hook_event_name: 'Stop' });
-    assert.equal(r.code, 0, r.stderr);
-    const out = JSON.parse(r.stdout);
-    assert.match(out.systemMessage, /maintenance worker: last run FAILED .*error_max_budget_usd.*backing off/);
-    assert.equal(existsSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.lock')), false, 'nothing launched');
-  } finally {
-    p.cleanup();
-  }
-});
+const lockPath = (p) => join(p.dir, '.sterling', 'transient', 'maintenance-worker.lock');
+const logText = (p) => {
+  const path = join(p.dir, '.sterling', 'maintenance-worker.log');
+  return existsSync(path) ? readFileSync(path, 'utf8') : '';
+};
 
-test('H19 Bash `git commit`: the daily-cap line rides additionalContext, and no worker starts', () => {
-  const today = new Date().toISOString().slice(0, 10);
-  const p = project({ spend: { [today]: 5 } });
-  try {
-    const r = run('h19-bash-delivery.mjs', p.dir, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'git commit -m "x"' }, tool_response: { stdout: '' } });
-    assert.equal(r.code, 0, r.stderr);
-    const out = JSON.parse(r.stdout);
-    assert.match(out.hookSpecificOutput.additionalContext, /maintenance worker: daily budget reached \(\$5\.00 of \$5\.00/);
-    assert.equal(existsSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.lock')), false, 'nothing launched');
-  } finally {
-    p.cleanup();
-  }
-});
+const CASES = [
+  ['a failed-run back-off', failedRecently, /backoff: last run FAILED .*error_max_budget_usd.*backing off/],
+  ['a no-progress back-off', noProgressRecently, /backoff: worker made no progress .*backing off/],
+];
+
+for (const [name, state, logged] of CASES) {
+  test(`H10 Stop: ${name} prints nothing about the worker, starts no worker, and is only in the log`, () => {
+    const p = project(state());
+    try {
+      const r = run('h10-direct-capture.mjs', p.dir, { hook_event_name: 'Stop' });
+      assert.equal(r.code, 0, r.stderr);
+      assert.doesNotMatch(r.stdout, /maintenance worker|backing off|no progress|daily budget/i, 'nothing on stdout');
+      assert.doesNotMatch(r.stderr, /maintenance worker|backing off|no progress|daily budget/i, 'nothing on stderr');
+      assert.equal(existsSync(lockPath(p)), false, 'nothing launched');
+      assert.match(logText(p), logged);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test(`H19 Bash \`git commit\`: ${name} adds nothing to additionalContext, and starts no worker`, () => {
+    const p = project(state());
+    try {
+      const r = run('h19-bash-delivery.mjs', p.dir, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'git commit -m "x"' }, tool_response: { stdout: '' } });
+      assert.equal(r.code, 0, r.stderr);
+      assert.doesNotMatch(r.stdout, /maintenance worker|backing off|no progress|daily budget/i);
+      assert.equal(existsSync(lockPath(p)), false, 'nothing launched');
+      assert.match(logText(p), logged);
+    } finally {
+      p.cleanup();
+    }
+  });
+}
 
 test('H19 Bash without a commit never consults the launcher', () => {
   const p = project(failedRecently());
@@ -90,6 +107,7 @@ test('H19 Bash without a commit never consults the launcher', () => {
     const r = run('h19-bash-delivery.mjs', p.dir, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'git status' }, tool_response: { stdout: '' } });
     assert.equal(r.code, 0, r.stderr);
     assert.doesNotMatch(r.stdout, /maintenance worker/);
+    assert.equal(logText(p), '', 'the launcher was never consulted, so nothing was logged');
   } finally {
     p.cleanup();
   }
