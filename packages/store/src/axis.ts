@@ -39,6 +39,12 @@ const AXIS_STOPWORDS = new Set([
 /** A term shorter than this is too generic to carry a mechanism. */
 export const AXIS_MIN_TERM_LEN = 4;
 
+/** A term longer than this is skipped: the rank_terms validator (index.ts
+ *  rankTerms) rejects anything over it, so one over-long token in free text
+ *  (a hash, a base64 blob, a minified identifier) would otherwise throw the
+ *  whole query. The validator derives its bound from THIS constant. */
+export const AXIS_MAX_TERM_LEN = 64;
+
 /** How many DISTINCT extracted terms must land in a record's narrow fields
  *  before it is worth injecting. One shared word is coincidence; two is signal.
  *  HONEST NOTE: 2 is a starting threshold chosen on the two motivating cases,
@@ -77,7 +83,7 @@ export function extractAxisTerms(text: unknown, maxTerms: number): string[] {
 function rankedAxisTerms(text: unknown): string[] {
   const counts = new Map<string, number>();
   for (const raw of String(text ?? '').toLowerCase().split(/[^a-z0-9_]+/)) {
-    if (raw.length < AXIS_MIN_TERM_LEN) continue;
+    if (raw.length < AXIS_MIN_TERM_LEN || raw.length > AXIS_MAX_TERM_LEN) continue;
     if (AXIS_STOPWORDS.has(raw)) continue;
     if (/^\d+$/.test(raw)) continue; // bare numbers carry no mechanism
     counts.set(raw, (counts.get(raw) ?? 0) + 1);
