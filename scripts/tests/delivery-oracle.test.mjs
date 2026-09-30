@@ -106,6 +106,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { isListingCommand } from '../hooks/lib/listing-command.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ORACLE = join(root, 'scripts', 'delivery-oracle.mjs');
@@ -1457,8 +1458,11 @@ test('J1: content sharing no axis vocabulary with any store record is silent on 
   }
 });
 
-test('J2: matches classify into hazards (anti_pattern) vs rationale (decision), NEVER owners, and expected_ids is their deduped union', () => {
-  // SABOTAGE: push output-axis matches into expected.owners (output-axis content matching confers no ownership).
+// Narrowed 2026-09-29 (ruling h23-output-axis-hazards-only-skip-listings-advisory-label,
+// 5564361d v2): H23 points at anti_pattern records only, so a matching decision is
+// NOT expected — the mirror must drop it exactly as the hook does.
+test('J2: matches classify into hazards (anti_pattern) only — a matching decision is never expected, NEVER owners, and expected_ids is the hazards', () => {
+  // SABOTAGE: push output-axis matches into expected.owners, or keep querying decisions into rationale.
   const deriveExpected = fn('deriveExpected');
   const { dir, store, cleanup } = makeAxisFixtureRepo();
   try {
@@ -1470,9 +1474,10 @@ test('J2: matches classify into hazards (anti_pattern) vs rationale (decision), 
     });
     const c = h23CaseOf(entries, 'Bash');
     assert.deepEqual(c.expected.hazards, [ap.id]);
-    assert.deepEqual(c.expected.rationale, [dec.id]);
+    assert.deepEqual(c.expected.rationale, [], 'H23 is hazards-only: a matching decision is not expected');
+    assert.ok(!c.expected_ids.includes(dec.id), 'the matching decision is absent from expected_ids');
     assert.deepEqual(c.expected.owners, [], 'output-axis content matching is never ownership');
-    assert.deepEqual(sorted(c.expected_ids), sorted([ap.id, dec.id]));
+    assert.deepEqual(sorted(c.expected_ids), sorted([ap.id]));
   } finally {
     cleanup();
   }
@@ -1577,6 +1582,15 @@ test('K3: tool "Read" synthesizes an ABSOLUTE file_path under the sandbox cwd; t
   assert.equal(typeof bash.stdin.tool_input.command, 'string');
   assert.ok(bash.stdin.tool_input.command.length > 0);
   assert.equal(bash.stdin.tool_name, 'Bash');
+  // H23 skips VCS/listing commands (ruling 5564361d v2), so a synthesized listing
+  // command would silence the very arm this case audits.
+  for (const rel of [null, 'src/owned.mjs']) {
+    const cmd = synthesizePayload(
+      { kind: 'case', payload_kind: 'output_axis', tool: 'Bash', rel, tool_response: CONTENT_SENTENCE },
+      { cwd: SANDBOX }
+    ).stdin.tool_input.command;
+    assert.equal(isListingCommand(cmd), false, `synthesized command "${cmd}" must not be a listing command H23 skips`);
+  }
 });
 
 // ===========================================================================

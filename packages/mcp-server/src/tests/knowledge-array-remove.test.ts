@@ -1833,3 +1833,171 @@ test('a full-uuid link target resolves through a mounted domain store', () => {
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Identical duplicates — decision array-remove-identical-duplicates-remove-one
+// (knowledge_get 03206bd8-10fa-4fa3-bf95-edbe97674d74). When a selector
+// matches 2+ elements and ALL are deep-equal, removing any one yields the same
+// array, so the ambiguity the AC8 refusal guards against does not exist and
+// exactly ONE is removed. Any non-identical multi-match still refuses (AC8).
+// Sabotage: keep the `hits.length !== 1` refusal unconditionally (the
+// duplicate cases go red), or remove ALL deep-equal hits (the survivor
+// assertions go red).
+// ---------------------------------------------------------------------------
+test('DUP1: two IDENTICAL files[] entries — exactly one is removed and one remains; the receipt says so', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const original = [
+      { path: 'src/dup.ts', role: 'the seam' },
+      { path: 'src/dup.ts', role: 'the seam' },
+      { path: 'src/c.ts', role: 'unrelated' },
+    ];
+    const article = mkArticle(tools, 'identical-duplicates-two', original);
+
+    const result = remover(tools).knowledgeArrayRemove(article.id as string, 'files[path=src/dup.ts]', article.version as number) as ArrayRemoveResult & {
+      removed: { selector: string; element: unknown; note?: string };
+    };
+
+    const expected = [original[0], original[2]];
+    assert.deepEqual((result.record as unknown as { files: Loose[] }).files, expected, 'one duplicate survives, the unrelated sibling is untouched, order preserved');
+    assert.deepEqual(result.removed.element, original[0], 'the receipt carries the removed element');
+    assert.match(String(result.removed.note), /removed 1 of 2 identical elements/i, 'the receipt states that one of N identical elements was removed');
+
+    const reread = getArticle(tools, article.id as string);
+    assert.deepEqual(reread.files, expected, 'the removal is PERSISTED');
+    assert.equal(reread.version, (article.version as number) + 1, 'a normal versioned write');
+  } finally {
+    cleanup();
+  }
+});
+
+test('DUP2: three IDENTICAL entries — exactly one is removed, two remain', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const original = [
+      { path: 'src/dup.ts', role: 'the seam' },
+      { path: 'src/dup.ts', role: 'the seam' },
+      { path: 'src/dup.ts', role: 'the seam' },
+      { path: 'src/c.ts', role: 'unrelated' },
+    ];
+    const article = mkArticle(tools, 'identical-duplicates-three', original);
+
+    const result = remover(tools).knowledgeArrayRemove(article.id as string, 'files[path=src/dup.ts]', article.version as number) as ArrayRemoveResult & {
+      removed: { note?: string };
+    };
+
+    assert.deepEqual(
+      (result.record as unknown as { files: Loose[] }).files,
+      [original[0], original[1], original[3]],
+      'exactly one of the three identical entries is removed, not all of them'
+    );
+    assert.match(String(result.removed.note), /removed 1 of 3 identical elements/i);
+    assert.equal(getArticle(tools, article.id as string).files.length, 3);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DUP3: identity is by content, not key order — entries whose fields are serialised in a different order still count as identical', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const original = [
+      { path: 'src/dup.ts', role: 'the seam' },
+      { role: 'the seam', path: 'src/dup.ts' },
+    ];
+    const article = mkArticle(tools, 'identical-duplicates-key-order', original);
+
+    const result = remover(tools).knowledgeArrayRemove(article.id as string, 'files[path=src/dup.ts]', article.version as number);
+
+    assert.equal((result.record as unknown as { files: Loose[] }).files.length, 1, 'key order does not make two otherwise-equal elements distinct');
+  } finally {
+    cleanup();
+  }
+});
+
+test('DUP4: two entries with the SAME path but DIFFERENT roles are still REFUSED, naming the count; record UNCHANGED', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const original = [
+      { path: 'src/dup.ts', role: 'first role' },
+      { path: 'src/dup.ts', role: 'second role' },
+    ];
+    const article = mkArticle(tools, 'same-path-different-role', original);
+    const before = getArticle(tools, article.id as string);
+
+    assert.throws(
+      () => remover(tools).knowledgeArrayRemove(article.id as string, 'files[path=src/dup.ts]', article.version as number),
+      /matches 2 element.*exactly one is required/is,
+      'elements that differ in any field keep the existing refusal'
+    );
+
+    const after = getArticle(tools, article.id as string);
+    assert.deepEqual(after.files, before.files);
+    assert.equal(after.version, before.version);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DUP5: two identical entries plus a THIRD that matches but differs — REFUSED (all hits must be deep-equal, not just some); record UNCHANGED', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const original = [
+      { path: 'src/dup.ts', role: 'the seam' },
+      { path: 'src/dup.ts', role: 'the seam' },
+      { path: 'src/dup.ts', role: 'a different seam' },
+    ];
+    const article = mkArticle(tools, 'two-identical-one-different', original);
+    const before = getArticle(tools, article.id as string);
+
+    assert.throws(
+      () => remover(tools).knowledgeArrayRemove(article.id as string, 'files[path=src/dup.ts]', article.version as number),
+      /matches 3 element.*exactly one is required/is
+    );
+
+    const after = getArticle(tools, article.id as string);
+    assert.deepEqual(after.files, before.files);
+    assert.equal(after.version, before.version);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DUP6: the selector comparison is case-SENSITIVE — [role=THE SEAM] does not match a role stored as "the seam" (zero matches)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const original = [
+      { path: 'src/a.ts', role: 'the seam' },
+      { path: 'src/b.ts', role: 'the seam' },
+    ];
+    const article = mkArticle(tools, 'case-sensitive-selector', original);
+
+    assert.throws(
+      () => remover(tools).knowledgeArrayRemove(article.id as string, 'files[role=THE SEAM]', article.version as number),
+      /matches 0 element/i
+    );
+    assert.equal(getArticle(tools, article.id as string).files.length, 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DUP7: the single-match case is unchanged — no identical-duplicate note on the receipt', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const original = [
+      { path: 'src/a.ts', role: 'the seam' },
+      { path: 'src/b.ts', role: 'the seam' },
+    ];
+    const article = mkArticle(tools, 'single-match-no-note', original);
+
+    const result = remover(tools).knowledgeArrayRemove(article.id as string, 'files[path=src/a.ts]', article.version as number) as ArrayRemoveResult & {
+      removed: { note?: string };
+    };
+
+    assert.deepEqual((result.record as unknown as { files: Loose[] }).files, [original[1]]);
+    assert.equal(result.removed.note, undefined);
+  } finally {
+    cleanup();
+  }
+});

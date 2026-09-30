@@ -22,6 +22,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { isListingCommand } from '../hooks/lib/listing-command.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -228,15 +229,17 @@ test('AC1: an object-shaped tool_response (e.g. a structured Bash result) is str
 // 2026-08-31): "payload drops to ONE pointer plus the suppressed-count tail (was
 // 3 + tail)" — the volume cut that keeps H23's unique output-axis coverage while
 // removing the noise its ~6% follow rate paid for. Class ordering (hazards ahead
-// of decisions) survives, but is now observable ONLY through WHICH record occupies
-// the single line: the hazard takes it and the decision falls into the tail.
-// The tail assertion below is the CONTROL ARM — "DEC-GAMMA absent" alone has two
-// possible causes (outranked-and-suppressed vs. never matched at all), and the
-// suppressed count of 1 is what distinguishes them.
-test('AC1: hazards outrank decisions for the single pointer line, the outranked decision lands in the suppressed count, and no record body renders inline', () => {
+// of decisions) survived until 2026-09-29, when ruling
+// h23-output-axis-hazards-only-skip-listings-advisory-label (5564361d v2) dropped
+// decisions from this channel entirely: a matching decision now neither renders
+// nor counts toward the tail. Two hazards plus one decision must therefore
+// disclose "(+1 more matched)" — 1, not 2 — which is the control arm proving
+// the decision was excluded rather than silently folded into the count.
+test('AC1: only hazards occupy the single pointer line and the suppressed count, a matching decision is excluded from both, and no record body renders inline', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    const ap = store.create(markedAntiPattern('AP-ALPHA'));
+    store.create(markedAntiPattern('AP-ALPHA'));
+    store.create(markedAntiPattern('AP-BETA'));
     const dec = store.create(markedDecision('DEC-GAMMA'));
     const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
@@ -245,18 +248,114 @@ test('AC1: hazards outrank decisions for the single pointer line, the outranked 
     const lines = payload.split('\n').filter((l) => l.includes('knowledge_get'));
     assert.equal(lines.length, 1, 'exactly one pointer line renders — OUTPUT_AXIS_POINTER_CAP is 1 per decision 284fc4b0'); // not-a-citation: fixture id
 
-    assert.ok(payload.includes('AP-ALPHA'), 'the hazard — the highest class — occupies the one available pointer line');
-    assert.match(payload, new RegExp(`knowledge_get ${ap.id}`), 'the rendered pointer is the anti_pattern, not the decision');
-    assert.ok(!payload.includes('DEC-GAMMA'), 'the decision is outranked by the hazard and renders no pointer of its own');
-    assert.doesNotMatch(payload, new RegExp(`knowledge_get ${dec.id}`), 'the outranked decision contributes no knowledge_get line');
+    assert.match(payload, /HAZARD anti_pattern '(AP-ALPHA|AP-BETA) /, 'a hazard occupies the one available pointer line');
+    assert.ok(!payload.includes('DEC-GAMMA'), 'the decision renders no pointer of its own');
+    assert.doesNotMatch(payload, new RegExp(`knowledge_get ${dec.id}`), 'the decision contributes no knowledge_get line');
 
     const remainder = payload.match(/\(\+(\d+) more matched\)/);
     assert.ok(remainder, 'the suppressed-count tail discloses what the cap withheld');
-    assert.equal(remainder[1], '1', 'CONTROL: 2 matched minus the 1 shown leaves exactly 1 suppressed — proving the decision MATCHED and was outranked, not that it failed to match');
+    assert.equal(remainder[1], '1', 'CONTROL: 2 hazards matched minus the 1 shown leaves exactly 1 suppressed — the matching decision is not counted');
 
     assert.doesNotMatch(payload, /guidance prose that must NEVER appear/, 'anti_pattern guidance never renders inline');
     assert.doesNotMatch(payload, /rationale prose that must NEVER appear/, 'decision rationale never renders inline');
     assert.doesNotMatch(payload, /No surface may ever silence/, 'the decision statement body never renders inline — pointer only');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// NARROWED 2026-09-29 (user ruling h23-output-axis-hazards-only-skip-listings-
+// advisory-label, knowledge_get 5564361d v2): the notice is labelled ADVISORY
+// (not an error), VCS/listing command output (first token git, ls, find, grep,
+// rg) is skipped, and only anti_pattern records are pointed at.
+// ---------------------------------------------------------------------------
+
+test('narrowed: an anti_pattern match emits, and the header opens with "ADVISORY (not an error)"', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
+    const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
+    assert.equal(r.code, 0);
+    const payload = directPayload(r);
+    assert.match(payload, /^ADVISORY \(not an error\)/, 'the notice must never read as an error');
+    assert.match(payload, new RegExp(`knowledge_get ${ap.id}`));
+  } finally {
+    cleanup();
+  }
+});
+
+test('narrowed: a decision-only match is silent — H23 points at anti_pattern records only', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(markedDecision('DEC-GAMMA'));
+    const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, '', 'a matching decision alone produces no additionalContext');
+    // CONTROL: the same content DOES fire once a hazard is present, so the
+    // silence above is the type filter, not content that never matches.
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
+    const control = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE, { session_id: 's2' }), dir);
+    assert.match(directPayload(control), new RegExp(`knowledge_get ${ap.id}`));
+  } finally {
+    cleanup();
+  }
+});
+
+test('narrowed: `git status --short` output containing store terms is silent', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
+    const r = runHook(postBash(dir, 'git status --short', ` M ${CONTENT_SENTENCE}`), dir);
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, '', 'VCS output is skipped whatever it contains');
+    // CONTROL: the same session, same content via a non-listing command fires —
+    // proving the silence above is the command-class skip, not dedup or a miss.
+    const control = runHook(postBash(dir, 'cat run.log', ` M ${CONTENT_SENTENCE}`), dir);
+    assert.match(directPayload(control), new RegExp(`knowledge_get ${ap.id}`));
+  } finally {
+    cleanup();
+  }
+});
+
+test('narrowed: `cd x && git log` is silent — a cd prefix does not hide the listing command', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
+    const r = runHook(postBash(dir, 'cd x && git log', CONTENT_SENTENCE), dir);
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, '');
+    const control = runHook(postBash(dir, 'cd x && cat run.log', CONTENT_SENTENCE), dir);
+    assert.match(directPayload(control), new RegExp(`knowledge_get ${ap.id}`), 'control: a cd prefix before a non-listing command still fires');
+  } finally {
+    cleanup();
+  }
+});
+
+test('narrowed: every listing command class is skipped through env, sudo and cd prefixes; a listing tool later in a pipe is not', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
+    const skipped = [
+      'ls -la',
+      'find . -name "*.log"',
+      'grep -rn breach .',
+      'rg breach',
+      '/usr/bin/git log --oneline',
+      'GIT_PAGER=cat git log',
+      'sudo git status',
+      'FOO=1 sudo ls -la logs',
+      'cd "a b" && cd c; rg flywheel',
+    ];
+    for (const command of skipped) {
+      const r = runHook(postBash(dir, command, CONTENT_SENTENCE), dir);
+      assert.equal(r.code, 0, command);
+      assert.equal(r.stdout, '', `${command} must be skipped`);
+    }
+    for (const [i, command] of ['cat run.log | grep breach', 'gitleaks detect', 'node find-probe.mjs'].entries()) {
+      const r = runHook(postBash(dir, command, CONTENT_SENTENCE, { session_id: `fires-${i}` }), dir);
+      assert.match(directPayload(r), new RegExp(`knowledge_get ${ap.id}`), `${command} is not a listing command and must still fire`);
+    }
   } finally {
     cleanup();
   }
@@ -283,14 +382,14 @@ test('AC2: Read of a file with an owning feature_article stays silent on the out
 // AC3 — Read of an UNOWNED file with matching content enqueues
 // ---------------------------------------------------------------------------
 
-test('AC3: Read of a file with no owning article, whose content matches a governing decision, delivers the pointer block directly', () => {
+test('AC3: Read of a file with no owning article, whose content matches a governing anti_pattern, delivers the pointer block directly', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    const dec = store.create(markedDecision('DEC-GAMMA'));
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
     const r = runHook(postRead(dir, 'logs/probe.txt', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
     const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
-    assert.match(payload, new RegExp(`knowledge_get ${dec.id}`));
+    assert.match(payload, new RegExp(`knowledge_get ${ap.id}`));
   } finally {
     cleanup();
   }
@@ -450,6 +549,80 @@ test('AC8: a >64KB tool_response with matching vocabulary inside the first 16,00
   }
 });
 
+test('narrowed: a compound command is skipped only when EVERY segment is a listing program (unit)', () => {
+  const skipped = [
+    'git status | grep foo',
+    'cd a && git log',
+    'git log && git diff',
+    'ls -la; ls src',
+    'grep -rl x . | rg y',
+    'git log 2>&1',
+    'find . -name "*.log" -print',
+    'git.exe status',
+    'C:\\Git\\bin\\git.exe log',
+    '"C:\\Program Files\\Git\\bin\\git.exe" log',
+    'LS',
+    'Git Status',
+    '& git status',
+    "& 'C:\\Git\\bin\\git.exe' log",
+  ];
+  for (const command of skipped) assert.equal(isListingCommand(command), true, `${command} must be skipped`);
+  const fires = [
+    'git log && cat secret.md',
+    'ls; cat notes.txt',
+    'grep -rl x | xargs cat',
+    'find . -exec cat {} \\;',
+    'find . -execdir cat {} +',
+    'ls || cat notes.txt',
+    'ls\ncat notes.txt',
+    'ls & cat notes.txt',
+    'cd a; cat notes.txt',
+    'cd a',
+    'cat run.log | grep breach',
+    'grep -rl x . | sort',
+    'grep "a;b" f',
+    'gitleaks detect',
+    'node find-probe.mjs',
+    'git.bat status',
+    '',
+  ];
+  for (const command of fires) assert.equal(isListingCommand(command), false, `${JSON.stringify(command)} must NOT be skipped`);
+  assert.equal(isListingCommand(undefined), false);
+});
+
+test('narrowed: a compound with a non-listing segment still fires end to end', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
+    for (const [i, command] of ['git log && cat secret.md', 'ls; cat notes.txt', 'grep -rl x | xargs cat', 'find . -exec cat {} \\;'].entries()) {
+      const r = runHook(postBash(dir, command, CONTENT_SENTENCE, { session_id: `compound-${i}` }), dir);
+      assert.match(directPayload(r), new RegExp(`knowledge_get ${ap.id}`), `${command} must fire`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('narrowed: PowerShell `git status` output containing store terms is silent, and Get-Content still fires', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
+    const r = runHook(
+      { hook_event_name: 'PostToolUse', tool_name: 'PowerShell', tool_input: { command: 'git status' }, tool_response: CONTENT_SENTENCE, cwd: dir },
+      dir
+    );
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, '', 'the command-class skip applies to PowerShell exactly as to Bash');
+    const control = runHook(
+      { hook_event_name: 'PostToolUse', tool_name: 'PowerShell', tool_input: { command: 'Get-Content run.log' }, tool_response: CONTENT_SENTENCE, cwd: dir },
+      dir
+    );
+    assert.match(directPayload(control), new RegExp(`knowledge_get ${ap.id}`), 'control: a non-listing PowerShell command still fires');
+  } finally {
+    cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Review-mandated additions (2026-08-21 correctness review of commit 4d854b6):
 // PowerShell parity, the .sterling/ self-reference exclusion, the two ownership
@@ -489,11 +662,11 @@ test('review (c): a file owned ONLY by a working_tree-scoped article still deliv
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('tree-scoped', ['logs/probe.txt'], { working_tree: 'detached-copy' }));
-    const dec = store.create(markedDecision('DEC-GAMMA'));
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
     const r = runHook(postRead(dir, 'logs/probe.txt', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
     const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
-    assert.match(payload, new RegExp(`knowledge_get ${dec.id}`), 'a working_tree-scoped owner means H19 delivers no substance here, so H23 must fire');
+    assert.match(payload, new RegExp(`knowledge_get ${ap.id}`), 'a working_tree-scoped owner means H19 delivers no substance here, so H23 must fire');
   } finally {
     cleanup();
   }
@@ -537,37 +710,34 @@ test('AC8: vocabulary appearing only AFTER the first 16,000 chars is never match
 });
 
 // ---------------------------------------------------------------------------
-// S4b rendering marker (c): decision.authority renders the same "[authority]"
-// bracketed marker on the H23 output-axis decision pointer line that H19 uses
-// on its statement pointer; absent authority renders no marker at all — same
-// present/absent contract, different delivery surface.
+// S4b rendering marker (c): the "[authority]" marker exists only on decisions,
+// and since ruling h23-output-axis-hazards-only-skip-listings-advisory-label
+// (5564361d v2) H23 renders no decision line at all — so a decision carrying
+// authority stays silent here, and the surviving hazard line carries no marker.
 // ---------------------------------------------------------------------------
 
-test('S4b (c): a decision with authority renders "[authority]" on its H23 pointer line', () => {
+test('S4b (c): a decision with authority renders no H23 pointer line — the marker has no output-axis surface any more', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    const dec = store.create(markedDecision('DEC-GAMMA', { authority: 'one_off' }));
+    store.create(markedDecision('DEC-GAMMA', { authority: 'one_off' }));
     const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
-    const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
-    const line = payload.split('\n').find((l) => l.includes(`knowledge_get ${dec.id}`));
-    assert.ok(line, 'the decision pointer line renders');
-    assert.match(line, /\[one_off\]/, 'authority renders as a bracketed marker on the pointer line');
+    assert.equal(r.stdout, '', 'a matching decision, with or without authority, renders nothing on H23');
   } finally {
     cleanup();
   }
 });
 
-test('S4b (c): a decision WITHOUT authority renders its H23 pointer line with no bracketed marker', () => {
+test('S4b (c): an H23 hazard pointer line carries no bracketed authority marker', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    const dec = store.create(markedDecision('DEC-GAMMA')); // no authority
+    const ap = store.create(markedAntiPattern('AP-ALPHA'));
     const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
     const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
-    const line = payload.split('\n').find((l) => l.includes(`knowledge_get ${dec.id}`));
-    assert.ok(line, 'the decision pointer line renders');
-    assert.doesNotMatch(line, /\[(standing|session_scoped|one_off)\]/, 'no authority → no bracketed marker at all');
+    const line = payload.split('\n').find((l) => l.includes(`knowledge_get ${ap.id}`));
+    assert.ok(line, 'the hazard pointer line renders');
+    assert.doesNotMatch(line, /\[(standing|session_scoped|one_off)\]/, 'no bracketed authority marker on a hazard line');
   } finally {
     cleanup();
   }
@@ -576,12 +746,12 @@ test('S4b (c): a decision WITHOUT authority renders its H23 pointer line with no
 test('self-root (Dome Farmer 454): a file owned by an article whose working_tree IS the project root gates H23 like a root owner — H19 delivers it, so no second block', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    const dec = store.create(markedDecision('DEC-SELF'));
-    // CONTROL: the same read of an UNOWNED path fires the decision, so the
-    // silence asserted below is the owner gate and not a decision that never matches.
+    const ap = store.create(markedAntiPattern('AP-SELF'));
+    // CONTROL: the same read of an UNOWNED path fires the hazard, so the
+    // silence asserted below is the owner gate and not a hazard that never matches.
     const control = runHook(postRead(dir, 'logs/unowned.txt', CONTENT_SENTENCE), dir);
     assert.equal(control.code, 0);
-    assert.match(directPayload(control), new RegExp(`knowledge_get ${dec.id}`), 'control: with no owner the decision fires');
+    assert.match(directPayload(control), new RegExp(`knowledge_get ${ap.id}`), 'control: with no owner the hazard fires');
     store.create(article('self-rooted', ['logs/probe.txt'], { working_tree: `${dir}/` }));
     const r = runHook(postRead(dir, 'logs/probe.txt', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);

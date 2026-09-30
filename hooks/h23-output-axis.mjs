@@ -7944,6 +7944,35 @@ function recordAdvisoryFire(root, hook, sessionId) {
   }
 }
 
+// scripts/hooks/lib/listing-command.mjs
+var LISTING_COMMANDS = /* @__PURE__ */ new Set(["git", "ls", "find", "grep", "rg"]);
+var SEGMENT_SPLIT = /&&|\|\||[;|\n]|(?<![>&])&(?![>&\d])/;
+var SEGMENT_PREFIX = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+|sudo\s+)/;
+var PROGRAM_TOKEN = /^(?:"([^"]*)"|'([^']*)'|(\S+))/;
+var FIND_RUNS_PROGRAM = /\s-(?:exec|execdir|ok|okdir)(?=\s|$)/;
+function programOf(segment) {
+  let rest = segment.trim();
+  for (let m2 = rest.match(SEGMENT_PREFIX); m2; m2 = rest.match(SEGMENT_PREFIX)) rest = rest.slice(m2[0].length);
+  const m = rest.match(PROGRAM_TOKEN);
+  if (!m) return null;
+  const token = m[1] ?? m[2] ?? m[3];
+  const name = token.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
+  return { name, rest };
+}
+function isListingCommand(command) {
+  let listing = 0;
+  for (const segment of String(command ?? "").split(SEGMENT_SPLIT)) {
+    if (segment.trim() === "") continue;
+    const program = programOf(segment);
+    if (!program) return false;
+    if (program.name === "cd") continue;
+    if (!LISTING_COMMANDS.has(program.name)) return false;
+    if (program.name === "find" && FIND_RUNS_PROGRAM.test(program.rest)) return false;
+    listing += 1;
+  }
+  return listing > 0;
+}
+
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, renameSync, openSync, closeSync } from "node:fs";
 import { join as join4, dirname as dirname3 } from "node:path";
@@ -8025,6 +8054,7 @@ try {
   if (toolName !== "Read" && toolName !== "Bash" && toolName !== "PowerShell") allow();
   const rawResponse = input.tool_response;
   if (rawResponse === void 0 || rawResponse === null) allow();
+  if (toolName !== "Read" && isListingCommand(input.tool_input?.command)) allow();
   const store = openStore(input.cwd);
   if (!store) allow();
   if (toolName === "Read") {
@@ -8040,10 +8070,7 @@ try {
   const clipped = content.slice(0, OUTPUT_AXIS_CLIP);
   const terms = extractAxisTerms(clipped, MAX_RANK_TERMS);
   if (terms.length < AXIS_MIN_HITS) allow();
-  const candidates = [
-    ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
-  ];
+  const candidates = store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 });
   if (!candidates.length) allow();
   const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, clipped)).sort((a, b) => b.hits.length - a.hits.length);
   if (!scored.length) allow();
@@ -8052,17 +8079,12 @@ try {
   const seen = new Set(guard.output_axis ?? []);
   const fresh = scored.filter((x) => !seen.has(x.record.id));
   if (!fresh.length) allow();
-  const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
-  const decisions = fresh.filter((x) => x.record.type === "decision");
-  const ordered = [...hazards, ...decisions];
-  const shown = ordered.slice(0, OUTPUT_AXIS_POINTER_CAP);
-  const remainder = ordered.length - shown.length;
-  const header = "STERLING OUTPUT-AXIS DELIVERY (H23) \u2014 the tool output you just consumed matches governing knowledge. Pointer only, never a block: follow the read below before assuming the answer, never treat this line as the ruling itself.";
+  const shown = fresh.slice(0, OUTPUT_AXIS_POINTER_CAP);
+  const remainder = fresh.length - shown.length;
+  const header = "ADVISORY (not an error) \u2014 STERLING OUTPUT-AXIS DELIVERY (H23): the tool output you just consumed matches a recorded hazard. Pointer only, never a block: follow the read below before assuming the answer, never treat this line as the ruling itself.";
   const pointerLines = shown.map((x) => {
     const r = x.record;
-    const kind = r.type === "anti_pattern" ? "HAZARD anti_pattern" : "DECISION";
-    const authorityMarker = r.authority ? `[${r.authority}] ` : "";
-    return { id: r.id, hazard: r.type === "anti_pattern", line: `  \u2192 ${authorityMarker}${kind} '${clipTitle(r.title)}' \xB7 knowledge_get ${r.id}` };
+    return { id: r.id, hazard: true, line: `  \u2192 HAZARD anti_pattern '${clipTitle(r.title)}' \xB7 knowledge_get ${r.id}` };
   });
   const tail = remainder > 0 ? `  (+${remainder} more matched)` : "";
   recordAdvisoryFire(input.cwd, "h23", input.session_id);
