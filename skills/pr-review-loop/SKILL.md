@@ -9,7 +9,7 @@ Decision `project-mode-hobby-work-toggle-decides-flow`. Sol has already reviewed
 
 ## Owner and tools
 
-- **One owner: you, the conductor.** Waiting runs only through `node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs"`, launched as a **background Bash** (`run_in_background`): one call ends with one JSON line, so one completion notification is exactly what you need. Keep the default `--timeout` (540s, under the 10-minute Bash window); a `timeout` result means run it again, and it is not a round.
+- **One owner: you, the conductor.** Waiting runs only through `node "${CLAUDE_PLUGIN_ROOT}/bin/pr-review-wait.mjs"`, launched as a **background Bash** (`run_in_background`): one call ends with one JSON line, so one completion notification is exactly what you need. Keep the default `--timeout` (540s, under the 10-minute Bash window); a `timeout` result means run it again, and it is not a round.
 - **Fixes go to an implementor** (brief: the finding, the file, the acceptance). You disposition findings and reply on GitHub.
 - Everything uses `gh`; the helper binds the repo to origin.
 
@@ -24,7 +24,7 @@ One **progress comment** on the PR holds the state: round, consumed review id, r
    - **fixed**: reply only AFTER the fix is pushed, citing the commit SHA ("will fix" is not a disposition);
    - **disagreed**: reply with the reason; a justified disagreement counts as handled;
    - **TASTE** (colours, placement, layout, naming style and the like): escalate to the user through **AskUserQuestion** and leave the comment unhandled until the user rules. Independent technical fixes continue meanwhile. A measurable defect (e.g. contrast failing a ratio) is not taste. If it is ambiguous, escalate. User-stated 2026-09-25, verbatim: *"If copilot start trying to adjust preference things like colours, placement and such, then also escalate it to me"*.
-3. **Only if this round's fixes produced a new head**, push through `/sterling:merge` again. Push the fix straight back to Copilot — no Sol, Opus or other reviewer re-checks a loop fix round; Copilot is the reviewer inside the loop (user-stated 2026-09-28: "co-pilot is the reviewer"). The one Sol review happens before the PR is opened. A round with no fix commits (every finding disagreed with or escalated) is dispositioned directly: no push and no re-arm, and the next wait keeps the same `--head`. The push reuses the PR, pushes the pinned SHA, prints JSON and re-arms the H10 duty for the new head. Before the first PR, and on a fix push that changes knowledge, reconcile first and then refresh the handoff docs with `node "${CLAUDE_PLUGIN_ROOT}/scripts/handoff-projection.mjs"`. This is practice, not a gate.
+3. **Only if this round's fixes produced a new head**, push through `/sterling:merge` again. Push the fix straight back to Copilot — no Sol, Opus or other reviewer re-checks a loop fix round; Copilot is the reviewer inside the loop (user-stated 2026-09-28: "co-pilot is the reviewer"). The one Sol review happens before the PR is opened. A round with no fix commits (every finding disagreed with or escalated) is dispositioned directly: no push and no re-arm, and the next wait keeps the same `--head`. The push reuses the PR, pushes the pinned SHA, prints JSON and re-arms the H10 duty for the new head. Before the first PR, and on a fix push that changes knowledge, reconcile first and then refresh the handoff docs with `node "${CLAUDE_PLUGIN_ROOT}/bin/handoff-projection.mjs"`. This is practice, not a gate.
 4. Update the progress comment: round +1, the consumed review id, the reviewed head, the status.
 
 ## Ending: three distinct outcomes
@@ -33,7 +33,7 @@ One **progress comment** on the PR holds the state: round, consumed review id, r
 - **CAPPED**: 5 completed review/response cycles across the PR's lifetime, not per session. Poll attempts do not count.
 - **ESCALATED**: a ruling from the user is outstanding (taste or ambiguity), and nothing else is left to do.
 
-Then settle H10's duty. This is a deliberate act, and it names the PR: `node "${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" --settle <clean|capped|escalated> --pr <n|PR URL>`. It refuses unless the armed loop is still owed, is for origin's repo and is the PR you name; a settled loop is never re-settled (the next `/sterling:merge` push re-arms it). Report the outcome, the PR link and the round count to the user.
+Then settle H10's duty. This is a deliberate act, and it names the PR: `node "${CLAUDE_PLUGIN_ROOT}/bin/pr-review-wait.mjs" --settle <clean|capped|escalated> --pr <n|PR URL>`. It refuses unless the armed loop is still owed, is for origin's repo and is the PR you name; a settled loop is never re-settled (the next `/sterling:merge` push re-arms it). Report the outcome, the PR link and the round count to the user.
 
 ## Interrupted mid-loop
 

@@ -22,7 +22,7 @@ const root = join(here, '..');
 // Parsed STRICTLY: an unrecognized or malformed argument refuses rather than
 // falling through to the default, which overwrites the shipped bundle (P5).
 const args = process.argv.slice(2);
-let outFile = join(root, 'packages', 'tui', 'bundle', 'sterling-tui.mjs');
+let outFile = join(root, 'tui', 'sterling-tui.mjs');
 for (let i = 0; i < args.length; i++) {
   if (args[i] !== '--out-file') {
     console.error(`build-tui: unrecognized argument '${args[i]}' — usage: build-tui.mjs [--out-file <path>]`);
