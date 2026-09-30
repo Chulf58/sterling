@@ -21,12 +21,14 @@ import { spawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 // builtins-only module — safe at load time on an unbuilt clone (see the
 // bootstrap-independence note in scripts/update.mjs).
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
 import { readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './handoff-projection.mjs';
 import { ContainmentError } from './contained-fs.mjs';
+import { isInstalledCopy } from './installed-copy.mjs';
 
 // Build + test batteries dominate an update (measured on this machine: build
 // ~19s, check ~12s, tests ~87s), so the ceiling is generous — a timeout here
@@ -424,8 +426,23 @@ export function handoffRefusalRemedy(repoPath) {
   );
 }
 
+/** The plugin root this module runs from: the nearest ancestor carrying
+ *  .claude-plugin/plugin.json (a walk-up, so it holds for scripts/lib/ and for a
+ *  bundled bin/ entry alike). null when no plugin tree sits above it. */
+function ownPluginRoot() {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 4; i++) {
+    if (existsSync(join(dir, '.claude-plugin', 'plugin.json'))) return dir;
+    dir = dirname(dir);
+  }
+  return null;
+}
+
+export const INSTALLED_COPY_REFUSAL =
+  'Sterling is installed as a plugin — update it with /plugin (Installed tab → Update) or `claude plugin update sterling@<marketplace>`. /sterling:update serves only a git clone of Sterling.';
+
 /** Existing project + domain stores, without opening any database connection. */
-function machineStores(cwd) {
+export function machineStores(cwd) {
   const stores = [join(cwd, '.sterling', 'sterling.db')];
   const domains = join(homedir(), '.sterling', 'domains');
   if (existsSync(domains)) {
@@ -436,8 +453,39 @@ function machineStores(cwd) {
   return stores.filter((store) => existsSync(store));
 }
 
-/** SQLite's application-owned user_version is the big-endian u32 at header offset 60. */
-function probeSchemaVersion(dbPath) {
+/**
+ * user_version as the last COMMITTED page 1 in `<db>-wal` states it, or null when
+ * the WAL holds no committed page 1. The stores run in WAL mode, so while any
+ * connection holds a store open (the MCP server, concurrently with SessionStart)
+ * the main file's header can lag the truth — a fresh store reads 0 there until its
+ * first checkpoint. Frames count only while their salts match the WAL header (a
+ * reset WAL leaves stale frames behind), and a page-1 frame only once a commit
+ * frame follows it. Checksums are not verified: this is a probe that prints a
+ * line, never a reader that acts on data.
+ */
+function walUserVersion(dbPath) {
+  const walPath = `${dbPath}-wal`;
+  if (!existsSync(walPath)) return null;
+  const wal = readFileSync(walPath);
+  if (wal.length < 32) return null;
+  const magic = wal.readUInt32BE(0);
+  if (magic !== 0x377f0682 && magic !== 0x377f0683) return null;
+  const pageSize = wal.readUInt32BE(8);
+  const salt1 = wal.readUInt32BE(16);
+  const salt2 = wal.readUInt32BE(20);
+  let pending = null;
+  let committed = null;
+  for (let off = 32; off + 24 + pageSize <= wal.length; off += 24 + pageSize) {
+    if (wal.readUInt32BE(off + 8) !== salt1 || wal.readUInt32BE(off + 12) !== salt2) break;
+    if (wal.readUInt32BE(off) === 1) pending = wal.readUInt32BE(off + 24 + 60);
+    if (wal.readUInt32BE(off + 4) !== 0 && pending !== null) committed = pending;
+  }
+  return committed;
+}
+
+/** SQLite's application-owned user_version is the big-endian u32 at header offset 60 —
+ *  read from the WAL's last committed page 1 when there is one (see walUserVersion). */
+export function probeSchemaVersion(dbPath) {
   const fd = openSync(dbPath, 'r');
   const header = Buffer.alloc(100);
   let bytesRead;
@@ -449,7 +497,7 @@ function probeSchemaVersion(dbPath) {
   if (bytesRead < header.length || header.subarray(0, 16).toString('latin1') !== 'SQLite format 3\0') {
     throw new Error(`'${dbPath}' is not a valid SQLite database file`);
   }
-  return header.readUInt32BE(60);
+  return walUserVersion(dbPath) ?? header.readUInt32BE(60);
 }
 
 /**
@@ -462,7 +510,14 @@ function probeSchemaVersion(dbPath) {
  * so on a fresh clone the fan-out list must be resolved LATE, at its own step,
  * not at startup.
  */
-export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {}, reexec = null, invokingProject = null, projectDir = null }) {
+export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {}, reexec = null, invokingProject = null, projectDir = null, pluginRoot = ownPluginRoot() }) {
+  // INSTALLED COPY (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
+  // design point D): a /plugin-installed Sterling has no .git at its plugin root and /plugin owns its
+  // updates — there is nothing here to fetch, build or fan out. Refused before anything else runs.
+  if (pluginRoot && isInstalledCopy(pluginRoot)) {
+    log(`\n✗ ${INSTALLED_COPY_REFUSAL}`);
+    return { exit: 2, currency: null, steps: [], projects: [], migrations: [], refusal: INSTALLED_COPY_REFUSAL };
+  }
   const git = gitFrom(exec, cwd);
   const nodeBin = opts.nodeBin ?? process.execPath;
   const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null };
@@ -983,11 +1038,12 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     if (!step('dependencies moved — npm ci', 'npm', ['ci']).ok) return report;
   }
 
-  // packages/*/dist and the TUI bundle are gitignored, so every machine builds
-  // its own; hooks/*.mjs bundles are COMMITTED, so a consumer must not rebuild
-  // them — npm run check verifies the committed ones are fresh instead.
+  // packages/*/dist are gitignored, so every machine builds its own; the hooks/*.mjs
+  // and tui/sterling-tui.mjs bundles are COMMITTED (decision
+  // sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, design A),
+  // so a consumer must not rebuild them — a rebuild would dirty the tracked bundle, and
+  // npm run check verifies the committed ones are fresh instead.
   if (!step('build server + packages (npm run build)', 'npm', ['run', 'build']).ok) return report;
-  if (!step('build TUI bundle (npm run build:tui)', 'npm', ['run', 'build:tui']).ok) return report;
   if (!step('consistency checks (npm run check)', 'npm', ['run', 'check'], { show: true }).ok) return report;
   // A red test battery is the ONE failure in this sequence that does not stop
   // it (decision update-red-test-battery-still-syncs-agents-skips-store-migration):
