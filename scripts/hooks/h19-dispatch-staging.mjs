@@ -68,6 +68,7 @@ import {
   stripReviewTerritoryLine,
   assembleDelivery,
   hazardParts,
+  boundedTermClause,
   cappedHazards,
   HAZARD_CAP,
   recordRevision,
@@ -442,8 +443,11 @@ async function main(input) {
         );
       }
       if (subjectHazards.length || subjectDecisions.length) {
-        const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(', ');
-        const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(', ');
+        // BOUNDED like H20's header (boundedTermClause): this header is PINNED,
+        // so an uncapped union of the subject records' terms is charged to the
+        // ordinary cap ahead of the owner article body.
+        const matched = boundedTermClause(freshSubject.flatMap((x) => x.hits));
+        const central = boundedTermClause(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)));
         const subjectLabel = `your task's SUBJECT`;
         const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
         const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(',')}] cap:${subjectHazards.length || 1}`;

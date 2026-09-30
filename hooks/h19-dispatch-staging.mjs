@@ -8847,6 +8847,11 @@ import { join as join6, dirname as dirname4 } from "node:path";
 function deliveryDir(cwd) {
   return join6(cwd, ".sterling", "transient", "delivery");
 }
+var HEADER_TERM_CAP = 6;
+function boundedTermClause(terms, cap = HEADER_TERM_CAP) {
+  const all = [...new Set(terms)];
+  return all.slice(0, cap).join(", ") + (all.length > cap ? ` (+${all.length - cap} more)` : "");
+}
 var REVIEW_TERRITORY_LINE_RE = /^[ \t]*REVIEW-TERRITORY:[ \t]*\[[^\n]*\][ \t]*\r?$/gm;
 function stripReviewTerritoryLine(text) {
   return String(text ?? "").replace(REVIEW_TERRITORY_LINE_RE, "");
@@ -9683,8 +9688,8 @@ async function main(input2) {
         );
       }
       if (subjectHazards.length || subjectDecisions.length) {
-        const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(", ");
-        const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(", ");
+        const matched = boundedTermClause(freshSubject.flatMap((x) => x.hits));
+        const central = boundedTermClause(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)));
         const subjectLabel = `your task's SUBJECT`;
         const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
         const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectHazards.length || 1}`;

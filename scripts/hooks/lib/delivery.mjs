@@ -73,6 +73,21 @@ export {
   hasFullNarrowCentralityCoverage,
 } from '@sterling/store';
 
+/** How many terms a mechanism-axis header's "matched on" / "central to the
+ *  record" clauses name before counting the rest (user ruling 2026-09-24, H20
+ *  decision crowd-out: the union of every record's terms measured ~75 words and
+ *  ~400 bytes of capped budget). ONE definition for H20's delivery header and
+ *  H19's pinned staging header, so the two cannot drift. */
+export const HEADER_TERM_CAP = 6;
+
+/** Render a header's term clause: the first HEADER_TERM_CAP distinct terms,
+ *  comma-joined, then " (+N more)" when the list was longer — the clause stays
+ *  honest about its size rather than silently dropping terms. Pure. */
+export function boundedTermClause(terms, cap = HEADER_TERM_CAP) {
+  const all = [...new Set(terms)];
+  return all.slice(0, cap).join(', ') + (all.length > cap ? ` (+${all.length - cap} more)` : '');
+}
+
 /** THE CANONICAL REVIEW-TERRITORY TERMINAL-LINE SHAPE (decision
  *  h20-specificity-rebuild-not-fourth-patch-structural-fixes-now-red-probes-frozen,
  *  fix 1). A code-touching dispatch brief carries a machine-readable

@@ -7913,6 +7913,11 @@ import { join as join4, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join4(cwd, ".sterling", "transient", "delivery");
 }
+var HEADER_TERM_CAP = 6;
+function boundedTermClause(terms, cap = HEADER_TERM_CAP) {
+  const all = [...new Set(terms)];
+  return all.slice(0, cap).join(", ") + (all.length > cap ? ` (+${all.length - cap} more)` : "");
+}
 var REVIEW_TERRITORY_LINE_RE = /^[ \t]*REVIEW-TERRITORY:[ \t]*\[[^\n]*\][ \t]*\r?$/gm;
 function stripReviewTerritoryLine(text) {
   return String(text ?? "").replace(REVIEW_TERRITORY_LINE_RE, "");
@@ -8500,7 +8505,6 @@ function decisionPointerPart(rel, decisions, { widen, cap = DECISION_POINTER_CAP
 
 // scripts/hooks/h20-mechanism-axis.mjs
 var MAX_DECISIONS = 5;
-var HEADER_CENTRAL_TERM_CAP = 6;
 var QUESTION_WORDS_RE = /\b(where|what|which|who|whom|whose|when|why|how|does|do|did|is|are|was|were|can|could|would|will|should)\b/i;
 function isQuestionShapedPrompt(text) {
   const t = String(text ?? "");
@@ -8660,8 +8664,7 @@ function main(input2) {
     );
     if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) return finish();
     const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
-    const centralAll = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))];
-    const centralCovered = centralAll.slice(0, HEADER_CENTRAL_TERM_CAP).join(", ") + (centralAll.length > HEADER_CENTRAL_TERM_CAP ? ` (+${centralAll.length - HEADER_CENTRAL_TERM_CAP} more)` : "");
+    const centralCovered = boundedTermClause(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)));
     const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
     const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask (probed 2026-08-11). Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : (
       // PreToolUse context arrives WITH the dispatch (timing note at the top

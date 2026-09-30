@@ -86,6 +86,7 @@ import {
   statusAnnotation,
   DECISION_STATEMENT_CLIP,
   DECISION_REJECTED_CLIP,
+  boundedTermClause,
 } from './lib/delivery.mjs';
 
 // Injection ceilings. Deliberately tighter than H19's file-touch payload: a
@@ -97,9 +98,6 @@ import {
 // since board a470046d slice 1, H19's path-scoped hazard block caps at the
 // same count, so the two channels share the bound.
 const MAX_DECISIONS = 5;
-/** How many "central to the record" terms the header names before counting
- *  the rest (user ruling 2026-09-24: trim the header's term list). */
-const HEADER_CENTRAL_TERM_CAP = 6;
 const NARROW_CLIP = 700;
 
 // PROMPT-SHAPE RANKING (consuming-project retro 2026-08-17-2111): a QUESTION
@@ -509,10 +507,7 @@ function main(input) {
     // every record's central terms ran to ~50 words and ~400 bytes of the
     // capped budget, crowding out the records themselves. The first few are
     // named and the rest counted, so the clause stays honest about its size.
-    const centralAll = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))];
-    const centralCovered =
-      centralAll.slice(0, HEADER_CENTRAL_TERM_CAP).join(', ') +
-      (centralAll.length > HEADER_CENTRAL_TERM_CAP ? ` (+${centralAll.length - HEADER_CENTRAL_TERM_CAP} more)` : '');
+    const centralCovered = boundedTermClause(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)));
     const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
     // The header names the SURFACE, because the stakes differ and the reader should
     // feel which one they are on. A bad dispatch wastes agent work; a bad choice put

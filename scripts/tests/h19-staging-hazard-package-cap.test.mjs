@@ -168,6 +168,22 @@ test('staging: the shared cap ranks BOTH channels by severity — a block subjec
   }
 });
 
+// `/⚠ ANTI-PATTERN/` also matches a degrade notice, so the sweeps count WHOLE
+// hazards (a RIGHT WAY line) and "delivery full" notices separately. The accepted
+// trade, stated rather than hidden: a pinned header is never evicted, so once the
+// pinned chrome plus two whole hazards leave no room for a third, the third
+// degrades to a one-line "delivery full" notice (P5: disclosed, never silent).
+// From `degradeFrom` bytes up that is exactly 2 whole + 1 notice; below it, 3 whole.
+const deliveryFullCount = (ctx) => (ctx.match(/not shown whole: delivery full/g) ?? []).length;
+function assertWholeVersusNotice(ctx, size, degradeFrom) {
+  const [whole, notices] = size >= degradeFrom ? [2, 1] : [3, 0];
+  assert.equal(wholeCount(ctx), whole, `~${size}B hazards: ${whole} whole:\n${ctx}`);
+  assert.equal(deliveryFullCount(ctx), notices, `~${size}B hazards: ${notices} "delivery full" notice(s)`);
+}
+// Measured thresholds (the 2,900B path and 2,700B subject sizes are the first to degrade).
+const PATH_DEGRADE_FROM = 2900;
+const SUBJECT_DEGRADE_FROM = 2700;
+
 // The staging headers are PINNED chrome (same class as the H20 header, commit
 // e2d41d6): under disclosure pressure at the transport ceiling a whole hazard
 // falls to its pointer before a header is evicted, so the lane never gets
@@ -183,6 +199,7 @@ for (const size of [2850, 2900, 2950, 3000, 3100, 3200]) {
       const ctx = stageAndStart(dir, 'Go work on src/a.mjs and report back.');
       assert.ok(Buffer.byteLength(ctx, 'utf8') <= 10000, `the transport ceiling holds (${Buffer.byteLength(ctx, 'utf8')})`);
       assert.match(ctx, /⚠ ANTI-PATTERN/, 'hazards are delivered');
+      assertWholeVersusNotice(ctx, size, PATH_DEGRADE_FROM);
       assert.match(ctx.split('\n')[0], /^STERLING KNOWLEDGE DELIVERY \(H19\) — owning knowledge for 'src\/a\.mjs'/, `the header is the first line:\n${ctx.slice(0, 300)}`);
     } finally {
       cleanup();
@@ -203,12 +220,57 @@ for (const size of [2600, 2650, 2700, 2750, 2800, 2850]) {
       const ctx = stageAndStart(dir, SUBJECT_PROMPT);
       assert.ok(Buffer.byteLength(ctx, 'utf8') <= 10000, `the transport ceiling holds (${Buffer.byteLength(ctx, 'utf8')})`);
       assert.match(ctx, /⚠ ANTI-PATTERN/, 'hazards are delivered');
+      assertWholeVersusNotice(ctx, size, SUBJECT_DEGRADE_FROM);
       assert.match(ctx, /^STERLING MECHANISM-AXIS STAGING \(H19\)/m, 'the subject header survives');
     } finally {
       cleanup();
     }
   });
 }
+
+// THE STAGING HEADER'S TERM LISTS ARE BOUNDED like H20's (user ruling
+// 2026-09-24, finding df5d9f7d, decision 301d8a0a): the header is pinned, so an
+// uncapped union of five records' terms is charged to the ordinary cap BEFORE
+// the owner article body. Six terms are named, the rest counted.
+test('staging: five subject records with ~10 central terms each cap both header term lists at 6 plus a count, and the owner article stays whole', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const groups = [
+      ['granite', 'basalt', 'quartz', 'feldspar', 'obsidian', 'pumice'],
+      ['violin', 'cello', 'oboe', 'bassoon', 'clarinet', 'trombone'],
+      ['cobalt', 'nickel', 'zinc', 'tungsten', 'titanium', 'vanadium'],
+      ['glacier', 'moraine', 'tundra', 'fjord', 'permafrost', 'drumlin'],
+      ['sextant', 'compass', 'astrolabe', 'chronometer', 'quadrant', 'backstaff'],
+    ];
+    groups.forEach((words, g) => {
+      const vocab = `${words.join(' ')} ${words.join(' ')} ${words.join(' ')}`;
+      store.create(antiPattern(`${words.join(' ')} failure ${g}`, `${vocab} recur though this bug rarely touches a field`, [], `SUBJECT_RW_${g}`));
+    });
+    const OWNER_MARK = 'OWNER_BODY_DELIVERED_WHOLE';
+    store.create({
+      id: randomUUID(), type: 'feature_article', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null,
+      links: [], scope: 'project', stack_tags: [], slug: 'staged-owner', title: 'staged-owner',
+      what_it_does: `the staged owner does a thing ${OWNER_MARK}`, intended_behavior: 'owner intends',
+      files: [{ path: 'src/a.mjs', role: 'owner' }],
+      current_ac: [{ ac_id: 'AC1', text: 'owner works', verifiable_at: 'final' }],
+      dependencies: { relies_on: [], relied_by: [] }, state: 'active', version: 1, history: [], live_test_refs: [],
+    });
+    const prompt = `Go work on src/a.mjs. Investigate ${groups.flat().join(' ')} together.`;
+    const ctx = stageAndStart(dir, prompt);
+    const header = ctx.split('\n').find((l) => l.startsWith('STERLING MECHANISM-AXIS STAGING (H19)'));
+    assert.ok(header, `fixture control: the subject header is present:\n${ctx}`);
+    const m = /\(matched on: (.*?); central to the record: (.*?)\), beyond any file/.exec(header);
+    assert.ok(m, `the header keeps its clause shape:\n${header}`);
+    for (const [label, clause] of [['matched', m[1]], ['central', m[2]]]) {
+      const named = clause.replace(/ \(\+\d+ more\)$/, '').split(', ');
+      assert.ok(named.length <= 6, `${label} names at most 6 terms, got ${named.length}: ${clause}`);
+      assert.match(clause, / \(\+\d+ more\)$/, `${label} counts the terms it did not name: ${clause}`);
+    }
+    assert.ok(ctx.includes(OWNER_MARK), `the owner article body is delivered whole:\n${ctx}`);
+  } finally {
+    cleanup();
+  }
+});
 
 test('staging: a read-only lane keeps per-channel POINTER caps (decision 21e3637e, current behaviour)', () => {
   const { dir, store, cleanup } = makeProject();
