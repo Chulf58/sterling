@@ -51,8 +51,13 @@ function gitMaybe(cwd, args) {
 // repo and the test sees it. State dir files:
 //   log.jsonl         one JSON argv array per invocation (appended)
 //   prs.json          [{repo, number, url, headRefName, baseRefName}] (open PRs)
-//   create_fail       present => `gh pr create` exits 1 and creates nothing
-//   create_fail_after present => `gh pr create` creates the PR, then exits 1
+//   create_fail       present => the create call exits 1 and creates nothing
+//   create_fail_after present => the create call creates the PR, then exits 1
+// The PR is created through the REST call `gh api --hostname <host> --method
+// POST repos/<owner>/<repo>/pulls -f head=… -f base=… -f title=… -f body=…`
+// (real `gh pr create` needs a local git binary gh can run, which Windows gh.exe
+// on WSL lacks). `gh pr create` is never legitimate: the fake exits 4 on it and
+// the tests assert it was never called.
 //   auth_fail         present => `gh auth status` exits 1
 const FAKE_GH_IMPL = `
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -80,14 +85,21 @@ if (a === 'pr' && b === 'list') {
   console.log(JSON.stringify(hits.map((p) => Object.fromEntries(fields.map((f) => [f, p[f]])))));
   process.exit(0);
 }
-if (a === 'pr' && b === 'create') {
-  if (existsSync(join(state, 'create_fail'))) { console.error('GraphQL: something went wrong (createPullRequest)'); process.exit(1); }
+if (a === 'pr' && b === 'create') { console.error('fake gh: gh pr create must never be called (work mode creates the PR through gh api)'); process.exit(4); }
+if (a === 'api') {
+  const m = (argv.find((x) => /^repos\\//.test(x)) ?? '').match(/^repos\\/([^/]+)\\/([^/]+)\\/pulls$/);
+  const host = flag('--hostname');
+  if (!m || !host || flag('--method') !== 'POST') { console.error('fake gh: unhandled api call ' + JSON.stringify(argv)); process.exit(3); }
+  const fields = {};
+  argv.forEach((x, i) => { if (x === '-f' || x === '-F') { const kv = argv[i + 1]; const k = kv.indexOf('='); fields[kv.slice(0, k)] = kv.slice(k + 1); } });
+  if (existsSync(join(state, 'create_fail'))) { console.error('gh: Validation Failed (HTTP 422)'); console.log(JSON.stringify({ message: 'Validation Failed' })); process.exit(1); }
+  const apiRepo = host + '/' + m[1] + '/' + m[2];
   const number = 7 + prs.length;
-  const url = 'https://' + repo + '/pull/' + number;
-  prs.push({ repo, number, url, headRefName: flag('--head'), baseRefName: flag('--base') });
+  const url = 'https://' + apiRepo + '/pull/' + number;
+  prs.push({ repo: apiRepo, number, url, headRefName: fields.head, baseRefName: fields.base });
   writeFileSync(prsFile, JSON.stringify(prs));
-  if (existsSync(join(state, 'create_fail_after'))) { console.error('HTTP 502: gateway timeout (the PR was created anyway)'); process.exit(1); }
-  console.log(url); process.exit(0);
+  if (existsSync(join(state, 'create_fail_after'))) { console.error('gh: HTTP 502: gateway timeout (the PR was created anyway)'); process.exit(1); }
+  console.log(JSON.stringify({ number, html_url: url, url: 'https://api.' + host + '/repos/' + m[1] + '/' + m[2] + '/pulls/' + number, head: { ref: fields.head }, base: { ref: fields.base } })); process.exit(0);
 }
 console.error('fake gh: unhandled ' + JSON.stringify(argv)); process.exit(3);
 `;
@@ -147,6 +159,25 @@ function ghCalls(state) {
   if (!existsSync(f)) return [];
   return readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
+
+/** The PR-create calls: `gh api … repos/<owner>/<repo>/pulls` with method POST,
+ * each as { argv, host, path, method, fields } (fields from the -f/-F pairs). */
+function createCalls(state) {
+  return ghCalls(state)
+    .filter((c) => c[0] === 'api' && c.some((x) => /^repos\/[^/]+\/[^/]+\/pulls$/.test(x)))
+    .map((argv) => {
+      const fields = {};
+      argv.forEach((x, i) => {
+        if (x === '-f' || x === '-F') {
+          const kv = argv[i + 1];
+          fields[kv.slice(0, kv.indexOf('='))] = kv.slice(kv.indexOf('=') + 1);
+        }
+      });
+      return { argv, host: argv[argv.indexOf('--hostname') + 1], path: argv.find((x) => /^repos\//.test(x)), method: argv[argv.indexOf('--method') + 1], fields };
+    });
+}
+
+const noPrCreateEver = (state) => assert.equal(ghCalls(state).filter((c) => c[0] === 'pr' && c[1] === 'create').length, 0, '`gh pr create` is never called');
 
 /** A project with a bare origin holding main, a feature branch checked out
  * with `commits` commits, and (unless mode is undefined) .sterling/config.json. */
@@ -239,15 +270,17 @@ test('work: a merge pushes the branch and CREATES the PR with an explicit repo/h
     assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the feature branch is pushed to origin at its tip');
     assert.equal(git(p.dir, ['rev-parse', '--abbrev-ref', `${p.branchName}@{upstream}`]), `origin/${p.branchName}`, 'push sets the upstream (-u)');
 
-    const creates = ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create');
-    assert.equal(creates.length, 1, 'exactly one gh pr create');
+    noPrCreateEver(p.gh.state);
+    const creates = createCalls(p.gh.state);
+    assert.equal(creates.length, 1, 'exactly one PR-create call (gh api POST .../pulls)');
     const c = creates[0];
-    const flag = (name) => c[c.indexOf(name) + 1];
-    assert.equal(flag('--repo'), ORIGIN_REPO);
-    assert.equal(flag('--head'), p.branchName);
-    assert.equal(flag('--base'), 'main');
-    assert.equal(flag('--title'), p.branchName, 'several commits: the title is the branch name (gh --fill semantics)');
-    const body = flag('--body');
+    assert.equal(c.host, 'github.com', 'the create names origin\'s host');
+    assert.equal(c.path, 'repos/acme/widget/pulls', 'the create names origin\'s owner/repo');
+    assert.equal(c.method, 'POST');
+    assert.equal(c.fields.head, p.branchName);
+    assert.equal(c.fields.base, 'main');
+    assert.equal(c.fields.title, p.branchName, 'several commits: the title is the branch name (gh --fill semantics)');
+    const body = c.fields.body;
     for (const piece of ['test: pin sprocket count', 'Red first.', 'feat: widget sprockets', 'Adds sprockets to the widget.']) {
       assert.ok(body.includes(piece), `the body carries every commit subject and body — missing ${piece}`);
     }
@@ -258,7 +291,7 @@ test('work: a merge pushes the branch and CREATES the PR with an explicit repo/h
   }
 });
 
-test('work: an existing open PR for the head is REUSED — the branch is pushed, no second gh pr create', () => {
+test('work: an existing open PR for the head is REUSED — the branch is pushed, no second create', () => {
   const p = makeProject({ mode: 'work' });
   try {
     seedPr(p, { number: 41 });
@@ -266,7 +299,8 @@ test('work: an existing open PR for the head is REUSED — the branch is pushed,
     assert.equal(r.status, 0, `reuse must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
     const out = parseSingleJson(r.stdout, 'work reuse');
     assert.deepEqual(out, { mode: 'work', ok: true, stage: 'done', error: null, exit: 0, pushed: true, pr_url: 'https://github.com/acme/widget/pull/41', pr_number: 41, branch: p.branchName, created: false });
-    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create').length, 0, 'no gh pr create when a PR is open');
+    assert.equal(createCalls(p.gh.state).length, 0, 'no create call when a PR is open');
+    noPrCreateEver(p.gh.state);
     const list = ghCalls(p.gh.state).find((c) => c[0] === 'pr' && c[1] === 'list');
     assert.ok(list, 'the open PR is looked up with gh pr list');
     assert.equal(list[list.indexOf('--head') + 1], p.branchName);
@@ -278,7 +312,7 @@ test('work: an existing open PR for the head is REUSED — the branch is pushed,
   }
 });
 
-test('work: pushed but gh pr create FAILED exits 1 naming what succeeded; the rerun detects the pushed branch and creates the PR', () => {
+test('work: pushed but the PR create FAILED exits 1 naming what succeeded; the rerun detects the pushed branch and creates the PR', () => {
   const p = makeProject({ mode: 'work' });
   try {
     writeFileSync(join(p.gh.state, 'create_fail'), '');
@@ -288,6 +322,8 @@ test('work: pushed but gh pr create FAILED exits 1 naming what succeeded; the re
     assert.match(r1.stderr, /rerun/i, 'stderr says a rerun is the remedy');
     assert.match(r1.stderr, /UNKNOWN/, 'after a failed create with no PR found, the PR state is reported UNKNOWN — never asserted absent');
     assert.doesNotMatch(r1.stderr, /no PR exists/i, 'the gate never claims no PR exists');
+    assert.match(r1.stderr, /Validation Failed/, 'gh\'s own stderr is printed, not swallowed');
+    assert.match(r1.stderr, /opened (it )?by hand.*reuses it.*review loop|by hand.*rerun.*reuses/is, 'the message says a hand-opened PR is reused by the rerun, which arms the review loop');
     assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the branch reached origin before the create failed');
     const out1 = parseSingleJson(r1.stdout, 'partial');
     assert.equal(out1.mode, 'work');
@@ -302,11 +338,12 @@ test('work: pushed but gh pr create FAILED exits 1 naming what succeeded; the re
     assert.equal(r2.status, 0, `the rerun must succeed — stdout=${oneLine(r2.stdout)} stderr=${oneLine(r2.stderr)}`);
     const out2 = parseSingleJson(r2.stdout, 'rerun');
     assert.deepEqual(out2, { mode: 'work', ok: true, stage: 'done', error: null, exit: 0, pushed: true, pr_url: 'https://github.com/acme/widget/pull/7', pr_number: 7, branch: p.branchName, created: true });
-    const creates = ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create');
+    noPrCreateEver(p.gh.state);
+    const creates = createCalls(p.gh.state);
     assert.equal(creates.length, 2, 'one failed create, one successful create on the rerun');
     const c = creates[1];
-    assert.equal(c[c.indexOf('--title') + 1], 'feat: widget sprockets', 'one commit: the title is its subject');
-    assert.ok(c[c.indexOf('--body') + 1].includes('Adds sprockets to the widget.'), 'one commit: the body carries its body');
+    assert.equal(c.fields.title, 'feat: widget sprockets', 'one commit: the title is its subject');
+    assert.ok(c.fields.body.includes('Adds sprockets to the widget.'), 'one commit: the body carries its body');
     assertBaseUntouched(p, 'rerun');
   } finally {
     p.cleanup();
@@ -323,9 +360,13 @@ test('work: with several remotes and a conflicting gh default repo, EVERY gh cal
     assert.equal(out.pr_url, 'https://github.com/acme/widget/pull/7', 'the PR is opened in origin\'s repo, never gh\'s default');
     const calls = ghCalls(p.gh.state);
     const repoCalls = calls.filter((c) => c[0] === 'pr' || c[0] === 'repo');
-    assert.ok(repoCalls.length >= 2, 'at least a lookup and a create');
+    const creates = createCalls(p.gh.state);
+    assert.ok(repoCalls.length + creates.length >= 2, 'at least a lookup and a create');
     for (const c of repoCalls) {
       assert.equal(c[c.indexOf('--repo') + 1], ORIGIN_REPO, `every repo-scoped gh call passes --repo ${ORIGIN_REPO}: ${JSON.stringify(c)}`);
+    }
+    for (const c of creates) {
+      assert.equal(`${c.host}/${c.path.replace(/^repos\//, '').replace(/\/pulls$/, '')}`, ORIGIN_REPO, `the create names origin's host and owner/repo: ${JSON.stringify(c.argv)}`);
     }
     const auth = calls.find((c) => c[0] === 'auth');
     assert.ok(auth && auth[auth.indexOf('--hostname') + 1] === 'github.com', 'auth is checked for origin\'s host');
@@ -341,7 +382,7 @@ test('work: an origin that is not a GitHub-shaped URL (a local path) is refused 
     const r = runDirectMerge(p);
     assert.equal(r.status, 2, `a non-GitHub origin exits 2 — stderr=${oneLine(r.stderr)}`);
     assert.match(r.stderr, /origin/);
-    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, 'no pr call');
+    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' || c[0] === 'api').length, 0, 'no pr or api call');
     assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');
   } finally {
     p.cleanup();
@@ -357,9 +398,9 @@ test('work: an open PR from the same head into ANOTHER base is not reused — a 
     const out = JSON.parse(r.stdout);
     assert.equal(out.created, true, 'the release PR is not reused for a merge into main');
     assert.notEqual(out.pr_number, 30);
-    const creates = ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create');
+    const creates = createCalls(p.gh.state);
     assert.equal(creates.length, 1);
-    assert.equal(creates[0][creates[0].indexOf('--base') + 1], 'main');
+    assert.equal(creates[0].fields.base, 'main');
     for (const l of ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'list')) {
       assert.equal(l[l.indexOf('--base') + 1], 'main', 'the lookup filters by base');
       assert.match(l[l.indexOf('--json') + 1], /headRefName/);
@@ -379,7 +420,8 @@ test('work: MORE THAN ONE open PR for the same repo/head/base fails closed with 
     assert.equal(r.status, 1, `ambiguous PRs exit 1 — stderr=${oneLine(r.stderr)}`);
     assert.match(r.stderr, /#31/);
     assert.match(r.stderr, /#32/);
-    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create').length, 0, 'no create');
+    assert.equal(createCalls(p.gh.state).length, 0, 'no create');
+    noPrCreateEver(p.gh.state);
     assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');
     assertBaseUntouched(p, 'ambiguous');
   } finally {
@@ -396,8 +438,9 @@ test('work: the push is PINNED to the preflight SHA — a commit that lands on t
     assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'origin holds the pinned, gated SHA — not the moved branch tip');
     assert.equal(git(p.dir, ['config', `branch.${p.branchName}.remote`]), 'origin', 'the upstream remote is set');
     assert.equal(git(p.dir, ['config', `branch.${p.branchName}.merge`]), `refs/heads/${p.branchName}`, 'the upstream branch is set');
-    const create = ghCalls(p.gh.state).find((c) => c[0] === 'pr' && c[1] === 'create');
-    assert.ok(!create.join(' ').includes('sneaky'), 'the PR text comes from the pinned range too');
+    const create = createCalls(p.gh.state)[0];
+    assert.ok(create, 'the PR was created');
+    assert.ok(!create.argv.join(' ').includes('sneaky'), 'the PR text comes from the pinned range too');
   } finally {
     p.cleanup();
   }
@@ -410,7 +453,7 @@ test('work: --branch naming something that is not a local branch (a tag) is refu
     const r = runDirectMerge(p, ['--branch', 'v1']);
     assert.equal(r.status, 2, `a non-branch --branch exits 2 — stderr=${oneLine(r.stderr)}`);
     assert.match(r.stderr, /v1/);
-    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, 'no pr call');
+    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' || c[0] === 'api').length, 0, 'no pr or api call');
     assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', 'refs/heads/v1']), null, 'nothing pushed');
   } finally {
     p.cleanup();
@@ -434,7 +477,7 @@ for (const mode of ['hobby', 'work']) {
       assert.doesNotMatch(r.stderr, /BATTERY-RAN/, 'refused before the battery');
       assertBaseUntouched(p, `${mode} foreign --branch`);
       assert.ok(gitMaybe(p.dir, ['rev-parse', '--verify', 'refs/heads/feat/other']), 'the named branch is not deleted');
-      assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, 'no pr call');
+      assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' || c[0] === 'api').length, 0, 'no pr or api call');
       assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', 'refs/heads/feat/other']), null, 'nothing pushed');
     } finally {
       p.cleanup();
@@ -457,7 +500,7 @@ for (const mode of ['hobby', 'work']) {
       assert.equal(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'local main does not move');
       assert.equal(git(p.origin, ['rev-parse', 'main']), p.originMainSha, 'origin main does not move');
       assert.ok(gitMaybe(p.dir, ['rev-parse', '--verify', `refs/heads/${p.branchName}`]), 'the feature branch survives');
-      assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, 'no pr call');
+      assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' || c[0] === 'api').length, 0, 'no pr or api call');
     } finally {
       p.cleanup();
     }
@@ -585,7 +628,7 @@ test('work stdout contract: success carries ok:true, stage done, error null, exi
   }
 });
 
-test('work: gh pr create FAILS but the PR exists afterwards (a create race or a timeout) — the strict follow-up lookup finds it and reports it REUSED with exit 0', () => {
+test('work: the PR create FAILS but the PR exists afterwards (a create race or a timeout) — the strict follow-up lookup finds it and reports it REUSED with exit 0', () => {
   const p = makeProject({ mode: 'work' });
   try {
     writeFileSync(join(p.gh.state, 'create_fail_after'), '');
@@ -615,7 +658,7 @@ function assertPushDestinationRefusal(p, r, label, destinations) {
   assert.equal(out.stage, 'work-preflight', label);
   assert.equal(out.pushed, false, label);
   for (const d of destinations) assert.ok(r.stderr.includes(d), `${label}: the refusal names destination ${d}`);
-  assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, `${label}: no pr call`);
+  assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' || c[0] === 'api').length, 0, `${label}: no pr or api call`);
   assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, `${label}: nothing pushed to origin`);
   const other = join(p.ssh.FAKE_SSH_ROOT, 'other', 'fork.git');
   if (existsSync(other)) assert.equal(gitMaybe(other, ['rev-parse', '--verify', p.branchName]), null, `${label}: nothing pushed to the other repo`);
@@ -750,7 +793,7 @@ test('work: gh present but UNAUTHENTICATED is refused with exit 2 naming gh auth
     const r = runDirectMerge(p);
     assert.equal(r.status, 2, `unauthenticated gh exits 2 — stderr=${oneLine(r.stderr)}`);
     assert.match(r.stderr, /gh auth login/);
-    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, 'no pr call');
+    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' || c[0] === 'api').length, 0, 'no pr or api call');
     assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');
     assertBaseUntouched(p, 'gh unauthenticated');
   } finally {
@@ -824,13 +867,39 @@ test('work S3: REUSING an open PR re-arms the duty — a settled loop goes back 
   }
 });
 
-test('work S3: a ship that FAILS (gh pr create fails, no PR found) arms nothing', () => {
+test('work S3: a ship that FAILS (the PR create fails, no PR found) arms nothing', () => {
   const p = makeProject({ mode: 'work' });
   try {
     writeFileSync(join(p.gh.state, 'create_fail'), '');
     const r = runDirectMerge(p);
     assert.equal(r.status, 1, oneLine(r.stdout + r.stderr));
     assert.equal(existsSync(prLoopFile(p)), false);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work S3: a failed create, then a PR opened by hand, then a rerun — the rerun REUSES that PR and re-arms the loop (owed, its number) over a settled loop for another PR', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    const settled = { pr_url: `https://${ORIGIN_REPO}/pull/33`, pr_number: 33, repo: ORIGIN_REPO, head_sha: 'e'.repeat(40), armed_at: '2026-01-01T00:00:00.000Z', status: 'clean', settled_at: '2026-01-01T01:00:00.000Z' };
+    mkdirSync(join(p.dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(prLoopFile(p), JSON.stringify(settled));
+    writeFileSync(join(p.gh.state, 'create_fail'), '');
+    const r1 = runDirectMerge(p);
+    assert.equal(r1.status, 1, oneLine(r1.stdout + r1.stderr));
+    assert.deepEqual(JSON.parse(readFileSync(prLoopFile(p), 'utf8')), settled, 'the failed ship leaves the earlier loop state untouched');
+
+    rmSync(join(p.gh.state, 'create_fail'));
+    seedPr(p, { number: 52 });
+    const r2 = runDirectMerge(p);
+    assert.equal(r2.status, 0, oneLine(r2.stdout + r2.stderr));
+    const out = parseSingleJson(r2.stdout, 'rerun after a hand-opened PR');
+    assert.equal(out.pr_number, 52);
+    assert.equal(out.created, false, 'the hand-opened PR is reused, not created');
+    assert.equal(createCalls(p.gh.state).length, 1, 'the rerun makes no second create call (only the failed one)');
+    noPrCreateEver(p.gh.state);
+    assertArmed(p, { number: 52 });
   } finally {
     p.cleanup();
   }
