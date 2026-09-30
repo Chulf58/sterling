@@ -287,6 +287,27 @@ export function readMachineRole(cwd) {
   }
 }
 
+const normPath = (p) => {
+  const t = String(p).replace(/\\/g, '/').replace(/\/+$/, '');
+  return process.platform === 'win32' ? t.toLowerCase() : t;
+};
+
+/**
+ * Which registered project an authoring-machine update was invoked for: the
+ * directory (CLAUDE_PROJECT_DIR when set, else the shell cwd) must EQUAL or sit
+ * INSIDE a registered repo_path; the nearest such ancestor wins. null when it
+ * is none — a set-but-unregistered CLAUDE_PROJECT_DIR is never replaced by cwd.
+ */
+export function resolveInvokingProject(list, { projectDir, cwd }) {
+  const dir = normPath(projectDir || cwd);
+  let best = null;
+  for (const p of list) {
+    const root = normPath(p.repo_path);
+    if ((dir === root || dir.startsWith(`${root}/`)) && (!best || root.length > normPath(best.repo_path).length)) best = p;
+  }
+  return best;
+}
+
 /** The one-line currency answer: what this machine is on, and how far behind. */
 export function currencyLine(c) {
   const id = c.describe && c.describe !== c.head_short ? `${c.describe} (${c.head_short})` : c.head_short;
@@ -441,7 +462,7 @@ function probeSchemaVersion(dbPath) {
  * so on a fresh clone the fan-out list must be resolved LATE, at its own step,
  * not at startup.
  */
-export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {}, reexec = null, invokingProject = null }) {
+export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {}, reexec = null, invokingProject = null, projectDir = null }) {
   const git = gitFrom(exec, cwd);
   const nodeBin = opts.nodeBin ?? process.execPath;
   const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null };
@@ -459,9 +480,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // Set on failure so the later "registry could not be read" summary (below)
   // can repeat the path and remedy instead of pointing back up with "see above".
   let registryFailureDetail = null;
-  const resolveProjects = async () => {
+  const resolveProjects = async ({ includeClone = false } = {}) => {
     try {
-      return typeof projects === 'function' ? (await projects()) ?? [] : projects;
+      return typeof projects === 'function' ? (await projects({ includeClone })) ?? [] : projects;
     } catch (err) {
       // Name the registry file so the remedy is actionable, not just "see
       // above" (board residual, LOW). Resolved the SAME way loadProjects does
@@ -628,26 +649,55 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // (it would regenerate architecture.md from the store: the very drift this avoids), no
   // launchers. The marker is NOT written: it attests the full post-merge sequence, which did
   // not run; the authoring branch never reads it either, so it cannot go stale-and-bite.
+  // The invoking directory must be a REGISTERED project (or inside one): sync-agents would
+  // otherwise install a whole agent roster into whatever directory the shell happened to be in.
   if (readMachineRole(cwd) === 'authoring') {
-    if (!invokingProject) {
-      log('\n✗ AUTHORING clone — cannot tell which project to sync: no invoking project was passed to the updater. Run it from the project (node scripts/update.mjs with that project as the working directory).');
+    if (!invokingProject && !projectDir) {
+      log('\n✗ AUTHORING clone — cannot tell which project to sync: no invoking directory was passed to the updater. Run it from the project (node scripts/update.mjs with that project as the working directory).');
       report.exit = 1;
       return report;
     }
-    log(`\nAUTHORING clone — nothing to pull; syncing ${invokingProject} only`);
+    const invokedFrom = projectDir || invokingProject;
     if (opts.check) {
-      log('  (--check: nothing fetched, nothing synced)');
+      log(`\nAUTHORING clone — nothing to pull; syncing ${invokedFrom} only`);
+      log('  (--check: nothing fetched, nothing synced, no currency line — there is nothing to pull)');
       return report;
     }
-    if (refreshProjects([{ name: invokingProject, repo_path: invokingProject }], { launchers: false, handoff: false })) {
-      log('\n✗ the sync of the invoking project failed (above) — fix it and rerun /sterling:update.');
+    if (opts.projects === false) {
+      log(`\nAUTHORING clone — nothing to pull; syncing ${invokedFrom} only`);
+      log('  (--no-projects: nothing synced — on the authoring machine the project sync is the whole update, so this run did nothing)');
+      return report;
     }
-    if (existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
-      const contract = step('contract drift in the invoking project (stamp-contract, dry run)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--project', invokingProject], {
+    const registered = await resolveProjects({ includeClone: true });
+    if (registered === null) {
+      log('\n✗ AUTHORING clone — the project registry could not be read, so the invoking project cannot be identified; nothing was synced.');
+      report.exit = 2;
+      return report;
+    }
+    const project = resolveInvokingProject(registered, { projectDir, cwd: invokingProject });
+    if (!project) {
+      log(`\n✗ AUTHORING clone — ${invokedFrom} is not a registered project (nor inside one), so nothing was synced: sync-agents would install a whole agent roster into it. Run /sterling:update from a project registered with /sterling:init (registered: ${registered.map((p) => p.repo_path).join(', ') || 'none'}).`);
+      report.exit = 2;
+      return report;
+    }
+    log(`\nAUTHORING clone — nothing to pull; syncing ${project.repo_path} only`);
+    if (opts.force) log('  (--force has no meaning on the authoring machine: there is no rebuild to force)');
+    refreshProjects([project], { launchers: false, handoff: false });
+    if (normPath(project.repo_path) === normPath(cwd)) {
+      log("▸ the clone's contract files are hand-maintained — not checked");
+    } else if (existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
+      const contract = step('contract drift in the invoking project (stamp-contract, dry run)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--project', project.repo_path], {
         show: true,
         tolerate: true,
       });
       report.contract_drift = !contract.ok;
+      // stamp-contract skips an unregistered or missing path and exits 0 with "0 project(s)
+      // processed": a green that checked nothing is exactly what P5 forbids.
+      if (contract.ok && /—\s*0 project\(s\) processed/.test(contract.out)) {
+        report.contract_unchecked = true;
+        log(`✗ stamp-contract checked NOTHING for ${project.repo_path} (0 project(s) processed) — the project is not reachable through the registry stamp-contract reads. Fix the registration and rerun.`);
+        fail(1);
+      }
       if (report.contract_drift) log('CONTRACT DRIFT in the invoking project — see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply --project <path>`.');
     }
     log('RESTART THE SESSION if agents changed — subagents load at CLI start.');

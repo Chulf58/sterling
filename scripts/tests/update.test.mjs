@@ -652,6 +652,8 @@ test('sibling contract drift is tolerated but repeated in the closing summary, n
 // and the check battery compares a committed projection against a store that is legitimately newer
 // (the Dome Farmer incident). A ROLE branch, not a flag — the flag was rejected by
 // already-current-requires-a-completion-marker-not-git-currency.
+const REG_P = [{ name: 'p', repo_path: '/tmp/p' }];
+
 function authoringCwd(role = 'authoring') {
   const cwd = mkdtempSync(join(tmpdir(), 'sterling-update-authoring-'));
   mkdirSync(join(cwd, '.sterling'), { recursive: true });
@@ -666,7 +668,7 @@ test('authoring role: no fetch/merge/build/check/test/migrate, syncs ONLY the in
   try {
     const { exec, calls } = fakeExec({ behind: 4 });
     const lines = [];
-    const fanOut = [{ name: 'other', repo_path: '/tmp/other' }];
+    const fanOut = [{ name: 'other', repo_path: '/tmp/other' }, { name: 'dome', repo_path: '/tmp/dome-farmer' }];
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: fanOut, invokingProject: '/tmp/dome-farmer', opts: {} });
 
     assert.equal(report.exit, 0);
@@ -691,14 +693,14 @@ test('authoring role: a stale marker does not matter, and a refused sync is exit
     seedUpdateMarker(cwd, 'c'.repeat(40));
     const refused = fakeExec({ syncStatus: () => 2, contractStatus: 2 });
     const lines = [];
-    const report = await runUpdate({ cwd, exec: refused.exec, log: (l) => lines.push(l), projects: [], invokingProject: '/tmp/p', opts: {} });
+    const report = await runUpdate({ cwd, exec: refused.exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {} });
     assert.equal(report.exit, 2, 'a locally modified agent is relayed as a refusal');
     assert.equal(report.contract_drift, true);
     assert.equal(refused.calls.filter((c) => c.startsWith('npm')).length, 0);
     assert.match(lines.join('\n'), /agent sync REFUSED/);
 
     const drift = fakeExec({ contractStatus: 2 });
-    const r2 = await runUpdate({ cwd, exec: drift.exec, log: () => {}, projects: [], invokingProject: '/tmp/p', opts: {} });
+    const r2 = await runUpdate({ cwd, exec: drift.exec, log: () => {}, projects: REG_P, invokingProject: '/tmp/p', opts: {} });
     assert.equal(r2.exit, 0, "a sibling's contract drift never fails the authoring sync");
     assert.equal(r2.contract_drift, true);
   } finally {
@@ -720,6 +722,102 @@ test('authoring role: --check changes nothing (no sync); a missing invoking proj
     const r2 = await runUpdate({ cwd, exec: none.exec, log: () => {}, projects: [], opts: {} });
     assert.equal(r2.exit, 1);
     assert.deepEqual(none.calls, []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: the invoking project must be REGISTERED — an unregistered cwd is a loud exit 2 with no sync', async () => {
+  const cwd = authoringCwd();
+  try {
+    const { exec, calls } = fakeExec();
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/not-a-project', opts: {} });
+    assert.equal(report.exit, 2);
+    assert.deepEqual(calls, [], 'nothing runs: no sync-agents, no stamp-contract');
+    assert.match(lines.join('\n'), /\/tmp\/not-a-project/, 'the refusal names the directory it refused');
+    assert.match(lines.join('\n'), /not (inside )?a registered project/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: a subdirectory of a registered project resolves to that project (longest match wins); CLAUDE_PROJECT_DIR beats cwd', async () => {
+  const cwd = authoringCwd();
+  try {
+    const reg = [
+      { name: 'outer', repo_path: '/tmp/work' },
+      { name: 'inner', repo_path: '/tmp/work/inner' },
+      { name: 'sibling', repo_path: '/tmp/work-other' },
+    ];
+    const sub = fakeExec();
+    await runUpdate({ cwd, exec: sub.exec, log: () => {}, projects: reg, invokingProject: '/tmp/work/inner/src/deep', opts: {} });
+    assert.deepEqual(sub.calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), ['/tmp/work/inner'], 'the nearest registered ancestor, not the prefix sibling');
+
+    const env = fakeExec();
+    const report = await runUpdate({ cwd, exec: env.exec, log: () => {}, projects: reg, invokingProject: '/tmp/work-other', projectDir: '/tmp/work', opts: {} });
+    assert.equal(report.exit, 0);
+    assert.deepEqual(env.calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), ['/tmp/work'], 'CLAUDE_PROJECT_DIR wins over cwd');
+
+    const bad = fakeExec();
+    const refused = await runUpdate({ cwd, exec: bad.exec, log: () => {}, projects: reg, invokingProject: '/tmp/work', projectDir: '/tmp/elsewhere', opts: {} });
+    assert.equal(refused.exit, 2, 'a set-but-unregistered CLAUDE_PROJECT_DIR is refused, never silently replaced by cwd');
+    assert.deepEqual(bad.calls, []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: the clone itself (when registered) is synced but its contract files are not checked', async () => {
+  const cwd = authoringCwd();
+  try {
+    const { exec, calls } = fakeExec();
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'sterling', repo_path: cwd }], invokingProject: cwd, opts: {} });
+    assert.equal(report.exit, 0);
+    assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 1);
+    assert.equal(calls.filter((c) => c.includes('stamp-contract')).length, 0, 'stamp-contract skips the clone silently, so it is not called');
+    assert.match(lines.join('\n'), /the clone's contract files are hand-maintained — not checked/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: stamp-contract reporting "0 project(s) processed" for a registered non-clone project is a loud step failure', async () => {
+  const cwd = authoringCwd();
+  try {
+    const inner = fakeExec();
+    const exec = (cmd, args) =>
+      args[0]?.endsWith('stamp-contract.mjs')
+        ? { status: 0, stdout: 'DRY-RUN (no writes; pass --apply) — 0 project(s) processed, 0 already in sync, 0 refusal(s).\n', stderr: '' }
+        : inner.exec(cmd, args);
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {} });
+    assert.equal(report.exit, 1);
+    assert.match(lines.join('\n'), /stamp-contract checked NOTHING/);
+    assert.equal(report.contract_unchecked, true);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: --no-projects is a stated no-op; --force is stated as meaningless and the sync still runs', async () => {
+  const cwd = authoringCwd();
+  try {
+    const off = fakeExec();
+    const lines = [];
+    const report = await runUpdate({ cwd, exec: off.exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: { projects: false } });
+    assert.equal(report.exit, 0);
+    assert.deepEqual(off.calls, [], '--no-projects syncs nothing on the authoring machine');
+    assert.match(lines.join('\n'), /--no-projects: nothing synced/);
+
+    const forced = fakeExec();
+    const forcedLines = [];
+    const r2 = await runUpdate({ cwd, exec: forced.exec, log: (l) => forcedLines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: { force: true } });
+    assert.equal(r2.exit, 0);
+    assert.match(forcedLines.join('\n'), /--force has no meaning on the authoring machine/);
+    assert.equal(forced.calls.filter((c) => c.includes('sync-agents')).length, 1);
+    assert.equal(forced.calls.filter((c) => c.startsWith('npm')).length, 0);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

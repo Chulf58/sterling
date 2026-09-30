@@ -73,13 +73,13 @@ const norm = (p) => {
   const s = p.replace(/\\/g, '/').replace(/\/+$/, '');
   return process.platform === 'win32' ? s.toLowerCase() : s;
 };
-async function loadProjects() {
+async function loadProjects({ includeClone = false } = {}) {
   const store = await loadStoreModule();
   const registry = new store.ProjectRegistry(store.registryPath());
   try {
     return registry
       .list()
-      .filter((p) => existsSync(p.repo_path) && norm(p.repo_path) !== norm(target))
+      .filter((p) => existsSync(p.repo_path) && (includeClone || norm(p.repo_path) !== norm(target)))
       .map((p) => ({ name: p.name, repo_path: p.repo_path }));
   } finally {
     registry.close();
@@ -105,7 +105,7 @@ const reexec = isReexecChild
       env: { ...process.env, [UPDATE_REEXEC_ENV]: '1', [UPDATE_REEXEC_FROM_ENV]: from },
     });
 
-// invokingProject: the authoring machine syncs ONLY the project this was run from
-// (cwd), never the clone it lives in — see the AUTHORING branch in runUpdate.
-const report = await runUpdate({ cwd: target, projects: loadProjects, opts, reexec, invokingProject: process.cwd() });
+// invokingProject / projectDir: the authoring machine syncs ONLY the registered project
+// this was run from (CLAUDE_PROJECT_DIR beats cwd) — see the AUTHORING branch in runUpdate.
+const report = await runUpdate({ cwd: target, projects: loadProjects, opts, reexec, invokingProject: process.cwd(), projectDir: process.env.CLAUDE_PROJECT_DIR || null });
 process.exit(report.exit);
