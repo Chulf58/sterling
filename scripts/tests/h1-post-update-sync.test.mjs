@@ -150,6 +150,36 @@ test('sync failure: NO marker (the next session retries) and a loud banner', () 
   assert.match(r.ctx, /retries at the next session start/);
 });
 
+test('stamp-contract CRASH (exit 1 with a stack) after sync-agents refreshed agents: failure banner names the crash, no marker, and the RESTART line is still shown', () => {
+  // An installed copy once crashed stamp-contract at module load (git log in a .git-less
+  // root). The agents were already refreshed by then, so the user must still be told to
+  // restart even though the step as a whole failed.
+  const plugin = makePluginRoot();
+  writeFileSync(
+    join(plugin, 'scripts', 'stamp-contract.mjs'),
+    `import { appendFileSync } from 'node:fs';\n` +
+      `appendFileSync(process.env.FIXTURE_LOG, 'stamp-contract ' + process.argv.slice(2).join(' ') + '\\n');\n` +
+      `throw new Error('stamp-contract: git log failed in /fixture: fatal: not a git repository');\n`
+  );
+  const project = makeProject({ syncedVersion: '0.0.1' });
+  const r = runH1(project, plugin);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(markerOf(project), '0.0.1', 'no marker: the next session retries');
+  assert.match(r.sys, /post-update sync FAILED/);
+  assert.match(r.ctx, /stamp-contract exited 1/);
+  assert.match(r.ctx, /git log failed/, 'the crash itself is named');
+  assert.match(r.sys, /agents synced — RESTART/, 'sync-agents changed agents, so the restart line still reaches the user');
+  assert.match(r.ctx, /EXIT AND RELAUNCH/);
+});
+
+test('sync-agents itself failing prints no restart line (nothing was refreshed to restart for)', () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ syncedVersion: '0.0.1' });
+  const r = runH1(project, plugin, { FIXTURE_SYNC_EXIT: '1' });
+  assert.match(r.sys, /post-update sync FAILED/);
+  assert.doesNotMatch(r.sys, /agents synced — RESTART/);
+});
+
 test('stamp-contract that checked nothing (0 projects) is a failure too: no marker', () => {
   const plugin = makePluginRoot();
   writeFileSync(join(plugin, 'scripts', 'stamp-contract.mjs'), LOGGING_SCRIPT('stamp-contract', 'stamp-contract: — 0 project(s) processed\n', 'FIXTURE_CONTRACT_EXIT'));

@@ -216,6 +216,8 @@ export const BIN_ENTRIES = {
   'install-agents': 'scripts/install-agents.mjs',
   'list-projects': 'scripts/list-projects.mjs',
   'migrate-stores': 'scripts/migrate-stores.mjs',
+  // the no_capture no-server fallback the MCP server's session-event refusal names
+  'no-capture': 'scripts/no-capture.mjs',
   'plan-lock': 'scripts/plan-lock.mjs',
   'pr-review-wait': 'scripts/pr-review-wait.mjs',
   'rotation-note': 'scripts/rotation-note.mjs',

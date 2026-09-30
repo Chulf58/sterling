@@ -392,9 +392,9 @@ test('CONDUCTOR NOT ACTIVE: a project path containing a space renders as ONE lin
       line,
       // CHANGED (plugin-marketplace integration): H1 names the bundled bin/sync-agents.mjs
       // when the plugin ships it (pluginScript, decision
-      // sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone), else the
-      // scripts/ source — both forms are the correct recovery command.
-      new RegExp(`^CONDUCTOR NOT ACTIVE: settings key missing — run \`node '.*'/(bin|scripts)/sync-agents\\.mjs --target '${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'\` then EXIT AND RELAUNCH$`),
+      // sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone), and this
+      // repo commits bin/, so the recovery command here is exactly the bin/ form.
+      new RegExp(`^CONDUCTOR NOT ACTIVE: settings key missing — run \`node '.*'/bin/sync-agents\\.mjs --target '${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'\` then EXIT AND RELAUNCH$`),
       'the exact single-line, single-quoted recovery command'
     );
   } finally {

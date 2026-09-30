@@ -155,9 +155,10 @@ test('hook bundle bytes do not depend on the cwd the build ran from (absWorkingD
 test('bin/ bundles the scripts an installed copy spawns: the consumer checks and the concept_designed fallback', () => {
   // templates/check-consumer.mjs spawns check-record-citations and check-stale-claims,
   // and templates/target-claude-md.md names concept-designed as the no-server fallback;
+  // (and the MCP server names no-capture beside it as the no-server fallback);
   // each imports @sterling/* through scripts/lib/project.mjs, which an installed copy
   // (no node_modules) cannot resolve from the scripts/ source.
-  for (const name of ['check-record-citations', 'check-stale-claims', 'concept-designed']) {
+  for (const name of ['check-record-citations', 'check-stale-claims', 'concept-designed', 'no-capture']) {
     assert.ok(name in BIN_ENTRIES, `${name} is a BIN_ENTRIES member`);
     assert.ok(existsSync(join(root, 'bin', `${name}.mjs`)), `bin/${name}.mjs is committed`);
   }
@@ -208,6 +209,29 @@ test('bin/migrate-stores.mjs --all-stores respawns ITSELF, not the scripts/ sour
     assert.doesNotMatch(JSON.stringify(line), /ERR_MODULE_NOT_FOUND|Cannot find/, 'the per-store child loaded');
     assert.equal(line.ok, true, JSON.stringify(line));
     assert.equal(r.status, 0, r.stdout + r.stderr);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('bin/stamp-contract.mjs from a .git-less plugin root (an installed copy): never a crash — exit 0 or 2 and one line naming the missing history', () => {
+  const base = mkdtempSync(join(tmpdir(), 'sterling-bin-stamp-'));
+  try {
+    const plugin = join(base, 'plugin');
+    mkdirSync(join(plugin, 'bin'), { recursive: true });
+    mkdirSync(join(plugin, 'templates'), { recursive: true });
+    writeFileSync(join(plugin, 'bin', 'stamp-contract.mjs'), readFileSync(join(root, 'bin', 'stamp-contract.mjs')));
+    for (const t of ['target-agents-md.md', 'target-claude-md.md']) writeFileSync(join(plugin, 'templates', t), readFileSync(join(root, 'templates', t)));
+    const registryDb = join(base, 'registry.db');
+    new ProjectRegistry(registryDb).close();
+    const r = spawnSync(process.execPath, [join(plugin, 'bin', 'stamp-contract.mjs'), '--project', join(base, 'project')], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      cwd: base,
+      env: { ...process.env, STERLING_REGISTRY_DB: registryDb, GIT_CEILING_DIRECTORIES: base },
+    });
+    assert.ok(r.status === 0 || r.status === 2, `exit 0 or 2, never a crash: ${r.status}\n${r.stdout}${r.stderr}`);
+    assert.ok(r.stderr.includes(`stamp-contract: no git history at ${plugin} (installed plugin copy) — only the current template text counts as template-descended; older bullets read as drift`), r.stderr);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

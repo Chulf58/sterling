@@ -9495,10 +9495,10 @@ function runPostUpdateSync(root, project) {
   if (sync.status !== 0) return { ok: false, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
   const contract = run("stamp-contract.mjs", ["--project", project]);
-  if (contract.error) return { ok: false, detail: `stamp-contract did not run (${contract.error})` };
-  if (contract.status !== 0 && contract.status !== 2) return { ok: false, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
+  if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
+  if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
   if (contract.status === 0 && /—\s*0 project\(s\) processed/.test(contract.out)) {
-    return { ok: false, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) \u2014 the project is not reachable through the project registry; run /sterling:init here to register it` };
+    return { ok: false, restart, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) \u2014 the project is not reachable through the project registry; run /sterling:init here to register it` };
   }
   return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail };
 }
@@ -9623,10 +9623,11 @@ POST-UPDATE SYNC (H1): SKIPPED \u2014 ${join11(root, ".claude-plugin", "plugin.j
       const hop = `Sterling ${previous ?? "(never synced)"}\u2192${current}`;
       const result = runPostUpdateSync(root, input.cwd);
       if (!result.ok) {
-        postUpdateWarning = `\u2717 ${hop}: post-update sync FAILED \u2014 ${result.detail}. `;
+        const restartOwed = result.restart ? " agents synced \u2014 RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough)." : "";
+        postUpdateWarning = `\u2717 ${hop}: post-update sync FAILED \u2014 ${result.detail}.${restartOwed} `;
         postUpdateContext = `
 
-POST-UPDATE SYNC FAILED (H1): ${hop} \u2014 ${result.detail}. No marker was written, so it retries at the next session start; tell the user and fix the cause.`;
+POST-UPDATE SYNC FAILED (H1): ${hop} \u2014 ${result.detail}. No marker was written, so it retries at the next session start; tell the user and fix the cause.` + (result.restart ? " sync-agents DID refresh agents before the failure: RESTART REQUIRED \u2014 project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent." : "");
       } else {
         try {
           writeFileSync7(markerPath, `${current}

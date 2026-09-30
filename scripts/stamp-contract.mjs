@@ -14,10 +14,10 @@
 //     and a per-bullet inventory would bury the rare refusal (P1).
 //   node scripts/stamp-contract.mjs [--apply] [--verbose] [--project <repo_path>...]
 import { readFileSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProjectRegistry, registryPath } from '@sterling/store';
+import { historicalVariants } from './lib/contract-history.mjs';
 
 const APPLY = process.argv.includes('--apply');
 const VERBOSE = process.argv.includes('--verbose');
@@ -179,28 +179,6 @@ function itemEnd(text, start) {
   return end;
 }
 
-// Every historical variant of each target bullet, from BOTH templates' git log — the "clean
-// template-descended" set a sibling block must match to be replaced. Searched across both files
-// (not just the lead's current home) so a bullet that moved at the AGENTS.md/CLAUDE.md split
-// commit keeps its pre-split ancestry.
-function historicalVariants() {
-  const allLeads = [...TARGET_LEADS, ...[...RENAMED_LEADS.values()].flat()];
-  const variants = new Map(allLeads.map((l) => [l, new Set()]));
-  for (const rel of TEMPLATE_RELS) {
-    const log = spawnSync('git', ['log', '--format=%H', '--', rel], { cwd: repoRoot, encoding: 'utf8' });
-    if (log.status !== 0) throw new Error(`stamp-contract: git log failed in ${repoRoot}: ${log.stderr}`);
-    for (const sha of log.stdout.split('\n').filter(Boolean)) {
-      const show = spawnSync('git', ['show', `${sha}:${rel}`], { cwd: repoRoot, encoding: 'utf8' });
-      if (show.status !== 0) continue;
-      for (const lead of allLeads) {
-        const found = extractBlock(show.stdout, lead);
-        if (found) variants.get(lead).add(found.block);
-      }
-    }
-  }
-  return variants;
-}
-
 const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync(join(repoRoot, rel), 'utf8')]));
 const current = new Map();
 const leadLayer = new Map(); // lead -> template rel it currently lives in (= the sibling file it propagates to)
@@ -210,7 +188,15 @@ for (const lead of TARGET_LEADS) {
   leadLayer.set(lead, home);
   current.set(lead, extractBlock(templates.get(home), lead).block);
 }
-const variants = historicalVariants();
+// Historical variants (scripts/lib/contract-history.mjs): the git history of both
+// templates, or on an installed copy with no history only the current text.
+const variants = historicalVariants({
+  repoRoot,
+  templateRels: TEMPLATE_RELS,
+  leads: [...TARGET_LEADS, ...[...RENAMED_LEADS.values()].flat()],
+  extractBlock,
+  currentBlocks: current,
+});
 const layerFileName = (rel) => (rel === AGENTS_TEMPLATE_REL ? 'AGENTS.md' : 'CLAUDE.md');
 
 const registry = new ProjectRegistry(registryPath());
