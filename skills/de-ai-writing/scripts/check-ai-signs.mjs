@@ -8,7 +8,7 @@
 // It is an aid, never a gate: it always exits 0. Judgement signs (1.6-1.8, 2.5, 2.6, 3.6,
 // 3.7) are not scanned; the skill covers them with a human read. Node builtins only.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 // --- sentence-level signs ----------------------------------------------------------------
@@ -126,7 +126,7 @@ const SENTENCE_SIGNS = [
     String.raw`\bconnected to\b`,
   ]],
   ['2.4', 'Negative parallelisms', [
-    String.raw`\bnot only\b[^.;!?]*?\bbut\b`,
+    String.raw`\bnot only\b[^.;!?]{0,200}?\bbut\b`,
     String.raw`\bnot (?:just|merely|simply)\b[^.;!?]{1,80}?(?:,|;|\u2014)\s*(?:it's|it is|it was|that's|but)\b`,
     String.raw`\b(?:isn't|is not|wasn't|aren't|it's not|it is not|that's not)\b[^.;!?,]{1,40},\s*(?:it's|it is|it was|but)\b`,
     String.raw`\bnot\s+[\w'-]+(?:\s+[\w'-]+){0,3},\s+but\b`,
@@ -152,7 +152,7 @@ const SENTENCE_SIGNS = [
     String.raw`\bmaintains a low profile\b`,
   ]],
   ['4.3', 'Placeholders', [
-    String.raw`\[(?:your|insert|describe|enter|add)\b[^\]]*\](?!\()`,
+    String.raw`\[(?:your|insert|describe|enter|add)\b[^\]]*\]`,
     String.raw`\bINSERT_[A-Z_]+\b`,
     String.raw`\b\d{4}-XX-XX\b`,
   ]],
@@ -210,16 +210,23 @@ function htmlToMarkdownish(text) {
     .replace(/&(?:mdash|amp|nbsp|quot|lt|gt|rsquo|lsquo|ldquo|rdquo|#8212|#x2014|#39);/gi, (m) => ENTITIES[m.toLowerCase()] ?? m);
 }
 
+const FRONT_MATTER_MAX_LINES = 40;
+
+// Front matter is a leading --- block with at least one "key:" line, closed within 40 lines.
+// Anything else starting with --- is a thematic break and stays prose.
 function stripFrontMatter(lines) {
   if (lines[0]?.trim() !== '---') return lines;
   const end = lines.findIndex((l, i) => i > 0 && l.trim() === '---');
-  return end === -1 ? lines : lines.map((l, i) => (i <= end ? '' : l));
+  if (end === -1 || end > FRONT_MATTER_MAX_LINES) return lines;
+  if (!lines.slice(1, end).some((l) => /^\s*[\w-]+\s*:/.test(l))) return lines;
+  return lines.map((l, i) => (i <= end ? '' : l));
 }
 
-/** Blank out fenced code, blockquote lines and table rows, keeping line structure. */
+/** Blank out fenced code, blockquote lines and table rows, keeping line structure.
+ *  Returns { lines, unclosedFence }. */
 function dropSkippedLines(lines) {
   let fence = null;
-  return lines.map((line) => {
+  const kept = lines.map((line) => {
     const f = line.match(/^\s{0,3}(`{3,}|~{3,})/);
     if (fence) {
       if (f && f[1][0] === fence[0] && f[1].length >= fence.length && line.trim() === f[1]) fence = null;
@@ -229,6 +236,7 @@ function dropSkippedLines(lines) {
     if (/^\s{0,3}>/.test(line) || /^\s*\|/.test(line)) return '';
     return line;
   });
+  return { lines: kept, unclosedFence: fence !== null };
 }
 
 const LIST_RE = /^\s*(?:[-*+]|\d+[.)])\s+/;
@@ -257,8 +265,10 @@ function maskInline(raw) {
     .replace(/[‘’]/g, "'")
     .replace(/[“”]/g, '"')
     .replace(/`[^`]*`/g, ' ')
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '[$1]')
-    .replace(new RegExp(`"[^"]{1,${QUOTE_SPAN_MAX}}"`, 'g'), ' ');
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    // An opening quote follows a non-word character and a closing one precedes one, so a stray
+    // inch mark (5") cannot open a span that swallows the prose after it.
+    .replace(new RegExp(`(?<!\\w)"[^"\\s](?:[^"]{0,${QUOTE_SPAN_MAX - 2}}[^"\\s])?"(?!\\w)`, 'g'), ' ');
 }
 
 function stripMarkers(s) {
@@ -269,6 +279,13 @@ function stripMarkers(s) {
     .replace(/\s+/g, ' ')
     .trim();
 }
+
+// 3.3: a list item that opens with a label: bold with the colon inside or outside, bold then a
+// dash, or an unbolded "Label:" of up to 40 characters with no sentence punctuation before it.
+const BOLD = String.raw`(?:\*\*[^*\n]+?\*\*|__[^_\n]+?__)`;
+const LIST_LEAD = String.raw`^\s*(?:[-*+]|\d+[.)])\s+`;
+const LABEL_BULLET_RE = new RegExp(`${LIST_LEAD}(?:\\*\\*[^*\\n]+?:\\*\\*|__[^_\\n]+?:__|${BOLD}\\s*[:\u2014\u2013-]|[A-Z][^:.!?\\n]{1,40}:\\s)`);
+const BOLD_LEAD_RE = new RegExp(`(${LIST_LEAD})${BOLD}`);
 
 const ABBR_RE = /\b(?:e\.g|i\.e|etc|vs|cf|approx|Mr|Mrs|Ms|Dr|St|No|Fig|U\.S|U\.K)\./gi;
 
@@ -292,7 +309,8 @@ const truncate = (s, n = 200) => (s.length > n ? `${s.slice(0, n - 3)}...` : s);
 /** Returns { words, sentences, findings: Map<sign, {count, items[]}> } for one text. */
 export function scanText(input) {
   const text = htmlToMarkdownish(input.replace(/\r\n?/g, '\n'));
-  const blocks = buildBlocks(dropSkippedLines(stripFrontMatter(text.split('\n'))));
+  const skipped = dropSkippedLines(stripFrontMatter(text.split('\n')));
+  const blocks = buildBlocks(skipped.lines);
   const findings = new Map();
   const add = (sign, item, count = 1) => {
     const f = findings.get(sign) ?? { count: 0, items: [] };
@@ -312,13 +330,11 @@ export function scanText(input) {
   for (const block of blocks) {
     if (block.kind === 'break') continue;
     const masked = maskInline(block.raw);
-    // A bold lead-in that opens a list item is a label, not bold running prose; 3.3 covers
-    // the "**Label:**" form, so those spans stay out of the 3.2 density.
-    const proseBold = block.kind === 'list' ? masked.replace(/^(\s*(?:[-*+]|\d+[.)])\s+)(?:\*\*[^*\n]+\*\*|__[^_\n]+__)/, '$1') : masked;
+    // A label bullet's bold lead-in is counted once, under 3.3, not again in the 3.2 density.
+    const isLabelBullet = block.kind === 'list' && LABEL_BULLET_RE.test(masked);
+    const proseBold = isLabelBullet ? masked.replace(BOLD_LEAD_RE, '$1') : masked;
     boldSpans += (proseBold.match(/\*\*[^*\n]+\*\*|__[^_\n]+__/g) ?? []).length;
-    if (block.kind === 'list' && /^\s*(?:[-*+]|\d+[.)])\s+(?:\*\*[^*\n]+:\*\*|__[^_\n]+:__)/.test(masked)) {
-      labelBullets.push(truncate(stripMarkers(masked)));
-    }
+    if (isLabelBullet) labelBullets.push(truncate(stripMarkers(masked)));
     const clean = stripMarkers(masked);
     if (block.kind === 'heading' && isTitleCase(clean)) add('3.1', truncate(clean));
     const emoji = clean.match(EMOJI_RE);
@@ -347,7 +363,8 @@ export function scanText(input) {
     for (const s of emDashSentences) findings.get('3.4').items.push(s);
   }
   if (breaks >= THEMATIC_BREAK_MIN) add('3.8', `${breaks} thematic breaks (---) in ${words} words`, breaks);
-  return { words, sentences: sentenceCount, findings };
+  const warnings = skipped.unclosedFence ? ['unclosed code fence: everything after it was skipped'] : [];
+  return { words, sentences: sentenceCount, findings, warnings };
 }
 
 // --- reporting ----------------------------------------------------------------------------------
@@ -361,7 +378,8 @@ function report(label, result, summary, out) {
     out.push(summary ? `${sign}  ${String(f.count).padStart(3)}  ${SIGN_NAME[sign]}` : `${sign} ${SIGN_NAME[sign]} (${f.count})`);
     if (!summary) for (const item of f.items) out.push(`  - ${item}`);
   }
-  out.push(total ? `${total} hit(s).` : 'No pattern-matchable signs found.');
+  if (result.words === 0) out.push('nothing scanned: every line was skipped (front matter/fence/blockquote/table)');
+  else out.push(total ? `${total} hit(s).` : 'No pattern-matchable signs found.');
 }
 
 function main(argv) {
@@ -383,6 +401,7 @@ function main(argv) {
       continue;
     }
     const result = scanText(content);
+    for (const w of result.warnings) console.error(`check-ai-signs: ${t === '-' ? '(stdin)' : t}: ${w}`);
     report(t === '-' ? '(stdin)' : t, result, summary, out);
     for (const [sign, f] of result.findings) totals.set(sign, (totals.get(sign) ?? 0) + f.count);
   }
@@ -395,4 +414,4 @@ function main(argv) {
 }
 
 // Run as a CLI only when executed directly, so tests can import scanText.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2));
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) main(process.argv.slice(2));
