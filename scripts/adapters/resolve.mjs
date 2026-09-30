@@ -8,6 +8,18 @@ import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+// Every adapter module is imported through ONE template-literal specifier with
+// a fixed `.mjs` suffix: Node resolves it exactly like a relative URL, and
+// esbuild turns it into a glob import that bundles every scripts/adapters/*.mjs
+// — so a bin/ bundle (scripts/lib/bundled-artifacts.mjs) loads an adapter with
+// no node_modules present. A registry entry naming a non-.mjs module is refused.
+function importAdapterModule(module) {
+  if (typeof module !== 'string' || !module.endsWith('.mjs')) {
+    throw new Error(`adapter registry: module ${JSON.stringify(module)} must be a .mjs file`);
+  }
+  return import(`./${module.slice(0, -'.mjs'.length)}.mjs`);
+}
+
 export function loadAdapterRegistry(dir = here) {
   const registry = JSON.parse(readFileSync(join(dir, 'registry.json'), 'utf8'));
   if (registry.version !== 1 || !Array.isArray(registry.adapters)) {
@@ -24,7 +36,7 @@ export async function loadAdapter(adapterName, dir = here) {
       `declared toolchain '${adapterName}' resolves to no registered adapter (registry: ${registry.adapters.map((a) => a.name).join(', ') || 'empty'}) — consistency check failure (§9.1)`
     );
   }
-  const mod = await import(new URL(`./${entry.module}`, import.meta.url).href);
+  const mod = await importAdapterModule(entry.module);
   return mod;
 }
 
@@ -55,7 +67,7 @@ export async function checkAdapterRegistry(dir = here) {
   for (const entry of registry.adapters) {
     let mod;
     try {
-      mod = await import(new URL(`./${entry.module}`, import.meta.url).href);
+      mod = await importAdapterModule(entry.module);
     } catch (e) {
       violations.push({ kind: 'module_unloadable', detail: `${entry.name} -> ${entry.module}: ${e.message}` });
       continue;

@@ -16,7 +16,7 @@ test('TUI bundle: single file, no workspace resolution, exits politely on non-TT
   // comparison would pass while the artifact was in fact rewritten.
   const outDir = mkdtempSync(join(tmpdir(), 'sterling-tui-build-'));
   const bundle = join(outDir, 'sterling-tui.mjs');
-  const shipped = join(root, 'packages', 'tui', 'bundle', 'sterling-tui.mjs');
+  const shipped = join(root, 'tui', 'sterling-tui.mjs');
   const shippedBefore = existsSync(shipped) ? statSync(shipped).mtimeMs : null;
   try {
     const build = spawnSync(process.execPath, [join(root, 'scripts', 'build-tui.mjs'), '--out-file', bundle], { encoding: 'utf8', cwd: root, timeout: 180_000 });

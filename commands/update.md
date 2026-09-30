@@ -5,7 +5,7 @@ description: Update this machine's Sterling clone to origin's default branch —
 Run the update executor and report its output to the user verbatim:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/scripts/update.mjs"
+node "${CLAUDE_PLUGIN_ROOT}/bin/update.mjs"
 ```
 
 (The script ships with the plugin and updates the Sterling clone it lives in — never the project you invoked it from. A bare `scripts/` path only resolves inside the Sterling repo itself.)

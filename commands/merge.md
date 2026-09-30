@@ -5,7 +5,7 @@ description: Merge the current conductor-direct branch into the base and sweep m
 Invoking this is the merge-to-main decision, so run it only once the change is committed and every affected article is reconciled. From the feature branch:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/scripts/direct-merge.mjs"
+node "${CLAUDE_PLUGIN_ROOT}/bin/direct-merge.mjs"
 ```
 
 It merges the current branch `--no-ff` into the base (the default branch; `--into <b>` to override), deletes that branch, sweeps every other fully merged branch (`git branch -d` refuses unmerged branches), then pushes the base to origin (`--no-push` opts out; no origin skips loudly). It refuses on a dirty tree, when no branch is checked out (detached HEAD, exit 2), when already on the base, when `--branch` names a branch other than the checked-out one (exit 2, before the battery — the battery validates the checked-out tree, so it cannot vouch for another branch; check that branch out instead), or when files beyond generated projections changed without both version fields moving together (`.claude-plugin/plugin.json` and `package.json`; `--allow-same-version` is the deliberate escape). Open `reconcile_needed` items covering changed files are disclosed on stderr with their paths and age, never refused (decision merge-discloses-derived-drift-never-refuses-on-it). Report the merged branch, swept list, and whether the push landed.
