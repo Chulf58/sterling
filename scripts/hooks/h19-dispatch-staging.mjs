@@ -68,6 +68,8 @@ import {
   stripReviewTerritoryLine,
   assembleDelivery,
   hazardParts,
+  cappedHazards,
+  HAZARD_CAP,
   recordRevision,
   resolveTotalCap,
   isSubstanceDelivered,
@@ -404,6 +406,14 @@ async function main(input) {
       ...(unattributableLine ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: unattributableLine }] : []),
       ...(!EXEMPT_AGENT_TYPES.has(input.agent_type) ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: RETURN_CONTRACT }] : []),
     ];
+    // ONE HAZARD CAP PER PACKAGE (decision 92088a62: "HAZARDS: at most 3 per
+    // package"). Each channel used to cap at HAZARD_CAP on its own, so a
+    // package could carry six whole hazards. The path channel fills the cap
+    // first and the subject channel gets what is left; its overflow is
+    // disclosed by its own '+N more' line. Read-only lanes keep per-channel
+    // pointer caps (decision 21e3637e): a pointer line is not a whole hazard.
+    const subjectHazardCap =
+      hazardMode === 'whole' ? Math.max(0, HAZARD_CAP - cappedHazards(freshHazards).length) : HAZARD_CAP;
     const assemble = () => {
       const parts = [];
       if (freshOwners.length || freshHazards.length || freshDecisions.length) {
@@ -438,7 +448,10 @@ async function main(input) {
             contentClass: 'chrome',
           },
           // Matched on the task's SUBJECT, not a file path.
-          ...hazardParts(subjectHazards, { remedy, matchLabel: 'for this subject', mode: hazardMode }),
+          ...hazardParts(subjectHazards, {
+            remedy, matchLabel: 'for this subject', mode: hazardMode, cap: subjectHazardCap,
+            capLabel: subjectHazardCap < HAZARD_CAP ? `cap ${HAZARD_CAP} per package, shared with the path channel` : undefined,
+          }),
           ...(subjectDecisions.length
             ? [
                 decisionPointerPart('(subject match)', subjectDecisions, {

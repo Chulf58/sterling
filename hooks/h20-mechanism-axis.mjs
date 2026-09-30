@@ -8049,41 +8049,50 @@ function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes, matchLabel = "for
   const slug = ap?.slug ? typeof clipSlugBytes === "number" ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug : "";
   return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, pointerOnly = false } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, pointerOnly = false, capLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
-  const fullTotal = total ?? hazards.length;
-  const dropped = suppressed ?? hazards.length - shown.length;
-  const blocks = shown.map(
-    (ap) => pointerOnly ? hazardHeaderLine(ap, { matchLabel }) : [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
-  );
-  if (dropped > 0) {
-    const keys = fileKeys.map((k) => `"${k}"`).join(",");
-    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
-    blocks.push(`\u2026 ${dropped} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
-  }
+  const blocks = shown.map((ap) => pointerOnly ? hazardHeaderLine(ap, { matchLabel }) : wholeHazardBlock(ap, charCap, matchLabel));
+  const disclosure = hazardDisclosureLine(hazards, shown, { cap, fileKeys, remedy, total, suppressed, capLabel });
+  if (disclosure) blocks.push(disclosure);
   return blocks;
 }
-function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = "whole" } = {}) {
+function wholeHazardBlock(ap, charCap, matchLabel) {
+  return [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n");
+}
+function hazardDisclosureLine(hazards, shown, { cap, fileKeys = [], remedy, total, suppressed, capLabel }) {
+  const fullTotal = total ?? hazards.length;
+  const dropped = suppressed ?? hazards.length - shown.length;
+  if (!(dropped > 0)) return "";
+  const keys = fileKeys.map((k) => `"${k}"`).join(",");
+  const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
+  return `\u2026 ${dropped} more hazard(s) NOT shown (${capLabel ?? `cap ${cap}`}) \u2014 ${widen} for the full set`;
+}
+function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = "whole", capLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
   if (mode === "pointer") return hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   if (mode === "question") return hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
-  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
-  return blocks.map(
-    (text, i) => i < shown.length ? {
-      kind: "hazard",
-      contentClass: "substance",
-      identity: shown[i].id,
-      revision: recordRevision(shown[i]),
-      name: shown[i].slug || shown[i].title,
-      text,
-      // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
-      // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
-      // the hard transport ceiling degrades to this bare notice — never a
-      // partial trigger/right_way (the HAZARDS clause: "each whole") —
-      // and the assembler then correctly withholds its substance mark.
-      pointer: hazardOverflowPointer(shown[i], matchLabel)
-    } : { kind: "hazard", contentClass: "chrome", text }
-  );
+  if (mode === "lead") return hazardLeadParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
+  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel, capLabel });
+  return blocks.map((text, i) => i < shown.length ? wholeHazardPart(shown[i], text, matchLabel) : { kind: "hazard", contentClass: "chrome", text });
+}
+function wholeHazardPart(ap, text, matchLabel) {
+  return {
+    kind: "hazard",
+    contentClass: "substance",
+    identity: ap.id,
+    revision: recordRevision(ap),
+    name: ap.slug || ap.title,
+    text,
+    // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
+    // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
+    // the hard transport ceiling degrades to this bare notice — never a
+    // partial trigger/right_way (the HAZARDS clause: "each whole") —
+    // and the assembler then correctly withholds its substance mark.
+    pointer: hazardOverflowPointer(ap, matchLabel),
+    // A hazard that fits alone but not beside what the package already holds
+    // degrades to this notice instead, so the reader is told the real cause.
+    pointerWhenFull: hazardPackageFullPointer(ap, matchLabel)
+  };
 }
 var HAZARD_POINTER_HEADER = "HAZARDS (pointer-only: read-only lane \u2014 knowledge_get each before acting on its subject)";
 function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel }) {
@@ -8099,7 +8108,8 @@ function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, supp
         revision: recordRevision(shown[i]),
         name: shown[i].slug || shown[i].title,
         text,
-        pointer: hazardOverflowPointer(shown[i], matchLabel)
+        pointer: hazardOverflowPointer(shown[i], matchLabel),
+        pointerWhenFull: hazardPackageFullPointer(shown[i], matchLabel)
       } : { kind: "hazard", contentClass: "chrome", text }
     )
   ];
@@ -8130,13 +8140,40 @@ function hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, sup
         revision: recordRevision(shown[i]),
         name: shown[i].slug || shown[i].title,
         text,
-        pointer: hazardOverflowPointer(shown[i], matchLabel)
+        pointer: hazardOverflowPointer(shown[i], matchLabel),
+        pointerWhenFull: hazardPackageFullPointer(shown[i], matchLabel)
       } : { kind: "hazard", contentClass: "chrome", text }
     )
   ];
 }
+function hazardLeadParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel = "for this path" }) {
+  if (!shown.length) return [];
+  const [lead, ...rest] = shown;
+  const parts = [wholeHazardPart(lead, wholeHazardBlock(lead, Number.MAX_SAFE_INTEGER, matchLabel), matchLabel)];
+  if (rest.length) {
+    parts.push(
+      { kind: "hazard", contentClass: "chrome", text: `\u25B8 ${rest.length} MORE HAZARD(S) ${matchLabel} \u2014 one line each, not the whole record; knowledge_get the id for its right way.` },
+      ...rest.map((ap) => ({
+        kind: "hazard",
+        contentClass: "discovery",
+        identity: ap.id,
+        revision: recordRevision(ap),
+        name: ap.slug || ap.title,
+        text: hazardQuestionLine(ap),
+        pointer: hazardOverflowPointer(ap, matchLabel),
+        pointerWhenFull: hazardPackageFullPointer(ap, matchLabel)
+      }))
+    );
+  }
+  const disclosure = hazardDisclosureLine(hazards, shown, { cap, fileKeys, remedy, total, suppressed });
+  if (disclosure) parts.push({ kind: "hazard", contentClass: "chrome", text: `  ${disclosure}` });
+  return parts;
+}
 function hazardOverflowPointer(record, matchLabel = "for this path") {
   return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
+}
+function hazardPackageFullPointer(record, matchLabel = "for this path") {
+  return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 not shown whole: delivery full (this package reached the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
 }
 var ARTICLE_POINTER_CAP = 3;
 function renderArticlePointers(articles, cap = ARTICLE_POINTER_CAP, { remedy } = {}) {
@@ -8254,6 +8291,7 @@ function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}
   const fitsOrdinaryCap = (extra = 0) => ordinaryBytesUsed() + extra <= ordinaryCeiling;
   const fitsTransport = (extra = 0) => totalBytes() + extra <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
   const pointerFor = (part) => part.pointer || "";
+  const fullPointerFor = (part) => part.pointerWhenFull || pointerFor(part);
   const tryDegradeOrdinary = (part, fitsFn) => {
     selected.set(part, { text: part.text, full: true });
     if (fitsFn("whole")) return;
@@ -8299,7 +8337,7 @@ ${line}` : line;
     selected.set(part, { text: part.text, full: true });
     if (fitsTransport()) return;
     selected.delete(part);
-    const ptr = pointerFor(part);
+    const ptr = bytes(part.text) > DELIVERY_TRANSPORT_VISIBLE_BYTES ? pointerFor(part) : fullPointerFor(part);
     if (ptr) {
       selected.set(part, { text: ptr, full: false });
       if (fitsTransport()) return;
@@ -8418,7 +8456,7 @@ ${line}` : line;
         continue;
       }
       if (degradable) {
-        selected.set(degradable, { text: pointerFor(degradable), full: false });
+        selected.set(degradable, { text: fullPointerFor(degradable), full: false });
         continue;
       }
       selected.set(aggregatePart, { text, full: false });
@@ -8550,6 +8588,13 @@ function finish(extraContext) {
 }
 var isQuestion = Array.isArray(input.tool_input?.questions);
 var isConsult = typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__");
+var isDispatch = !isQuestion && !isConsult;
+function citedInBrief(record, text) {
+  const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const id8 = String(record.id ?? "").slice(0, 8);
+  if (id8.length === 8 && new RegExp(`(?<![0-9a-f])${esc(id8)}(?![0-9a-f])`, "i").test(text)) return true;
+  return !!record.slug && new RegExp(`(?<![a-z0-9-])${esc(record.slug)}(?![a-z0-9-])`, "i").test(text);
+}
 function main(input2) {
   try {
     const outgoing = outgoingProposalText(input2.tool_input);
@@ -8599,9 +8644,12 @@ function main(input2) {
     if (!scored.length) return finish();
     const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
     const guard = readGuard(gPath);
-    const fresh = scored.filter(
-      (x) => x.record.type === "anti_pattern" && !isQuestion ? !isSubstanceDelivered(guard, x.record) : !isKnownDelivered(guard, x.record)
-    );
+    const briefText = String(input2.tool_input?.prompt ?? "");
+    const fresh = scored.filter((x) => {
+      if (x.record.type !== "anti_pattern") return !isKnownDelivered(guard, x.record);
+      if (isDispatch && citedInBrief(x.record, briefText)) return false;
+      return isConsult ? !isSubstanceDelivered(guard, x.record) : !isKnownDelivered(guard, x.record);
+    });
     if (!fresh.length) return finish();
     const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
     const decisions = fresh.filter((x) => x.record.type === "decision");
@@ -8614,7 +8662,12 @@ function main(input2) {
     const centralAll = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))];
     const centralCovered = centralAll.slice(0, HEADER_CENTRAL_TERM_CAP).join(", ") + (centralAll.length > HEADER_CENTRAL_TERM_CAP ? ` (+${centralAll.length - HEADER_CENTRAL_TERM_CAP} more)` : "");
     const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
-    const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask (probed 2026-08-11). Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input2.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
+    const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask (probed 2026-08-11). Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : (
+      // PreToolUse context arrives WITH the dispatch (timing note at the top
+      // of this file), so the brief has already gone out: the act this
+      // prompts is a correction (decision a4912f91 point 5).
+      `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just dispatched '${input2.tool_input?.subagent_type ?? "an agent"}'; the brief has already gone out. The store holds records matching its SUBJECT (${matchedClause}), which no file you touched would surface. If one changes the brief's premise, correct the agent now with SendMessage (or re-dispatch) \u2014 a fan-out multiplies a bad premise by N.`
+    );
     const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
     const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
     const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
@@ -8650,7 +8703,8 @@ function main(input2) {
         remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
         // Matched on the prompt's SUBJECT, not a file path (the H19 label).
         matchLabel: "for this subject",
-        mode: isQuestion ? "question" : "whole"
+        // Dispatch: rank 1 whole, ranks 2-3 as trigger lines (a4912f91).
+        mode: isQuestion ? "question" : isDispatch ? "lead" : "whole"
       })
     ];
     const decisionBlocks = [

@@ -217,7 +217,12 @@ test('REGRESSION: a Task dispatch still renders the unchanged literal dispatch p
     const r = runHook(dispatch(dir, MOTIVATING_PROMPT, 'coder'), dir);
     assert.equal(r.code, 0);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    assert.match(ctx, /you are about to dispatch 'coder'/, 'Task dispatch keeps the exact literal existing phrase — h20-mechanism-axis.mjs:201 interpolates subagent_type (\'coder\' per this fixture); decision 2d19ac0c quoted a paraphrase, not the real output — untouched by this change'); // not-a-citation: fixture id
+    // UPDATED 2026-09-30: decision h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines
+    // (a4912f91, point 5) retired "you are about to dispatch": PreToolUse
+    // context arrives WITH the dispatch. The pin keeps its purpose — the
+    // dispatch header still interpolates subagent_type and never takes the
+    // consult framing.
+    assert.match(ctx, /you have just dispatched 'coder'/, 'Task dispatch names the agent type (\'coder\' per this fixture) in the dispatch header');
     assert.doesNotMatch(ctx, /consult|sparring/i, 'the new consult framing must not leak onto the dispatch path');
   } finally {
     cleanup();

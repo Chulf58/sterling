@@ -171,7 +171,14 @@ test('H20: the injection stays within the configured delivery total cap, and a s
     const ctx = ctxOf(r);
     assert.match(ctx, /MECHANISM-AXIS DELIVERY/, 'CONTROL: it fired');
     // Hazards are exempt from the cap; everything else fits what remains.
-    const hazardBytes = [...ctx.matchAll(/⚠ ANTI-PATTERN[\s\S]*?RIGHT WAY: [^\n]*/g)].reduce((n, m) => n + bytes(m[0]), 0);
+    // Hazard text on the dispatch surface is the lead block plus the trigger
+    // lines, their one-line header and the '+N more' line (decision
+    // h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines, a4912f91).
+    // All are hazard parts, exempt from the configured cap like the block.
+    const hazardBytes = [
+      ...ctx.matchAll(/⚠ ANTI-PATTERN[\s\S]*?RIGHT WAY: [^\n]*/g),
+      ...ctx.matchAll(/^▸ \d+ MORE HAZARD\(S\) [^\n]*|^ {2}→ [^\n]* — HAZARD: [^\n]*|^ {2}… \d+ more hazard\(s\) NOT shown[^\n]*/gm),
+    ].reduce((n, m) => n + bytes(m[0]), 0);
     assert.ok(bytes(ctx) - hazardBytes <= H20_CAP, `non-hazard H20 text must fit the cap (was ${bytes(ctx) - hazardBytes})`);
 
     const q = runHook(

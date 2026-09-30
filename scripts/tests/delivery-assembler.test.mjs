@@ -550,8 +550,13 @@ test('MEDIUM 5: H20 subject-matched hazards beyond HAZARD_CAP (4) state the omit
     );
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    const shownCount = ids.filter((id) => ctx.includes(id)).length;
-    assert.equal(shownCount, 3, `expected exactly HAZARD_CAP (3) hazards rendered whole; ctx=${ctx}`);
+    // UPDATED 2026-09-30 for decision h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines
+    // (a4912f91): the dispatch surface renders rank 1 whole and ranks 2-3 as
+    // `name (id8)` lines, so "selected" is counted by id8, not by full id.
+    // The subject of this test (the 4th is disclosed, never silently dropped)
+    // is unchanged.
+    const shownCount = ids.filter((id) => ctx.includes(id.slice(0, 8))).length;
+    assert.equal(shownCount, 3, `expected exactly HAZARD_CAP (3) hazards selected (1 whole + 2 trigger lines); ctx=${ctx}`);
     assert.match(ctx, /1 more hazard\(s\) NOT shown \(cap 3\)/, 'the 4th matched hazard is disclosed as an omitted count, not silently dropped');
   } finally {
     cleanup();
@@ -609,10 +614,14 @@ test('MEDIUM 5: dispatch staging discloses hazards beyond HAZARD_CAP too', () =>
         assert.ok(ctx.includes(expectedTriggers[i]), `hazard ${i} trigger arrives whole, beyond 2,400 chars`);
         assert.ok(ctx.includes(expectedRightWays[i]), `hazard ${i} right way arrives whole, beyond 2,400 chars`);
       } else {
+        // UPDATED 2026-09-30: each of these ~5KB hazards fits the ceiling on
+        // its own and degrades only because the package is full, so its
+        // notice says so. 'TOO LARGE' is kept for a hazard that alone
+        // exceeds the ceiling (hazardOverflowPointer's own contract).
         assert.match(
           ctx,
-          new RegExp(`TOO LARGE to show in full \\(exceeds the transport limit\\) · knowledge_get ${ids[i]}`),
-          `selected hazard ${i} is named by the transport-overflow pointer`
+          new RegExp(`not shown whole: delivery full \\(this package reached the transport limit\\) · knowledge_get ${ids[i]}`),
+          `selected hazard ${i} is named by the package-full pointer`
         );
         assert.ok(!ctx.includes(`TRG${i}`), `selected hazard ${i} never renders a partial trigger`);
         assert.ok(!ctx.includes(`RW${i}`), `selected hazard ${i} never renders a partial right way`);
@@ -934,4 +943,54 @@ test('pinned chrome is never evicted for the disclosure while a whole hazard can
   assert.match(r.text, /HAZ3 POINTER/, 'the last hazard fell to its pointer to make room');
   assert.match(r.text, /\+1 more records/, 'the omission is still disclosed');
   assert.equal(r.degraded, true);
+});
+
+// ---------------------------------------------------------------------------
+// The degrade notice names its CAUSE. 'TOO LARGE to show' is true only for a
+// hazard whose own whole block exceeds the transport ceiling. A hazard that
+// fits alone but degrades because the package is already full said TOO LARGE
+// too, which sent the reader to shrink a record that was never oversized.
+// ---------------------------------------------------------------------------
+
+test('assembler: a hazard that fits alone but not beside another whole hazard says "delivery full", never TOO LARGE', () => {
+  const a = antiPattern('package-full-a', ['src/a.mjs'], { severity: 'block', trigger: 'A'.repeat(3000), right_way: 'a'.repeat(3000) });
+  const b = antiPattern('package-full-b', ['src/a.mjs'], { trigger: 'B'.repeat(3000), right_way: 'b'.repeat(3000) });
+  const assembled = assembleDelivery(hazardParts([a, b]), 0);
+  assert.ok(Buffer.byteLength(assembled.text, 'utf8') <= 10000, 'the transport ceiling holds');
+  assert.deepEqual(assembled.emittedSubstance.map((e) => e.identity), [a.id], 'the lead hazard arrives whole; the crowded one earns no mark');
+  const bLine = assembled.text.split('\n').find((l) => l.includes(`knowledge_get ${b.id}`));
+  assert.ok(bLine, `the crowded hazard is still named:\n${assembled.text.slice(-400)}`);
+  assert.match(bLine, /not shown whole: delivery full/, 'the notice names the real cause: the package is full');
+  assert.doesNotMatch(bLine, /TOO LARGE/, 'a hazard that fits on its own is never called too large');
+});
+
+test('assembler: a hazard that alone exceeds the transport ceiling still says TOO LARGE beside a small whole hazard', () => {
+  const small = antiPattern('small-whole', ['src/a.mjs'], { severity: 'block' });
+  const huge = antiPattern('huge-alone', ['src/a.mjs'], { trigger: 'T'.repeat(6000), right_way: 'R'.repeat(6000) });
+  const assembled = assembleDelivery(hazardParts([small, huge]), 0);
+  const hugeLine = assembled.text.split('\n').find((l) => l.includes(`knowledge_get ${huge.id}`));
+  assert.ok(hugeLine, 'the oversized hazard is named');
+  assert.match(hugeLine, /TOO LARGE to show in full \(exceeds the transport limit\)/, 'an oversized hazard keeps the TOO LARGE notice');
+  assert.doesNotMatch(hugeLine, /delivery full/);
+  assert.deepEqual(assembled.emittedSubstance.map((e) => e.identity), [small.id]);
+});
+
+test('assembler: the disclosure-eviction path degrades a whole hazard with its package-full notice, not its TOO LARGE one', () => {
+  const body = (head, n) => `${head}\n${'x'.repeat(n)}`;
+  const hazard = (i, n) => ({
+    kind: 'hazard', contentClass: 'substance', identity: `haz${i}`, revision: 'r1', text: body(`HAZ${i}`, n),
+    pointer: `HAZ${i} TOO LARGE`, pointerWhenFull: `HAZ${i} DELIVERY FULL`,
+  });
+  // Same measured window as the pinned-chrome test above.
+  const parts = [
+    { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: body('HEADER', 400) },
+    hazard(1, 3190),
+    hazard(2, 3190),
+    hazard(3, 3190),
+    { kind: 'ordinary', contentClass: 'discovery', identities: [{ identity: 'dec1', revision: 'r1' }], text: body('DECISIONS', 500), pointer: 'DECISIONS POINTER' },
+  ];
+  const r = assembleDelivery(parts, 3000);
+  assert.match(r.text, /HAZ3 DELIVERY FULL/, 'the evicted hazard fell to its package-full notice');
+  assert.doesNotMatch(r.text, /TOO LARGE/, 'none of these hazards is oversized on its own');
+  assert.match(r.text, /\+1 more records/);
 });
