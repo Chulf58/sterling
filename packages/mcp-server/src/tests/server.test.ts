@@ -30,6 +30,11 @@ const SERVED_TOOLS = [
   // The string sibling of append — a surgical edit inside a field too large to
   // retransmit (board fd6d8da9).
   'knowledge_edit',
+  // The background maintenance worker's one store write: a stale path:line
+  // reference moved only when the new line at HEAD carries an anchor quoted
+  // from the article (decision
+  // maintenance-queue-background-haiku-worker-simple-redesign, point 3a).
+  'knowledge_line_ref_fix',
   // The DESTROYING sibling of edit/append: removes ONE element from a
   // feature_article's files[] by the same arr[key=value] selector, so a
   // single-entry removal no longer demands a whole-array retransmit (the

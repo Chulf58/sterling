@@ -22,6 +22,14 @@
 // and the state file. Nothing is printed at Stop or after a commit; H1 shows
 // only a BROKEN last run, once, on its session-start line.
 //
+// BATCHING: a trigger launches only when BATCH_MIN_ITEMS items are eligible or
+// the oldest has waited BATCH_MAX_WAIT_MS; below that the outcome is a quiet,
+// logged 'batching' (not a run, so no no_progress and no back-off).
+// LINE REFERENCES: the child may repair a moved path:line reference with
+// knowledge_line_ref_fix; the runner journals each call; a fix alone is never
+// progress (only the close that follows it is). A database-locked
+// maintenance_remove is retry-later ('busy'), never a refusal.
+//
 // WHAT IT DOES NOT DO: author article prose, create records, edit a queue item,
 // or retry a close the server refused. It does not guarantee a verdict is
 // right: every close is logged so it can be spot-checked (decision point (6)).
@@ -46,6 +54,13 @@ export const WORKER_AGENT = 'librarian';
  *  ruling 2026-09-30, decision
  *  maintenance-worker-notices-session-start-only-and-no-sliver-launch). */
 export const WORKER_RUN_BUDGET_USD = 2;
+/** BATCHING (decision maintenance-queue-background-haiku-worker-simple-redesign,
+ *  point (2a), user-ruled 2026-09-30): a trigger launches only when at least
+ *  this many items are eligible, or the oldest eligible item has waited
+ *  BATCH_MAX_WAIT_MS. The audit measured launches for a single item paying the
+ *  worker's fixed startup cost for one judgment. */
+export const BATCH_MIN_ITEMS = 5;
+export const BATCH_MAX_WAIT_MS = 30 * 60_000;
 /** A burst of commits/Stops inside this window starts one worker, not many. */
 export const DEBOUNCE_MS = 2 * 60_000;
 /** No relaunch this long after a run that failed (error_max_budget included). */
@@ -64,6 +79,9 @@ export const LOG_RUN_CAP_BYTES = 1_000_000;
 /** The smallest --budget-usd the runner accepts: --max-budget-usd cannot
  *  express less, so a smaller (or malformed) value is a recorded failed run. */
 export const MIN_RUN_BUDGET_USD = 0.01;
+/** A maintenance_remove error that means the store was busy, not that the
+ *  server judged the item: retry later. */
+const BUSY_RE = /database is locked|SQLITE_BUSY/i;
 /** Set in the runner's and the child's environment so a Sterling hook that
  *  somehow runs inside them never launches a second worker. */
 export const WORKER_ENV_FLAG = 'STERLING_MAINTENANCE_WORKER';
@@ -73,11 +91,16 @@ export const WORKER_DISABLE_ENV = 'STERLING_MAINTENANCE_WORKER_DISABLE';
 /** The MCP server name the child sees. Tool names follow it. */
 const SERVER = 'sterling';
 const mcp = (name) => `mcp__${SERVER}__${name}`;
+/** The name the plugin-mounted server gives the same tool. */
+const mcpPlugin = (name) => `mcp__plugin_sterling_sterling__${name}`;
 /** Every tool the child may call. dontAsk alone denies MCP calls (probe (B)),
  *  so each is named. Read/Grep are the librarian's own read-only tools; no
  *  Bash, so the child judges from the item, the article and the committed
- *  files rather than from git diffs. */
-export const WORKER_TOOLS = [mcp('maintenance_query'), mcp('knowledge_get'), mcp('maintenance_remove'), 'Read', 'Grep'];
+ *  files rather than from git diffs. knowledge_line_ref_fix is the one article
+ *  write it gets (decision point (3a)): the server checks the new line at HEAD
+ *  contains the anchor and changes nothing else, so it can only move a
+ *  path:line reference. Both mounted names are allowed. */
+export const WORKER_TOOLS = [mcp('maintenance_query'), mcp('knowledge_get'), mcp('maintenance_remove'), mcp('knowledge_line_ref_fix'), mcpPlugin('knowledge_line_ref_fix'), 'Read', 'Grep'];
 /** Denied explicitly, so a project's permissions.allow cannot widen the worker. */
 export const WORKER_DISALLOWED_TOOLS = [
   ...['create', 'update', 'append', 'edit', 'array_remove', 'retire', 'supersede', 'split', 'extract', 'promote', 'link'].map((v) => mcp(`knowledge_${v}`)),
@@ -522,6 +545,25 @@ function launchWorker(opts) {
     }
     const eligible = open.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
     if (eligible.length === 0) return { launched: false, reason: 'none_eligible' };
+    // BATCHING. The wait is measured from the item's created_at: it is the one
+    // timestamp the launcher already holds for every item (a "last became
+    // eligible" time would need new state), and an item that sat dirty then went
+    // clean HAS been waiting, so it does not wait again. An item with no usable
+    // created_at counts as already waited, so the batch check can never strand
+    // work it cannot date. This sits after back-off, lock and debounce and
+    // before the lock is taken: a batching result changes no state.
+    const waited = (t) => {
+      const created = Date.parse(t.created_at ?? '');
+      return Number.isFinite(created) ? nowMs - created : Infinity;
+    };
+    const oldestWaitMs = Math.max(...eligible.map(waited));
+    if (eligible.length < BATCH_MIN_ITEMS && oldestWaitMs < BATCH_MAX_WAIT_MS) {
+      return {
+        launched: false,
+        reason: 'batching',
+        detail: `${eligible.length} of ${BATCH_MIN_ITEMS} eligible reconcile items, oldest waited ${ageText(new Date(nowMs - oldestWaitMs).toISOString(), nowMs)} of ${Math.round(BATCH_MAX_WAIT_MS / 60_000)}m — no worker until ${BATCH_MIN_ITEMS} are eligible or the oldest has waited that long`,
+      };
+    }
 
     const pluginRoot = opts.pluginRoot ?? pluginRootFrom();
     if (!pluginRoot) return { launched: false, reason: 'error', detail: failDetail('plugin root not found above the hook') };
@@ -646,14 +688,17 @@ export function streamJournal(journal, observe = () => {}, launchKeys = new Map(
   let buf = '';
   const pending = new Map();
   const calls = new Map();
-  const out = { result: null, removes: 0, closedOk: 0, lines: 0, mcpStatus: null, sterlingOk: 0 };
+  const out = { result: null, removes: 0, closedOk: 0, lineRefFixes: 0, lineRefFixesOk: 0, lines: 0, mcpStatus: null, sterlingOk: 0 };
+  const isFix = (name) => String(name).endsWith('__knowledge_line_ref_fix');
+  const fixEntry = (input, is_error, result) => ({ kind: 'tool_call', tool: 'knowledge_line_ref_fix', article_id: input.id ?? null, field: input.field ?? null, find: input.find ?? null, replace: input.replace ?? null, anchor: input.anchor ?? null, is_error, result });
   const handle = (e) => {
     out.lines++;
     const content = e?.message?.content;
     if (e?.type === 'assistant' && Array.isArray(content)) {
       for (const c of content) {
         if (c?.type !== 'tool_use') continue;
-        if (String(c.name).endsWith('__maintenance_remove')) pending.set(c.id, c.input ?? {});
+        if (String(c.name).endsWith('__maintenance_remove')) pending.set(c.id, { fix: false, input: c.input ?? {} });
+        else if (isFix(c.name)) pending.set(c.id, { fix: true, input: c.input ?? {} });
         else calls.set(c.id, { name: String(c.name), input: c.input ?? {} });
       }
     } else if (e?.type === 'user' && Array.isArray(content)) {
@@ -669,9 +714,19 @@ export function streamJournal(journal, observe = () => {}, launchKeys = new Map(
           continue;
         }
         if (!pending.has(c.tool_use_id)) continue;
-        const input = pending.get(c.tool_use_id);
+        const { fix, input } = pending.get(c.tool_use_id);
         pending.delete(c.tool_use_id);
         const text = Array.isArray(c.content) ? c.content.map((p) => p?.text ?? '').join('') : String(c.content ?? '');
+        if (fix) {
+          // A refused fix is the tool doing its job, not an error of the run.
+          journal(fixEntry(input, Boolean(c.is_error), text.slice(0, 400)));
+          out.lineRefFixes++;
+          if (!c.is_error) {
+            out.lineRefFixesOk++;
+            out.sterlingOk++;
+          }
+          continue;
+        }
         journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error: Boolean(c.is_error), result: text.slice(0, 400) });
         out.removes++;
         if (!c.is_error) {
@@ -707,7 +762,9 @@ export function streamJournal(journal, observe = () => {}, launchKeys = new Map(
     end() {
       feedLine(buf);
       buf = '';
-      for (const input of pending.values()) journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error: null, result: 'no result before the run ended' });
+      for (const { fix, input } of pending.values()) {
+        journal(fix ? fixEntry(input, null, 'no result before the run ended') : { kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error: null, result: 'no result before the run ended' });
+      }
       pending.clear();
       return out;
     },
@@ -813,9 +870,16 @@ export async function runWorker(opts) {
     };
     let refusedVerdicts = 0;
     let newRefusals = 0;
+    let busyCalls = 0;
     const journalCall = (entry) => {
       journal(entry);
-      if (entry.kind === 'tool_call' && entry.is_error === true && byId.has(entry.item_id) && !/permission/i.test(entry.result ?? '')) {
+      if (entry.kind === 'tool_call' && entry.tool === 'maintenance_remove' && entry.is_error === true && BUSY_RE.test(entry.result ?? '')) {
+        // A locked store is retry-later, not the server's judgment: no 'refused'
+        // verdict, no evidence stamp, so judgedVerdicts ignores it and the item
+        // stays eligible for a later run.
+        busyCalls++;
+        if (byId.has(entry.item_id)) journal({ kind: 'verdict', item_id: entry.item_id, verdict: 'busy', reason: String(entry.result ?? '').slice(0, 200) });
+      } else if (entry.kind === 'tool_call' && entry.is_error === true && byId.has(entry.item_id) && !/permission/i.test(entry.result ?? '')) {
         // The server's refusal IS the evidence for this verdict.
         journal({ kind: 'verdict', item_id: entry.item_id, verdict: 'refused', file_keys: byId.get(entry.item_id).file_keys, head: eligible.head, evidence: true, reason: String(entry.result ?? '').slice(0, 200) });
         refusedVerdicts++;
@@ -874,7 +938,7 @@ export async function runWorker(opts) {
         resolve({ code: c, spawnError: null, timedOut });
       });
     });
-    const { result, removes, closedOk, mcpStatus, sterlingOk } = stream.end();
+    const { result, removes, closedOk, lineRefFixes, lineRefFixesOk, mcpStatus, sterlingOk } = stream.end();
     if (spawnError) {
       record({ ok: false, at: iso(), error: `could not start ${bin}: ${spawnError.message ?? spawnError}` });
       return 1;
@@ -926,8 +990,17 @@ export async function runWorker(opts) {
       remove_calls: removes,
       closes_ok: closedOk,
       evidenced_verdicts: evidenced,
-      // No evidence-backed verdict, no close and no NEW refusal: back off like a failure.
+      // No evidence-backed verdict, no close and no NEW refusal: back off like a
+      // failure. A line-reference fix is NEVER progress on its own: the server
+      // accepts a shift back and forth (2->4, then 4->2) when both lines hold the
+      // anchor, so counting fixes would loop a $2 run at every trigger. A run that
+      // fixes and then closes counts through closes_ok; a refused close through
+      // newRefusals. A locked-database remove is none of these: a run that only
+      // hit the lock backs off, which is the retry delay.
       refused_verdicts: refusedVerdicts,
+      busy_calls: busyCalls,
+      line_ref_fixes: lineRefFixes,
+      line_ref_fixes_ok: lineRefFixesOk,
       no_progress: evidenced === 0 && closedOk === 0 && newRefusals === 0,
       cost_usd: reported ? cost : null,
       // The MCP server's status from the stream's init event (null: never
