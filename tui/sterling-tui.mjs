@@ -46,9 +46,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// ../../../node_modules/lazyness/lib/Lazyness.js
+// node_modules/lazyness/lib/Lazyness.js
 var require_Lazyness = __commonJS({
-  "../../../node_modules/lazyness/lib/Lazyness.js"(exports, module) {
+  "node_modules/lazyness/lib/Lazyness.js"(exports, module) {
     "use strict";
     function Lazyness(require_) {
       if (!this || !(this instanceof Lazyness)) {
@@ -183,9 +183,9 @@ var require_Lazyness = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/tty.js
+// node_modules/terminal-kit/lib/tty.js
 var require_tty = __commonJS({
-  "../../../node_modules/terminal-kit/lib/tty.js"(exports, module) {
+  "node_modules/terminal-kit/lib/tty.js"(exports, module) {
     "use strict";
     var execSync = __require("child_process").execSync;
     var fs = __require("fs");
@@ -252,9 +252,9 @@ var require_tty = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/escape.js
+// node_modules/string-kit/lib/escape.js
 var require_escape = __commonJS({
-  "../../../node_modules/string-kit/lib/escape.js"(exports) {
+  "node_modules/string-kit/lib/escape.js"(exports) {
     "use strict";
     exports.regExp = exports.regExpPattern = (str) => str.replace(/([.*+?^${}()|[\]/\\])/g, "\\$1");
     exports.regExpReplacement = (str) => str.replace(/\$/g, "$$$$");
@@ -302,9 +302,9 @@ var require_escape = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/ansi.js
+// node_modules/string-kit/lib/ansi.js
 var require_ansi = __commonJS({
-  "../../../node_modules/string-kit/lib/ansi.js"(exports, module) {
+  "node_modules/string-kit/lib/ansi.js"(exports, module) {
     "use strict";
     var ansi = {
       reset: "\x1B[0m",
@@ -517,16 +517,16 @@ var require_ansi = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/json-data/unicode-emoji-width-ranges.json
+// node_modules/string-kit/lib/json-data/unicode-emoji-width-ranges.json
 var require_unicode_emoji_width_ranges = __commonJS({
-  "../../../node_modules/string-kit/lib/json-data/unicode-emoji-width-ranges.json"(exports, module) {
+  "node_modules/string-kit/lib/json-data/unicode-emoji-width-ranges.json"(exports, module) {
     module.exports = [{ s: 9728, e: 9747, w: 1 }, { s: 9748, e: 9749, w: 2 }, { s: 9750, e: 9799, w: 1 }, { s: 9800, e: 9811, w: 2 }, { s: 9812, e: 9854, w: 1 }, { s: 9855, e: 9855, w: 2 }, { s: 9856, e: 9874, w: 1 }, { s: 9875, e: 9875, w: 2 }, { s: 9876, e: 9888, w: 1 }, { s: 9889, e: 9889, w: 2 }, { s: 9890, e: 9897, w: 1 }, { s: 9898, e: 9899, w: 2 }, { s: 9900, e: 9916, w: 1 }, { s: 9917, e: 9918, w: 2 }, { s: 9919, e: 9923, w: 1 }, { s: 9924, e: 9925, w: 2 }, { s: 9926, e: 9933, w: 1 }, { s: 9934, e: 9934, w: 2 }, { s: 9935, e: 9939, w: 1 }, { s: 9940, e: 9940, w: 2 }, { s: 9941, e: 9961, w: 1 }, { s: 9962, e: 9962, w: 2 }, { s: 9963, e: 9969, w: 1 }, { s: 9970, e: 9971, w: 2 }, { s: 9972, e: 9972, w: 1 }, { s: 9973, e: 9973, w: 2 }, { s: 9974, e: 9977, w: 1 }, { s: 9978, e: 9978, w: 2 }, { s: 9979, e: 9980, w: 1 }, { s: 9981, e: 9981, w: 2 }, { s: 9982, e: 9983, w: 1 }, { s: 9984, e: 9988, w: 1 }, { s: 9989, e: 9989, w: 2 }, { s: 9990, e: 9993, w: 1 }, { s: 9994, e: 9995, w: 2 }, { s: 9996, e: 10023, w: 1 }, { s: 10024, e: 10024, w: 2 }, { s: 10025, e: 10059, w: 1 }, { s: 10060, e: 10060, w: 2 }, { s: 10061, e: 10061, w: 1 }, { s: 10062, e: 10062, w: 2 }, { s: 10063, e: 10066, w: 1 }, { s: 10067, e: 10069, w: 2 }, { s: 10070, e: 10070, w: 1 }, { s: 10071, e: 10071, w: 2 }, { s: 10072, e: 10132, w: 1 }, { s: 10133, e: 10135, w: 2 }, { s: 10136, e: 10159, w: 1 }, { s: 10160, e: 10160, w: 2 }, { s: 10161, e: 10174, w: 1 }, { s: 10175, e: 10175, w: 2 }, { s: 126976, e: 126979, w: 1 }, { s: 126980, e: 126980, w: 2 }, { s: 126981, e: 127182, w: 1 }, { s: 127183, e: 127183, w: 2 }, { s: 127184, e: 127373, w: 1 }, { s: 127374, e: 127374, w: 2 }, { s: 127375, e: 127376, w: 1 }, { s: 127377, e: 127386, w: 2 }, { s: 127387, e: 127487, w: 1 }, { s: 127744, e: 127776, w: 2 }, { s: 127777, e: 127788, w: 1 }, { s: 127789, e: 127797, w: 2 }, { s: 127798, e: 127798, w: 1 }, { s: 127799, e: 127868, w: 2 }, { s: 127869, e: 127869, w: 1 }, { s: 127870, e: 127891, w: 2 }, { s: 127892, e: 127903, w: 1 }, { s: 127904, e: 127946, w: 2 }, { s: 127947, e: 127950, w: 1 }, { s: 127951, e: 127955, w: 2 }, { s: 127956, e: 127967, w: 1 }, { s: 127968, e: 127984, w: 2 }, { s: 127985, e: 127987, w: 1 }, { s: 127988, e: 127988, w: 2 }, { s: 127989, e: 127991, w: 1 }, { s: 127992, e: 127994, w: 2 }, { s: 128e3, e: 128062, w: 2 }, { s: 128063, e: 128063, w: 1 }, { s: 128064, e: 128064, w: 2 }, { s: 128065, e: 128065, w: 1 }, { s: 128066, e: 128252, w: 2 }, { s: 128253, e: 128254, w: 1 }, { s: 128255, e: 128317, w: 2 }, { s: 128318, e: 128330, w: 1 }, { s: 128331, e: 128334, w: 2 }, { s: 128335, e: 128335, w: 1 }, { s: 128336, e: 128359, w: 2 }, { s: 128360, e: 128377, w: 1 }, { s: 128378, e: 128378, w: 2 }, { s: 128379, e: 128404, w: 1 }, { s: 128405, e: 128406, w: 2 }, { s: 128407, e: 128419, w: 1 }, { s: 128420, e: 128420, w: 2 }, { s: 128421, e: 128506, w: 1 }, { s: 128507, e: 128591, w: 2 }, { s: 128592, e: 128639, w: 1 }, { s: 128640, e: 128709, w: 2 }, { s: 128710, e: 128715, w: 1 }, { s: 128716, e: 128716, w: 2 }, { s: 128717, e: 128719, w: 1 }, { s: 128720, e: 128722, w: 2 }, { s: 128723, e: 128724, w: 1 }, { s: 128725, e: 128727, w: 2 }, { s: 128728, e: 128746, w: 1 }, { s: 128747, e: 128748, w: 2 }, { s: 128749, e: 128755, w: 1 }, { s: 128756, e: 128764, w: 2 }, { s: 128765, e: 128991, w: 1 }, { s: 128992, e: 129003, w: 2 }, { s: 129004, e: 129291, w: 1 }, { s: 129292, e: 129338, w: 2 }, { s: 129339, e: 129339, w: 1 }, { s: 129340, e: 129349, w: 2 }, { s: 129350, e: 129350, w: 1 }, { s: 129351, e: 129400, w: 2 }, { s: 129401, e: 129401, w: 1 }, { s: 129402, e: 129483, w: 2 }, { s: 129484, e: 129484, w: 1 }, { s: 129485, e: 129535, w: 2 }, { s: 129536, e: 129647, w: 1 }, { s: 129648, e: 129652, w: 2 }, { s: 129653, e: 129655, w: 1 }, { s: 129656, e: 129658, w: 2 }, { s: 129659, e: 129663, w: 1 }, { s: 129664, e: 129670, w: 2 }, { s: 129671, e: 129679, w: 1 }, { s: 129680, e: 129704, w: 2 }, { s: 129705, e: 129711, w: 1 }, { s: 129712, e: 129718, w: 2 }, { s: 129719, e: 129727, w: 1 }, { s: 129728, e: 129730, w: 2 }, { s: 129731, e: 129743, w: 1 }, { s: 129744, e: 129750, w: 2 }, { s: 129751, e: 129791, w: 1 }];
   }
 });
 
-// ../../../node_modules/string-kit/lib/unicode.js
+// node_modules/string-kit/lib/unicode.js
 var require_unicode = __commonJS({
-  "../../../node_modules/string-kit/lib/unicode.js"(exports, module) {
+  "node_modules/string-kit/lib/unicode.js"(exports, module) {
     "use strict";
     var unicode = {};
     module.exports = unicode;
@@ -697,9 +697,9 @@ var require_unicode = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/inspect.js
+// node_modules/string-kit/lib/inspect.js
 var require_inspect = __commonJS({
-  "../../../node_modules/string-kit/lib/inspect.js"(exports) {
+  "node_modules/string-kit/lib/inspect.js"(exports) {
     "use strict";
     var escape = require_escape();
     var ansi = require_ansi();
@@ -1236,9 +1236,9 @@ var require_inspect = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/naturalSort.js
+// node_modules/string-kit/lib/naturalSort.js
 var require_naturalSort = __commonJS({
-  "../../../node_modules/string-kit/lib/naturalSort.js"(exports, module) {
+  "node_modules/string-kit/lib/naturalSort.js"(exports, module) {
     "use strict";
     var CONTROL_CLASS = 1;
     var WORD_SEPARATOR_CLASS = 2;
@@ -1346,9 +1346,9 @@ var require_naturalSort = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/StringNumber.js
+// node_modules/string-kit/lib/StringNumber.js
 var require_StringNumber = __commonJS({
-  "../../../node_modules/string-kit/lib/StringNumber.js"(exports, module) {
+  "node_modules/string-kit/lib/StringNumber.js"(exports, module) {
     "use strict";
     var NUMERALS = [
       "0",
@@ -1689,9 +1689,9 @@ var require_StringNumber = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/format.js
+// node_modules/string-kit/lib/format.js
 var require_format = __commonJS({
-  "../../../node_modules/string-kit/lib/format.js"(exports) {
+  "node_modules/string-kit/lib/format.js"(exports) {
     "use strict";
     var inspect = require_inspect().inspect;
     var inspectError = require_inspect().inspectError;
@@ -2853,9 +2853,9 @@ var require_format = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/misc.js
+// node_modules/string-kit/lib/misc.js
 var require_misc = __commonJS({
-  "../../../node_modules/string-kit/lib/misc.js"(exports) {
+  "node_modules/string-kit/lib/misc.js"(exports) {
     "use strict";
     exports.resize = function(str, length) {
       if (str.length === length) {
@@ -2879,9 +2879,9 @@ var require_misc = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/regexp.js
+// node_modules/string-kit/lib/regexp.js
 var require_regexp = __commonJS({
-  "../../../node_modules/string-kit/lib/regexp.js"(exports) {
+  "node_modules/string-kit/lib/regexp.js"(exports) {
     "use strict";
     var escape = require_escape();
     exports.regexp = {};
@@ -2898,9 +2898,9 @@ var require_regexp = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/camel.js
+// node_modules/string-kit/lib/camel.js
 var require_camel = __commonJS({
-  "../../../node_modules/string-kit/lib/camel.js"(exports, module) {
+  "node_modules/string-kit/lib/camel.js"(exports, module) {
     "use strict";
     var camel = {};
     module.exports = camel;
@@ -2953,16 +2953,16 @@ var require_camel = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/json-data/latinize-map.json
+// node_modules/string-kit/lib/json-data/latinize-map.json
 var require_latinize_map = __commonJS({
-  "../../../node_modules/string-kit/lib/json-data/latinize-map.json"(exports, module) {
+  "node_modules/string-kit/lib/json-data/latinize-map.json"(exports, module) {
     module.exports = { "\u07C0": "0", "\u0301": "", "\xA0": " ", "\u24B6": "A", \uFF21: "A", \u00C0: "A", \u00C1: "A", \u00C2: "A", \u1EA6: "A", \u1EA4: "A", \u1EAA: "A", \u1EA8: "A", \u00C3: "A", \u0100: "A", \u0102: "A", \u1EB0: "A", \u1EAE: "A", \u1EB4: "A", \u1EB2: "A", \u0226: "A", \u01E0: "A", \u00C4: "A", \u01DE: "A", \u1EA2: "A", \u00C5: "A", \u01FA: "A", \u01CD: "A", \u0200: "A", \u0202: "A", \u1EA0: "A", \u1EAC: "A", \u1EB6: "A", \u1E00: "A", \u0104: "A", "\u023A": "A", "\u2C6F": "A", "\uA732": "AA", \u00C6: "AE", \u01FC: "AE", \u01E2: "AE", "\uA734": "AO", "\uA736": "AU", "\uA738": "AV", "\uA73A": "AV", "\uA73C": "AY", "\u24B7": "B", \uFF22: "B", \u1E02: "B", \u1E04: "B", \u1E06: "B", "\u0243": "B", \u0181: "B", \uFF43: "C", "\u24B8": "C", \uFF23: "C", "\uA73E": "C", \u1E08: "C", \u00C7: "C", "\u24B9": "D", \uFF24: "D", \u1E0A: "D", \u010E: "D", \u1E0C: "D", \u1E10: "D", \u1E12: "D", \u1E0E: "D", \u0110: "D", \u018A: "D", \u0189: "D", "\u1D05": "D", "\uA779": "D", \u00D0: "Dh", \u01F1: "DZ", \u01C4: "DZ", \u01F2: "Dz", \u01C5: "Dz", \u025B: "E", "\u24BA": "E", \uFF25: "E", \u00C8: "E", \u00C9: "E", \u00CA: "E", \u1EC0: "E", \u1EBE: "E", \u1EC4: "E", \u1EC2: "E", \u1EBC: "E", \u0112: "E", \u1E14: "E", \u1E16: "E", \u0114: "E", \u0116: "E", \u00CB: "E", \u1EBA: "E", \u011A: "E", \u0204: "E", \u0206: "E", \u1EB8: "E", \u1EC6: "E", \u0228: "E", \u1E1C: "E", \u0118: "E", \u1E18: "E", \u1E1A: "E", \u0190: "E", \u018E: "E", "\u1D07": "E", "\uA77C": "F", "\u24BB": "F", \uFF26: "F", \u1E1E: "F", \u0191: "F", "\uA77B": "F", "\u24BC": "G", \uFF27: "G", \u01F4: "G", \u011C: "G", \u1E20: "G", \u011E: "G", \u0120: "G", \u01E6: "G", \u0122: "G", \u01E4: "G", \u0193: "G", "\uA7A0": "G", "\uA77D": "G", "\uA77E": "G", \u0262: "G", "\u24BD": "H", \uFF28: "H", \u0124: "H", \u1E22: "H", \u1E26: "H", \u021E: "H", \u1E24: "H", \u1E28: "H", \u1E2A: "H", \u0126: "H", "\u2C67": "H", "\u2C75": "H", "\uA78D": "H", "\u24BE": "I", \uFF29: "I", \u00CC: "I", \u00CD: "I", \u00CE: "I", \u0128: "I", \u012A: "I", \u012C: "I", \u0130: "I", \u00CF: "I", \u1E2E: "I", \u1EC8: "I", \u01CF: "I", \u0208: "I", \u020A: "I", \u1ECA: "I", \u012E: "I", \u1E2C: "I", \u0197: "I", "\u24BF": "J", \uFF2A: "J", \u0134: "J", "\u0248": "J", "\u0237": "J", "\u24C0": "K", \uFF2B: "K", \u1E30: "K", \u01E8: "K", \u1E32: "K", \u0136: "K", \u1E34: "K", \u0198: "K", "\u2C69": "K", "\uA740": "K", "\uA742": "K", "\uA744": "K", "\uA7A2": "K", "\u24C1": "L", \uFF2C: "L", \u013F: "L", \u0139: "L", \u013D: "L", \u1E36: "L", \u1E38: "L", \u013B: "L", \u1E3C: "L", \u1E3A: "L", \u0141: "L", "\u023D": "L", "\u2C62": "L", "\u2C60": "L", "\uA748": "L", "\uA746": "L", "\uA780": "L", \u01C7: "LJ", \u01C8: "Lj", "\u24C2": "M", \uFF2D: "M", \u1E3E: "M", \u1E40: "M", \u1E42: "M", "\u2C6E": "M", \u019C: "M", "\u03FB": "M", "\uA7A4": "N", "\u0220": "N", "\u24C3": "N", \uFF2E: "N", \u01F8: "N", \u0143: "N", \u00D1: "N", \u1E44: "N", \u0147: "N", \u1E46: "N", \u0145: "N", \u1E4A: "N", \u1E48: "N", \u019D: "N", "\uA790": "N", "\u1D0E": "N", \u01CA: "NJ", \u01CB: "Nj", "\u24C4": "O", \uFF2F: "O", \u00D2: "O", \u00D3: "O", \u00D4: "O", \u1ED2: "O", \u1ED0: "O", \u1ED6: "O", \u1ED4: "O", \u00D5: "O", \u1E4C: "O", \u022C: "O", \u1E4E: "O", \u014C: "O", \u1E50: "O", \u1E52: "O", \u014E: "O", \u022E: "O", \u0230: "O", \u00D6: "O", \u022A: "O", \u1ECE: "O", \u0150: "O", \u01D1: "O", \u020C: "O", \u020E: "O", \u01A0: "O", \u1EDC: "O", \u1EDA: "O", \u1EE0: "O", \u1EDE: "O", \u1EE2: "O", \u1ECC: "O", \u1ED8: "O", \u01EA: "O", \u01EC: "O", \u00D8: "O", \u01FE: "O", \u0186: "O", \u019F: "O", "\uA74A": "O", "\uA74C": "O", \u0152: "OE", \u01A2: "OI", "\uA74E": "OO", \u0222: "OU", "\u24C5": "P", \uFF30: "P", \u1E54: "P", \u1E56: "P", \u01A4: "P", "\u2C63": "P", "\uA750": "P", "\uA752": "P", "\uA754": "P", "\u24C6": "Q", \uFF31: "Q", "\uA756": "Q", "\uA758": "Q", "\u024A": "Q", "\u24C7": "R", \uFF32: "R", \u0154: "R", \u1E58: "R", \u0158: "R", \u0210: "R", \u0212: "R", \u1E5A: "R", \u1E5C: "R", \u0156: "R", \u1E5E: "R", "\u024C": "R", "\u2C64": "R", "\uA75A": "R", "\uA7A6": "R", "\uA782": "R", "\u24C8": "S", \uFF33: "S", "\u1E9E": "S", \u015A: "S", \u1E64: "S", \u015C: "S", \u1E60: "S", \u0160: "S", \u1E66: "S", \u1E62: "S", \u1E68: "S", \u0218: "S", \u015E: "S", "\u2C7E": "S", "\uA7A8": "S", "\uA784": "S", "\u24C9": "T", \uFF34: "T", \u1E6A: "T", \u0164: "T", \u1E6C: "T", \u021A: "T", \u0162: "T", \u1E70: "T", \u1E6E: "T", \u0166: "T", \u01AC: "T", \u01AE: "T", "\u023E": "T", "\uA786": "T", \u00DE: "Th", "\uA728": "TZ", "\u24CA": "U", \uFF35: "U", \u00D9: "U", \u00DA: "U", \u00DB: "U", \u0168: "U", \u1E78: "U", \u016A: "U", \u1E7A: "U", \u016C: "U", \u00DC: "U", \u01DB: "U", \u01D7: "U", \u01D5: "U", \u01D9: "U", \u1EE6: "U", \u016E: "U", \u0170: "U", \u01D3: "U", \u0214: "U", \u0216: "U", \u01AF: "U", \u1EEA: "U", \u1EE8: "U", \u1EEE: "U", \u1EEC: "U", \u1EF0: "U", \u1EE4: "U", \u1E72: "U", \u0172: "U", \u1E76: "U", \u1E74: "U", "\u0244": "U", "\u24CB": "V", \uFF36: "V", \u1E7C: "V", \u1E7E: "V", \u01B2: "V", "\uA75E": "V", "\u0245": "V", "\uA760": "VY", "\u24CC": "W", \uFF37: "W", \u1E80: "W", \u1E82: "W", \u0174: "W", \u1E86: "W", \u1E84: "W", \u1E88: "W", "\u2C72": "W", "\u24CD": "X", \uFF38: "X", \u1E8A: "X", \u1E8C: "X", "\u24CE": "Y", \uFF39: "Y", \u1EF2: "Y", \u00DD: "Y", \u0176: "Y", \u1EF8: "Y", \u0232: "Y", \u1E8E: "Y", \u0178: "Y", \u1EF6: "Y", \u1EF4: "Y", \u01B3: "Y", "\u024E": "Y", "\u1EFE": "Y", "\u24CF": "Z", \uFF3A: "Z", \u0179: "Z", \u1E90: "Z", \u017B: "Z", \u017D: "Z", \u1E92: "Z", \u1E94: "Z", \u01B5: "Z", \u0224: "Z", "\u2C7F": "Z", "\u2C6B": "Z", "\uA762": "Z", "\u24D0": "a", \uFF41: "a", \u1E9A: "a", \u00E0: "a", \u00E1: "a", \u00E2: "a", \u1EA7: "a", \u1EA5: "a", \u1EAB: "a", \u1EA9: "a", \u00E3: "a", \u0101: "a", \u0103: "a", \u1EB1: "a", \u1EAF: "a", \u1EB5: "a", \u1EB3: "a", \u0227: "a", \u01E1: "a", \u00E4: "a", \u01DF: "a", \u1EA3: "a", \u00E5: "a", \u01FB: "a", \u01CE: "a", \u0201: "a", \u0203: "a", \u1EA1: "a", \u1EAD: "a", \u1EB7: "a", \u1E01: "a", \u0105: "a", "\u2C65": "a", \u0250: "a", \u0251: "a", "\uA733": "aa", \u00E6: "ae", \u01FD: "ae", \u01E3: "ae", "\uA735": "ao", "\uA737": "au", "\uA739": "av", "\uA73B": "av", "\uA73D": "ay", "\u24D1": "b", \uFF42: "b", \u1E03: "b", \u1E05: "b", \u1E07: "b", \u0180: "b", \u0183: "b", \u0253: "b", \u0182: "b", "\u24D2": "c", \u0107: "c", \u0109: "c", \u010B: "c", \u010D: "c", \u00E7: "c", \u1E09: "c", \u0188: "c", "\u023C": "c", "\uA73F": "c", "\u2184": "c", C: "c", \u0106: "c", \u0108: "c", \u010A: "c", \u010C: "c", \u0187: "c", "\u023B": "c", "\u24D3": "d", \uFF44: "d", \u1E0B: "d", \u010F: "d", \u1E0D: "d", \u1E11: "d", \u1E13: "d", \u1E0F: "d", \u0111: "d", \u018C: "d", \u0256: "d", \u0257: "d", \u018B: "d", \u13E7: "d", "\u0501": "d", "\uA7AA": "d", \u00F0: "dh", \u01F3: "dz", \u01C6: "dz", "\u24D4": "e", \uFF45: "e", \u00E8: "e", \u00E9: "e", \u00EA: "e", \u1EC1: "e", \u1EBF: "e", \u1EC5: "e", \u1EC3: "e", \u1EBD: "e", \u0113: "e", \u1E15: "e", \u1E17: "e", \u0115: "e", \u0117: "e", \u00EB: "e", \u1EBB: "e", \u011B: "e", \u0205: "e", \u0207: "e", \u1EB9: "e", \u1EC7: "e", \u0229: "e", \u1E1D: "e", \u0119: "e", \u1E19: "e", \u1E1B: "e", "\u0247": "e", \u01DD: "e", "\u24D5": "f", \uFF46: "f", \u1E1F: "f", \u0192: "f", \uFB00: "ff", \uFB01: "fi", \uFB02: "fl", \uFB03: "ffi", \uFB04: "ffl", "\u24D6": "g", \uFF47: "g", \u01F5: "g", \u011D: "g", \u1E21: "g", \u011F: "g", \u0121: "g", \u01E7: "g", \u0123: "g", \u01E5: "g", \u0260: "g", "\uA7A1": "g", "\uA77F": "g", "\u1D79": "g", "\u24D7": "h", \uFF48: "h", \u0125: "h", \u1E23: "h", \u1E27: "h", \u021F: "h", \u1E25: "h", \u1E29: "h", \u1E2B: "h", \u1E96: "h", \u0127: "h", "\u2C68": "h", "\u2C76": "h", \u0265: "h", \u0195: "hv", "\u24D8": "i", \uFF49: "i", \u00EC: "i", \u00ED: "i", \u00EE: "i", \u0129: "i", \u012B: "i", \u012D: "i", \u00EF: "i", \u1E2F: "i", \u1EC9: "i", \u01D0: "i", \u0209: "i", \u020B: "i", \u1ECB: "i", \u012F: "i", \u1E2D: "i", \u0268: "i", \u0131: "i", "\u24D9": "j", \uFF4A: "j", \u0135: "j", \u01F0: "j", "\u0249": "j", "\u24DA": "k", \uFF4B: "k", \u1E31: "k", \u01E9: "k", \u1E33: "k", \u0137: "k", \u1E35: "k", \u0199: "k", "\u2C6A": "k", "\uA741": "k", "\uA743": "k", "\uA745": "k", "\uA7A3": "k", "\u24DB": "l", \uFF4C: "l", \u0140: "l", \u013A: "l", \u013E: "l", \u1E37: "l", \u1E39: "l", \u013C: "l", \u1E3D: "l", \u1E3B: "l", \u017F: "l", \u0142: "l", \u019A: "l", \u026B: "l", "\u2C61": "l", "\uA749": "l", "\uA781": "l", "\uA747": "l", \u026D: "l", \u01C9: "lj", "\u24DC": "m", \uFF4D: "m", \u1E3F: "m", \u1E41: "m", \u1E43: "m", \u0271: "m", \u026F: "m", "\u24DD": "n", \uFF4E: "n", \u01F9: "n", \u0144: "n", \u00F1: "n", \u1E45: "n", \u0148: "n", \u1E47: "n", \u0146: "n", \u1E4B: "n", \u1E49: "n", \u019E: "n", \u0272: "n", \u0149: "n", "\uA791": "n", "\uA7A5": "n", "\u0509": "n", \u01CC: "nj", "\u24DE": "o", \uFF4F: "o", \u00F2: "o", \u00F3: "o", \u00F4: "o", \u1ED3: "o", \u1ED1: "o", \u1ED7: "o", \u1ED5: "o", \u00F5: "o", \u1E4D: "o", \u022D: "o", \u1E4F: "o", \u014D: "o", \u1E51: "o", \u1E53: "o", \u014F: "o", \u022F: "o", \u0231: "o", \u00F6: "o", \u022B: "o", \u1ECF: "o", \u0151: "o", \u01D2: "o", \u020D: "o", \u020F: "o", \u01A1: "o", \u1EDD: "o", \u1EDB: "o", \u1EE1: "o", \u1EDF: "o", \u1EE3: "o", \u1ECD: "o", \u1ED9: "o", \u01EB: "o", \u01ED: "o", \u00F8: "o", \u01FF: "o", "\uA74B": "o", "\uA74D": "o", \u0275: "o", \u0254: "o", "\u1D11": "o", \u0153: "oe", \u01A3: "oi", "\uA74F": "oo", \u0223: "ou", "\u24DF": "p", \uFF50: "p", \u1E55: "p", \u1E57: "p", \u01A5: "p", "\u1D7D": "p", "\uA751": "p", "\uA753": "p", "\uA755": "p", \u03C1: "p", "\u24E0": "q", \uFF51: "q", "\u024B": "q", "\uA757": "q", "\uA759": "q", "\u24E1": "r", \uFF52: "r", \u0155: "r", \u1E59: "r", \u0159: "r", \u0211: "r", \u0213: "r", \u1E5B: "r", \u1E5D: "r", \u0157: "r", \u1E5F: "r", "\u024D": "r", \u027D: "r", "\uA75B": "r", "\uA7A7": "r", "\uA783": "r", "\u24E2": "s", \uFF53: "s", \u015B: "s", \u1E65: "s", \u015D: "s", \u1E61: "s", \u0161: "s", \u1E67: "s", \u1E63: "s", \u1E69: "s", \u0219: "s", \u015F: "s", "\u023F": "s", "\uA7A9": "s", "\uA785": "s", \u1E9B: "s", \u0282: "s", \u00DF: "ss", "\u24E3": "t", \uFF54: "t", \u1E6B: "t", \u1E97: "t", \u0165: "t", \u1E6D: "t", \u021B: "t", \u0163: "t", \u1E71: "t", \u1E6F: "t", \u0167: "t", \u01AD: "t", \u0288: "t", "\u2C66": "t", "\uA787": "t", \u00FE: "th", "\uA729": "tz", "\u24E4": "u", \uFF55: "u", \u00F9: "u", \u00FA: "u", \u00FB: "u", \u0169: "u", \u1E79: "u", \u016B: "u", \u1E7B: "u", \u016D: "u", \u00FC: "u", \u01DC: "u", \u01D8: "u", \u01D6: "u", \u01DA: "u", \u1EE7: "u", \u016F: "u", \u0171: "u", \u01D4: "u", \u0215: "u", \u0217: "u", \u01B0: "u", \u1EEB: "u", \u1EE9: "u", \u1EEF: "u", \u1EED: "u", \u1EF1: "u", \u1EE5: "u", \u1E73: "u", \u0173: "u", \u1E77: "u", \u1E75: "u", \u0289: "u", "\u24E5": "v", \uFF56: "v", \u1E7D: "v", \u1E7F: "v", \u028B: "v", "\uA75F": "v", \u028C: "v", "\uA761": "vy", "\u24E6": "w", \uFF57: "w", \u1E81: "w", \u1E83: "w", \u0175: "w", \u1E87: "w", \u1E85: "w", \u1E98: "w", \u1E89: "w", "\u2C73": "w", "\u24E7": "x", \uFF58: "x", \u1E8B: "x", \u1E8D: "x", "\u24E8": "y", \uFF59: "y", \u1EF3: "y", \u00FD: "y", \u0177: "y", \u1EF9: "y", \u0233: "y", \u1E8F: "y", \u00FF: "y", \u1EF7: "y", \u1E99: "y", \u1EF5: "y", \u01B4: "y", "\u024F": "y", "\u1EFF": "y", "\u24E9": "z", \uFF5A: "z", \u017A: "z", \u1E91: "z", \u017C: "z", \u017E: "z", \u1E93: "z", \u1E95: "z", \u01B6: "z", \u0225: "z", "\u0240": "z", "\u2C6C": "z", "\uA763": "z" };
   }
 });
 
-// ../../../node_modules/string-kit/lib/latinize.js
+// node_modules/string-kit/lib/latinize.js
 var require_latinize = __commonJS({
-  "../../../node_modules/string-kit/lib/latinize.js"(exports, module) {
+  "node_modules/string-kit/lib/latinize.js"(exports, module) {
     "use strict";
     var latinizeMap = require_latinize_map();
     module.exports = function(str) {
@@ -2973,9 +2973,9 @@ var require_latinize = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/toTitleCase.js
+// node_modules/string-kit/lib/toTitleCase.js
 var require_toTitleCase = __commonJS({
-  "../../../node_modules/string-kit/lib/toTitleCase.js"(exports, module) {
+  "node_modules/string-kit/lib/toTitleCase.js"(exports, module) {
     "use strict";
     var DEFAULT_OPTIONS = {
       underscoreToSpace: true,
@@ -3039,9 +3039,9 @@ var require_toTitleCase = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/wordwrap.js
+// node_modules/string-kit/lib/wordwrap.js
 var require_wordwrap = __commonJS({
-  "../../../node_modules/string-kit/lib/wordwrap.js"(exports, module) {
+  "node_modules/string-kit/lib/wordwrap.js"(exports, module) {
     "use strict";
     var unicode = require_unicode();
     var FRENCH_DOUBLE_GRAPH_TYPO = {
@@ -3152,9 +3152,9 @@ var require_wordwrap = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/fuzzy.js
+// node_modules/string-kit/lib/fuzzy.js
 var require_fuzzy = __commonJS({
-  "../../../node_modules/string-kit/lib/fuzzy.js"(exports, module) {
+  "node_modules/string-kit/lib/fuzzy.js"(exports, module) {
     "use strict";
     var fuzzy = {};
     module.exports = fuzzy;
@@ -3355,9 +3355,9 @@ var require_fuzzy = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/english.js
+// node_modules/string-kit/lib/english.js
 var require_english = __commonJS({
-  "../../../node_modules/string-kit/lib/english.js"(exports, module) {
+  "node_modules/string-kit/lib/english.js"(exports, module) {
     "use strict";
     var english = {};
     module.exports = english;
@@ -3401,23 +3401,23 @@ var require_english = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/json-data/emoji-keyword-to-charlist.json
+// node_modules/string-kit/lib/json-data/emoji-keyword-to-charlist.json
 var require_emoji_keyword_to_charlist = __commonJS({
-  "../../../node_modules/string-kit/lib/json-data/emoji-keyword-to-charlist.json"(exports, module) {
+  "node_modules/string-kit/lib/json-data/emoji-keyword-to-charlist.json"(exports, module) {
     module.exports = { "10": ["\u{1F51F}"], grin: ["\u{1F600}", "\u{1F603}", "\u{1F604}", "\u{1F606}", "\u{1F605}", "\u{1F63A}", "\u{1F638}"], face: ["\u{1F600}", "\u{1F603}", "\u{1F604}", "\u{1F601}", "\u{1F606}", "\u{1F605}", "\u{1F602}", "\u{1F642}", "\u{1F643}", "\u{1FAE0}", "\u{1F609}", "\u{1F60A}", "\u{1F607}", "\u{1F970}", "\u{1F60D}", "\u{1F618}", "\u{1F617}", "\u263A\uFE0F", "\u{1F61A}", "\u{1F619}", "\u{1F972}", "\u{1F60B}", "\u{1F61B}", "\u{1F61C}", "\u{1F92A}", "\u{1F61D}", "\u{1F911}", "\u{1F917}", "\u{1F92D}", "\u{1FAE2}", "\u{1FAE3}", "\u{1F92B}", "\u{1F914}", "\u{1FAE1}", "\u{1F910}", "\u{1F928}", "\u{1F610}", "\u{1F611}", "\u{1F636}", "\u{1FAE5}", "\u{1F636}\u200D\u{1F32B}\uFE0F", "\u{1F60F}", "\u{1F612}", "\u{1F644}", "\u{1F62C}", "\u{1F62E}\u200D\u{1F4A8}", "\u{1F925}", "\u{1FAE8}", "\u{1F60C}", "\u{1F614}", "\u{1F62A}", "\u{1F924}", "\u{1F634}", "\u{1F637}", "\u{1F912}", "\u{1F915}", "\u{1F922}", "\u{1F92E}", "\u{1F927}", "\u{1F975}", "\u{1F976}", "\u{1F974}", "\u{1F635}", "\u{1F635}\u200D\u{1F4AB}", "\u{1F920}", "\u{1F973}", "\u{1F978}", "\u{1F60E}", "\u{1F913}", "\u{1F9D0}", "\u{1F615}", "\u{1FAE4}", "\u{1F61F}", "\u{1F641}", "\u2639\uFE0F", "\u{1F62E}", "\u{1F62F}", "\u{1F632}", "\u{1F633}", "\u{1F97A}", "\u{1F979}", "\u{1F626}", "\u{1F627}", "\u{1F628}", "\u{1F630}", "\u{1F625}", "\u{1F622}", "\u{1F62D}", "\u{1F631}", "\u{1F616}", "\u{1F623}", "\u{1F61E}", "\u{1F613}", "\u{1F629}", "\u{1F62B}", "\u{1F971}", "\u{1F624}", "\u{1F621}", "\u{1F620}", "\u{1F92C}", "\u{1F608}", "\u{1F47F}", "\u{1F921}", "\u{1F91B}", "\u{1F91C}", "\u{1F435}", "\u{1F436}", "\u{1F431}", "\u{1F42F}", "\u{1F434}", "\u{1F42E}", "\u{1F437}", "\u{1F42D}", "\u{1F430}", "\u{1F425}", "\u{1F432}", "\u{1F31A}", "\u{1F31B}", "\u{1F31C}", "\u{1F31D}", "\u{1F31E}", "\u{1F32C}\uFE0F", "\u{1F4C4}"], big: ["\u{1F603}"], eyes: ["\u{1F603}", "\u{1F604}", "\u{1F601}", "\u{1F60A}", "\u{1F60D}", "\u{1F61A}", "\u{1F619}", "\u{1FAE2}", "\u{1F644}", "\u{1F635}", "\u{1F635}\u200D\u{1F4AB}", "\u{1F638}", "\u{1F63B}", "\u{1F440}"], smile: ["\u{1F604}", "\u{1F601}", "\u{1F642}", "\u{1F60A}", "\u{1F607}", "\u{1F970}", "\u{1F60D}", "\u263A\uFE0F", "\u{1F619}", "\u{1F972}", "\u{1F917}", "\u{1F60E}", "\u{1F608}", "\u{1F638}", "\u{1F63B}", "\u{1F63C}"], beam: ["\u{1F601}"], squint: ["\u{1F606}", "\u{1F61D}"], sweat: ["\u{1F605}", "\u{1F630}", "\u{1F613}", "\u{1F4A6}"], roll: ["\u{1F923}", "\u{1F644}", "\u{1F9FB}"], on: ["\u{1F923}", "\u{1F92C}", "\u2764\uFE0F\u200D\u{1F525}", "\u{1F356}", "\u26F1\uFE0F", "\u{1F51B}"], the: ["\u{1F923}", "\u{1F918}", "\u{1FAF5}"], floor: ["\u{1F923}"], laugh: ["\u{1F923}"], tears: ["\u{1F602}", "\u{1F979}", "\u{1F639}"], joy: ["\u{1F602}", "\u{1F639}"], slightly: ["\u{1F642}", "\u{1F641}"], upside: ["\u{1F643}"], down: ["\u{1F643}", "\u{1FAF3}", "\u{1F447}", "\u{1F44E}", "\u2198\uFE0F", "\u2B07\uFE0F", "\u2199\uFE0F", "\u2195\uFE0F", "\u2935\uFE0F", "\u23EC", "\u{1F53B}"], melt: ["\u{1FAE0}"], wink: ["\u{1F609}", "\u{1F61C}"], halo: ["\u{1F607}"], hearts: ["\u{1F970}", "\u{1F49E}", "\u{1F495}"], heart: ["\u{1F60D}", "\u{1F63B}", "\u{1F498}", "\u{1F49D}", "\u{1F496}", "\u{1F497}", "\u{1F493}", "\u{1F49F}", "\u2763\uFE0F", "\u{1F494}", "\u2764\uFE0F\u200D\u{1F525}", "\u2764\uFE0F\u200D\u{1FA79}", "\u2764\uFE0F", "\u{1FA77}", "\u{1F9E1}", "\u{1F49B}", "\u{1F49A}", "\u{1F499}", "\u{1FA75}", "\u{1F49C}", "\u{1F90E}", "\u{1F5A4}", "\u{1FA76}", "\u{1F90D}", "\u{1FAF6}", "\u{1FAC0}", "\u{1F491}", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F468}", "\u{1F468}\u200D\u2764\uFE0F\u200D\u{1F468}", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F469}", "\u2665\uFE0F"], star: ["\u{1F929}", "\u2B50", "\u{1F31F}", "\u{1F320}", "\u2721\uFE0F", "\u262A\uFE0F", "\u{1F52F}", "\u2734\uFE0F"], struck: ["\u{1F929}"], blow: ["\u{1F618}"], kiss: ["\u{1F618}", "\u{1F617}", "\u{1F61A}", "\u{1F619}", "\u{1F63D}", "\u{1F48B}", "\u{1F48F}", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F468}", "\u{1F468}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F468}", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F469}"], closed: ["\u{1F61A}", "\u{1F302}", "\u{1F4D5}", "\u{1F4EB}", "\u{1F4EA}"], tear: ["\u{1F972}", "\u{1F4C6}"], savore: ["\u{1F60B}"], food: ["\u{1F60B}", "\u{1F958}", "\u{1F372}", "\u{1F96B}"], tongue: ["\u{1F61B}", "\u{1F61C}", "\u{1F61D}", "\u{1F445}"], zany: ["\u{1F92A}"], money: ["\u{1F911}", "\u{1F4B0}", "\u{1F4B8}"], mouth: ["\u{1F911}", "\u{1F92D}", "\u{1FAE2}", "\u{1F910}", "\u{1F636}", "\u{1FAE4}", "\u{1F62E}", "\u{1F626}", "\u{1F92C}", "\u{1F444}"], open: ["\u{1F917}", "\u{1FAE2}", "\u{1F62E}", "\u{1F626}", "\u{1F450}", "\u{1F4D6}", "\u{1F4EC}", "\u{1F4ED}", "\u{1F4C2}", "\u{1F23A}"], hands: ["\u{1F917}", "\u{1F44F}", "\u{1F64C}", "\u{1FAF6}", "\u{1F450}", "\u{1F64F}", "\u{1F9D1}\u200D\u{1F91D}\u200D\u{1F9D1}", "\u{1F46D}", "\u{1F46B}", "\u{1F46C}"], hand: ["\u{1F92D}", "\u{1FAE2}", "\u{1F44B}", "\u{1F91A}", "\u{1F590}\uFE0F", "\u270B", "\u{1FAF1}", "\u{1FAF2}", "\u{1FAF3}", "\u{1FAF4}", "\u{1FAF7}", "\u{1FAF8}", "\u{1F44C}", "\u{1F90F}", "\u270C\uFE0F", "\u{1FAF0}", "\u{1F919}", "\u270D\uFE0F", "\u{1F481}", "\u{1F481}\u200D\u2642\uFE0F", "\u{1F481}\u200D\u2640\uFE0F", "\u{1F64B}", "\u{1F64B}\u200D\u2642\uFE0F", "\u{1F64B}\u200D\u2640\uFE0F", "\u{1FAAD}"], over: ["\u{1F92D}", "\u{1FAE2}", "\u{1F304}"], and: ["\u{1FAE2}", "\u2620\uFE0F", "\u{1FAF0}", "\u{1F46B}", "\u{1F37D}\uFE0F", "\u{1F374}", "\u26C8\uFE0F", "\u2692\uFE0F", "\u{1F6E0}\uFE0F", "\u{1F3F9}", "\u{1F529}", "\u{1F6CB}\uFE0F", "\u262A\uFE0F"], peek: ["\u{1FAE3}"], eye: ["\u{1FAE3}", "\u{1F441}\uFE0F\u200D\u{1F5E8}\uFE0F", "\u{1F441}\uFE0F"], shush: ["\u{1F92B}"], think: ["\u{1F914}"], salute: ["\u{1FAE1}", "\u{1F596}"], zipper: ["\u{1F910}"], raised: ["\u{1F928}", "\u{1F91A}", "\u270B", "\u270A", "\u{1F4EB}", "\u{1F4EC}"], eyebrow: ["\u{1F928}"], neutral: ["\u{1F610}"], expressionless: ["\u{1F611}"], without: ["\u{1F636}", "\u{1F375}", "\u26C4"], dotted: ["\u{1FAE5}", "\u{1F52F}"], line: ["\u{1FAE5}"], in: ["\u{1F636}\u200D\u{1F32B}\uFE0F", "\u{1F631}", "\u{1F441}\uFE0F\u200D\u{1F5E8}\uFE0F", "\u{1F935}", "\u{1F935}\u200D\u2642\uFE0F", "\u{1F935}\u200D\u2640\uFE0F", "\u{1F9D1}\u200D\u{1F9BC}", "\u{1F468}\u200D\u{1F9BC}", "\u{1F469}\u200D\u{1F9BC}", "\u{1F9D1}\u200D\u{1F9BD}", "\u{1F468}\u200D\u{1F9BD}", "\u{1F469}\u200D\u{1F9BD}", "\u{1F574}\uFE0F", "\u{1F9D6}", "\u{1F9D6}\u200D\u2642\uFE0F", "\u{1F9D6}\u200D\u2640\uFE0F", "\u{1F9D8}", "\u{1F9D8}\u200D\u2642\uFE0F", "\u{1F9D8}\u200D\u2640\uFE0F", "\u{1F6CC}", "\u{1F464}", "\u{1F465}", "\u{1F343}", "\u26F3", "\u{1F6AE}"], clouds: ["\u{1F636}\u200D\u{1F32B}\uFE0F"], smirk: ["\u{1F60F}"], unamused: ["\u{1F612}"], grimace: ["\u{1F62C}"], exhale: ["\u{1F62E}\u200D\u{1F4A8}"], lying: ["\u{1F925}"], shake: ["\u{1FAE8}"], relieved: ["\u{1F60C}", "\u{1F625}"], pensive: ["\u{1F614}"], sleepy: ["\u{1F62A}"], drool: ["\u{1F924}"], sleep: ["\u{1F634}"], medical: ["\u{1F637}", "\u2695\uFE0F"], mask: ["\u{1F637}", "\u{1F93F}"], thermometer: ["\u{1F912}", "\u{1F321}\uFE0F"], head: ["\u{1F915}", "\u{1F92F}", "\u{1F5E3}\uFE0F"], bandage: ["\u{1F915}", "\u{1FA79}"], nauseated: ["\u{1F922}"], vomite: ["\u{1F92E}"], sneez: ["\u{1F927}"], hot: ["\u{1F975}", "\u{1F336}\uFE0F", "\u{1F32D}", "\u2615", "\u2668\uFE0F"], cold: ["\u{1F976}"], woozy: ["\u{1F974}"], crossed: ["\u{1F635}", "\u{1F91E}", "\u{1FAF0}", "\u2694\uFE0F", "\u{1F38C}"], out: ["\u{1F635}"], spiral: ["\u{1F635}\u200D\u{1F4AB}", "\u{1F41A}", "\u{1F5D2}\uFE0F", "\u{1F5D3}\uFE0F"], explode: ["\u{1F92F}"], cowboy: ["\u{1F920}"], hat: ["\u{1F920}", "\u{1F452}", "\u{1F3A9}"], party: ["\u{1F973}", "\u{1F389}"], disguised: ["\u{1F978}"], sunglasses: ["\u{1F60E}", "\u{1F576}\uFE0F"], nerd: ["\u{1F913}"], monocle: ["\u{1F9D0}"], confused: ["\u{1F615}"], diagonal: ["\u{1FAE4}"], worried: ["\u{1F61F}"], frown: ["\u{1F641}", "\u2639\uFE0F", "\u{1F626}", "\u{1F64D}", "\u{1F64D}\u200D\u2642\uFE0F", "\u{1F64D}\u200D\u2640\uFE0F"], hushed: ["\u{1F62F}"], astonished: ["\u{1F632}"], flushed: ["\u{1F633}"], plead: ["\u{1F97A}"], hold: ["\u{1F979}", "\u{1F9D1}\u200D\u{1F91D}\u200D\u{1F9D1}", "\u{1F46D}", "\u{1F46B}", "\u{1F46C}"], back: ["\u{1F979}", "\u{1F91A}", "\u{1F519}"], anguished: ["\u{1F627}"], fearful: ["\u{1F628}"], anxious: ["\u{1F630}"], sad: ["\u{1F625}"], but: ["\u{1F625}"], cry: ["\u{1F622}", "\u{1F62D}", "\u{1F63F}"], loudly: ["\u{1F62D}"], scream: ["\u{1F631}"], fear: ["\u{1F631}"], confounded: ["\u{1F616}"], persever: ["\u{1F623}"], disappointed: ["\u{1F61E}"], downcast: ["\u{1F613}"], weary: ["\u{1F629}", "\u{1F640}"], tired: ["\u{1F62B}"], yawn: ["\u{1F971}"], steam: ["\u{1F624}", "\u{1F35C}"], from: ["\u{1F624}"], nose: ["\u{1F624}", "\u{1F443}", "\u{1F43D}"], enraged: ["\u{1F621}"], angry: ["\u{1F620}", "\u{1F47F}"], symbols: ["\u{1F92C}", "\u{1F523}"], horns: ["\u{1F608}", "\u{1F47F}", "\u{1F918}"], skull: ["\u{1F480}", "\u2620\uFE0F"], crossbones: ["\u2620\uFE0F"], pile: ["\u{1F4A9}"], poo: ["\u{1F4A9}"], clown: ["\u{1F921}"], ogre: ["\u{1F479}"], goblin: ["\u{1F47A}"], ghost: ["\u{1F47B}"], alien: ["\u{1F47D}", "\u{1F47E}"], monster: ["\u{1F47E}"], robot: ["\u{1F916}"], cat: ["\u{1F63A}", "\u{1F638}", "\u{1F639}", "\u{1F63B}", "\u{1F63C}", "\u{1F63D}", "\u{1F640}", "\u{1F63F}", "\u{1F63E}", "\u{1F431}", "\u{1F408}", "\u{1F408}\u200D\u2B1B"], wry: ["\u{1F63C}"], pout: ["\u{1F63E}", "\u{1F64E}", "\u{1F64E}\u200D\u2642\uFE0F", "\u{1F64E}\u200D\u2640\uFE0F"], see: ["\u{1F648}"], no: ["\u{1F648}", "\u{1F649}", "\u{1F64A}", "\u{1F645}", "\u{1F645}\u200D\u2642\uFE0F", "\u{1F645}\u200D\u2640\uFE0F", "\u26D4", "\u{1F6B3}", "\u{1F6AD}", "\u{1F6AF}", "\u{1F6B7}", "\u{1F4F5}", "\u{1F51E}", "\u{1F235}"], evil: ["\u{1F648}", "\u{1F649}", "\u{1F64A}"], monkey: ["\u{1F648}", "\u{1F649}", "\u{1F64A}", "\u{1F435}", "\u{1F412}"], hear: ["\u{1F649}", "\u{1F9BB}"], speak: ["\u{1F64A}", "\u{1F5E3}\uFE0F"], love: ["\u{1F48C}", "\u{1F91F}", "\u{1F3E9}"], letter: ["\u{1F48C}"], arrow: ["\u{1F498}", "\u{1F4F2}", "\u{1F4E9}", "\u{1F3F9}", "\u2B06\uFE0F", "\u2197\uFE0F", "\u27A1\uFE0F", "\u2198\uFE0F", "\u2B07\uFE0F", "\u2199\uFE0F", "\u2B05\uFE0F", "\u2196\uFE0F", "\u2195\uFE0F", "\u2194\uFE0F", "\u21A9\uFE0F", "\u21AA\uFE0F", "\u2934\uFE0F", "\u2935\uFE0F", "\u{1F519}", "\u{1F51A}", "\u{1F51B}", "\u{1F51C}", "\u{1F51D}"], ribbon: ["\u{1F49D}", "\u{1F380}", "\u{1F397}\uFE0F"], sparkle: ["\u{1F496}", "\u2747\uFE0F"], grow: ["\u{1F497}"], beat: ["\u{1F493}"], revolve: ["\u{1F49E}"], two: ["\u{1F495}", "\u{1F42B}", "\u{1F551}", "\u{1F55D}"], decoration: ["\u{1F49F}", "\u{1F38D}"], exclamation: ["\u2763\uFE0F", "\u203C\uFE0F", "\u2049\uFE0F", "\u2755", "\u2757"], broken: ["\u{1F494}"], fire: ["\u2764\uFE0F\u200D\u{1F525}", "\u{1F692}", "\u{1F525}", "\u{1F9EF}"], mend: ["\u2764\uFE0F\u200D\u{1FA79}"], red: ["\u2764\uFE0F", "\u{1F468}\u200D\u{1F9B0}", "\u{1F469}\u200D\u{1F9B0}", "\u{1F9D1}\u200D\u{1F9B0}", "\u{1F34E}", "\u{1F9E7}", "\u{1F004}", "\u{1F3EE}", "\u2753", "\u2757", "\u2B55", "\u{1F534}", "\u{1F7E5}", "\u{1F53A}", "\u{1F53B}"], pink: ["\u{1FA77}"], orange: ["\u{1F9E1}", "\u{1F4D9}", "\u{1F7E0}", "\u{1F7E7}", "\u{1F536}", "\u{1F538}"], yellow: ["\u{1F49B}", "\u{1F7E1}", "\u{1F7E8}"], green: ["\u{1F49A}", "\u{1F34F}", "\u{1F96C}", "\u{1F957}", "\u{1F4D7}", "\u{1F7E2}", "\u{1F7E9}"], blue: ["\u{1F499}", "\u{1FA75}", "\u{1F4D8}", "\u{1F535}", "\u{1F7E6}", "\u{1F537}", "\u{1F539}"], light: ["\u{1FA75}", "\u{1F688}", "\u{1F6A8}", "\u{1F6A5}", "\u{1F6A6}", "\u{1F4A1}"], purple: ["\u{1F49C}", "\u{1F7E3}", "\u{1F7EA}"], brown: ["\u{1F90E}", "\u{1F7E4}", "\u{1F7EB}"], black: ["\u{1F5A4}", "\u{1F408}\u200D\u2B1B", "\u{1F426}\u200D\u2B1B", "\u2712\uFE0F", "\u26AB", "\u2B1B", "\u25FC\uFE0F", "\u25FE", "\u25AA\uFE0F", "\u{1F532}", "\u{1F3F4}"], grey: ["\u{1FA76}"], white: ["\u{1F90D}", "\u{1F468}\u200D\u{1F9B3}", "\u{1F469}\u200D\u{1F9B3}", "\u{1F9D1}\u200D\u{1F9B3}", "\u{1F9D1}\u200D\u{1F9AF}", "\u{1F468}\u200D\u{1F9AF}", "\u{1F469}\u200D\u{1F9AF}", "\u{1F4AE}", "\u{1F9AF}", "\u2754", "\u2755", "\u26AA", "\u2B1C", "\u25FB\uFE0F", "\u25FD", "\u25AB\uFE0F", "\u{1F533}", "\u{1F3F3}\uFE0F"], mark: ["\u{1F48B}", "\u203C\uFE0F", "\u2049\uFE0F", "\u2753", "\u2754", "\u2755", "\u2757", "\u2705", "\u2714\uFE0F", "\u274C", "\u274E", "\u303D\uFE0F", "\u2122\uFE0F"], hundred: ["\u{1F4AF}"], points: ["\u{1F4AF}"], anger: ["\u{1F4A2}", "\u{1F5EF}\uFE0F"], symbol: ["\u{1F4A2}", "\u267F", "\u{1F6BC}", "\u269B\uFE0F", "\u262E\uFE0F", "\u26A7\uFE0F", "\u2695\uFE0F", "\u267B\uFE0F", "\u{1F530}"], collision: ["\u{1F4A5}"], dizzy: ["\u{1F4AB}"], droplets: ["\u{1F4A6}"], dash: ["\u{1F4A8}", "\u3030\uFE0F"], away: ["\u{1F4A8}"], hole: ["\u{1F573}\uFE0F", "\u26F3"], speech: ["\u{1F4AC}", "\u{1F441}\uFE0F\u200D\u{1F5E8}\uFE0F", "\u{1F5E8}\uFE0F"], balloon: ["\u{1F4AC}", "\u{1F4AD}", "\u{1F388}"], bubble: ["\u{1F441}\uFE0F\u200D\u{1F5E8}\uFE0F", "\u{1F5E8}\uFE0F", "\u{1F5EF}\uFE0F", "\u{1F9CB}"], left: ["\u{1F5E8}\uFE0F", "\u{1F448}", "\u{1F91B}", "\u{1F50D}", "\u{1F6C5}", "\u2199\uFE0F", "\u2B05\uFE0F", "\u2196\uFE0F", "\u2194\uFE0F", "\u21A9\uFE0F", "\u21AA\uFE0F"], right: ["\u{1F5EF}\uFE0F", "\u{1F449}", "\u{1F91C}", "\u{1F50E}", "\u2197\uFE0F", "\u27A1\uFE0F", "\u2198\uFE0F", "\u2194\uFE0F", "\u21A9\uFE0F", "\u21AA\uFE0F", "\u2934\uFE0F", "\u2935\uFE0F"], thought: ["\u{1F4AD}"], zzz: ["\u{1F4A4}"], wave: ["\u{1F44B}", "\u{1F30A}"], fingers: ["\u{1F590}\uFE0F", "\u{1F90C}", "\u{1F91E}"], splayed: ["\u{1F590}\uFE0F"], vulcan: ["\u{1F596}"], rightwards: ["\u{1FAF1}", "\u{1FAF8}"], leftwards: ["\u{1FAF2}", "\u{1FAF7}"], palm: ["\u{1FAF3}", "\u{1FAF4}", "\u{1F334}"], up: ["\u{1FAF4}", "\u{1F446}", "\u261D\uFE0F", "\u{1F44D}", "\u{1F932}", "\u{1F4C4}", "\u{1F5DE}\uFE0F", "\u2B06\uFE0F", "\u2197\uFE0F", "\u2196\uFE0F", "\u2195\uFE0F", "\u2934\uFE0F", "\u23EB", "\u{1F199}", "\u{1F53A}"], push: ["\u{1FAF7}", "\u{1FAF8}"], ok: ["\u{1F44C}", "\u{1F646}", "\u{1F646}\u200D\u2642\uFE0F", "\u{1F646}\u200D\u2640\uFE0F", "\u{1F197}"], pinched: ["\u{1F90C}"], pinch: ["\u{1F90F}"], victory: ["\u270C\uFE0F"], index: ["\u{1FAF0}", "\u{1F448}", "\u{1F449}", "\u{1F446}", "\u{1F447}", "\u261D\uFE0F", "\u{1FAF5}", "\u{1F5C2}\uFE0F", "\u{1F4C7}"], finger: ["\u{1FAF0}", "\u{1F595}"], thumb: ["\u{1FAF0}"], you: ["\u{1F91F}"], gesture: ["\u{1F91F}", "\u{1F645}", "\u{1F645}\u200D\u2642\uFE0F", "\u{1F645}\u200D\u2640\uFE0F", "\u{1F646}", "\u{1F646}\u200D\u2642\uFE0F", "\u{1F646}\u200D\u2640\uFE0F"], sign: ["\u{1F918}", "\u{1F6D1}", "\u{1F3E7}", "\u{1F6AE}", "\u2640\uFE0F", "\u2642\uFE0F", "\u{1F7F0}", "\u{1F4B2}"], call: ["\u{1F919}"], me: ["\u{1F919}"], backhand: ["\u{1F448}", "\u{1F449}", "\u{1F446}", "\u{1F447}"], point: ["\u{1F448}", "\u{1F449}", "\u{1F446}", "\u{1F447}", "\u261D\uFE0F", "\u{1FAF5}"], middle: ["\u{1F595}"], at: ["\u{1FAF5}", "\u{1F306}", "\u{1F309}"], viewer: ["\u{1FAF5}"], thumbs: ["\u{1F44D}", "\u{1F44E}"], fist: ["\u270A", "\u{1F44A}", "\u{1F91B}", "\u{1F91C}"], oncome: ["\u{1F44A}", "\u{1F68D}", "\u{1F694}", "\u{1F696}", "\u{1F698}"], clap: ["\u{1F44F}"], raise: ["\u{1F64C}", "\u{1F64B}", "\u{1F64B}\u200D\u2642\uFE0F", "\u{1F64B}\u200D\u2640\uFE0F"], palms: ["\u{1F932}"], together: ["\u{1F932}"], handshake: ["\u{1F91D}"], folded: ["\u{1F64F}"], write: ["\u270D\uFE0F"], nail: ["\u{1F485}"], polish: ["\u{1F485}"], selfie: ["\u{1F933}"], flexed: ["\u{1F4AA}"], biceps: ["\u{1F4AA}"], mechanical: ["\u{1F9BE}", "\u{1F9BF}"], arm: ["\u{1F9BE}"], leg: ["\u{1F9BF}", "\u{1F9B5}", "\u{1F357}"], foot: ["\u{1F9B6}"], ear: ["\u{1F442}", "\u{1F9BB}", "\u{1F33D}"], aid: ["\u{1F9BB}"], brain: ["\u{1F9E0}"], anatomical: ["\u{1FAC0}"], lungs: ["\u{1FAC1}"], tooth: ["\u{1F9B7}"], bone: ["\u{1F9B4}", "\u{1F356}"], bite: ["\u{1FAE6}"], lip: ["\u{1FAE6}"], baby: ["\u{1F476}", "\u{1F469}\u200D\u{1F37C}", "\u{1F468}\u200D\u{1F37C}", "\u{1F9D1}\u200D\u{1F37C}", "\u{1F47C}", "\u{1F424}", "\u{1F425}", "\u{1F37C}", "\u{1F6BC}"], child: ["\u{1F9D2}"], boy: ["\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F467}\u200D\u{1F466}"], girl: ["\u{1F467}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F469}\u200D\u{1F467}", "\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F467}\u200D\u{1F467}"], person: ["\u{1F9D1}", "\u{1F471}", "\u{1F9D4}", "\u{1F9D1}\u200D\u{1F9B0}", "\u{1F9D1}\u200D\u{1F9B1}", "\u{1F9D1}\u200D\u{1F9B3}", "\u{1F9D1}\u200D\u{1F9B2}", "\u{1F9D3}", "\u{1F64D}", "\u{1F64E}", "\u{1F645}", "\u{1F646}", "\u{1F481}", "\u{1F64B}", "\u{1F9CF}", "\u{1F647}", "\u{1F926}", "\u{1F937}", "\u{1FAC5}", "\u{1F473}", "\u{1F472}", "\u{1F935}", "\u{1F470}", "\u{1FAC4}", "\u{1F9D1}\u200D\u{1F37C}", "\u{1F486}", "\u{1F487}", "\u{1F6B6}", "\u{1F9CD}", "\u{1F9CE}", "\u{1F9D1}\u200D\u{1F9AF}", "\u{1F9D1}\u200D\u{1F9BC}", "\u{1F9D1}\u200D\u{1F9BD}", "\u{1F3C3}", "\u{1F574}\uFE0F", "\u{1F9D6}", "\u{1F9D7}", "\u{1F93A}", "\u{1F3CC}\uFE0F", "\u{1F3C4}", "\u{1F6A3}", "\u{1F3CA}", "\u26F9\uFE0F", "\u{1F3CB}\uFE0F", "\u{1F6B4}", "\u{1F6B5}", "\u{1F938}", "\u{1F93D}", "\u{1F93E}", "\u{1F939}", "\u{1F9D8}", "\u{1F6C0}", "\u{1F6CC}"], blond: ["\u{1F471}", "\u{1F471}\u200D\u2640\uFE0F", "\u{1F471}\u200D\u2642\uFE0F"], hair: ["\u{1F471}", "\u{1F468}\u200D\u{1F9B0}", "\u{1F468}\u200D\u{1F9B1}", "\u{1F468}\u200D\u{1F9B3}", "\u{1F469}\u200D\u{1F9B0}", "\u{1F9D1}\u200D\u{1F9B0}", "\u{1F469}\u200D\u{1F9B1}", "\u{1F9D1}\u200D\u{1F9B1}", "\u{1F469}\u200D\u{1F9B3}", "\u{1F9D1}\u200D\u{1F9B3}", "\u{1F471}\u200D\u2640\uFE0F", "\u{1F471}\u200D\u2642\uFE0F", "\u{1FAAE}"], man: ["\u{1F468}", "\u{1F9D4}\u200D\u2642\uFE0F", "\u{1F468}\u200D\u{1F9B0}", "\u{1F468}\u200D\u{1F9B1}", "\u{1F468}\u200D\u{1F9B3}", "\u{1F468}\u200D\u{1F9B2}", "\u{1F471}\u200D\u2642\uFE0F", "\u{1F474}", "\u{1F64D}\u200D\u2642\uFE0F", "\u{1F64E}\u200D\u2642\uFE0F", "\u{1F645}\u200D\u2642\uFE0F", "\u{1F646}\u200D\u2642\uFE0F", "\u{1F481}\u200D\u2642\uFE0F", "\u{1F64B}\u200D\u2642\uFE0F", "\u{1F9CF}\u200D\u2642\uFE0F", "\u{1F647}\u200D\u2642\uFE0F", "\u{1F926}\u200D\u2642\uFE0F", "\u{1F937}\u200D\u2642\uFE0F", "\u{1F468}\u200D\u2695\uFE0F", "\u{1F468}\u200D\u{1F393}", "\u{1F468}\u200D\u{1F3EB}", "\u{1F468}\u200D\u2696\uFE0F", "\u{1F468}\u200D\u{1F33E}", "\u{1F468}\u200D\u{1F373}", "\u{1F468}\u200D\u{1F527}", "\u{1F468}\u200D\u{1F3ED}", "\u{1F468}\u200D\u{1F4BC}", "\u{1F468}\u200D\u{1F52C}", "\u{1F468}\u200D\u{1F4BB}", "\u{1F468}\u200D\u{1F3A4}", "\u{1F468}\u200D\u{1F3A8}", "\u{1F468}\u200D\u2708\uFE0F", "\u{1F468}\u200D\u{1F680}", "\u{1F468}\u200D\u{1F692}", "\u{1F46E}\u200D\u2642\uFE0F", "\u{1F575}\uFE0F\u200D\u2642\uFE0F", "\u{1F482}\u200D\u2642\uFE0F", "\u{1F477}\u200D\u2642\uFE0F", "\u{1F473}\u200D\u2642\uFE0F", "\u{1F935}\u200D\u2642\uFE0F", "\u{1F470}\u200D\u2642\uFE0F", "\u{1FAC3}", "\u{1F468}\u200D\u{1F37C}", "\u{1F9B8}\u200D\u2642\uFE0F", "\u{1F9B9}\u200D\u2642\uFE0F", "\u{1F9D9}\u200D\u2642\uFE0F", "\u{1F9DA}\u200D\u2642\uFE0F", "\u{1F9DB}\u200D\u2642\uFE0F", "\u{1F9DD}\u200D\u2642\uFE0F", "\u{1F9DE}\u200D\u2642\uFE0F", "\u{1F9DF}\u200D\u2642\uFE0F", "\u{1F486}\u200D\u2642\uFE0F", "\u{1F487}\u200D\u2642\uFE0F", "\u{1F6B6}\u200D\u2642\uFE0F", "\u{1F9CD}\u200D\u2642\uFE0F", "\u{1F9CE}\u200D\u2642\uFE0F", "\u{1F468}\u200D\u{1F9AF}", "\u{1F468}\u200D\u{1F9BC}", "\u{1F468}\u200D\u{1F9BD}", "\u{1F3C3}\u200D\u2642\uFE0F", "\u{1F57A}", "\u{1F9D6}\u200D\u2642\uFE0F", "\u{1F9D7}\u200D\u2642\uFE0F", "\u{1F3CC}\uFE0F\u200D\u2642\uFE0F", "\u{1F3C4}\u200D\u2642\uFE0F", "\u{1F6A3}\u200D\u2642\uFE0F", "\u{1F3CA}\u200D\u2642\uFE0F", "\u26F9\uFE0F\u200D\u2642\uFE0F", "\u{1F3CB}\uFE0F\u200D\u2642\uFE0F", "\u{1F6B4}\u200D\u2642\uFE0F", "\u{1F6B5}\u200D\u2642\uFE0F", "\u{1F938}\u200D\u2642\uFE0F", "\u{1F93D}\u200D\u2642\uFE0F", "\u{1F93E}\u200D\u2642\uFE0F", "\u{1F939}\u200D\u2642\uFE0F", "\u{1F9D8}\u200D\u2642\uFE0F", "\u{1F46B}", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F468}", "\u{1F468}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F468}", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F468}", "\u{1F468}\u200D\u2764\uFE0F\u200D\u{1F468}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F45E}", "\u{1F1EE}\u{1F1F2}"], beard: ["\u{1F9D4}", "\u{1F9D4}\u200D\u2642\uFE0F", "\u{1F9D4}\u200D\u2640\uFE0F"], woman: ["\u{1F9D4}\u200D\u2640\uFE0F", "\u{1F469}", "\u{1F469}\u200D\u{1F9B0}", "\u{1F469}\u200D\u{1F9B1}", "\u{1F469}\u200D\u{1F9B3}", "\u{1F469}\u200D\u{1F9B2}", "\u{1F471}\u200D\u2640\uFE0F", "\u{1F475}", "\u{1F64D}\u200D\u2640\uFE0F", "\u{1F64E}\u200D\u2640\uFE0F", "\u{1F645}\u200D\u2640\uFE0F", "\u{1F646}\u200D\u2640\uFE0F", "\u{1F481}\u200D\u2640\uFE0F", "\u{1F64B}\u200D\u2640\uFE0F", "\u{1F9CF}\u200D\u2640\uFE0F", "\u{1F647}\u200D\u2640\uFE0F", "\u{1F926}\u200D\u2640\uFE0F", "\u{1F937}\u200D\u2640\uFE0F", "\u{1F469}\u200D\u2695\uFE0F", "\u{1F469}\u200D\u{1F393}", "\u{1F469}\u200D\u{1F3EB}", "\u{1F469}\u200D\u2696\uFE0F", "\u{1F469}\u200D\u{1F33E}", "\u{1F469}\u200D\u{1F373}", "\u{1F469}\u200D\u{1F527}", "\u{1F469}\u200D\u{1F3ED}", "\u{1F469}\u200D\u{1F4BC}", "\u{1F469}\u200D\u{1F52C}", "\u{1F469}\u200D\u{1F4BB}", "\u{1F469}\u200D\u{1F3A4}", "\u{1F469}\u200D\u{1F3A8}", "\u{1F469}\u200D\u2708\uFE0F", "\u{1F469}\u200D\u{1F680}", "\u{1F469}\u200D\u{1F692}", "\u{1F46E}\u200D\u2640\uFE0F", "\u{1F575}\uFE0F\u200D\u2640\uFE0F", "\u{1F482}\u200D\u2640\uFE0F", "\u{1F477}\u200D\u2640\uFE0F", "\u{1F473}\u200D\u2640\uFE0F", "\u{1F9D5}", "\u{1F935}\u200D\u2640\uFE0F", "\u{1F470}\u200D\u2640\uFE0F", "\u{1F930}", "\u{1F469}\u200D\u{1F37C}", "\u{1F9B8}\u200D\u2640\uFE0F", "\u{1F9B9}\u200D\u2640\uFE0F", "\u{1F9D9}\u200D\u2640\uFE0F", "\u{1F9DA}\u200D\u2640\uFE0F", "\u{1F9DB}\u200D\u2640\uFE0F", "\u{1F9DD}\u200D\u2640\uFE0F", "\u{1F9DE}\u200D\u2640\uFE0F", "\u{1F9DF}\u200D\u2640\uFE0F", "\u{1F486}\u200D\u2640\uFE0F", "\u{1F487}\u200D\u2640\uFE0F", "\u{1F6B6}\u200D\u2640\uFE0F", "\u{1F9CD}\u200D\u2640\uFE0F", "\u{1F9CE}\u200D\u2640\uFE0F", "\u{1F469}\u200D\u{1F9AF}", "\u{1F469}\u200D\u{1F9BC}", "\u{1F469}\u200D\u{1F9BD}", "\u{1F3C3}\u200D\u2640\uFE0F", "\u{1F483}", "\u{1F9D6}\u200D\u2640\uFE0F", "\u{1F9D7}\u200D\u2640\uFE0F", "\u{1F3CC}\uFE0F\u200D\u2640\uFE0F", "\u{1F3C4}\u200D\u2640\uFE0F", "\u{1F6A3}\u200D\u2640\uFE0F", "\u{1F3CA}\u200D\u2640\uFE0F", "\u26F9\uFE0F\u200D\u2640\uFE0F", "\u{1F3CB}\uFE0F\u200D\u2640\uFE0F", "\u{1F6B4}\u200D\u2640\uFE0F", "\u{1F6B5}\u200D\u2640\uFE0F", "\u{1F938}\u200D\u2640\uFE0F", "\u{1F93D}\u200D\u2640\uFE0F", "\u{1F93E}\u200D\u2640\uFE0F", "\u{1F939}\u200D\u2640\uFE0F", "\u{1F9D8}\u200D\u2640\uFE0F", "\u{1F46B}", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F468}", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F469}", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F468}", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F469}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F469}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F467}", "\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F45A}", "\u{1F461}", "\u{1F462}", "\u{1F452}"], curly: ["\u{1F468}\u200D\u{1F9B1}", "\u{1F469}\u200D\u{1F9B1}", "\u{1F9D1}\u200D\u{1F9B1}", "\u27B0", "\u27BF"], bald: ["\u{1F468}\u200D\u{1F9B2}", "\u{1F469}\u200D\u{1F9B2}", "\u{1F9D1}\u200D\u{1F9B2}"], older: ["\u{1F9D3}"], old: ["\u{1F474}", "\u{1F475}", "\u{1F5DD}\uFE0F"], tip: ["\u{1F481}", "\u{1F481}\u200D\u2642\uFE0F", "\u{1F481}\u200D\u2640\uFE0F"], deaf: ["\u{1F9CF}", "\u{1F9CF}\u200D\u2642\uFE0F", "\u{1F9CF}\u200D\u2640\uFE0F"], bow: ["\u{1F647}", "\u{1F647}\u200D\u2642\uFE0F", "\u{1F647}\u200D\u2640\uFE0F", "\u{1F3F9}"], facepalm: ["\u{1F926}", "\u{1F926}\u200D\u2642\uFE0F", "\u{1F926}\u200D\u2640\uFE0F"], shrug: ["\u{1F937}", "\u{1F937}\u200D\u2642\uFE0F", "\u{1F937}\u200D\u2640\uFE0F"], health: ["\u{1F9D1}\u200D\u2695\uFE0F", "\u{1F468}\u200D\u2695\uFE0F", "\u{1F469}\u200D\u2695\uFE0F"], worker: ["\u{1F9D1}\u200D\u2695\uFE0F", "\u{1F468}\u200D\u2695\uFE0F", "\u{1F469}\u200D\u2695\uFE0F", "\u{1F9D1}\u200D\u{1F3ED}", "\u{1F468}\u200D\u{1F3ED}", "\u{1F469}\u200D\u{1F3ED}", "\u{1F9D1}\u200D\u{1F4BC}", "\u{1F468}\u200D\u{1F4BC}", "\u{1F469}\u200D\u{1F4BC}", "\u{1F477}", "\u{1F477}\u200D\u2642\uFE0F", "\u{1F477}\u200D\u2640\uFE0F", "\u26D1\uFE0F"], student: ["\u{1F9D1}\u200D\u{1F393}", "\u{1F468}\u200D\u{1F393}", "\u{1F469}\u200D\u{1F393}"], teacher: ["\u{1F9D1}\u200D\u{1F3EB}", "\u{1F468}\u200D\u{1F3EB}", "\u{1F469}\u200D\u{1F3EB}"], judge: ["\u{1F9D1}\u200D\u2696\uFE0F", "\u{1F468}\u200D\u2696\uFE0F", "\u{1F469}\u200D\u2696\uFE0F"], farmer: ["\u{1F9D1}\u200D\u{1F33E}", "\u{1F468}\u200D\u{1F33E}", "\u{1F469}\u200D\u{1F33E}"], cook: ["\u{1F9D1}\u200D\u{1F373}", "\u{1F468}\u200D\u{1F373}", "\u{1F469}\u200D\u{1F373}", "\u{1F373}", "\u{1F1E8}\u{1F1F0}"], mechanic: ["\u{1F9D1}\u200D\u{1F527}", "\u{1F468}\u200D\u{1F527}", "\u{1F469}\u200D\u{1F527}"], factory: ["\u{1F9D1}\u200D\u{1F3ED}", "\u{1F468}\u200D\u{1F3ED}", "\u{1F469}\u200D\u{1F3ED}", "\u{1F3ED}"], office: ["\u{1F9D1}\u200D\u{1F4BC}", "\u{1F468}\u200D\u{1F4BC}", "\u{1F469}\u200D\u{1F4BC}", "\u{1F3E2}", "\u{1F3E3}", "\u{1F3E4}"], scientist: ["\u{1F9D1}\u200D\u{1F52C}", "\u{1F468}\u200D\u{1F52C}", "\u{1F469}\u200D\u{1F52C}"], technologist: ["\u{1F9D1}\u200D\u{1F4BB}", "\u{1F468}\u200D\u{1F4BB}", "\u{1F469}\u200D\u{1F4BB}"], singer: ["\u{1F9D1}\u200D\u{1F3A4}", "\u{1F468}\u200D\u{1F3A4}", "\u{1F469}\u200D\u{1F3A4}"], artist: ["\u{1F9D1}\u200D\u{1F3A8}", "\u{1F468}\u200D\u{1F3A8}", "\u{1F469}\u200D\u{1F3A8}", "\u{1F3A8}"], pilot: ["\u{1F9D1}\u200D\u2708\uFE0F", "\u{1F468}\u200D\u2708\uFE0F", "\u{1F469}\u200D\u2708\uFE0F"], astronaut: ["\u{1F9D1}\u200D\u{1F680}", "\u{1F468}\u200D\u{1F680}", "\u{1F469}\u200D\u{1F680}"], firefighter: ["\u{1F9D1}\u200D\u{1F692}", "\u{1F468}\u200D\u{1F692}", "\u{1F469}\u200D\u{1F692}"], police: ["\u{1F46E}", "\u{1F46E}\u200D\u2642\uFE0F", "\u{1F46E}\u200D\u2640\uFE0F", "\u{1F693}", "\u{1F694}", "\u{1F6A8}"], officer: ["\u{1F46E}", "\u{1F46E}\u200D\u2642\uFE0F", "\u{1F46E}\u200D\u2640\uFE0F"], detective: ["\u{1F575}\uFE0F", "\u{1F575}\uFE0F\u200D\u2642\uFE0F", "\u{1F575}\uFE0F\u200D\u2640\uFE0F"], guard: ["\u{1F482}", "\u{1F482}\u200D\u2642\uFE0F", "\u{1F482}\u200D\u2640\uFE0F"], ninja: ["\u{1F977}"], construction: ["\u{1F477}", "\u{1F477}\u200D\u2642\uFE0F", "\u{1F477}\u200D\u2640\uFE0F", "\u{1F3D7}\uFE0F", "\u{1F6A7}"], crown: ["\u{1FAC5}", "\u{1F451}"], prince: ["\u{1F934}"], princess: ["\u{1F478}"], wear: ["\u{1F473}", "\u{1F473}\u200D\u2642\uFE0F", "\u{1F473}\u200D\u2640\uFE0F"], turban: ["\u{1F473}", "\u{1F473}\u200D\u2642\uFE0F", "\u{1F473}\u200D\u2640\uFE0F"], skullcap: ["\u{1F472}"], headscarf: ["\u{1F9D5}"], tuxedo: ["\u{1F935}", "\u{1F935}\u200D\u2642\uFE0F", "\u{1F935}\u200D\u2640\uFE0F"], veil: ["\u{1F470}", "\u{1F470}\u200D\u2642\uFE0F", "\u{1F470}\u200D\u2640\uFE0F"], pregnant: ["\u{1F930}", "\u{1FAC3}", "\u{1FAC4}"], breast: ["\u{1F931}"], feed: ["\u{1F931}", "\u{1F469}\u200D\u{1F37C}", "\u{1F468}\u200D\u{1F37C}", "\u{1F9D1}\u200D\u{1F37C}"], angel: ["\u{1F47C}"], santa: ["\u{1F385}"], claus: ["\u{1F385}", "\u{1F936}", "\u{1F9D1}\u200D\u{1F384}"], mrs: ["\u{1F936}"], mx: ["\u{1F9D1}\u200D\u{1F384}"], superhero: ["\u{1F9B8}", "\u{1F9B8}\u200D\u2642\uFE0F", "\u{1F9B8}\u200D\u2640\uFE0F"], supervillain: ["\u{1F9B9}", "\u{1F9B9}\u200D\u2642\uFE0F", "\u{1F9B9}\u200D\u2640\uFE0F"], mage: ["\u{1F9D9}", "\u{1F9D9}\u200D\u2642\uFE0F", "\u{1F9D9}\u200D\u2640\uFE0F"], fairy: ["\u{1F9DA}", "\u{1F9DA}\u200D\u2642\uFE0F", "\u{1F9DA}\u200D\u2640\uFE0F"], vampire: ["\u{1F9DB}", "\u{1F9DB}\u200D\u2642\uFE0F", "\u{1F9DB}\u200D\u2640\uFE0F"], merperson: ["\u{1F9DC}"], merman: ["\u{1F9DC}\u200D\u2642\uFE0F"], mermaid: ["\u{1F9DC}\u200D\u2640\uFE0F"], elf: ["\u{1F9DD}", "\u{1F9DD}\u200D\u2642\uFE0F", "\u{1F9DD}\u200D\u2640\uFE0F"], genie: ["\u{1F9DE}", "\u{1F9DE}\u200D\u2642\uFE0F", "\u{1F9DE}\u200D\u2640\uFE0F"], zombie: ["\u{1F9DF}", "\u{1F9DF}\u200D\u2642\uFE0F", "\u{1F9DF}\u200D\u2640\uFE0F"], troll: ["\u{1F9CC}"], gett: ["\u{1F486}", "\u{1F486}\u200D\u2642\uFE0F", "\u{1F486}\u200D\u2640\uFE0F", "\u{1F487}", "\u{1F487}\u200D\u2642\uFE0F", "\u{1F487}\u200D\u2640\uFE0F"], massage: ["\u{1F486}", "\u{1F486}\u200D\u2642\uFE0F", "\u{1F486}\u200D\u2640\uFE0F"], haircut: ["\u{1F487}", "\u{1F487}\u200D\u2642\uFE0F", "\u{1F487}\u200D\u2640\uFE0F"], walk: ["\u{1F6B6}", "\u{1F6B6}\u200D\u2642\uFE0F", "\u{1F6B6}\u200D\u2640\uFE0F"], stand: ["\u{1F9CD}", "\u{1F9CD}\u200D\u2642\uFE0F", "\u{1F9CD}\u200D\u2640\uFE0F"], kneel: ["\u{1F9CE}", "\u{1F9CE}\u200D\u2642\uFE0F", "\u{1F9CE}\u200D\u2640\uFE0F"], cane: ["\u{1F9D1}\u200D\u{1F9AF}", "\u{1F468}\u200D\u{1F9AF}", "\u{1F469}\u200D\u{1F9AF}", "\u{1F9AF}"], motorized: ["\u{1F9D1}\u200D\u{1F9BC}", "\u{1F468}\u200D\u{1F9BC}", "\u{1F469}\u200D\u{1F9BC}", "\u{1F9BC}"], wheelchair: ["\u{1F9D1}\u200D\u{1F9BC}", "\u{1F468}\u200D\u{1F9BC}", "\u{1F469}\u200D\u{1F9BC}", "\u{1F9D1}\u200D\u{1F9BD}", "\u{1F468}\u200D\u{1F9BD}", "\u{1F469}\u200D\u{1F9BD}", "\u{1F9BD}", "\u{1F9BC}", "\u267F"], manual: ["\u{1F9D1}\u200D\u{1F9BD}", "\u{1F468}\u200D\u{1F9BD}", "\u{1F469}\u200D\u{1F9BD}", "\u{1F9BD}"], run: ["\u{1F3C3}", "\u{1F3C3}\u200D\u2642\uFE0F", "\u{1F3C3}\u200D\u2640\uFE0F", "\u{1F3BD}", "\u{1F45F}"], dance: ["\u{1F483}", "\u{1F57A}"], suit: ["\u{1F574}\uFE0F", "\u2660\uFE0F", "\u2665\uFE0F", "\u2666\uFE0F", "\u2663\uFE0F"], levitate: ["\u{1F574}\uFE0F"], people: ["\u{1F46F}", "\u{1F93C}", "\u{1F9D1}\u200D\u{1F91D}\u200D\u{1F9D1}", "\u{1FAC2}"], bunny: ["\u{1F46F}", "\u{1F46F}\u200D\u2642\uFE0F", "\u{1F46F}\u200D\u2640\uFE0F"], ears: ["\u{1F46F}", "\u{1F46F}\u200D\u2642\uFE0F", "\u{1F46F}\u200D\u2640\uFE0F"], men: ["\u{1F46F}\u200D\u2642\uFE0F", "\u{1F93C}\u200D\u2642\uFE0F", "\u{1F46C}", "\u{1F6B9}"], women: ["\u{1F46F}\u200D\u2640\uFE0F", "\u{1F93C}\u200D\u2640\uFE0F", "\u{1F46D}", "\u{1F6BA}"], steamy: ["\u{1F9D6}", "\u{1F9D6}\u200D\u2642\uFE0F", "\u{1F9D6}\u200D\u2640\uFE0F"], room: ["\u{1F9D6}", "\u{1F9D6}\u200D\u2642\uFE0F", "\u{1F9D6}\u200D\u2640\uFE0F", "\u{1F6B9}", "\u{1F6BA}"], climb: ["\u{1F9D7}", "\u{1F9D7}\u200D\u2642\uFE0F", "\u{1F9D7}\u200D\u2640\uFE0F"], fence: ["\u{1F93A}"], horse: ["\u{1F3C7}", "\u{1F434}", "\u{1F40E}", "\u{1F3A0}"], race: ["\u{1F3C7}", "\u{1F3CE}\uFE0F"], skier: ["\u26F7\uFE0F"], snowboarder: ["\u{1F3C2}"], golf: ["\u{1F3CC}\uFE0F", "\u{1F3CC}\uFE0F\u200D\u2642\uFE0F", "\u{1F3CC}\uFE0F\u200D\u2640\uFE0F"], surf: ["\u{1F3C4}", "\u{1F3C4}\u200D\u2642\uFE0F", "\u{1F3C4}\u200D\u2640\uFE0F"], row: ["\u{1F6A3}", "\u{1F6A3}\u200D\u2642\uFE0F", "\u{1F6A3}\u200D\u2640\uFE0F"], boat: ["\u{1F6A3}", "\u{1F6A3}\u200D\u2642\uFE0F", "\u{1F6A3}\u200D\u2640\uFE0F", "\u{1F6E5}\uFE0F"], swim: ["\u{1F3CA}", "\u{1F3CA}\u200D\u2642\uFE0F", "\u{1F3CA}\u200D\u2640\uFE0F"], bounce: ["\u26F9\uFE0F", "\u26F9\uFE0F\u200D\u2642\uFE0F", "\u26F9\uFE0F\u200D\u2640\uFE0F"], ball: ["\u26F9\uFE0F", "\u26F9\uFE0F\u200D\u2642\uFE0F", "\u26F9\uFE0F\u200D\u2640\uFE0F", "\u{1F359}", "\u{1F38A}", "\u26BD", "\u{1F3B1}", "\u{1F52E}", "\u{1FAA9}"], lift: ["\u{1F3CB}\uFE0F", "\u{1F3CB}\uFE0F\u200D\u2642\uFE0F", "\u{1F3CB}\uFE0F\u200D\u2640\uFE0F"], weights: ["\u{1F3CB}\uFE0F", "\u{1F3CB}\uFE0F\u200D\u2642\uFE0F", "\u{1F3CB}\uFE0F\u200D\u2640\uFE0F"], bike: ["\u{1F6B4}", "\u{1F6B4}\u200D\u2642\uFE0F", "\u{1F6B4}\u200D\u2640\uFE0F", "\u{1F6B5}", "\u{1F6B5}\u200D\u2642\uFE0F", "\u{1F6B5}\u200D\u2640\uFE0F"], mountain: ["\u{1F6B5}", "\u{1F6B5}\u200D\u2642\uFE0F", "\u{1F6B5}\u200D\u2640\uFE0F", "\u{1F3D4}\uFE0F", "\u26F0\uFE0F", "\u{1F69E}", "\u{1F6A0}"], cartwheel: ["\u{1F938}", "\u{1F938}\u200D\u2642\uFE0F", "\u{1F938}\u200D\u2640\uFE0F"], wrestle: ["\u{1F93C}", "\u{1F93C}\u200D\u2642\uFE0F", "\u{1F93C}\u200D\u2640\uFE0F"], play: ["\u{1F93D}", "\u{1F93D}\u200D\u2642\uFE0F", "\u{1F93D}\u200D\u2640\uFE0F", "\u{1F93E}", "\u{1F93E}\u200D\u2642\uFE0F", "\u{1F93E}\u200D\u2640\uFE0F", "\u{1F3B4}", "\u25B6\uFE0F", "\u23EF\uFE0F"], water: ["\u{1F93D}", "\u{1F93D}\u200D\u2642\uFE0F", "\u{1F93D}\u200D\u2640\uFE0F", "\u{1F403}", "\u{1F30A}", "\u{1F52B}", "\u{1F6B0}", "\u{1F6BE}", "\u{1F6B1}"], polo: ["\u{1F93D}", "\u{1F93D}\u200D\u2642\uFE0F", "\u{1F93D}\u200D\u2640\uFE0F"], handball: ["\u{1F93E}", "\u{1F93E}\u200D\u2642\uFE0F", "\u{1F93E}\u200D\u2640\uFE0F"], juggle: ["\u{1F939}", "\u{1F939}\u200D\u2642\uFE0F", "\u{1F939}\u200D\u2640\uFE0F"], lotus: ["\u{1F9D8}", "\u{1F9D8}\u200D\u2642\uFE0F", "\u{1F9D8}\u200D\u2640\uFE0F", "\u{1FAB7}"], position: ["\u{1F9D8}", "\u{1F9D8}\u200D\u2642\uFE0F", "\u{1F9D8}\u200D\u2640\uFE0F"], take: ["\u{1F6C0}"], bath: ["\u{1F6C0}"], bed: ["\u{1F6CC}", "\u{1F6CF}\uFE0F"], couple: ["\u{1F491}", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F468}", "\u{1F468}\u200D\u2764\uFE0F\u200D\u{1F468}", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F469}"], family: ["\u{1F46A}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F467}", "\u{1F468}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F468}\u200D\u{1F467}\u200D\u{1F467}", "\u{1F469}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F466}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F467}", "\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", "\u{1F469}\u200D\u{1F467}\u200D\u{1F467}"], bust: ["\u{1F464}"], silhouette: ["\u{1F464}", "\u{1F465}"], busts: ["\u{1F465}"], hug: ["\u{1FAC2}"], footprints: ["\u{1F463}"], gorilla: ["\u{1F98D}"], orangutan: ["\u{1F9A7}"], dog: ["\u{1F436}", "\u{1F415}", "\u{1F9AE}", "\u{1F415}\u200D\u{1F9BA}", "\u{1F32D}"], guide: ["\u{1F9AE}"], service: ["\u{1F415}\u200D\u{1F9BA}", "\u{1F202}\uFE0F"], poodle: ["\u{1F429}"], wolf: ["\u{1F43A}"], fox: ["\u{1F98A}"], raccoon: ["\u{1F99D}"], lion: ["\u{1F981}"], tiger: ["\u{1F42F}", "\u{1F405}"], leopard: ["\u{1F406}"], moose: ["\u{1FACE}"], donkey: ["\u{1FACF}"], unicorn: ["\u{1F984}"], zebra: ["\u{1F993}"], deer: ["\u{1F98C}"], bison: ["\u{1F9AC}"], cow: ["\u{1F42E}", "\u{1F404}"], ox: ["\u{1F402}"], buffalo: ["\u{1F403}"], pig: ["\u{1F437}", "\u{1F416}", "\u{1F43D}"], boar: ["\u{1F417}"], ram: ["\u{1F40F}"], ewe: ["\u{1F411}"], goat: ["\u{1F410}"], camel: ["\u{1F42A}", "\u{1F42B}"], hump: ["\u{1F42B}"], llama: ["\u{1F999}"], giraffe: ["\u{1F992}"], elephant: ["\u{1F418}"], mammoth: ["\u{1F9A3}"], rhinoceros: ["\u{1F98F}"], hippopotamus: ["\u{1F99B}"], mouse: ["\u{1F42D}", "\u{1F401}", "\u{1F5B1}\uFE0F", "\u{1FAA4}"], rat: ["\u{1F400}"], hamster: ["\u{1F439}"], rabbit: ["\u{1F430}", "\u{1F407}"], chipmunk: ["\u{1F43F}\uFE0F"], beaver: ["\u{1F9AB}"], hedgehog: ["\u{1F994}"], bat: ["\u{1F987}"], bear: ["\u{1F43B}", "\u{1F43B}\u200D\u2744\uFE0F", "\u{1F9F8}"], polar: ["\u{1F43B}\u200D\u2744\uFE0F"], koala: ["\u{1F428}"], panda: ["\u{1F43C}"], sloth: ["\u{1F9A5}"], otter: ["\u{1F9A6}"], skunk: ["\u{1F9A8}"], kangaroo: ["\u{1F998}"], badger: ["\u{1F9A1}"], paw: ["\u{1F43E}"], prints: ["\u{1F43E}"], turkey: ["\u{1F983}", "\u{1F1F9}\u{1F1F7}"], chicken: ["\u{1F414}"], rooster: ["\u{1F413}"], hatch: ["\u{1F423}"], chick: ["\u{1F423}", "\u{1F424}", "\u{1F425}"], front: ["\u{1F425}"], bird: ["\u{1F426}", "\u{1F426}\u200D\u2B1B"], penguin: ["\u{1F427}"], dove: ["\u{1F54A}\uFE0F"], eagle: ["\u{1F985}"], duck: ["\u{1F986}"], swan: ["\u{1F9A2}"], owl: ["\u{1F989}"], dodo: ["\u{1F9A4}"], feather: ["\u{1FAB6}"], flamingo: ["\u{1F9A9}"], peacock: ["\u{1F99A}"], parrot: ["\u{1F99C}"], wing: ["\u{1FABD}"], goose: ["\u{1FABF}"], frog: ["\u{1F438}"], crocodile: ["\u{1F40A}"], turtle: ["\u{1F422}"], lizard: ["\u{1F98E}"], snake: ["\u{1F40D}"], dragon: ["\u{1F432}", "\u{1F409}", "\u{1F004}"], sauropod: ["\u{1F995}"], rex: ["\u{1F996}"], spout: ["\u{1F433}"], whale: ["\u{1F433}", "\u{1F40B}"], dolphin: ["\u{1F42C}"], seal: ["\u{1F9AD}"], fish: ["\u{1F41F}", "\u{1F420}", "\u{1F365}", "\u{1F3A3}"], tropical: ["\u{1F420}", "\u{1F379}"], blowfish: ["\u{1F421}"], shark: ["\u{1F988}"], octopus: ["\u{1F419}"], shell: ["\u{1F41A}"], coral: ["\u{1FAB8}"], jellyfish: ["\u{1FABC}"], snail: ["\u{1F40C}"], butterfly: ["\u{1F98B}"], bug: ["\u{1F41B}"], ant: ["\u{1F41C}"], honeybee: ["\u{1F41D}"], beetle: ["\u{1FAB2}", "\u{1F41E}"], lady: ["\u{1F41E}"], cricket: ["\u{1F997}", "\u{1F3CF}"], cockroach: ["\u{1FAB3}"], spider: ["\u{1F577}\uFE0F", "\u{1F578}\uFE0F"], web: ["\u{1F578}\uFE0F"], scorpion: ["\u{1F982}"], mosquito: ["\u{1F99F}"], fly: ["\u{1FAB0}", "\u{1F6F8}", "\u{1F94F}"], worm: ["\u{1FAB1}"], microbe: ["\u{1F9A0}"], bouquet: ["\u{1F490}"], cherry: ["\u{1F338}"], blossom: ["\u{1F338}", "\u{1F33C}"], flower: ["\u{1F4AE}", "\u{1F940}", "\u{1F3B4}"], rosette: ["\u{1F3F5}\uFE0F"], rose: ["\u{1F339}"], wilted: ["\u{1F940}"], hibiscus: ["\u{1F33A}"], sunflower: ["\u{1F33B}"], tulip: ["\u{1F337}"], hyacinth: ["\u{1FABB}"], seedle: ["\u{1F331}"], potted: ["\u{1FAB4}"], plant: ["\u{1FAB4}"], evergreen: ["\u{1F332}"], tree: ["\u{1F332}", "\u{1F333}", "\u{1F334}", "\u{1F384}", "\u{1F38B}"], deciduous: ["\u{1F333}"], cactus: ["\u{1F335}"], sheaf: ["\u{1F33E}"], rice: ["\u{1F33E}", "\u{1F358}", "\u{1F359}", "\u{1F35A}", "\u{1F35B}"], herb: ["\u{1F33F}"], shamrock: ["\u2618\uFE0F"], four: ["\u{1F340}", "\u{1F553}", "\u{1F55F}"], leaf: ["\u{1F340}", "\u{1F341}", "\u{1F342}", "\u{1F343}"], clover: ["\u{1F340}"], maple: ["\u{1F341}"], fallen: ["\u{1F342}"], flutter: ["\u{1F343}"], wind: ["\u{1F343}", "\u{1F32C}\uFE0F", "\u{1F390}"], empty: ["\u{1FAB9}"], nest: ["\u{1FAB9}", "\u{1FABA}", "\u{1FA86}"], eggs: ["\u{1FABA}"], mushroom: ["\u{1F344}"], grapes: ["\u{1F347}"], melon: ["\u{1F348}"], watermelon: ["\u{1F349}"], tangerine: ["\u{1F34A}"], lemon: ["\u{1F34B}"], banana: ["\u{1F34C}"], pineapple: ["\u{1F34D}"], mango: ["\u{1F96D}"], apple: ["\u{1F34E}", "\u{1F34F}"], pear: ["\u{1F350}"], peach: ["\u{1F351}"], cherries: ["\u{1F352}"], strawberry: ["\u{1F353}"], blueberries: ["\u{1FAD0}"], kiwi: ["\u{1F95D}"], fruit: ["\u{1F95D}"], tomato: ["\u{1F345}"], olive: ["\u{1FAD2}"], coconut: ["\u{1F965}"], avocado: ["\u{1F951}"], eggplant: ["\u{1F346}"], potato: ["\u{1F954}", "\u{1F360}"], carrot: ["\u{1F955}"], corn: ["\u{1F33D}"], pepper: ["\u{1F336}\uFE0F", "\u{1FAD1}"], bell: ["\u{1FAD1}", "\u{1F6CE}\uFE0F", "\u{1F514}", "\u{1F515}"], cucumber: ["\u{1F952}"], leafy: ["\u{1F96C}"], broccoli: ["\u{1F966}"], garlic: ["\u{1F9C4}"], onion: ["\u{1F9C5}"], peanuts: ["\u{1F95C}"], beans: ["\u{1FAD8}"], chestnut: ["\u{1F330}"], ginger: ["\u{1FADA}"], root: ["\u{1FADA}"], pea: ["\u{1FADB}"], pod: ["\u{1FADB}"], bread: ["\u{1F35E}", "\u{1F956}"], croissant: ["\u{1F950}"], baguette: ["\u{1F956}"], flatbread: ["\u{1FAD3}", "\u{1F959}"], pretzel: ["\u{1F968}"], bagel: ["\u{1F96F}"], pancakes: ["\u{1F95E}"], waffle: ["\u{1F9C7}"], cheese: ["\u{1F9C0}"], wedge: ["\u{1F9C0}"], meat: ["\u{1F356}", "\u{1F969}"], poultry: ["\u{1F357}"], cut: ["\u{1F969}"], bacon: ["\u{1F953}"], hamburger: ["\u{1F354}"], french: ["\u{1F35F}", "\u{1F1EC}\u{1F1EB}", "\u{1F1F5}\u{1F1EB}", "\u{1F1F9}\u{1F1EB}"], fries: ["\u{1F35F}"], pizza: ["\u{1F355}"], sandwich: ["\u{1F96A}", "\u{1F1EC}\u{1F1F8}"], taco: ["\u{1F32E}"], burrito: ["\u{1F32F}"], tamale: ["\u{1FAD4}"], stuffed: ["\u{1F959}"], falafel: ["\u{1F9C6}"], egg: ["\u{1F95A}"], shallow: ["\u{1F958}"], pan: ["\u{1F958}"], pot: ["\u{1F372}", "\u{1F36F}"], fondue: ["\u{1FAD5}"], bowl: ["\u{1F963}", "\u{1F35C}", "\u{1F3B3}"], spoon: ["\u{1F963}", "\u{1F944}"], salad: ["\u{1F957}"], popcorn: ["\u{1F37F}"], butter: ["\u{1F9C8}"], salt: ["\u{1F9C2}"], canned: ["\u{1F96B}"], bento: ["\u{1F371}"], box: ["\u{1F371}", "\u{1F961}", "\u{1F9C3}", "\u{1F94A}", "\u{1F5F3}\uFE0F", "\u{1F5C3}\uFE0F", "\u2611\uFE0F"], cracker: ["\u{1F358}"], cooked: ["\u{1F35A}"], curry: ["\u{1F35B}"], spaghetti: ["\u{1F35D}"], roasted: ["\u{1F360}"], sweet: ["\u{1F360}"], oden: ["\u{1F362}"], sushi: ["\u{1F363}"], fried: ["\u{1F364}"], shrimp: ["\u{1F364}", "\u{1F990}"], cake: ["\u{1F365}", "\u{1F96E}", "\u{1F382}"], swirl: ["\u{1F365}"], moon: ["\u{1F96E}", "\u{1F311}", "\u{1F312}", "\u{1F313}", "\u{1F314}", "\u{1F315}", "\u{1F316}", "\u{1F317}", "\u{1F318}", "\u{1F319}", "\u{1F31A}", "\u{1F31B}", "\u{1F31C}", "\u{1F31D}", "\u{1F391}"], dango: ["\u{1F361}"], dumple: ["\u{1F95F}"], fortune: ["\u{1F960}"], cookie: ["\u{1F960}", "\u{1F36A}"], takeout: ["\u{1F961}"], crab: ["\u{1F980}"], lobster: ["\u{1F99E}"], squid: ["\u{1F991}"], oyster: ["\u{1F9AA}"], soft: ["\u{1F366}"], ice: ["\u{1F366}", "\u{1F367}", "\u{1F368}", "\u{1F9CA}", "\u{1F3D2}", "\u26F8\uFE0F"], cream: ["\u{1F366}", "\u{1F368}"], shaved: ["\u{1F367}"], doughnut: ["\u{1F369}"], birthday: ["\u{1F382}"], shortcake: ["\u{1F370}"], cupcake: ["\u{1F9C1}"], pie: ["\u{1F967}"], chocolate: ["\u{1F36B}"], bar: ["\u{1F36B}", "\u{1F4CA}"], candy: ["\u{1F36C}"], lollipop: ["\u{1F36D}"], custard: ["\u{1F36E}"], honey: ["\u{1F36F}"], bottle: ["\u{1F37C}", "\u{1F37E}", "\u{1F9F4}"], glass: ["\u{1F95B}", "\u{1F377}", "\u{1F378}", "\u{1F943}", "\u{1F50D}", "\u{1F50E}"], milk: ["\u{1F95B}"], beverage: ["\u2615", "\u{1F9C3}"], teapot: ["\u{1FAD6}"], teacup: ["\u{1F375}"], handle: ["\u{1F375}"], sake: ["\u{1F376}"], pop: ["\u{1F37E}"], cork: ["\u{1F37E}"], wine: ["\u{1F377}"], cocktail: ["\u{1F378}"], drink: ["\u{1F379}"], beer: ["\u{1F37A}", "\u{1F37B}"], mug: ["\u{1F37A}"], clink: ["\u{1F37B}", "\u{1F942}"], mugs: ["\u{1F37B}"], glasses: ["\u{1F942}", "\u{1F453}"], tumbler: ["\u{1F943}"], pour: ["\u{1FAD7}"], liquid: ["\u{1FAD7}"], cup: ["\u{1F964}"], straw: ["\u{1F964}"], tea: ["\u{1F9CB}"], mate: ["\u{1F9C9}"], chopsticks: ["\u{1F962}"], fork: ["\u{1F37D}\uFE0F", "\u{1F374}"], knife: ["\u{1F37D}\uFE0F", "\u{1F374}", "\u{1F52A}"], plate: ["\u{1F37D}\uFE0F"], kitchen: ["\u{1F52A}"], jar: ["\u{1FAD9}"], amphora: ["\u{1F3FA}"], globe: ["\u{1F30D}", "\u{1F30E}", "\u{1F30F}", "\u{1F310}"], show: ["\u{1F30D}", "\u{1F30E}", "\u{1F30F}"], europe: ["\u{1F30D}"], africa: ["\u{1F30D}", "\u{1F1FF}\u{1F1E6}"], americas: ["\u{1F30E}"], asia: ["\u{1F30F}"], australia: ["\u{1F30F}", "\u{1F1E6}\u{1F1FA}"], meridians: ["\u{1F310}"], world: ["\u{1F5FA}\uFE0F"], map: ["\u{1F5FA}\uFE0F", "\u{1F5FE}"], japan: ["\u{1F5FE}", "\u{1F1EF}\u{1F1F5}"], compass: ["\u{1F9ED}"], snow: ["\u{1F3D4}\uFE0F", "\u{1F328}\uFE0F", "\u26C4"], capped: ["\u{1F3D4}\uFE0F"], volcano: ["\u{1F30B}"], mount: ["\u{1F5FB}"], fuji: ["\u{1F5FB}"], camp: ["\u{1F3D5}\uFE0F"], beach: ["\u{1F3D6}\uFE0F"], umbrella: ["\u{1F3D6}\uFE0F", "\u{1F302}", "\u2602\uFE0F", "\u2614", "\u26F1\uFE0F"], desert: ["\u{1F3DC}\uFE0F", "\u{1F3DD}\uFE0F"], island: ["\u{1F3DD}\uFE0F", "\u{1F1E6}\u{1F1E8}", "\u{1F1E7}\u{1F1FB}", "\u{1F1E8}\u{1F1F5}", "\u{1F1E8}\u{1F1FD}", "\u{1F1F3}\u{1F1EB}"], national: ["\u{1F3DE}\uFE0F"], park: ["\u{1F3DE}\uFE0F"], stadium: ["\u{1F3DF}\uFE0F"], classical: ["\u{1F3DB}\uFE0F"], build: ["\u{1F3DB}\uFE0F", "\u{1F3D7}\uFE0F", "\u{1F3E2}"], brick: ["\u{1F9F1}"], rock: ["\u{1FAA8}"], wood: ["\u{1FAB5}"], hut: ["\u{1F6D6}"], houses: ["\u{1F3D8}\uFE0F"], derelict: ["\u{1F3DA}\uFE0F"], house: ["\u{1F3DA}\uFE0F", "\u{1F3E0}", "\u{1F3E1}"], garden: ["\u{1F3E1}"], japanese: ["\u{1F3E3}", "\u{1F3EF}", "\u{1F38E}", "\u{1F530}", "\u{1F201}", "\u{1F202}\uFE0F", "\u{1F237}\uFE0F", "\u{1F236}", "\u{1F22F}", "\u{1F250}", "\u{1F239}", "\u{1F21A}", "\u{1F232}", "\u{1F251}", "\u{1F238}", "\u{1F234}", "\u{1F233}", "\u3297\uFE0F", "\u3299\uFE0F", "\u{1F23A}", "\u{1F235}"], post: ["\u{1F3E3}", "\u{1F3E4}"], hospital: ["\u{1F3E5}"], bank: ["\u{1F3E6}"], hotel: ["\u{1F3E8}", "\u{1F3E9}"], convenience: ["\u{1F3EA}"], store: ["\u{1F3EA}", "\u{1F3EC}"], school: ["\u{1F3EB}"], department: ["\u{1F3EC}"], castle: ["\u{1F3EF}", "\u{1F3F0}"], wed: ["\u{1F492}"], tokyo: ["\u{1F5FC}"], tower: ["\u{1F5FC}"], statue: ["\u{1F5FD}"], liberty: ["\u{1F5FD}"], church: ["\u26EA"], mosque: ["\u{1F54C}"], hindu: ["\u{1F6D5}"], temple: ["\u{1F6D5}"], synagogue: ["\u{1F54D}"], shinto: ["\u26E9\uFE0F"], shrine: ["\u26E9\uFE0F"], kaaba: ["\u{1F54B}"], fountain: ["\u26F2", "\u{1F58B}\uFE0F"], tent: ["\u26FA", "\u{1F3AA}"], foggy: ["\u{1F301}"], night: ["\u{1F303}", "\u{1F309}"], stars: ["\u{1F303}"], cityscape: ["\u{1F3D9}\uFE0F", "\u{1F306}"], sunrise: ["\u{1F304}", "\u{1F305}"], mountains: ["\u{1F304}"], dusk: ["\u{1F306}"], sunset: ["\u{1F307}"], bridge: ["\u{1F309}"], springs: ["\u2668\uFE0F"], carousel: ["\u{1F3A0}"], playground: ["\u{1F6DD}"], slide: ["\u{1F6DD}"], ferris: ["\u{1F3A1}"], wheel: ["\u{1F3A1}", "\u{1F6DE}", "\u2638\uFE0F"], roller: ["\u{1F3A2}", "\u{1F6FC}"], coaster: ["\u{1F3A2}"], barber: ["\u{1F488}"], pole: ["\u{1F488}", "\u{1F3A3}"], circus: ["\u{1F3AA}"], locomotive: ["\u{1F682}"], railway: ["\u{1F683}", "\u{1F69E}", "\u{1F6E4}\uFE0F", "\u{1F69F}"], car: ["\u{1F683}", "\u{1F68B}", "\u{1F693}", "\u{1F694}", "\u{1F3CE}\uFE0F", "\u{1F6A8}"], high: ["\u{1F684}", "\u26A1", "\u{1F460}", "\u{1F50A}"], speed: ["\u{1F684}"], train: ["\u{1F684}", "\u{1F685}", "\u{1F686}"], bullet: ["\u{1F685}"], metro: ["\u{1F687}"], rail: ["\u{1F688}"], station: ["\u{1F689}"], tram: ["\u{1F68A}", "\u{1F68B}"], monorail: ["\u{1F69D}"], bus: ["\u{1F68C}", "\u{1F68D}", "\u{1F68F}"], trolleybus: ["\u{1F68E}"], minibus: ["\u{1F690}"], ambulance: ["\u{1F691}"], engine: ["\u{1F692}"], taxi: ["\u{1F695}", "\u{1F696}"], automobile: ["\u{1F697}", "\u{1F698}"], sport: ["\u{1F699}"], utility: ["\u{1F699}"], vehicle: ["\u{1F699}"], pickup: ["\u{1F6FB}"], truck: ["\u{1F6FB}", "\u{1F69A}"], delivery: ["\u{1F69A}"], articulated: ["\u{1F69B}"], lorry: ["\u{1F69B}"], tractor: ["\u{1F69C}"], motorcycle: ["\u{1F3CD}\uFE0F"], motor: ["\u{1F6F5}", "\u{1F6E5}\uFE0F"], scooter: ["\u{1F6F5}", "\u{1F6F4}"], auto: ["\u{1F6FA}"], rickshaw: ["\u{1F6FA}"], bicycle: ["\u{1F6B2}"], kick: ["\u{1F6F4}"], skateboard: ["\u{1F6F9}"], skate: ["\u{1F6FC}", "\u26F8\uFE0F"], stop: ["\u{1F68F}", "\u{1F6D1}", "\u23F9\uFE0F"], motorway: ["\u{1F6E3}\uFE0F"], track: ["\u{1F6E4}\uFE0F", "\u23ED\uFE0F", "\u23EE\uFE0F"], oil: ["\u{1F6E2}\uFE0F"], drum: ["\u{1F6E2}\uFE0F", "\u{1F941}", "\u{1FA98}"], fuel: ["\u26FD"], pump: ["\u26FD"], horizontal: ["\u{1F6A5}"], traffic: ["\u{1F6A5}", "\u{1F6A6}"], vertical: ["\u{1F6A6}", "\u{1F503}"], anchor: ["\u2693"], ring: ["\u{1F6DF}", "\u{1F48D}"], buoy: ["\u{1F6DF}"], sailboat: ["\u26F5"], canoe: ["\u{1F6F6}"], speedboat: ["\u{1F6A4}"], passenger: ["\u{1F6F3}\uFE0F"], ship: ["\u{1F6F3}\uFE0F", "\u{1F6A2}"], ferry: ["\u26F4\uFE0F"], airplane: ["\u2708\uFE0F", "\u{1F6E9}\uFE0F", "\u{1F6EB}", "\u{1F6EC}"], small: ["\u{1F6E9}\uFE0F", "\u{1F324}\uFE0F", "\u25FE", "\u25FD", "\u25AA\uFE0F", "\u25AB\uFE0F", "\u{1F538}", "\u{1F539}"], departure: ["\u{1F6EB}"], arrival: ["\u{1F6EC}"], parachute: ["\u{1FA82}"], seat: ["\u{1F4BA}"], helicopter: ["\u{1F681}"], suspension: ["\u{1F69F}"], cableway: ["\u{1F6A0}"], aerial: ["\u{1F6A1}"], tramway: ["\u{1F6A1}"], satellite: ["\u{1F6F0}\uFE0F", "\u{1F4E1}"], rocket: ["\u{1F680}"], saucer: ["\u{1F6F8}"], bellhop: ["\u{1F6CE}\uFE0F"], luggage: ["\u{1F9F3}", "\u{1F6C5}"], hourglass: ["\u231B", "\u23F3"], done: ["\u231B", "\u23F3"], not: ["\u23F3", "\u{1F236}"], watch: ["\u231A"], alarm: ["\u23F0"], clock: ["\u23F0", "\u23F2\uFE0F", "\u{1F570}\uFE0F", "\u{1F55B}", "\u{1F550}", "\u{1F551}", "\u{1F552}", "\u{1F553}", "\u{1F554}", "\u{1F555}", "\u{1F556}", "\u{1F557}", "\u{1F558}", "\u{1F559}", "\u{1F55A}"], stopwatch: ["\u23F1\uFE0F"], timer: ["\u23F2\uFE0F"], mantelpiece: ["\u{1F570}\uFE0F"], twelve: ["\u{1F55B}", "\u{1F567}"], thirty: ["\u{1F567}", "\u{1F55C}", "\u{1F55D}", "\u{1F55E}", "\u{1F55F}", "\u{1F560}", "\u{1F561}", "\u{1F562}", "\u{1F563}", "\u{1F564}", "\u{1F565}", "\u{1F566}"], one: ["\u{1F550}", "\u{1F55C}", "\u{1FA71}", "\u{1F51E}"], three: ["\u{1F552}", "\u{1F55E}"], five: ["\u{1F554}", "\u{1F560}"], six: ["\u{1F555}", "\u{1F561}", "\u{1F52F}"], seven: ["\u{1F556}", "\u{1F562}"], eight: ["\u{1F557}", "\u{1F563}", "\u2733\uFE0F", "\u2734\uFE0F"], nine: ["\u{1F558}", "\u{1F564}"], ten: ["\u{1F559}", "\u{1F565}"], eleven: ["\u{1F55A}", "\u{1F566}"], new: ["\u{1F311}", "\u{1F31A}", "\u{1F195}", "\u{1F1F3}\u{1F1E8}", "\u{1F1F3}\u{1F1FF}", "\u{1F1F5}\u{1F1EC}"], wax: ["\u{1F312}", "\u{1F314}"], crescent: ["\u{1F312}", "\u{1F318}", "\u{1F319}", "\u262A\uFE0F"], first: ["\u{1F313}", "\u{1F31B}"], quarter: ["\u{1F313}", "\u{1F317}", "\u{1F31B}", "\u{1F31C}"], gibbous: ["\u{1F314}", "\u{1F316}"], full: ["\u{1F315}", "\u{1F31D}"], wane: ["\u{1F316}", "\u{1F318}"], last: ["\u{1F317}", "\u{1F31C}", "\u23EE\uFE0F"], sun: ["\u2600\uFE0F", "\u{1F31E}", "\u26C5", "\u{1F324}\uFE0F", "\u{1F325}\uFE0F", "\u{1F326}\uFE0F"], ringed: ["\u{1FA90}"], planet: ["\u{1FA90}"], glow: ["\u{1F31F}"], shoot: ["\u{1F320}"], milky: ["\u{1F30C}"], way: ["\u{1F30C}"], cloud: ["\u2601\uFE0F", "\u26C5", "\u26C8\uFE0F", "\u{1F324}\uFE0F", "\u{1F325}\uFE0F", "\u{1F326}\uFE0F", "\u{1F327}\uFE0F", "\u{1F328}\uFE0F", "\u{1F329}\uFE0F"], behind: ["\u26C5", "\u{1F324}\uFE0F", "\u{1F325}\uFE0F", "\u{1F326}\uFE0F"], lightning: ["\u26C8\uFE0F", "\u{1F329}\uFE0F"], rain: ["\u26C8\uFE0F", "\u{1F326}\uFE0F", "\u{1F327}\uFE0F", "\u2614"], large: ["\u{1F325}\uFE0F", "\u2B1B", "\u2B1C", "\u{1F536}", "\u{1F537}"], tornado: ["\u{1F32A}\uFE0F"], fog: ["\u{1F32B}\uFE0F"], cyclone: ["\u{1F300}"], rainbow: ["\u{1F308}", "\u{1F3F3}\uFE0F\u200D\u{1F308}"], drops: ["\u2614"], ground: ["\u26F1\uFE0F"], voltage: ["\u26A1"], snowflake: ["\u2744\uFE0F"], snowman: ["\u2603\uFE0F", "\u26C4"], comet: ["\u2604\uFE0F"], droplet: ["\u{1F4A7}"], jack: ["\u{1F383}"], lantern: ["\u{1F383}", "\u{1F3EE}"], christmas: ["\u{1F384}", "\u{1F1E8}\u{1F1FD}"], fireworks: ["\u{1F386}"], sparkler: ["\u{1F387}"], firecracker: ["\u{1F9E8}"], sparkles: ["\u2728"], popper: ["\u{1F389}"], confetti: ["\u{1F38A}"], tanabata: ["\u{1F38B}"], pine: ["\u{1F38D}"], dolls: ["\u{1F38E}", "\u{1FA86}"], carp: ["\u{1F38F}"], streamer: ["\u{1F38F}"], chime: ["\u{1F390}"], view: ["\u{1F391}"], ceremony: ["\u{1F391}"], envelope: ["\u{1F9E7}", "\u2709\uFE0F", "\u{1F4E8}", "\u{1F4E9}"], wrapped: ["\u{1F381}"], gift: ["\u{1F381}"], reminder: ["\u{1F397}\uFE0F"], admission: ["\u{1F39F}\uFE0F"], tickets: ["\u{1F39F}\uFE0F"], ticket: ["\u{1F3AB}"], military: ["\u{1F396}\uFE0F", "\u{1FA96}"], medal: ["\u{1F396}\uFE0F", "\u{1F3C5}", "\u{1F947}", "\u{1F948}", "\u{1F949}"], trophy: ["\u{1F3C6}"], sports: ["\u{1F3C5}"], "1st": ["\u{1F947}"], place: ["\u{1F947}", "\u{1F948}", "\u{1F949}", "\u{1F6D0}"], "2nd": ["\u{1F948}"], "3rd": ["\u{1F949}"], soccer: ["\u26BD"], baseball: ["\u26BE"], softball: ["\u{1F94E}"], basketball: ["\u{1F3C0}"], volleyball: ["\u{1F3D0}"], american: ["\u{1F3C8}", "\u{1F1E6}\u{1F1F8}"], football: ["\u{1F3C8}", "\u{1F3C9}"], rugby: ["\u{1F3C9}"], tennis: ["\u{1F3BE}"], disc: ["\u{1F94F}"], game: ["\u{1F3CF}", "\u{1F3AE}", "\u{1F3B2}"], field: ["\u{1F3D1}"], hockey: ["\u{1F3D1}", "\u{1F3D2}"], lacrosse: ["\u{1F94D}"], ping: ["\u{1F3D3}"], pong: ["\u{1F3D3}"], badminton: ["\u{1F3F8}"], glove: ["\u{1F94A}"], martial: ["\u{1F94B}"], arts: ["\u{1F94B}", "\u{1F3AD}"], uniform: ["\u{1F94B}"], goal: ["\u{1F945}"], net: ["\u{1F945}"], flag: ["\u26F3", "\u{1F4EB}", "\u{1F4EA}", "\u{1F4EC}", "\u{1F4ED}", "\u{1F3C1}", "\u{1F6A9}", "\u{1F3F4}", "\u{1F3F3}\uFE0F", "\u{1F3F3}\uFE0F\u200D\u{1F308}", "\u{1F3F3}\uFE0F\u200D\u26A7\uFE0F", "\u{1F3F4}\u200D\u2620\uFE0F", "\u{1F1E6}\u{1F1E8}", "\u{1F1E6}\u{1F1E9}", "\u{1F1E6}\u{1F1EA}", "\u{1F1E6}\u{1F1EB}", "\u{1F1E6}\u{1F1EC}", "\u{1F1E6}\u{1F1EE}", "\u{1F1E6}\u{1F1F1}", "\u{1F1E6}\u{1F1F2}", "\u{1F1E6}\u{1F1F4}", "\u{1F1E6}\u{1F1F6}", "\u{1F1E6}\u{1F1F7}", "\u{1F1E6}\u{1F1F8}", "\u{1F1E6}\u{1F1F9}", "\u{1F1E6}\u{1F1FA}", "\u{1F1E6}\u{1F1FC}", "\u{1F1E6}\u{1F1FD}", "\u{1F1E6}\u{1F1FF}", "\u{1F1E7}\u{1F1E6}", "\u{1F1E7}\u{1F1E7}", "\u{1F1E7}\u{1F1E9}", "\u{1F1E7}\u{1F1EA}", "\u{1F1E7}\u{1F1EB}", "\u{1F1E7}\u{1F1EC}", "\u{1F1E7}\u{1F1ED}", "\u{1F1E7}\u{1F1EE}", "\u{1F1E7}\u{1F1EF}", "\u{1F1E7}\u{1F1F1}", "\u{1F1E7}\u{1F1F2}", "\u{1F1E7}\u{1F1F3}", "\u{1F1E7}\u{1F1F4}", "\u{1F1E7}\u{1F1F6}", "\u{1F1E7}\u{1F1F7}", "\u{1F1E7}\u{1F1F8}", "\u{1F1E7}\u{1F1F9}", "\u{1F1E7}\u{1F1FB}", "\u{1F1E7}\u{1F1FC}", "\u{1F1E7}\u{1F1FE}", "\u{1F1E7}\u{1F1FF}", "\u{1F1E8}\u{1F1E6}", "\u{1F1E8}\u{1F1E8}", "\u{1F1E8}\u{1F1E9}", "\u{1F1E8}\u{1F1EB}", "\u{1F1E8}\u{1F1EC}", "\u{1F1E8}\u{1F1ED}", "\u{1F1E8}\u{1F1EE}", "\u{1F1E8}\u{1F1F0}", "\u{1F1E8}\u{1F1F1}", "\u{1F1E8}\u{1F1F2}", "\u{1F1E8}\u{1F1F3}", "\u{1F1E8}\u{1F1F4}", "\u{1F1E8}\u{1F1F5}", "\u{1F1E8}\u{1F1F7}", "\u{1F1E8}\u{1F1FA}", "\u{1F1E8}\u{1F1FB}", "\u{1F1E8}\u{1F1FC}", "\u{1F1E8}\u{1F1FD}", "\u{1F1E8}\u{1F1FE}", "\u{1F1E8}\u{1F1FF}", "\u{1F1E9}\u{1F1EA}", "\u{1F1E9}\u{1F1EC}", "\u{1F1E9}\u{1F1EF}", "\u{1F1E9}\u{1F1F0}", "\u{1F1E9}\u{1F1F2}", "\u{1F1E9}\u{1F1F4}", "\u{1F1E9}\u{1F1FF}", "\u{1F1EA}\u{1F1E6}", "\u{1F1EA}\u{1F1E8}", "\u{1F1EA}\u{1F1EA}", "\u{1F1EA}\u{1F1EC}", "\u{1F1EA}\u{1F1ED}", "\u{1F1EA}\u{1F1F7}", "\u{1F1EA}\u{1F1F8}", "\u{1F1EA}\u{1F1F9}", "\u{1F1EA}\u{1F1FA}", "\u{1F1EB}\u{1F1EE}", "\u{1F1EB}\u{1F1EF}", "\u{1F1EB}\u{1F1F0}", "\u{1F1EB}\u{1F1F2}", "\u{1F1EB}\u{1F1F4}", "\u{1F1EB}\u{1F1F7}", "\u{1F1EC}\u{1F1E6}", "\u{1F1EC}\u{1F1E7}", "\u{1F1EC}\u{1F1E9}", "\u{1F1EC}\u{1F1EA}", "\u{1F1EC}\u{1F1EB}", "\u{1F1EC}\u{1F1EC}", "\u{1F1EC}\u{1F1ED}", "\u{1F1EC}\u{1F1EE}", "\u{1F1EC}\u{1F1F1}", "\u{1F1EC}\u{1F1F2}", "\u{1F1EC}\u{1F1F3}", "\u{1F1EC}\u{1F1F5}", "\u{1F1EC}\u{1F1F6}", "\u{1F1EC}\u{1F1F7}", "\u{1F1EC}\u{1F1F8}", "\u{1F1EC}\u{1F1F9}", "\u{1F1EC}\u{1F1FA}", "\u{1F1EC}\u{1F1FC}", "\u{1F1EC}\u{1F1FE}", "\u{1F1ED}\u{1F1F0}", "\u{1F1ED}\u{1F1F2}", "\u{1F1ED}\u{1F1F3}", "\u{1F1ED}\u{1F1F7}", "\u{1F1ED}\u{1F1F9}", "\u{1F1ED}\u{1F1FA}", "\u{1F1EE}\u{1F1E8}", "\u{1F1EE}\u{1F1E9}", "\u{1F1EE}\u{1F1EA}", "\u{1F1EE}\u{1F1F1}", "\u{1F1EE}\u{1F1F2}", "\u{1F1EE}\u{1F1F3}", "\u{1F1EE}\u{1F1F4}", "\u{1F1EE}\u{1F1F6}", "\u{1F1EE}\u{1F1F7}", "\u{1F1EE}\u{1F1F8}", "\u{1F1EE}\u{1F1F9}", "\u{1F1EF}\u{1F1EA}", "\u{1F1EF}\u{1F1F2}", "\u{1F1EF}\u{1F1F4}", "\u{1F1EF}\u{1F1F5}", "\u{1F1F0}\u{1F1EA}", "\u{1F1F0}\u{1F1EC}", "\u{1F1F0}\u{1F1ED}", "\u{1F1F0}\u{1F1EE}", "\u{1F1F0}\u{1F1F2}", "\u{1F1F0}\u{1F1F3}", "\u{1F1F0}\u{1F1F5}", "\u{1F1F0}\u{1F1F7}", "\u{1F1F0}\u{1F1FC}", "\u{1F1F0}\u{1F1FE}", "\u{1F1F0}\u{1F1FF}", "\u{1F1F1}\u{1F1E6}", "\u{1F1F1}\u{1F1E7}", "\u{1F1F1}\u{1F1E8}", "\u{1F1F1}\u{1F1EE}", "\u{1F1F1}\u{1F1F0}", "\u{1F1F1}\u{1F1F7}", "\u{1F1F1}\u{1F1F8}", "\u{1F1F1}\u{1F1F9}", "\u{1F1F1}\u{1F1FA}", "\u{1F1F1}\u{1F1FB}", "\u{1F1F1}\u{1F1FE}", "\u{1F1F2}\u{1F1E6}", "\u{1F1F2}\u{1F1E8}", "\u{1F1F2}\u{1F1E9}", "\u{1F1F2}\u{1F1EA}", "\u{1F1F2}\u{1F1EB}", "\u{1F1F2}\u{1F1EC}", "\u{1F1F2}\u{1F1ED}", "\u{1F1F2}\u{1F1F0}", "\u{1F1F2}\u{1F1F1}", "\u{1F1F2}\u{1F1F2}", "\u{1F1F2}\u{1F1F3}", "\u{1F1F2}\u{1F1F4}", "\u{1F1F2}\u{1F1F5}", "\u{1F1F2}\u{1F1F6}", "\u{1F1F2}\u{1F1F7}", "\u{1F1F2}\u{1F1F8}", "\u{1F1F2}\u{1F1F9}", "\u{1F1F2}\u{1F1FA}", "\u{1F1F2}\u{1F1FB}", "\u{1F1F2}\u{1F1FC}", "\u{1F1F2}\u{1F1FD}", "\u{1F1F2}\u{1F1FE}", "\u{1F1F2}\u{1F1FF}", "\u{1F1F3}\u{1F1E6}", "\u{1F1F3}\u{1F1E8}", "\u{1F1F3}\u{1F1EA}", "\u{1F1F3}\u{1F1EB}", "\u{1F1F3}\u{1F1EC}", "\u{1F1F3}\u{1F1EE}", "\u{1F1F3}\u{1F1F1}", "\u{1F1F3}\u{1F1F4}", "\u{1F1F3}\u{1F1F5}", "\u{1F1F3}\u{1F1F7}", "\u{1F1F3}\u{1F1FA}", "\u{1F1F3}\u{1F1FF}", "\u{1F1F4}\u{1F1F2}", "\u{1F1F5}\u{1F1E6}", "\u{1F1F5}\u{1F1EA}", "\u{1F1F5}\u{1F1EB}", "\u{1F1F5}\u{1F1EC}", "\u{1F1F5}\u{1F1ED}", "\u{1F1F5}\u{1F1F0}", "\u{1F1F5}\u{1F1F1}", "\u{1F1F5}\u{1F1F2}", "\u{1F1F5}\u{1F1F3}", "\u{1F1F5}\u{1F1F7}", "\u{1F1F5}\u{1F1F8}", "\u{1F1F5}\u{1F1F9}", "\u{1F1F5}\u{1F1FC}", "\u{1F1F5}\u{1F1FE}", "\u{1F1F6}\u{1F1E6}", "\u{1F1F7}\u{1F1EA}", "\u{1F1F7}\u{1F1F4}", "\u{1F1F7}\u{1F1F8}", "\u{1F1F7}\u{1F1FA}", "\u{1F1F7}\u{1F1FC}", "\u{1F1F8}\u{1F1E6}", "\u{1F1F8}\u{1F1E7}", "\u{1F1F8}\u{1F1E8}", "\u{1F1F8}\u{1F1E9}", "\u{1F1F8}\u{1F1EA}", "\u{1F1F8}\u{1F1EC}", "\u{1F1F8}\u{1F1ED}", "\u{1F1F8}\u{1F1EE}", "\u{1F1F8}\u{1F1EF}", "\u{1F1F8}\u{1F1F0}", "\u{1F1F8}\u{1F1F1}", "\u{1F1F8}\u{1F1F2}", "\u{1F1F8}\u{1F1F3}", "\u{1F1F8}\u{1F1F4}", "\u{1F1F8}\u{1F1F7}", "\u{1F1F8}\u{1F1F8}", "\u{1F1F8}\u{1F1F9}", "\u{1F1F8}\u{1F1FB}", "\u{1F1F8}\u{1F1FD}", "\u{1F1F8}\u{1F1FE}", "\u{1F1F8}\u{1F1FF}", "\u{1F1F9}\u{1F1E6}", "\u{1F1F9}\u{1F1E8}", "\u{1F1F9}\u{1F1E9}", "\u{1F1F9}\u{1F1EB}", "\u{1F1F9}\u{1F1EC}", "\u{1F1F9}\u{1F1ED}", "\u{1F1F9}\u{1F1EF}", "\u{1F1F9}\u{1F1F0}", "\u{1F1F9}\u{1F1F1}", "\u{1F1F9}\u{1F1F2}", "\u{1F1F9}\u{1F1F3}", "\u{1F1F9}\u{1F1F4}", "\u{1F1F9}\u{1F1F7}", "\u{1F1F9}\u{1F1F9}", "\u{1F1F9}\u{1F1FB}", "\u{1F1F9}\u{1F1FC}", "\u{1F1F9}\u{1F1FF}", "\u{1F1FA}\u{1F1E6}", "\u{1F1FA}\u{1F1EC}", "\u{1F1FA}\u{1F1F2}", "\u{1F1FA}\u{1F1F3}", "\u{1F1FA}\u{1F1F8}", "\u{1F1FA}\u{1F1FE}", "\u{1F1FA}\u{1F1FF}", "\u{1F1FB}\u{1F1E6}", "\u{1F1FB}\u{1F1E8}", "\u{1F1FB}\u{1F1EA}", "\u{1F1FB}\u{1F1EC}", "\u{1F1FB}\u{1F1EE}", "\u{1F1FB}\u{1F1F3}", "\u{1F1FB}\u{1F1FA}", "\u{1F1FC}\u{1F1EB}", "\u{1F1FC}\u{1F1F8}", "\u{1F1FD}\u{1F1F0}", "\u{1F1FE}\u{1F1EA}", "\u{1F1FE}\u{1F1F9}", "\u{1F1FF}\u{1F1E6}", "\u{1F1FF}\u{1F1F2}", "\u{1F1FF}\u{1F1FC}", "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}", "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}", "\u{1F3F4}\u{E0067}\u{E0062}\u{E0077}\u{E006C}\u{E0073}\u{E007F}"], dive: ["\u{1F93F}"], shirt: ["\u{1F3BD}", "\u{1F455}"], skis: ["\u{1F3BF}"], sled: ["\u{1F6F7}"], curl: ["\u{1F94C}", "\u{1F4C3}"], stone: ["\u{1F94C}", "\u{1F48E}"], bullseye: ["\u{1F3AF}"], yo: ["\u{1FA80}"], kite: ["\u{1FA81}"], pistol: ["\u{1F52B}"], pool: ["\u{1F3B1}"], crystal: ["\u{1F52E}"], magic: ["\u{1FA84}"], wand: ["\u{1FA84}"], video: ["\u{1F3AE}", "\u{1F4F9}"], joystick: ["\u{1F579}\uFE0F"], slot: ["\u{1F3B0}"], machine: ["\u{1F3B0}", "\u{1F4E0}"], die: ["\u{1F3B2}"], puzzle: ["\u{1F9E9}"], piece: ["\u{1F9E9}", "\u{1FA71}"], teddy: ["\u{1F9F8}"], pinata: ["\u{1FA85}"], mirror: ["\u{1FAA9}", "\u{1FA9E}"], spade: ["\u2660\uFE0F"], diamond: ["\u2666\uFE0F", "\u{1F536}", "\u{1F537}", "\u{1F538}", "\u{1F539}", "\u{1F4A0}"], club: ["\u2663\uFE0F"], chess: ["\u265F\uFE0F"], pawn: ["\u265F\uFE0F"], joker: ["\u{1F0CF}"], mahjong: ["\u{1F004}"], cards: ["\u{1F3B4}"], perform: ["\u{1F3AD}"], framed: ["\u{1F5BC}\uFE0F"], picture: ["\u{1F5BC}\uFE0F"], palette: ["\u{1F3A8}"], thread: ["\u{1F9F5}"], sew: ["\u{1FAA1}"], needle: ["\u{1FAA1}"], yarn: ["\u{1F9F6}"], knot: ["\u{1FAA2}"], goggles: ["\u{1F97D}"], lab: ["\u{1F97C}"], coat: ["\u{1F97C}", "\u{1F9E5}"], safety: ["\u{1F9BA}", "\u{1F9F7}"], vest: ["\u{1F9BA}"], necktie: ["\u{1F454}"], jeans: ["\u{1F456}"], scarf: ["\u{1F9E3}"], gloves: ["\u{1F9E4}"], socks: ["\u{1F9E6}"], dress: ["\u{1F457}"], kimono: ["\u{1F458}"], sari: ["\u{1F97B}"], swimsuit: ["\u{1FA71}"], briefs: ["\u{1FA72}"], shorts: ["\u{1FA73}"], bikini: ["\u{1F459}"], clothes: ["\u{1F45A}"], fold: ["\u{1FAAD}"], fan: ["\u{1FAAD}"], purse: ["\u{1F45B}"], handbag: ["\u{1F45C}"], clutch: ["\u{1F45D}"], bag: ["\u{1F45D}", "\u{1F4B0}"], shop: ["\u{1F6CD}\uFE0F", "\u{1F6D2}"], bags: ["\u{1F6CD}\uFE0F"], backpack: ["\u{1F392}"], thong: ["\u{1FA74}"], sandal: ["\u{1FA74}", "\u{1F461}"], shoe: ["\u{1F45E}", "\u{1F45F}", "\u{1F97F}", "\u{1F460}"], hike: ["\u{1F97E}"], boot: ["\u{1F97E}", "\u{1F462}"], flat: ["\u{1F97F}"], heeled: ["\u{1F460}"], ballet: ["\u{1FA70}"], shoes: ["\u{1FA70}"], pick: ["\u{1FAAE}", "\u26CF\uFE0F", "\u2692\uFE0F"], top: ["\u{1F3A9}", "\u{1F51D}"], graduation: ["\u{1F393}"], cap: ["\u{1F393}", "\u{1F9E2}"], billed: ["\u{1F9E2}"], helmet: ["\u{1FA96}", "\u26D1\uFE0F"], rescue: ["\u26D1\uFE0F"], prayer: ["\u{1F4FF}"], beads: ["\u{1F4FF}"], lipstick: ["\u{1F484}"], gem: ["\u{1F48E}"], muted: ["\u{1F507}"], speaker: ["\u{1F507}", "\u{1F508}", "\u{1F509}", "\u{1F50A}"], low: ["\u{1F508}", "\u{1FAAB}"], volume: ["\u{1F508}", "\u{1F509}", "\u{1F50A}"], medium: ["\u{1F509}", "\u25FC\uFE0F", "\u25FB\uFE0F", "\u25FE", "\u25FD"], loudspeaker: ["\u{1F4E2}"], megaphone: ["\u{1F4E3}"], postal: ["\u{1F4EF}"], horn: ["\u{1F4EF}"], slash: ["\u{1F515}"], musical: ["\u{1F3BC}", "\u{1F3B5}", "\u{1F3B6}", "\u{1F3B9}"], score: ["\u{1F3BC}"], note: ["\u{1F3B5}"], notes: ["\u{1F3B6}"], studio: ["\u{1F399}\uFE0F"], microphone: ["\u{1F399}\uFE0F", "\u{1F3A4}"], level: ["\u{1F39A}\uFE0F"], slider: ["\u{1F39A}\uFE0F"], control: ["\u{1F39B}\uFE0F", "\u{1F6C2}"], knobs: ["\u{1F39B}\uFE0F"], headphone: ["\u{1F3A7}"], radio: ["\u{1F4FB}", "\u{1F518}"], saxophone: ["\u{1F3B7}"], accordion: ["\u{1FA97}"], guitar: ["\u{1F3B8}"], keyboard: ["\u{1F3B9}", "\u2328\uFE0F"], trumpet: ["\u{1F3BA}"], violin: ["\u{1F3BB}"], banjo: ["\u{1FA95}"], long: ["\u{1FA98}"], maracas: ["\u{1FA87}"], flute: ["\u{1FA88}"], mobile: ["\u{1F4F1}", "\u{1F4F2}", "\u{1F4F5}", "\u{1F4F4}"], phone: ["\u{1F4F1}", "\u{1F4F2}", "\u{1F4F4}"], telephone: ["\u260E\uFE0F", "\u{1F4DE}"], receiver: ["\u{1F4DE}"], pager: ["\u{1F4DF}"], fax: ["\u{1F4E0}"], battery: ["\u{1F50B}", "\u{1FAAB}"], electric: ["\u{1F50C}"], plug: ["\u{1F50C}"], laptop: ["\u{1F4BB}"], desktop: ["\u{1F5A5}\uFE0F"], computer: ["\u{1F5A5}\uFE0F", "\u{1F5B1}\uFE0F", "\u{1F4BD}"], printer: ["\u{1F5A8}\uFE0F"], trackball: ["\u{1F5B2}\uFE0F"], disk: ["\u{1F4BD}", "\u{1F4BE}", "\u{1F4BF}"], floppy: ["\u{1F4BE}"], optical: ["\u{1F4BF}"], dvd: ["\u{1F4C0}"], abacus: ["\u{1F9EE}"], movie: ["\u{1F3A5}"], camera: ["\u{1F3A5}", "\u{1F4F7}", "\u{1F4F8}", "\u{1F4F9}"], film: ["\u{1F39E}\uFE0F", "\u{1F4FD}\uFE0F"], frames: ["\u{1F39E}\uFE0F"], projector: ["\u{1F4FD}\uFE0F"], clapper: ["\u{1F3AC}"], board: ["\u{1F3AC}"], television: ["\u{1F4FA}"], flash: ["\u{1F4F8}"], videocassette: ["\u{1F4FC}"], magnify: ["\u{1F50D}", "\u{1F50E}"], tilted: ["\u{1F50D}", "\u{1F50E}"], candle: ["\u{1F56F}\uFE0F"], bulb: ["\u{1F4A1}"], flashlight: ["\u{1F526}"], paper: ["\u{1F3EE}", "\u{1F9FB}"], diya: ["\u{1FA94}"], lamp: ["\u{1FA94}", "\u{1F6CB}\uFE0F"], notebook: ["\u{1F4D4}", "\u{1F4D3}"], decorative: ["\u{1F4D4}"], cover: ["\u{1F4D4}"], book: ["\u{1F4D5}", "\u{1F4D6}", "\u{1F4D7}", "\u{1F4D8}", "\u{1F4D9}"], books: ["\u{1F4DA}"], ledger: ["\u{1F4D2}"], page: ["\u{1F4C3}", "\u{1F4C4}"], scroll: ["\u{1F4DC}"], newspaper: ["\u{1F4F0}", "\u{1F5DE}\uFE0F"], rolled: ["\u{1F5DE}\uFE0F"], bookmark: ["\u{1F4D1}", "\u{1F516}"], tabs: ["\u{1F4D1}"], label: ["\u{1F3F7}\uFE0F"], coin: ["\u{1FA99}"], yen: ["\u{1F4B4}", "\u{1F4B9}"], banknote: ["\u{1F4B4}", "\u{1F4B5}", "\u{1F4B6}", "\u{1F4B7}"], dollar: ["\u{1F4B5}", "\u{1F4B2}"], euro: ["\u{1F4B6}"], pound: ["\u{1F4B7}"], wings: ["\u{1F4B8}"], credit: ["\u{1F4B3}"], card: ["\u{1F4B3}", "\u{1F5C2}\uFE0F", "\u{1F4C7}", "\u{1F5C3}\uFE0F", "\u{1FAAA}"], receipt: ["\u{1F9FE}"], chart: ["\u{1F4B9}", "\u{1F4C8}", "\u{1F4C9}", "\u{1F4CA}"], increase: ["\u{1F4B9}", "\u{1F4C8}"], mail: ["\u{1F4E7}"], income: ["\u{1F4E8}"], outbox: ["\u{1F4E4}"], tray: ["\u{1F4E4}", "\u{1F4E5}"], inbox: ["\u{1F4E5}"], package: ["\u{1F4E6}"], mailbox: ["\u{1F4EB}", "\u{1F4EA}", "\u{1F4EC}", "\u{1F4ED}"], lowered: ["\u{1F4EA}", "\u{1F4ED}"], postbox: ["\u{1F4EE}"], ballot: ["\u{1F5F3}\uFE0F"], pencil: ["\u270F\uFE0F"], nib: ["\u2712\uFE0F"], pen: ["\u{1F58B}\uFE0F", "\u{1F58A}\uFE0F", "\u{1F50F}"], paintbrush: ["\u{1F58C}\uFE0F"], crayon: ["\u{1F58D}\uFE0F"], memo: ["\u{1F4DD}"], briefcase: ["\u{1F4BC}"], file: ["\u{1F4C1}", "\u{1F4C2}", "\u{1F5C3}\uFE0F", "\u{1F5C4}\uFE0F"], folder: ["\u{1F4C1}", "\u{1F4C2}"], dividers: ["\u{1F5C2}\uFE0F"], calendar: ["\u{1F4C5}", "\u{1F4C6}", "\u{1F5D3}\uFE0F"], off: ["\u{1F4C6}", "\u{1F4F4}"], notepad: ["\u{1F5D2}\uFE0F"], decrease: ["\u{1F4C9}"], clipboard: ["\u{1F4CB}"], pushpin: ["\u{1F4CC}", "\u{1F4CD}"], round: ["\u{1F4CD}"], paperclip: ["\u{1F4CE}"], linked: ["\u{1F587}\uFE0F"], paperclips: ["\u{1F587}\uFE0F"], straight: ["\u{1F4CF}"], ruler: ["\u{1F4CF}", "\u{1F4D0}"], triangular: ["\u{1F4D0}", "\u{1F6A9}"], scissors: ["\u2702\uFE0F"], cabinet: ["\u{1F5C4}\uFE0F"], wastebasket: ["\u{1F5D1}\uFE0F"], locked: ["\u{1F512}", "\u{1F50F}", "\u{1F510}"], unlocked: ["\u{1F513}"], key: ["\u{1F510}", "\u{1F511}", "\u{1F5DD}\uFE0F"], hammer: ["\u{1F528}", "\u2692\uFE0F", "\u{1F6E0}\uFE0F"], axe: ["\u{1FA93}"], wrench: ["\u{1F6E0}\uFE0F", "\u{1F527}"], dagger: ["\u{1F5E1}\uFE0F"], swords: ["\u2694\uFE0F"], bomb: ["\u{1F4A3}"], boomerang: ["\u{1FA83}"], shield: ["\u{1F6E1}\uFE0F"], carpentry: ["\u{1FA9A}"], saw: ["\u{1FA9A}"], screwdriver: ["\u{1FA9B}"], nut: ["\u{1F529}"], bolt: ["\u{1F529}"], gear: ["\u2699\uFE0F"], clamp: ["\u{1F5DC}\uFE0F"], balance: ["\u2696\uFE0F"], scale: ["\u2696\uFE0F"], link: ["\u{1F517}"], chains: ["\u26D3\uFE0F"], hook: ["\u{1FA9D}"], toolbox: ["\u{1F9F0}"], magnet: ["\u{1F9F2}"], ladder: ["\u{1FA9C}"], alembic: ["\u2697\uFE0F"], test: ["\u{1F9EA}"], tube: ["\u{1F9EA}"], petri: ["\u{1F9EB}"], dish: ["\u{1F9EB}"], dna: ["\u{1F9EC}"], microscope: ["\u{1F52C}"], telescope: ["\u{1F52D}"], antenna: ["\u{1F4E1}", "\u{1F4F6}"], syringe: ["\u{1F489}"], drop: ["\u{1FA78}"], blood: ["\u{1FA78}", "\u{1F170}\uFE0F", "\u{1F18E}", "\u{1F171}\uFE0F", "\u{1F17E}\uFE0F"], pill: ["\u{1F48A}"], adhesive: ["\u{1FA79}"], crutch: ["\u{1FA7C}"], stethoscope: ["\u{1FA7A}"], ray: ["\u{1FA7B}"], door: ["\u{1F6AA}"], elevator: ["\u{1F6D7}"], window: ["\u{1FA9F}"], couch: ["\u{1F6CB}\uFE0F"], chair: ["\u{1FA91}"], toilet: ["\u{1F6BD}"], plunger: ["\u{1FAA0}"], shower: ["\u{1F6BF}"], bathtub: ["\u{1F6C1}"], trap: ["\u{1FAA4}"], razor: ["\u{1FA92}"], lotion: ["\u{1F9F4}"], pin: ["\u{1F9F7}"], broom: ["\u{1F9F9}"], basket: ["\u{1F9FA}"], bucket: ["\u{1FAA3}"], soap: ["\u{1F9FC}"], bubbles: ["\u{1FAE7}"], toothbrush: ["\u{1FAA5}"], sponge: ["\u{1F9FD}"], extinguisher: ["\u{1F9EF}"], cart: ["\u{1F6D2}"], cigarette: ["\u{1F6AC}"], coffin: ["\u26B0\uFE0F"], headstone: ["\u{1FAA6}"], funeral: ["\u26B1\uFE0F"], urn: ["\u26B1\uFE0F"], nazar: ["\u{1F9FF}"], amulet: ["\u{1F9FF}"], hamsa: ["\u{1FAAC}"], moai: ["\u{1F5FF}"], placard: ["\u{1FAA7}"], identification: ["\u{1FAAA}"], atm: ["\u{1F3E7}"], litter: ["\u{1F6AE}", "\u{1F6AF}"], bin: ["\u{1F6AE}"], potable: ["\u{1F6B0}", "\u{1F6B1}"], restroom: ["\u{1F6BB}"], closet: ["\u{1F6BE}"], passport: ["\u{1F6C2}"], customs: ["\u{1F6C3}"], baggage: ["\u{1F6C4}"], claim: ["\u{1F6C4}"], warn: ["\u26A0\uFE0F"], children: ["\u{1F6B8}"], cross: ["\u{1F6B8}", "\u271D\uFE0F", "\u2626\uFE0F", "\u274C", "\u274E"], entry: ["\u26D4"], prohibited: ["\u{1F6AB}", "\u{1F232}"], bicycles: ["\u{1F6B3}"], smoke: ["\u{1F6AD}"], non: ["\u{1F6B1}"], pedestrians: ["\u{1F6B7}"], phones: ["\u{1F4F5}"], under: ["\u{1F51E}"], eighteen: ["\u{1F51E}"], radioactive: ["\u2622\uFE0F"], biohazard: ["\u2623\uFE0F"], curve: ["\u21A9\uFE0F", "\u21AA\uFE0F", "\u2934\uFE0F", "\u2935\uFE0F"], clockwise: ["\u{1F503}"], arrows: ["\u{1F503}", "\u{1F504}"], counterclockwise: ["\u{1F504}"], button: ["\u{1F504}", "\u{1F500}", "\u{1F501}", "\u{1F502}", "\u25B6\uFE0F", "\u23E9", "\u23ED\uFE0F", "\u23EF\uFE0F", "\u25C0\uFE0F", "\u23EA", "\u23EE\uFE0F", "\u{1F53C}", "\u23EB", "\u{1F53D}", "\u23EC", "\u23F8\uFE0F", "\u23F9\uFE0F", "\u23FA\uFE0F", "\u23CF\uFE0F", "\u{1F505}", "\u{1F506}", "\u2705", "\u274E", "\u{1F170}\uFE0F", "\u{1F18E}", "\u{1F171}\uFE0F", "\u{1F191}", "\u{1F192}", "\u{1F193}", "\u{1F194}", "\u{1F195}", "\u{1F196}", "\u{1F17E}\uFE0F", "\u{1F197}", "\u{1F17F}\uFE0F", "\u{1F198}", "\u{1F199}", "\u{1F19A}", "\u{1F201}", "\u{1F202}\uFE0F", "\u{1F237}\uFE0F", "\u{1F236}", "\u{1F22F}", "\u{1F250}", "\u{1F239}", "\u{1F21A}", "\u{1F232}", "\u{1F251}", "\u{1F238}", "\u{1F234}", "\u{1F233}", "\u3297\uFE0F", "\u3299\uFE0F", "\u{1F23A}", "\u{1F235}", "\u{1F518}", "\u{1F533}", "\u{1F532}"], end: ["\u{1F51A}"], soon: ["\u{1F51C}"], worship: ["\u{1F6D0}"], atom: ["\u269B\uFE0F"], om: ["\u{1F549}\uFE0F"], david: ["\u2721\uFE0F"], dharma: ["\u2638\uFE0F"], yin: ["\u262F\uFE0F"], yang: ["\u262F\uFE0F"], latin: ["\u271D\uFE0F", "\u{1F520}", "\u{1F521}", "\u{1F524}"], orthodox: ["\u2626\uFE0F"], peace: ["\u262E\uFE0F"], menorah: ["\u{1F54E}"], pointed: ["\u{1F52F}", "\u2734\uFE0F", "\u{1F53A}", "\u{1F53B}"], khanda: ["\u{1FAAF}"], aries: ["\u2648"], taurus: ["\u2649"], gemini: ["\u264A"], cancer: ["\u264B"], leo: ["\u264C"], virgo: ["\u264D"], libra: ["\u264E"], scorpio: ["\u264F"], sagittarius: ["\u2650"], capricorn: ["\u2651"], aquarius: ["\u2652"], pisces: ["\u2653"], ophiuchus: ["\u26CE"], shuffle: ["\u{1F500}"], tracks: ["\u{1F500}"], repeat: ["\u{1F501}", "\u{1F502}"], single: ["\u{1F502}"], fast: ["\u23E9", "\u23EA", "\u23EB", "\u23EC"], forward: ["\u23E9"], next: ["\u23ED\uFE0F"], or: ["\u23EF\uFE0F"], pause: ["\u23EF\uFE0F", "\u23F8\uFE0F"], reverse: ["\u25C0\uFE0F", "\u23EA"], upwards: ["\u{1F53C}"], downwards: ["\u{1F53D}"], record: ["\u23FA\uFE0F"], eject: ["\u23CF\uFE0F"], cinema: ["\u{1F3A6}"], dim: ["\u{1F505}"], bright: ["\u{1F506}"], bars: ["\u{1F4F6}"], wireless: ["\u{1F6DC}"], vibration: ["\u{1F4F3}"], mode: ["\u{1F4F3}"], female: ["\u2640\uFE0F"], male: ["\u2642\uFE0F"], transgender: ["\u26A7\uFE0F", "\u{1F3F3}\uFE0F\u200D\u26A7\uFE0F"], multiply: ["\u2716\uFE0F"], plus: ["\u2795"], minus: ["\u2796"], divide: ["\u2797"], heavy: ["\u{1F7F0}", "\u{1F4B2}"], equals: ["\u{1F7F0}"], infinity: ["\u267E\uFE0F"], double: ["\u203C\uFE0F", "\u27BF"], question: ["\u2049\uFE0F", "\u2753", "\u2754"], wavy: ["\u3030\uFE0F"], currency: ["\u{1F4B1}"], exchange: ["\u{1F4B1}"], recycle: ["\u267B\uFE0F"], fleur: ["\u269C\uFE0F"], de: ["\u269C\uFE0F"], lis: ["\u269C\uFE0F"], trident: ["\u{1F531}"], emblem: ["\u{1F531}"], name: ["\u{1F4DB}"], badge: ["\u{1F4DB}"], for: ["\u{1F530}", "\u{1F23A}"], beginner: ["\u{1F530}"], hollow: ["\u2B55"], circle: ["\u2B55", "\u{1F534}", "\u{1F7E0}", "\u{1F7E1}", "\u{1F7E2}", "\u{1F535}", "\u{1F7E3}", "\u{1F7E4}", "\u26AB", "\u26AA"], check: ["\u2705", "\u2611\uFE0F", "\u2714\uFE0F"], loop: ["\u27B0", "\u27BF"], part: ["\u303D\uFE0F"], alternation: ["\u303D\uFE0F"], spoked: ["\u2733\uFE0F"], asterisk: ["\u2733\uFE0F"], copyright: ["\xA9\uFE0F"], registered: ["\xAE\uFE0F"], trade: ["\u2122\uFE0F"], keycap: ["#\uFE0F\u20E3", "*\uFE0F\u20E3", "0\uFE0F\u20E3", "1\uFE0F\u20E3", "2\uFE0F\u20E3", "3\uFE0F\u20E3", "4\uFE0F\u20E3", "5\uFE0F\u20E3", "6\uFE0F\u20E3", "7\uFE0F\u20E3", "8\uFE0F\u20E3", "9\uFE0F\u20E3", "\u{1F51F}"], input: ["\u{1F520}", "\u{1F521}", "\u{1F522}", "\u{1F523}", "\u{1F524}"], uppercase: ["\u{1F520}"], lowercase: ["\u{1F521}"], numbers: ["\u{1F522}"], letters: ["\u{1F524}"], type: ["\u{1F170}\uFE0F", "\u{1F18E}", "\u{1F171}\uFE0F", "\u{1F17E}\uFE0F"], ab: ["\u{1F18E}"], cl: ["\u{1F191}"], cool: ["\u{1F192}"], free: ["\u{1F193}", "\u{1F236}", "\u{1F21A}"], information: ["\u2139\uFE0F"], id: ["\u{1F194}"], circled: ["\u24C2\uFE0F"], ng: ["\u{1F196}"], sos: ["\u{1F198}"], vs: ["\u{1F19A}"], here: ["\u{1F201}"], charge: ["\u{1F202}\uFE0F", "\u{1F236}", "\u{1F21A}"], monthly: ["\u{1F237}\uFE0F"], amount: ["\u{1F237}\uFE0F"], reserved: ["\u{1F22F}"], bargain: ["\u{1F250}"], discount: ["\u{1F239}"], acceptable: ["\u{1F251}"], application: ["\u{1F238}"], pass: ["\u{1F234}"], grade: ["\u{1F234}"], vacancy: ["\u{1F233}", "\u{1F235}"], congratulations: ["\u3297\uFE0F"], secret: ["\u3299\uFE0F"], business: ["\u{1F23A}"], square: ["\u{1F7E5}", "\u{1F7E7}", "\u{1F7E8}", "\u{1F7E9}", "\u{1F7E6}", "\u{1F7EA}", "\u{1F7EB}", "\u2B1B", "\u2B1C", "\u25FC\uFE0F", "\u25FB\uFE0F", "\u25FE", "\u25FD", "\u25AA\uFE0F", "\u25AB\uFE0F", "\u{1F533}", "\u{1F532}"], triangle: ["\u{1F53A}", "\u{1F53B}"], dot: ["\u{1F4A0}"], chequered: ["\u{1F3C1}"], flags: ["\u{1F38C}"], pirate: ["\u{1F3F4}\u200D\u2620\uFE0F"], ascension: ["\u{1F1E6}\u{1F1E8}"], andorra: ["\u{1F1E6}\u{1F1E9}"], united: ["\u{1F1E6}\u{1F1EA}", "\u{1F1EC}\u{1F1E7}", "\u{1F1FA}\u{1F1F3}", "\u{1F1FA}\u{1F1F8}"], arab: ["\u{1F1E6}\u{1F1EA}"], emirates: ["\u{1F1E6}\u{1F1EA}"], afghanistan: ["\u{1F1E6}\u{1F1EB}"], antigua: ["\u{1F1E6}\u{1F1EC}"], barbuda: ["\u{1F1E6}\u{1F1EC}"], anguilla: ["\u{1F1E6}\u{1F1EE}"], albania: ["\u{1F1E6}\u{1F1F1}"], armenia: ["\u{1F1E6}\u{1F1F2}"], angola: ["\u{1F1E6}\u{1F1F4}"], antarctica: ["\u{1F1E6}\u{1F1F6}"], argentina: ["\u{1F1E6}\u{1F1F7}"], samoa: ["\u{1F1E6}\u{1F1F8}", "\u{1F1FC}\u{1F1F8}"], austria: ["\u{1F1E6}\u{1F1F9}"], aruba: ["\u{1F1E6}\u{1F1FC}"], aland: ["\u{1F1E6}\u{1F1FD}"], islands: ["\u{1F1E6}\u{1F1FD}", "\u{1F1E8}\u{1F1E8}", "\u{1F1E8}\u{1F1F0}", "\u{1F1EB}\u{1F1F0}", "\u{1F1EB}\u{1F1F4}", "\u{1F1EC}\u{1F1F8}", "\u{1F1ED}\u{1F1F2}", "\u{1F1EE}\u{1F1E8}", "\u{1F1F0}\u{1F1FE}", "\u{1F1F2}\u{1F1ED}", "\u{1F1F2}\u{1F1F5}", "\u{1F1F5}\u{1F1F3}", "\u{1F1F8}\u{1F1E7}", "\u{1F1F9}\u{1F1E8}", "\u{1F1FA}\u{1F1F2}", "\u{1F1FB}\u{1F1EC}", "\u{1F1FB}\u{1F1EE}"], azerbaijan: ["\u{1F1E6}\u{1F1FF}"], bosnia: ["\u{1F1E7}\u{1F1E6}"], herzegovina: ["\u{1F1E7}\u{1F1E6}"], barbados: ["\u{1F1E7}\u{1F1E7}"], bangladesh: ["\u{1F1E7}\u{1F1E9}"], belgium: ["\u{1F1E7}\u{1F1EA}"], burkina: ["\u{1F1E7}\u{1F1EB}"], faso: ["\u{1F1E7}\u{1F1EB}"], bulgaria: ["\u{1F1E7}\u{1F1EC}"], bahrain: ["\u{1F1E7}\u{1F1ED}"], burundi: ["\u{1F1E7}\u{1F1EE}"], benin: ["\u{1F1E7}\u{1F1EF}"], st: ["\u{1F1E7}\u{1F1F1}", "\u{1F1F0}\u{1F1F3}", "\u{1F1F1}\u{1F1E8}", "\u{1F1F2}\u{1F1EB}", "\u{1F1F5}\u{1F1F2}", "\u{1F1F8}\u{1F1ED}", "\u{1F1FB}\u{1F1E8}"], barthelemy: ["\u{1F1E7}\u{1F1F1}"], bermuda: ["\u{1F1E7}\u{1F1F2}"], brunei: ["\u{1F1E7}\u{1F1F3}"], bolivia: ["\u{1F1E7}\u{1F1F4}"], caribbean: ["\u{1F1E7}\u{1F1F6}"], netherlands: ["\u{1F1E7}\u{1F1F6}", "\u{1F1F3}\u{1F1F1}"], brazil: ["\u{1F1E7}\u{1F1F7}"], bahamas: ["\u{1F1E7}\u{1F1F8}"], bhutan: ["\u{1F1E7}\u{1F1F9}"], bouvet: ["\u{1F1E7}\u{1F1FB}"], botswana: ["\u{1F1E7}\u{1F1FC}"], belarus: ["\u{1F1E7}\u{1F1FE}"], belize: ["\u{1F1E7}\u{1F1FF}"], canada: ["\u{1F1E8}\u{1F1E6}"], cocos: ["\u{1F1E8}\u{1F1E8}"], keel: ["\u{1F1E8}\u{1F1E8}"], congo: ["\u{1F1E8}\u{1F1E9}", "\u{1F1E8}\u{1F1EC}"], kinshasa: ["\u{1F1E8}\u{1F1E9}"], central: ["\u{1F1E8}\u{1F1EB}"], african: ["\u{1F1E8}\u{1F1EB}"], republic: ["\u{1F1E8}\u{1F1EB}", "\u{1F1E9}\u{1F1F4}"], brazzaville: ["\u{1F1E8}\u{1F1EC}"], switzerland: ["\u{1F1E8}\u{1F1ED}"], cote: ["\u{1F1E8}\u{1F1EE}"], ivoire: ["\u{1F1E8}\u{1F1EE}"], chile: ["\u{1F1E8}\u{1F1F1}"], cameroon: ["\u{1F1E8}\u{1F1F2}"], china: ["\u{1F1E8}\u{1F1F3}", "\u{1F1ED}\u{1F1F0}", "\u{1F1F2}\u{1F1F4}"], colombia: ["\u{1F1E8}\u{1F1F4}"], clipperton: ["\u{1F1E8}\u{1F1F5}"], costa: ["\u{1F1E8}\u{1F1F7}"], rica: ["\u{1F1E8}\u{1F1F7}"], cuba: ["\u{1F1E8}\u{1F1FA}"], cape: ["\u{1F1E8}\u{1F1FB}"], verde: ["\u{1F1E8}\u{1F1FB}"], curacao: ["\u{1F1E8}\u{1F1FC}"], cyprus: ["\u{1F1E8}\u{1F1FE}"], czechia: ["\u{1F1E8}\u{1F1FF}"], germany: ["\u{1F1E9}\u{1F1EA}"], diego: ["\u{1F1E9}\u{1F1EC}"], garcia: ["\u{1F1E9}\u{1F1EC}"], djibouti: ["\u{1F1E9}\u{1F1EF}"], denmark: ["\u{1F1E9}\u{1F1F0}"], dominica: ["\u{1F1E9}\u{1F1F2}"], dominican: ["\u{1F1E9}\u{1F1F4}"], algeria: ["\u{1F1E9}\u{1F1FF}"], ceuta: ["\u{1F1EA}\u{1F1E6}"], melilla: ["\u{1F1EA}\u{1F1E6}"], ecuador: ["\u{1F1EA}\u{1F1E8}"], estonia: ["\u{1F1EA}\u{1F1EA}"], egypt: ["\u{1F1EA}\u{1F1EC}"], western: ["\u{1F1EA}\u{1F1ED}"], sahara: ["\u{1F1EA}\u{1F1ED}"], eritrea: ["\u{1F1EA}\u{1F1F7}"], spain: ["\u{1F1EA}\u{1F1F8}"], ethiopia: ["\u{1F1EA}\u{1F1F9}"], european: ["\u{1F1EA}\u{1F1FA}"], union: ["\u{1F1EA}\u{1F1FA}"], finland: ["\u{1F1EB}\u{1F1EE}"], fiji: ["\u{1F1EB}\u{1F1EF}"], falkland: ["\u{1F1EB}\u{1F1F0}"], micronesia: ["\u{1F1EB}\u{1F1F2}"], faroe: ["\u{1F1EB}\u{1F1F4}"], france: ["\u{1F1EB}\u{1F1F7}"], gabon: ["\u{1F1EC}\u{1F1E6}"], kingdom: ["\u{1F1EC}\u{1F1E7}"], grenada: ["\u{1F1EC}\u{1F1E9}"], georgia: ["\u{1F1EC}\u{1F1EA}", "\u{1F1EC}\u{1F1F8}"], guiana: ["\u{1F1EC}\u{1F1EB}"], guernsey: ["\u{1F1EC}\u{1F1EC}"], ghana: ["\u{1F1EC}\u{1F1ED}"], gibraltar: ["\u{1F1EC}\u{1F1EE}"], greenland: ["\u{1F1EC}\u{1F1F1}"], gambia: ["\u{1F1EC}\u{1F1F2}"], guinea: ["\u{1F1EC}\u{1F1F3}", "\u{1F1EC}\u{1F1F6}", "\u{1F1EC}\u{1F1FC}", "\u{1F1F5}\u{1F1EC}"], guadeloupe: ["\u{1F1EC}\u{1F1F5}"], equatorial: ["\u{1F1EC}\u{1F1F6}"], greece: ["\u{1F1EC}\u{1F1F7}"], south: ["\u{1F1EC}\u{1F1F8}", "\u{1F1F0}\u{1F1F7}", "\u{1F1F8}\u{1F1F8}", "\u{1F1FF}\u{1F1E6}"], guatemala: ["\u{1F1EC}\u{1F1F9}"], guam: ["\u{1F1EC}\u{1F1FA}"], bissau: ["\u{1F1EC}\u{1F1FC}"], guyana: ["\u{1F1EC}\u{1F1FE}"], hong: ["\u{1F1ED}\u{1F1F0}"], kong: ["\u{1F1ED}\u{1F1F0}"], sar: ["\u{1F1ED}\u{1F1F0}", "\u{1F1F2}\u{1F1F4}"], heard: ["\u{1F1ED}\u{1F1F2}"], mcdonald: ["\u{1F1ED}\u{1F1F2}"], honduras: ["\u{1F1ED}\u{1F1F3}"], croatia: ["\u{1F1ED}\u{1F1F7}"], haiti: ["\u{1F1ED}\u{1F1F9}"], hungary: ["\u{1F1ED}\u{1F1FA}"], canary: ["\u{1F1EE}\u{1F1E8}"], indonesia: ["\u{1F1EE}\u{1F1E9}"], ireland: ["\u{1F1EE}\u{1F1EA}"], israel: ["\u{1F1EE}\u{1F1F1}"], isle: ["\u{1F1EE}\u{1F1F2}"], india: ["\u{1F1EE}\u{1F1F3}"], british: ["\u{1F1EE}\u{1F1F4}", "\u{1F1FB}\u{1F1EC}"], indian: ["\u{1F1EE}\u{1F1F4}"], ocean: ["\u{1F1EE}\u{1F1F4}"], territory: ["\u{1F1EE}\u{1F1F4}"], iraq: ["\u{1F1EE}\u{1F1F6}"], iran: ["\u{1F1EE}\u{1F1F7}"], iceland: ["\u{1F1EE}\u{1F1F8}"], italy: ["\u{1F1EE}\u{1F1F9}"], jersey: ["\u{1F1EF}\u{1F1EA}"], jamaica: ["\u{1F1EF}\u{1F1F2}"], jordan: ["\u{1F1EF}\u{1F1F4}"], kenya: ["\u{1F1F0}\u{1F1EA}"], kyrgyzstan: ["\u{1F1F0}\u{1F1EC}"], cambodia: ["\u{1F1F0}\u{1F1ED}"], kiribati: ["\u{1F1F0}\u{1F1EE}"], comoros: ["\u{1F1F0}\u{1F1F2}"], kitts: ["\u{1F1F0}\u{1F1F3}"], nevis: ["\u{1F1F0}\u{1F1F3}"], north: ["\u{1F1F0}\u{1F1F5}", "\u{1F1F2}\u{1F1F0}"], korea: ["\u{1F1F0}\u{1F1F5}", "\u{1F1F0}\u{1F1F7}"], kuwait: ["\u{1F1F0}\u{1F1FC}"], cayman: ["\u{1F1F0}\u{1F1FE}"], kazakhstan: ["\u{1F1F0}\u{1F1FF}"], laos: ["\u{1F1F1}\u{1F1E6}"], lebanon: ["\u{1F1F1}\u{1F1E7}"], lucia: ["\u{1F1F1}\u{1F1E8}"], liechtenstein: ["\u{1F1F1}\u{1F1EE}"], sri: ["\u{1F1F1}\u{1F1F0}"], lanka: ["\u{1F1F1}\u{1F1F0}"], liberia: ["\u{1F1F1}\u{1F1F7}"], lesotho: ["\u{1F1F1}\u{1F1F8}"], lithuania: ["\u{1F1F1}\u{1F1F9}"], luxembourg: ["\u{1F1F1}\u{1F1FA}"], latvia: ["\u{1F1F1}\u{1F1FB}"], libya: ["\u{1F1F1}\u{1F1FE}"], morocco: ["\u{1F1F2}\u{1F1E6}"], monaco: ["\u{1F1F2}\u{1F1E8}"], moldova: ["\u{1F1F2}\u{1F1E9}"], montenegro: ["\u{1F1F2}\u{1F1EA}"], martin: ["\u{1F1F2}\u{1F1EB}"], madagascar: ["\u{1F1F2}\u{1F1EC}"], marshall: ["\u{1F1F2}\u{1F1ED}"], macedonia: ["\u{1F1F2}\u{1F1F0}"], mali: ["\u{1F1F2}\u{1F1F1}"], myanmar: ["\u{1F1F2}\u{1F1F2}"], burma: ["\u{1F1F2}\u{1F1F2}"], mongolia: ["\u{1F1F2}\u{1F1F3}"], macao: ["\u{1F1F2}\u{1F1F4}"], northern: ["\u{1F1F2}\u{1F1F5}"], mariana: ["\u{1F1F2}\u{1F1F5}"], martinique: ["\u{1F1F2}\u{1F1F6}"], mauritania: ["\u{1F1F2}\u{1F1F7}"], montserrat: ["\u{1F1F2}\u{1F1F8}"], malta: ["\u{1F1F2}\u{1F1F9}"], mauritius: ["\u{1F1F2}\u{1F1FA}"], maldives: ["\u{1F1F2}\u{1F1FB}"], malawi: ["\u{1F1F2}\u{1F1FC}"], mexico: ["\u{1F1F2}\u{1F1FD}"], malaysia: ["\u{1F1F2}\u{1F1FE}"], mozambique: ["\u{1F1F2}\u{1F1FF}"], namibia: ["\u{1F1F3}\u{1F1E6}"], caledonia: ["\u{1F1F3}\u{1F1E8}"], niger: ["\u{1F1F3}\u{1F1EA}"], norfolk: ["\u{1F1F3}\u{1F1EB}"], nigeria: ["\u{1F1F3}\u{1F1EC}"], nicaragua: ["\u{1F1F3}\u{1F1EE}"], norway: ["\u{1F1F3}\u{1F1F4}"], nepal: ["\u{1F1F3}\u{1F1F5}"], nauru: ["\u{1F1F3}\u{1F1F7}"], niue: ["\u{1F1F3}\u{1F1FA}"], zealand: ["\u{1F1F3}\u{1F1FF}"], oman: ["\u{1F1F4}\u{1F1F2}"], panama: ["\u{1F1F5}\u{1F1E6}"], peru: ["\u{1F1F5}\u{1F1EA}"], polynesia: ["\u{1F1F5}\u{1F1EB}"], papua: ["\u{1F1F5}\u{1F1EC}"], philippines: ["\u{1F1F5}\u{1F1ED}"], pakistan: ["\u{1F1F5}\u{1F1F0}"], poland: ["\u{1F1F5}\u{1F1F1}"], pierre: ["\u{1F1F5}\u{1F1F2}"], miquelon: ["\u{1F1F5}\u{1F1F2}"], pitcairn: ["\u{1F1F5}\u{1F1F3}"], puerto: ["\u{1F1F5}\u{1F1F7}"], rico: ["\u{1F1F5}\u{1F1F7}"], palestinian: ["\u{1F1F5}\u{1F1F8}"], territories: ["\u{1F1F5}\u{1F1F8}", "\u{1F1F9}\u{1F1EB}"], portugal: ["\u{1F1F5}\u{1F1F9}"], palau: ["\u{1F1F5}\u{1F1FC}"], paraguay: ["\u{1F1F5}\u{1F1FE}"], qatar: ["\u{1F1F6}\u{1F1E6}"], reunion: ["\u{1F1F7}\u{1F1EA}"], romania: ["\u{1F1F7}\u{1F1F4}"], serbia: ["\u{1F1F7}\u{1F1F8}"], russia: ["\u{1F1F7}\u{1F1FA}"], rwanda: ["\u{1F1F7}\u{1F1FC}"], saudi: ["\u{1F1F8}\u{1F1E6}"], arabia: ["\u{1F1F8}\u{1F1E6}"], solomon: ["\u{1F1F8}\u{1F1E7}"], seychelles: ["\u{1F1F8}\u{1F1E8}"], sudan: ["\u{1F1F8}\u{1F1E9}", "\u{1F1F8}\u{1F1F8}"], sweden: ["\u{1F1F8}\u{1F1EA}"], singapore: ["\u{1F1F8}\u{1F1EC}"], helena: ["\u{1F1F8}\u{1F1ED}"], slovenia: ["\u{1F1F8}\u{1F1EE}"], svalbard: ["\u{1F1F8}\u{1F1EF}"], jan: ["\u{1F1F8}\u{1F1EF}"], mayen: ["\u{1F1F8}\u{1F1EF}"], slovakia: ["\u{1F1F8}\u{1F1F0}"], sierra: ["\u{1F1F8}\u{1F1F1}"], leone: ["\u{1F1F8}\u{1F1F1}"], san: ["\u{1F1F8}\u{1F1F2}"], marino: ["\u{1F1F8}\u{1F1F2}"], senegal: ["\u{1F1F8}\u{1F1F3}"], somalia: ["\u{1F1F8}\u{1F1F4}"], suriname: ["\u{1F1F8}\u{1F1F7}"], sao: ["\u{1F1F8}\u{1F1F9}"], tome: ["\u{1F1F8}\u{1F1F9}"], principe: ["\u{1F1F8}\u{1F1F9}"], el: ["\u{1F1F8}\u{1F1FB}"], salvador: ["\u{1F1F8}\u{1F1FB}"], sint: ["\u{1F1F8}\u{1F1FD}"], maarten: ["\u{1F1F8}\u{1F1FD}"], syria: ["\u{1F1F8}\u{1F1FE}"], eswatini: ["\u{1F1F8}\u{1F1FF}"], tristan: ["\u{1F1F9}\u{1F1E6}"], da: ["\u{1F1F9}\u{1F1E6}"], cunha: ["\u{1F1F9}\u{1F1E6}"], turks: ["\u{1F1F9}\u{1F1E8}"], caicos: ["\u{1F1F9}\u{1F1E8}"], chad: ["\u{1F1F9}\u{1F1E9}"], southern: ["\u{1F1F9}\u{1F1EB}"], togo: ["\u{1F1F9}\u{1F1EC}"], thailand: ["\u{1F1F9}\u{1F1ED}"], tajikistan: ["\u{1F1F9}\u{1F1EF}"], tokelau: ["\u{1F1F9}\u{1F1F0}"], timor: ["\u{1F1F9}\u{1F1F1}"], leste: ["\u{1F1F9}\u{1F1F1}"], turkmenistan: ["\u{1F1F9}\u{1F1F2}"], tunisia: ["\u{1F1F9}\u{1F1F3}"], tonga: ["\u{1F1F9}\u{1F1F4}"], trinidad: ["\u{1F1F9}\u{1F1F9}"], tobago: ["\u{1F1F9}\u{1F1F9}"], tuvalu: ["\u{1F1F9}\u{1F1FB}"], taiwan: ["\u{1F1F9}\u{1F1FC}"], tanzania: ["\u{1F1F9}\u{1F1FF}"], ukraine: ["\u{1F1FA}\u{1F1E6}"], uganda: ["\u{1F1FA}\u{1F1EC}"], us: ["\u{1F1FA}\u{1F1F2}", "\u{1F1FB}\u{1F1EE}"], outly: ["\u{1F1FA}\u{1F1F2}"], nations: ["\u{1F1FA}\u{1F1F3}"], states: ["\u{1F1FA}\u{1F1F8}"], uruguay: ["\u{1F1FA}\u{1F1FE}"], uzbekistan: ["\u{1F1FA}\u{1F1FF}"], vatican: ["\u{1F1FB}\u{1F1E6}"], city: ["\u{1F1FB}\u{1F1E6}"], vincent: ["\u{1F1FB}\u{1F1E8}"], grenadines: ["\u{1F1FB}\u{1F1E8}"], venezuela: ["\u{1F1FB}\u{1F1EA}"], virgin: ["\u{1F1FB}\u{1F1EC}", "\u{1F1FB}\u{1F1EE}"], vietnam: ["\u{1F1FB}\u{1F1F3}"], vanuatu: ["\u{1F1FB}\u{1F1FA}"], wallis: ["\u{1F1FC}\u{1F1EB}"], futuna: ["\u{1F1FC}\u{1F1EB}"], kosovo: ["\u{1F1FD}\u{1F1F0}"], yemen: ["\u{1F1FE}\u{1F1EA}"], mayotte: ["\u{1F1FE}\u{1F1F9}"], zambia: ["\u{1F1FF}\u{1F1F2}"], zimbabwe: ["\u{1F1FF}\u{1F1FC}"], england: ["\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"], scotland: ["\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}"], wales: ["\u{1F3F4}\u{E0067}\u{E0062}\u{E0077}\u{E006C}\u{E0073}\u{E007F}"] };
   }
 });
 
-// ../../../node_modules/string-kit/lib/json-data/emoji-char-to-canonical-name.json
+// node_modules/string-kit/lib/json-data/emoji-char-to-canonical-name.json
 var require_emoji_char_to_canonical_name = __commonJS({
-  "../../../node_modules/string-kit/lib/json-data/emoji-char-to-canonical-name.json"(exports, module) {
+  "node_modules/string-kit/lib/json-data/emoji-char-to-canonical-name.json"(exports, module) {
     module.exports = { "\u{1F600}": "grinning-face", "\u{1F603}": "grinning-face-with-big-eyes", "\u{1F604}": "grinning-face-with-smiling-eyes", "\u{1F601}": "beaming-face-with-smiling-eyes", "\u{1F606}": "grinning-squinting-face", "\u{1F605}": "grinning-face-with-sweat", "\u{1F923}": "rolling-on-the-floor-laughing", "\u{1F602}": "face-with-tears-of-joy", "\u{1F642}": "slightly-smiling-face", "\u{1F643}": "upside-down-face", "\u{1FAE0}": "melting-face", "\u{1F609}": "winking-face", "\u{1F60A}": "smiling-face-with-smiling-eyes", "\u{1F607}": "smiling-face-with-halo", "\u{1F970}": "smiling-face-with-hearts", "\u{1F60D}": "smiling-face-with-heart-eyes", "\u{1F929}": "star-struck", "\u{1F618}": "face-blowing-a-kiss", "\u{1F617}": "kissing-face", "\u263A\uFE0F": "smiling-face", "\u{1F61A}": "kissing-face-with-closed-eyes", "\u{1F619}": "kissing-face-with-smiling-eyes", "\u{1F972}": "smiling-face-with-tear", "\u{1F60B}": "face-savoring-food", "\u{1F61B}": "face-with-tongue", "\u{1F61C}": "winking-face-with-tongue", "\u{1F92A}": "zany-face", "\u{1F61D}": "squinting-face-with-tongue", "\u{1F911}": "money-mouth-face", "\u{1F917}": "smiling-face-with-open-hands", "\u{1F92D}": "face-with-hand-over-mouth", "\u{1FAE2}": "face-with-open-eyes-and-hand-over-mouth", "\u{1FAE3}": "face-with-peeking-eye", "\u{1F92B}": "shushing-face", "\u{1F914}": "thinking-face", "\u{1FAE1}": "saluting-face", "\u{1F910}": "zipper-mouth-face", "\u{1F928}": "face-with-raised-eyebrow", "\u{1F610}": "neutral-face", "\u{1F611}": "expressionless-face", "\u{1F636}": "face-without-mouth", "\u{1FAE5}": "dotted-line-face", "\u{1F636}\u200D\u{1F32B}\uFE0F": "face-in-clouds", "\u{1F60F}": "smirking-face", "\u{1F612}": "unamused-face", "\u{1F644}": "face-with-rolling-eyes", "\u{1F62C}": "grimacing-face", "\u{1F62E}\u200D\u{1F4A8}": "face-exhaling", "\u{1F925}": "lying-face", "\u{1FAE8}": "shaking-face", "\u{1F60C}": "relieved-face", "\u{1F614}": "pensive-face", "\u{1F62A}": "sleepy-face", "\u{1F924}": "drooling-face", "\u{1F634}": "sleeping-face", "\u{1F637}": "face-with-medical-mask", "\u{1F912}": "face-with-thermometer", "\u{1F915}": "face-with-head-bandage", "\u{1F922}": "nauseated-face", "\u{1F92E}": "face-vomiting", "\u{1F927}": "sneezing-face", "\u{1F975}": "hot-face", "\u{1F976}": "cold-face", "\u{1F974}": "woozy-face", "\u{1F635}": "face-with-crossed-out-eyes", "\u{1F635}\u200D\u{1F4AB}": "face-with-spiral-eyes", "\u{1F92F}": "exploding-head", "\u{1F920}": "cowboy-hat-face", "\u{1F973}": "partying-face", "\u{1F978}": "disguised-face", "\u{1F60E}": "smiling-face-with-sunglasses", "\u{1F913}": "nerd-face", "\u{1F9D0}": "face-with-monocle", "\u{1F615}": "confused-face", "\u{1FAE4}": "face-with-diagonal-mouth", "\u{1F61F}": "worried-face", "\u{1F641}": "slightly-frowning-face", "\u2639\uFE0F": "frowning-face", "\u{1F62E}": "face-with-open-mouth", "\u{1F62F}": "hushed-face", "\u{1F632}": "astonished-face", "\u{1F633}": "flushed-face", "\u{1F97A}": "pleading-face", "\u{1F979}": "face-holding-back-tears", "\u{1F626}": "frowning-face-with-open-mouth", "\u{1F627}": "anguished-face", "\u{1F628}": "fearful-face", "\u{1F630}": "anxious-face-with-sweat", "\u{1F625}": "sad-but-relieved-face", "\u{1F622}": "crying-face", "\u{1F62D}": "loudly-crying-face", "\u{1F631}": "face-screaming-in-fear", "\u{1F616}": "confounded-face", "\u{1F623}": "persevering-face", "\u{1F61E}": "disappointed-face", "\u{1F613}": "downcast-face-with-sweat", "\u{1F629}": "weary-face", "\u{1F62B}": "tired-face", "\u{1F971}": "yawning-face", "\u{1F624}": "face-with-steam-from-nose", "\u{1F621}": "enraged-face", "\u{1F620}": "angry-face", "\u{1F92C}": "face-with-symbols-on-mouth", "\u{1F608}": "smiling-face-with-horns", "\u{1F47F}": "angry-face-with-horns", "\u{1F480}": "skull", "\u2620\uFE0F": "skull-and-crossbones", "\u{1F4A9}": "pile-of-poo", "\u{1F921}": "clown-face", "\u{1F479}": "ogre", "\u{1F47A}": "goblin", "\u{1F47B}": "ghost", "\u{1F47D}": "alien", "\u{1F47E}": "alien-monster", "\u{1F916}": "robot", "\u{1F63A}": "grinning-cat", "\u{1F638}": "grinning-cat-with-smiling-eyes", "\u{1F639}": "cat-with-tears-of-joy", "\u{1F63B}": "smiling-cat-with-heart-eyes", "\u{1F63C}": "cat-with-wry-smile", "\u{1F63D}": "kissing-cat", "\u{1F640}": "weary-cat", "\u{1F63F}": "crying-cat", "\u{1F63E}": "pouting-cat", "\u{1F648}": "see-no-evil-monkey", "\u{1F649}": "hear-no-evil-monkey", "\u{1F64A}": "speak-no-evil-monkey", "\u{1F48C}": "love-letter", "\u{1F498}": "heart-with-arrow", "\u{1F49D}": "heart-with-ribbon", "\u{1F496}": "sparkling-heart", "\u{1F497}": "growing-heart", "\u{1F493}": "beating-heart", "\u{1F49E}": "revolving-hearts", "\u{1F495}": "two-hearts", "\u{1F49F}": "heart-decoration", "\u2763\uFE0F": "heart-exclamation", "\u{1F494}": "broken-heart", "\u2764\uFE0F\u200D\u{1F525}": "heart-on-fire", "\u2764\uFE0F\u200D\u{1FA79}": "mending-heart", "\u2764\uFE0F": "red-heart", "\u{1FA77}": "pink-heart", "\u{1F9E1}": "orange-heart", "\u{1F49B}": "yellow-heart", "\u{1F49A}": "green-heart", "\u{1F499}": "blue-heart", "\u{1FA75}": "light-blue-heart", "\u{1F49C}": "purple-heart", "\u{1F90E}": "brown-heart", "\u{1F5A4}": "black-heart", "\u{1FA76}": "grey-heart", "\u{1F90D}": "white-heart", "\u{1F48B}": "kiss-mark", "\u{1F4AF}": "hundred-points", "\u{1F4A2}": "anger-symbol", "\u{1F4A5}": "collision", "\u{1F4AB}": "dizzy", "\u{1F4A6}": "sweat-droplets", "\u{1F4A8}": "dashing-away", "\u{1F573}\uFE0F": "hole", "\u{1F4AC}": "speech-balloon", "\u{1F441}\uFE0F\u200D\u{1F5E8}\uFE0F": "eye-in-speech-bubble", "\u{1F5E8}\uFE0F": "left-speech-bubble", "\u{1F5EF}\uFE0F": "right-anger-bubble", "\u{1F4AD}": "thought-balloon", "\u{1F4A4}": "zzz", "\u{1F44B}": "waving-hand", "\u{1F91A}": "raised-back-of-hand", "\u{1F590}\uFE0F": "hand-with-fingers-splayed", "\u270B": "raised-hand", "\u{1F596}": "vulcan-salute", "\u{1FAF1}": "rightwards-hand", "\u{1FAF2}": "leftwards-hand", "\u{1FAF3}": "palm-down-hand", "\u{1FAF4}": "palm-up-hand", "\u{1FAF7}": "leftwards-pushing-hand", "\u{1FAF8}": "rightwards-pushing-hand", "\u{1F44C}": "ok-hand", "\u{1F90C}": "pinched-fingers", "\u{1F90F}": "pinching-hand", "\u270C\uFE0F": "victory-hand", "\u{1F91E}": "crossed-fingers", "\u{1FAF0}": "hand-with-index-finger-and-thumb-crossed", "\u{1F91F}": "love-you-gesture", "\u{1F918}": "sign-of-the-horns", "\u{1F919}": "call-me-hand", "\u{1F448}": "backhand-index-pointing-left", "\u{1F449}": "backhand-index-pointing-right", "\u{1F446}": "backhand-index-pointing-up", "\u{1F595}": "middle-finger", "\u{1F447}": "backhand-index-pointing-down", "\u261D\uFE0F": "index-pointing-up", "\u{1FAF5}": "index-pointing-at-the-viewer", "\u{1F44D}": "thumbs-up", "\u{1F44E}": "thumbs-down", "\u270A": "raised-fist", "\u{1F44A}": "oncoming-fist", "\u{1F91B}": "left-facing-fist", "\u{1F91C}": "right-facing-fist", "\u{1F44F}": "clapping-hands", "\u{1F64C}": "raising-hands", "\u{1FAF6}": "heart-hands", "\u{1F450}": "open-hands", "\u{1F932}": "palms-up-together", "\u{1F91D}": "handshake", "\u{1F64F}": "folded-hands", "\u270D\uFE0F": "writing-hand", "\u{1F485}": "nail-polish", "\u{1F933}": "selfie", "\u{1F4AA}": "flexed-biceps", "\u{1F9BE}": "mechanical-arm", "\u{1F9BF}": "mechanical-leg", "\u{1F9B5}": "leg", "\u{1F9B6}": "foot", "\u{1F442}": "ear", "\u{1F9BB}": "ear-with-hearing-aid", "\u{1F443}": "nose", "\u{1F9E0}": "brain", "\u{1FAC0}": "anatomical-heart", "\u{1FAC1}": "lungs", "\u{1F9B7}": "tooth", "\u{1F9B4}": "bone", "\u{1F440}": "eyes", "\u{1F441}\uFE0F": "eye", "\u{1F445}": "tongue", "\u{1F444}": "mouth", "\u{1FAE6}": "biting-lip", "\u{1F476}": "baby", "\u{1F9D2}": "child", "\u{1F466}": "boy", "\u{1F467}": "girl", "\u{1F9D1}": "person", "\u{1F471}": "person-blond-hair", "\u{1F468}": "man", "\u{1F9D4}": "person-beard", "\u{1F9D4}\u200D\u2642\uFE0F": "man-beard", "\u{1F9D4}\u200D\u2640\uFE0F": "woman-beard", "\u{1F468}\u200D\u{1F9B0}": "man-red-hair", "\u{1F468}\u200D\u{1F9B1}": "man-curly-hair", "\u{1F468}\u200D\u{1F9B3}": "man-white-hair", "\u{1F468}\u200D\u{1F9B2}": "man-bald", "\u{1F469}": "woman", "\u{1F469}\u200D\u{1F9B0}": "woman-red-hair", "\u{1F9D1}\u200D\u{1F9B0}": "person-red-hair", "\u{1F469}\u200D\u{1F9B1}": "woman-curly-hair", "\u{1F9D1}\u200D\u{1F9B1}": "person-curly-hair", "\u{1F469}\u200D\u{1F9B3}": "woman-white-hair", "\u{1F9D1}\u200D\u{1F9B3}": "person-white-hair", "\u{1F469}\u200D\u{1F9B2}": "woman-bald", "\u{1F9D1}\u200D\u{1F9B2}": "person-bald", "\u{1F471}\u200D\u2640\uFE0F": "woman-blond-hair", "\u{1F471}\u200D\u2642\uFE0F": "man-blond-hair", "\u{1F9D3}": "older-person", "\u{1F474}": "old-man", "\u{1F475}": "old-woman", "\u{1F64D}": "person-frowning", "\u{1F64D}\u200D\u2642\uFE0F": "man-frowning", "\u{1F64D}\u200D\u2640\uFE0F": "woman-frowning", "\u{1F64E}": "person-pouting", "\u{1F64E}\u200D\u2642\uFE0F": "man-pouting", "\u{1F64E}\u200D\u2640\uFE0F": "woman-pouting", "\u{1F645}": "person-gesturing-no", "\u{1F645}\u200D\u2642\uFE0F": "man-gesturing-no", "\u{1F645}\u200D\u2640\uFE0F": "woman-gesturing-no", "\u{1F646}": "person-gesturing-ok", "\u{1F646}\u200D\u2642\uFE0F": "man-gesturing-ok", "\u{1F646}\u200D\u2640\uFE0F": "woman-gesturing-ok", "\u{1F481}": "person-tipping-hand", "\u{1F481}\u200D\u2642\uFE0F": "man-tipping-hand", "\u{1F481}\u200D\u2640\uFE0F": "woman-tipping-hand", "\u{1F64B}": "person-raising-hand", "\u{1F64B}\u200D\u2642\uFE0F": "man-raising-hand", "\u{1F64B}\u200D\u2640\uFE0F": "woman-raising-hand", "\u{1F9CF}": "deaf-person", "\u{1F9CF}\u200D\u2642\uFE0F": "deaf-man", "\u{1F9CF}\u200D\u2640\uFE0F": "deaf-woman", "\u{1F647}": "person-bowing", "\u{1F647}\u200D\u2642\uFE0F": "man-bowing", "\u{1F647}\u200D\u2640\uFE0F": "woman-bowing", "\u{1F926}": "person-facepalming", "\u{1F926}\u200D\u2642\uFE0F": "man-facepalming", "\u{1F926}\u200D\u2640\uFE0F": "woman-facepalming", "\u{1F937}": "person-shrugging", "\u{1F937}\u200D\u2642\uFE0F": "man-shrugging", "\u{1F937}\u200D\u2640\uFE0F": "woman-shrugging", "\u{1F9D1}\u200D\u2695\uFE0F": "health-worker", "\u{1F468}\u200D\u2695\uFE0F": "man-health-worker", "\u{1F469}\u200D\u2695\uFE0F": "woman-health-worker", "\u{1F9D1}\u200D\u{1F393}": "student", "\u{1F468}\u200D\u{1F393}": "man-student", "\u{1F469}\u200D\u{1F393}": "woman-student", "\u{1F9D1}\u200D\u{1F3EB}": "teacher", "\u{1F468}\u200D\u{1F3EB}": "man-teacher", "\u{1F469}\u200D\u{1F3EB}": "woman-teacher", "\u{1F9D1}\u200D\u2696\uFE0F": "judge", "\u{1F468}\u200D\u2696\uFE0F": "man-judge", "\u{1F469}\u200D\u2696\uFE0F": "woman-judge", "\u{1F9D1}\u200D\u{1F33E}": "farmer", "\u{1F468}\u200D\u{1F33E}": "man-farmer", "\u{1F469}\u200D\u{1F33E}": "woman-farmer", "\u{1F9D1}\u200D\u{1F373}": "cook", "\u{1F468}\u200D\u{1F373}": "man-cook", "\u{1F469}\u200D\u{1F373}": "woman-cook", "\u{1F9D1}\u200D\u{1F527}": "mechanic", "\u{1F468}\u200D\u{1F527}": "man-mechanic", "\u{1F469}\u200D\u{1F527}": "woman-mechanic", "\u{1F9D1}\u200D\u{1F3ED}": "factory-worker", "\u{1F468}\u200D\u{1F3ED}": "man-factory-worker", "\u{1F469}\u200D\u{1F3ED}": "woman-factory-worker", "\u{1F9D1}\u200D\u{1F4BC}": "office-worker", "\u{1F468}\u200D\u{1F4BC}": "man-office-worker", "\u{1F469}\u200D\u{1F4BC}": "woman-office-worker", "\u{1F9D1}\u200D\u{1F52C}": "scientist", "\u{1F468}\u200D\u{1F52C}": "man-scientist", "\u{1F469}\u200D\u{1F52C}": "woman-scientist", "\u{1F9D1}\u200D\u{1F4BB}": "technologist", "\u{1F468}\u200D\u{1F4BB}": "man-technologist", "\u{1F469}\u200D\u{1F4BB}": "woman-technologist", "\u{1F9D1}\u200D\u{1F3A4}": "singer", "\u{1F468}\u200D\u{1F3A4}": "man-singer", "\u{1F469}\u200D\u{1F3A4}": "woman-singer", "\u{1F9D1}\u200D\u{1F3A8}": "artist", "\u{1F468}\u200D\u{1F3A8}": "man-artist", "\u{1F469}\u200D\u{1F3A8}": "woman-artist", "\u{1F9D1}\u200D\u2708\uFE0F": "pilot", "\u{1F468}\u200D\u2708\uFE0F": "man-pilot", "\u{1F469}\u200D\u2708\uFE0F": "woman-pilot", "\u{1F9D1}\u200D\u{1F680}": "astronaut", "\u{1F468}\u200D\u{1F680}": "man-astronaut", "\u{1F469}\u200D\u{1F680}": "woman-astronaut", "\u{1F9D1}\u200D\u{1F692}": "firefighter", "\u{1F468}\u200D\u{1F692}": "man-firefighter", "\u{1F469}\u200D\u{1F692}": "woman-firefighter", "\u{1F46E}": "police-officer", "\u{1F46E}\u200D\u2642\uFE0F": "man-police-officer", "\u{1F46E}\u200D\u2640\uFE0F": "woman-police-officer", "\u{1F575}\uFE0F": "detective", "\u{1F575}\uFE0F\u200D\u2642\uFE0F": "man-detective", "\u{1F575}\uFE0F\u200D\u2640\uFE0F": "woman-detective", "\u{1F482}": "guard", "\u{1F482}\u200D\u2642\uFE0F": "man-guard", "\u{1F482}\u200D\u2640\uFE0F": "woman-guard", "\u{1F977}": "ninja", "\u{1F477}": "construction-worker", "\u{1F477}\u200D\u2642\uFE0F": "man-construction-worker", "\u{1F477}\u200D\u2640\uFE0F": "woman-construction-worker", "\u{1FAC5}": "person-with-crown", "\u{1F934}": "prince", "\u{1F478}": "princess", "\u{1F473}": "person-wearing-turban", "\u{1F473}\u200D\u2642\uFE0F": "man-wearing-turban", "\u{1F473}\u200D\u2640\uFE0F": "woman-wearing-turban", "\u{1F472}": "person-with-skullcap", "\u{1F9D5}": "woman-with-headscarf", "\u{1F935}": "person-in-tuxedo", "\u{1F935}\u200D\u2642\uFE0F": "man-in-tuxedo", "\u{1F935}\u200D\u2640\uFE0F": "woman-in-tuxedo", "\u{1F470}": "person-with-veil", "\u{1F470}\u200D\u2642\uFE0F": "man-with-veil", "\u{1F470}\u200D\u2640\uFE0F": "woman-with-veil", "\u{1F930}": "pregnant-woman", "\u{1FAC3}": "pregnant-man", "\u{1FAC4}": "pregnant-person", "\u{1F931}": "breast-feeding", "\u{1F469}\u200D\u{1F37C}": "woman-feeding-baby", "\u{1F468}\u200D\u{1F37C}": "man-feeding-baby", "\u{1F9D1}\u200D\u{1F37C}": "person-feeding-baby", "\u{1F47C}": "baby-angel", "\u{1F385}": "santa-claus", "\u{1F936}": "mrs-claus", "\u{1F9D1}\u200D\u{1F384}": "mx-claus", "\u{1F9B8}": "superhero", "\u{1F9B8}\u200D\u2642\uFE0F": "man-superhero", "\u{1F9B8}\u200D\u2640\uFE0F": "woman-superhero", "\u{1F9B9}": "supervillain", "\u{1F9B9}\u200D\u2642\uFE0F": "man-supervillain", "\u{1F9B9}\u200D\u2640\uFE0F": "woman-supervillain", "\u{1F9D9}": "mage", "\u{1F9D9}\u200D\u2642\uFE0F": "man-mage", "\u{1F9D9}\u200D\u2640\uFE0F": "woman-mage", "\u{1F9DA}": "fairy", "\u{1F9DA}\u200D\u2642\uFE0F": "man-fairy", "\u{1F9DA}\u200D\u2640\uFE0F": "woman-fairy", "\u{1F9DB}": "vampire", "\u{1F9DB}\u200D\u2642\uFE0F": "man-vampire", "\u{1F9DB}\u200D\u2640\uFE0F": "woman-vampire", "\u{1F9DC}": "merperson", "\u{1F9DC}\u200D\u2642\uFE0F": "merman", "\u{1F9DC}\u200D\u2640\uFE0F": "mermaid", "\u{1F9DD}": "elf", "\u{1F9DD}\u200D\u2642\uFE0F": "man-elf", "\u{1F9DD}\u200D\u2640\uFE0F": "woman-elf", "\u{1F9DE}": "genie", "\u{1F9DE}\u200D\u2642\uFE0F": "man-genie", "\u{1F9DE}\u200D\u2640\uFE0F": "woman-genie", "\u{1F9DF}": "zombie", "\u{1F9DF}\u200D\u2642\uFE0F": "man-zombie", "\u{1F9DF}\u200D\u2640\uFE0F": "woman-zombie", "\u{1F9CC}": "troll", "\u{1F486}": "person-getting-massage", "\u{1F486}\u200D\u2642\uFE0F": "man-getting-massage", "\u{1F486}\u200D\u2640\uFE0F": "woman-getting-massage", "\u{1F487}": "person-getting-haircut", "\u{1F487}\u200D\u2642\uFE0F": "man-getting-haircut", "\u{1F487}\u200D\u2640\uFE0F": "woman-getting-haircut", "\u{1F6B6}": "person-walking", "\u{1F6B6}\u200D\u2642\uFE0F": "man-walking", "\u{1F6B6}\u200D\u2640\uFE0F": "woman-walking", "\u{1F9CD}": "person-standing", "\u{1F9CD}\u200D\u2642\uFE0F": "man-standing", "\u{1F9CD}\u200D\u2640\uFE0F": "woman-standing", "\u{1F9CE}": "person-kneeling", "\u{1F9CE}\u200D\u2642\uFE0F": "man-kneeling", "\u{1F9CE}\u200D\u2640\uFE0F": "woman-kneeling", "\u{1F9D1}\u200D\u{1F9AF}": "person-with-white-cane", "\u{1F468}\u200D\u{1F9AF}": "man-with-white-cane", "\u{1F469}\u200D\u{1F9AF}": "woman-with-white-cane", "\u{1F9D1}\u200D\u{1F9BC}": "person-in-motorized-wheelchair", "\u{1F468}\u200D\u{1F9BC}": "man-in-motorized-wheelchair", "\u{1F469}\u200D\u{1F9BC}": "woman-in-motorized-wheelchair", "\u{1F9D1}\u200D\u{1F9BD}": "person-in-manual-wheelchair", "\u{1F468}\u200D\u{1F9BD}": "man-in-manual-wheelchair", "\u{1F469}\u200D\u{1F9BD}": "woman-in-manual-wheelchair", "\u{1F3C3}": "person-running", "\u{1F3C3}\u200D\u2642\uFE0F": "man-running", "\u{1F3C3}\u200D\u2640\uFE0F": "woman-running", "\u{1F483}": "woman-dancing", "\u{1F57A}": "man-dancing", "\u{1F574}\uFE0F": "person-in-suit-levitating", "\u{1F46F}": "people-with-bunny-ears", "\u{1F46F}\u200D\u2642\uFE0F": "men-with-bunny-ears", "\u{1F46F}\u200D\u2640\uFE0F": "women-with-bunny-ears", "\u{1F9D6}": "person-in-steamy-room", "\u{1F9D6}\u200D\u2642\uFE0F": "man-in-steamy-room", "\u{1F9D6}\u200D\u2640\uFE0F": "woman-in-steamy-room", "\u{1F9D7}": "person-climbing", "\u{1F9D7}\u200D\u2642\uFE0F": "man-climbing", "\u{1F9D7}\u200D\u2640\uFE0F": "woman-climbing", "\u{1F93A}": "person-fencing", "\u{1F3C7}": "horse-racing", "\u26F7\uFE0F": "skier", "\u{1F3C2}": "snowboarder", "\u{1F3CC}\uFE0F": "person-golfing", "\u{1F3CC}\uFE0F\u200D\u2642\uFE0F": "man-golfing", "\u{1F3CC}\uFE0F\u200D\u2640\uFE0F": "woman-golfing", "\u{1F3C4}": "person-surfing", "\u{1F3C4}\u200D\u2642\uFE0F": "man-surfing", "\u{1F3C4}\u200D\u2640\uFE0F": "woman-surfing", "\u{1F6A3}": "person-rowing-boat", "\u{1F6A3}\u200D\u2642\uFE0F": "man-rowing-boat", "\u{1F6A3}\u200D\u2640\uFE0F": "woman-rowing-boat", "\u{1F3CA}": "person-swimming", "\u{1F3CA}\u200D\u2642\uFE0F": "man-swimming", "\u{1F3CA}\u200D\u2640\uFE0F": "woman-swimming", "\u26F9\uFE0F": "person-bouncing-ball", "\u26F9\uFE0F\u200D\u2642\uFE0F": "man-bouncing-ball", "\u26F9\uFE0F\u200D\u2640\uFE0F": "woman-bouncing-ball", "\u{1F3CB}\uFE0F": "person-lifting-weights", "\u{1F3CB}\uFE0F\u200D\u2642\uFE0F": "man-lifting-weights", "\u{1F3CB}\uFE0F\u200D\u2640\uFE0F": "woman-lifting-weights", "\u{1F6B4}": "person-biking", "\u{1F6B4}\u200D\u2642\uFE0F": "man-biking", "\u{1F6B4}\u200D\u2640\uFE0F": "woman-biking", "\u{1F6B5}": "person-mountain-biking", "\u{1F6B5}\u200D\u2642\uFE0F": "man-mountain-biking", "\u{1F6B5}\u200D\u2640\uFE0F": "woman-mountain-biking", "\u{1F938}": "person-cartwheeling", "\u{1F938}\u200D\u2642\uFE0F": "man-cartwheeling", "\u{1F938}\u200D\u2640\uFE0F": "woman-cartwheeling", "\u{1F93C}": "people-wrestling", "\u{1F93C}\u200D\u2642\uFE0F": "men-wrestling", "\u{1F93C}\u200D\u2640\uFE0F": "women-wrestling", "\u{1F93D}": "person-playing-water-polo", "\u{1F93D}\u200D\u2642\uFE0F": "man-playing-water-polo", "\u{1F93D}\u200D\u2640\uFE0F": "woman-playing-water-polo", "\u{1F93E}": "person-playing-handball", "\u{1F93E}\u200D\u2642\uFE0F": "man-playing-handball", "\u{1F93E}\u200D\u2640\uFE0F": "woman-playing-handball", "\u{1F939}": "person-juggling", "\u{1F939}\u200D\u2642\uFE0F": "man-juggling", "\u{1F939}\u200D\u2640\uFE0F": "woman-juggling", "\u{1F9D8}": "person-in-lotus-position", "\u{1F9D8}\u200D\u2642\uFE0F": "man-in-lotus-position", "\u{1F9D8}\u200D\u2640\uFE0F": "woman-in-lotus-position", "\u{1F6C0}": "person-taking-bath", "\u{1F6CC}": "person-in-bed", "\u{1F9D1}\u200D\u{1F91D}\u200D\u{1F9D1}": "people-holding-hands", "\u{1F46D}": "women-holding-hands", "\u{1F46B}": "woman-and-man-holding-hands", "\u{1F46C}": "men-holding-hands", "\u{1F48F}": "kiss", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F468}": "kiss-woman-man", "\u{1F468}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F468}": "kiss-man-man", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F469}": "kiss-woman-woman", "\u{1F491}": "couple-with-heart", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F468}": "couple-with-heart-woman-man", "\u{1F468}\u200D\u2764\uFE0F\u200D\u{1F468}": "couple-with-heart-man-man", "\u{1F469}\u200D\u2764\uFE0F\u200D\u{1F469}": "couple-with-heart-woman-woman", "\u{1F46A}": "family", "\u{1F468}\u200D\u{1F469}\u200D\u{1F466}": "family-man-woman-boy", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}": "family-man-woman-girl", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}": "family-man-woman-girl-boy", "\u{1F468}\u200D\u{1F469}\u200D\u{1F466}\u200D\u{1F466}": "family-man-woman-boy-boy", "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F467}": "family-man-woman-girl-girl", "\u{1F468}\u200D\u{1F468}\u200D\u{1F466}": "family-man-man-boy", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}": "family-man-man-girl", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}\u200D\u{1F466}": "family-man-man-girl-boy", "\u{1F468}\u200D\u{1F468}\u200D\u{1F466}\u200D\u{1F466}": "family-man-man-boy-boy", "\u{1F468}\u200D\u{1F468}\u200D\u{1F467}\u200D\u{1F467}": "family-man-man-girl-girl", "\u{1F469}\u200D\u{1F469}\u200D\u{1F466}": "family-woman-woman-boy", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}": "family-woman-woman-girl", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}": "family-woman-woman-girl-boy", "\u{1F469}\u200D\u{1F469}\u200D\u{1F466}\u200D\u{1F466}": "family-woman-woman-boy-boy", "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F467}": "family-woman-woman-girl-girl", "\u{1F468}\u200D\u{1F466}": "family-man-boy", "\u{1F468}\u200D\u{1F466}\u200D\u{1F466}": "family-man-boy-boy", "\u{1F468}\u200D\u{1F467}": "family-man-girl", "\u{1F468}\u200D\u{1F467}\u200D\u{1F466}": "family-man-girl-boy", "\u{1F468}\u200D\u{1F467}\u200D\u{1F467}": "family-man-girl-girl", "\u{1F469}\u200D\u{1F466}": "family-woman-boy", "\u{1F469}\u200D\u{1F466}\u200D\u{1F466}": "family-woman-boy-boy", "\u{1F469}\u200D\u{1F467}": "family-woman-girl", "\u{1F469}\u200D\u{1F467}\u200D\u{1F466}": "family-woman-girl-boy", "\u{1F469}\u200D\u{1F467}\u200D\u{1F467}": "family-woman-girl-girl", "\u{1F5E3}\uFE0F": "speaking-head", "\u{1F464}": "bust-in-silhouette", "\u{1F465}": "busts-in-silhouette", "\u{1FAC2}": "people-hugging", "\u{1F463}": "footprints", "\u{1F435}": "monkey-face", "\u{1F412}": "monkey", "\u{1F98D}": "gorilla", "\u{1F9A7}": "orangutan", "\u{1F436}": "dog-face", "\u{1F415}": "dog", "\u{1F9AE}": "guide-dog", "\u{1F415}\u200D\u{1F9BA}": "service-dog", "\u{1F429}": "poodle", "\u{1F43A}": "wolf", "\u{1F98A}": "fox", "\u{1F99D}": "raccoon", "\u{1F431}": "cat-face", "\u{1F408}": "cat", "\u{1F408}\u200D\u2B1B": "black-cat", "\u{1F981}": "lion", "\u{1F42F}": "tiger-face", "\u{1F405}": "tiger", "\u{1F406}": "leopard", "\u{1F434}": "horse-face", "\u{1FACE}": "moose", "\u{1FACF}": "donkey", "\u{1F40E}": "horse", "\u{1F984}": "unicorn", "\u{1F993}": "zebra", "\u{1F98C}": "deer", "\u{1F9AC}": "bison", "\u{1F42E}": "cow-face", "\u{1F402}": "ox", "\u{1F403}": "water-buffalo", "\u{1F404}": "cow", "\u{1F437}": "pig-face", "\u{1F416}": "pig", "\u{1F417}": "boar", "\u{1F43D}": "pig-nose", "\u{1F40F}": "ram", "\u{1F411}": "ewe", "\u{1F410}": "goat", "\u{1F42A}": "camel", "\u{1F42B}": "two-hump-camel", "\u{1F999}": "llama", "\u{1F992}": "giraffe", "\u{1F418}": "elephant", "\u{1F9A3}": "mammoth", "\u{1F98F}": "rhinoceros", "\u{1F99B}": "hippopotamus", "\u{1F42D}": "mouse-face", "\u{1F401}": "mouse", "\u{1F400}": "rat", "\u{1F439}": "hamster", "\u{1F430}": "rabbit-face", "\u{1F407}": "rabbit", "\u{1F43F}\uFE0F": "chipmunk", "\u{1F9AB}": "beaver", "\u{1F994}": "hedgehog", "\u{1F987}": "bat", "\u{1F43B}": "bear", "\u{1F43B}\u200D\u2744\uFE0F": "polar-bear", "\u{1F428}": "koala", "\u{1F43C}": "panda", "\u{1F9A5}": "sloth", "\u{1F9A6}": "otter", "\u{1F9A8}": "skunk", "\u{1F998}": "kangaroo", "\u{1F9A1}": "badger", "\u{1F43E}": "paw-prints", "\u{1F983}": "turkey", "\u{1F414}": "chicken", "\u{1F413}": "rooster", "\u{1F423}": "hatching-chick", "\u{1F424}": "baby-chick", "\u{1F425}": "front-facing-baby-chick", "\u{1F426}": "bird", "\u{1F427}": "penguin", "\u{1F54A}\uFE0F": "dove", "\u{1F985}": "eagle", "\u{1F986}": "duck", "\u{1F9A2}": "swan", "\u{1F989}": "owl", "\u{1F9A4}": "dodo", "\u{1FAB6}": "feather", "\u{1F9A9}": "flamingo", "\u{1F99A}": "peacock", "\u{1F99C}": "parrot", "\u{1FABD}": "wing", "\u{1F426}\u200D\u2B1B": "black-bird", "\u{1FABF}": "goose", "\u{1F438}": "frog", "\u{1F40A}": "crocodile", "\u{1F422}": "turtle", "\u{1F98E}": "lizard", "\u{1F40D}": "snake", "\u{1F432}": "dragon-face", "\u{1F409}": "dragon", "\u{1F995}": "sauropod", "\u{1F996}": "t-rex", "\u{1F433}": "spouting-whale", "\u{1F40B}": "whale", "\u{1F42C}": "dolphin", "\u{1F9AD}": "seal", "\u{1F41F}": "fish", "\u{1F420}": "tropical-fish", "\u{1F421}": "blowfish", "\u{1F988}": "shark", "\u{1F419}": "octopus", "\u{1F41A}": "spiral-shell", "\u{1FAB8}": "coral", "\u{1FABC}": "jellyfish", "\u{1F40C}": "snail", "\u{1F98B}": "butterfly", "\u{1F41B}": "bug", "\u{1F41C}": "ant", "\u{1F41D}": "honeybee", "\u{1FAB2}": "beetle", "\u{1F41E}": "lady-beetle", "\u{1F997}": "cricket", "\u{1FAB3}": "cockroach", "\u{1F577}\uFE0F": "spider", "\u{1F578}\uFE0F": "spider-web", "\u{1F982}": "scorpion", "\u{1F99F}": "mosquito", "\u{1FAB0}": "fly", "\u{1FAB1}": "worm", "\u{1F9A0}": "microbe", "\u{1F490}": "bouquet", "\u{1F338}": "cherry-blossom", "\u{1F4AE}": "white-flower", "\u{1FAB7}": "lotus", "\u{1F3F5}\uFE0F": "rosette", "\u{1F339}": "rose", "\u{1F940}": "wilted-flower", "\u{1F33A}": "hibiscus", "\u{1F33B}": "sunflower", "\u{1F33C}": "blossom", "\u{1F337}": "tulip", "\u{1FABB}": "hyacinth", "\u{1F331}": "seedling", "\u{1FAB4}": "potted-plant", "\u{1F332}": "evergreen-tree", "\u{1F333}": "deciduous-tree", "\u{1F334}": "palm-tree", "\u{1F335}": "cactus", "\u{1F33E}": "sheaf-of-rice", "\u{1F33F}": "herb", "\u2618\uFE0F": "shamrock", "\u{1F340}": "four-leaf-clover", "\u{1F341}": "maple-leaf", "\u{1F342}": "fallen-leaf", "\u{1F343}": "leaf-fluttering-in-wind", "\u{1FAB9}": "empty-nest", "\u{1FABA}": "nest-with-eggs", "\u{1F344}": "mushroom", "\u{1F347}": "grapes", "\u{1F348}": "melon", "\u{1F349}": "watermelon", "\u{1F34A}": "tangerine", "\u{1F34B}": "lemon", "\u{1F34C}": "banana", "\u{1F34D}": "pineapple", "\u{1F96D}": "mango", "\u{1F34E}": "red-apple", "\u{1F34F}": "green-apple", "\u{1F350}": "pear", "\u{1F351}": "peach", "\u{1F352}": "cherries", "\u{1F353}": "strawberry", "\u{1FAD0}": "blueberries", "\u{1F95D}": "kiwi-fruit", "\u{1F345}": "tomato", "\u{1FAD2}": "olive", "\u{1F965}": "coconut", "\u{1F951}": "avocado", "\u{1F346}": "eggplant", "\u{1F954}": "potato", "\u{1F955}": "carrot", "\u{1F33D}": "ear-of-corn", "\u{1F336}\uFE0F": "hot-pepper", "\u{1FAD1}": "bell-pepper", "\u{1F952}": "cucumber", "\u{1F96C}": "leafy-green", "\u{1F966}": "broccoli", "\u{1F9C4}": "garlic", "\u{1F9C5}": "onion", "\u{1F95C}": "peanuts", "\u{1FAD8}": "beans", "\u{1F330}": "chestnut", "\u{1FADA}": "ginger-root", "\u{1FADB}": "pea-pod", "\u{1F35E}": "bread", "\u{1F950}": "croissant", "\u{1F956}": "baguette-bread", "\u{1FAD3}": "flatbread", "\u{1F968}": "pretzel", "\u{1F96F}": "bagel", "\u{1F95E}": "pancakes", "\u{1F9C7}": "waffle", "\u{1F9C0}": "cheese-wedge", "\u{1F356}": "meat-on-bone", "\u{1F357}": "poultry-leg", "\u{1F969}": "cut-of-meat", "\u{1F953}": "bacon", "\u{1F354}": "hamburger", "\u{1F35F}": "french-fries", "\u{1F355}": "pizza", "\u{1F32D}": "hot-dog", "\u{1F96A}": "sandwich", "\u{1F32E}": "taco", "\u{1F32F}": "burrito", "\u{1FAD4}": "tamale", "\u{1F959}": "stuffed-flatbread", "\u{1F9C6}": "falafel", "\u{1F95A}": "egg", "\u{1F373}": "cooking", "\u{1F958}": "shallow-pan-of-food", "\u{1F372}": "pot-of-food", "\u{1FAD5}": "fondue", "\u{1F963}": "bowl-with-spoon", "\u{1F957}": "green-salad", "\u{1F37F}": "popcorn", "\u{1F9C8}": "butter", "\u{1F9C2}": "salt", "\u{1F96B}": "canned-food", "\u{1F371}": "bento-box", "\u{1F358}": "rice-cracker", "\u{1F359}": "rice-ball", "\u{1F35A}": "cooked-rice", "\u{1F35B}": "curry-rice", "\u{1F35C}": "steaming-bowl", "\u{1F35D}": "spaghetti", "\u{1F360}": "roasted-sweet-potato", "\u{1F362}": "oden", "\u{1F363}": "sushi", "\u{1F364}": "fried-shrimp", "\u{1F365}": "fish-cake-with-swirl", "\u{1F96E}": "moon-cake", "\u{1F361}": "dango", "\u{1F95F}": "dumpling", "\u{1F960}": "fortune-cookie", "\u{1F961}": "takeout-box", "\u{1F980}": "crab", "\u{1F99E}": "lobster", "\u{1F990}": "shrimp", "\u{1F991}": "squid", "\u{1F9AA}": "oyster", "\u{1F366}": "soft-ice-cream", "\u{1F367}": "shaved-ice", "\u{1F368}": "ice-cream", "\u{1F369}": "doughnut", "\u{1F36A}": "cookie", "\u{1F382}": "birthday-cake", "\u{1F370}": "shortcake", "\u{1F9C1}": "cupcake", "\u{1F967}": "pie", "\u{1F36B}": "chocolate-bar", "\u{1F36C}": "candy", "\u{1F36D}": "lollipop", "\u{1F36E}": "custard", "\u{1F36F}": "honey-pot", "\u{1F37C}": "baby-bottle", "\u{1F95B}": "glass-of-milk", "\u2615": "hot-beverage", "\u{1FAD6}": "teapot", "\u{1F375}": "teacup-without-handle", "\u{1F376}": "sake", "\u{1F37E}": "bottle-with-popping-cork", "\u{1F377}": "wine-glass", "\u{1F378}": "cocktail-glass", "\u{1F379}": "tropical-drink", "\u{1F37A}": "beer-mug", "\u{1F37B}": "clinking-beer-mugs", "\u{1F942}": "clinking-glasses", "\u{1F943}": "tumbler-glass", "\u{1FAD7}": "pouring-liquid", "\u{1F964}": "cup-with-straw", "\u{1F9CB}": "bubble-tea", "\u{1F9C3}": "beverage-box", "\u{1F9C9}": "mate", "\u{1F9CA}": "ice", "\u{1F962}": "chopsticks", "\u{1F37D}\uFE0F": "fork-and-knife-with-plate", "\u{1F374}": "fork-and-knife", "\u{1F944}": "spoon", "\u{1F52A}": "kitchen-knife", "\u{1FAD9}": "jar", "\u{1F3FA}": "amphora", "\u{1F30D}": "globe-showing-europe-africa", "\u{1F30E}": "globe-showing-americas", "\u{1F30F}": "globe-showing-asia-australia", "\u{1F310}": "globe-with-meridians", "\u{1F5FA}\uFE0F": "world-map", "\u{1F5FE}": "map-of-japan", "\u{1F9ED}": "compass", "\u{1F3D4}\uFE0F": "snow-capped-mountain", "\u26F0\uFE0F": "mountain", "\u{1F30B}": "volcano", "\u{1F5FB}": "mount-fuji", "\u{1F3D5}\uFE0F": "camping", "\u{1F3D6}\uFE0F": "beach-with-umbrella", "\u{1F3DC}\uFE0F": "desert", "\u{1F3DD}\uFE0F": "desert-island", "\u{1F3DE}\uFE0F": "national-park", "\u{1F3DF}\uFE0F": "stadium", "\u{1F3DB}\uFE0F": "classical-building", "\u{1F3D7}\uFE0F": "building-construction", "\u{1F9F1}": "brick", "\u{1FAA8}": "rock", "\u{1FAB5}": "wood", "\u{1F6D6}": "hut", "\u{1F3D8}\uFE0F": "houses", "\u{1F3DA}\uFE0F": "derelict-house", "\u{1F3E0}": "house", "\u{1F3E1}": "house-with-garden", "\u{1F3E2}": "office-building", "\u{1F3E3}": "japanese-post-office", "\u{1F3E4}": "post-office", "\u{1F3E5}": "hospital", "\u{1F3E6}": "bank", "\u{1F3E8}": "hotel", "\u{1F3E9}": "love-hotel", "\u{1F3EA}": "convenience-store", "\u{1F3EB}": "school", "\u{1F3EC}": "department-store", "\u{1F3ED}": "factory", "\u{1F3EF}": "japanese-castle", "\u{1F3F0}": "castle", "\u{1F492}": "wedding", "\u{1F5FC}": "tokyo-tower", "\u{1F5FD}": "statue-of-liberty", "\u26EA": "church", "\u{1F54C}": "mosque", "\u{1F6D5}": "hindu-temple", "\u{1F54D}": "synagogue", "\u26E9\uFE0F": "shinto-shrine", "\u{1F54B}": "kaaba", "\u26F2": "fountain", "\u26FA": "tent", "\u{1F301}": "foggy", "\u{1F303}": "night-with-stars", "\u{1F3D9}\uFE0F": "cityscape", "\u{1F304}": "sunrise-over-mountains", "\u{1F305}": "sunrise", "\u{1F306}": "cityscape-at-dusk", "\u{1F307}": "sunset", "\u{1F309}": "bridge-at-night", "\u2668\uFE0F": "hot-springs", "\u{1F3A0}": "carousel-horse", "\u{1F6DD}": "playground-slide", "\u{1F3A1}": "ferris-wheel", "\u{1F3A2}": "roller-coaster", "\u{1F488}": "barber-pole", "\u{1F3AA}": "circus-tent", "\u{1F682}": "locomotive", "\u{1F683}": "railway-car", "\u{1F684}": "high-speed-train", "\u{1F685}": "bullet-train", "\u{1F686}": "train", "\u{1F687}": "metro", "\u{1F688}": "light-rail", "\u{1F689}": "station", "\u{1F68A}": "tram", "\u{1F69D}": "monorail", "\u{1F69E}": "mountain-railway", "\u{1F68B}": "tram-car", "\u{1F68C}": "bus", "\u{1F68D}": "oncoming-bus", "\u{1F68E}": "trolleybus", "\u{1F690}": "minibus", "\u{1F691}": "ambulance", "\u{1F692}": "fire-engine", "\u{1F693}": "police-car", "\u{1F694}": "oncoming-police-car", "\u{1F695}": "taxi", "\u{1F696}": "oncoming-taxi", "\u{1F697}": "automobile", "\u{1F698}": "oncoming-automobile", "\u{1F699}": "sport-utility-vehicle", "\u{1F6FB}": "pickup-truck", "\u{1F69A}": "delivery-truck", "\u{1F69B}": "articulated-lorry", "\u{1F69C}": "tractor", "\u{1F3CE}\uFE0F": "racing-car", "\u{1F3CD}\uFE0F": "motorcycle", "\u{1F6F5}": "motor-scooter", "\u{1F9BD}": "manual-wheelchair", "\u{1F9BC}": "motorized-wheelchair", "\u{1F6FA}": "auto-rickshaw", "\u{1F6B2}": "bicycle", "\u{1F6F4}": "kick-scooter", "\u{1F6F9}": "skateboard", "\u{1F6FC}": "roller-skate", "\u{1F68F}": "bus-stop", "\u{1F6E3}\uFE0F": "motorway", "\u{1F6E4}\uFE0F": "railway-track", "\u{1F6E2}\uFE0F": "oil-drum", "\u26FD": "fuel-pump", "\u{1F6DE}": "wheel", "\u{1F6A8}": "police-car-light", "\u{1F6A5}": "horizontal-traffic-light", "\u{1F6A6}": "vertical-traffic-light", "\u{1F6D1}": "stop-sign", "\u{1F6A7}": "construction", "\u2693": "anchor", "\u{1F6DF}": "ring-buoy", "\u26F5": "sailboat", "\u{1F6F6}": "canoe", "\u{1F6A4}": "speedboat", "\u{1F6F3}\uFE0F": "passenger-ship", "\u26F4\uFE0F": "ferry", "\u{1F6E5}\uFE0F": "motor-boat", "\u{1F6A2}": "ship", "\u2708\uFE0F": "airplane", "\u{1F6E9}\uFE0F": "small-airplane", "\u{1F6EB}": "airplane-departure", "\u{1F6EC}": "airplane-arrival", "\u{1FA82}": "parachute", "\u{1F4BA}": "seat", "\u{1F681}": "helicopter", "\u{1F69F}": "suspension-railway", "\u{1F6A0}": "mountain-cableway", "\u{1F6A1}": "aerial-tramway", "\u{1F6F0}\uFE0F": "satellite", "\u{1F680}": "rocket", "\u{1F6F8}": "flying-saucer", "\u{1F6CE}\uFE0F": "bellhop-bell", "\u{1F9F3}": "luggage", "\u231B": "hourglass-done", "\u23F3": "hourglass-not-done", "\u231A": "watch", "\u23F0": "alarm-clock", "\u23F1\uFE0F": "stopwatch", "\u23F2\uFE0F": "timer-clock", "\u{1F570}\uFE0F": "mantelpiece-clock", "\u{1F55B}": "twelve-o-clock", "\u{1F567}": "twelve-thirty", "\u{1F550}": "one-o-clock", "\u{1F55C}": "one-thirty", "\u{1F551}": "two-o-clock", "\u{1F55D}": "two-thirty", "\u{1F552}": "three-o-clock", "\u{1F55E}": "three-thirty", "\u{1F553}": "four-o-clock", "\u{1F55F}": "four-thirty", "\u{1F554}": "five-o-clock", "\u{1F560}": "five-thirty", "\u{1F555}": "six-o-clock", "\u{1F561}": "six-thirty", "\u{1F556}": "seven-o-clock", "\u{1F562}": "seven-thirty", "\u{1F557}": "eight-o-clock", "\u{1F563}": "eight-thirty", "\u{1F558}": "nine-o-clock", "\u{1F564}": "nine-thirty", "\u{1F559}": "ten-o-clock", "\u{1F565}": "ten-thirty", "\u{1F55A}": "eleven-o-clock", "\u{1F566}": "eleven-thirty", "\u{1F311}": "new-moon", "\u{1F312}": "waxing-crescent-moon", "\u{1F313}": "first-quarter-moon", "\u{1F314}": "waxing-gibbous-moon", "\u{1F315}": "full-moon", "\u{1F316}": "waning-gibbous-moon", "\u{1F317}": "last-quarter-moon", "\u{1F318}": "waning-crescent-moon", "\u{1F319}": "crescent-moon", "\u{1F31A}": "new-moon-face", "\u{1F31B}": "first-quarter-moon-face", "\u{1F31C}": "last-quarter-moon-face", "\u{1F321}\uFE0F": "thermometer", "\u2600\uFE0F": "sun", "\u{1F31D}": "full-moon-face", "\u{1F31E}": "sun-with-face", "\u{1FA90}": "ringed-planet", "\u2B50": "star", "\u{1F31F}": "glowing-star", "\u{1F320}": "shooting-star", "\u{1F30C}": "milky-way", "\u2601\uFE0F": "cloud", "\u26C5": "sun-behind-cloud", "\u26C8\uFE0F": "cloud-with-lightning-and-rain", "\u{1F324}\uFE0F": "sun-behind-small-cloud", "\u{1F325}\uFE0F": "sun-behind-large-cloud", "\u{1F326}\uFE0F": "sun-behind-rain-cloud", "\u{1F327}\uFE0F": "cloud-with-rain", "\u{1F328}\uFE0F": "cloud-with-snow", "\u{1F329}\uFE0F": "cloud-with-lightning", "\u{1F32A}\uFE0F": "tornado", "\u{1F32B}\uFE0F": "fog", "\u{1F32C}\uFE0F": "wind-face", "\u{1F300}": "cyclone", "\u{1F308}": "rainbow", "\u{1F302}": "closed-umbrella", "\u2602\uFE0F": "umbrella", "\u2614": "umbrella-with-rain-drops", "\u26F1\uFE0F": "umbrella-on-ground", "\u26A1": "high-voltage", "\u2744\uFE0F": "snowflake", "\u2603\uFE0F": "snowman", "\u26C4": "snowman-without-snow", "\u2604\uFE0F": "comet", "\u{1F525}": "fire", "\u{1F4A7}": "droplet", "\u{1F30A}": "water-wave", "\u{1F383}": "jack-o-lantern", "\u{1F384}": "christmas-tree", "\u{1F386}": "fireworks", "\u{1F387}": "sparkler", "\u{1F9E8}": "firecracker", "\u2728": "sparkles", "\u{1F388}": "balloon", "\u{1F389}": "party-popper", "\u{1F38A}": "confetti-ball", "\u{1F38B}": "tanabata-tree", "\u{1F38D}": "pine-decoration", "\u{1F38E}": "japanese-dolls", "\u{1F38F}": "carp-streamer", "\u{1F390}": "wind-chime", "\u{1F391}": "moon-viewing-ceremony", "\u{1F9E7}": "red-envelope", "\u{1F380}": "ribbon", "\u{1F381}": "wrapped-gift", "\u{1F397}\uFE0F": "reminder-ribbon", "\u{1F39F}\uFE0F": "admission-tickets", "\u{1F3AB}": "ticket", "\u{1F396}\uFE0F": "military-medal", "\u{1F3C6}": "trophy", "\u{1F3C5}": "sports-medal", "\u{1F947}": "1st-place-medal", "\u{1F948}": "2nd-place-medal", "\u{1F949}": "3rd-place-medal", "\u26BD": "soccer-ball", "\u26BE": "baseball", "\u{1F94E}": "softball", "\u{1F3C0}": "basketball", "\u{1F3D0}": "volleyball", "\u{1F3C8}": "american-football", "\u{1F3C9}": "rugby-football", "\u{1F3BE}": "tennis", "\u{1F94F}": "flying-disc", "\u{1F3B3}": "bowling", "\u{1F3CF}": "cricket-game", "\u{1F3D1}": "field-hockey", "\u{1F3D2}": "ice-hockey", "\u{1F94D}": "lacrosse", "\u{1F3D3}": "ping-pong", "\u{1F3F8}": "badminton", "\u{1F94A}": "boxing-glove", "\u{1F94B}": "martial-arts-uniform", "\u{1F945}": "goal-net", "\u26F3": "flag-in-hole", "\u26F8\uFE0F": "ice-skate", "\u{1F3A3}": "fishing-pole", "\u{1F93F}": "diving-mask", "\u{1F3BD}": "running-shirt", "\u{1F3BF}": "skis", "\u{1F6F7}": "sled", "\u{1F94C}": "curling-stone", "\u{1F3AF}": "bullseye", "\u{1FA80}": "yo-yo", "\u{1FA81}": "kite", "\u{1F52B}": "water-pistol", "\u{1F3B1}": "pool-8-ball", "\u{1F52E}": "crystal-ball", "\u{1FA84}": "magic-wand", "\u{1F3AE}": "video-game", "\u{1F579}\uFE0F": "joystick", "\u{1F3B0}": "slot-machine", "\u{1F3B2}": "game-die", "\u{1F9E9}": "puzzle-piece", "\u{1F9F8}": "teddy-bear", "\u{1FA85}": "pinata", "\u{1FAA9}": "mirror-ball", "\u{1FA86}": "nesting-dolls", "\u2660\uFE0F": "spade-suit", "\u2665\uFE0F": "heart-suit", "\u2666\uFE0F": "diamond-suit", "\u2663\uFE0F": "club-suit", "\u265F\uFE0F": "chess-pawn", "\u{1F0CF}": "joker", "\u{1F004}": "mahjong-red-dragon", "\u{1F3B4}": "flower-playing-cards", "\u{1F3AD}": "performing-arts", "\u{1F5BC}\uFE0F": "framed-picture", "\u{1F3A8}": "artist-palette", "\u{1F9F5}": "thread", "\u{1FAA1}": "sewing-needle", "\u{1F9F6}": "yarn", "\u{1FAA2}": "knot", "\u{1F453}": "glasses", "\u{1F576}\uFE0F": "sunglasses", "\u{1F97D}": "goggles", "\u{1F97C}": "lab-coat", "\u{1F9BA}": "safety-vest", "\u{1F454}": "necktie", "\u{1F455}": "t-shirt", "\u{1F456}": "jeans", "\u{1F9E3}": "scarf", "\u{1F9E4}": "gloves", "\u{1F9E5}": "coat", "\u{1F9E6}": "socks", "\u{1F457}": "dress", "\u{1F458}": "kimono", "\u{1F97B}": "sari", "\u{1FA71}": "one-piece-swimsuit", "\u{1FA72}": "briefs", "\u{1FA73}": "shorts", "\u{1F459}": "bikini", "\u{1F45A}": "woman-s-clothes", "\u{1FAAD}": "folding-hand-fan", "\u{1F45B}": "purse", "\u{1F45C}": "handbag", "\u{1F45D}": "clutch-bag", "\u{1F6CD}\uFE0F": "shopping-bags", "\u{1F392}": "backpack", "\u{1FA74}": "thong-sandal", "\u{1F45E}": "man-s-shoe", "\u{1F45F}": "running-shoe", "\u{1F97E}": "hiking-boot", "\u{1F97F}": "flat-shoe", "\u{1F460}": "high-heeled-shoe", "\u{1F461}": "woman-s-sandal", "\u{1FA70}": "ballet-shoes", "\u{1F462}": "woman-s-boot", "\u{1FAAE}": "hair-pick", "\u{1F451}": "crown", "\u{1F452}": "woman-s-hat", "\u{1F3A9}": "top-hat", "\u{1F393}": "graduation-cap", "\u{1F9E2}": "billed-cap", "\u{1FA96}": "military-helmet", "\u26D1\uFE0F": "rescue-worker-s-helmet", "\u{1F4FF}": "prayer-beads", "\u{1F484}": "lipstick", "\u{1F48D}": "ring", "\u{1F48E}": "gem-stone", "\u{1F507}": "muted-speaker", "\u{1F508}": "speaker-low-volume", "\u{1F509}": "speaker-medium-volume", "\u{1F50A}": "speaker-high-volume", "\u{1F4E2}": "loudspeaker", "\u{1F4E3}": "megaphone", "\u{1F4EF}": "postal-horn", "\u{1F514}": "bell", "\u{1F515}": "bell-with-slash", "\u{1F3BC}": "musical-score", "\u{1F3B5}": "musical-note", "\u{1F3B6}": "musical-notes", "\u{1F399}\uFE0F": "studio-microphone", "\u{1F39A}\uFE0F": "level-slider", "\u{1F39B}\uFE0F": "control-knobs", "\u{1F3A4}": "microphone", "\u{1F3A7}": "headphone", "\u{1F4FB}": "radio", "\u{1F3B7}": "saxophone", "\u{1FA97}": "accordion", "\u{1F3B8}": "guitar", "\u{1F3B9}": "musical-keyboard", "\u{1F3BA}": "trumpet", "\u{1F3BB}": "violin", "\u{1FA95}": "banjo", "\u{1F941}": "drum", "\u{1FA98}": "long-drum", "\u{1FA87}": "maracas", "\u{1FA88}": "flute", "\u{1F4F1}": "mobile-phone", "\u{1F4F2}": "mobile-phone-with-arrow", "\u260E\uFE0F": "telephone", "\u{1F4DE}": "telephone-receiver", "\u{1F4DF}": "pager", "\u{1F4E0}": "fax-machine", "\u{1F50B}": "battery", "\u{1FAAB}": "low-battery", "\u{1F50C}": "electric-plug", "\u{1F4BB}": "laptop", "\u{1F5A5}\uFE0F": "desktop-computer", "\u{1F5A8}\uFE0F": "printer", "\u2328\uFE0F": "keyboard", "\u{1F5B1}\uFE0F": "computer-mouse", "\u{1F5B2}\uFE0F": "trackball", "\u{1F4BD}": "computer-disk", "\u{1F4BE}": "floppy-disk", "\u{1F4BF}": "optical-disk", "\u{1F4C0}": "dvd", "\u{1F9EE}": "abacus", "\u{1F3A5}": "movie-camera", "\u{1F39E}\uFE0F": "film-frames", "\u{1F4FD}\uFE0F": "film-projector", "\u{1F3AC}": "clapper-board", "\u{1F4FA}": "television", "\u{1F4F7}": "camera", "\u{1F4F8}": "camera-with-flash", "\u{1F4F9}": "video-camera", "\u{1F4FC}": "videocassette", "\u{1F50D}": "magnifying-glass-tilted-left", "\u{1F50E}": "magnifying-glass-tilted-right", "\u{1F56F}\uFE0F": "candle", "\u{1F4A1}": "light-bulb", "\u{1F526}": "flashlight", "\u{1F3EE}": "red-paper-lantern", "\u{1FA94}": "diya-lamp", "\u{1F4D4}": "notebook-with-decorative-cover", "\u{1F4D5}": "closed-book", "\u{1F4D6}": "open-book", "\u{1F4D7}": "green-book", "\u{1F4D8}": "blue-book", "\u{1F4D9}": "orange-book", "\u{1F4DA}": "books", "\u{1F4D3}": "notebook", "\u{1F4D2}": "ledger", "\u{1F4C3}": "page-with-curl", "\u{1F4DC}": "scroll", "\u{1F4C4}": "page-facing-up", "\u{1F4F0}": "newspaper", "\u{1F5DE}\uFE0F": "rolled-up-newspaper", "\u{1F4D1}": "bookmark-tabs", "\u{1F516}": "bookmark", "\u{1F3F7}\uFE0F": "label", "\u{1F4B0}": "money-bag", "\u{1FA99}": "coin", "\u{1F4B4}": "yen-banknote", "\u{1F4B5}": "dollar-banknote", "\u{1F4B6}": "euro-banknote", "\u{1F4B7}": "pound-banknote", "\u{1F4B8}": "money-with-wings", "\u{1F4B3}": "credit-card", "\u{1F9FE}": "receipt", "\u{1F4B9}": "chart-increasing-with-yen", "\u2709\uFE0F": "envelope", "\u{1F4E7}": "e-mail", "\u{1F4E8}": "incoming-envelope", "\u{1F4E9}": "envelope-with-arrow", "\u{1F4E4}": "outbox-tray", "\u{1F4E5}": "inbox-tray", "\u{1F4E6}": "package", "\u{1F4EB}": "closed-mailbox-with-raised-flag", "\u{1F4EA}": "closed-mailbox-with-lowered-flag", "\u{1F4EC}": "open-mailbox-with-raised-flag", "\u{1F4ED}": "open-mailbox-with-lowered-flag", "\u{1F4EE}": "postbox", "\u{1F5F3}\uFE0F": "ballot-box-with-ballot", "\u270F\uFE0F": "pencil", "\u2712\uFE0F": "black-nib", "\u{1F58B}\uFE0F": "fountain-pen", "\u{1F58A}\uFE0F": "pen", "\u{1F58C}\uFE0F": "paintbrush", "\u{1F58D}\uFE0F": "crayon", "\u{1F4DD}": "memo", "\u{1F4BC}": "briefcase", "\u{1F4C1}": "file-folder", "\u{1F4C2}": "open-file-folder", "\u{1F5C2}\uFE0F": "card-index-dividers", "\u{1F4C5}": "calendar", "\u{1F4C6}": "tear-off-calendar", "\u{1F5D2}\uFE0F": "spiral-notepad", "\u{1F5D3}\uFE0F": "spiral-calendar", "\u{1F4C7}": "card-index", "\u{1F4C8}": "chart-increasing", "\u{1F4C9}": "chart-decreasing", "\u{1F4CA}": "bar-chart", "\u{1F4CB}": "clipboard", "\u{1F4CC}": "pushpin", "\u{1F4CD}": "round-pushpin", "\u{1F4CE}": "paperclip", "\u{1F587}\uFE0F": "linked-paperclips", "\u{1F4CF}": "straight-ruler", "\u{1F4D0}": "triangular-ruler", "\u2702\uFE0F": "scissors", "\u{1F5C3}\uFE0F": "card-file-box", "\u{1F5C4}\uFE0F": "file-cabinet", "\u{1F5D1}\uFE0F": "wastebasket", "\u{1F512}": "locked", "\u{1F513}": "unlocked", "\u{1F50F}": "locked-with-pen", "\u{1F510}": "locked-with-key", "\u{1F511}": "key", "\u{1F5DD}\uFE0F": "old-key", "\u{1F528}": "hammer", "\u{1FA93}": "axe", "\u26CF\uFE0F": "pick", "\u2692\uFE0F": "hammer-and-pick", "\u{1F6E0}\uFE0F": "hammer-and-wrench", "\u{1F5E1}\uFE0F": "dagger", "\u2694\uFE0F": "crossed-swords", "\u{1F4A3}": "bomb", "\u{1FA83}": "boomerang", "\u{1F3F9}": "bow-and-arrow", "\u{1F6E1}\uFE0F": "shield", "\u{1FA9A}": "carpentry-saw", "\u{1F527}": "wrench", "\u{1FA9B}": "screwdriver", "\u{1F529}": "nut-and-bolt", "\u2699\uFE0F": "gear", "\u{1F5DC}\uFE0F": "clamp", "\u2696\uFE0F": "balance-scale", "\u{1F9AF}": "white-cane", "\u{1F517}": "link", "\u26D3\uFE0F": "chains", "\u{1FA9D}": "hook", "\u{1F9F0}": "toolbox", "\u{1F9F2}": "magnet", "\u{1FA9C}": "ladder", "\u2697\uFE0F": "alembic", "\u{1F9EA}": "test-tube", "\u{1F9EB}": "petri-dish", "\u{1F9EC}": "dna", "\u{1F52C}": "microscope", "\u{1F52D}": "telescope", "\u{1F4E1}": "satellite-antenna", "\u{1F489}": "syringe", "\u{1FA78}": "drop-of-blood", "\u{1F48A}": "pill", "\u{1FA79}": "adhesive-bandage", "\u{1FA7C}": "crutch", "\u{1FA7A}": "stethoscope", "\u{1FA7B}": "x-ray", "\u{1F6AA}": "door", "\u{1F6D7}": "elevator", "\u{1FA9E}": "mirror", "\u{1FA9F}": "window", "\u{1F6CF}\uFE0F": "bed", "\u{1F6CB}\uFE0F": "couch-and-lamp", "\u{1FA91}": "chair", "\u{1F6BD}": "toilet", "\u{1FAA0}": "plunger", "\u{1F6BF}": "shower", "\u{1F6C1}": "bathtub", "\u{1FAA4}": "mouse-trap", "\u{1FA92}": "razor", "\u{1F9F4}": "lotion-bottle", "\u{1F9F7}": "safety-pin", "\u{1F9F9}": "broom", "\u{1F9FA}": "basket", "\u{1F9FB}": "roll-of-paper", "\u{1FAA3}": "bucket", "\u{1F9FC}": "soap", "\u{1FAE7}": "bubbles", "\u{1FAA5}": "toothbrush", "\u{1F9FD}": "sponge", "\u{1F9EF}": "fire-extinguisher", "\u{1F6D2}": "shopping-cart", "\u{1F6AC}": "cigarette", "\u26B0\uFE0F": "coffin", "\u{1FAA6}": "headstone", "\u26B1\uFE0F": "funeral-urn", "\u{1F9FF}": "nazar-amulet", "\u{1FAAC}": "hamsa", "\u{1F5FF}": "moai", "\u{1FAA7}": "placard", "\u{1FAAA}": "identification-card", "\u{1F3E7}": "atm-sign", "\u{1F6AE}": "litter-in-bin-sign", "\u{1F6B0}": "potable-water", "\u267F": "wheelchair-symbol", "\u{1F6B9}": "men-s-room", "\u{1F6BA}": "women-s-room", "\u{1F6BB}": "restroom", "\u{1F6BC}": "baby-symbol", "\u{1F6BE}": "water-closet", "\u{1F6C2}": "passport-control", "\u{1F6C3}": "customs", "\u{1F6C4}": "baggage-claim", "\u{1F6C5}": "left-luggage", "\u26A0\uFE0F": "warning", "\u{1F6B8}": "children-crossing", "\u26D4": "no-entry", "\u{1F6AB}": "prohibited", "\u{1F6B3}": "no-bicycles", "\u{1F6AD}": "no-smoking", "\u{1F6AF}": "no-littering", "\u{1F6B1}": "non-potable-water", "\u{1F6B7}": "no-pedestrians", "\u{1F4F5}": "no-mobile-phones", "\u{1F51E}": "no-one-under-eighteen", "\u2622\uFE0F": "radioactive", "\u2623\uFE0F": "biohazard", "\u2B06\uFE0F": "up-arrow", "\u2197\uFE0F": "up-right-arrow", "\u27A1\uFE0F": "right-arrow", "\u2198\uFE0F": "down-right-arrow", "\u2B07\uFE0F": "down-arrow", "\u2199\uFE0F": "down-left-arrow", "\u2B05\uFE0F": "left-arrow", "\u2196\uFE0F": "up-left-arrow", "\u2195\uFE0F": "up-down-arrow", "\u2194\uFE0F": "left-right-arrow", "\u21A9\uFE0F": "right-arrow-curving-left", "\u21AA\uFE0F": "left-arrow-curving-right", "\u2934\uFE0F": "right-arrow-curving-up", "\u2935\uFE0F": "right-arrow-curving-down", "\u{1F503}": "clockwise-vertical-arrows", "\u{1F504}": "counterclockwise-arrows-button", "\u{1F519}": "back-arrow", "\u{1F51A}": "end-arrow", "\u{1F51B}": "on-arrow", "\u{1F51C}": "soon-arrow", "\u{1F51D}": "top-arrow", "\u{1F6D0}": "place-of-worship", "\u269B\uFE0F": "atom-symbol", "\u{1F549}\uFE0F": "om", "\u2721\uFE0F": "star-of-david", "\u2638\uFE0F": "wheel-of-dharma", "\u262F\uFE0F": "yin-yang", "\u271D\uFE0F": "latin-cross", "\u2626\uFE0F": "orthodox-cross", "\u262A\uFE0F": "star-and-crescent", "\u262E\uFE0F": "peace-symbol", "\u{1F54E}": "menorah", "\u{1F52F}": "dotted-six-pointed-star", "\u{1FAAF}": "khanda", "\u2648": "aries", "\u2649": "taurus", "\u264A": "gemini", "\u264B": "cancer", "\u264C": "leo", "\u264D": "virgo", "\u264E": "libra", "\u264F": "scorpio", "\u2650": "sagittarius", "\u2651": "capricorn", "\u2652": "aquarius", "\u2653": "pisces", "\u26CE": "ophiuchus", "\u{1F500}": "shuffle-tracks-button", "\u{1F501}": "repeat-button", "\u{1F502}": "repeat-single-button", "\u25B6\uFE0F": "play-button", "\u23E9": "fast-forward-button", "\u23ED\uFE0F": "next-track-button", "\u23EF\uFE0F": "play-or-pause-button", "\u25C0\uFE0F": "reverse-button", "\u23EA": "fast-reverse-button", "\u23EE\uFE0F": "last-track-button", "\u{1F53C}": "upwards-button", "\u23EB": "fast-up-button", "\u{1F53D}": "downwards-button", "\u23EC": "fast-down-button", "\u23F8\uFE0F": "pause-button", "\u23F9\uFE0F": "stop-button", "\u23FA\uFE0F": "record-button", "\u23CF\uFE0F": "eject-button", "\u{1F3A6}": "cinema", "\u{1F505}": "dim-button", "\u{1F506}": "bright-button", "\u{1F4F6}": "antenna-bars", "\u{1F6DC}": "wireless", "\u{1F4F3}": "vibration-mode", "\u{1F4F4}": "mobile-phone-off", "\u2640\uFE0F": "female-sign", "\u2642\uFE0F": "male-sign", "\u26A7\uFE0F": "transgender-symbol", "\u2716\uFE0F": "multiply", "\u2795": "plus", "\u2796": "minus", "\u2797": "divide", "\u{1F7F0}": "heavy-equals-sign", "\u267E\uFE0F": "infinity", "\u203C\uFE0F": "double-exclamation-mark", "\u2049\uFE0F": "exclamation-question-mark", "\u2753": "red-question-mark", "\u2754": "white-question-mark", "\u2755": "white-exclamation-mark", "\u2757": "red-exclamation-mark", "\u3030\uFE0F": "wavy-dash", "\u{1F4B1}": "currency-exchange", "\u{1F4B2}": "heavy-dollar-sign", "\u2695\uFE0F": "medical-symbol", "\u267B\uFE0F": "recycling-symbol", "\u269C\uFE0F": "fleur-de-lis", "\u{1F531}": "trident-emblem", "\u{1F4DB}": "name-badge", "\u{1F530}": "japanese-symbol-for-beginner", "\u2B55": "hollow-red-circle", "\u2705": "check-mark-button", "\u2611\uFE0F": "check-box-with-check", "\u2714\uFE0F": "check-mark", "\u274C": "cross-mark", "\u274E": "cross-mark-button", "\u27B0": "curly-loop", "\u27BF": "double-curly-loop", "\u303D\uFE0F": "part-alternation-mark", "\u2733\uFE0F": "eight-spoked-asterisk", "\u2734\uFE0F": "eight-pointed-star", "\u2747\uFE0F": "sparkle", "\xA9\uFE0F": "copyright", "\xAE\uFE0F": "registered", "\u2122\uFE0F": "trade-mark", "#\uFE0F\u20E3": "keycap-#", "*\uFE0F\u20E3": "keycap-*", "0\uFE0F\u20E3": "keycap-0", "1\uFE0F\u20E3": "keycap-1", "2\uFE0F\u20E3": "keycap-2", "3\uFE0F\u20E3": "keycap-3", "4\uFE0F\u20E3": "keycap-4", "5\uFE0F\u20E3": "keycap-5", "6\uFE0F\u20E3": "keycap-6", "7\uFE0F\u20E3": "keycap-7", "8\uFE0F\u20E3": "keycap-8", "9\uFE0F\u20E3": "keycap-9", "\u{1F51F}": "keycap-10", "\u{1F520}": "input-latin-uppercase", "\u{1F521}": "input-latin-lowercase", "\u{1F522}": "input-numbers", "\u{1F523}": "input-symbols", "\u{1F524}": "input-latin-letters", "\u{1F170}\uFE0F": "a-button-blood-type", "\u{1F18E}": "ab-button-blood-type", "\u{1F171}\uFE0F": "b-button-blood-type", "\u{1F191}": "cl-button", "\u{1F192}": "cool-button", "\u{1F193}": "free-button", "\u2139\uFE0F": "information", "\u{1F194}": "id-button", "\u24C2\uFE0F": "circled-m", "\u{1F195}": "new-button", "\u{1F196}": "ng-button", "\u{1F17E}\uFE0F": "o-button-blood-type", "\u{1F197}": "ok-button", "\u{1F17F}\uFE0F": "p-button", "\u{1F198}": "sos-button", "\u{1F199}": "up-button", "\u{1F19A}": "vs-button", "\u{1F201}": "japanese-here-button", "\u{1F202}\uFE0F": "japanese-service-charge-button", "\u{1F237}\uFE0F": "japanese-monthly-amount-button", "\u{1F236}": "japanese-not-free-of-charge-button", "\u{1F22F}": "japanese-reserved-button", "\u{1F250}": "japanese-bargain-button", "\u{1F239}": "japanese-discount-button", "\u{1F21A}": "japanese-free-of-charge-button", "\u{1F232}": "japanese-prohibited-button", "\u{1F251}": "japanese-acceptable-button", "\u{1F238}": "japanese-application-button", "\u{1F234}": "japanese-passing-grade-button", "\u{1F233}": "japanese-vacancy-button", "\u3297\uFE0F": "japanese-congratulations-button", "\u3299\uFE0F": "japanese-secret-button", "\u{1F23A}": "japanese-open-for-business-button", "\u{1F235}": "japanese-no-vacancy-button", "\u{1F534}": "red-circle", "\u{1F7E0}": "orange-circle", "\u{1F7E1}": "yellow-circle", "\u{1F7E2}": "green-circle", "\u{1F535}": "blue-circle", "\u{1F7E3}": "purple-circle", "\u{1F7E4}": "brown-circle", "\u26AB": "black-circle", "\u26AA": "white-circle", "\u{1F7E5}": "red-square", "\u{1F7E7}": "orange-square", "\u{1F7E8}": "yellow-square", "\u{1F7E9}": "green-square", "\u{1F7E6}": "blue-square", "\u{1F7EA}": "purple-square", "\u{1F7EB}": "brown-square", "\u2B1B": "black-large-square", "\u2B1C": "white-large-square", "\u25FC\uFE0F": "black-medium-square", "\u25FB\uFE0F": "white-medium-square", "\u25FE": "black-medium-small-square", "\u25FD": "white-medium-small-square", "\u25AA\uFE0F": "black-small-square", "\u25AB\uFE0F": "white-small-square", "\u{1F536}": "large-orange-diamond", "\u{1F537}": "large-blue-diamond", "\u{1F538}": "small-orange-diamond", "\u{1F539}": "small-blue-diamond", "\u{1F53A}": "red-triangle-pointed-up", "\u{1F53B}": "red-triangle-pointed-down", "\u{1F4A0}": "diamond-with-a-dot", "\u{1F518}": "radio-button", "\u{1F533}": "white-square-button", "\u{1F532}": "black-square-button", "\u{1F3C1}": "chequered-flag", "\u{1F6A9}": "triangular-flag", "\u{1F38C}": "crossed-flags", "\u{1F3F4}": "black-flag", "\u{1F3F3}\uFE0F": "white-flag", "\u{1F3F3}\uFE0F\u200D\u{1F308}": "rainbow-flag", "\u{1F3F3}\uFE0F\u200D\u26A7\uFE0F": "transgender-flag", "\u{1F3F4}\u200D\u2620\uFE0F": "pirate-flag", "\u{1F1E6}\u{1F1E8}": "flag-ascension-island", "\u{1F1E6}\u{1F1E9}": "flag-andorra", "\u{1F1E6}\u{1F1EA}": "flag-united-arab-emirates", "\u{1F1E6}\u{1F1EB}": "flag-afghanistan", "\u{1F1E6}\u{1F1EC}": "flag-antigua-&-barbuda", "\u{1F1E6}\u{1F1EE}": "flag-anguilla", "\u{1F1E6}\u{1F1F1}": "flag-albania", "\u{1F1E6}\u{1F1F2}": "flag-armenia", "\u{1F1E6}\u{1F1F4}": "flag-angola", "\u{1F1E6}\u{1F1F6}": "flag-antarctica", "\u{1F1E6}\u{1F1F7}": "flag-argentina", "\u{1F1E6}\u{1F1F8}": "flag-american-samoa", "\u{1F1E6}\u{1F1F9}": "flag-austria", "\u{1F1E6}\u{1F1FA}": "flag-australia", "\u{1F1E6}\u{1F1FC}": "flag-aruba", "\u{1F1E6}\u{1F1FD}": "flag-aland-islands", "\u{1F1E6}\u{1F1FF}": "flag-azerbaijan", "\u{1F1E7}\u{1F1E6}": "flag-bosnia-&-herzegovina", "\u{1F1E7}\u{1F1E7}": "flag-barbados", "\u{1F1E7}\u{1F1E9}": "flag-bangladesh", "\u{1F1E7}\u{1F1EA}": "flag-belgium", "\u{1F1E7}\u{1F1EB}": "flag-burkina-faso", "\u{1F1E7}\u{1F1EC}": "flag-bulgaria", "\u{1F1E7}\u{1F1ED}": "flag-bahrain", "\u{1F1E7}\u{1F1EE}": "flag-burundi", "\u{1F1E7}\u{1F1EF}": "flag-benin", "\u{1F1E7}\u{1F1F1}": "flag-st-barthelemy", "\u{1F1E7}\u{1F1F2}": "flag-bermuda", "\u{1F1E7}\u{1F1F3}": "flag-brunei", "\u{1F1E7}\u{1F1F4}": "flag-bolivia", "\u{1F1E7}\u{1F1F6}": "flag-caribbean-netherlands", "\u{1F1E7}\u{1F1F7}": "flag-brazil", "\u{1F1E7}\u{1F1F8}": "flag-bahamas", "\u{1F1E7}\u{1F1F9}": "flag-bhutan", "\u{1F1E7}\u{1F1FB}": "flag-bouvet-island", "\u{1F1E7}\u{1F1FC}": "flag-botswana", "\u{1F1E7}\u{1F1FE}": "flag-belarus", "\u{1F1E7}\u{1F1FF}": "flag-belize", "\u{1F1E8}\u{1F1E6}": "flag-canada", "\u{1F1E8}\u{1F1E8}": "flag-cocos-keeling-islands", "\u{1F1E8}\u{1F1E9}": "flag-congo-kinshasa", "\u{1F1E8}\u{1F1EB}": "flag-central-african-republic", "\u{1F1E8}\u{1F1EC}": "flag-congo-brazzaville", "\u{1F1E8}\u{1F1ED}": "flag-switzerland", "\u{1F1E8}\u{1F1EE}": "flag-cote-d-ivoire", "\u{1F1E8}\u{1F1F0}": "flag-cook-islands", "\u{1F1E8}\u{1F1F1}": "flag-chile", "\u{1F1E8}\u{1F1F2}": "flag-cameroon", "\u{1F1E8}\u{1F1F3}": "flag-china", "\u{1F1E8}\u{1F1F4}": "flag-colombia", "\u{1F1E8}\u{1F1F5}": "flag-clipperton-island", "\u{1F1E8}\u{1F1F7}": "flag-costa-rica", "\u{1F1E8}\u{1F1FA}": "flag-cuba", "\u{1F1E8}\u{1F1FB}": "flag-cape-verde", "\u{1F1E8}\u{1F1FC}": "flag-curacao", "\u{1F1E8}\u{1F1FD}": "flag-christmas-island", "\u{1F1E8}\u{1F1FE}": "flag-cyprus", "\u{1F1E8}\u{1F1FF}": "flag-czechia", "\u{1F1E9}\u{1F1EA}": "flag-germany", "\u{1F1E9}\u{1F1EC}": "flag-diego-garcia", "\u{1F1E9}\u{1F1EF}": "flag-djibouti", "\u{1F1E9}\u{1F1F0}": "flag-denmark", "\u{1F1E9}\u{1F1F2}": "flag-dominica", "\u{1F1E9}\u{1F1F4}": "flag-dominican-republic", "\u{1F1E9}\u{1F1FF}": "flag-algeria", "\u{1F1EA}\u{1F1E6}": "flag-ceuta-&-melilla", "\u{1F1EA}\u{1F1E8}": "flag-ecuador", "\u{1F1EA}\u{1F1EA}": "flag-estonia", "\u{1F1EA}\u{1F1EC}": "flag-egypt", "\u{1F1EA}\u{1F1ED}": "flag-western-sahara", "\u{1F1EA}\u{1F1F7}": "flag-eritrea", "\u{1F1EA}\u{1F1F8}": "flag-spain", "\u{1F1EA}\u{1F1F9}": "flag-ethiopia", "\u{1F1EA}\u{1F1FA}": "flag-european-union", "\u{1F1EB}\u{1F1EE}": "flag-finland", "\u{1F1EB}\u{1F1EF}": "flag-fiji", "\u{1F1EB}\u{1F1F0}": "flag-falkland-islands", "\u{1F1EB}\u{1F1F2}": "flag-micronesia", "\u{1F1EB}\u{1F1F4}": "flag-faroe-islands", "\u{1F1EB}\u{1F1F7}": "flag-france", "\u{1F1EC}\u{1F1E6}": "flag-gabon", "\u{1F1EC}\u{1F1E7}": "flag-united-kingdom", "\u{1F1EC}\u{1F1E9}": "flag-grenada", "\u{1F1EC}\u{1F1EA}": "flag-georgia", "\u{1F1EC}\u{1F1EB}": "flag-french-guiana", "\u{1F1EC}\u{1F1EC}": "flag-guernsey", "\u{1F1EC}\u{1F1ED}": "flag-ghana", "\u{1F1EC}\u{1F1EE}": "flag-gibraltar", "\u{1F1EC}\u{1F1F1}": "flag-greenland", "\u{1F1EC}\u{1F1F2}": "flag-gambia", "\u{1F1EC}\u{1F1F3}": "flag-guinea", "\u{1F1EC}\u{1F1F5}": "flag-guadeloupe", "\u{1F1EC}\u{1F1F6}": "flag-equatorial-guinea", "\u{1F1EC}\u{1F1F7}": "flag-greece", "\u{1F1EC}\u{1F1F8}": "flag-south-georgia-&-south-sandwich-islands", "\u{1F1EC}\u{1F1F9}": "flag-guatemala", "\u{1F1EC}\u{1F1FA}": "flag-guam", "\u{1F1EC}\u{1F1FC}": "flag-guinea-bissau", "\u{1F1EC}\u{1F1FE}": "flag-guyana", "\u{1F1ED}\u{1F1F0}": "flag-hong-kong-sar-china", "\u{1F1ED}\u{1F1F2}": "flag-heard-&-mcdonald-islands", "\u{1F1ED}\u{1F1F3}": "flag-honduras", "\u{1F1ED}\u{1F1F7}": "flag-croatia", "\u{1F1ED}\u{1F1F9}": "flag-haiti", "\u{1F1ED}\u{1F1FA}": "flag-hungary", "\u{1F1EE}\u{1F1E8}": "flag-canary-islands", "\u{1F1EE}\u{1F1E9}": "flag-indonesia", "\u{1F1EE}\u{1F1EA}": "flag-ireland", "\u{1F1EE}\u{1F1F1}": "flag-israel", "\u{1F1EE}\u{1F1F2}": "flag-isle-of-man", "\u{1F1EE}\u{1F1F3}": "flag-india", "\u{1F1EE}\u{1F1F4}": "flag-british-indian-ocean-territory", "\u{1F1EE}\u{1F1F6}": "flag-iraq", "\u{1F1EE}\u{1F1F7}": "flag-iran", "\u{1F1EE}\u{1F1F8}": "flag-iceland", "\u{1F1EE}\u{1F1F9}": "flag-italy", "\u{1F1EF}\u{1F1EA}": "flag-jersey", "\u{1F1EF}\u{1F1F2}": "flag-jamaica", "\u{1F1EF}\u{1F1F4}": "flag-jordan", "\u{1F1EF}\u{1F1F5}": "flag-japan", "\u{1F1F0}\u{1F1EA}": "flag-kenya", "\u{1F1F0}\u{1F1EC}": "flag-kyrgyzstan", "\u{1F1F0}\u{1F1ED}": "flag-cambodia", "\u{1F1F0}\u{1F1EE}": "flag-kiribati", "\u{1F1F0}\u{1F1F2}": "flag-comoros", "\u{1F1F0}\u{1F1F3}": "flag-st-kitts-&-nevis", "\u{1F1F0}\u{1F1F5}": "flag-north-korea", "\u{1F1F0}\u{1F1F7}": "flag-south-korea", "\u{1F1F0}\u{1F1FC}": "flag-kuwait", "\u{1F1F0}\u{1F1FE}": "flag-cayman-islands", "\u{1F1F0}\u{1F1FF}": "flag-kazakhstan", "\u{1F1F1}\u{1F1E6}": "flag-laos", "\u{1F1F1}\u{1F1E7}": "flag-lebanon", "\u{1F1F1}\u{1F1E8}": "flag-st-lucia", "\u{1F1F1}\u{1F1EE}": "flag-liechtenstein", "\u{1F1F1}\u{1F1F0}": "flag-sri-lanka", "\u{1F1F1}\u{1F1F7}": "flag-liberia", "\u{1F1F1}\u{1F1F8}": "flag-lesotho", "\u{1F1F1}\u{1F1F9}": "flag-lithuania", "\u{1F1F1}\u{1F1FA}": "flag-luxembourg", "\u{1F1F1}\u{1F1FB}": "flag-latvia", "\u{1F1F1}\u{1F1FE}": "flag-libya", "\u{1F1F2}\u{1F1E6}": "flag-morocco", "\u{1F1F2}\u{1F1E8}": "flag-monaco", "\u{1F1F2}\u{1F1E9}": "flag-moldova", "\u{1F1F2}\u{1F1EA}": "flag-montenegro", "\u{1F1F2}\u{1F1EB}": "flag-st-martin", "\u{1F1F2}\u{1F1EC}": "flag-madagascar", "\u{1F1F2}\u{1F1ED}": "flag-marshall-islands", "\u{1F1F2}\u{1F1F0}": "flag-north-macedonia", "\u{1F1F2}\u{1F1F1}": "flag-mali", "\u{1F1F2}\u{1F1F2}": "flag-myanmar-burma", "\u{1F1F2}\u{1F1F3}": "flag-mongolia", "\u{1F1F2}\u{1F1F4}": "flag-macao-sar-china", "\u{1F1F2}\u{1F1F5}": "flag-northern-mariana-islands", "\u{1F1F2}\u{1F1F6}": "flag-martinique", "\u{1F1F2}\u{1F1F7}": "flag-mauritania", "\u{1F1F2}\u{1F1F8}": "flag-montserrat", "\u{1F1F2}\u{1F1F9}": "flag-malta", "\u{1F1F2}\u{1F1FA}": "flag-mauritius", "\u{1F1F2}\u{1F1FB}": "flag-maldives", "\u{1F1F2}\u{1F1FC}": "flag-malawi", "\u{1F1F2}\u{1F1FD}": "flag-mexico", "\u{1F1F2}\u{1F1FE}": "flag-malaysia", "\u{1F1F2}\u{1F1FF}": "flag-mozambique", "\u{1F1F3}\u{1F1E6}": "flag-namibia", "\u{1F1F3}\u{1F1E8}": "flag-new-caledonia", "\u{1F1F3}\u{1F1EA}": "flag-niger", "\u{1F1F3}\u{1F1EB}": "flag-norfolk-island", "\u{1F1F3}\u{1F1EC}": "flag-nigeria", "\u{1F1F3}\u{1F1EE}": "flag-nicaragua", "\u{1F1F3}\u{1F1F1}": "flag-netherlands", "\u{1F1F3}\u{1F1F4}": "flag-norway", "\u{1F1F3}\u{1F1F5}": "flag-nepal", "\u{1F1F3}\u{1F1F7}": "flag-nauru", "\u{1F1F3}\u{1F1FA}": "flag-niue", "\u{1F1F3}\u{1F1FF}": "flag-new-zealand", "\u{1F1F4}\u{1F1F2}": "flag-oman", "\u{1F1F5}\u{1F1E6}": "flag-panama", "\u{1F1F5}\u{1F1EA}": "flag-peru", "\u{1F1F5}\u{1F1EB}": "flag-french-polynesia", "\u{1F1F5}\u{1F1EC}": "flag-papua-new-guinea", "\u{1F1F5}\u{1F1ED}": "flag-philippines", "\u{1F1F5}\u{1F1F0}": "flag-pakistan", "\u{1F1F5}\u{1F1F1}": "flag-poland", "\u{1F1F5}\u{1F1F2}": "flag-st-pierre-&-miquelon", "\u{1F1F5}\u{1F1F3}": "flag-pitcairn-islands", "\u{1F1F5}\u{1F1F7}": "flag-puerto-rico", "\u{1F1F5}\u{1F1F8}": "flag-palestinian-territories", "\u{1F1F5}\u{1F1F9}": "flag-portugal", "\u{1F1F5}\u{1F1FC}": "flag-palau", "\u{1F1F5}\u{1F1FE}": "flag-paraguay", "\u{1F1F6}\u{1F1E6}": "flag-qatar", "\u{1F1F7}\u{1F1EA}": "flag-reunion", "\u{1F1F7}\u{1F1F4}": "flag-romania", "\u{1F1F7}\u{1F1F8}": "flag-serbia", "\u{1F1F7}\u{1F1FA}": "flag-russia", "\u{1F1F7}\u{1F1FC}": "flag-rwanda", "\u{1F1F8}\u{1F1E6}": "flag-saudi-arabia", "\u{1F1F8}\u{1F1E7}": "flag-solomon-islands", "\u{1F1F8}\u{1F1E8}": "flag-seychelles", "\u{1F1F8}\u{1F1E9}": "flag-sudan", "\u{1F1F8}\u{1F1EA}": "flag-sweden", "\u{1F1F8}\u{1F1EC}": "flag-singapore", "\u{1F1F8}\u{1F1ED}": "flag-st-helena", "\u{1F1F8}\u{1F1EE}": "flag-slovenia", "\u{1F1F8}\u{1F1EF}": "flag-svalbard-&-jan-mayen", "\u{1F1F8}\u{1F1F0}": "flag-slovakia", "\u{1F1F8}\u{1F1F1}": "flag-sierra-leone", "\u{1F1F8}\u{1F1F2}": "flag-san-marino", "\u{1F1F8}\u{1F1F3}": "flag-senegal", "\u{1F1F8}\u{1F1F4}": "flag-somalia", "\u{1F1F8}\u{1F1F7}": "flag-suriname", "\u{1F1F8}\u{1F1F8}": "flag-south-sudan", "\u{1F1F8}\u{1F1F9}": "flag-sao-tome-&-principe", "\u{1F1F8}\u{1F1FB}": "flag-el-salvador", "\u{1F1F8}\u{1F1FD}": "flag-sint-maarten", "\u{1F1F8}\u{1F1FE}": "flag-syria", "\u{1F1F8}\u{1F1FF}": "flag-eswatini", "\u{1F1F9}\u{1F1E6}": "flag-tristan-da-cunha", "\u{1F1F9}\u{1F1E8}": "flag-turks-&-caicos-islands", "\u{1F1F9}\u{1F1E9}": "flag-chad", "\u{1F1F9}\u{1F1EB}": "flag-french-southern-territories", "\u{1F1F9}\u{1F1EC}": "flag-togo", "\u{1F1F9}\u{1F1ED}": "flag-thailand", "\u{1F1F9}\u{1F1EF}": "flag-tajikistan", "\u{1F1F9}\u{1F1F0}": "flag-tokelau", "\u{1F1F9}\u{1F1F1}": "flag-timor-leste", "\u{1F1F9}\u{1F1F2}": "flag-turkmenistan", "\u{1F1F9}\u{1F1F3}": "flag-tunisia", "\u{1F1F9}\u{1F1F4}": "flag-tonga", "\u{1F1F9}\u{1F1F7}": "flag-turkey", "\u{1F1F9}\u{1F1F9}": "flag-trinidad-&-tobago", "\u{1F1F9}\u{1F1FB}": "flag-tuvalu", "\u{1F1F9}\u{1F1FC}": "flag-taiwan", "\u{1F1F9}\u{1F1FF}": "flag-tanzania", "\u{1F1FA}\u{1F1E6}": "flag-ukraine", "\u{1F1FA}\u{1F1EC}": "flag-uganda", "\u{1F1FA}\u{1F1F2}": "flag-us-outlying-islands", "\u{1F1FA}\u{1F1F3}": "flag-united-nations", "\u{1F1FA}\u{1F1F8}": "flag-united-states", "\u{1F1FA}\u{1F1FE}": "flag-uruguay", "\u{1F1FA}\u{1F1FF}": "flag-uzbekistan", "\u{1F1FB}\u{1F1E6}": "flag-vatican-city", "\u{1F1FB}\u{1F1E8}": "flag-st-vincent-&-grenadines", "\u{1F1FB}\u{1F1EA}": "flag-venezuela", "\u{1F1FB}\u{1F1EC}": "flag-british-virgin-islands", "\u{1F1FB}\u{1F1EE}": "flag-us-virgin-islands", "\u{1F1FB}\u{1F1F3}": "flag-vietnam", "\u{1F1FB}\u{1F1FA}": "flag-vanuatu", "\u{1F1FC}\u{1F1EB}": "flag-wallis-&-futuna", "\u{1F1FC}\u{1F1F8}": "flag-samoa", "\u{1F1FD}\u{1F1F0}": "flag-kosovo", "\u{1F1FE}\u{1F1EA}": "flag-yemen", "\u{1F1FE}\u{1F1F9}": "flag-mayotte", "\u{1F1FF}\u{1F1E6}": "flag-south-africa", "\u{1F1FF}\u{1F1F2}": "flag-zambia", "\u{1F1FF}\u{1F1FC}": "flag-zimbabwe", "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}": "flag-england", "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}": "flag-scotland", "\u{1F3F4}\u{E0067}\u{E0062}\u{E0077}\u{E006C}\u{E0073}\u{E007F}": "flag-wales" };
   }
 });
 
-// ../../../node_modules/string-kit/lib/emoji.js
+// node_modules/string-kit/lib/emoji.js
 var require_emoji = __commonJS({
-  "../../../node_modules/string-kit/lib/emoji.js"(exports, module) {
+  "node_modules/string-kit/lib/emoji.js"(exports, module) {
     "use strict";
     var latinize = require_latinize();
     var english = require_english();
@@ -3493,9 +3493,9 @@ var require_emoji = __commonJS({
   }
 });
 
-// ../../../node_modules/string-kit/lib/string.js
+// node_modules/string-kit/lib/string.js
 var require_string = __commonJS({
-  "../../../node_modules/string-kit/lib/string.js"(exports, module) {
+  "node_modules/string-kit/lib/string.js"(exports, module) {
     "use strict";
     var stringKit = {};
     module.exports = stringKit;
@@ -3529,9 +3529,9 @@ var require_string = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/misc.js
+// node_modules/terminal-kit/lib/misc.js
 var require_misc2 = __commonJS({
-  "../../../node_modules/terminal-kit/lib/misc.js"(exports) {
+  "node_modules/terminal-kit/lib/misc.js"(exports) {
     "use strict";
     var string = require_string();
     var colorNameToIndexDict = {
@@ -3979,9 +3979,9 @@ var require_misc2 = __commonJS({
   }
 });
 
-// ../../../node_modules/setimmediate/setImmediate.js
+// node_modules/setimmediate/setImmediate.js
 var require_setImmediate = __commonJS({
-  "../../../node_modules/setimmediate/setImmediate.js"(exports) {
+  "node_modules/setimmediate/setImmediate.js"(exports) {
     (function(global2, undefined2) {
       "use strict";
       if (global2.setImmediate) {
@@ -4127,9 +4127,9 @@ var require_setImmediate = __commonJS({
   }
 });
 
-// ../../../node_modules/seventh/lib/core.js
+// node_modules/seventh/lib/core.js
 var require_core = __commonJS({
-  "../../../node_modules/seventh/lib/core.js"(exports, module) {
+  "node_modules/seventh/lib/core.js"(exports, module) {
     "use strict";
     var NativePromise = global.Promise;
     var nextTick;
@@ -4589,9 +4589,9 @@ var require_core = __commonJS({
   }
 });
 
-// ../../../node_modules/seventh/lib/batch.js
+// node_modules/seventh/lib/batch.js
 var require_batch = __commonJS({
-  "../../../node_modules/seventh/lib/batch.js"() {
+  "node_modules/seventh/lib/batch.js"() {
     "use strict";
     var Promise2 = require_seventh();
     var HOLE = {};
@@ -5033,9 +5033,9 @@ var require_batch = __commonJS({
   }
 });
 
-// ../../../node_modules/seventh/lib/wrapper.js
+// node_modules/seventh/lib/wrapper.js
 var require_wrapper = __commonJS({
-  "../../../node_modules/seventh/lib/wrapper.js"() {
+  "node_modules/seventh/lib/wrapper.js"() {
     "use strict";
     var Promise2 = require_seventh();
     Promise2.timeLimit = (timeout, asyncFnOrPromise) => {
@@ -5119,9 +5119,9 @@ var require_wrapper = __commonJS({
   }
 });
 
-// ../../../node_modules/seventh/lib/decorators.js
+// node_modules/seventh/lib/decorators.js
 var require_decorators = __commonJS({
-  "../../../node_modules/seventh/lib/decorators.js"() {
+  "node_modules/seventh/lib/decorators.js"() {
     "use strict";
     var Promise2 = require_seventh();
     var noop = () => void 0;
@@ -5612,9 +5612,9 @@ var require_decorators = __commonJS({
   }
 });
 
-// ../../../node_modules/seventh/lib/Queue.js
+// node_modules/seventh/lib/Queue.js
 var require_Queue = __commonJS({
-  "../../../node_modules/seventh/lib/Queue.js"() {
+  "node_modules/seventh/lib/Queue.js"() {
     "use strict";
     var Promise2 = require_seventh();
     function Queue(jobRunner, concurrency = 4) {
@@ -5786,9 +5786,9 @@ var require_Queue = __commonJS({
   }
 });
 
-// ../../../node_modules/seventh/lib/api.js
+// node_modules/seventh/lib/api.js
 var require_api = __commonJS({
-  "../../../node_modules/seventh/lib/api.js"() {
+  "node_modules/seventh/lib/api.js"() {
     "use strict";
     var Promise2 = require_seventh();
     Promise2.promisifyNodeApi = (api, suffix, multiSuffix, filter, anything) => {
@@ -5831,9 +5831,9 @@ var require_api = __commonJS({
   }
 });
 
-// ../../../node_modules/seventh/lib/parasite.js
+// node_modules/seventh/lib/parasite.js
 var require_parasite = __commonJS({
-  "../../../node_modules/seventh/lib/parasite.js"() {
+  "node_modules/seventh/lib/parasite.js"() {
     "use strict";
     var Promise2 = require_seventh();
     Promise2.parasite = () => {
@@ -5852,9 +5852,9 @@ var require_parasite = __commonJS({
   }
 });
 
-// ../../../node_modules/seventh/lib/misc.js
+// node_modules/seventh/lib/misc.js
 var require_misc3 = __commonJS({
-  "../../../node_modules/seventh/lib/misc.js"() {
+  "node_modules/seventh/lib/misc.js"() {
     "use strict";
     var Promise2 = require_seventh();
     var exitInProgress = false;
@@ -5899,9 +5899,9 @@ var require_misc3 = __commonJS({
   }
 });
 
-// ../../../node_modules/seventh/lib/seventh.js
+// node_modules/seventh/lib/seventh.js
 var require_seventh = __commonJS({
-  "../../../node_modules/seventh/lib/seventh.js"(exports, module) {
+  "node_modules/seventh/lib/seventh.js"(exports, module) {
     "use strict";
     var seventh = require_core();
     module.exports = seventh;
@@ -5915,16 +5915,16 @@ var require_seventh = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termkit.js
+// node_modules/terminal-kit/lib/termkit.js
 var require_termkit = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termkit.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termkit.js"(exports, module) {
     module.exports = require_termkit_no_lazy_require();
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/detectTerminal.js
+// node_modules/terminal-kit/lib/detectTerminal.js
 var require_detectTerminal = __commonJS({
-  "../../../node_modules/terminal-kit/lib/detectTerminal.js"(exports) {
+  "node_modules/terminal-kit/lib/detectTerminal.js"(exports) {
     "use strict";
     var Promise2 = require_seventh();
     var exec = __require("child_process").exec;
@@ -6255,16 +6255,16 @@ var require_detectTerminal = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/README
+// node_modules/terminal-kit/lib/termconfig/README
 var require_README = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/README"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/README"(exports, module) {
     module.exports = {};
   }
 });
 
-// ../../../node_modules/tree-kit/lib/extend.js
+// node_modules/tree-kit/lib/extend.js
 var require_extend = __commonJS({
-  "../../../node_modules/tree-kit/lib/extend.js"(exports, module) {
+  "node_modules/tree-kit/lib/extend.js"(exports, module) {
     "use strict";
     function extend(options, target, ...sources) {
       var i, source, newTarget = false, length = sources.length;
@@ -6525,9 +6525,9 @@ var require_extend = __commonJS({
   }
 });
 
-// ../../../node_modules/tree-kit/lib/clone.js
+// node_modules/tree-kit/lib/clone.js
 var require_clone = __commonJS({
-  "../../../node_modules/tree-kit/lib/clone.js"(exports, module) {
+  "node_modules/tree-kit/lib/clone.js"(exports, module) {
     "use strict";
     function clone(originalObject, circular) {
       var originalProto = Object.getPrototypeOf(originalObject);
@@ -6577,9 +6577,9 @@ var require_clone = __commonJS({
   }
 });
 
-// ../../../node_modules/tree-kit/lib/path.js
+// node_modules/tree-kit/lib/path.js
 var require_path = __commonJS({
-  "../../../node_modules/tree-kit/lib/path.js"(exports, module) {
+  "node_modules/tree-kit/lib/path.js"(exports, module) {
     "use strict";
     var treePath = {};
     module.exports = treePath;
@@ -6872,9 +6872,9 @@ var require_path = __commonJS({
   }
 });
 
-// ../../../node_modules/tree-kit/lib/dotPath.js
+// node_modules/tree-kit/lib/dotPath.js
 var require_dotPath = __commonJS({
-  "../../../node_modules/tree-kit/lib/dotPath.js"(exports, module) {
+  "node_modules/tree-kit/lib/dotPath.js"(exports, module) {
     "use strict";
     var dotPath = {};
     module.exports = dotPath;
@@ -7085,9 +7085,9 @@ var require_dotPath = __commonJS({
   }
 });
 
-// ../../../node_modules/tree-kit/lib/wildDotPath.js
+// node_modules/tree-kit/lib/wildDotPath.js
 var require_wildDotPath = __commonJS({
-  "../../../node_modules/tree-kit/lib/wildDotPath.js"(exports, module) {
+  "node_modules/tree-kit/lib/wildDotPath.js"(exports, module) {
     "use strict";
     var wildDotPath = {};
     module.exports = wildDotPath;
@@ -7352,9 +7352,9 @@ var require_wildDotPath = __commonJS({
   }
 });
 
-// ../../../node_modules/tree-kit/lib/lazy.js
+// node_modules/tree-kit/lib/lazy.js
 var require_lazy = __commonJS({
-  "../../../node_modules/tree-kit/lib/lazy.js"(exports) {
+  "node_modules/tree-kit/lib/lazy.js"(exports) {
     "use strict";
     exports.defineLazyProperty = function defineLazyProperty(object, name, func) {
       Object.defineProperty(object, name, {
@@ -7375,9 +7375,9 @@ var require_lazy = __commonJS({
   }
 });
 
-// ../../../node_modules/tree-kit/lib/diff.js
+// node_modules/tree-kit/lib/diff.js
 var require_diff = __commonJS({
-  "../../../node_modules/tree-kit/lib/diff.js"(exports) {
+  "node_modules/tree-kit/lib/diff.js"(exports) {
     "use strict";
     function diff(left, right, options) {
       var i, key, keyPath, leftKeys, rightKeys, leftTypeof, rightTypeof, depth, diffObject, length, arrayMode;
@@ -7475,9 +7475,9 @@ var require_diff = __commonJS({
   }
 });
 
-// ../../../node_modules/tree-kit/lib/mask.js
+// node_modules/tree-kit/lib/mask.js
 var require_mask = __commonJS({
-  "../../../node_modules/tree-kit/lib/mask.js"(exports, module) {
+  "node_modules/tree-kit/lib/mask.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var util2 = __require("util");
@@ -7683,9 +7683,9 @@ var require_mask = __commonJS({
   }
 });
 
-// ../../../node_modules/tree-kit/lib/arrayLike.js
+// node_modules/tree-kit/lib/arrayLike.js
 var require_arrayLike = __commonJS({
-  "../../../node_modules/tree-kit/lib/arrayLike.js"(exports) {
+  "node_modules/tree-kit/lib/arrayLike.js"(exports) {
     "use strict";
     exports.map = function(object, fn) {
       if (!object || typeof object !== "object") {
@@ -7702,9 +7702,9 @@ var require_arrayLike = __commonJS({
   }
 });
 
-// ../../../node_modules/tree-kit/lib/tree.js
+// node_modules/tree-kit/lib/tree.js
 var require_tree = __commonJS({
-  "../../../node_modules/tree-kit/lib/tree.js"(exports, module) {
+  "node_modules/tree-kit/lib/tree.js"(exports, module) {
     "use strict";
     var tree = {};
     module.exports = tree;
@@ -7725,9 +7725,9 @@ var require_tree = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/colorScheme/xterm.json
+// node_modules/terminal-kit/lib/colorScheme/xterm.json
 var require_xterm = __commonJS({
-  "../../../node_modules/terminal-kit/lib/colorScheme/xterm.json"(exports, module) {
+  "node_modules/terminal-kit/lib/colorScheme/xterm.json"(exports, module) {
     module.exports = [
       { r: 0, g: 0, b: 0, names: ["black"] },
       { r: 205, g: 0, b: 0, names: ["red"] },
@@ -7749,9 +7749,9 @@ var require_xterm = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/xterm.js
+// node_modules/terminal-kit/lib/termconfig/xterm.js
 var require_xterm2 = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/xterm.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/xterm.js"(exports, module) {
     "use strict";
     var string = require_string();
     var defaultColor = "\x1B[39m";
@@ -8433,9 +8433,9 @@ var require_xterm2 = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/xterm-256color.js
+// node_modules/terminal-kit/lib/termconfig/xterm-256color.js
 var require_xterm_256color = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/xterm-256color.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/xterm-256color.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm = require_xterm2();
@@ -8488,9 +8488,9 @@ var require_xterm_256color = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/colorScheme/atomic-terminal.json
+// node_modules/terminal-kit/lib/colorScheme/atomic-terminal.json
 var require_atomic_terminal = __commonJS({
-  "../../../node_modules/terminal-kit/lib/colorScheme/atomic-terminal.json"(exports, module) {
+  "node_modules/terminal-kit/lib/colorScheme/atomic-terminal.json"(exports, module) {
     module.exports = [
       { r: 0, g: 0, b: 0, names: ["black"] },
       { r: 204, g: 0, b: 0, names: ["red"] },
@@ -8512,9 +8512,9 @@ var require_atomic_terminal = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/atomic-terminal.js
+// node_modules/terminal-kit/lib/termconfig/atomic-terminal.js
 var require_atomic_terminal2 = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/atomic-terminal.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/atomic-terminal.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm256 = require_xterm_256color();
@@ -8550,9 +8550,9 @@ var require_atomic_terminal2 = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/eterm.js
+// node_modules/terminal-kit/lib/termconfig/eterm.js
 var require_eterm = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/eterm.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/eterm.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm = require_xterm2();
@@ -8662,9 +8662,9 @@ var require_eterm = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/eterm-256color.js
+// node_modules/terminal-kit/lib/termconfig/eterm-256color.js
 var require_eterm_256color = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/eterm-256color.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/eterm-256color.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm256 = require_xterm_256color();
@@ -8691,9 +8691,9 @@ var require_eterm_256color = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/colorScheme/gnome.json
+// node_modules/terminal-kit/lib/colorScheme/gnome.json
 var require_gnome = __commonJS({
-  "../../../node_modules/terminal-kit/lib/colorScheme/gnome.json"(exports, module) {
+  "node_modules/terminal-kit/lib/colorScheme/gnome.json"(exports, module) {
     module.exports = [
       { r: 0, g: 0, b: 0, names: ["black"] },
       { r: 204, g: 0, b: 0, names: ["red"] },
@@ -8715,9 +8715,9 @@ var require_gnome = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/gnome.js
+// node_modules/terminal-kit/lib/termconfig/gnome.js
 var require_gnome2 = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/gnome.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/gnome.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm = require_xterm2();
@@ -8760,9 +8760,9 @@ var require_gnome2 = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/gnome-256color.js
+// node_modules/terminal-kit/lib/termconfig/gnome-256color.js
 var require_gnome_256color = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/gnome-256color.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/gnome-256color.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm256 = require_xterm_256color();
@@ -8789,9 +8789,9 @@ var require_gnome_256color = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/kitty.js
+// node_modules/terminal-kit/lib/termconfig/kitty.js
 var require_kitty = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/kitty.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/kitty.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm256 = require_xterm_256color();
@@ -8817,9 +8817,9 @@ var require_kitty = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/colorScheme/konsole.json
+// node_modules/terminal-kit/lib/colorScheme/konsole.json
 var require_konsole = __commonJS({
-  "../../../node_modules/terminal-kit/lib/colorScheme/konsole.json"(exports, module) {
+  "node_modules/terminal-kit/lib/colorScheme/konsole.json"(exports, module) {
     module.exports = [
       { r: 0, g: 0, b: 0, names: ["black"] },
       { r: 178, g: 24, b: 24, names: ["red"] },
@@ -8841,9 +8841,9 @@ var require_konsole = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/konsole.js
+// node_modules/terminal-kit/lib/termconfig/konsole.js
 var require_konsole2 = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/konsole.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/konsole.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm = require_xterm2();
@@ -8939,9 +8939,9 @@ var require_konsole2 = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/konsole-256color.js
+// node_modules/terminal-kit/lib/termconfig/konsole-256color.js
 var require_konsole_256color = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/konsole-256color.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/konsole-256color.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm256 = require_xterm_256color();
@@ -8968,9 +8968,9 @@ var require_konsole_256color = __commonJS({
   }
 });
 
-// ../../../node_modules/nextgen-events/package.json
+// node_modules/nextgen-events/package.json
 var require_package = __commonJS({
-  "../../../node_modules/nextgen-events/package.json"(exports, module) {
+  "node_modules/nextgen-events/package.json"(exports, module) {
     module.exports = {
       name: "nextgen-events",
       version: "1.5.3",
@@ -9032,9 +9032,9 @@ var require_package = __commonJS({
   }
 });
 
-// ../../../node_modules/nextgen-events/lib/Proxy.js
+// node_modules/nextgen-events/lib/Proxy.js
 var require_Proxy = __commonJS({
-  "../../../node_modules/nextgen-events/lib/Proxy.js"(exports, module) {
+  "node_modules/nextgen-events/lib/Proxy.js"(exports, module) {
     "use strict";
     function Proxy2() {
       this.localServices = {};
@@ -9401,9 +9401,9 @@ var require_Proxy = __commonJS({
   }
 });
 
-// ../../../node_modules/nextgen-events/lib/NextGenEvents.js
+// node_modules/nextgen-events/lib/NextGenEvents.js
 var require_NextGenEvents = __commonJS({
-  "../../../node_modules/nextgen-events/lib/NextGenEvents.js"(exports, module) {
+  "node_modules/nextgen-events/lib/NextGenEvents.js"(exports, module) {
     "use strict";
     var nextTick = process.browser ? window.setImmediate : process.nextTick;
     if (!global.__NEXTGEN_EVENTS__) {
@@ -10404,9 +10404,9 @@ var require_NextGenEvents = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/gpm.js
+// node_modules/terminal-kit/lib/gpm.js
 var require_gpm = __commonJS({
-  "../../../node_modules/terminal-kit/lib/gpm.js"(exports, module) {
+  "node_modules/terminal-kit/lib/gpm.js"(exports, module) {
     "use strict";
     var net = __require("net");
     var NextGenEvents = require_NextGenEvents();
@@ -10560,9 +10560,9 @@ var require_gpm = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/colorScheme/linux.json
+// node_modules/terminal-kit/lib/colorScheme/linux.json
 var require_linux = __commonJS({
-  "../../../node_modules/terminal-kit/lib/colorScheme/linux.json"(exports, module) {
+  "node_modules/terminal-kit/lib/colorScheme/linux.json"(exports, module) {
     module.exports = [
       { r: 0, g: 0, b: 0, names: ["black"] },
       { r: 170, g: 0, b: 0, names: ["red"] },
@@ -10584,9 +10584,9 @@ var require_linux = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/linux.js
+// node_modules/terminal-kit/lib/termconfig/linux.js
 var require_linux2 = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/linux.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/linux.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var string = require_string();
@@ -10920,9 +10920,9 @@ var require_linux2 = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/none.js
+// node_modules/terminal-kit/lib/termconfig/none.js
 var require_none = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/none.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/none.js"(exports, module) {
     "use strict";
     var esc = {
       /* Common sequences */
@@ -11134,9 +11134,9 @@ var require_none = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/colorScheme/vga.json
+// node_modules/terminal-kit/lib/colorScheme/vga.json
 var require_vga = __commonJS({
-  "../../../node_modules/terminal-kit/lib/colorScheme/vga.json"(exports, module) {
+  "node_modules/terminal-kit/lib/colorScheme/vga.json"(exports, module) {
     module.exports = [
       { r: 0, g: 0, b: 0, names: ["black"] },
       { r: 170, g: 0, b: 0, names: ["red"] },
@@ -11158,9 +11158,9 @@ var require_vga = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/xterm.generic.js
+// node_modules/terminal-kit/lib/termconfig/xterm.generic.js
 var require_xterm_generic = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/xterm.generic.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/xterm.generic.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm = require_xterm2();
@@ -11208,9 +11208,9 @@ var require_xterm_generic = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/xterm-256color.generic.js
+// node_modules/terminal-kit/lib/termconfig/xterm-256color.generic.js
 var require_xterm_256color_generic = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/xterm-256color.generic.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/xterm-256color.generic.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm256 = require_xterm_256color();
@@ -11232,9 +11232,9 @@ var require_xterm_256color_generic = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/osx-256color.js
+// node_modules/terminal-kit/lib/termconfig/osx-256color.js
 var require_osx_256color = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/osx-256color.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/osx-256color.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm256Generic = require_xterm_256color_generic();
@@ -11377,9 +11377,9 @@ var require_osx_256color = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/rxvt.js
+// node_modules/terminal-kit/lib/termconfig/rxvt.js
 var require_rxvt = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/rxvt.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/rxvt.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm = require_xterm2();
@@ -11459,9 +11459,9 @@ var require_rxvt = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/rxvt-256color.js
+// node_modules/terminal-kit/lib/termconfig/rxvt-256color.js
 var require_rxvt_256color = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/rxvt-256color.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/rxvt-256color.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm256 = require_xterm_256color();
@@ -11488,9 +11488,9 @@ var require_rxvt_256color = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/termux.js
+// node_modules/terminal-kit/lib/termconfig/termux.js
 var require_termux = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/termux.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/termux.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm256 = require_xterm_256color();
@@ -11520,9 +11520,9 @@ var require_termux = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/colorScheme/xfce.json
+// node_modules/terminal-kit/lib/colorScheme/xfce.json
 var require_xfce = __commonJS({
-  "../../../node_modules/terminal-kit/lib/colorScheme/xfce.json"(exports, module) {
+  "node_modules/terminal-kit/lib/colorScheme/xfce.json"(exports, module) {
     module.exports = [
       { r: 0, g: 0, b: 0, names: ["black"] },
       { r: 170, g: 0, b: 0, names: ["red"] },
@@ -11544,9 +11544,9 @@ var require_xfce = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/xfce.js
+// node_modules/terminal-kit/lib/termconfig/xfce.js
 var require_xfce2 = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/xfce.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/xfce.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm256 = require_xterm_256color();
@@ -11581,9 +11581,9 @@ var require_xfce2 = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/xterm-truecolor.generic.js
+// node_modules/terminal-kit/lib/termconfig/xterm-truecolor.generic.js
 var require_xterm_truecolor_generic = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/xterm-truecolor.generic.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/xterm-truecolor.generic.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm256 = require_xterm_256color();
@@ -11609,9 +11609,9 @@ var require_xterm_truecolor_generic = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termconfig/xterm-truecolor.js
+// node_modules/terminal-kit/lib/termconfig/xterm-truecolor.js
 var require_xterm_truecolor = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termconfig/xterm-truecolor.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termconfig/xterm-truecolor.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var xterm256 = require_xterm_256color();
@@ -11637,10 +11637,10 @@ var require_xterm_truecolor = __commonJS({
   }
 });
 
-// require("./termconfig/**/*") in ../../../node_modules/terminal-kit/lib/Terminal.js
+// require("./termconfig/**/*") in node_modules/terminal-kit/lib/Terminal.js
 var globRequire_termconfig;
 var init_ = __esm({
-  'require("./termconfig/**/*") in ../../../node_modules/terminal-kit/lib/Terminal.js'() {
+  'require("./termconfig/**/*") in node_modules/terminal-kit/lib/Terminal.js'() {
     globRequire_termconfig = __glob({
       "./termconfig/README": () => require_README(),
       "./termconfig/atomic-terminal.js": () => require_atomic_terminal2(),
@@ -11668,9 +11668,9 @@ var init_ = __esm({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/colorScheme/default.json
+// node_modules/terminal-kit/lib/colorScheme/default.json
 var require_default = __commonJS({
-  "../../../node_modules/terminal-kit/lib/colorScheme/default.json"(exports, module) {
+  "node_modules/terminal-kit/lib/colorScheme/default.json"(exports, module) {
     module.exports = [
       { r: 0, g: 0, b: 0, names: ["black"] },
       { r: 180, g: 0, b: 0, names: ["red"] },
@@ -11692,9 +11692,9 @@ var require_default = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/colorScheme/solarized.json
+// node_modules/terminal-kit/lib/colorScheme/solarized.json
 var require_solarized = __commonJS({
-  "../../../node_modules/terminal-kit/lib/colorScheme/solarized.json"(exports, module) {
+  "node_modules/terminal-kit/lib/colorScheme/solarized.json"(exports, module) {
     module.exports = [
       { r: 7, g: 54, b: 66, names: ["base02"] },
       { r: 220, g: 50, b: 47, names: ["red"] },
@@ -11716,10 +11716,10 @@ var require_solarized = __commonJS({
   }
 });
 
-// require("./colorScheme/**/*.json") in ../../../node_modules/terminal-kit/lib/Terminal.js
+// require("./colorScheme/**/*.json") in node_modules/terminal-kit/lib/Terminal.js
 var globRequire_colorScheme_json;
 var init_2 = __esm({
-  'require("./colorScheme/**/*.json") in ../../../node_modules/terminal-kit/lib/Terminal.js'() {
+  'require("./colorScheme/**/*.json") in node_modules/terminal-kit/lib/Terminal.js'() {
     globRequire_colorScheme_json = __glob({
       "./colorScheme/atomic-terminal.json": () => require_atomic_terminal(),
       "./colorScheme/default.json": () => require_default(),
@@ -11734,9 +11734,9 @@ var init_2 = __esm({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/yesOrNo.js
+// node_modules/terminal-kit/lib/yesOrNo.js
 var require_yesOrNo = __commonJS({
-  "../../../node_modules/terminal-kit/lib/yesOrNo.js"(exports, module) {
+  "node_modules/terminal-kit/lib/yesOrNo.js"(exports, module) {
     "use strict";
     var Promise2 = require_seventh();
     module.exports = function yesOrNo(options, callback) {
@@ -11801,9 +11801,9 @@ var require_yesOrNo = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/autoComplete.js
+// node_modules/terminal-kit/lib/autoComplete.js
 var require_autoComplete = __commonJS({
-  "../../../node_modules/terminal-kit/lib/autoComplete.js"(exports, module) {
+  "node_modules/terminal-kit/lib/autoComplete.js"(exports, module) {
     "use strict";
     module.exports = function autoComplete(array, startString, returnAlternatives, prefix, postfix) {
       var i, j, exitLoop, candidates = [], completed = startString, hasCompleted = false;
@@ -11849,9 +11849,9 @@ var require_autoComplete = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/inputField.js
+// node_modules/terminal-kit/lib/inputField.js
 var require_inputField = __commonJS({
-  "../../../node_modules/terminal-kit/lib/inputField.js"(exports, module) {
+  "node_modules/terminal-kit/lib/inputField.js"(exports, module) {
     "use strict";
     var NextGenEvents = require_NextGenEvents();
     var Promise2 = require_seventh();
@@ -12639,9 +12639,9 @@ var require_inputField = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/fileHelpers.js
+// node_modules/terminal-kit/lib/fileHelpers.js
 var require_fileHelpers = __commonJS({
-  "../../../node_modules/terminal-kit/lib/fileHelpers.js"(exports) {
+  "node_modules/terminal-kit/lib/fileHelpers.js"(exports) {
     "use strict";
     var autoComplete = require_autoComplete();
     var fs = __require("fs");
@@ -12725,9 +12725,9 @@ var require_fileHelpers = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/fileInput.js
+// node_modules/terminal-kit/lib/fileInput.js
 var require_fileInput = __commonJS({
-  "../../../node_modules/terminal-kit/lib/fileInput.js"(exports, module) {
+  "node_modules/terminal-kit/lib/fileInput.js"(exports, module) {
     "use strict";
     var fileHelpers = require_fileHelpers();
     var path = __require("path");
@@ -12769,9 +12769,9 @@ var require_fileInput = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/singleLineMenu.js
+// node_modules/terminal-kit/lib/singleLineMenu.js
 var require_singleLineMenu = __commonJS({
-  "../../../node_modules/terminal-kit/lib/singleLineMenu.js"(exports, module) {
+  "node_modules/terminal-kit/lib/singleLineMenu.js"(exports, module) {
     "use strict";
     var termkit2 = require_termkit();
     var stringWidth = termkit2.stringWidth;
@@ -13139,9 +13139,9 @@ var require_singleLineMenu = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/singleColumnMenu.js
+// node_modules/terminal-kit/lib/singleColumnMenu.js
 var require_singleColumnMenu = __commonJS({
-  "../../../node_modules/terminal-kit/lib/singleColumnMenu.js"(exports, module) {
+  "node_modules/terminal-kit/lib/singleColumnMenu.js"(exports, module) {
     "use strict";
     var termkit2 = require_termkit();
     var stringWidth = termkit2.stringWidth;
@@ -13689,9 +13689,9 @@ var require_singleColumnMenu = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/gridMenu.js
+// node_modules/terminal-kit/lib/gridMenu.js
 var require_gridMenu = __commonJS({
-  "../../../node_modules/terminal-kit/lib/gridMenu.js"(exports, module) {
+  "node_modules/terminal-kit/lib/gridMenu.js"(exports, module) {
     "use strict";
     var Promise2 = require_seventh();
     var defaultKeyBindings = {
@@ -13989,9 +13989,9 @@ var require_gridMenu = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/progressBar.js
+// node_modules/terminal-kit/lib/progressBar.js
 var require_progressBar = __commonJS({
-  "../../../node_modules/terminal-kit/lib/progressBar.js"(exports, module) {
+  "node_modules/terminal-kit/lib/progressBar.js"(exports, module) {
     "use strict";
     module.exports = function progressBar_(options) {
       if (!options || typeof options !== "object") {
@@ -14359,9 +14359,9 @@ var require_progressBar = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/spChars.js
+// node_modules/terminal-kit/lib/spChars.js
 var require_spChars = __commonJS({
-  "../../../node_modules/terminal-kit/lib/spChars.js"(exports, module) {
+  "node_modules/terminal-kit/lib/spChars.js"(exports, module) {
     "use strict";
     var BIT_DOTS = "\u2800\u2801\u2802\u2803\u2804\u2805\u2806\u2807\u2840\u2841\u2842\u2843\u2844\u2845\u2846\u2847\u2808\u2809\u280A\u280B\u280C\u280D\u280E\u280F\u2848\u2849\u284A\u284B\u284C\u284D\u284E\u284F\u2810\u2811\u2812\u2813\u2814\u2815\u2816\u2817\u2850\u2851\u2852\u2853\u2854\u2855\u2856\u2857\u2818\u2819\u281A\u281B\u281C\u281D\u281E\u281F\u2858\u2859\u285A\u285B\u285C\u285D\u285E\u285F\u2820\u2821\u2822\u2823\u2824\u2825\u2826\u2827\u2860\u2861\u2862\u2863\u2864\u2865\u2866\u2867\u2828\u2829\u282A\u282B\u282C\u282D\u282E\u282F\u2868\u2869\u286A\u286B\u286C\u286D\u286E\u286F\u2830\u2831\u2832\u2833\u2834\u2835\u2836\u2837\u2870\u2871\u2872\u2873\u2874\u2875\u2876\u2877\u2838\u2839\u283A\u283B\u283C\u283D\u283E\u283F\u2878\u2879\u287A\u287B\u287C\u287D\u287E\u287F\u2880\u2881\u2882\u2883\u2884\u2885\u2886\u2887\u28C0\u28C1\u28C2\u28C3\u28C4\u28C5\u28C6\u28C7\u2888\u2889\u288A\u288B\u288C\u288D\u288E\u288F\u28C8\u28C9\u28CA\u28CB\u28CC\u28CD\u28CE\u28CF\u2890\u2891\u2892\u2893\u2894\u2895\u2896\u2897\u28D0\u28D1\u28D2\u28D3\u28D4\u28D5\u28D6\u28D7\u2898\u2899\u289A\u289B\u289C\u289D\u289E\u289F\u28D8\u28D9\u28DA\u28DB\u28DC\u28DD\u28DE\u28DF\u28A0\u28A1\u28A2\u28A3\u28A4\u28A5\u28A6\u28A7\u28E0\u28E1\u28E2\u28E3\u28E4\u28E5\u28E6\u28E7\u28A8\u28A9\u28AA\u28AB\u28AC\u28AD\u28AE\u28AF\u28E8\u28E9\u28EA\u28EB\u28EC\u28ED\u28EE\u28EF\u28B0\u28B1\u28B2\u28B3\u28B4\u28B5\u28B6\u28B7\u28F0\u28F1\u28F2\u28F3\u28F4\u28F5\u28F6\u28F7\u28B8\u28B9\u28BA\u28BB\u28BC\u28BD\u28BE\u28BF\u28F8\u28F9\u28FA\u28FB\u28FC\u28FD\u28FE\u28FF".split("");
     var GROWING_BLOCK = [" ", "\u2581", "\u2582", "\u2583", "\u2584", "\u2585", "\u2586", "\u2587", "\u2588"];
@@ -14644,9 +14644,9 @@ var require_spChars = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/bar.js
+// node_modules/terminal-kit/lib/bar.js
 var require_bar = __commonJS({
-  "../../../node_modules/terminal-kit/lib/bar.js"(exports, module) {
+  "node_modules/terminal-kit/lib/bar.js"(exports, module) {
     "use strict";
     var spChars = require_spChars();
     module.exports = function(value, options) {
@@ -14680,9 +14680,9 @@ var require_bar = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/slowTyping.js
+// node_modules/terminal-kit/lib/slowTyping.js
 var require_slowTyping = __commonJS({
-  "../../../node_modules/terminal-kit/lib/slowTyping.js"(exports, module) {
+  "node_modules/terminal-kit/lib/slowTyping.js"(exports, module) {
     "use strict";
     var Promise2 = require_seventh();
     module.exports = function slowTyping(str, options, callback) {
@@ -14746,18 +14746,18 @@ var require_slowTyping = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/patches.js
+// node_modules/terminal-kit/lib/patches.js
 var require_patches = __commonJS({
-  "../../../node_modules/terminal-kit/lib/patches.js"() {
+  "node_modules/terminal-kit/lib/patches.js"() {
     "use strict";
     var Promise2 = require_seventh();
     Promise2.promisifyNodeApi(__require("child_process"));
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/extClipboard.js
+// node_modules/terminal-kit/lib/extClipboard.js
 var require_extClipboard = __commonJS({
-  "../../../node_modules/terminal-kit/lib/extClipboard.js"(exports) {
+  "node_modules/terminal-kit/lib/extClipboard.js"(exports) {
     "use strict";
     var Promise2 = require_seventh();
     var string = require_string();
@@ -14799,9 +14799,9 @@ var require_extClipboard = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/Terminal.js
+// node_modules/terminal-kit/lib/Terminal.js
 var require_Terminal = __commonJS({
-  "../../../node_modules/terminal-kit/lib/Terminal.js"(exports, module) {
+  "node_modules/terminal-kit/lib/Terminal.js"(exports, module) {
     "use strict";
     init_();
     init_2();
@@ -16546,9 +16546,9 @@ var require_Terminal = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/windows.js
+// node_modules/terminal-kit/lib/windows.js
 var require_windows = __commonJS({
-  "../../../node_modules/terminal-kit/lib/windows.js"(exports, module) {
+  "node_modules/terminal-kit/lib/windows.js"(exports, module) {
     "use strict";
     module.exports = function(termkit2) {
       termkit2.globalConfig.preferProcessSigwinch = true;
@@ -16556,9 +16556,9 @@ var require_windows = __commonJS({
   }
 });
 
-// ../../../node_modules/iota-array/iota.js
+// node_modules/iota-array/iota.js
 var require_iota = __commonJS({
-  "../../../node_modules/iota-array/iota.js"(exports, module) {
+  "node_modules/iota-array/iota.js"(exports, module) {
     "use strict";
     function iota(n) {
       var result = new Array(n);
@@ -16571,9 +16571,9 @@ var require_iota = __commonJS({
   }
 });
 
-// ../../../node_modules/is-buffer/index.js
+// node_modules/is-buffer/index.js
 var require_is_buffer = __commonJS({
-  "../../../node_modules/is-buffer/index.js"(exports, module) {
+  "node_modules/is-buffer/index.js"(exports, module) {
     module.exports = function(obj) {
       return obj != null && (isBuffer(obj) || isSlowBuffer(obj) || !!obj._isBuffer);
     };
@@ -16586,9 +16586,9 @@ var require_is_buffer = __commonJS({
   }
 });
 
-// ../../../node_modules/ndarray/ndarray.js
+// node_modules/ndarray/ndarray.js
 var require_ndarray = __commonJS({
-  "../../../node_modules/ndarray/ndarray.js"(exports, module) {
+  "node_modules/ndarray/ndarray.js"(exports, module) {
     var iota = require_iota();
     var isBuffer = require_is_buffer();
     var hasTypedArrays = typeof Float64Array !== "undefined";
@@ -16840,9 +16840,9 @@ var require_ndarray = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/chunkstream.js
+// node_modules/pngjs/lib/chunkstream.js
 var require_chunkstream = __commonJS({
-  "../../../node_modules/pngjs/lib/chunkstream.js"(exports, module) {
+  "node_modules/pngjs/lib/chunkstream.js"(exports, module) {
     "use strict";
     var util2 = __require("util");
     var Stream = __require("stream");
@@ -16978,9 +16978,9 @@ var require_chunkstream = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/interlace.js
+// node_modules/pngjs/lib/interlace.js
 var require_interlace = __commonJS({
-  "../../../node_modules/pngjs/lib/interlace.js"(exports) {
+  "node_modules/pngjs/lib/interlace.js"(exports) {
     "use strict";
     var imagePasses = [
       {
@@ -17061,9 +17061,9 @@ var require_interlace = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/paeth-predictor.js
+// node_modules/pngjs/lib/paeth-predictor.js
 var require_paeth_predictor = __commonJS({
-  "../../../node_modules/pngjs/lib/paeth-predictor.js"(exports, module) {
+  "node_modules/pngjs/lib/paeth-predictor.js"(exports, module) {
     "use strict";
     module.exports = function paethPredictor(left, above, upLeft) {
       let paeth = left + above - upLeft;
@@ -17081,9 +17081,9 @@ var require_paeth_predictor = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/filter-parse.js
+// node_modules/pngjs/lib/filter-parse.js
 var require_filter_parse = __commonJS({
-  "../../../node_modules/pngjs/lib/filter-parse.js"(exports, module) {
+  "node_modules/pngjs/lib/filter-parse.js"(exports, module) {
     "use strict";
     var interlaceUtils = require_interlace();
     var paethPredictor = require_paeth_predictor();
@@ -17222,9 +17222,9 @@ var require_filter_parse = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/filter-parse-async.js
+// node_modules/pngjs/lib/filter-parse-async.js
 var require_filter_parse_async = __commonJS({
-  "../../../node_modules/pngjs/lib/filter-parse-async.js"(exports, module) {
+  "node_modules/pngjs/lib/filter-parse-async.js"(exports, module) {
     "use strict";
     var util2 = __require("util");
     var ChunkStream = require_chunkstream();
@@ -17248,9 +17248,9 @@ var require_filter_parse_async = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/constants.js
+// node_modules/pngjs/lib/constants.js
 var require_constants = __commonJS({
-  "../../../node_modules/pngjs/lib/constants.js"(exports, module) {
+  "node_modules/pngjs/lib/constants.js"(exports, module) {
     "use strict";
     module.exports = {
       PNG_SIGNATURE: [137, 80, 78, 71, 13, 10, 26, 10],
@@ -17283,9 +17283,9 @@ var require_constants = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/crc.js
+// node_modules/pngjs/lib/crc.js
 var require_crc = __commonJS({
-  "../../../node_modules/pngjs/lib/crc.js"(exports, module) {
+  "node_modules/pngjs/lib/crc.js"(exports, module) {
     "use strict";
     var crcTable = [];
     (function() {
@@ -17323,9 +17323,9 @@ var require_crc = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/parser.js
+// node_modules/pngjs/lib/parser.js
 var require_parser = __commonJS({
-  "../../../node_modules/pngjs/lib/parser.js"(exports, module) {
+  "node_modules/pngjs/lib/parser.js"(exports, module) {
     "use strict";
     var constants = require_constants();
     var CrcCalculator = require_crc();
@@ -17544,9 +17544,9 @@ var require_parser = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/bitmapper.js
+// node_modules/pngjs/lib/bitmapper.js
 var require_bitmapper = __commonJS({
-  "../../../node_modules/pngjs/lib/bitmapper.js"(exports) {
+  "node_modules/pngjs/lib/bitmapper.js"(exports) {
     "use strict";
     var interlaceUtils = require_interlace();
     var pixelBppMapper = [
@@ -17792,9 +17792,9 @@ var require_bitmapper = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/format-normaliser.js
+// node_modules/pngjs/lib/format-normaliser.js
 var require_format_normaliser = __commonJS({
-  "../../../node_modules/pngjs/lib/format-normaliser.js"(exports, module) {
+  "node_modules/pngjs/lib/format-normaliser.js"(exports, module) {
     "use strict";
     function dePalette(indata, outdata, width, height, palette) {
       let pxPos = 0;
@@ -17873,9 +17873,9 @@ var require_format_normaliser = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/parser-async.js
+// node_modules/pngjs/lib/parser-async.js
 var require_parser_async = __commonJS({
-  "../../../node_modules/pngjs/lib/parser-async.js"(exports, module) {
+  "node_modules/pngjs/lib/parser-async.js"(exports, module) {
     "use strict";
     var util2 = __require("util");
     var zlib = __require("zlib");
@@ -18003,9 +18003,9 @@ var require_parser_async = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/bitpacker.js
+// node_modules/pngjs/lib/bitpacker.js
 var require_bitpacker = __commonJS({
-  "../../../node_modules/pngjs/lib/bitpacker.js"(exports, module) {
+  "node_modules/pngjs/lib/bitpacker.js"(exports, module) {
     "use strict";
     var constants = require_constants();
     module.exports = function(dataIn, width, height, options) {
@@ -18153,9 +18153,9 @@ var require_bitpacker = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/filter-pack.js
+// node_modules/pngjs/lib/filter-pack.js
 var require_filter_pack = __commonJS({
-  "../../../node_modules/pngjs/lib/filter-pack.js"(exports, module) {
+  "node_modules/pngjs/lib/filter-pack.js"(exports, module) {
     "use strict";
     var paethPredictor = require_paeth_predictor();
     function filterNone(pxData, pxPos, byteWidth, rawData, rawPos) {
@@ -18295,9 +18295,9 @@ var require_filter_pack = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/packer.js
+// node_modules/pngjs/lib/packer.js
 var require_packer = __commonJS({
-  "../../../node_modules/pngjs/lib/packer.js"(exports, module) {
+  "node_modules/pngjs/lib/packer.js"(exports, module) {
     "use strict";
     var constants = require_constants();
     var CrcStream = require_crc();
@@ -18395,9 +18395,9 @@ var require_packer = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/packer-async.js
+// node_modules/pngjs/lib/packer-async.js
 var require_packer_async = __commonJS({
-  "../../../node_modules/pngjs/lib/packer-async.js"(exports, module) {
+  "node_modules/pngjs/lib/packer-async.js"(exports, module) {
     "use strict";
     var util2 = __require("util");
     var Stream = __require("stream");
@@ -18437,9 +18437,9 @@ var require_packer_async = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/sync-inflate.js
+// node_modules/pngjs/lib/sync-inflate.js
 var require_sync_inflate = __commonJS({
-  "../../../node_modules/pngjs/lib/sync-inflate.js"(exports, module) {
+  "node_modules/pngjs/lib/sync-inflate.js"(exports, module) {
     "use strict";
     var assert = __require("assert").ok;
     var zlib = __require("zlib");
@@ -18574,9 +18574,9 @@ var require_sync_inflate = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/sync-reader.js
+// node_modules/pngjs/lib/sync-reader.js
 var require_sync_reader = __commonJS({
-  "../../../node_modules/pngjs/lib/sync-reader.js"(exports, module) {
+  "node_modules/pngjs/lib/sync-reader.js"(exports, module) {
     "use strict";
     var SyncReader = module.exports = function(buffer) {
       this._buffer = buffer;
@@ -18612,9 +18612,9 @@ var require_sync_reader = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/filter-parse-sync.js
+// node_modules/pngjs/lib/filter-parse-sync.js
 var require_filter_parse_sync = __commonJS({
-  "../../../node_modules/pngjs/lib/filter-parse-sync.js"(exports) {
+  "node_modules/pngjs/lib/filter-parse-sync.js"(exports) {
     "use strict";
     var SyncReader = require_sync_reader();
     var Filter = require_filter_parse();
@@ -18636,9 +18636,9 @@ var require_filter_parse_sync = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/parser-sync.js
+// node_modules/pngjs/lib/parser-sync.js
 var require_parser_sync = __commonJS({
-  "../../../node_modules/pngjs/lib/parser-sync.js"(exports, module) {
+  "node_modules/pngjs/lib/parser-sync.js"(exports, module) {
     "use strict";
     var hasSyncZlib = true;
     var zlib = __require("zlib");
@@ -18731,9 +18731,9 @@ var require_parser_sync = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/packer-sync.js
+// node_modules/pngjs/lib/packer-sync.js
 var require_packer_sync = __commonJS({
-  "../../../node_modules/pngjs/lib/packer-sync.js"(exports, module) {
+  "node_modules/pngjs/lib/packer-sync.js"(exports, module) {
     "use strict";
     var hasSyncZlib = true;
     var zlib = __require("zlib");
@@ -18776,9 +18776,9 @@ var require_packer_sync = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/png-sync.js
+// node_modules/pngjs/lib/png-sync.js
 var require_png_sync = __commonJS({
-  "../../../node_modules/pngjs/lib/png-sync.js"(exports) {
+  "node_modules/pngjs/lib/png-sync.js"(exports) {
     "use strict";
     var parse = require_parser_sync();
     var pack = require_packer_sync();
@@ -18791,9 +18791,9 @@ var require_png_sync = __commonJS({
   }
 });
 
-// ../../../node_modules/pngjs/lib/png.js
+// node_modules/pngjs/lib/png.js
 var require_png = __commonJS({
-  "../../../node_modules/pngjs/lib/png.js"(exports) {
+  "node_modules/pngjs/lib/png.js"(exports) {
     "use strict";
     var util2 = __require("util");
     var Stream = __require("stream");
@@ -18928,9 +18928,9 @@ var require_png = __commonJS({
   }
 });
 
-// ../../../node_modules/jpeg-js/lib/encoder.js
+// node_modules/jpeg-js/lib/encoder.js
 var require_encoder = __commonJS({
-  "../../../node_modules/jpeg-js/lib/encoder.js"(exports, module) {
+  "node_modules/jpeg-js/lib/encoder.js"(exports, module) {
     var btoa = btoa || function(buf) {
       return Buffer.from(buf).toString("base64");
     };
@@ -20005,9 +20005,9 @@ var require_encoder = __commonJS({
   }
 });
 
-// ../../../node_modules/jpeg-js/lib/decoder.js
+// node_modules/jpeg-js/lib/decoder.js
 var require_decoder = __commonJS({
-  "../../../node_modules/jpeg-js/lib/decoder.js"(exports, module) {
+  "node_modules/jpeg-js/lib/decoder.js"(exports, module) {
     var JpegImage = (function jpegImage() {
       "use strict";
       var dctZigZag = new Int32Array([
@@ -21067,9 +21067,9 @@ var require_decoder = __commonJS({
   }
 });
 
-// ../../../node_modules/jpeg-js/index.js
+// node_modules/jpeg-js/index.js
 var require_jpeg_js = __commonJS({
-  "../../../node_modules/jpeg-js/index.js"(exports, module) {
+  "node_modules/jpeg-js/index.js"(exports, module) {
     var encode = require_encoder();
     var decode = require_decoder();
     module.exports = {
@@ -21079,9 +21079,9 @@ var require_jpeg_js = __commonJS({
   }
 });
 
-// ../../../node_modules/uniq/uniq.js
+// node_modules/uniq/uniq.js
 var require_uniq = __commonJS({
-  "../../../node_modules/uniq/uniq.js"(exports, module) {
+  "node_modules/uniq/uniq.js"(exports, module) {
     "use strict";
     function unique_pred(list, compare) {
       var ptr = 1, len = list.length, a = list[0], b = list[0];
@@ -21134,9 +21134,9 @@ var require_uniq = __commonJS({
   }
 });
 
-// ../../../node_modules/cwise-compiler/lib/compile.js
+// node_modules/cwise-compiler/lib/compile.js
 var require_compile = __commonJS({
-  "../../../node_modules/cwise-compiler/lib/compile.js"(exports, module) {
+  "node_modules/cwise-compiler/lib/compile.js"(exports, module) {
     "use strict";
     var uniq = require_uniq();
     function innerFill(order, proc, body) {
@@ -21433,9 +21433,9 @@ var require_compile = __commonJS({
   }
 });
 
-// ../../../node_modules/cwise-compiler/lib/thunk.js
+// node_modules/cwise-compiler/lib/thunk.js
 var require_thunk = __commonJS({
-  "../../../node_modules/cwise-compiler/lib/thunk.js"(exports, module) {
+  "node_modules/cwise-compiler/lib/thunk.js"(exports, module) {
     "use strict";
     var compile = require_compile();
     function createThunk(proc) {
@@ -21511,9 +21511,9 @@ var require_thunk = __commonJS({
   }
 });
 
-// ../../../node_modules/cwise-compiler/compiler.js
+// node_modules/cwise-compiler/compiler.js
 var require_compiler = __commonJS({
-  "../../../node_modules/cwise-compiler/compiler.js"(exports, module) {
+  "node_modules/cwise-compiler/compiler.js"(exports, module) {
     "use strict";
     var createThunk = require_thunk();
     function Procedure() {
@@ -21606,16 +21606,16 @@ var require_compiler = __commonJS({
   }
 });
 
-// ../../../node_modules/ndarray-pack/doConvert.js
+// node_modules/ndarray-pack/doConvert.js
 var require_doConvert = __commonJS({
-  "../../../node_modules/ndarray-pack/doConvert.js"(exports, module) {
+  "node_modules/ndarray-pack/doConvert.js"(exports, module) {
     module.exports = require_compiler()({ "args": ["array", "scalar", "index"], "pre": { "body": "{}", "args": [], "thisVars": [], "localVars": [] }, "body": { "body": "{\nvar _inline_1_v=_inline_1_arg1_,_inline_1_i\nfor(_inline_1_i=0;_inline_1_i<_inline_1_arg2_.length-1;++_inline_1_i) {\n_inline_1_v=_inline_1_v[_inline_1_arg2_[_inline_1_i]]\n}\n_inline_1_arg0_=_inline_1_v[_inline_1_arg2_[_inline_1_arg2_.length-1]]\n}", "args": [{ "name": "_inline_1_arg0_", "lvalue": true, "rvalue": false, "count": 1 }, { "name": "_inline_1_arg1_", "lvalue": false, "rvalue": true, "count": 1 }, { "name": "_inline_1_arg2_", "lvalue": false, "rvalue": true, "count": 4 }], "thisVars": [], "localVars": ["_inline_1_i", "_inline_1_v"] }, "post": { "body": "{}", "args": [], "thisVars": [], "localVars": [] }, "funcName": "convert", "blockSize": 64 });
   }
 });
 
-// ../../../node_modules/ndarray-pack/convert.js
+// node_modules/ndarray-pack/convert.js
 var require_convert = __commonJS({
-  "../../../node_modules/ndarray-pack/convert.js"(exports, module) {
+  "node_modules/ndarray-pack/convert.js"(exports, module) {
     "use strict";
     var ndarray = require_ndarray();
     var do_convert = require_doConvert();
@@ -21638,9 +21638,9 @@ var require_convert = __commonJS({
   }
 });
 
-// ../../../node_modules/omggif/omggif.js
+// node_modules/omggif/omggif.js
 var require_omggif = __commonJS({
-  "../../../node_modules/omggif/omggif.js"(exports) {
+  "node_modules/omggif/omggif.js"(exports) {
     "use strict";
     function GifWriter(buf, width, height, gopts) {
       var p = 0;
@@ -22200,9 +22200,9 @@ var require_omggif = __commonJS({
   }
 });
 
-// ../../../node_modules/node-bitmap/lib/bitmap.js
+// node_modules/node-bitmap/lib/bitmap.js
 var require_bitmap = __commonJS({
-  "../../../node_modules/node-bitmap/lib/bitmap.js"(exports, module) {
+  "node_modules/node-bitmap/lib/bitmap.js"(exports, module) {
     var Bitmap = module.exports = exports = function(buffer) {
       this.buffer = buffer;
       this.initialized = false;
@@ -22779,16 +22779,16 @@ var require_bitmap = __commonJS({
   }
 });
 
-// ../../../node_modules/node-bitmap/index.js
+// node_modules/node-bitmap/index.js
 var require_node_bitmap = __commonJS({
-  "../../../node_modules/node-bitmap/index.js"(exports, module) {
+  "node_modules/node-bitmap/index.js"(exports, module) {
     module.exports = require_bitmap();
   }
 });
 
-// ../../../node_modules/@cronvel/get-pixels/node-pixels.js
+// node_modules/@cronvel/get-pixels/node-pixels.js
 var require_node_pixels = __commonJS({
-  "../../../node_modules/@cronvel/get-pixels/node-pixels.js"(exports, module) {
+  "node_modules/@cronvel/get-pixels/node-pixels.js"(exports, module) {
     "use strict";
     var ndarray = require_ndarray();
     var PNG = require_png().PNG;
@@ -22929,9 +22929,9 @@ var require_node_pixels = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/image.js
+// node_modules/terminal-kit/lib/image.js
 var require_image = __commonJS({
-  "../../../node_modules/terminal-kit/lib/image.js"(exports, module) {
+  "node_modules/terminal-kit/lib/image.js"(exports, module) {
     "use strict";
     var ndarray = require_ndarray();
     var Promise2 = require_seventh();
@@ -23026,9 +23026,9 @@ var require_image = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/Palette.js
+// node_modules/terminal-kit/lib/Palette.js
 var require_Palette = __commonJS({
-  "../../../node_modules/terminal-kit/lib/Palette.js"(exports, module) {
+  "node_modules/terminal-kit/lib/Palette.js"(exports, module) {
     "use strict";
     var termkit2 = require_termkit();
     var defaultAdaptivePaletteDef = [
@@ -23292,9 +23292,9 @@ var require_Palette = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/Rect.js
+// node_modules/terminal-kit/lib/Rect.js
 var require_Rect = __commonJS({
-  "../../../node_modules/terminal-kit/lib/Rect.js"(exports, module) {
+  "node_modules/terminal-kit/lib/Rect.js"(exports, module) {
     "use strict";
     var termkit2 = require_termkit();
     function Rect(xmin, ymin, xmax, ymax) {
@@ -23684,9 +23684,9 @@ var require_Rect = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/ScreenBuffer.js
+// node_modules/terminal-kit/lib/ScreenBuffer.js
 var require_ScreenBuffer = __commonJS({
-  "../../../node_modules/terminal-kit/lib/ScreenBuffer.js"(exports, module) {
+  "node_modules/terminal-kit/lib/ScreenBuffer.js"(exports, module) {
     "use strict";
     var misc = require_misc2();
     var fs = __require("fs");
@@ -25058,9 +25058,9 @@ var require_ScreenBuffer = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/ScreenBufferHD.js
+// node_modules/terminal-kit/lib/ScreenBufferHD.js
 var require_ScreenBufferHD = __commonJS({
-  "../../../node_modules/terminal-kit/lib/ScreenBufferHD.js"(exports, module) {
+  "node_modules/terminal-kit/lib/ScreenBufferHD.js"(exports, module) {
     "use strict";
     var ScreenBuffer = require_ScreenBuffer();
     var misc = require_misc2();
@@ -25939,9 +25939,9 @@ var require_ScreenBufferHD = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/TextBuffer.js
+// node_modules/terminal-kit/lib/TextBuffer.js
 var require_TextBuffer = __commonJS({
-  "../../../node_modules/terminal-kit/lib/TextBuffer.js"(exports, module) {
+  "node_modules/terminal-kit/lib/TextBuffer.js"(exports, module) {
     "use strict";
     var misc = require_misc2();
     var fs = __require("fs");
@@ -27564,9 +27564,9 @@ var require_TextBuffer = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/vte/toInputSequence.js
+// node_modules/terminal-kit/lib/vte/toInputSequence.js
 var require_toInputSequence = __commonJS({
-  "../../../node_modules/terminal-kit/lib/vte/toInputSequence.js"(exports) {
+  "node_modules/terminal-kit/lib/vte/toInputSequence.js"(exports) {
     "use strict";
     exports.specialKeys = {
       /*
@@ -27719,9 +27719,9 @@ var require_toInputSequence = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/vte/fromOutputSequence.js
+// node_modules/terminal-kit/lib/vte/fromOutputSequence.js
 var require_fromOutputSequence = __commonJS({
-  "../../../node_modules/terminal-kit/lib/vte/fromOutputSequence.js"(exports) {
+  "node_modules/terminal-kit/lib/vte/fromOutputSequence.js"(exports) {
     "use strict";
     exports.control = {
       "\\x07": { event: "bell" },
@@ -27920,9 +27920,9 @@ var require_fromOutputSequence = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/vte/SequencesReader.js
+// node_modules/terminal-kit/lib/vte/SequencesReader.js
 var require_SequencesReader = __commonJS({
-  "../../../node_modules/terminal-kit/lib/vte/SequencesReader.js"(exports, module) {
+  "node_modules/terminal-kit/lib/vte/SequencesReader.js"(exports, module) {
     "use strict";
     var fromOutputSequence = require_fromOutputSequence();
     var string = require_string();
@@ -28178,9 +28178,9 @@ var require_SequencesReader = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/vte/Vte.js
+// node_modules/terminal-kit/lib/vte/Vte.js
 var require_Vte = __commonJS({
-  "../../../node_modules/terminal-kit/lib/vte/Vte.js"(exports, module) {
+  "node_modules/terminal-kit/lib/vte/Vte.js"(exports, module) {
     "use strict";
     var ScreenBuffer = require_ScreenBuffer();
     var Rect = require_Rect();
@@ -29023,9 +29023,9 @@ var require_Vte = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/Element.js
+// node_modules/terminal-kit/lib/document/Element.js
 var require_Element = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/Element.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/Element.js"(exports, module) {
     "use strict";
     var misc = require_misc2();
     var string = require_string();
@@ -29675,9 +29675,9 @@ var require_Element = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/Container.js
+// node_modules/terminal-kit/lib/document/Container.js
 var require_Container = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/Container.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/Container.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var ScreenBuffer = require_ScreenBuffer();
@@ -29928,9 +29928,9 @@ var require_Container = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/Document.js
+// node_modules/terminal-kit/lib/document/Document.js
 var require_Document = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/Document.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/Document.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var Container = require_Container();
@@ -30444,9 +30444,9 @@ var require_Document = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/Text.js
+// node_modules/terminal-kit/lib/document/Text.js
 var require_Text = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/Text.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/Text.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     function Text(options) {
@@ -30599,9 +30599,9 @@ var require_Text = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/AnimatedText.js
+// node_modules/terminal-kit/lib/document/AnimatedText.js
 var require_AnimatedText = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/AnimatedText.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/AnimatedText.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var Text = require_Text();
@@ -30660,9 +30660,9 @@ var require_AnimatedText = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/Button.js
+// node_modules/terminal-kit/lib/document/Button.js
 var require_Button = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/Button.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/Button.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var Text = require_Text();
@@ -30928,9 +30928,9 @@ var require_Button = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/ToggleButton.js
+// node_modules/terminal-kit/lib/document/ToggleButton.js
 var require_ToggleButton = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/ToggleButton.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/ToggleButton.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var Text = require_Text();
@@ -31041,9 +31041,9 @@ var require_ToggleButton = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/Slider.js
+// node_modules/terminal-kit/lib/document/Slider.js
 var require_Slider = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/Slider.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/Slider.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var Button = require_Button();
@@ -31231,9 +31231,9 @@ var require_Slider = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/TextBox.js
+// node_modules/terminal-kit/lib/document/TextBox.js
 var require_TextBox = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/TextBox.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/TextBox.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var Slider = require_Slider();
@@ -31727,9 +31727,9 @@ var require_TextBox = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/EditableTextBox.js
+// node_modules/terminal-kit/lib/document/EditableTextBox.js
 var require_EditableTextBox = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/EditableTextBox.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/EditableTextBox.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var TextBox = require_TextBox();
@@ -32268,9 +32268,9 @@ var require_EditableTextBox = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/Bar.js
+// node_modules/terminal-kit/lib/document/Bar.js
 var require_Bar = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/Bar.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/Bar.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var builtinBarChars = require_spChars().bar;
@@ -32421,9 +32421,9 @@ var require_Bar = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/BaseMenu.js
+// node_modules/terminal-kit/lib/document/BaseMenu.js
 var require_BaseMenu = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/BaseMenu.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/BaseMenu.js"(exports, module) {
     "use strict";
     var tree = require_tree();
     var Element = require_Element();
@@ -32852,9 +32852,9 @@ var require_BaseMenu = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/ColumnMenu.js
+// node_modules/terminal-kit/lib/document/ColumnMenu.js
 var require_ColumnMenu = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/ColumnMenu.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/ColumnMenu.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var BaseMenu = require_BaseMenu();
@@ -33171,9 +33171,9 @@ var require_ColumnMenu = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/SelectList.js
+// node_modules/terminal-kit/lib/document/SelectList.js
 var require_SelectList = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/SelectList.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/SelectList.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var BaseMenu = require_BaseMenu();
@@ -33326,9 +33326,9 @@ var require_SelectList = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/ColumnMenuMulti.js
+// node_modules/terminal-kit/lib/document/ColumnMenuMulti.js
 var require_ColumnMenuMulti = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/ColumnMenuMulti.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/ColumnMenuMulti.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var ColumnMenu = require_ColumnMenu();
@@ -33433,9 +33433,9 @@ var require_ColumnMenuMulti = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/SelectListMulti.js
+// node_modules/terminal-kit/lib/document/SelectListMulti.js
 var require_SelectListMulti = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/SelectListMulti.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/SelectListMulti.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var BaseMenu = require_BaseMenu();
@@ -33547,9 +33547,9 @@ var require_SelectListMulti = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/LabeledInput.js
+// node_modules/terminal-kit/lib/document/LabeledInput.js
 var require_LabeledInput = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/LabeledInput.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/LabeledInput.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var Text = require_Text();
@@ -33840,9 +33840,9 @@ var require_LabeledInput = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/RowMenu.js
+// node_modules/terminal-kit/lib/document/RowMenu.js
 var require_RowMenu = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/RowMenu.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/RowMenu.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var BaseMenu = require_BaseMenu();
@@ -34087,9 +34087,9 @@ var require_RowMenu = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/InlineInput.js
+// node_modules/terminal-kit/lib/document/InlineInput.js
 var require_InlineInput = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/InlineInput.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/InlineInput.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var TextBox = require_TextBox();
@@ -34453,9 +34453,9 @@ var require_InlineInput = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/InlineFileInput.js
+// node_modules/terminal-kit/lib/document/InlineFileInput.js
 var require_InlineFileInput = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/InlineFileInput.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/InlineFileInput.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var InlineInput = require_InlineInput();
@@ -34533,9 +34533,9 @@ var require_InlineFileInput = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/InlineMenu.js
+// node_modules/terminal-kit/lib/document/InlineMenu.js
 var require_InlineMenu = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/InlineMenu.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/InlineMenu.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var TextBox = require_TextBox();
@@ -34594,9 +34594,9 @@ var require_InlineMenu = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/Inspector.js
+// node_modules/terminal-kit/lib/document/Inspector.js
 var require_Inspector = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/Inspector.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/Inspector.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var Text = require_Text();
@@ -34896,9 +34896,9 @@ var require_Inspector = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/Form.js
+// node_modules/terminal-kit/lib/document/Form.js
 var require_Form = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/Form.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/Form.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var LabeledInput = require_LabeledInput();
@@ -35119,9 +35119,9 @@ var require_Form = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/ColumnMenuMixed.js
+// node_modules/terminal-kit/lib/document/ColumnMenuMixed.js
 var require_ColumnMenuMixed = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/ColumnMenuMixed.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/ColumnMenuMixed.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var ColumnMenu = require_ColumnMenu();
@@ -35203,9 +35203,9 @@ var require_ColumnMenuMixed = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/DropDownMenu.js
+// node_modules/terminal-kit/lib/document/DropDownMenu.js
 var require_DropDownMenu = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/DropDownMenu.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/DropDownMenu.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var ToggleButton = require_ToggleButton();
@@ -35385,9 +35385,9 @@ var require_DropDownMenu = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/TextTable.js
+// node_modules/terminal-kit/lib/document/TextTable.js
 var require_TextTable = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/TextTable.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/TextTable.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var TextBox = require_TextBox();
@@ -35781,9 +35781,9 @@ var require_TextTable = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/Layout.js
+// node_modules/terminal-kit/lib/document/Layout.js
 var require_Layout = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/Layout.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/Layout.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var Container = require_Container();
@@ -36011,9 +36011,9 @@ var require_Layout = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/Border.js
+// node_modules/terminal-kit/lib/document/Border.js
 var require_Border = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/Border.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/Border.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var framesChars = require_spChars().box;
@@ -36095,9 +36095,9 @@ var require_Border = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/document/Window.js
+// node_modules/terminal-kit/lib/document/Window.js
 var require_Window = __commonJS({
-  "../../../node_modules/terminal-kit/lib/document/Window.js"(exports, module) {
+  "node_modules/terminal-kit/lib/document/Window.js"(exports, module) {
     "use strict";
     var Element = require_Element();
     var Container = require_Container();
@@ -36161,9 +36161,9 @@ var require_Window = __commonJS({
   }
 });
 
-// ../../../node_modules/chroma-js/dist/chroma.cjs
+// node_modules/chroma-js/dist/chroma.cjs
 var require_chroma = __commonJS({
-  "../../../node_modules/chroma-js/dist/chroma.cjs"(exports, module) {
+  "node_modules/chroma-js/dist/chroma.cjs"(exports, module) {
     (function(global2, factory) {
       typeof exports === "object" && typeof module !== "undefined" ? module.exports = factory() : typeof define === "function" && define.amd ? define(factory) : (global2 = typeof globalThis !== "undefined" ? globalThis : global2 || self, global2.chroma = factory());
     })(exports, (function() {
@@ -38972,9 +38972,9 @@ var require_chroma = __commonJS({
   }
 });
 
-// ../../../node_modules/terminal-kit/lib/termkit-no-lazy-require.js
+// node_modules/terminal-kit/lib/termkit-no-lazy-require.js
 var require_termkit_no_lazy_require = __commonJS({
-  "../../../node_modules/terminal-kit/lib/termkit-no-lazy-require.js"(exports, module) {
+  "node_modules/terminal-kit/lib/termkit-no-lazy-require.js"(exports, module) {
     "use strict";
     var termkit2 = {};
     module.exports = termkit2;
@@ -39078,7 +39078,7 @@ import { mkdirSync as mkdirSync2, existsSync as existsSync2, realpathSync, statS
 import { dirname as dirname2, basename, join as join2, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 
-// ../../../node_modules/zod/v3/external.js
+// node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
   BRAND: () => BRAND,
@@ -39190,7 +39190,7 @@ __export(external_exports, {
   void: () => voidType
 });
 
-// ../../../node_modules/zod/v3/helpers/util.js
+// node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
   util2.assertEqual = (_) => {
@@ -39324,7 +39324,7 @@ var getParsedType = (data) => {
   }
 };
 
-// ../../../node_modules/zod/v3/ZodError.js
+// node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   "invalid_type",
   "invalid_literal",
@@ -39442,7 +39442,7 @@ ZodError.create = (issues) => {
   return error;
 };
 
-// ../../../node_modules/zod/v3/locales/en.js
+// node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -39545,7 +39545,7 @@ var errorMap = (issue, _ctx) => {
 };
 var en_default = errorMap;
 
-// ../../../node_modules/zod/v3/errors.js
+// node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -39554,7 +39554,7 @@ function getErrorMap() {
   return overrideErrorMap;
 }
 
-// ../../../node_modules/zod/v3/helpers/parseUtil.js
+// node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...issueData.path || []];
@@ -39664,14 +39664,14 @@ var isDirty = (x) => x.status === "dirty";
 var isValid = (x) => x.status === "valid";
 var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
 
-// ../../../node_modules/zod/v3/helpers/errorUtil.js
+// node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function(errorUtil2) {
   errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
 
-// ../../../node_modules/zod/v3/types.js
+// node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
