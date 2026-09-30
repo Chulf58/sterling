@@ -8847,6 +8847,11 @@ import { join as join6, dirname as dirname4 } from "node:path";
 function deliveryDir(cwd) {
   return join6(cwd, ".sterling", "transient", "delivery");
 }
+var HEADER_TERM_CAP = 6;
+function boundedTermClause(terms, cap = HEADER_TERM_CAP) {
+  const all = [...new Set(terms)];
+  return all.slice(0, cap).join(", ") + (all.length > cap ? ` (+${all.length - cap} more)` : "");
+}
 var REVIEW_TERRITORY_LINE_RE = /^[ \t]*REVIEW-TERRITORY:[ \t]*\[[^\n]*\][ \t]*\r?$/gm;
 function stripReviewTerritoryLine(text) {
   return String(text ?? "").replace(REVIEW_TERRITORY_LINE_RE, "");
@@ -9063,41 +9068,50 @@ function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes, matchLabel = "for
   const slug = ap?.slug ? typeof clipSlugBytes === "number" ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug : "";
   return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, pointerOnly = false } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, pointerOnly = false, capLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
-  const fullTotal = total ?? hazards.length;
-  const dropped = suppressed ?? hazards.length - shown.length;
-  const blocks = shown.map(
-    (ap) => pointerOnly ? hazardHeaderLine(ap, { matchLabel }) : [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
-  );
-  if (dropped > 0) {
-    const keys = fileKeys.map((k) => `"${k}"`).join(",");
-    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
-    blocks.push(`\u2026 ${dropped} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
-  }
+  const blocks = shown.map((ap) => pointerOnly ? hazardHeaderLine(ap, { matchLabel }) : wholeHazardBlock(ap, charCap, matchLabel));
+  const disclosure2 = hazardDisclosureLine(hazards, shown, { cap, fileKeys, remedy, total, suppressed, capLabel });
+  if (disclosure2) blocks.push(disclosure2);
   return blocks;
 }
-function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = "whole" } = {}) {
+function wholeHazardBlock(ap, charCap, matchLabel) {
+  return [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n");
+}
+function hazardDisclosureLine(hazards, shown, { cap, fileKeys = [], remedy, total, suppressed, capLabel }) {
+  const fullTotal = total ?? hazards.length;
+  const dropped = suppressed ?? hazards.length - shown.length;
+  if (!(dropped > 0)) return "";
+  const keys = fileKeys.map((k) => `"${k}"`).join(",");
+  const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
+  return `\u2026 ${dropped} more hazard(s) NOT shown (${capLabel ?? `cap ${cap}`}) \u2014 ${widen} for the full set`;
+}
+function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = "whole", capLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
   if (mode === "pointer") return hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   if (mode === "question") return hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
-  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
-  return blocks.map(
-    (text, i) => i < shown.length ? {
-      kind: "hazard",
-      contentClass: "substance",
-      identity: shown[i].id,
-      revision: recordRevision(shown[i]),
-      name: shown[i].slug || shown[i].title,
-      text,
-      // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
-      // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
-      // the hard transport ceiling degrades to this bare notice — never a
-      // partial trigger/right_way (the HAZARDS clause: "each whole") —
-      // and the assembler then correctly withholds its substance mark.
-      pointer: hazardOverflowPointer(shown[i], matchLabel)
-    } : { kind: "hazard", contentClass: "chrome", text }
-  );
+  if (mode === "lead") return hazardLeadParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
+  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel, capLabel });
+  return blocks.map((text, i) => i < shown.length ? wholeHazardPart(shown[i], text, matchLabel) : { kind: "hazard", contentClass: "chrome", text });
+}
+function wholeHazardPart(ap, text, matchLabel) {
+  return {
+    kind: "hazard",
+    contentClass: "substance",
+    identity: ap.id,
+    revision: recordRevision(ap),
+    name: ap.slug || ap.title,
+    text,
+    // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
+    // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
+    // the hard transport ceiling degrades to this bare notice — never a
+    // partial trigger/right_way (the HAZARDS clause: "each whole") —
+    // and the assembler then correctly withholds its substance mark.
+    pointer: hazardOverflowPointer(ap, matchLabel),
+    // A hazard that fits alone but not beside what the package already holds
+    // degrades to this notice instead, so the reader is told the real cause.
+    pointerWhenFull: hazardPackageFullPointer(ap, matchLabel)
+  };
 }
 var HAZARD_POINTER_HEADER = "HAZARDS (pointer-only: read-only lane \u2014 knowledge_get each before acting on its subject)";
 function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel }) {
@@ -9112,8 +9126,10 @@ function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, supp
         identity: shown[i].id,
         revision: recordRevision(shown[i]),
         name: shown[i].slug || shown[i].title,
-        text,
-        pointer: hazardOverflowPointer(shown[i], matchLabel)
+        text
+        // No pointer: a line IS its pointer. One that does not fit is
+        // omitted and named in the '+N more' disclosure, never turned
+        // into a degrade notice for a record that was never whole.
       } : { kind: "hazard", contentClass: "chrome", text }
     )
   ];
@@ -9143,14 +9159,41 @@ function hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, sup
         identity: shown[i].id,
         revision: recordRevision(shown[i]),
         name: shown[i].slug || shown[i].title,
-        text,
-        pointer: hazardOverflowPointer(shown[i], matchLabel)
+        text
+        // No pointer: a line IS its pointer. One that does not fit is
+        // omitted and named in the '+N more' disclosure, never turned
+        // into a degrade notice for a record that was never whole.
       } : { kind: "hazard", contentClass: "chrome", text }
     )
   ];
 }
+function hazardLeadParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel = "for this path" }) {
+  if (!shown.length) return [];
+  const [lead, ...rest] = shown;
+  const parts = [wholeHazardPart(lead, wholeHazardBlock(lead, Number.MAX_SAFE_INTEGER, matchLabel), matchLabel)];
+  if (rest.length) {
+    parts.push(
+      { kind: "hazard", contentClass: "chrome", text: `\u25B8 ${rest.length} MORE HAZARD(S) ${matchLabel} \u2014 one line each, not the whole record; knowledge_get the id for its right way.` },
+      ...rest.map((ap) => ({
+        // No pointer: a line IS its pointer (see hazardQuestionParts).
+        kind: "hazard",
+        contentClass: "discovery",
+        identity: ap.id,
+        revision: recordRevision(ap),
+        name: ap.slug || ap.title,
+        text: hazardQuestionLine(ap)
+      }))
+    );
+  }
+  const disclosure2 = hazardDisclosureLine(hazards, shown, { cap, fileKeys, remedy, total, suppressed });
+  if (disclosure2) parts.push({ kind: "hazard", contentClass: "chrome", text: `  ${disclosure2}` });
+  return parts;
+}
 function hazardOverflowPointer(record, matchLabel = "for this path") {
   return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
+}
+function hazardPackageFullPointer(record, matchLabel = "for this path") {
+  return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 not shown whole: delivery full (this package reached the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
 }
 var DECISION_POINTER_CAP = 8;
 var DECISION_AUTHORITY_RANK = { standing: 0, session_scoped: 2, one_off: 3 };
@@ -9269,6 +9312,7 @@ function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}
   const fitsOrdinaryCap = (extra = 0) => ordinaryBytesUsed() + extra <= ordinaryCeiling;
   const fitsTransport = (extra = 0) => totalBytes() + extra <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
   const pointerFor = (part) => part.pointer || "";
+  const fullPointerFor = (part) => part.pointerWhenFull || pointerFor(part);
   const tryDegradeOrdinary = (part, fitsFn) => {
     selected.set(part, { text: part.text, full: true });
     if (fitsFn("whole")) return;
@@ -9314,7 +9358,7 @@ ${line}` : line;
     selected.set(part, { text: part.text, full: true });
     if (fitsTransport()) return;
     selected.delete(part);
-    const ptr = pointerFor(part);
+    const ptr = bytes(part.text) > DELIVERY_TRANSPORT_VISIBLE_BYTES ? pointerFor(part) : fullPointerFor(part);
     if (ptr) {
       selected.set(part, { text: ptr, full: false });
       if (fitsTransport()) return;
@@ -9426,14 +9470,14 @@ ${line}` : line;
       selected.delete(aggregatePart);
       const evictable = [...items].reverse().filter((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
       const last = evictable.find((part) => !isChrome(part) && !reserved.has(part)) ?? evictable.find((part) => !isChrome(part)) ?? evictable[0];
-      if (last) {
+      const degradable = !transportOk ? [...items].reverse().find((part) => isHazard(part) && selected.has(part) && selected.get(part).full && pointerFor(part)) : null;
+      if (last && (!isChrome(last) || !degradable)) {
         selected.delete(last);
         omitted.push(last);
         continue;
       }
-      const degradable = !transportOk ? [...items].reverse().find((part) => isHazard(part) && selected.has(part) && selected.get(part).full && pointerFor(part)) : null;
       if (degradable) {
-        selected.set(degradable, { text: pointerFor(degradable), full: false });
+        selected.set(degradable, { text: fullPointerFor(degradable), full: false });
         continue;
       }
       selected.set(aggregatePart, { text, full: false });
@@ -9618,6 +9662,11 @@ async function main(input2) {
       ...unattributableLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: unattributableLine }] : [],
       ...!EXEMPT_AGENT_TYPES.has(input2.agent_type) ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: RETURN_CONTRACT }] : []
     ];
+    const packageHazards = hazardMode === "whole" ? cappedHazards([...freshHazards, ...subjectHazards]) : null;
+    const channelCap = (list) => packageHazards ? packageHazards.filter((r) => list.includes(r)).length : HAZARD_CAP;
+    const channelCapLabel = (cap) => cap < HAZARD_CAP ? `cap ${HAZARD_CAP} per package, shared across the path and subject channels` : void 0;
+    const pathHazardCap = channelCap(freshHazards);
+    const subjectHazardCap = channelCap(subjectHazards);
     const assemble = () => {
       const parts = [];
       if (freshOwners.length || freshHazards.length || freshDecisions.length) {
@@ -9629,15 +9678,18 @@ async function main(input2) {
         });
         const decisionParts = freshDecisions.length ? [decisionPointerPart(rels.join(", "), freshDecisions, { widen: decisionWiden })] : [];
         parts.push(
-          { kind: "ordinary", contentClass: "chrome", text: payloadHeaderLine(rels.join(", ")) },
-          ...hazardParts(freshHazards, { fileKeys: rels, mode: hazardMode }),
+          // PINNED (P5), like H20's header: under disclosure pressure at the
+          // transport ceiling a whole hazard falls to its pointer before a
+          // pinned header is evicted, so the lane never gets unattributed hazards.
+          { kind: "ordinary", pinned: true, contentClass: "chrome", text: payloadHeaderLine(rels.join(", ")) },
+          ...hazardParts(freshHazards, { fileKeys: rels, mode: hazardMode, cap: pathHazardCap, capLabel: channelCapLabel(pathHazardCap) }),
           ...ownerParts,
           ...decisionParts
         );
       }
       if (subjectHazards.length || subjectDecisions.length) {
-        const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(", ");
-        const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(", ");
+        const matched = boundedTermClause(freshSubject.flatMap((x) => x.hits));
+        const central = boundedTermClause(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)));
         const subjectLabel = `your task's SUBJECT`;
         const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
         const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectHazards.length || 1}`;
@@ -9646,9 +9698,17 @@ async function main(input2) {
           {
             text: `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching ${subjectLabel} (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`,
             kind: "ordinary",
+            pinned: true,
+            // P5, as the path header above
             contentClass: "chrome"
           },
-          ...hazardParts(subjectHazards, { remedy, matchLabel: "for this subject", mode: hazardMode }),
+          ...hazardParts(subjectHazards, {
+            remedy,
+            matchLabel: "for this subject",
+            mode: hazardMode,
+            cap: subjectHazardCap,
+            capLabel: channelCapLabel(subjectHazardCap)
+          }),
           ...subjectDecisions.length ? [
             decisionPointerPart("(subject match)", subjectDecisions, {
               widen: decisionRemedy,

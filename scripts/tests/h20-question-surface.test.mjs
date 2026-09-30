@@ -227,29 +227,54 @@ test('question surface: a hazard with no slug is named by its title', () => {
   }
 });
 
-test('same-session guard: a hazard shown as a question pointer must still render WHOLE on a later dispatch (decision 6300c1e8)', () => {
+// UPDATED 2026-09-30. This test used to pin that a question-surface pointer
+// never suppresses a later WHOLE rendering on the dispatch surface. Decision
+// h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines (a4912f91,
+// point 4) now judges dispatch hazards by isKnownDelivered, and its NOT
+// GUARANTEED clause accepts that a hazard shown as a line is not shown whole
+// later in the session. The consult surface still renders hazards whole and
+// still judges them by the substance ledger, so that half of the original pin
+// survives and is kept below.
+test('same-session guard: a hazard shown as a question pointer is not re-shown on a later dispatch (decision a4912f91)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    store.create(antiPattern(HAZARD_TITLE, HAZARD_TRIGGER, 'breach-countdown-hud-reload'));
-    // First: AskUserQuestion — the hazard renders as a one-line pointer, which
-    // marks it DISCOVERY only (never substance — it was never shown whole).
+    const ap = store.create(antiPattern(HAZARD_TITLE, HAZARD_TRIGGER, 'breach-countdown-hud-reload'));
     const first = ctxOf(runHook(askQuestion(dir, QUESTION, OPTIONS), dir));
     assert.match(first, /HAZARD: Any breach countdown widget that shows countdown seconds/, 'the pointer rendered on the question surface');
-    // Then: a Task dispatch on the SAME subject, same session (shared guard).
-    // A discovery mark must never suppress dispatch's own WHOLE rendering —
-    // that would violate 301d8a0a's "dispatch keeps hazards whole" via the
-    // pre-filter alone, with no record of it ever having been shown whole.
     const second = runHook(
       dispatch(dir, 'Investigate: should the breach countdown widget show countdown seconds when the HUD timer reloads during a breach?'),
       dir
     );
     assert.equal(second.code, 0, 'never blocks (AC7)');
-    assert.notEqual(second.stdout, '', 'the hazard must still be delivered on this later dispatch, not silently dropped by the pre-filter');
-    const ctx2 = JSON.parse(second.stdout).hookSpecificOutput.additionalContext;
+    assert.ok(!second.stdout.includes(ap.id.slice(0, 8)), 'the discovery mark suppresses the hazard on the dispatch surface');
+  } finally {
+    cleanup();
+  }
+});
+
+test('same-session guard: a hazard shown as a question pointer must still render WHOLE on a later consult (decision 6300c1e8)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(antiPattern(HAZARD_TITLE, HAZARD_TRIGGER, 'breach-countdown-hud-reload'));
+    const first = ctxOf(runHook(askQuestion(dir, QUESTION, OPTIONS), dir));
+    assert.match(first, /HAZARD: Any breach countdown widget that shows countdown seconds/, 'the pointer rendered on the question surface');
+    // A codex consult on the SAME subject, same session (shared guard). A
+    // discovery mark must never suppress the consult's own WHOLE rendering.
+    const second = runHook(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'mcp__codex__codex',
+        tool_input: { prompt: 'Investigate: should the breach countdown widget show countdown seconds when the HUD timer reloads during a breach?' },
+        session_id: 's1',
+        cwd: dir,
+      },
+      dir
+    );
+    const ctx2 = ctxOf(second);
     assert.match(
       ctx2,
       /⚠ ANTI-PATTERN \[WARN\] for this subject — 'Breach countdown widget re-triggers a HUD timer reload mid-breach'/,
-      'the hazard renders WHOLE on dispatch, even though it was already shown as a question pointer'
+      'the hazard renders WHOLE on the consult, even though it was already shown as a question pointer'
     );
     assert.match(ctx2, /TRIGGER: Any breach countdown widget that shows countdown seconds/);
     assert.match(ctx2, /RIGHT WAY: right way text the question surface must never inline/);

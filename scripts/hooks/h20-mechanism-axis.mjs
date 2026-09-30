@@ -86,6 +86,7 @@ import {
   statusAnnotation,
   DECISION_STATEMENT_CLIP,
   DECISION_REJECTED_CLIP,
+  boundedTermClause,
 } from './lib/delivery.mjs';
 
 // Injection ceilings. Deliberately tighter than H19's file-touch payload: a
@@ -97,9 +98,6 @@ import {
 // since board a470046d slice 1, H19's path-scoped hazard block caps at the
 // same count, so the two channels share the bound.
 const MAX_DECISIONS = 5;
-/** How many "central to the record" terms the header names before counting
- *  the rest (user ruling 2026-09-24: trim the header's term list). */
-const HEADER_CENTRAL_TERM_CAP = 6;
 const NARROW_CLIP = 700;
 
 // PROMPT-SHAPE RANKING (consuming-project retro 2026-08-17-2111): a QUESTION
@@ -308,6 +306,22 @@ function finish(extraContext) {
 // hook's default state.
 const isQuestion = Array.isArray(input.tool_input?.questions);
 const isConsult = typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__');
+// The Task|Agent surface. Only here do hazards render lead-whole with trigger
+// lines (decision h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines,
+// a4912f91); a consult keeps them whole.
+const isDispatch = !isQuestion && !isConsult;
+
+/** True when the outgoing brief already cites this record by full id, id8 or
+ *  slug. On the dispatch surface such a hazard is dropped before selection
+ *  and spends no mark (a4912f91 point 1): the brief already carries it.
+ *  Bounded on both sides so a longer slug or a longer hex run is not a
+ *  citation; an id8 followed by '-' is the start of a full id and counts. */
+function citedInBrief(record, text) {
+  const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const id8 = String(record.id ?? '').slice(0, 8);
+  if (id8.length === 8 && new RegExp(`(?<![0-9a-f])${esc(id8)}(?![0-9a-f])`, 'i').test(text)) return true;
+  return !!record.slug && new RegExp(`(?<![a-z0-9-])${esc(record.slug)}(?![a-z0-9-])`, 'i').test(text);
+}
 
 // THE BODY IS A FUNCTION, AND EVERY TERMINAL CALL INSIDE IT IS A `return`
 // (decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-
@@ -439,24 +453,23 @@ function main(input) {
     // holds: an owner shown here as a mere article POINTER is untouched by
     // this check's effect on H19, which guards SUBSTANCE independently).
     //
-    // EXCEPTION (fix round on decision 6300c1e8, board review of 9b32948): a
-    // hazard is no longer ALWAYS substance here — on the question surface it
-    // renders as a one-line pointer and is marked DISCOVERY only (hazardParts'
-    // 'question' mode). `isKnownDelivered` treats that discovery mark as
-    // "already shown", so a later dispatch/consult in the SAME session would
-    // drop the hazard from `fresh` before it ever got the chance to render
-    // whole — silently violating 301d8a0a's "dispatch keeps hazards whole"
-    // with no trace that the hazard was never actually shown whole. An
-    // anti_pattern candidate on the non-question surface is therefore judged
-    // by `isSubstanceDelivered` alone: only a WHOLE prior showing suppresses
-    // it. Every other candidate, and every hazard ON the question surface
-    // itself (where discovery IS the mark that surface earns), still uses the
-    // conservative `isKnownDelivered`.
-    const fresh = scored.filter((x) =>
-      x.record.type === 'anti_pattern' && !isQuestion
-        ? !isSubstanceDelivered(guard, x.record)
-        : !isKnownDelivered(guard, x.record)
-    );
+    // EXCEPTION, the CONSULT surface only: an anti_pattern there is judged by
+    // `isSubstanceDelivered` alone, because a consult still renders hazards
+    // whole and a pointer shown elsewhere must not suppress that (fix round on
+    // decision 6300c1e8). The DISPATCH surface judges hazards by
+    // `isKnownDelivered` (decision a4912f91 point 4): ranks 2-3 go out as
+    // one-line pointers credited as discovery, and the substance ledger alone
+    // would re-show them on every dispatch. Accepted cost, stated in that
+    // ruling's NOT GUARANTEED: a hazard shown as a line (here or on the
+    // question surface) is not shown whole later by H20 in this session.
+    // Hazards the brief already cites are dropped first and spend no mark
+    // (point 1).
+    const briefText = String(input.tool_input?.prompt ?? '');
+    const fresh = scored.filter((x) => {
+      if (x.record.type !== 'anti_pattern') return !isKnownDelivered(guard, x.record);
+      if (isDispatch && citedInBrief(x.record, briefText)) return false;
+      return isConsult ? !isSubstanceDelivered(guard, x.record) : !isKnownDelivered(guard, x.record);
+    });
     if (!fresh.length) return finish();
 
     // NOT sliced to HAZARD_CAP here (fix-round MEDIUM 5): `hazardParts` below
@@ -494,10 +507,7 @@ function main(input) {
     // every record's central terms ran to ~50 words and ~400 bytes of the
     // capped budget, crowding out the records themselves. The first few are
     // named and the rest counted, so the clause stays honest about its size.
-    const centralAll = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))];
-    const centralCovered =
-      centralAll.slice(0, HEADER_CENTRAL_TERM_CAP).join(', ') +
-      (centralAll.length > HEADER_CENTRAL_TERM_CAP ? ` (+${centralAll.length - HEADER_CENTRAL_TERM_CAP} more)` : '');
+    const centralCovered = boundedTermClause(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)));
     const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
     // The header names the SURFACE, because the stakes differ and the reader should
     // feel which one they are on. A bad dispatch wastes agent work; a bad choice put
@@ -515,9 +525,12 @@ function main(input) {
       ? `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to CONSULT the sparring partner (codex). ` +
         `The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. ` +
         `Path-scoped delivery cannot find these. Check them BEFORE the consult goes out — a bad premise sent to an external model is still a bad premise.`
-      : `STERLING MECHANISM-AXIS DELIVERY (H20) — you are about to dispatch '${input.tool_input?.subagent_type ?? 'an agent'}'. ` +
-        `The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. ` +
-        `Path-scoped delivery cannot find these. Check them BEFORE the brief goes out — a fan-out multiplies a bad premise by N.`;
+      : // PreToolUse context arrives WITH the dispatch (timing note at the top
+        // of this file), so the brief has already gone out: the act this
+        // prompts is a correction (decision a4912f91 point 5).
+        `STERLING MECHANISM-AXIS DELIVERY (H20) — you have just dispatched '${input.tool_input?.subagent_type ?? 'an agent'}'; the brief has already gone out. ` +
+        `The store holds records matching its SUBJECT (${matchedClause}), which no file you touched would surface. ` +
+        `If one changes the brief's premise, correct the agent now with SendMessage (or re-dispatch) — a fan-out multiplies a bad premise by N.`;
     // A subject match has no file_keys answer — overflow widening queries are
     // rank_terms-shaped (review finding 4's class, fixed at both call sites).
     const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',');
@@ -573,9 +586,11 @@ function main(input) {
       return `${head} — REFUTED TRAIL${q} — rejected: ${clip(r.rejected_answer, 100)}`;
     };
     const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
-    // Hazards render WHOLE on the dispatch/consult surface (they always have,
-    // `renderHazards` at MAX_SAFE_INTEGER) — a whole hazard IS substance there
-    // (decision 92088a62 item 4). On the AskUserQuestion surface only, they
+    // Hazards render WHOLE on the consult surface — a whole hazard IS
+    // substance there (decision 92088a62 item 4). On the dispatch surface the
+    // rank-1 hazard is whole and ranks 2-3 are one-line trigger pointers
+    // ('lead' mode, decision a4912f91 — the third narrowing). On the
+    // AskUserQuestion surface only, they
     // render as ONE-LINE POINTERS (decision question-surface-gets-hazards-
     // as-pointers, 6300c1e8 — the second narrowing of 301d8a0a's hazards-whole
     // rule, after 21e3637e's read-only-lane pointer): no edit happens while
@@ -588,7 +603,8 @@ function main(input) {
         remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
         // Matched on the prompt's SUBJECT, not a file path (the H19 label).
         matchLabel: 'for this subject',
-        mode: isQuestion ? 'question' : 'whole',
+        // Dispatch: rank 1 whole, ranks 2-3 as trigger lines (a4912f91).
+        mode: isQuestion ? 'question' : isDispatch ? 'lead' : 'whole',
       }),
     ];
     // The question surface keeps the part's identities and disclosure (the SAME
@@ -692,7 +708,13 @@ function main(input) {
     const pin = modelPin();
     const pinPart = pin?.line ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: pin.line }] : [];
     const blocks = [
-      { kind: 'ordinary', contentClass: 'chrome', text: header },
+      // PINNED (P5): the header attributes the whole block to H20. Unpinned it
+      // was placed AFTER whole hazards, which are exempt from the configured
+      // cap and bound only by the transport ceiling, so three whole hazards at
+      // the ceiling degraded it to nothing and the conductor got an
+      // unattributed block. Pinned chrome is placed first; a hazard that then
+      // no longer fits falls to its pointer (the existing held-back behaviour).
+      { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: header },
       // A prior ANSWER outranks everything on a question-shaped prompt — it is
       // the direct "don't re-derive" signal; on a change-shaped prompt hazards
       // still lead (stop the mistake), answers ride with the article pointers.

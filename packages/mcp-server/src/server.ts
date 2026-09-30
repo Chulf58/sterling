@@ -528,7 +528,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_remove',
     {
       description:
-        "Remove a board or queue item — the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). The result discloses artifact_evidence (records touching the item's file_keys written since it was created); an empty list means the close rests on your word. An already-removed id reports when it was removed.",
+        "Remove a board or queue item — the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed.",
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.boardRemove(id))
@@ -538,7 +538,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'maintenance_remove',
     {
       description:
-        "Remove a maintenance-queue (source:\"system\") item once its fulfilling artifact exists; user board items are refused. Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). Logged to the drain log; the result discloses artifact_evidence like board_remove — an empty list means verify against HEAD before closing.",
+        "Remove a maintenance-queue (source:\"system\") item once its fulfilling artifact exists; user board items are refused. Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). Logged to the drain log; the result discloses artifact_evidence (capped compact records plus artifact_evidence_count, the de-duplicated match count within the same 200-record scan window) like board_remove — an empty list means verify against HEAD before closing.",
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.maintenanceRemove(id))

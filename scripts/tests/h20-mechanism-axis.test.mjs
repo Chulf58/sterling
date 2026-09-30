@@ -471,3 +471,50 @@ test('axisHits: matches trigger and title but NOT rationale or right_way', () =>
   assert.deepEqual(axisHits(ap, ['latch', 'emission']).sort(), ['emission', 'latch']);
   assert.deepEqual(axisHits(ap, ['countdown']), [], 'right_way is outside the narrow surface on purpose');
 });
+
+// REGRESSION (Dome Farmer session c94bc5f0, 9 of 23 H20 dispatch deliveries had
+// no header): the header was an ORDINARY chrome part, placed only after whole
+// hazards had taken the transport ceiling, so it degraded to nothing and the
+// conductor got an unattributed block. The header is pinned chrome now: it is
+// placed before hazards, and a hazard that no longer fits degrades to its
+// pointer (the existing held-back behaviour) — the header never does.
+// REWORKED 2026-09-30 for decision h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines
+// (a4912f91): the dispatch surface now renders ONE whole hazard plus trigger
+// lines, so three 43-45-line hazards measured ~4.6KB and never reached the
+// ceiling. The pressure now comes from one long lead hazard plus the lines.
+// The body length is swept because the defect lives in a narrow byte window
+// (lead + lines within one header's width of the 10000 ceiling, with the
+// decisions' disclosure needing room). Measured 2026-09-30 with the header's
+// `pinned: true` removed: bodies of 128-130 lines lost the header; 110-127
+// kept it by luck of the byte window; above 130 the lead alone no longer fits.
+const SWEEP_LINES = [126, 127, 128, 129, 130];
+for (const lines of SWEEP_LINES) {
+  test(`H20: a whole lead hazard plus trigger lines at the transport ceiling (${lines}-line body) still leave the header as the first line (P5: never an unattributed block)`, () => {
+    const { dir, store, cleanup } = makeProject();
+    try {
+      const fill = (tag) => Array.from({ length: lines }, (_, i) => `${tag} line ${i} explains the wrong way and the right way in detail`).join('\n');
+      for (const n of [1, 2, 3]) {
+        const r = antiPattern(
+          `Ticker gauge ${n} flicker when the reel cascade replays`,
+          'whenever the reel cascade replays the ticker gauge flicker shows stale totals',
+          [`game/ticker/gauge_${n}.gd`]
+        );
+        r.right_way = fill(`hazard${n}`);
+        r.wrong_way = fill(`wrong${n}`);
+        store.create(r);
+      }
+      for (const n of [1, 2]) {
+        store.create(decisionRecord(`Reel cascade ticker gauge ruling ${n}`, `The reel cascade replay ticker gauge flicker rule ${n} is settled.`, [`game/ticker/ruling_${n}.gd`]));
+      }
+      const r = runHook(dispatch(dir, 'Fix the reel cascade replay so the ticker gauge flicker stops showing stale totals.'), dir);
+      assert.equal(r.code, 0, 'never blocks (AC7)');
+      const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+      assert.ok(Buffer.byteLength(ctx, 'utf8') <= 10000, `the transport ceiling still holds (${Buffer.byteLength(ctx, 'utf8')} bytes)`);
+      assert.match(ctx, /⚠ ANTI-PATTERN/, 'hazards are still delivered');
+      assert.match(ctx.split('\n')[0], /^STERLING MECHANISM-AXIS DELIVERY \(H20\)/, 'the header is the first line, even with hazards at the ceiling');
+      assert.ok(Buffer.byteLength(ctx, 'utf8') > 9000, `fixture control: the delivery is near the ceiling (${Buffer.byteLength(ctx, 'utf8')} bytes)`);
+    } finally {
+      cleanup();
+    }
+  });
+}

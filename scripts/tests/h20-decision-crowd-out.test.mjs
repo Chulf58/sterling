@@ -210,7 +210,13 @@ test('H20 E2E (incident shape, question-shaped brief): the top decision arrives 
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
 
     // Fixture controls: the incident's shape really is reproduced.
-    assert.equal((ctx.match(/^⚠ ANTI-PATTERN \[/gm) || []).length, 3, 'control: three whole hazards render');
+    // UPDATED 2026-09-30 for decision h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines
+    // (a4912f91): the dispatch surface renders rank 1 whole and ranks 2-3 as
+    // trigger lines, so the three selected hazards are one block plus two
+    // lines. The byte pressure of three whole hazards is pinned at the
+    // assembler level in this file's unit tests above.
+    assert.equal((ctx.match(/^⚠ ANTI-PATTERN \[/gm) || []).length, 1, 'control: the lead hazard renders whole');
+    assert.equal((ctx.match(/^ {2}→ .* \([0-9a-f]{8}\) — HAZARD: /gm) || []).length, 2, 'control: ranks 2-3 render as trigger lines');
     assert.match(ctx, /PRIOR ANSWERS in the store/, 'control: prior answers render');
     assert.match(ctx, /ARTICLES matching this prompt's SUBJECT/, 'control: article pointers render');
 

@@ -68,6 +68,9 @@ import {
   stripReviewTerritoryLine,
   assembleDelivery,
   hazardParts,
+  boundedTermClause,
+  cappedHazards,
+  HAZARD_CAP,
   recordRevision,
   resolveTotalCap,
   isSubstanceDelivered,
@@ -404,6 +407,21 @@ async function main(input) {
       ...(unattributableLine ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: unattributableLine }] : []),
       ...(!EXEMPT_AGENT_TYPES.has(input.agent_type) ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: RETURN_CONTRACT }] : []),
     ];
+    // ONE HAZARD CAP PER PACKAGE (decision 92088a62: "HAZARDS: at most 3 per
+    // package"). Each channel used to cap at HAZARD_CAP on its own, so a
+    // package could carry six whole hazards. The union is ranked ONCE by
+    // cappedHazards (severity first; the path channel is listed first, so it
+    // wins ties) and the top HAZARD_CAP are split back into the two labelled
+    // channels. A stable sort keeps each channel's members in its own order,
+    // so each channel's share is exactly the top-k of its own list, and
+    // hazardParts at cap k renders those and discloses the rest.
+    // Read-only lanes keep per-channel pointer caps (decision 21e3637e): a
+    // pointer line is not a whole hazard.
+    const packageHazards = hazardMode === 'whole' ? cappedHazards([...freshHazards, ...subjectHazards]) : null;
+    const channelCap = (list) => (packageHazards ? packageHazards.filter((r) => list.includes(r)).length : HAZARD_CAP);
+    const channelCapLabel = (cap) => (cap < HAZARD_CAP ? `cap ${HAZARD_CAP} per package, shared across the path and subject channels` : undefined);
+    const pathHazardCap = channelCap(freshHazards);
+    const subjectHazardCap = channelCap(subjectHazards);
     const assemble = () => {
       const parts = [];
       if (freshOwners.length || freshHazards.length || freshDecisions.length) {
@@ -415,15 +433,21 @@ async function main(input) {
         });
         const decisionParts = freshDecisions.length ? [decisionPointerPart(rels.join(', '), freshDecisions, { widen: decisionWiden })] : [];
         parts.push(
-          { kind: 'ordinary', contentClass: 'chrome', text: payloadHeaderLine(rels.join(', ')) },
-          ...hazardParts(freshHazards, { fileKeys: rels, mode: hazardMode }),
+          // PINNED (P5), like H20's header: under disclosure pressure at the
+          // transport ceiling a whole hazard falls to its pointer before a
+          // pinned header is evicted, so the lane never gets unattributed hazards.
+          { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: payloadHeaderLine(rels.join(', ')) },
+          ...hazardParts(freshHazards, { fileKeys: rels, mode: hazardMode, cap: pathHazardCap, capLabel: channelCapLabel(pathHazardCap) }),
           ...ownerParts,
           ...decisionParts
         );
       }
       if (subjectHazards.length || subjectDecisions.length) {
-        const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(', ');
-        const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(', ');
+        // BOUNDED like H20's header (boundedTermClause): this header is PINNED,
+        // so an uncapped union of the subject records' terms is charged to the
+        // ordinary cap ahead of the owner article body.
+        const matched = boundedTermClause(freshSubject.flatMap((x) => x.hits));
+        const central = boundedTermClause(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)));
         const subjectLabel = `your task's SUBJECT`;
         const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
         const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(',')}] cap:${subjectHazards.length || 1}`;
@@ -435,10 +459,13 @@ async function main(input) {
               `(matched on: ${matched}; central to the record: ${central}), beyond any file the task names. ` +
               `Path-scoped delivery cannot find these — consult them before acting on the premise they govern.`,
             kind: 'ordinary',
+            pinned: true, // P5, as the path header above
             contentClass: 'chrome',
           },
           // Matched on the task's SUBJECT, not a file path.
-          ...hazardParts(subjectHazards, { remedy, matchLabel: 'for this subject', mode: hazardMode }),
+          ...hazardParts(subjectHazards, {
+            remedy, matchLabel: 'for this subject', mode: hazardMode, cap: subjectHazardCap, capLabel: channelCapLabel(subjectHazardCap),
+          }),
           ...(subjectDecisions.length
             ? [
                 decisionPointerPart('(subject match)', subjectDecisions, {

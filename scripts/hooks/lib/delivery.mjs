@@ -73,6 +73,21 @@ export {
   hasFullNarrowCentralityCoverage,
 } from '@sterling/store';
 
+/** How many terms a mechanism-axis header's "matched on" / "central to the
+ *  record" clauses name before counting the rest (user ruling 2026-09-24, H20
+ *  decision crowd-out: the union of every record's terms measured ~75 words and
+ *  ~400 bytes of capped budget). ONE definition for H20's delivery header and
+ *  H19's pinned staging header, so the two cannot drift. */
+export const HEADER_TERM_CAP = 6;
+
+/** Render a header's term clause: the first HEADER_TERM_CAP distinct terms,
+ *  comma-joined, then " (+N more)" when the list was longer — the clause stays
+ *  honest about its size rather than silently dropping terms. Pure. */
+export function boundedTermClause(terms, cap = HEADER_TERM_CAP) {
+  const all = [...new Set(terms)];
+  return all.slice(0, cap).join(', ') + (all.length > cap ? ` (+${all.length - cap} more)` : '');
+}
+
 /** THE CANONICAL REVIEW-TERRITORY TERMINAL-LINE SHAPE (decision
  *  h20-specificity-rebuild-not-fourth-patch-structural-fixes-now-red-probes-frozen,
  *  fix 1). A code-touching dispatch brief carries a machine-readable
@@ -869,24 +884,33 @@ export function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes, matchLabel
  *  died) and must still replay the ORIGINAL '+N more' tail rather than deriving
  *  a new one from the survivors it happens to have left. Omitted, both fall back
  *  to today's derivation, so every producer call is byte-identical. */
-export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, pointerOnly = false } = {}) {
+export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, pointerOnly = false, capLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
+  const blocks = shown.map((ap) => (pointerOnly ? hazardHeaderLine(ap, { matchLabel }) : wholeHazardBlock(ap, charCap, matchLabel)));
+  const disclosure = hazardDisclosureLine(hazards, shown, { cap, fileKeys, remedy, total, suppressed, capLabel });
+  if (disclosure) blocks.push(disclosure);
+  return blocks;
+}
+
+/** One hazard's whole block: header line, TRIGGER, RIGHT WAY. */
+function wholeHazardBlock(ap, charCap, matchLabel) {
+  return [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join('\n');
+}
+
+/** The '+N more' line for hazards the cap kept out, or '' when none were.
+ *  `capLabel` (optional) replaces the default `cap N` wording, for a caller
+ *  whose cap is what a shared package cap left over (dispatch staging's
+ *  subject channel). */
+function hazardDisclosureLine(hazards, shown, { cap, fileKeys = [], remedy, total, suppressed, capLabel }) {
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
-  const blocks = shown.map((ap) =>
-    pointerOnly
-      ? hazardHeaderLine(ap, { matchLabel })
-      : [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join('\n')
-  );
-  if (dropped > 0) {
-    // `remedy` overrides the widening query for callers whose match was not a
-    // file_keys join (the subject channel has no file answer at all — a
-    // file_keys:[] query would be unrunnable; review finding 4, 2026-08-10).
-    const keys = fileKeys.map((k) => `"${k}"`).join(',');
-    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
-    blocks.push(`… ${dropped} more hazard(s) NOT shown (cap ${cap}) — ${widen} for the full set`);
-  }
-  return blocks;
+  if (!(dropped > 0)) return '';
+  // `remedy` overrides the widening query for callers whose match was not a
+  // file_keys join (the subject channel has no file answer at all — a
+  // file_keys:[] query would be unrunnable; review finding 4, 2026-08-10).
+  const keys = fileKeys.map((k) => `"${k}"`).join(',');
+  const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
+  return `… ${dropped} more hazard(s) NOT shown (${capLabel ?? `cap ${cap}`}) — ${widen} for the full set`;
 }
 
 /** Hazard blocks as ASSEMBLER PARTS (decision 92088a62), paired 1:1 with the
@@ -898,24 +922,30 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
  *  (item 4: Bash now included). The trailing '+N more' disclosure line, if
  *  any, carries no identity and `contentClass:'chrome'`, so it can never earn
  *  a delivery mark for a hazard the reader never actually saw. */
-export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = 'whole' } = {}) {
+export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, mode = 'whole', capLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
   if (mode === 'pointer') return hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   if (mode === 'question') return hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
-  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
-  return blocks.map((text, i) =>
-    i < shown.length
-      ? {
-          kind: 'hazard', contentClass: 'substance', identity: shown[i].id, revision: recordRevision(shown[i]), name: shown[i].slug || shown[i].title, text,
-          // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
-          // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
-          // the hard transport ceiling degrades to this bare notice — never a
-          // partial trigger/right_way (the HAZARDS clause: "each whole") —
-          // and the assembler then correctly withholds its substance mark.
-          pointer: hazardOverflowPointer(shown[i], matchLabel),
-        }
-      : { kind: 'hazard', contentClass: 'chrome', text }
-  );
+  if (mode === 'lead') return hazardLeadParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel });
+  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel, capLabel });
+  return blocks.map((text, i) => (i < shown.length ? wholeHazardPart(shown[i], text, matchLabel) : { kind: 'hazard', contentClass: 'chrome', text }));
+}
+
+/** A whole hazard as an assembler part: substance, credited only if its full
+ *  text survives. */
+function wholeHazardPart(ap, text, matchLabel) {
+  return {
+    kind: 'hazard', contentClass: 'substance', identity: ap.id, revision: recordRevision(ap), name: ap.slug || ap.title, text,
+    // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
+    // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
+    // the hard transport ceiling degrades to this bare notice — never a
+    // partial trigger/right_way (the HAZARDS clause: "each whole") —
+    // and the assembler then correctly withholds its substance mark.
+    pointer: hazardOverflowPointer(ap, matchLabel),
+    // A hazard that fits alone but not beside what the package already holds
+    // degrades to this notice instead, so the reader is told the real cause.
+    pointerWhenFull: hazardPackageFullPointer(ap, matchLabel),
+  };
 }
 
 /** The header a READ-ONLY lane's hazard pointers render under (P5: a reader
@@ -942,7 +972,9 @@ function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, supp
       i < shown.length
         ? {
             kind: 'hazard', contentClass: 'discovery', identity: shown[i].id, revision: recordRevision(shown[i]), name: shown[i].slug || shown[i].title, text,
-            pointer: hazardOverflowPointer(shown[i], matchLabel),
+            // No pointer: a line IS its pointer. One that does not fit is
+            // omitted and named in the '+N more' disclosure, never turned
+            // into a degrade notice for a record that was never whole.
           }
         : { kind: 'hazard', contentClass: 'chrome', text }
     ),
@@ -995,11 +1027,42 @@ function hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, sup
       i < shown.length
         ? {
             kind: 'hazard', contentClass: 'discovery', identity: shown[i].id, revision: recordRevision(shown[i]), name: shown[i].slug || shown[i].title, text,
-            pointer: hazardOverflowPointer(shown[i], matchLabel),
+            // No pointer: a line IS its pointer. One that does not fit is
+            // omitted and named in the '+N more' disclosure, never turned
+            // into a degrade notice for a record that was never whole.
           }
         : { kind: 'hazard', contentClass: 'chrome', text }
     ),
   ];
+}
+
+/** LEAD MODE of `hazardParts` (user ruling
+ *  h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines, a4912f91 —
+ *  the THIRD narrowing of 301d8a0a's hazards-whole rule, H20's dispatch
+ *  surface only). Measured: the conductor acted on rank 3 in 0 of 77
+ *  dispatches and never fetched a hazard pointer, while about half the acts
+ *  used right_way detail (finding 8d488eb5). So the rank-1 hazard of the ONE
+ *  `cappedHazards` selection stays whole (substance) and ranks 2..cap render
+ *  as `hazardQuestionLine` pointers (discovery), with ONE '+N more' line for
+ *  the rest. Credit is per part, as in the other modes. A caller must judge
+ *  freshness with `isKnownDelivered`, or the lines would re-show on every
+ *  dispatch. */
+function hazardLeadParts(hazards, shown, { cap, fileKeys, remedy, total, suppressed, matchLabel = 'for this path' }) {
+  if (!shown.length) return [];
+  const [lead, ...rest] = shown;
+  const parts = [wholeHazardPart(lead, wholeHazardBlock(lead, Number.MAX_SAFE_INTEGER, matchLabel), matchLabel)];
+  if (rest.length) {
+    parts.push(
+      { kind: 'hazard', contentClass: 'chrome', text: `▸ ${rest.length} MORE HAZARD(S) ${matchLabel} — one line each, not the whole record; knowledge_get the id for its right way.` },
+      ...rest.map((ap) => ({
+        // No pointer: a line IS its pointer (see hazardQuestionParts).
+        kind: 'hazard', contentClass: 'discovery', identity: ap.id, revision: recordRevision(ap), name: ap.slug || ap.title, text: hazardQuestionLine(ap),
+      }))
+    );
+  }
+  const disclosure = hazardDisclosureLine(hazards, shown, { cap, fileKeys, remedy, total, suppressed });
+  if (disclosure) parts.push({ kind: 'hazard', contentClass: 'chrome', text: `  ${disclosure}` });
+  return parts;
 }
 
 /** The degraded notice a hazard renders as when its own whole block cannot
@@ -1009,6 +1072,13 @@ function hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, sup
  *  the platform's transport boundary. */
 export function hazardOverflowPointer(record, matchLabel = 'for this path') {
   return `⚠ ANTI-PATTERN [${(record?.severity ?? 'warn').toUpperCase()}] ${matchLabel} — TOO LARGE to show in full (exceeds the transport limit) · knowledge_get ${record?.id}${statusAnnotation(record)}`;
+}
+
+/** The degraded notice for a hazard that would fit the transport ceiling on
+ *  its own but not beside what the package already holds. 'TOO LARGE' there
+ *  named the wrong cause: the record is fine, the package is full. */
+export function hazardPackageFullPointer(record, matchLabel = 'for this path') {
+  return `⚠ ANTI-PATTERN [${(record?.severity ?? 'warn').toUpperCase()}] ${matchLabel} — not shown whole: delivery full (this package reached the transport limit) · knowledge_get ${record?.id}${statusAnnotation(record)}`;
 }
 
 /** How many feature_article pointers render per dispatch (H20 subject-axis
@@ -1336,7 +1406,10 @@ export function resolveTotalCap(cwd) {
  * spend no mark at all, and stay eligible for a later, real delivery.
  *
  * A part is `{text, kind, contentClass, pinned, identity, revision,
- * identities, disclosureIdentities, pointer, suffix}`. "PINNED" below means exempt from the
+ * identities, disclosureIdentities, pointer, pointerWhenFull, suffix}`.
+ * `pointerWhenFull` (hazards only, optional) is the notice used when a hazard
+ * that fits the transport ceiling on its own is degraded because the package
+ * is full; `pointer` stays the notice for a hazard that alone exceeds it. "PINNED" below means exempt from the
  * ordinary excerpt-then-pointer CLIPPING path — it is NOT a guarantee of
  * unconditional wholeness (fix-round HIGH 1/4 correction: pinned parts
  * used to be described as "always whole", which stopped being true once
@@ -1448,6 +1521,8 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
   const fitsOrdinaryCap = (extra = 0) => ordinaryBytesUsed() + extra <= ordinaryCeiling;
   const fitsTransport = (extra = 0) => totalBytes() + extra <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
   const pointerFor = (part) => part.pointer || '';
+  // A hazard's notice when the PACKAGE, not the hazard, is too big.
+  const fullPointerFor = (part) => part.pointerWhenFull || pointerFor(part);
 
   // ORDINARY/CHROME DEGRADE: whole while it fits both budgets, then a
   // byte-safe excerpt + `suffix`, then a bare `pointer`, then full omission.
@@ -1512,7 +1587,9 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
     selected.set(part, { text: part.text, full: true });
     if (fitsTransport()) return;
     selected.delete(part);
-    const ptr = pointerFor(part);
+    // The notice names the cause: TOO LARGE only when the hazard alone
+    // exceeds the ceiling; otherwise the package is full.
+    const ptr = bytes(part.text) > DELIVERY_TRANSPORT_VISIBLE_BYTES ? pointerFor(part) : fullPointerFor(part);
     if (ptr) {
       selected.set(part, { text: ptr, full: false });
       if (fitsTransport()) return;
@@ -1729,11 +1806,6 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
         evictable.find((part) => !isChrome(part) && !reserved.has(part)) ??
         evictable.find((part) => !isChrome(part)) ??
         evictable[0];
-      if (last) {
-        selected.delete(last);
-        omitted.push(last);
-        continue;
-      }
       // Only reach for a hazard when the HARD TRANSPORT CEILING itself is
       // what still fails to fit — never for the CONFIGURED cap alone
       // (`fitsOrdinaryCap`, decision 301d8a0a): a pathologically tiny
@@ -1744,8 +1816,19 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
       const degradable = !transportOk
         ? [...items].reverse().find((part) => isHazard(part) && selected.has(part) && selected.get(part).full && pointerFor(part))
         : null;
+      // PINNED CHROME OUTLIVES A HAZARD'S WHOLENESS (P5): the H20 header
+      // attributes the whole block, and whole hazards at the transport ceiling
+      // used to push it out here — the conductor got an unattributed block.
+      // A hazard that can fall to its own pointer goes first; pinned chrome is
+      // evicted only when no hazard can give room.
+      if (last && (!isChrome(last) || !degradable)) {
+        selected.delete(last);
+        omitted.push(last);
+        continue;
+      }
       if (degradable) {
-        selected.set(degradable, { text: pointerFor(degradable), full: false });
+        // Already selected whole, so it fits alone: the package is what is full.
+        selected.set(degradable, { text: fullPointerFor(degradable), full: false });
         continue;
       }
       selected.set(aggregatePart, { text, full: false });

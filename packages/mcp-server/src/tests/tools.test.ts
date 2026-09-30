@@ -1107,6 +1107,36 @@ test('board_remove / maintenance_remove disclose artifact_evidence — the bindi
   }
 });
 
+test('board_remove / maintenance_remove cap artifact_evidence to board_query\'s compact shape: true total in artifact_evidence_count, three {id8,type,name} records (Dome Farmer sterling-issues.md:100-107)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const item = (tools.boardAdd({ text: 'fix the gadget', source: 'user', file_keys: ['src/gadget.ts'] }) as { record: { id: string } }).record;
+    const qi = tools.maintenanceEnqueue({ reason: 'capture_owed', text: 'capture owed on the gadget work', file_keys: ['src/gadget.ts'] });
+    for (let i = 0; i < 6; i++) {
+      tools.knowledgeCreate('decision', { title: `gadget ruling ${i}`, statement: 'S', alternatives_rejected: [], rationale: 'R', file_keys: ['src/gadget.ts'] });
+    }
+    for (const closed of [tools.maintenanceRemove(qi.record.id), tools.boardRemove(item.id)]) {
+      assert.equal(closed.artifact_evidence_count, 6, 'the count is the TRUE dedup\'d total, not the clipped length');
+      assert.equal(closed.artifact_evidence?.length, 3, 'only three records ride the receipt');
+      for (const rec of closed.artifact_evidence ?? []) {
+        assert.deepEqual(Object.keys(rec).sort(), ['id8', 'name', 'type'], 'the compact board_query shape, never a full digest');
+        assert.equal((rec as { type: string }).type, 'decision');
+        assert.equal(String((rec as { id8: string }).id8).length, 8);
+      }
+      assert.equal(closed.note, undefined, 'evidence exists, so no operator-word warning');
+    }
+
+    // the empty-evidence case is unchanged: an empty array and the operator's-word note
+    const bare = (tools.boardAdd({ text: 'someday thing', source: 'user', file_keys: ['src/never.ts'] }) as { record: { id: string } }).record;
+    const abandoned = tools.boardRemove(bare.id);
+    assert.deepEqual(abandoned.artifact_evidence, []);
+    assert.equal(abandoned.artifact_evidence_count, 0);
+    assert.match(abandoned.note ?? '', /operator's word/);
+  } finally {
+    cleanup();
+  }
+});
+
 test('removal evidence survives the store cap: old high-overlap records cannot push the one fulfilling write out (review finding 12)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-evidence-'));
   const store = new SterlingStore(join(dir, 'sterling.db'));
@@ -1133,7 +1163,7 @@ test('removal evidence survives the store cap: old high-overlap records cannot p
     tools.knowledgeCreate('decision', { title: 'the fulfilling ruling', statement: 'S', alternatives_rejected: [], rationale: 'R', file_keys: ['src/hot.ts'] });
     const closed = tools.boardRemove(item.id);
     assert.ok(
-      (closed.artifact_evidence ?? []).some((e) => (e as { title?: string }).title === 'the fulfilling ruling'),
+      (closed.artifact_evidence ?? []).some((e) => (e as { name?: string }).name === 'the fulfilling ruling'),
       'the since-filter runs over a wide scan, not a pre-filtered window'
     );
     assert.equal(closed.note, undefined, "and no operator's-word accusation fires when evidence exists");
