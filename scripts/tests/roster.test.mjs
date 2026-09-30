@@ -157,13 +157,13 @@ test('skills ship with live file references and pass the skill linter', () => {
   assert.deepEqual(skills.map((s) => s.file).sort(), [
     'cleanup/SKILL.md',
     'closing-out-tasks/SKILL.md',
+    'de-ai-writing/SKILL.md',
     'debug/SKILL.md',
     'decision-records/SKILL.md',
     'delegating-to-subagents/SKILL.md',
     'design-research/SKILL.md',
     'drain/SKILL.md',
     'grill/SKILL.md',
-    'plain-prose/SKILL.md',
     'pr-review-loop/SKILL.md',
     'review-brief/SKILL.md',
   ]);
