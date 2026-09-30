@@ -272,6 +272,21 @@ export function stampConsumerRoleIfAbsent(cwd, log) {
   }
 }
 
+/**
+ * The clone's declared machine role from <cwd>/.sterling/config.json
+ * (`machine_role`), or null when undeclared, absent or unparseable — the safe
+ * posture is consumer, the same fail-open read H1 and clone-currency make
+ * inline (neither exports a reader this builtins-only module could import).
+ */
+export function readMachineRole(cwd) {
+  try {
+    const role = JSON.parse(readFileSync(join(cwd, '.sterling', 'config.json'), 'utf8')).machine_role;
+    return typeof role === 'string' ? role : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The one-line currency answer: what this machine is on, and how far behind. */
 export function currencyLine(c) {
   const id = c.describe && c.describe !== c.head_short ? `${c.describe} (${c.head_short})` : c.head_short;
@@ -426,7 +441,7 @@ function probeSchemaVersion(dbPath) {
  * so on a fresh clone the fan-out list must be resolved LATE, at its own step,
  * not at startup.
  */
-export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {}, reexec = null }) {
+export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {}, reexec = null, invokingProject = null }) {
   const git = gitFrom(exec, cwd);
   const nodeBin = opts.nodeBin ?? process.execPath;
   const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null };
@@ -483,7 +498,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // any persisted schedule. One target's failure never stops another's refresh.
   // This guarantees convergence when refresh runs, not freshness between runs.
   // Returns the number of targets whose refresh failed or was refused.
-  const refreshProjects = (list, { launchers }) => {
+  const refreshProjects = (list, { launchers, handoff: withHandoff = true }) => {
     let failures = 0;
     for (const p of list) {
       const entry = { name: p.name, repo_path: p.repo_path, status: null };
@@ -533,7 +548,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // ACTIONABLE refusal (a hand-written file, symlink or ignore rule in the way,
       // a missing or empty store): exit 2. Anything else non-zero may have left an
       // INCOMPLETE export: exit 1.
-      if (mode !== 'work') {
+      if (!withHandoff) {
+        entry.handoff = 'not_run';
+      } else if (mode !== 'work') {
         log(`      skipped — ${HOBBY_SKIP_DETAIL}`);
         entry.handoff = 'skipped';
       } else {
@@ -601,6 +618,41 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     else log('  ok');
     return { ok: true, out };
   };
+
+  // AUTHORING MACHINE (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
+  // point 5, user-ruled 2026-09-30 'Sync only'). Work lands in this clone, so there is nothing
+  // to pull, and the check battery compares the committed projection against a store that is
+  // legitimately newer (Dome Farmer, docs/sterling-issues.md:109-116). A ROLE branch, not a
+  // --no-check flag (already-current-requires-a-completion-marker-not-git-currency rejects the
+  // flag). Only the INVOKING project is synced — no registry fan-out, no handoff projection
+  // (it would regenerate architecture.md from the store: the very drift this avoids), no
+  // launchers. The marker is NOT written: it attests the full post-merge sequence, which did
+  // not run; the authoring branch never reads it either, so it cannot go stale-and-bite.
+  if (readMachineRole(cwd) === 'authoring') {
+    if (!invokingProject) {
+      log('\n✗ AUTHORING clone — cannot tell which project to sync: no invoking project was passed to the updater. Run it from the project (node scripts/update.mjs with that project as the working directory).');
+      report.exit = 1;
+      return report;
+    }
+    log(`\nAUTHORING clone — nothing to pull; syncing ${invokingProject} only`);
+    if (opts.check) {
+      log('  (--check: nothing fetched, nothing synced)');
+      return report;
+    }
+    if (refreshProjects([{ name: invokingProject, repo_path: invokingProject }], { launchers: false, handoff: false })) {
+      log('\n✗ the sync of the invoking project failed (above) — fix it and rerun /sterling:update.');
+    }
+    if (existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
+      const contract = step('contract drift in the invoking project (stamp-contract, dry run)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--project', invokingProject], {
+        show: true,
+        tolerate: true,
+      });
+      report.contract_drift = !contract.ok;
+      if (report.contract_drift) log('CONTRACT DRIFT in the invoking project — see the stamp-contract block above. Tolerated; resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply --project <path>`.');
+    }
+    log('RESTART THE SESSION if agents changed — subagents load at CLI start.');
+    return report;
+  }
 
   if (opts.fetch !== false) {
     const f = exec('git', ['fetch', 'origin', '--tags', '--prune'], { cwd });

@@ -647,6 +647,102 @@ test('sibling contract drift is tolerated but repeated in the closing summary, n
   }
 });
 
+// AUTHORING MACHINE (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
+// point 5, user-ruled 2026-09-30 'Sync only'): work lands in this clone, so there is nothing to pull,
+// and the check battery compares a committed projection against a store that is legitimately newer
+// (the Dome Farmer incident). A ROLE branch, not a flag — the flag was rejected by
+// already-current-requires-a-completion-marker-not-git-currency.
+function authoringCwd(role = 'authoring') {
+  const cwd = mkdtempSync(join(tmpdir(), 'sterling-update-authoring-'));
+  mkdirSync(join(cwd, '.sterling'), { recursive: true });
+  if (role !== null) writeFileSync(join(cwd, '.sterling', 'config.json'), JSON.stringify({ machine_role: role }));
+  mkdirSync(join(cwd, 'scripts'), { recursive: true });
+  writeFileSync(join(cwd, 'scripts', 'stamp-contract.mjs'), '// fixture\n');
+  return cwd;
+}
+
+test('authoring role: no fetch/merge/build/check/test/migrate, syncs ONLY the invoking project, prints the loud line', async () => {
+  const cwd = authoringCwd();
+  try {
+    const { exec, calls } = fakeExec({ behind: 4 });
+    const lines = [];
+    const fanOut = [{ name: 'other', repo_path: '/tmp/other' }];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: fanOut, invokingProject: '/tmp/dome-farmer', opts: {} });
+
+    assert.equal(report.exit, 0);
+    for (const forbidden of ['git', 'npm', 'migrate-stores', 'init.mjs', 'handoff-projection']) {
+      assert.deepEqual(calls.filter((c) => c.startsWith(forbidden) || c.includes(forbidden)), [], `no ${forbidden} call on the authoring machine`);
+    }
+    assert.deepEqual(calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), ['/tmp/dome-farmer'], 'sync-agents gets the invoking project only — no fan-out');
+    const contract = calls.filter((c) => c.includes('stamp-contract.mjs'));
+    assert.equal(contract.length, 1);
+    assert.match(contract[0], /--project \/tmp\/dome-farmer$/, 'stamp-contract is scoped to the invoking project');
+    assert.doesNotMatch(contract[0], /--apply/, 'the existing dry-run posture is kept');
+    assert.ok(lines.some((l) => l.includes('AUTHORING clone — nothing to pull; syncing /tmp/dome-farmer only')), 'the loud line names the project');
+    assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'the marker attests the full sequence, which did not run — never written');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: a stale marker does not matter, and a refused sync is exit 2 while contract drift stays tolerated', async () => {
+  const cwd = authoringCwd();
+  try {
+    seedUpdateMarker(cwd, 'c'.repeat(40));
+    const refused = fakeExec({ syncStatus: () => 2, contractStatus: 2 });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec: refused.exec, log: (l) => lines.push(l), projects: [], invokingProject: '/tmp/p', opts: {} });
+    assert.equal(report.exit, 2, 'a locally modified agent is relayed as a refusal');
+    assert.equal(report.contract_drift, true);
+    assert.equal(refused.calls.filter((c) => c.startsWith('npm')).length, 0);
+    assert.match(lines.join('\n'), /agent sync REFUSED/);
+
+    const drift = fakeExec({ contractStatus: 2 });
+    const r2 = await runUpdate({ cwd, exec: drift.exec, log: () => {}, projects: [], invokingProject: '/tmp/p', opts: {} });
+    assert.equal(r2.exit, 0, "a sibling's contract drift never fails the authoring sync");
+    assert.equal(r2.contract_drift, true);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: --check changes nothing (no sync); a missing invoking project is a loud failure', async () => {
+  const cwd = authoringCwd();
+  try {
+    const checked = fakeExec();
+    const lines = [];
+    const report = await runUpdate({ cwd, exec: checked.exec, log: (l) => lines.push(l), projects: [], invokingProject: '/tmp/p', opts: { check: true } });
+    assert.equal(report.exit, 0);
+    assert.deepEqual(checked.calls, [], '--check on the authoring machine runs nothing at all');
+    assert.ok(lines.some((l) => l.includes('AUTHORING clone — nothing to pull')));
+
+    const none = fakeExec();
+    const r2 = await runUpdate({ cwd, exec: none.exec, log: () => {}, projects: [], opts: {} });
+    assert.equal(r2.exit, 1);
+    assert.deepEqual(none.calls, []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('consumer and undeclared roles keep the full sequence unchanged (fetch, merge, build, check, test, fan-out)', async () => {
+  for (const role of ['consumer', null]) {
+    const cwd = authoringCwd(role);
+    try {
+      const { exec, calls } = fakeExec({ behind: 1 });
+      const report = await runUpdate({ cwd, exec, log: () => {}, projects: [{ name: 'p', repo_path: '/tmp/p' }], invokingProject: '/tmp/dome-farmer', opts: {} });
+      assert.equal(report.exit, 0);
+      assert.ok(calls.some((c) => c.startsWith('git fetch')));
+      assert.ok(calls.some((c) => c.includes('merge --ff-only')));
+      for (const npm of ['npm run build', 'npm run check', 'npm test']) assert.ok(calls.includes(npm), `${role}: ${npm} runs`);
+      assert.deepEqual(calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), ['/tmp/p'], 'the registry fan-out, not the invoking project');
+      assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), true);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }
+});
+
 test('a per-project sync refusal surfaces as exit 2 without stopping the other projects', async () => {
   const cwd = scratchCwd();
   try {

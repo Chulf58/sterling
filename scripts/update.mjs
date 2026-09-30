@@ -21,6 +21,10 @@
 //   node scripts/update.mjs [--check] [--force] [--no-fetch] [--no-test]
 //                           [--no-projects] [--target <sterling clone>]
 //
+// AUTHORING machine (machine_role:"authoring" in the clone's config): no fetch,
+// no build/check/test, no migration — only the project this was run FROM (cwd)
+// has its agents and contract synced; see the AUTHORING branch in runUpdate.
+//
 // Exit codes: 0 = updated or already current · 1 = a step failed · 2 = refused
 // (nothing mutated), a per-project refusal, or an unreadable project registry.
 import { spawnSync } from 'node:child_process';
@@ -101,5 +105,7 @@ const reexec = isReexecChild
       env: { ...process.env, [UPDATE_REEXEC_ENV]: '1', [UPDATE_REEXEC_FROM_ENV]: from },
     });
 
-const report = await runUpdate({ cwd: target, projects: loadProjects, opts, reexec });
+// invokingProject: the authoring machine syncs ONLY the project this was run from
+// (cwd), never the clone it lives in — see the AUTHORING branch in runUpdate.
+const report = await runUpdate({ cwd: target, projects: loadProjects, opts, reexec, invokingProject: process.cwd() });
 process.exit(report.exit);
