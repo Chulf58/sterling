@@ -53,6 +53,8 @@ function gitMaybe(cwd, args) {
 //   prs.json          [{repo, number, url, headRefName, baseRefName}] (open PRs)
 //   create_fail       present => the create call exits 1 and creates nothing
 //   create_fail_after present => the create call creates the PR, then exits 1
+//   create_nonpr      present => the create call exits 0 printing JSON that is not a PR, and creates nothing
+//   create_nonpr_after present => the same answer, but the PR was created
 // The PR is created through the REST call `gh api --hostname <host> --method
 // POST repos/<owner>/<repo>/pulls -f head=… -f base=… -f title=… -f body=…`
 // (real `gh pr create` needs a local git binary gh can run, which Windows gh.exe
@@ -94,10 +96,12 @@ if (a === 'api') {
   argv.forEach((x, i) => { if (x === '-f' || x === '-F') { const kv = argv[i + 1]; const k = kv.indexOf('='); fields[kv.slice(0, k)] = kv.slice(k + 1); } });
   if (existsSync(join(state, 'create_fail'))) { console.error('gh: Validation Failed (HTTP 422)'); console.log(JSON.stringify({ message: 'Validation Failed' })); process.exit(1); }
   const apiRepo = host + '/' + m[1] + '/' + m[2];
+  if (existsSync(join(state, 'create_nonpr'))) { console.log(JSON.stringify({ message: 'accepted' })); process.exit(0); }
   const number = 7 + prs.length;
   const url = 'https://' + apiRepo + '/pull/' + number;
   prs.push({ repo: apiRepo, number, url, headRefName: fields.head, baseRefName: fields.base });
   writeFileSync(prsFile, JSON.stringify(prs));
+  if (existsSync(join(state, 'create_nonpr_after'))) { console.log(JSON.stringify({ message: 'accepted' })); process.exit(0); }
   if (existsSync(join(state, 'create_fail_after'))) { console.error('gh: HTTP 502: gateway timeout (the PR was created anyway)'); process.exit(1); }
   console.log(JSON.stringify({ number, html_url: url, url: 'https://api.' + host + '/repos/' + m[1] + '/' + m[2] + '/pulls/' + number, head: { ref: fields.head }, base: { ref: fields.base } })); process.exit(0);
 }
@@ -277,6 +281,8 @@ test('work: a merge pushes the branch and CREATES the PR with an explicit repo/h
     assert.equal(c.host, 'github.com', 'the create names origin\'s host');
     assert.equal(c.path, 'repos/acme/widget/pulls', 'the create names origin\'s owner/repo');
     assert.equal(c.method, 'POST');
+    assert.ok(!c.argv.includes('-F'), 'fields are sent with -f (raw strings), never -F (which reads @file values)');
+    assert.equal(c.argv.filter((x) => x === '-f').length, 4, 'head, base, title and body are each a -f field');
     assert.equal(c.fields.head, p.branchName);
     assert.equal(c.fields.base, 'main');
     assert.equal(c.fields.title, p.branchName, 'several commits: the title is the branch name (gh --fill semantics)');
@@ -286,6 +292,24 @@ test('work: a merge pushes the branch and CREATES the PR with an explicit repo/h
     }
     assert.ok(body.indexOf('test: pin sprocket count') < body.indexOf('feat: widget sprockets'), 'commits listed oldest first');
     assert.ok(body.trimEnd().endsWith(ATTRIBUTION), 'the body ends with the PR attribution line');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: a title and body starting with @ reach the create call literally (-f raw fields, never -F @file)', () => {
+  const p = makeProject({ mode: 'work', commits: [{ subject: '@team fix sprockets', body: '@reviewer please look at the sprockets.' }] });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `work merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const creates = createCalls(p.gh.state);
+    assert.equal(creates.length, 1);
+    const [c] = creates;
+    assert.ok(!c.argv.includes('-F'), 'no -F field in the create call');
+    assert.equal(c.argv.filter((x) => x === '-f').length, 4, 'head, base, title and body are each a -f field');
+    assert.equal(c.fields.title, '@team fix sprockets', 'a title starting with @ is sent literally');
+    assert.ok(c.fields.body.startsWith('@reviewer please look at the sprockets.'), 'a body starting with @ is sent literally');
+    noPrCreateEver(p.gh.state);
   } finally {
     p.cleanup();
   }
@@ -323,7 +347,7 @@ test('work: pushed but the PR create FAILED exits 1 naming what succeeded; the r
     assert.match(r1.stderr, /UNKNOWN/, 'after a failed create with no PR found, the PR state is reported UNKNOWN — never asserted absent');
     assert.doesNotMatch(r1.stderr, /no PR exists/i, 'the gate never claims no PR exists');
     assert.match(r1.stderr, /Validation Failed/, 'gh\'s own stderr is printed, not swallowed');
-    assert.match(r1.stderr, /opened (it )?by hand.*reuses it.*review loop|by hand.*rerun.*reuses/is, 'the message says a hand-opened PR is reused by the rerun, which arms the review loop');
+    assert.match(r1.stderr, /by hand.*reuses it and arms the review loop/s, 'the message says a hand-opened PR is reused by the rerun, which arms the review loop');
     assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the branch reached origin before the create failed');
     const out1 = parseSingleJson(r1.stdout, 'partial');
     assert.equal(out1.mode, 'work');
@@ -645,6 +669,47 @@ test('work: the PR create FAILS but the PR exists afterwards (a create race or a
     assert.equal(after[after.indexOf('--repo') + 1], ORIGIN_REPO);
     assert.equal(after[after.indexOf('--head') + 1], p.branchName);
     assert.equal(after[after.indexOf('--base') + 1], 'main');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: the create exits 0 but its answer is NOT a PR, and the PR exists — the strict read-back finds it and reports it REUSED (exit 0, created false)', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    writeFileSync(join(p.gh.state, 'create_nonpr_after'), '');
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `exit 0 when the read-back finds the PR — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const out = parseSingleJson(r.stdout, 'non-PR answer, PR present');
+    assert.equal(out.ok, true);
+    assert.equal(out.created, false, 'not asserted as created by this run when the answer was not a PR');
+    assert.equal(out.pr_url, 'https://github.com/acme/widget/pull/7');
+    assert.equal(out.pr_number, 7);
+    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'list').length, 2, 'one lookup before the create, one read-back after the unreadable answer');
+    noPrCreateEver(p.gh.state);
+    assertArmed(p, { number: 7 });
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: the create exits 0 but its answer is NOT a PR, and no PR is found — exit 1, state UNKNOWN, nothing armed', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    writeFileSync(join(p.gh.state, 'create_nonpr'), '');
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 1, `an unreadable create with no PR found exits 1 — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /UNKNOWN/, 'the PR state is reported UNKNOWN, never asserted absent');
+    assert.match(r.stderr, /PUSHED/);
+    assert.doesNotMatch(r.stderr, /no PR exists/i);
+    assert.match(r.stderr, /by hand.*reuses it and arms the review loop/s);
+    const out = parseSingleJson(r.stdout, 'non-PR answer, no PR');
+    assert.equal(out.ok, false);
+    assert.equal(out.pushed, true);
+    assert.equal(out.pr_url, null);
+    assert.equal(out.pr_number, null);
+    assert.equal(out.created, false);
+    assert.equal(existsSync(prLoopFile(p)), false, 'a ship that ends UNKNOWN arms nothing');
   } finally {
     p.cleanup();
   }
