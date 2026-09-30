@@ -6,8 +6,9 @@
 // merges server-side, so no hook guards a hand-typed merge.
 //
 // Every gh call names the repo (host/owner/repo, parsed from origin's URL),
-// head and base explicitly, so the result never depends on gh's own
-// default-repo guessing. Push reuses the gate's Windows git.exe
+// head and base explicitly (the PR is created with `gh api POST .../pulls`,
+// never `gh pr create`, which needs a local git binary gh can run), so the
+// result never depends on gh's own default-repo guessing. Push reuses the gate's Windows git.exe
 // retry. The flow is retryable end to end: a rerun after "pushed, but no PR"
 // finds no open PR, pushes again (a no-op) and creates it.
 import { spawnSync } from 'node:child_process';
@@ -285,13 +286,38 @@ export function shipAsPr({ cwd, repo, branch, base, mergeBase, branchTip, state,
     return null;
   }
 
+  // The PR is created through the REST API, never `gh pr create`: that command
+  // shells out to a local git binary, and the Windows gh.exe that WSL resolves
+  // cannot find one ("unable to find git executable in PATH"). `gh api` needs
+  // no git, and the repo is named explicitly (host, owner, repo from origin).
   state.stage = 'pr-create';
-  const create = gh(cwd, ['pr', 'create', '--repo', repo, '--head', branch, '--base', base, '--title', text.title, '--body', text.body]);
-  // STRICT READ-BACK after EVERY create, failed or not: a failed create may
-  // still have made the PR (a race with another run, a timeout after the
-  // server acted), so the repo/head/base lookup decides. Found after a
-  // failure → reported as reused. Not found or not readable → the state is
-  // UNKNOWN, never asserted absent.
+  const [host, owner, name] = repo.split('/');
+  const create = gh(cwd, [
+    'api', '--hostname', host, '--method', 'POST', `repos/${owner}/${name}/pulls`,
+    '-f', `head=${branch}`, '-f', `base=${base}`, '-f', `title=${text.title}`, '-f', `body=${text.body}`,
+  ]);
+  const said = [create.stderr, create.stdout].map((t) => String(t ?? '').trim()).filter(Boolean).join('\n') || String(create.error?.message ?? '').trim();
+  // A successful POST is authoritative: the 201 body names the PR it made.
+  // Anything else (a failed call, or an answer that is not a PR) falls to a
+  // STRICT READ-BACK: a failed create may still have made the PR (a race with
+  // another run, a timeout after the server acted), so the repo/head/base
+  // lookup decides. Found after a failure → reported as reused. Not found or
+  // not readable → the state is UNKNOWN, never asserted absent.
+  if (create.status === 0) {
+    let made = null;
+    try {
+      made = JSON.parse(create.stdout);
+    } catch {
+      made = null;
+    }
+    if (typeof made?.html_url === 'string' && Number.isInteger(made?.number)) {
+      state.pr_url = made.html_url;
+      state.pr_number = made.number;
+      state.created = true;
+      log(`direct-merge: opened PR #${made.number}: ${made.html_url}`);
+      return null;
+    }
+  }
   let found;
   let lookupError = null;
   try {
@@ -306,24 +332,23 @@ export function shipAsPr({ cwd, repo, branch, base, mergeBase, branchTip, state,
       exitCode: 1,
       error: [
         create.status !== 0
-          ? `direct-merge: PUSHED ${branch} (${branchTip}) to origin, but \`gh pr create\` FAILED, and whether a PR exists is UNKNOWN.`
-          : `direct-merge: PUSHED ${branch} (${branchTip}) to origin and \`gh pr create\` reported success, but the PR could not be read back, so its state is UNKNOWN.`,
+          ? `direct-merge: PUSHED ${branch} (${branchTip}) to origin, but the PR create (gh api POST repos/${owner}/${name}/pulls) FAILED, and whether a PR exists is UNKNOWN.`
+          : `direct-merge: PUSHED ${branch} (${branchTip}) to origin and the PR create (gh api POST repos/${owner}/${name}/pulls) reported success, but its answer was not a PR and none could be read back, so the PR state is UNKNOWN.`,
         lookupError ? `The follow-up lookup failed: ${lookupError}` : 'The follow-up lookup found no open PR for this repo, head and base.',
         `Check with: ${lookupCmd}`,
         `Then rerun /sterling:merge: it is safe — it reuses an open PR for this head and base, or creates one; the push is a no-op.`,
-        `gh pr create said: ${streams(create)}`,
+        `If you open the PR by hand instead, rerunning /sterling:merge on ${branch} reuses it and arms the review loop.`,
+        `gh api said: ${said}`,
       ].join('\n'),
     };
   }
-  const created = found;
-  state.pr_url = created.url;
-  state.pr_number = created.number;
+  state.pr_url = found.url;
+  state.pr_number = found.number;
   if (create.status !== 0) {
-    log(`direct-merge: \`gh pr create\` failed (${streams(create)}), but an open PR for ${branch} into ${base} exists — reused: ${created.url}`);
+    log(`direct-merge: the PR create failed (${said}), but an open PR for ${branch} into ${base} exists — reused: ${found.url}`);
     return null;
   }
-  state.created = true;
-  log(`direct-merge: opened PR #${created.number}: ${created.url}`);
+  log(`direct-merge: the PR create's answer was not a PR, but an open PR for ${branch} into ${base} exists — reused: ${found.url}`);
   return null;
 }
 
