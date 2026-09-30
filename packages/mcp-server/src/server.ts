@@ -433,6 +433,24 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'knowledge_line_ref_fix',
+    {
+      description:
+        "Move ONE stale path:line reference inside a feature_article string field, verified by the server — the background maintenance worker's only store write (decision maintenance-queue-background-haiku-worker-simple-redesign, point 3a). `find` and `replace` are bare line references ([path]:N or [path]:N-M, whitespace trimmed, no other text); `replace` keeps find's path part and changes only the line. `field` takes knowledge_edit's grammar (a string field or 'arr[key=value].sub'). Refused with nothing written, naming the failed check, unless: (1) the record is an active feature_article, the field one of what_it_does, intended_behavior, steps_runbook, current_ac[..].text, files[..].role (never history) and a string, and find matches exactly once as a whole reference; (2) both sides are line references with the same path, replace differs from find, and it is a shift only — a point stays a point, a range keeps its width (a bare ':N' only when the article owns exactly one files[] entry); (3) the path is one of the article's files[] (exact, or a unique suffix on a '/' boundary); (4) every new line exists in the file AS COMMITTED AT HEAD (not the working tree) and its FIRST line contains `anchor` literally; (5) `anchor` is at least 6 characters, not only punctuation, and is quoted from the field's own text within 120 characters of the reference (the reference itself excluded); (6) nothing but the substitution changes (a write landing while the checks ran refuses). Same versioned write path as knowledge_edit, but it takes NO resolves: a queue item closes only through maintenance_remove. The receipt carries `verification` {path, lines, anchor, head_commit, blob}.",
+      inputSchema: strict({
+        id: z.string().describe('the feature_article to fix (full uuid, slug, or unambiguous 8-char prefix)'),
+        field: z.string().describe("a string field, or 'arr[key=value].sub' — knowledge_edit's selector grammar"),
+        find: z.string().describe('the exact current reference, e.g. "scripts/hooks/lib/maintenance-worker.mjs:471", "maintenance-worker.mjs:461-466" or ":1348"'),
+        replace: z.string().describe("the new reference: find's path part, a new line or line range"),
+        anchor: z.string().describe("a code fragment or symbol quoted from the field's text near the reference that must appear on the first new line at HEAD"),
+        projection: z.enum(['full', 'digest']).optional(),
+      }),
+    },
+    ({ id, field, find, replace, anchor, projection }) =>
+      json(tools.writeProjected(tools.knowledgeLineRefFix(id, field, find, replace, anchor), projection))
+  );
+
+  server.registerTool(
     'knowledge_array_remove',
     {
       description:

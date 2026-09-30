@@ -8787,6 +8787,8 @@ import { closeSync as closeSync4, existsSync as existsSync7, mkdirSync as mkdirS
 import { dirname as dirname7, isAbsolute as isAbsolute2, join as join11, resolve as resolve6, sep as sep2 } from "node:path";
 import { fileURLToPath } from "node:url";
 var WORKER_RUN_BUDGET_USD = 2;
+var BATCH_MIN_ITEMS = 5;
+var BATCH_MAX_WAIT_MS = 30 * 6e4;
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;
 var WORKER_TIMEOUT_MS = 20 * 6e4;
@@ -8797,7 +8799,8 @@ var WORKER_ENV_FLAG = "STERLING_MAINTENANCE_WORKER";
 var WORKER_DISABLE_ENV = "STERLING_MAINTENANCE_WORKER_DISABLE";
 var SERVER = "sterling";
 var mcp = (name) => `mcp__${SERVER}__${name}`;
-var WORKER_TOOLS = [mcp("maintenance_query"), mcp("knowledge_get"), mcp("maintenance_remove"), "Read", "Grep"];
+var mcpPlugin = (name) => `mcp__plugin_sterling_sterling__${name}`;
+var WORKER_TOOLS = [mcp("maintenance_query"), mcp("knowledge_get"), mcp("maintenance_remove"), mcp("knowledge_line_ref_fix"), mcpPlugin("knowledge_line_ref_fix"), "Read", "Grep"];
 var WORKER_DISALLOWED_TOOLS = [
   ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
   ...["add", "remove", "update", "edit"].map((v) => mcp(`board_${v}`)),
@@ -9054,6 +9057,18 @@ function launchWorker(opts) {
     }
     const eligible = open.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
     if (eligible.length === 0) return { launched: false, reason: "none_eligible" };
+    const waited = (t) => {
+      const created = Date.parse(t.created_at ?? "");
+      return Number.isFinite(created) ? nowMs - created : Infinity;
+    };
+    const oldestWaitMs = Math.max(...eligible.map(waited));
+    if (eligible.length < BATCH_MIN_ITEMS && oldestWaitMs < BATCH_MAX_WAIT_MS) {
+      return {
+        launched: false,
+        reason: "batching",
+        detail: `${eligible.length} of ${BATCH_MIN_ITEMS} eligible reconcile items, oldest waited ${ageText(new Date(nowMs - oldestWaitMs).toISOString(), nowMs)} of ${Math.round(BATCH_MAX_WAIT_MS / 6e4)}m \u2014 no worker until ${BATCH_MIN_ITEMS} are eligible or the oldest has waited that long`
+      };
+    }
     const pluginRoot = opts.pluginRoot ?? pluginRootFrom();
     if (!pluginRoot) return { launched: false, reason: "error", detail: failDetail("plugin root not found above the hook") };
     resolveMcpConfig(pluginRoot, opts.root);
@@ -9091,6 +9106,15 @@ function launchWorker(opts) {
 }
 function releaseLock(paths, token) {
   if (readJson(paths.lock)?.token === token) rmSync3(paths.lock, { force: true });
+}
+function ageText(iso, nowMs = Date.now()) {
+  const ms = nowMs - Date.parse(iso ?? "");
+  if (!Number.isFinite(ms)) return "unknown";
+  const mins = Math.max(0, Math.floor(ms / 6e4));
+  const days = Math.floor(mins / 1440);
+  const hours = Math.floor(mins % 1440 / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  return hours > 0 ? `${hours}h` : `${mins}m`;
 }
 
 // scripts/hooks/h10-direct-capture.mjs

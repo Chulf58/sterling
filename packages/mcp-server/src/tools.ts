@@ -22,7 +22,7 @@ import {
   type QueryOptions,
   type ToolStore,
 } from '@sterling/store';
-import { AttestationRefusal, collectAttestationEvidence, type AttestationEvidence } from './attestation-proof.js';
+import { AttestationRefusal, collectAttestationEvidence, readHeadFile, type AttestationEvidence } from './attestation-proof.js';
 
 export interface SkippedCheck {
   check: string;
@@ -4559,6 +4559,246 @@ export class SterlingTools {
         ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record),
         ...this.articleOversizeWarnings(record),
         ...this.citedIdWarnings(replace),
+        ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+      ],
+    };
+  }
+
+  /** The six checks of knowledge_line_ref_fix, named in every refusal it throws. */
+  private static readonly LINE_REF_CHECKS: Record<number, string> = {
+    1: 'record, field and match',
+    2: 'line-reference form',
+    3: 'path in files[]',
+    4: 'line at HEAD',
+    5: 'anchor',
+    6: 'substitution only',
+  };
+  /** `[path]:N` or `[path]:N-M`, nothing else. The path charset is the repo-relative POSIX one. */
+  private static readonly LINE_REF_RE = /^([A-Za-z0-9_.@+\-/]+)?:([1-9]\d*)(?:-([1-9]\d*))?$/;
+  private static readonly LINE_REF_PATH_CHAR = /[A-Za-z0-9_.@+\-/]/;
+  /** The only fields a line reference may be fixed in — prose that cites code. Never history, titles or paths. */
+  private static readonly LINE_REF_PLAIN_FIELDS = ['what_it_does', 'intended_behavior', 'steps_runbook'];
+  private static readonly LINE_REF_ELEMENT_FIELDS: Record<string, string> = { current_ac: 'text', files: 'role' };
+  /** How far (in field characters, either side, the reference itself excluded) the anchor may sit from `find`. */
+  private static readonly LINE_REF_ANCHOR_REACH = 120;
+
+  /**
+   * knowledge_line_ref_fix — the ONE store write the background maintenance
+   * worker may make (decision maintenance-queue-background-haiku-worker-simple-redesign,
+   * point 3a, user-ruled 2026-09-30: "Line references only"): move a stale
+   * `path:line` reference inside a feature_article string field, accepted only
+   * when the server verifies the new line mechanically. Everything else in the
+   * article stays with the conductor.
+   *
+   * FAIL-CLOSED: every check below refuses with nothing written, naming the
+   * check that failed —
+   *   1. an active feature_article; the field is on the allowlist
+   *      (what_it_does, intended_behavior, steps_runbook, current_ac[..].text,
+   *      files[..].role — never history) and is a string; `find` matches exactly
+   *      once and as a WHOLE reference (`worker.mjs:4` inside `worker.mjs:41`,
+   *      or a bare `:4` inside `x.ts:4`, is refused rather than spliced).
+   *   2. `find` and `replace` are both `[path]:N[-M]` after trimming, with the
+   *      SAME path part (or both bare); replace differs from find; it is a
+   *      SHIFT only (a point stays a point, a range keeps its width); a bare
+   *      `:N` resolves only when the article owns exactly one files[] entry.
+   *   3. the path is one files[] path, exactly or as a unique suffix on a `/`
+   *      boundary.
+   *   4. every line of the new reference exists in the file AS COMMITTED AT
+   *      HEAD (readHeadFile: `ls-tree` + `cat-file`, never the working tree),
+   *      and the anchor is a literal substring of the FIRST new line.
+   *   5. the anchor is at least 6 non-blank characters, not only punctuation,
+   *      and appears literally in the field's own text OUTSIDE the reference
+   *      being replaced, within 120 characters of it — the caller quotes it
+   *      from the prose around the reference, never invents it.
+   *   6. only the substitution changes: the new value is built from the one
+   *      validated site (so no INPUT can widen it), and a write that landed
+   *      after the checks read the record refuses — re-checked after the git
+   *      reads, and backstopped by expected_version on the write itself — so
+   *      this call's stale copy of the field never overwrites it.
+   *
+   * NO `resolves`: a queue item closes only through the attested
+   * maintenance_remove, never as a side effect of this write (review round
+   * 2026-09-30).
+   *
+   * NOT GUARANTEED: that the new line is the one the prose MEANS — only that it
+   * carries a fragment the prose itself quotes. The git reads happen before
+   * knowledgeUpdate opens its transaction, never under the writer lock.
+   */
+  knowledgeLineRefFix(
+    id: string,
+    field: string,
+    find: string,
+    replace: string,
+    anchor: string
+  ): {
+    record: DurableRecord;
+    replaced: { field: string; find: string; replace: string };
+    verification: { path: string; lines: string; anchor: string; head_commit: string; blob: string };
+    warnings: string[];
+    claims_check?: string;
+  } {
+    const op = 'knowledge_line_ref_fix';
+    const refuse = (check: number, detail: string): never => {
+      throw new Error(`${op}: refused at check ${check} (${SterlingTools.LINE_REF_CHECKS[check]}) — ${detail}. Nothing was written.`);
+    };
+    const old = this.resolveRecordId(id, op);
+    this.refuseStaleAddress(old, id, op);
+    if (old.type !== 'feature_article') refuse(1, `'${old.id}' is a ${old.type}, not a feature_article — line references are fixed only in articles`);
+    if (old.status !== 'active') refuse(1, `'${old.id}' is ${old.status}, not active`);
+    const rec = old as unknown as Record<string, unknown>;
+
+    // CHECK 1 — the field resolves to ONE string (knowledge_edit's selector grammar).
+    let current: string;
+    let bodyFor: (next: string) => Record<string, unknown>;
+    const selector = /^([A-Za-z_]\w*)\[([A-Za-z_]\w*)=(.+)\]\.([A-Za-z_]\w*)$/.exec(field);
+    const allowed = selector
+      ? SterlingTools.LINE_REF_ELEMENT_FIELDS[selector[1]!] === selector[4]
+      : SterlingTools.LINE_REF_PLAIN_FIELDS.includes(field);
+    if (!allowed) {
+      return refuse(
+        1,
+        `field '${field}' is not one of the fields a line reference may be fixed in (${SterlingTools.LINE_REF_PLAIN_FIELDS.join(', ')}, ` +
+          `${Object.entries(SterlingTools.LINE_REF_ELEMENT_FIELDS).map(([b, sub]) => `${b}[..].${sub}`).join(', ')})`
+      );
+    }
+    if (selector) {
+      const [, base, key, value, sub] = selector as unknown as [string, string, string, string, string];
+      const arr = rec[base];
+      if (!Array.isArray(arr)) return refuse(1, `'${base}' on ${old.type} is ${arr === undefined ? 'absent' : typeof arr}, not an array`);
+      const hits = arr.filter((el) => elementOwnsScalar(el, key) && String(el[key]) === value);
+      if (hits.length !== 1) return refuse(1, `selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required`);
+      const el = hits[0] as Record<string, unknown>;
+      const cur = el[sub];
+      if (typeof cur !== 'string') return refuse(1, `'${sub}' on the selected ${base} element is ${cur === undefined ? 'absent' : typeof cur}, not a string`);
+      current = cur;
+      bodyFor = (next) => ({ [base]: arr.map((e) => (e === el ? { ...el, [sub]: next } : e)) });
+    } else {
+      const cur = rec[field];
+      if (typeof cur !== 'string') return refuse(1, `'${field}' on ${old.type} is ${cur === undefined ? 'absent' : typeof cur}, not a string`);
+      current = cur;
+      bodyFor = (next) => ({ [field]: next });
+    }
+
+    // CHECK 2 — both sides are bare line references with the same path part.
+    const f = typeof find === 'string' ? find.trim() : '';
+    const r = typeof replace === 'string' ? replace.trim() : '';
+    const pf = SterlingTools.LINE_REF_RE.exec(f);
+    if (!pf) return refuse(2, `'find' is not a line reference ('${find}') — it must be [path]:N or [path]:N-M with no other text`);
+    const pr = SterlingTools.LINE_REF_RE.exec(r);
+    if (!pr) return refuse(2, `'replace' is not a line reference ('${replace}') — it must be [path]:N or [path]:N-M with no other text`);
+    if (f === r) return refuse(2, `no-op: replace equals find ('${f}')`);
+    const start = Number(pr[2]);
+    const end = pr[3] === undefined ? start : Number(pr[3]);
+    if (end < start) return refuse(2, `'replace' range ${start}-${end} runs backwards`);
+    const findStart = Number(pf[2]);
+    const findEnd = pf[3] === undefined ? findStart : Number(pf[3]);
+    if (findEnd < findStart) return refuse(2, `'find' range ${findStart}-${findEnd} runs backwards`);
+    if ((pf[3] === undefined) !== (pr[3] === undefined) || findEnd - findStart !== end - start) {
+      return refuse(
+        2,
+        `shift only: 'find' ('${f}') spans ${findEnd - findStart + 1} line(s) as a ${pf[3] === undefined ? 'point' : 'range'} but 'replace' ('${r}') spans ` +
+          `${end - start + 1} as a ${pr[3] === undefined ? 'point' : 'range'} — a point stays a point and a range keeps its width`
+      );
+    }
+    if (pf[1] !== pr[1]) {
+      return refuse(
+        2,
+        `'replace' must keep find's path ${pf[1] ? `'${pf[1]}'` : '(the bare :N form)'}, but it has ${pr[1] ? `'${pr[1]}'` : 'the bare :N form'} — only the line number may change`
+      );
+    }
+    const files = (Array.isArray(rec.files) ? rec.files : []) as { path?: unknown }[];
+    const filePaths = files.map((e) => e.path).filter((p): p is string => typeof p === 'string');
+    if (pf[1] === undefined && filePaths.length !== 1) {
+      return refuse(2, `a bare ':N' reference names no path, and the article owns ${filePaths.length} files[] entries, so its path cannot be resolved unambiguously — use the path-qualified form`);
+    }
+
+    // CHECK 1 (continued) — `find` occurs exactly once, as a whole reference.
+    const occurrences = SterlingTools.countOccurrences(current, f);
+    if (occurrences === 0) return refuse(1, `'find' ('${f}') does not appear in ${field}`);
+    if (occurrences > 1) return refuse(1, `'find' ('${f}') appears ${occurrences} times in ${field} — exactly once is required`);
+    const at = current.indexOf(f);
+    const prev = at > 0 ? current[at - 1]! : '';
+    const tail = current.slice(at + f.length, at + f.length + 2);
+    if ((prev && SterlingTools.LINE_REF_PATH_CHAR.test(prev)) || /^(?:\d|[-:]\d)/.test(tail)) {
+      return refuse(1, `'find' ('${f}') is not a whole reference in ${field}: it is part of '${current.slice(Math.max(0, at - 20), at + f.length + 2)}'`);
+    }
+
+    // CHECK 5 — the anchor is substantive and quoted from the field itself.
+    if (typeof anchor !== 'string' || anchor.trim().length < 6) {
+      return refuse(5, `'anchor' must be at least 6 characters (got ${typeof anchor === 'string' ? anchor.trim().length : 0})`);
+    }
+    if (!/[\p{L}\p{N}]/u.test(anchor)) return refuse(5, `'anchor' ('${anchor}') is only whitespace or punctuation`);
+    const outside = current.slice(0, at) + '\u0000' + current.slice(at + f.length);
+    if (!outside.includes(anchor)) {
+      return refuse(5, `'anchor' ('${anchor}') does not appear in the field's own text outside the reference being replaced — it must be quoted from the article, never supplied fresh`);
+    }
+    const reach = SterlingTools.LINE_REF_ANCHOR_REACH;
+    const near = current.slice(Math.max(0, at - reach), at) + '\u0000' + current.slice(at + f.length, at + f.length + reach);
+    if (!near.includes(anchor)) {
+      return refuse(5, `anchor is not next to the reference: '${anchor}' appears in the field, but not within ${reach} characters of '${f}' on either side`);
+    }
+
+    // CHECK 3 — the path is one of the article's files[].
+    let path: string;
+    if (pf[1] === undefined) {
+      path = filePaths[0]!;
+    } else {
+      const short = pf[1];
+      const owners = filePaths.filter((p) => p === short || p.endsWith(`/${short}`));
+      if (owners.length === 0) return refuse(3, `path '${short}' matches none of the article's files[] (${filePaths.join(', ') || 'none'})`);
+      if (owners.length > 1) return refuse(3, `path '${short}' is ambiguous: it matches ${owners.length} files[] entries (${owners.join(', ')})`);
+      path = owners[0]!;
+    }
+
+    // CHECK 4 — the new lines exist at HEAD and carry the anchor.
+    const tree = this.treeRootFor(rec);
+    if (tree.unresolved || !tree.root) {
+      return refuse(4, `cannot resolve the working tree this article owns its paths in (${tree.unresolved ? 'working_tree is not mapped in config.working_trees' : 'no repo root is configured'})`);
+    }
+    let head: ReturnType<typeof readHeadFile>;
+    try {
+      head = readHeadFile(tree.root, path);
+    } catch (err) {
+      if (err instanceof AttestationRefusal) return refuse(4, `cannot read '${path}' at HEAD: ${err.reason}`);
+      throw err;
+    }
+    const lines = head.text.split('\n');
+    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+    const commit = head.head_commit.slice(0, 12);
+    const label = end === start ? String(start) : `${start}-${end}`;
+    if (end > lines.length) return refuse(4, `'${path}' has ${lines.length} lines at HEAD (${commit}), so line ${end} does not exist`);
+    if (!lines[start - 1]!.replace(/\r$/, '').includes(anchor)) {
+      return refuse(
+        4,
+        end === start
+          ? `line ${start} of '${path}' at HEAD (${commit}) does not contain the anchor '${anchor}'`
+          : `the first line (${start}) of lines ${label} of '${path}' at HEAD (${commit}) does not contain the anchor '${anchor}' — the anchor must be on the first line of the new reference`
+      );
+    }
+
+    // CHECK 6 — the new value differs from the old one only at the validated
+    // site, and only if nothing wrote the record while the checks ran. The
+    // re-read names the failure; expected_version on the write is the backstop
+    // for a write landing after it.
+    const live = this.store.get(old.id) as { version?: number } | null;
+    if (!live || live.version !== old.version) {
+      return refuse(
+        6,
+        `'${old.id}' moved from version ${old.version} to version ${live?.version ?? '(absent)'} while the checks ran — this call's copy of '${field}' is stale ` +
+          `and writing it would overwrite that change; re-read the record and retry`
+      );
+    }
+    const next = current.slice(0, at) + r + current.slice(at + f.length);
+    const body = bodyFor(next);
+    const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, body, undefined, old.version, op));
+    return {
+      record,
+      ...(claims_check ? { claims_check } : {}),
+      replaced: { field, find: f, replace: r },
+      verification: { path, lines: label, anchor, head_commit: head.head_commit, blob: head.blob },
+      warnings: [
+        ...this.historyRotationWarnings(this.attemptedHistoryLen(old, body), record),
+        ...this.articleOversizeWarnings(record),
         ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
       ],
     };

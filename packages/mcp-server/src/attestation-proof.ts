@@ -326,3 +326,29 @@ export function collectAttestationEvidence(opts: CollectOptions): AttestationEvi
   }
   return { head_commit: head, perPath };
 }
+
+/** One path's committed content at HEAD, read from the object store — never the worktree. */
+export interface HeadFileContent {
+  head_commit: string;
+  /** The blob id of the path's regular-file entry in HEAD's tree. */
+  blob: string;
+  /** The blob's bytes decoded as UTF-8. */
+  text: string;
+}
+
+/**
+ * Read one repo-relative path's content AS COMMITTED at HEAD (knowledge_line_ref_fix's
+ * line check). The same membership/name/mode authority as the attestation proof —
+ * one exact-name `ls-tree` against the captured commit — then `git cat-file blob`
+ * of that entry, so a working-tree-only edit can never satisfy the check. An absent
+ * entry, a symlink, a gitlink or a directory refuses, never guesses.
+ */
+export function readHeadFile(root: string, key: string): HeadFileContent {
+  if (!root) throw new AttestationRefusal('no worktree root was supplied');
+  const head = headCommit(root);
+  const entry = headTreeEntries(root, head, [key]).get(key);
+  if (!entry) throw new AttestationRefusal(`no entry with this exact name in the tree of commit ${head}`, key);
+  const blob = blobIdFor(entry, key);
+  const text = git(root, ['cat-file', 'blob', blob]).stdout.toString('utf8');
+  return { head_commit: head, blob, text };
+}

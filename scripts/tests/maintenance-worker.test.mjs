@@ -9,7 +9,8 @@ import { EventEmitter } from 'node:events';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawnSync as realSpawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   acquireLock,
   hasEvidence,
@@ -32,6 +33,8 @@ import {
   WORKER_TOOLS,
   WORKER_DISALLOWED_TOOLS,
   BACKOFF_MS,
+  BATCH_MIN_ITEMS,
+  BATCH_MAX_WAIT_MS,
   DEBOUNCE_MS,
   LOCK_STALE_MS,
   ROTATE_BYTES,
@@ -269,7 +272,9 @@ test('builds the probed claude argv: Sonnet 5.5, low effort, librarian, dontAsk,
       '--verbose',
       '--max-budget-usd', '2',
     ]);
-    assert.deepEqual(WORKER_TOOLS, ['mcp__sterling__maintenance_query', 'mcp__sterling__knowledge_get', 'mcp__sterling__maintenance_remove', 'Read', 'Grep'], '[finding 3] no board_update');
+    // CHANGED (point 4, line references): the two mounted names of knowledge_line_ref_fix join the
+    // allowlist; every other entry, and the absence of board_update, is unchanged.
+    assert.deepEqual(WORKER_TOOLS, ['mcp__sterling__maintenance_query', 'mcp__sterling__knowledge_get', 'mcp__sterling__maintenance_remove', 'mcp__sterling__knowledge_line_ref_fix', 'mcp__plugin_sterling_sterling__knowledge_line_ref_fix', 'Read', 'Grep'], '[finding 3] no board_update');
     for (const banned of ['--bare', 'bypassPermissions', '--plugin-dir', '--dangerously-skip-permissions']) {
       assert.ok(!args.includes(banned), `${banned} is never passed`);
     }
@@ -1104,4 +1109,332 @@ test('[end to end] a crashed run (no result event, non-zero exit) is recorded, a
   } finally {
     fx.cleanup();
   }
+});
+
+// ---- batching, database-locked retry-later, line-reference fixes, prompt (0.18.33 lane) ----
+
+const aged = (id, ageMs, keys = [`src/${id}.mjs`]) => ({ ...ITEM(id, keys), created_at: new Date(NOW - ageMs).toISOString() });
+const MIN = 60_000;
+
+test('[batching] fewer than BATCH_MIN_ITEMS eligible items whose oldest is younger than BATCH_MAX_WAIT_MS do not launch: a quiet, logged "batching" outcome that arms no back-off and takes no debounce or lock', () => {
+  assert.equal(BATCH_MIN_ITEMS, 5);
+  assert.equal(BATCH_MAX_WAIT_MS, 30 * MIN);
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    const items = ['a', 'b', 'c', 'd'].map((id, i) => aged(id, (i + 1) * MIN));
+    const r = launch(fx, { spawn: sp.fn, items });
+    assert.equal(r.launched, false);
+    assert.equal(r.reason, 'batching');
+    assert.equal(r.line, undefined, 'no hook line');
+    assert.equal(sp.calls.length, 0);
+    assert.equal(existsSync(fx.paths.lock), false, 'no lock taken');
+    assert.equal(existsSync(fx.paths.lastLaunch), false, 'no debounce armed');
+    assert.equal(existsSync(fx.paths.state), false, 'not recorded as a run: no no_progress, no back-off');
+    assert.match(readFileSync(fx.paths.log, 'utf8'), /batching: 4 of 5 eligible reconcile items, oldest waited 4m of 30m/);
+    // the very next trigger is still not blocked by anything the batching outcome left behind
+    const next = launch(fx, { spawn: sp.fn, items: [...items, aged('e', 2 * MIN)], now: NOW + 1000 });
+    assert.equal(next.launched, true, JSON.stringify(next));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[batching] BATCH_MIN_ITEMS eligible items launch even when all are young', () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    const r = launch(fx, { spawn: sp.fn, items: ['a', 'b', 'c', 'd', 'e'].map((id) => aged(id, MIN)) });
+    assert.equal(r.launched, true, JSON.stringify(r));
+    assert.equal(r.items, 5);
+    assert.equal(sp.calls.length, 1);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[batching] one eligible item launches once it has waited BATCH_MAX_WAIT_MS (and not a minute earlier)', () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    const young = launch(fx, { spawn: sp.fn, items: [aged('a', BATCH_MAX_WAIT_MS - MIN)] });
+    assert.equal(young.reason, 'batching');
+    const old = launch(fx, { spawn: sp.fn, items: [aged('a', BATCH_MAX_WAIT_MS)] });
+    assert.equal(old.launched, true, JSON.stringify(old));
+    assert.equal(sp.calls.length, 1);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[batching] the wait is the OLDEST eligible item\'s; items dirty or judged do not count toward the batch or its age', () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    // one old item, but it is dirty: only the young clean one is eligible
+    const dirtyGit = fakeGit({ porcelain: ' M src/old.mjs\0' });
+    const r = launch(fx, { spawn: sp.fn, spawnSync: dirtyGit, items: [aged('old', 2 * BATCH_MAX_WAIT_MS), aged('young', MIN)] });
+    assert.equal(r.reason, 'batching');
+    assert.match(readFileSync(fx.paths.log, 'utf8'), /batching: 1 of 5 eligible reconcile items, oldest waited 1m of 30m/);
+    assert.equal(sp.calls.length, 0);
+
+    // an old item already judged owes_prose (evidence-backed) for its CURRENT file_keys: it neither
+    // makes the batch nor supplies the age, so the lone young item still batches
+    journalLine(fx, { kind: 'verdict', item_id: 'judged', verdict: 'owes_prose', file_keys: ['src/judged.mjs'], evidence: true });
+    const judged = launch(fx, { spawn: sp.fn, items: [aged('judged', 2 * BATCH_MAX_WAIT_MS), aged('young', MIN)] });
+    assert.equal(judged.reason, 'batching');
+    assert.equal(readFileSync(fx.paths.log, 'utf8').split('batching: 1 of 5 eligible reconcile items, oldest waited 1m of 30m').length - 1, 2, 'the judged item did not count: both launches logged 1 of 5');
+    // four young clean items plus the judged one is still 4 eligible, not 5
+    const four = launch(fx, { spawn: sp.fn, items: [aged('judged', 2 * BATCH_MAX_WAIT_MS), ...['a', 'b', 'c', 'd'].map((id) => aged(id, MIN))] });
+    assert.equal(four.reason, 'batching');
+    assert.equal(sp.calls.length, 0);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[batching] an item without a usable created_at counts as already waited: the batch check never strands work it cannot date', () => {
+  const fx = fixture();
+  try {
+    const sp = fakeSpawn();
+    const r = launch(fx, { spawn: sp.fn, items: [{ ...ITEM('a'), created_at: 'not a date' }] });
+    assert.equal(r.launched, true, JSON.stringify(r));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[batching] back-off, lock and debounce still come first: a young batch under back-off reports backoff, not batching', () => {
+  const fx = fixture();
+  try {
+    writeState(fx, { last_run: { ok: true, no_progress: true, at: new Date(NOW - MIN).toISOString(), error: null } });
+    const r = launch(fx, { spawn: fakeSpawn().fn, items: [aged('a', MIN)] });
+    assert.equal(r.reason, 'backoff');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+const BUSY_TEXT = 'Error: SqliteError: database is locked';
+const busyRun = (fx, items, events, token = 'tok') => runWorker({ ...eligibleRun(fx, items, token), spawn: fakeClaude([...events, resultEvent({})]).fn });
+
+test('[busy] a maintenance_remove that fails with a locked database is retry-later: no refused verdict, not judged, the item stays eligible, and a repeat remove that succeeds closes it', async () => {
+  const fx = fixture();
+  try {
+    const items = [{ id: 'A', file_keys: ['src/a.mjs'], feature_link: 'aaaaaaaa-1111-2222-3333-444444444444', slug: 'art-a' }];
+    // CHANGED (review): the third phrasing, 'store is busy, try again', was retry-later while BUSY_RE
+    // matched a bare "busy". The pattern is narrowed to the two real SQLite lock texts, because a
+    // bare "busy" also matched a genuine refusal that merely names a file such as busy-indicator.ts.
+    // That phrasing is now a refusal (see the busy-indicator test below).
+    for (const text of [BUSY_TEXT, 'SQLITE_BUSY: cannot start a transaction']) {
+      await busyRun(fx, items, [removeCall('t1', 'A'), removeResult('t1', text, true)]);
+    }
+    const lines = readJournal(fx);
+    const verdicts = lines.filter((l) => l.kind === 'verdict');
+    assert.equal(verdicts.filter((v) => v.verdict === 'refused').length, 0, 'never a refused verdict');
+    assert.equal(verdicts.filter((v) => v.evidence === true).length, 0, 'no evidence:true stamp');
+    assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict]), [['A', 'busy'], ['A', 'busy']]);
+    assert.equal(judgedVerdicts(fx.project).size, 0, 'judgedVerdicts ignores a busy verdict');
+    const store = { count: () => 1, query: () => [ITEM('A')] };
+    assert.equal(unjudgedReconcileItems(store, fx.project, HEAD).length, 1, 'the item stays eligible');
+    const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.equal(last.ok, true, 'a locked database is not a failed run');
+    assert.equal(last.refused_verdicts, 0);
+    assert.equal(last.busy_calls, 1);
+    // the tool call itself is still on record
+    assert.equal(lines.filter((l) => l.kind === 'tool_call' && l.is_error === true).length, 2);
+    // the retry after the lock clears closes it and is progress
+    await busyRun(fx, items, [removeCall('t1', 'A'), removeResult('t1', BUSY_TEXT, true), removeCall('t2', 'A'), removeResult('t2', 'Closed as ALREADY-PAID')], 'tok2');
+    const after = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.equal(after.no_progress, false);
+    assert.equal(after.closes_ok, 1);
+    assert.equal(after.refused_verdicts, 0);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[busy] a refusal whose text merely contains "busy" (a file named busy-indicator.ts) or a bare "store is busy" is a refused verdict, not retry-later', async () => {
+  const fx = fixture();
+  try {
+    const items = [
+      { id: 'A', file_keys: ['src/a.mjs'], feature_link: 'aaaaaaaa-1111-2222-3333-444444444444', slug: 'art-a' },
+      { id: 'B', file_keys: ['src/b.mjs'], feature_link: 'bbbbbbbb-1111-2222-3333-444444444444', slug: 'art-b' },
+    ];
+    await busyRun(fx, items, [removeCall('t1', 'A'), removeResult('t1', 'refused: src/busy-indicator.ts differs from HEAD', true), removeCall('t2', 'B'), removeResult('t2', 'store is busy, try again', true)]);
+    assert.deepEqual([...judgedVerdicts(fx.project)].map(([id, v]) => [id, v.verdict]), [['A', 'refused'], ['B', 'refused']]);
+    const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.equal(last.refused_verdicts, 2);
+    assert.equal(last.busy_calls, 0);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[busy] a real refusal is still a refused verdict, and a locked-database remove neither counts as a new refusal nor stands as one', async () => {
+  const fx = fixture();
+  try {
+    const items = [
+      { id: 'A', file_keys: ['src/a.mjs'], feature_link: 'aaaaaaaa-1111-2222-3333-444444444444', slug: 'art-a' },
+      { id: 'B', file_keys: ['src/b.mjs'], feature_link: 'bbbbbbbb-1111-2222-3333-444444444444', slug: 'art-b' },
+    ];
+    await busyRun(fx, items, [removeCall('t1', 'A'), removeResult('t1', BUSY_TEXT, true), removeCall('t2', 'B'), removeResult('t2', 'refused: worktree differs from HEAD', true)]);
+    assert.deepEqual([...judgedVerdicts(fx.project).keys()], ['B']);
+    const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+    assert.equal(last.refused_verdicts, 1);
+    assert.equal(last.busy_calls, 1);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+const LINK = 'aaaaaaaa-1111-2222-3333-444444444444';
+const lineFix = (id, input) => toolUse(id, 'mcp__sterling__knowledge_line_ref_fix', { id: LINK, field: 'what_it_does', find: 'src/a.mjs:10', replace: 'src/a.mjs:14', anchor: 'export const a', ...input });
+const fixOk = (id) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'updated what_it_does' }] } });
+/** The evidence the gate wants for item A: a good knowledge_get on its article and a good Read of its file. */
+const evidenceForA = () => [toolUse('e1', 'mcp__sterling__knowledge_get', { id: LINK }), toolOk('e1'), toolUse('e2', 'Read', { file_path: 'src/a.mjs' }), toolOk('e2')];
+const ITEM_A = [{ id: 'A', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' }];
+const lastRun = (fx) => JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
+
+test('[line-ref] the argv allows knowledge_line_ref_fix under both mounted names and neither is denied', () => {
+  const args = buildWorkerArgs({ prompt: 'P', mcpConfig: '{}' });
+  const allowed = args[args.indexOf('--allowedTools') + 1].split(',');
+  const denied = args[args.indexOf('--disallowedTools') + 1].split(',');
+  for (const name of ['mcp__sterling__knowledge_line_ref_fix', 'mcp__plugin_sterling_sterling__knowledge_line_ref_fix']) {
+    assert.ok(allowed.includes(name), `${name} is allowed`);
+    assert.ok(!denied.includes(name), `${name} is not denied`);
+  }
+  assert.equal(denied.filter((d) => /line_ref/.test(d)).length, 0);
+  assert.equal(allowed.filter((t) => denied.includes(t)).length, 0);
+});
+
+test('[line-ref] the stream journal records each knowledge_line_ref_fix call with its result (no resolves field); a fix alone is not progress, and a tool refusal is not an error of the run', async () => {
+  const fx = fixture();
+  try {
+    const sp = fakeClaude([
+      ...evidenceForA(),
+      lineFix('f1', {}),
+      fixOk('f1'),
+      lineFix('f2', { find: 'src/a.mjs:20', replace: 'src/a.mjs:25', resolves: 'A' }),
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'f2', content: 'refused: anchor not on line 25 at HEAD', is_error: true }] } },
+      resultEvent({}),
+    ]);
+    assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: sp.fn }), 0, 'a tool refusal leaves the run ok');
+    const lines = readJournal(fx);
+    const fixes = lines.filter((l) => l.tool === 'knowledge_line_ref_fix');
+    assert.equal(fixes.length, 2);
+    assert.deepEqual(fixes.map((l) => [l.kind, l.article_id, l.field, l.find, l.replace, l.is_error]), [
+      ['tool_call', LINK, 'what_it_does', 'src/a.mjs:10', 'src/a.mjs:14', false],
+      ['tool_call', LINK, 'what_it_does', 'src/a.mjs:20', 'src/a.mjs:25', true],
+    ]);
+    // CHANGED (review): the tool no longer takes resolves, so the journal no longer records it, even if a child passes one.
+    assert.ok(fixes.every((l) => !('resolves' in l)), 'no resolves field on a fix call');
+    assert.match(fixes[1].result, /anchor not on line 25/);
+    assert.equal(lines.filter((l) => l.kind === 'verdict').length, 0, 'a refused fix never becomes a refused verdict');
+    const last = lastRun(fx);
+    assert.equal(last.ok, true);
+    assert.equal(last.line_ref_fixes_ok, 1);
+    assert.equal(last.line_ref_fixes, 2);
+    // CHANGED (ping-pong loop): a successful, evidenced fix used to make the run progress. A fix alone is
+    // never progress now: the server accepts 2->4 then 4->2, so counting it would loop a $2 run forever.
+    assert.equal(last.no_progress, true, 'a fix alone is never progress');
+    assert.equal(last.refused_verdicts, 0);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[line-ref] a fix on its own is never progress: with or without the evidence, real or no-op, by uuid or by slug, the run is no_progress but the fix is still journalled and counted', async () => {
+  const cases = [
+    ['no evidence at all', [lineFix('f1', {}), fixOk('f1')]],
+    ['knowledge_get only, no file read', [toolUse('e1', 'mcp__sterling__knowledge_get', { id: LINK }), toolOk('e1'), lineFix('f1', {}), fixOk('f1')]],
+    ['a no-op fix (find === replace)', [...evidenceForA(), lineFix('f1', { replace: 'src/a.mjs:10' }), fixOk('f1')]],
+    ['a fix on an article that is not an eligible item', [...evidenceForA(), lineFix('f1', { id: 'cccccccc-1111-2222-3333-444444444444' }), fixOk('f1')]],
+    ['an evidenced real fix', [...evidenceForA(), lineFix('f1', {}), fixOk('f1')]],
+    // CHANGED (ping-pong loop): this was the "fix by slug with a directory Grep is progress" case. Its intent flips:
+    // even a fully evidenced fix is no_progress, because the server accepts 2->4 then 4->2 and progress would loop.
+    ['a fix by slug with a directory Grep as file evidence', [toolUse('e1', 'mcp__sterling__knowledge_get', { id: 'art-a' }), toolOk('e1'), toolUse('e2', 'Grep', { pattern: 'x', path: 'src' }), toolOk('e2'), lineFix('f1', { id: 'art-a' }), fixOk('f1')]],
+  ];
+  for (const [name, events] of cases) {
+    const fx = fixture();
+    try {
+      await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: fakeClaude([...events, resultEvent({})]).fn });
+      assert.equal(lastRun(fx).no_progress, true, name);
+      assert.equal(lastRun(fx).line_ref_fixes_ok, 1, `${name}: the fix is still journalled and counted as a call`);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test('[line-ref] ping-pong: two runs that each make an evidenced fix (2->4, then 4->2) and never close are both no_progress, and the launch after them backs off; a fix plus a successful close is still progress', async () => {
+  const fx = fixture();
+  try {
+    const run = (token, events) => runWorker({ ...eligibleRun(fx, ITEM_A, token), spawn: fakeClaude([...events, resultEvent({})]).fn });
+    await run('t1', [...evidenceForA(), lineFix('f1', { find: 'src/a.mjs:2', replace: 'src/a.mjs:4' }), fixOk('f1')]);
+    assert.equal(lastRun(fx).no_progress, true);
+    await run('t2', [...evidenceForA(), lineFix('f2', { find: 'src/a.mjs:4', replace: 'src/a.mjs:2' }), fixOk('f2')]);
+    const second = lastRun(fx);
+    assert.equal(second.no_progress, true, 'the second fix is no more progress than the first');
+    assert.equal(second.line_ref_fixes_ok, 1);
+    const sp = fakeSpawn();
+    const blocked = launch(fx, { spawn: sp.fn, items: [ITEM('A')], now: Date.parse(second.at) + 60_000 });
+    assert.equal(blocked.reason, 'backoff');
+    assert.equal(sp.calls.length, 0);
+    // fix, then the attested close: progress through closes_ok
+    await run('t3', [...evidenceForA(), lineFix('f3', {}), fixOk('f3'), removeCall('c1', 'A'), removeResult('c1', 'Closed as ALREADY-PAID')]);
+    const closed = lastRun(fx);
+    assert.equal(closed.no_progress, false);
+    assert.equal(closed.closes_ok, 1);
+    assert.equal(closed.line_ref_fixes_ok, 1);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[line-ref] only refused fixes and no other progress is still no_progress; the plugin-mounted name is journalled the same; an unanswered fix is journalled at the end', async () => {
+  const fx = fixture();
+  try {
+    const items = [{ id: 'A', file_keys: ['src/a.mjs'], feature_link: 'aaaaaaaa-1111-2222-3333-444444444444', slug: 'art-a' }];
+    const refused = fakeClaude([
+      { ...lineFix('f1', {}), message: { content: [{ type: 'tool_use', id: 'f1', name: 'mcp__plugin_sterling_sterling__knowledge_line_ref_fix', input: { id: 'x', field: 'what_it_does' } }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'f1', content: 'refused', is_error: true }] } },
+      lineFix('f2', {}),
+      resultEvent({}),
+    ]);
+    await runWorker({ ...eligibleRun(fx, items), spawn: refused.fn });
+    const lines = readJournal(fx).filter((l) => l.tool === 'knowledge_line_ref_fix');
+    assert.deepEqual(lines.map((l) => l.is_error), [true, null]);
+    assert.equal(lines[1].result, 'no result before the run ended');
+    assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.no_progress, true);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[line-ref] streamJournal counts successful fixes and answers them as sterling calls', () => {
+  const journalled = [];
+  const s = streamJournal((e) => journalled.push(e));
+  s.feed([lineFix('f1', {}), { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'f1', content: 'ok' }] } }].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const out = s.end();
+  assert.equal(out.lineRefFixes, 1);
+  assert.equal(out.lineRefFixesOk, 1);
+  assert.equal(out.sterlingOk, 1);
+});
+
+test('[prompt] the shipped prompt no longer invites an early stop, keeps the evidence wording, and documents the busy retry and the line-reference tool', () => {
+  const prompt = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'templates', 'maintenance-worker-prompt.md'), 'utf8');
+  assert.doesNotMatch(prompt, /short of budget/i);
+  assert.doesNotMatch(prompt, /STOP and leave the remaining items/);
+  assert.match(prompt, /judge every listed item/i);
+  assert.match(prompt, /never stamped owes_prose without reading/i);
+  assert.match(prompt, /A verdict needs evidence\. Before you report owes_prose, you must have called knowledge_get on the item's article AND either Read one of the item's file_keys or run Grep/);
+  assert.match(prompt, /database is locked/i);
+  assert.match(prompt, /retry that call once/i);
+  assert.match(prompt, /mcp__sterling__knowledge_line_ref_fix/);
+  assert.match(prompt, /anchor/);
+  // CHANGED (review): the tool lost its resolves argument; the item is closed only with the attested maintenance_remove.
+  assert.doesNotMatch(prompt, /resolves/);
+  assert.match(prompt, /close it ONLY with maintenance_remove/);
+  assert.match(prompt, /quotes right next to that reference/);
 });

@@ -119,10 +119,10 @@ const FENCE_BASELINE = '703a327';
 // in every template on purpose.
 const BASELINE_OVERRIDES = {
   'conductor.md': '1501adf', // moved 2026-09-29: deliberate review-cadence prose (f1fd5d9, 1501adf; decision review-sparsely-before-commit-ledger-kept)
-  'implementor.md': '9fdc3e4',
+  'implementor.md': 'edbb9f8', // moved 2026-09-30: knowledge_line_ref_fix added to disallowedTools (store writes stay the conductor's; roster.test.mjs)
   'researcher.md': '87aa5ff',
   'scout.md': '87aa5ff',
-  'librarian.md': '87aa5ff',
+  'librarian.md': 'edbb9f8', // moved 2026-09-30: knowledge_line_ref_fix granted (the background worker runs as --agent librarian; decision maintenance-queue-background-haiku-worker-simple-redesign 3a)
 };
 const renderConfig = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
 const renderOpts = { pluginVersion: '0.0.0-test', now: '2026-01-01T00:00:00.000Z', vars: { NODE: '"/usr/bin/node"', HOOKS_DIR: '/x/hooks', GIT_RO: '/x/git-ro.mjs' }, config: renderConfig };
