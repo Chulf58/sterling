@@ -88,6 +88,7 @@ import {
   DECISION_REJECTED_CLIP,
   boundedTermClause,
 } from './lib/delivery.mjs';
+import { dispatchOverlapNotice } from './lib/dispatch-overlap.mjs';
 
 // Injection ceilings. Deliberately tighter than H19's file-touch payload: a
 // keyword match is WEAKER evidence of relevance than an explicit file_keys
@@ -288,13 +289,31 @@ function emitEnvelope(extraContext, opts) {
   return exitAfterWrite(JSON.stringify(envelopeFor(extraContext)), 0, opts);
 }
 
+/** DISPATCH OVERLAP (decision h20-warns-on-dispatch-file-overlap-with-live-
+ *  agents): on the Task|Agent surface only, the advisory block naming files
+ *  this brief shares with a live dispatch, a degraded line when the register
+ *  cannot be read, or null. Computed once and memoized, like the model pin,
+ *  because EVERY output path below carries it: the early exits through
+ *  finish(), the full delivery as a pinned part, and the catch arm.
+ *  dispatchOverlapNotice never throws. */
+let overlapMemo;
+function overlapNotice() {
+  if (overlapMemo === undefined) {
+    const onDispatch = !Array.isArray(input.tool_input?.questions) && !(typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__'));
+    overlapMemo = onDispatch ? dispatchOverlapNotice(input) : null;
+  }
+  return overlapMemo;
+}
+
 /** Exit 0, emitting the composed envelope — the replacement for a bare allow()
- *  on every early-exit below. With no pin and no carriage it is exactly allow():
- *  silence, so a non-codex dispatch that matched nothing still prints nothing. */
+ *  on every early-exit below. With no pin, no carriage and no overlap it is
+ *  exactly allow(): silence, so a non-codex dispatch that matched nothing
+ *  still prints nothing. The overlap block rides after any carriage. */
 function finish(extraContext) {
   const pin = modelPin();
-  if (!pin?.line && !pin?.updatedInput && !extraContext) return allow();
-  return emitEnvelope(extraContext);
+  const context = [extraContext, overlapNotice()].filter(Boolean).join('\n\n');
+  if (!pin?.line && !pin?.updatedInput && !context) return allow();
+  return emitEnvelope(context);
 }
 
 // TWO SURFACES, ONE MECHANISM (board 62806222 + board 4e6eb510). Task/Agent
@@ -725,6 +744,10 @@ function main(input) {
       ...(promptIsQuestionShaped
         ? [...priorParts, ...articleParts, ...decisionBlocks, ...hazardBlocks]
         : [...hazardBlocks, ...decisionBlocks, ...priorParts, ...articleParts]),
+      // DISPATCH OVERLAP, appended and PINNED: it is about this dispatch's
+      // write territory, not a record, so the cap must not trade it away for
+      // a pointer. Absent when there is no overlap, leaving the rest unchanged.
+      ...(overlapNotice() ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: overlapNotice() }] : []),
     ];
     const assembled = assembleDelivery([...pinPart, ...blocks], resolveTotalCap(input.cwd));
     const carriage = assembled.text;
@@ -776,6 +799,13 @@ function main(input) {
   } catch (e) {
     const failure = `H20: mechanism-axis delivery failed: ${(e && e.message) || e}`;
     const pin = modelPin();
+    const overlap = overlapNotice();
+    if (overlap && !pin?.line && !pin?.updatedInput) {
+      // A relevance failure must not swallow the overlap warning either: loud
+      // on stderr, the warning still delivered, exit 0 (never a gate).
+      process.stderr.write(failure);
+      return emitEnvelope(`${overlap}\n\n⚠ ${failure} — relevance carriage was SKIPPED for this dispatch.`);
+    }
     if (pin?.line || pin?.updatedInput) {
       // THE LAST OUTPUT PATH. A relevance failure must not silently unpin the
       // consult's model: warnNonBlocking exits 1, and an exit-1 hook's stdout is
