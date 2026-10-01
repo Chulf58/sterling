@@ -7,7 +7,7 @@ var __export = (target2, all) => {
 };
 
 // scripts/fs-remove.mjs
-import { rmSync, existsSync as existsSync3 } from "node:fs";
+import { rmSync as rmSync2, existsSync as existsSync3 } from "node:fs";
 import { join as join3 } from "node:path";
 import { randomUUID as randomUUID2 } from "node:crypto";
 
@@ -4538,11 +4538,29 @@ var todoSchema = base.extend({
   // re-stamped on a board_update that changes text/file_keys; a caller MAY
   // supply it, and the tool layer refuses an unresolvable sha by name rather
   // than silently replacing it with HEAD (P5).
-  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional()
+  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional(),
+  // Semantic order between user asks (decision
+  // every-user-ask-is-boarded-at-intake-with-slim-blocked-by, rule 6): the
+  // SLUGS of the board items this one waits on. Slugs, never ids, because a
+  // slug is the immutable address (decision board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address). Lives in the JSON body
+  // like every other todo field, so it needs no migration. Existence of each
+  // blocker is checked at the tool layer when written; a blocker removed later
+  // reads as closed, it is never rewritten out of this list.
+  blocked_by: external_exports.array(external_exports.string().min(1)).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "source 'system' requires system_reason (\xA73.2.7)" });
+  }
+  if (rec.blocked_by !== void 0 && rec.source === "system") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      path: ["blocked_by"],
+      message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+    });
+  }
+  if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["blocked_by"], message: `blocked_by lists '${rec.slug}', the item itself \u2014 an item cannot block itself` });
   }
 });
 var briefSchema = base.extend({
@@ -5218,7 +5236,8 @@ var runtimeMarkerSchema = external_exports.object({
 }).strict();
 
 // scripts/lib/project.mjs
-import { readFileSync, existsSync as existsSync2 } from "node:fs";
+import { readFileSync, existsSync as existsSync2, mkdtempSync, rmSync } from "node:fs";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
@@ -7674,7 +7693,7 @@ try {
   }
   for (const p of paths) {
     const rel = normalizeRepoPath(p);
-    rmSync(join3(target, rel));
+    rmSync2(join3(target, rel));
     removed.push(rel);
     for (const article of store.query({ types: ["feature_article"], file_keys: [rel], cap: 100 })) {
       store.enqueueSystemTodo({

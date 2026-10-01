@@ -4680,11 +4680,29 @@ var init_records = __esm({
       // re-stamped on a board_update that changes text/file_keys; a caller MAY
       // supply it, and the tool layer refuses an unresolvable sha by name rather
       // than silently replacing it with HEAD (P5).
-      measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional()
+      measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional(),
+      // Semantic order between user asks (decision
+      // every-user-ask-is-boarded-at-intake-with-slim-blocked-by, rule 6): the
+      // SLUGS of the board items this one waits on. Slugs, never ids, because a
+      // slug is the immutable address (decision board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address). Lives in the JSON body
+      // like every other todo field, so it needs no migration. Existence of each
+      // blocker is checked at the tool layer when written; a blocker removed later
+      // reads as closed, it is never rewritten out of this list.
+      blocked_by: external_exports.array(external_exports.string().min(1)).optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       if (rec.source === "system" && !rec.system_reason) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "source 'system' requires system_reason (\xA73.2.7)" });
+      }
+      if (rec.blocked_by !== void 0 && rec.source === "system") {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["blocked_by"],
+          message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+        });
+      }
+      if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["blocked_by"], message: `blocked_by lists '${rec.slug}', the item itself \u2014 an item cannot block itself` });
       }
     });
     briefSchema = base.extend({
@@ -7685,9 +7703,10 @@ import { existsSync as existsSync6, readFileSync as readFileSync7 } from "node:f
 import { join as join10 } from "node:path";
 
 // scripts/lib/project.mjs
-import { readFileSync, existsSync as existsSync2 } from "node:fs";
+import { readFileSync, existsSync as existsSync2, mkdtempSync, rmSync } from "node:fs";
 init_dist();
 init_dist2();
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
 // scripts/lib/store-path.mjs
 import { lstatSync, realpathSync as realpathSync2 } from "node:fs";
@@ -8031,7 +8050,7 @@ var UPDATE_MARKER_RELATIVE_PATH = join5(".sterling", "update-complete.json");
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, rmSync, statSync as statSync2, renameSync } from "node:fs";
+import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync2, renameSync } from "node:fs";
 init_dist2();
 import { join as join6, dirname as dirname3 } from "node:path";
 
@@ -8671,7 +8690,7 @@ function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE_
 init_dist();
 import { existsSync as existsSync5, readFileSync as readFileSync6 } from "node:fs";
 import { join as join9 } from "node:path";
-import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 var EXAMPLE_CAP = 5;
 var EXAMPLE_PRIORITY = ["rejected", "needs_rework", "uncovered", "approved"];
 var VERDICTS = ["approved", "rejected", "needs_rework"];
@@ -8719,7 +8738,7 @@ function readAttestationGlobs(projectRoot2) {
   }
 }
 function readOnlyProbe(dbPath, fn) {
-  const db = new DatabaseSync3(dbPath, { readOnly: true });
+  const db = new DatabaseSync4(dbPath, { readOnly: true });
   try {
     return fn(db);
   } finally {
