@@ -118,10 +118,11 @@ const FENCE_BASELINE = '703a327';
 // agent-templates-dual-lane-audit-september-2026), which changed Claude-visible prose
 // in every template on purpose.
 const BASELINE_OVERRIDES = {
-  'conductor.md': 'fc054b1', // moved 2026-10-01: deliberate board-intake, parallel-planning and Fable-fallback prose (462c4f8, fc054b1; decision every-user-ask-is-boarded-at-intake-with-slim-blocked-by); before that 1501adf, review-cadence prose (decision review-sparsely-before-commit-ledger-kept)
+  'conductor.md': '364de04', // moved 2026-10-01 (reviewer roster bullet and review-pairing line, decision reviewer-agent-is-the-one-review-rubric-for-claude-and-codex); before that fc054b1: deliberate board-intake, parallel-planning and Fable-fallback prose (462c4f8, fc054b1; decision every-user-ask-is-boarded-at-intake-with-slim-blocked-by); before that 1501adf, review-cadence prose (decision review-sparsely-before-commit-ledger-kept)
   'implementor.md': 'edbb9f8', // moved 2026-09-30: knowledge_line_ref_fix added to disallowedTools (store writes stay the conductor's; roster.test.mjs)
   'researcher.md': '87aa5ff',
   'scout.md': '87aa5ff',
+  'reviewer.md': '364de04', // pinned at the commit that added it
   'librarian.md': 'edbb9f8', // moved 2026-09-30: knowledge_line_ref_fix granted (the background worker runs as --agent librarian; decision maintenance-queue-background-haiku-worker-simple-redesign 3a)
 };
 const renderConfig = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));

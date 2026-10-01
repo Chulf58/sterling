@@ -179,6 +179,12 @@ export const configSchema = z.object({
   dispatch_register: z
     .object({
       stale_minutes: z.number().int().positive().default(60),
+      // H10 keeps holding a capture_pending declaration while any row of the
+      // current session ENDED within this many minutes, so a lane that parks
+      // on background work and resumes as a new round does not open a gap
+      // (decision capture-pending-hold-window-spans-resume-rounds). 0 turns
+      // the window off.
+      resume_hold_minutes: z.number().int().nonnegative().default(10),
     })
     .default({}),
   // Concurrent-subagent ceiling (decision foreign_d7a0289f, board 18a22b56): every
@@ -210,6 +216,10 @@ export const configSchema = z.object({
       // roster is classless (decision agent-roster-is-classless-four-agents), and
       // the debugger role it rejected has no key here.
       librarian: modelEffort.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
+      // reviewer judges a diff (decision
+      // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
+      // dispatch pins its model explicitly; this is the install-time default.
+      reviewer: modelEffort.default({ model: 'claude-opus-5-5', effort: 'high' }),
     })
     .default({}),
   // Per-project agent tool extension (decision

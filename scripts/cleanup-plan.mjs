@@ -14,8 +14,12 @@
 //   delete   on disk, no live owner, no reference from any other file.
 // A reference is a mention of the filename, the stem, the stem's PascalCase or
 // camelCase form, or (for a .gd file) the class_name the file declares.
-// Only `delete` paths reach the top-level delete_paths list. The planner opens
-// a read-only copy of the store and never writes to it.
+// Only `delete` paths reach the top-level delete_paths list. An article whose
+// every path is absent is not a candidate at all (decision
+// cleanup-plan-skips-deprecated-articles-whose-files-are-all-gone): its files
+// are already deleted, the store keeps it as history, and nothing is left to
+// plan. A path that cannot be statted for any reason but ENOENT counts as
+// present. The planner opens a read-only copy of the store and never writes to it.
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -115,6 +119,15 @@ function buildPlan(store) {
     }
   }
 
+  const isGone = (path) => {
+    try {
+      lstatSync(join(target, path));
+      return false;
+    } catch (e) {
+      return e.code === 'ENOENT';
+    }
+  };
+
   let gitWhy;
   const classify = (a, path) => {
     const owners = (liveOwners.get(path) ?? []).filter((o) => o.id !== a.id).map((o) => o.slug);
@@ -136,7 +149,7 @@ function buildPlan(store) {
   };
 
   const candidates = articles
-    .filter((a) => a.state === 'deprecated' || a.state === 'dormant')
+    .filter((a) => (a.state === 'deprecated' || a.state === 'dormant') && !a.files.every((f) => isGone(f.path)))
     .map((a) => {
       // relies_on names articles by SLUG (pinned convention, decision foreign_474b1c71); id accepted as a legacy fallback.
       const active_dependents = articles

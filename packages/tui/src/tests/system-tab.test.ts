@@ -232,11 +232,11 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
   return {
     agents: ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
     // insertion order fixes the row order + the cursor index per key:
-    // implementor=0, researcher=1, scout=2, librarian=3, classifiers=4.
+    // implementor=0, researcher=1, scout=2, librarian=3, classifiers=4, reviewer=5.
     // LOW-3 (second Opus re-check round): the System tab now filters
-    // config.models to exactly this 5-key set (the classless four-agent
+    // config.models to exactly this 6-key set (the classless four-agent
     // roster, decision agent-roster-is-classless-four-agents f0893161, plus
-    // classifiers) — the fixture previously also carried an orphan 'coder'
+    // classifiers and reviewer) — the fixture previously also carried an orphan 'coder'
     // key + agent (a relic of the pre-rename roster) at index 0 specifically
     // to exercise "an unmapped key/agent renders inertly"; that behavior no
     // longer exists to exercise (an unmapped key is now FILTERED OUT, never
@@ -249,6 +249,9 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
       scout: { model: 'claude-opus-4-8', effort: 'low' },
       librarian: { model: 'claude-opus-4-8', effort: 'low' },
       classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
+      // last, so the cursor indices above are unchanged (reviewer joined the
+      // roster in decision reviewer-agent-is-the-one-review-rubric-for-claude-and-codex)
+      reviewer: { model: 'claude-opus-4-8', effort: 'low' },
     },
     catalog: freshCatalog(),
     ...over,

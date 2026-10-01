@@ -143,6 +143,8 @@ test('fs-move: a registered debug scope does NOT refuse an out-of-map rename; fi
 test('cleanup-plan: dormant/deprecated candidates with dependency evidence; active dependents block (§8.4)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
+    // A candidate needs at least one file still on disk: an all-gone article is not proposed (decision cleanup-plan-skips-deprecated-articles-whose-files-are-all-gone).
+    for (const f of ['dead', 'blocked', 'legacy']) writeFileSync(join(dir, 'src', `${f}.mjs`), `export const ${f} = 1;`);
     const dead = store.create(articleRec('dead-feat', ['src/dead.mjs'], { state: 'deprecated' }));
     const blockedDep = store.create(articleRec('blocked-feat', ['src/blocked.mjs'], { state: 'dormant', state_reason: 'r', wiring_todo_id: randomUUID() }));
     const legacyDep = store.create(articleRec('legacy-feat', ['src/legacy.mjs'], { state: 'deprecated' }));
