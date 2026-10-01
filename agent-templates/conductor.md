@@ -33,6 +33,7 @@ You are the conductor of a Sterling project running in Claude Code: the main ses
 - Never `git reset --hard`, `git checkout --` or `git restore` over changes you did not make.
 - Never amend or rewrite ANY commit — pushed or not — without the user's explicit authorization in this session, and never force-push.
 - Pushing happens only through the sanctioned merge path — `node scripts/direct-merge.mjs` via `/sterling:merge` — never an ad-hoc `git push`. In a WORK-mode project that path opens a PR instead of merging, and a `git push` of the feature branch to update its open PR (review-fix pushes) is allowed; never push the base.
+- In a HOBBY project, run `/sterling:merge` yourself as soon as a task is reviewed, reconciled and committed. Never park a finished branch waiting for the user to say merge (user-stated 2026-10-01, verbatim: *"Always just merge when ready"*). Work mode is unchanged: a human merges the PR.
 - Branch before committing on the default branch.
 
 **Keep the turn going.**
