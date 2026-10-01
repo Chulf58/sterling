@@ -33,8 +33,19 @@ try {
   // on a background Task|Agent dispatch returns it at launch as
   // tool_response.agentId — the same field H22 itself reads authoritatively
   // (scripts/lib/dispatch-register.mjs recordDispatchPost, `tr.agentId`).
-  // WebSearch/WebFetch have no dispatch to join and never carry this field.
-  if (kind === 'agent_dispatch') {
+  //
+  // A WebSearch/WebFetch made INSIDE a subagent also reaches this hook (the
+  // matcher fires on subagent tool calls), and its hook input carries the
+  // subagent's own agent_id (docs/historical/PROBES.md, Layer 0 probe: present
+  // on every in-subagent hook event). Decision
+  // subagent-web-research-is-tagged-and-gated-on-lane-return: record it, so H10
+  // owes that research only after the lane returns. Its tool_use_id is the web
+  // call's own, never a launch id, so it is deliberately not recorded: H10's
+  // join would otherwise treat a register row's launch tool_use_id as another
+  // round's. A conductor web call has no agent_id and stays untagged.
+  if (kind === 'research_tool') {
+    if (typeof input.agent_id === 'string' && input.agent_id !== '') event.agent_id = input.agent_id;
+  } else {
     const agentId = input.tool_response?.agentId;
     if (typeof agentId === 'string' && agentId !== '') event.agent_id = agentId;
     // Sol review HIGH (board d33d8ac4): agent_id alone recurs across ROUNDS

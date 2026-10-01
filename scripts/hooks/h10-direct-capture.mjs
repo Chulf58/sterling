@@ -720,9 +720,16 @@ try {
   // research duty for a DISPATCHED research/scout agent while that agent is
   // still running — demanding a research_finding/no_capture before the agent
   // has reported asks for a write-up of work that does not exist yet.
-  // `research_tool` events (WebSearch/WebFetch) are NEVER gated — those calls
-  // are synchronous conductor actions, already complete by construction, and
-  // never carry a join key at all.
+  // A `research_tool` event (WebSearch/WebFetch) made by the CONDUCTOR is
+  // never gated: the call is synchronous and complete by construction, and it
+  // carries no join key. One made INSIDE a subagent carries that lane's
+  // `agent_id` (H16, decision subagent-web-research-is-tagged-and-gated-on-
+  // lane-return) and is gated exactly like an agent_dispatch event, through
+  // the same `ownRegisterRow` join below: the lane's web research is owed only
+  // once the lane returns. H16 records no tool_use_id on it (a web call's own
+  // id is never a launch id), so it always joins by the (session_id,
+  // agent_id) singleton rule; a lane with 2+ rounds in this session is
+  // ambiguous and falls to the legacy rule, i.e. due at once, as before.
   //
   // JOIN KEY (Sol review HIGH, round 2 of this fix): `agent_id` ALONE is NOT
   // unique per dispatch — H22 permits the SAME agent_id across ROUNDS (a
@@ -821,6 +828,10 @@ try {
     return undefined;
   };
   const isDispatchEventLive = (e) => ownRegisterRow(e)?.status === 'presumed-active';
+  // Which research events wait on a lane's return: every agent_dispatch event,
+  // and a research_tool event tagged with the subagent's agent_id.
+  const isLaneResearchEvent = (e) =>
+    e.kind === 'agent_dispatch' || (e.kind === 'research_tool' && typeof e.agent_id === 'string' && e.agent_id !== '');
 
   // Worktree subagents record their touches under
   // .claude/worktrees/<name>/<repo-relative path> (anti_pattern foreign_b3972717) while
@@ -1362,7 +1373,27 @@ try {
   // conversion, so the debt is still recorded (P5).
   // Not guaranteed (stated in the decision): a stale presumed-active row that
   // never received a terminal hook holds the declaration until its TTL expires.
-  const pendingHeld = Boolean(pendingDetail) && liveDispatches.length > 0;
+  //
+  // RESUME-ROUND WINDOW (decision capture-pending-hold-window-spans-resume-
+  // rounds, 5f21707a, user-ruled 2026-10-01, amending point 3 above): a lane
+  // that parks on its own background work ends a register round at every
+  // SubagentStop and resumes as a NEW round minutes later, so between rounds
+  // nothing is presumed-active (finding 9f82a87d measured 4-6 minute gaps).
+  // The declaration therefore also holds while any row of THIS session ended
+  // within config.dispatch_register.resume_hold_minutes (zod default 10). A
+  // foreign session's row never holds. Not guaranteed (stated in the
+  // decision): a lane resuming after more than N minutes still opens a gap,
+  // and a lane that has really finished delays the debt by up to N minutes.
+  const resumeHoldMs = config.dispatch_register.resume_hold_minutes * 60_000;
+  const recentlyEndedDispatches =
+    classified.availability === 'ok' && typeof input.session_id === 'string' && input.session_id
+      ? classified.entries.filter((r) => {
+          if (r.status !== 'inactive-confirmed' || r.entry.session_id !== input.session_id) return false;
+          const age = nowMs - Date.parse(r.entry.ended?.at);
+          return age >= 0 && age < resumeHoldMs; // NaN (unreadable ended.at) fails both
+        })
+      : [];
+  const pendingHeld = Boolean(pendingDetail) && (liveDispatches.length > 0 || recentlyEndedDispatches.length > 0);
 
   // GRACE PER DECLARATION (same decision, point 1; identity-based per the
   // fix-round review): each declaration EVENT has its own one-Stop grace. The
@@ -1493,8 +1524,10 @@ try {
   //     dispatch actually returned, the event simply stays ARMED and is
   //     evaluated as an ordinary unmet research event (P5: uncertain is never
   //     silently discharged).
-  // `research_tool` events are NEVER touched by this — they are synchronous,
-  // already complete at their own `at` by construction. Findings
+  // A conductor `research_tool` event is NEVER touched by this — it is
+  // synchronous, already complete at its own `at` by construction. A
+  // subagent's tagged one (isLaneResearchEvent) takes the dispatch anchor,
+  // since its lane may still be running when the declaration is made. Findings
   // (`individuallyResearchSatisfied` / the group `researchSatisfied` check)
   // keep their existing, unrelated satisfaction rule — only the no_capture
   // DISCHARGE anchor changes here.
@@ -1503,7 +1536,7 @@ try {
     return row && row.status === 'inactive-confirmed' && isValidAt(row.entry.ended?.at) ? row.entry.ended.at : null;
   };
   const dischargedOnResearchLaneForDispatch = (e) => {
-    if (e.kind !== 'agent_dispatch') return dischargedOnResearchLane(e.at);
+    if (!isLaneResearchEvent(e)) return dischargedOnResearchLane(e.at);
     if (isDispatchEventLive(e)) return false;
     const returnAt = dispatchEventReturnAt(e);
     if (!returnAt) return false; // no valid OWN return evidence — never discharge, stays armed
@@ -1512,8 +1545,9 @@ try {
   const activeResearchEvents = researchEvents.filter((e) => {
     // RESEARCH RETURN GATE (see the per-dispatch join comment above): a
     // dispatched research agent's own event waits for ITS OWN return before it
-    // can arm the duty at all; a research_tool event is never gated.
-    if (e.kind === 'agent_dispatch' && isDispatchEventLive(e)) return false;
+    // can arm the duty at all, and so does a subagent's tagged web call; a
+    // conductor research_tool event is never gated.
+    if (isLaneResearchEvent(e) && isDispatchEventLive(e)) return false;
     return !dischargedOnResearchLaneForDispatch(e);
   });
 
@@ -1539,7 +1573,7 @@ try {
   // Computed only when there is something to check (at least one LIVE
   // agent_dispatch research event, by its own join) — an unconditional store
   // query here would be wasted work on every ordinary Stop.
-  const hasLiveAgentDispatchEvents = researchEvents.some((e) => e.kind === 'agent_dispatch' && isDispatchEventLive(e));
+  const hasLiveAgentDispatchEvents = researchEvents.some((e) => isLaneResearchEvent(e) && isDispatchEventLive(e));
   const researchSatisfyingRecords = hasLiveAgentDispatchEvents
     ? store.query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
     : [];
@@ -1547,7 +1581,7 @@ try {
     isValidAt(at) && researchSatisfyingRecords.some((r) => r.created_at >= at || r.updated_at >= at);
   const outstandingDeferredResearchEvents = researchEvents.filter(
     (e) =>
-      e.kind === 'agent_dispatch' &&
+      isLaneResearchEvent(e) &&
       isDispatchEventLive(e) &&
       !dischargedOnResearchLaneForDispatch(e) &&
       !individuallyResearchSatisfied(e.at)
