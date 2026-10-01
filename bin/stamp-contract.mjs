@@ -7,14 +7,14 @@ var __export = (target, all) => {
 };
 
 // scripts/stamp-contract.mjs
-import { readFileSync, writeFileSync, existsSync as existsSync2, realpathSync as realpathSync2 } from "node:fs";
-import { join as join3, dirname as dirname2, resolve as resolve2 } from "node:path";
+import { readFileSync as readFileSync3, writeFileSync, existsSync as existsSync2, realpathSync as realpathSync2 } from "node:fs";
+import { join as join5, dirname as dirname2, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// packages/store/dist/index.js
+// ../../../packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 
-// node_modules/zod/v3/external.js
+// ../../../node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
   BRAND: () => BRAND,
@@ -126,7 +126,7 @@ __export(external_exports, {
   void: () => voidType
 });
 
-// node_modules/zod/v3/helpers/util.js
+// ../../../node_modules/zod/v3/helpers/util.js
 var util;
 (function(util2) {
   util2.assertEqual = (_) => {
@@ -260,7 +260,7 @@ var getParsedType = (data) => {
   }
 };
 
-// node_modules/zod/v3/ZodError.js
+// ../../../node_modules/zod/v3/ZodError.js
 var ZodIssueCode = util.arrayToEnum([
   "invalid_type",
   "invalid_literal",
@@ -378,7 +378,7 @@ ZodError.create = (issues) => {
   return error;
 };
 
-// node_modules/zod/v3/locales/en.js
+// ../../../node_modules/zod/v3/locales/en.js
 var errorMap = (issue, _ctx) => {
   let message;
   switch (issue.code) {
@@ -481,7 +481,7 @@ var errorMap = (issue, _ctx) => {
 };
 var en_default = errorMap;
 
-// node_modules/zod/v3/errors.js
+// ../../../node_modules/zod/v3/errors.js
 var overrideErrorMap = en_default;
 function setErrorMap(map) {
   overrideErrorMap = map;
@@ -490,7 +490,7 @@ function getErrorMap() {
   return overrideErrorMap;
 }
 
-// node_modules/zod/v3/helpers/parseUtil.js
+// ../../../node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
   const { data, path, errorMaps, issueData } = params;
   const fullPath = [...path, ...issueData.path || []];
@@ -600,14 +600,14 @@ var isDirty = (x) => x.status === "dirty";
 var isValid = (x) => x.status === "valid";
 var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
 
-// node_modules/zod/v3/helpers/errorUtil.js
+// ../../../node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 (function(errorUtil2) {
   errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
 
-// node_modules/zod/v3/types.js
+// ../../../node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
   constructor(parent, value, path, key) {
     this._cachedPath = [];
@@ -4055,7 +4055,7 @@ var coerce = {
 };
 var NEVER = INVALID;
 
-// packages/schemas/dist/paths.js
+// ../../../packages/schemas/dist/paths.js
 function normalizeRepoPath(input) {
   const fwd = input.replace(/\\/g, "/");
   if (/^[A-Za-z]:/.test(fwd)) {
@@ -4087,7 +4087,7 @@ var repoPath = external_exports.string().transform((value, ctx) => {
   }
 });
 
-// packages/schemas/dist/envelope.js
+// ../../../packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
 var linkSchema = external_exports.object({
   rel: external_exports.enum(LINK_RELS),
@@ -4134,7 +4134,7 @@ function refineSupersession(rec, ctx) {
   }
 }
 
-// packages/schemas/dist/records.js
+// ../../../packages/schemas/dist/records.js
 var verifiableAt = external_exports.union([external_exports.literal("final"), external_exports.string().regex(/^phase:\d+$/)]);
 var base = external_exports.object(envelopeFields);
 var decisionSchema = base.extend({
@@ -4614,7 +4614,7 @@ var AGENT_MODEL_KEY = {
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
 
-// packages/schemas/dist/transient.js
+// ../../../packages/schemas/dist/transient.js
 var NO_CAPTURE_LANES = ["research", "capture", "all"];
 var noCaptureLaneSchema = external_exports.enum(NO_CAPTURE_LANES);
 var sessionEventSchema = external_exports.object({
@@ -4640,7 +4640,7 @@ var sessionEventSchema = external_exports.object({
   target: external_exports.string().trim().min(1).optional()
 });
 
-// packages/schemas/dist/config.js
+// ../../../packages/schemas/dist/config.js
 var modelEffort = external_exports.object({
   model: external_exports.string(),
   effort: external_exports.enum(["low", "medium", "high", "xhigh"])
@@ -5051,7 +5051,7 @@ var configSchema = external_exports.object({
   pr_review: external_exports.unknown().default({ copilot_logins: [] })
 });
 
-// packages/schemas/dist/registry.js
+// ../../../packages/schemas/dist/registry.js
 var projectRegistrationSchema = external_exports.object({
   // identity: the project root, absolute POSIX (machine-global, like backup_path —
   // NOT a repo-relative file_key, so it does not go through the path invariant).
@@ -5071,7 +5071,7 @@ var projectRegistrationSchema = external_exports.object({
   last_seen_at: external_exports.string().nullable().default(null)
 });
 
-// packages/schemas/dist/staleness.js
+// ../../../packages/schemas/dist/staleness.js
 var runtimeMarkerSchema = external_exports.object({
   /** the content build-id the running server loaded at boot */
   build_id: external_exports.string(),
@@ -5079,7 +5079,7 @@ var runtimeMarkerSchema = external_exports.object({
   booted_at: external_exports.string()
 }).strict();
 
-// packages/store/dist/registry.js
+// ../../../packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -5145,10 +5145,10 @@ var ProjectRegistry = class {
   }
 };
 
-// packages/store/dist/axis.js
+// ../../../packages/store/dist/axis.js
 var AXIS_MAX_TERM_LEN = 64;
 
-// packages/store/dist/index.js
+// ../../../packages/store/dist/index.js
 var MAX_RANK_TERMS = 16;
 function rankTermDedupeKey(term) {
   const isPrefix = term.endsWith("*") && term.length > 1;
@@ -5172,6 +5172,8 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
 
 // scripts/lib/contract-history.mjs
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join as join3 } from "node:path";
 
 // scripts/lib/installed-copy.mjs
 import { existsSync, realpathSync } from "node:fs";
@@ -5199,23 +5201,13 @@ function isInstalledCopy(root, { env = process.env, home = homedir2() } = {}) {
 }
 
 // scripts/lib/contract-history.mjs
-function historicalVariants({
-  repoRoot: repoRoot2,
-  templateRels,
-  leads,
-  extractBlock: extractBlock2,
-  currentBlocks,
-  warn = (line) => console.error(line),
-  git = (args) => spawnSync("git", args, { cwd: repoRoot2, encoding: "utf8" })
-}) {
+var CONTRACT_HISTORY_REL = "bin/contract-history.json";
+function gitVariants({ repoRoot: repoRoot2, templateRels, leads, extractBlock: extractBlock2, git }) {
   const variants2 = new Map(leads.map((l) => [l, /* @__PURE__ */ new Set()]));
   for (const rel of templateRels) {
     const log = git(["log", "--format=%H", "--", rel]);
     if (log.status !== 0) {
-      if (isInstalledCopy(repoRoot2) || /not a git repository/i.test(log.stderr ?? "")) {
-        warn(`stamp-contract: no git history at ${repoRoot2} (installed plugin copy) \u2014 only the current template text counts as template-descended; older bullets read as drift`);
-        return new Map(leads.map((l) => [l, new Set(currentBlocks.has(l) ? [currentBlocks.get(l)] : [])]));
-      }
+      if (isInstalledCopy(repoRoot2) || /not a git repository/i.test(log.stderr ?? "")) return null;
       throw new Error(`stamp-contract: git log failed in ${repoRoot2}: ${log.stderr}`);
     }
     for (const sha of log.stdout.split("\n").filter(Boolean)) {
@@ -5229,15 +5221,53 @@ function historicalVariants({
   }
   return variants2;
 }
-
-// scripts/stamp-contract.mjs
-var APPLY = process.argv.includes("--apply");
-var VERBOSE = process.argv.includes("--verbose");
-var onlyProjects = [];
-for (let i = 2; i < process.argv.length; i++) {
-  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve2(process.argv[++i]));
+function loadSnapshot(path) {
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT") return { ok: false, reason: `${path} is missing` };
+    throw err;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return { ok: false, reason: `${path} is unparseable (${err.message})` };
+  }
+  const valid = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && Object.values(parsed).every((v) => Array.isArray(v) && v.every((b) => typeof b === "string"));
+  if (!valid) return { ok: false, reason: `${path} is unparseable (expected an object of lead \u2192 string[])` };
+  return { ok: true, blocks: parsed };
 }
-var repoRoot = join3(dirname2(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+function historicalVariants({
+  repoRoot: repoRoot2,
+  templateRels,
+  leads,
+  extractBlock: extractBlock2,
+  currentBlocks,
+  warn = (line) => console.error(line),
+  git = (args) => spawnSync("git", args, { cwd: repoRoot2, encoding: "utf8" })
+}) {
+  const fromGit = gitVariants({ repoRoot: repoRoot2, templateRels, leads, extractBlock: extractBlock2, git });
+  if (fromGit) return fromGit;
+  const currentOnly = () => new Map(leads.map((l) => [l, new Set(currentBlocks.has(l) ? [currentBlocks.get(l)] : [])]));
+  const snapshot = loadSnapshot(join3(repoRoot2, CONTRACT_HISTORY_REL));
+  if (!snapshot.ok) {
+    warn(`stamp-contract: DEGRADED \u2014 no git history at ${repoRoot2} (installed plugin copy) and ${snapshot.reason} \u2014 only the current template text counts as template-descended; older bullets read as drift`);
+    return currentOnly();
+  }
+  const variants2 = currentOnly();
+  const absent = leads.filter((l) => !Object.hasOwn(snapshot.blocks, l));
+  if (absent.length) {
+    warn(`stamp-contract: DEGRADED \u2014 ${join3(repoRoot2, CONTRACT_HISTORY_REL)} has no entry for ${absent.length} lead(s) (${absent.join(" | ")}) \u2014 only their current template text counts as template-descended`);
+  }
+  for (const lead of leads) for (const block of snapshot.blocks[lead] ?? []) variants2.get(lead).add(block);
+  return variants2;
+}
+
+// scripts/lib/contract-bullets.mjs
+import { readFileSync as readFileSync2 } from "node:fs";
+import { join as join4 } from "node:path";
 var AGENTS_TEMPLATE_REL = "templates/target-agents-md.md";
 var CLAUDE_TEMPLATE_REL = "templates/target-claude-md.md";
 var TEMPLATE_RELS = [AGENTS_TEMPLATE_REL, CLAUDE_TEMPLATE_REL];
@@ -5256,7 +5286,8 @@ var TARGET_LEADS = [
   // any other index gets ANCHOR_MISSING_REFUSED, so folding was still the right
   // call for THIS bullet — but for that reason, not the one first written down.
   // [2026-09-26: the index pinning is gone — inserts are now declared per lead in
-  // INSERT_AFTER, the {lead, insertAfter} generalization this note once tracked.]
+  // INSERT_AFTER (scripts/stamp-contract.mjs), the {lead, insertAfter} generalization this
+  // note once tracked.]
   "- **Stage retrieval before acting**",
   // Added 2026-07-27. The mirror rule says the template is the SOURCE, but the two
   // had diverged and the stronger text was in Sterling's own CLAUDE.md — so seven
@@ -5274,9 +5305,9 @@ var TARGET_LEADS = [
   // template-descended guard as the normal replace path.
   "- **Knowledge is born structured.**",
   // 2026-09-26: the Codex and READY TO CLEAR bullets are NEW to older siblings, so they
-  // arrive through the insert path — see INSERT_AFTER below. Codex stays BEFORE
-  // READY TO CLEAR here: leads are processed in order, and READY TO CLEAR anchors on
-  // the Codex bullet, so a sibling missing both gets them back in template order.
+  // arrive through the insert path — see INSERT_AFTER in scripts/stamp-contract.mjs. Codex
+  // stays BEFORE READY TO CLEAR here: leads are processed in order, and READY TO CLEAR
+  // anchors on the Codex bullet, so a sibling missing both gets them back in template order.
   "- **Codex runs through the MCP tool, never the shell.**",
   "- **Say `READY TO CLEAR` plainly when it is time.**",
   // 2026-09-28: auto-memory is off (decision sterling-projects-run-with-claude-code-auto-memory-off),
@@ -5291,20 +5322,10 @@ var TARGET_LEADS = [
   "- **Write plainly; no AI tells.**",
   "- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**"
 ];
-var INSERT_AFTER = /* @__PURE__ */ new Map([
-  ["- **Concept articles \u2014 capture design the moment it settles", ["- **Reconcile _every affected_ article, not just the primary one**"]],
-  ["- **Codex runs through the MCP tool, never the shell.**", ["- **Knowledge is born structured.**"]],
-  ["- **Say `READY TO CLEAR` plainly when it is time.**", ["- **Codex runs through the MCP tool, never the shell.**", "- **Knowledge is born structured.**"]],
-  ["- **Instruction-file proposals replace memory.**", ["- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
-  ["- **Write plainly; no AI tells.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
-  ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", ["- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]]
-]);
 var RENAMED_LEADS = /* @__PURE__ */ new Map([
   ["- **Knowledge is born structured.**", ["- **Notes are the user's surface.**"]]
 ]);
-var normalizeEol = (text) => text.replace(/\r\n/g, "\n");
-var detectEol = (text) => text.includes("\r\n") ? "\r\n" : "\n";
-var withEol = (lfText, eol) => eol === "\r\n" ? lfText.replace(/\n/g, "\r\n") : lfText;
+var HISTORY_LEADS = [...TARGET_LEADS, ...[...RENAMED_LEADS.values()].flat()];
 var FENCE = /^\s*(```|~~~)/;
 function fenceSpans(lines) {
   const spans = /* @__PURE__ */ new Map();
@@ -5333,6 +5354,38 @@ function extractBlock(text, lead) {
   while (end < lines.length && !/^(- |#|\s*$)/.test(lines[end]) && !FENCE.test(lines[end])) end++;
   return { start, end, block: lines.slice(start, end).join("\n") };
 }
+function readTemplateBullets(repoRoot2) {
+  const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync2(join4(repoRoot2, rel), "utf8")]));
+  const leadLayer2 = /* @__PURE__ */ new Map();
+  const current2 = /* @__PURE__ */ new Map();
+  for (const lead of TARGET_LEADS) {
+    const home = TEMPLATE_RELS.find((rel) => extractBlock(templates.get(rel), lead));
+    if (!home) throw new Error(`stamp-contract: no template carries target bullet '${lead}' \u2014 refusing (P5)`);
+    leadLayer2.set(lead, home);
+    current2.set(lead, extractBlock(templates.get(home), lead).block);
+  }
+  return { templates, leadLayer: leadLayer2, current: current2 };
+}
+
+// scripts/stamp-contract.mjs
+var APPLY = process.argv.includes("--apply");
+var VERBOSE = process.argv.includes("--verbose");
+var onlyProjects = [];
+for (let i = 2; i < process.argv.length; i++) {
+  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve2(process.argv[++i]));
+}
+var repoRoot = join5(dirname2(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+var INSERT_AFTER = /* @__PURE__ */ new Map([
+  ["- **Concept articles \u2014 capture design the moment it settles", ["- **Reconcile _every affected_ article, not just the primary one**"]],
+  ["- **Codex runs through the MCP tool, never the shell.**", ["- **Knowledge is born structured.**"]],
+  ["- **Say `READY TO CLEAR` plainly when it is time.**", ["- **Codex runs through the MCP tool, never the shell.**", "- **Knowledge is born structured.**"]],
+  ["- **Instruction-file proposals replace memory.**", ["- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
+  ["- **Write plainly; no AI tells.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", ["- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]]
+]);
+var normalizeEol = (text) => text.replace(/\r\n/g, "\n");
+var detectEol = (text) => text.includes("\r\n") ? "\r\n" : "\n";
+var withEol = (lfText, eol) => eol === "\r\n" ? lfText.replace(/\n/g, "\r\n") : lfText;
 function itemEnd(text, start) {
   const lines = text.split("\n");
   const spans = fenceSpans(lines);
@@ -5357,19 +5410,11 @@ function itemEnd(text, start) {
   }
   return end;
 }
-var templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync(join3(repoRoot, rel), "utf8")]));
-var current = /* @__PURE__ */ new Map();
-var leadLayer = /* @__PURE__ */ new Map();
-for (const lead of TARGET_LEADS) {
-  const home = TEMPLATE_RELS.find((rel) => extractBlock(templates.get(rel), lead));
-  if (!home) throw new Error(`stamp-contract: no template carries target bullet '${lead}' \u2014 refusing (P5)`);
-  leadLayer.set(lead, home);
-  current.set(lead, extractBlock(templates.get(home), lead).block);
-}
+var { leadLayer, current } = readTemplateBullets(repoRoot);
 var variants = historicalVariants({
   repoRoot,
   templateRels: TEMPLATE_RELS,
-  leads: [...TARGET_LEADS, ...[...RENAMED_LEADS.values()].flat()],
+  leads: HISTORY_LEADS,
   extractBlock,
   currentBlocks: current
 });
@@ -5392,8 +5437,8 @@ for (const p of projects) {
     continue;
   }
   if (realpathSync2(repo) === selfPath) continue;
-  const agentsMd = join3(repo, "AGENTS.md");
-  const claudeMd = join3(repo, "CLAUDE.md");
+  const agentsMd = join5(repo, "AGENTS.md");
+  const claudeMd = join5(repo, "CLAUDE.md");
   if (!existsSync2(agentsMd)) {
     results.push({ project: p.name, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node scripts/init.mjs --target ${repo}` });
     drift++;
@@ -5405,7 +5450,7 @@ for (const p of projects) {
     continue;
   }
   const loadSibling = (path) => {
-    const raw = readFileSync(path, "utf8");
+    const raw = readFileSync3(path, "utf8");
     return { path, eol: detectEol(raw), text: normalizeEol(raw) };
   };
   const siblingFiles = /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, loadSibling(agentsMd)], [CLAUDE_TEMPLATE_REL, loadSibling(claudeMd)]]);
