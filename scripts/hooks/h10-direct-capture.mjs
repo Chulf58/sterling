@@ -385,10 +385,12 @@ try {
    * stop_hook_active suppresses without spending, so a suppressed advisory can still
    * fire on a later Stop of the same session.
    *
-   * Fan-out deferral/staleness disclosures (decision foreign_ec9eacaa) ride this release
-   * whichever way it goes: prefixed to the block when one is due, and otherwise
-   * emitted as a systemMessage on the exit-0 release — a deferral is a fact to
-   * disclose, never a reason to block (P5).
+   * Degradation disclosures ride this release whichever way it goes: prefixed
+   * to the block when one is due, and otherwise emitted as a systemMessage on
+   * the exit-0 release (P5). The fan-out deferral (decision foreign_ec9eacaa) is
+   * a fact to disclose, never a reason to block, and conductor-facing only: it
+   * goes out as a once-per-set notice, never a systemMessage (decision
+   * h10-deferral-is-conductor-facing-degradations-stay-loud).
    */
   // SPEND AFTER DELIVERY, shared (point D, decision foreign_ee8ab1f5; Fix 1 review
   // round): write stderr synchronously; ONLY on a successful write run the
@@ -465,7 +467,7 @@ try {
       // Disclosures never CAUSE a block — they only ride one that is already due.
       // FIX 1 (review round): this is a THIRD `[dispatch_status_unknown]`
       // delivery path — a pressure/gauge block can carry the same
-      // disclosureParts the duty-nag and exit-0 releases carry, so it must
+      // degradationParts the duty-nag and exit-0 releases carry, so it must
       // spend the unknown-note keys too (never duty-nagged/capture-nagged —
       // no duty is rendered on this path).
       advisoryText = parts.join('\n\n');
@@ -478,21 +480,34 @@ try {
         disclose(`H10: context advisory publish failed — ${String((e && e.message) || e)}; it will retry on the next Stop\n`);
       }
     }
+    // FAN-OUT DEFERRAL (decision h10-deferral-is-conductor-facing-degradations-
+    // stay-loud): informational, so it never rides the systemMessage below —
+    // it reaches the conductor as the next prompt's additionalContext
+    // (h19-delivery-drain), keyed by session so a notice from this session's
+    // last Stop is never drained into the next session.
+    if (deferralKey && !deferralNoted) {
+      try {
+        publishNotice(input.cwd, deferralLine(8), { sessionId: hasSession ? input.session_id : undefined });
+        spendDeferralNoted();
+      } catch (e) {
+        degradationParts.push(`H10: deferral notice publish failed — ${String((e && e.message) || e)}; ${deferralLine(8)}`);
+      }
+    }
     // R0: the payload and the exit are ONE state machine — a bare
     // process.stdout.write() followed by a separate allow() can exit before
     // the pipe drains (decision hook-stdout-exit-after-write-callback-bound-
     // exit-deny-stays-synchronous).
     // PR REVIEW LOOP nag due and no duty block carried it: this release BLOCKS
-    // once instead (see the prLoop block below disclosureParts).
-    if (prLoop?.blockDue) writeThenSpend(disclosureParts.join('\n\n'), [prLoop.spend, spendDispatchUnknownKeys]);
-    if (disclosureParts.length || advisoryText) {
+    // once instead (see the prLoop block below degradationParts).
+    if (prLoop?.blockDue) writeThenSpend(degradationParts.join('\n\n'), [prLoop.spend, spendDispatchUnknownKeys]);
+    if (degradationParts.length || advisoryText) {
       // dispatch-unknown-noted.json is spent here too (point C, decision
-      // ee8ab1f5): these rows ride disclosureParts, which leaves through BOTH
+      // ee8ab1f5): these rows ride degradationParts, which leaves through BOTH
       // this exit-0 systemMessage release AND the duty-nag deny below — a
       // deny-only spend cannot guarantee once-per-session (Codex round 2,
       // adopted). Spent only inside onWritten, i.e. after the payload is
       // actually handed off.
-      exitAfterWrite(JSON.stringify({ systemMessage: [...disclosureParts, advisoryText].filter(Boolean).join('\n\n') }), 0, {
+      exitAfterWrite(JSON.stringify({ systemMessage: [...degradationParts, advisoryText].filter(Boolean).join('\n\n') }), 0, {
         onWritten: spendDispatchUnknownKeys,
       });
       // This write's exit is async, so a bare `return` here would let the
@@ -863,30 +878,61 @@ try {
   // duty set's own exclusion.
   const settlementCandidates = allTouchedPaths.filter((p) => !isDeferred(p));
   const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...ownersOf(p)]))];
-  // Disclosure, not a demand: rides whatever release/deny the duties below
-  // produce. Deliberately avoids the article-demand and capture-nag wording —
-  // a deferred duty is not owed to the conductor right now.
-  const disclosureParts = [];
-  if (lostSettlementMessage) disclosureParts.push(lostSettlementMessage);
-  if (residueLines.length) disclosureParts.push(...residueLines);
-  if (deferredPaths.length) {
-    // Board cdaf2824 (residual build, 2026-08-31): a count-only disclosure
-    // beside a path-specific article demand asserts no identity between the
-    // two, which manufactured false defect reports in two unrelated projects
-    // — the reader could see a file was deferred and a file was demanded, but
-    // not whether they were the same file. Name the deferred PATHS themselves
-    // (repo-relative, comma-separated), capped so a wide fan-out cannot flood
-    // the Stop message: past PATH_DISPLAY_CAP, show the first N and "+K more".
-    const PATH_DISPLAY_CAP = 8;
+  // Disclosure, not a demand. Deliberately avoids the article-demand and
+  // capture-nag wording — a deferred duty is not owed to the conductor right
+  // now. SPLIT (decision h10-deferral-is-conductor-facing-degradations-stay-
+  // loud): degradationParts (lost settlement, residue, [dispatch_status_unknown],
+  // [register_unavailable], PR-loop state) ride every release loud (P5); the
+  // deferral line is informational and conductor-facing only — the notice
+  // channel on a release (releaseWithPressure), the capped line inside a
+  // blocking duty nag.
+  const degradationParts = [];
+  if (lostSettlementMessage) degradationParts.push(lostSettlementMessage);
+  if (residueLines.length) degradationParts.push(...residueLines);
+  // Board cdaf2824 (residual build, 2026-08-31): a count-only disclosure
+  // beside a path-specific article demand asserts no identity between the
+  // two, which manufactured false defect reports in two unrelated projects —
+  // the reader could see a file was deferred and a file was demanded, but not
+  // whether they were the same file. Name the deferred PATHS themselves
+  // (repo-relative, comma-separated), capped: past `cap`, show the first N and
+  // "+K more". The notice names 8; a blocking nag names 3 (the ruling's (4)).
+  const deferralLine = (cap) => {
+    if (!deferredPaths.length) return '';
     const pathsDisplay =
-      deferredPaths.length > PATH_DISPLAY_CAP
-        ? `${deferredPaths.slice(0, PATH_DISPLAY_CAP).join(', ')} +${deferredPaths.length - PATH_DISPLAY_CAP} more`
-        : deferredPaths.join(', ');
-    disclosureParts.push(
-      `• deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(', ')}]: ${pathsDisplay} — duty re-arms when they land ` +
-        `(repeats by design while the dispatch(es) stay live — fan-out-aware duty deferral; not a stuck nag)`
-    );
-  }
+      deferredPaths.length > cap ? `${deferredPaths.slice(0, cap).join(', ')} +${deferredPaths.length - cap} more` : deferredPaths.join(', ');
+    return `• deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(', ')}]: ${pathsDisplay} — duty re-arms when they land`;
+  };
+  // FIX 2 (review round, re-applied): `raw.session_id !== input.session_id`
+  // passes when BOTH are undefined, so an absent session_id was never
+  // actually excluded — hasSession gates the reader, the writer AND the
+  // duty-nagged spend callback below, all off this ONE check.
+  const hasSession = typeof input.session_id === 'string' && input.session_id.length > 0;
+  // Once per session per {owners, paths} set, like dispatch-unknown-noted.json:
+  // an unchanged deferral is published once, a changed set publishes again.
+  // Spent only after delivery (the notice publish, or the nag's stderr write).
+  const deferralNotedPath = join(input.cwd, '.sterling', 'transient', 'deferral-noted.json');
+  const deferralKey = deferredPaths.length
+    ? createHash('sha256')
+        .update(JSON.stringify({ owners: [...deferredAgents].sort(), paths: [...deferredPaths].sort() }))
+        .digest('hex')
+    : null;
+  const deferralNoted = (() => {
+    if (!deferralKey || !hasSession) return false;
+    try {
+      const raw = JSON.parse(readFileSync(deferralNotedPath, 'utf8'));
+      return raw.session_id === input.session_id && raw.key === deferralKey;
+    } catch {
+      return false;
+    }
+  })();
+  const spendDeferralNoted = () => {
+    if (!deferralKey || !hasSession) return; // sessionless: never persisted, so it republishes each Stop
+    try {
+      writeFileSync(deferralNotedPath, JSON.stringify({ session_id: input.session_id, key: deferralKey }));
+    } catch {
+      // best-effort — the next Stop simply republishes the same deferral
+    }
+  };
   // UNKNOWN — disclosed WITHOUT excluding. Only named when it actually bites
   // something this Stop touched: an unknown owner of an untouched file changes
   // no outcome and would repeat byte-identically every Stop (board cac61a95
@@ -898,11 +944,6 @@ try {
   const bitingUnknown = unknownRows.filter((row) =>
     (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => [...touchedKeys].some((k) => entryOwns(joinKey(f), k)))
   );
-  // FIX 2 (review round, re-applied): `raw.session_id !== input.session_id`
-  // passes when BOTH are undefined, so an absent session_id was never
-  // actually excluded — hasSession gates the reader, the writer AND the
-  // duty-nagged spend callback below, all off this ONE check.
-  const hasSession = typeof input.session_id === 'string' && input.session_id.length > 0;
   const dispatchUnknownNotedPath = join(input.cwd, '.sterling', 'transient', 'dispatch-unknown-noted.json');
   const dispatchUnknownNotedKeys = (() => {
     if (!hasSession) return new Set(); // absent session_id: never salvaged (point E), read skipped entirely
@@ -925,7 +966,7 @@ try {
     const key = dispatchUnknownKey(row);
     if (dispatchUnknownNotedKeys.has(key)) continue;
     pendingDispatchUnknownKeys.push(key);
-    disclosureParts.push(
+    degradationParts.push(
       render(
         disclosure(
           'dispatch_status_unknown',
@@ -955,7 +996,7 @@ try {
   // genuinely-missing file — silence is the byte-identical posture; only
   // 'corrupt' is worth a line (an all-clear would be a false claim).
   if (classified.availability === 'corrupt') {
-    disclosureParts.push(
+    degradationParts.push(
       render(
         disclosure(
           'register_unavailable',
@@ -989,7 +1030,7 @@ try {
       // Never guessed as work — but an ARMED loop is never silently suppressed
       // either (Sol review): say that its state was not evaluated.
       if (existsSync(join(input.cwd, PR_LOOP_REL))) {
-        disclosureParts.push(
+        degradationParts.push(
           `• PR review loop: the project mode is unreadable (${String((e && e.message) || e)}) — ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
         );
       }
@@ -1000,7 +1041,7 @@ try {
     try {
       state = readPrLoop(input.cwd);
     } catch (e) {
-      disclosureParts.push(`• PR review loop: ${PR_LOOP_REL} is unreadable (${String((e && e.message) || e)}) — whether a loop is owed is UNKNOWN; rerun /sterling:merge to re-arm it, or delete the file if no PR is open.`);
+      degradationParts.push(`• PR review loop: ${PR_LOOP_REL} is unreadable (${String((e && e.message) || e)}) — whether a loop is owed is UNKNOWN; rerun /sterling:merge to re-arm it, or delete the file if no PR is open.`);
       return null;
     }
     if (!state || state.status !== 'owed') return null;
@@ -1034,7 +1075,7 @@ try {
       },
     };
   })();
-  if (prLoop) disclosureParts.push(prLoop.blockDue ? prLoop.text : prLoop.reminder);
+  if (prLoop) degradationParts.push(prLoop.blockDue ? prLoop.text : prLoop.reminder);
 
   // Clear the transient registers at the end of the work they represent (P4).
   // INVARIANT: at a Stop, settled work may be consumed, durably queued work may
@@ -2293,7 +2334,10 @@ try {
     // straight into queued debt with the nag never having been shown.
     // Any fan-out deferral/staleness leads the block: the demands that follow are
     // exactly the ones the deferral did NOT cover (decision foreign_ec9eacaa).
-    const parts = [...disclosureParts];
+    // Inside the nag the deferral line names at most 3 paths and carries no
+    // rationale tail (decision h10-deferral-is-conductor-facing-degradations-
+    // stay-loud (4)); degradations ride unchanged.
+    const parts = [deferralLine(3), ...degradationParts].filter(Boolean);
 
     const hasDebug = activeDebugEvents.length > 0;
     const captureLaneOpen = hasCaptureDuty && !captured && !pendingDetail;
@@ -2319,7 +2363,7 @@ try {
     if (articleLaneOpen) openLanes.push('articles');
     openLanes.sort();
     // FIX 4 (review round): concept/article compact too — only DEFERRAL lines
-    // (disclosureParts, already outside this compact/full decision) stay as
+    // (deferralLine and degradationParts, already outside this compact/full decision) stay as
     // full lines beside the one-liner; they carry live ownership evidence
     // (decision foreign_ee8ab1f5 (2)) that a token can't stand in for.
     const laneVariant = (lane) => {
@@ -2490,7 +2534,10 @@ try {
         writeFileSync(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
       },
       spendDispatchUnknownKeys,
-      // The PR review loop text rode disclosureParts into this block.
+      // The nag showed the conductor this deferral set, so the release that
+      // follows does not publish it again as a notice.
+      spendDeferralNoted,
+      // The PR review loop text rode degradationParts into this block.
       () => prLoop?.blockDue && prLoop.spend(),
     ]);
   }

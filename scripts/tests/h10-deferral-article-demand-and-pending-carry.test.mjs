@@ -70,7 +70,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -101,6 +101,12 @@ function runHook(script, input, cwd, env = {}) {
 // which stream carries it — checking the union avoids anchoring the oracle to
 // an unstated delivery channel (same helper the h22 suite uses).
 const out = (r) => `${r.stdout}\n${r.stderr}`;
+// The deferral line on a non-blocking release reaches the conductor through the
+// notice channel, not stdout/stderr (decision h10-deferral-is-conductor-facing-
+// degradations-stay-loud), so the union now includes the published notices.
+const noticesDir = (dir) => join(dir, '.sterling', 'transient', 'notices');
+const disclosed = (r, dir) =>
+  [out(r), ...(existsSync(noticesDir(dir)) ? readdirSync(noticesDir(dir)).map((n) => readFileSync(join(noticesDir(dir), n), 'utf8')) : [])].join('\n');
 
 function envelope(type, at = NOW) {
   return {
@@ -290,7 +296,7 @@ test('A2 (DEFECT 1, RED at HEAD): the THRESHOLD counts the SUBTRACTED set — tw
       'DEFECT 1 SHAPE (RED at HEAD, fires as 2): with ALPHA and BETA deferred, only GAMMA and DELTA are genuinely unowned-and-undeferred — 2 is under the default threshold of 3, so the demand must not fire at all. At HEAD the unsubtracted count is 4 and it fires.'
     );
     assert.doesNotMatch(out(r), /article demand/i, 'no demand text at all — a sub-threshold set is not a demand');
-    assert.match(out(r), /defer/i, 'the deferral is still disclosed on the release (silence would be a different defect)');
+    assert.match(disclosed(r, dir), /defer/i, 'the deferral is still disclosed on the release (silence would be a different defect)');
     assert.equal(articleMissing(store).length, 0, 'and nothing is minted for territory that is still being authored');
     assert.equal(existsSync(touchesPath(dir)), true, 'a deferring release is non-terminal — touches.json survives so the duty re-arms when the dispatches land');
   } finally {
@@ -318,7 +324,7 @@ test('C0 (CONTROL for C1 — placed first): the same wholly-deferred fixture WIT
 
     const r = stopOnce(dir);
     assert.equal(r.code, 0, 'CONTROL BROKEN if this is not 0: the sole touched file is deferred and the capture duty is satisfied — nothing may block');
-    assert.match(out(r), /defer/i, 'CONTROL BROKEN: the deferral is disclosed');
+    assert.match(disclosed(r, dir), /defer/i, 'CONTROL BROKEN: the deferral is disclosed');
     assert.equal(owed(store, 'concept_article_missing').length, 0, 'no concept duty exists in this arm');
   } finally {
     cleanup();

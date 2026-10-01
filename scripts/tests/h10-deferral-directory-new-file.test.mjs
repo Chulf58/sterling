@@ -18,7 +18,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -120,7 +120,11 @@ test('a register row owning the directory game/world/beam_pad defers a file CREA
     const r = stop(dir);
     assert.doesNotMatch(out(r), /article demand/i, `the deferred new file raises no article demand; out=${out(r)}`);
     assert.notEqual(r.code, 2, `nothing blocks: the only touched file is owned by a live dispatch; out=${out(r)}`);
-    assert.match(out(r), /deferred: 1 file\(s\) owned by live dispatch\(es\) \[lane-beam\]: game\/world\/beam_pad\/x\.gd/, `the deferral is disclosed with its owner; out=${out(r)}`);
+    // The deferral reaches the conductor as a notice, not stdout/stderr
+    // (decision h10-deferral-is-conductor-facing-degradations-stay-loud).
+    const notices = join(dir, '.sterling', 'transient', 'notices');
+    const noticeText = readdirSync(notices).map((n) => readFileSync(join(notices, n), 'utf8')).join('\n');
+    assert.match(noticeText, /deferred: 1 file\(s\) owned by live dispatch\(es\) \[lane-beam\]: game\/world\/beam_pad\/x\.gd/, `the deferral is disclosed with its owner; notices=${noticeText}`);
   } finally {
     cleanup();
   }
