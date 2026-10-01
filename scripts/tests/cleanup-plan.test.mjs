@@ -113,14 +113,42 @@ test('cleanup-plan: a co-owner that is itself deprecated does not count as a liv
   }
 });
 
-test('cleanup-plan: a file not on disk is absent, a store edit only', () => {
-  const { dir, store, cleanup } = makeProject({ 'src/keep-repo-nonempty.mjs': 'x\n' });
+test('cleanup-plan: in a candidate with a file on disk, a file not on disk is absent, a store edit only', () => {
+  const { dir, store, cleanup } = makeProject({ 'src/still_here.mjs': 'export const s = 1;\n', 'src/other.mjs': 'export const o = 1;\n' });
   try {
-    const dead = store.create(articleRec('gone-feat', ['src/gone.mjs'], { state: 'deprecated' }));
+    const dead = store.create(articleRec('gone-feat', ['src/gone.mjs', 'src/still_here.mjs'], { state: 'deprecated' }));
     const p = plan(dir);
     const c = p.candidates.find((x) => x.article === dead.id);
     assert.equal(bucketOf(c, 'src/gone.mjs').bucket, 'absent');
+    assert.equal(bucketOf(c, 'src/still_here.mjs').bucket, 'delete', 'the present path is handled as before');
+    assert.deepEqual(p.delete_paths, ['src/still_here.mjs']);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a deprecated or dormant article whose every file is gone is not a candidate', () => {
+  const { dir, store, cleanup } = makeProject({ 'src/other.mjs': 'export const o = 1;\n' });
+  try {
+    const dep = store.create(articleRec('gone-deprecated', ['src/gone_a.mjs', 'src/gone_b.mjs'], { state: 'deprecated' }));
+    const dorm = store.create(articleRec('gone-dormant', ['src/gone_c.mjs'], { state: 'dormant', state_reason: 'r', wiring_todo_id: randomUUID() }));
+    const p = plan(dir);
+    assert.ok(!p.candidates.some((x) => x.article === dep.id), 'an all-gone deprecated article yields no candidate');
+    assert.ok(!p.candidates.some((x) => x.article === dorm.id), 'an all-gone dormant article yields no candidate');
+    assert.deepEqual(p.candidates, []);
     assert.deepEqual(p.delete_paths, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: an all-gone article is skipped even when an active article relies on it', () => {
+  const { dir, store, cleanup } = makeProject({ 'src/other.mjs': 'export const o = 1;\n' });
+  try {
+    const dead = store.create(articleRec('gone-base', ['src/gone.mjs'], { state: 'deprecated' }));
+    store.create(articleRec('live-user', ['src/other.mjs'], { dependencies: { relies_on: ['gone-base'], relied_by: [] } }));
+    const p = plan(dir);
+    assert.ok(!p.candidates.some((x) => x.article === dead.id));
   } finally {
     cleanup();
   }
