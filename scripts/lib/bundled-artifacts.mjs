@@ -30,6 +30,7 @@ import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
+import { contractHistoryJson } from './contract-bullets.mjs';
 
 // Banner for bundles that inline CommonJS dependencies: esbuild's ESM output
 // has no `require`, so a bundled CJS module's require() of a node builtin
@@ -230,6 +231,9 @@ export const BIN_ENTRIES = {
 // identity (above) keeps each module's derived paths pointing into the shipped
 // tree: bin/ sits one level below the root exactly as scripts/ does, and nested
 // modules (scripts/lib/*, scripts/adapters/*) keep their own locations.
+// It also writes outDir/contract-history.json, the stamp-contract bullet history an installed
+// copy (no git) reads in place of the templates' git log (scripts/lib/contract-history.mjs);
+// it leaves out the current template blocks, so a template commit does not make bin/ stale.
 // Returns the emitted absolute paths.
 export async function buildBins({ root, outDir }) {
   const emitted = [];
@@ -250,6 +254,9 @@ export async function buildBins({ root, outDir }) {
     });
     emitted.push(outFile);
   }
+  const historyFile = join(outDir, 'contract-history.json');
+  writeFileSync(historyFile, contractHistoryJson(root));
+  emitted.push(historyFile);
   return emitted;
 }
 
