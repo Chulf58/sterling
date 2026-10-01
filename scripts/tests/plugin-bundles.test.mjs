@@ -81,7 +81,8 @@ test('bin bundles: one per BIN_ENTRIES member, node: imports only, source identi
   try {
     const binDir = join(tmp, 'bin');
     buildInto('build-bin.mjs', binDir);
-    assert.deepEqual(readdirSync(binDir).sort(), Object.keys(BIN_ENTRIES).map((n) => `${n}.mjs`).sort());
+    // plus the stamp-contract bullet history an installed copy reads in place of git (buildBins)
+    assert.deepEqual(readdirSync(binDir).sort(), [...Object.keys(BIN_ENTRIES).map((n) => `${n}.mjs`), 'contract-history.json'].sort());
     for (const file of readdirSync(binDir)) {
       const src = readFileSync(join(binDir, file), 'utf8');
       assert.deepEqual(nonBuiltinImports(src), [], `${file} imports only node: builtins`);
@@ -231,7 +232,8 @@ test('bin/stamp-contract.mjs from a .git-less plugin root (an installed copy): n
       env: { ...process.env, STERLING_REGISTRY_DB: registryDb, GIT_CEILING_DIRECTORIES: base },
     });
     assert.ok(r.status === 0 || r.status === 2, `exit 0 or 2, never a crash: ${r.status}\n${r.stdout}${r.stderr}`);
-    assert.ok(r.stderr.includes(`stamp-contract: no git history at ${plugin} (installed plugin copy) — only the current template text counts as template-descended; older bullets read as drift`), r.stderr);
+    // no bin/contract-history.json was copied, so this is the degraded current-only path
+    assert.ok(r.stderr.includes(`stamp-contract: DEGRADED — no git history at ${plugin} (installed plugin copy) and ${join(plugin, 'bin', 'contract-history.json')} is missing — only the current template text counts as template-descended; older bullets read as drift`), r.stderr);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
