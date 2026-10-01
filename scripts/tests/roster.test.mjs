@@ -42,9 +42,11 @@ const CFG = { config: { models: MODELS }, models: MODELS };
 // added conductor: a MAIN-SESSION agent, never dispatched, so it is
 // registered like every other agent but exempt from the §7.3/§7.4/tool-grant
 // linters (MAIN_SESSION_AGENTS in ../lib/checks.mjs) — the loop below still
-// runs it through each linter and expects an empty (vacuous) result. The
-// roster is now implementor/researcher/scout/librarian/conductor.
-const ROSTER = ['implementor', 'researcher', 'scout', 'librarian', 'conductor'];
+// runs it through each linter and expects an empty (vacuous) result. Decision
+// reviewer-agent-is-the-one-review-rubric-for-claude-and-codex (2026-09-30)
+// then added reviewer, a fifth subagent. The roster is now
+// implementor/researcher/scout/librarian/reviewer/conductor.
+const ROSTER = ['implementor', 'researcher', 'scout', 'librarian', 'reviewer', 'conductor'];
 
 test('the §7.1 roster is registered, linter-complete, and spawn-contracted', () => {
   const registry = loadRegistry(join(TPL, 'registry.json'));
@@ -222,7 +224,7 @@ test('inherit-all implementor: no tools: line; disallowedTools denies exactly th
 });
 
 test('the allowlist agents keep their tools: line (a read-only agent must not silently gain an MCP writer)', () => {
-  for (const file of ['researcher.md', 'scout.md', 'librarian.md']) {
+  for (const file of ['researcher.md', 'scout.md', 'librarian.md', 'reviewer.md']) {
     assert.match(fmOf(readFileSync(join(TPL, file), 'utf8')), /^tools:/m, `${file} keeps its allowlist`);
   }
 });
@@ -239,6 +241,52 @@ test('web tools: the researcher allowlist carries WebSearch and WebFetch; scout 
     assert.ok(!tools.includes('WebSearch') && !tools.includes('WebFetch'), `${file} stays without web tools`);
   }
   for (const write of ['Edit', 'Write', 'NotebookEdit']) assert.ok(!researcher.includes(write), `researcher.md stays read-only — no ${write}`);
+});
+
+// Decision reviewer-agent-is-the-one-review-rubric-for-claude-and-codex
+// (user-ruled 2026-09-30): the reviewer is read-only BY TOOL GRANT. Review lanes
+// ran as general-purpose, which grants every tool, so read-only was only
+// requested in prose; this pin is what makes it enforced.
+test('reviewer: registered, read-only by tool grant (no Edit/Write/NotebookEdit, no web, no store-write tool under either prefix), still holds the read-side store tools', () => {
+  const registry = loadRegistry(join(TPL, 'registry.json'));
+  assert.ok(registry.agents.some((a) => a.name === 'reviewer' && a.file === 'reviewer.md'), 'reviewer is registered against reviewer.md');
+  const fm = fmOf(readFileSync(join(TPL, 'reviewer.md'), 'utf8'));
+  assert.match(fm, /^name: reviewer$/m);
+  assert.doesNotMatch(fm, /^disallowedTools:/m, 'an allowlist agent, not inherit-all');
+  const tools = fm.match(/^tools:\s*(.+)$/m)[1].split(',').map((t) => t.trim());
+  for (const write of ['Edit', 'Write', 'NotebookEdit', 'WebSearch', 'WebFetch', 'Agent', 'Task']) {
+    assert.ok(!tools.includes(write), `reviewer.md grants no ${write}`);
+  }
+  for (const w of STORE_WRITE_TOOLS) {
+    for (const prefix of ['mcp__sterling__', 'mcp__plugin_sterling_sterling__']) {
+      assert.ok(!tools.includes(prefix + w), `reviewer.md grants no store write ${prefix}${w}`);
+    }
+  }
+  for (const need of ['Read', 'Grep', 'Glob', 'Bash', 'ToolSearch']) assert.ok(tools.includes(need), `reviewer.md grants ${need}`);
+  for (const read of ['knowledge_query', 'knowledge_get', 'board_query', 'board_get']) {
+    for (const prefix of ['mcp__sterling__', 'mcp__plugin_sterling_sterling__']) assert.ok(tools.includes(prefix + read), `reviewer.md grants ${prefix}${read}`);
+  }
+});
+
+// The reviewer body is the ONE rubric: the Codex Sol call is handed the same
+// body, and the review-brief skill points at it instead of holding its own copy.
+test('reviewer body carries the one review rubric; the review-brief skill points at it and no longer says there is no reviewer agent', () => {
+  const body = readFileSync(join(TPL, 'reviewer.md'), 'utf8').replace(/^---[\s\S]*?\n---/, '');
+  for (const [label, re] of [
+    ['riskiest part first', /riskiest/i],
+    ['every changed test read in full', /every changed test[^.]*in full/i],
+    ['removed assertions', /removed assertion/i],
+    ['severity ranking', /CRITICAL[\s\S]*HIGH[\s\S]*MEDIUM[\s\S]*LOW/],
+    ['file:line per finding', /file:line|path:line/],
+    ['test-integrity verdict', /test[- ]integrity/i],
+    ['areas checked with nothing found', /nothing found/i],
+  ]) assert.match(body, re, `reviewer body carries: ${label}`);
+  const skill = readFileSync(join(root, 'skills', 'review-brief', 'SKILL.md'), 'utf8');
+  assert.match(skill, /agent-templates\/reviewer\.md/, 'the skill names the template that holds the rubric');
+  assert.doesNotMatch(skill, /no standing `?reviewer`? agent/i, 'the skill no longer denies the reviewer agent');
+  const conductor = readFileSync(join(TPL, 'conductor.md'), 'utf8');
+  assert.match(conductor, /\*\*reviewer\*\*/, 'the conductor roster names the reviewer');
+  assert.doesNotMatch(conductor, /run as `researcher`/, 'review lanes no longer run as researcher');
 });
 
 test('tool-grant linter: inherit-all (disallowedTools, no tools:) passes; a template with neither still fails; deny entries are linted like grants', () => {
