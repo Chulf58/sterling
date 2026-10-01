@@ -36,6 +36,8 @@ import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launche
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, userScopeCodexServer, codexUserScopeLine } from './lib/codex-mcp.mjs';
 import { renderTmuxLauncher } from './lib/launcher-tmux.mjs';
+import { isInstalledCopy } from './lib/installed-copy.mjs';
+import { cloneLauncherTarget, marketplaceAutoUpdate, autoUpdateWarning, cloneCleanupLines } from './lib/consumer-cutover.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
@@ -625,11 +627,25 @@ const expectedTmuxLauncher = assertNoDeadTerms('sterling-launch.sh', lf(
   renderTmuxLauncher(pluginRoot, { session: sessionName, splitPercent })
 ));
 const tmuxLauncherPath = join(target, 'sterling-launch.sh');
-if (!existsSync(tmuxLauncherPath)) {
+// S6 consumer cutover (decision s6-consumer-cutover-init-on-installed-copy-fixes-
+// launchers): on an installed copy, a launcher that starts claude with --plugin-dir keeps
+// the project on its old clone (--plugin-dir overrides the installed plugin), so it is
+// replaced even without a stamp. The clones that launcher and sterling-update.bat named
+// are collected for the manual deletion step printed at the end; nothing deletes them.
+const installedCopy = isInstalledCopy(pluginRoot);
+const oldClonePaths = [];
+const existingTmuxLauncher = existsSync(tmuxLauncherPath) ? readFileSync(tmuxLauncherPath, 'utf8') : null;
+const cloneLauncher = installedCopy && existingTmuxLauncher !== null ? cloneLauncherTarget(existingTmuxLauncher) : null;
+if (existingTmuxLauncher === null) {
   writeFileSync(tmuxLauncherPath, expectedTmuxLauncher);
   items.push({ item: 'sterling-launch.sh', status: 'created', detail: `tmux session ${sessionName}, ${splitPercent}% TUI pane` });
-} else if (normalize(readFileSync(tmuxLauncherPath, 'utf8')) === normalize(expectedTmuxLauncher)) {
+} else if (normalize(existingTmuxLauncher) === normalize(expectedTmuxLauncher)) {
   items.push({ item: 'sterling-launch.sh', status: 'matches', detail: 'generated content unchanged' });
+} else if (cloneLauncher) {
+  writeFileSync(tmuxLauncherPath, expectedTmuxLauncher);
+  if (cloneLauncher.clonePath) oldClonePaths.push(cloneLauncher.clonePath);
+  const from = cloneLauncher.clonePath ? `the clone ${cloneLauncher.clonePath}` : 'a clone (the old launcher does not record its path)';
+  items.push({ item: 'sterling-launch.sh', status: 'replaced', detail: `the old launcher started claude with --plugin-dir pointing at ${from}, which overrides the installed plugin; regenerated in the installed-copy shape` });
 } else {
   items.push({ item: 'sterling-launch.sh', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
 }
@@ -683,7 +699,11 @@ if (existsSync(nativeLauncherPath)) {
 // deterministic; a session interpreting its refusals is what kept going wrong).
 // Ensure logic shared with /sterling:update's project fan-out, which delivers
 // this launcher to projects whose init predates it.
-items.push({ item: UPDATE_LAUNCHER_NAME, ...ensureUpdateLauncher(target, pluginRoot) });
+// On an installed copy a clone-updater shape is deleted (S6); its clone joins the
+// manual deletion step.
+const { clonePath: updaterClonePath, ...updateLauncherRow } = ensureUpdateLauncher(target, pluginRoot);
+if (updaterClonePath) oldClonePaths.push(updaterClonePath);
+items.push({ item: UPDATE_LAUNCHER_NAME, ...updateLauncherRow });
 
 // (6) the consumer-runnable checks entry (board 4ccf0644): check-record-citations
 // + check-stale-claims were registered only in the CLONE's own `npm run check` —
@@ -909,6 +929,17 @@ if (codexUserScope.found) {
   items.push({ item: 'codex MCP (user scope)', status: 'skipped', detail: 'no codex server in the user-level Claude config — see the codex mcp line below for the command' });
 }
 
+// PLUGIN AUTO-UPDATE (S6, decision s6-consumer-cutover-init-on-installed-copy-fixes-
+// launchers, ruling point 3): a third-party marketplace does not auto-update by default
+// (finding plugin-github-source-install-copies-tracked-head-tree-october-2026), so an
+// installed copy warns with the exact settings JSON. Same pattern as the codex check
+// above: init only READS the user-level file, and a missing or unparseable one is a
+// warning, never a crash.
+if (installedCopy) {
+  const autoUpdateLine = autoUpdateWarning(marketplaceAutoUpdate());
+  if (autoUpdateLine) warns.push(autoUpdateLine);
+}
+
 if (initIsPluginRepo) {
   // The native-claude Windows MCP config (.claude-plugin/sterling-mcp-win.json) is
   // RETIRED with the native launcher, its only reader (decision
@@ -1063,3 +1094,7 @@ if (restartNeeded || conductorActivation.activation === 'written' || conductorAc
 } else {
   console.log('\nno agent changes — no restart required');
 }
+
+// S6 ruling point 4: deleting the old clone stays a manual step, printed last.
+const cleanupLines = cloneCleanupLines(oldClonePaths);
+if (cleanupLines.length) console.log('\n' + cleanupLines.join('\n'));

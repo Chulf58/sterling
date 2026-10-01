@@ -1150,6 +1150,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // in this fan-out re-bakes them, so a consumer is told once. Only a consumer clone
   // reaches this point: the authoring branch above returns before any pull.
   log('\n▸ launchers — re-run /sterling:init in each Sterling project so its launchers run tui/sterling-tui.mjs (launchers baked before this version point at packages/tui/bundle/sterling-tui.mjs, which no longer ships).');
+  // S6 (decision s6-consumer-cutover-init-on-installed-copy-fixes-launchers): init run
+  // through a --plugin-dir launcher is the CLONE's init and re-bakes the clone launcher,
+  // so the route off the clone is named here too.
+  log('  To move this machine off the clone instead: run `claude plugin marketplace add Chulf58/sterling` and `claude plugin install sterling@sterling`, then in each project start `claude` directly, not through sterling-launch.sh (its --plugin-dir overrides the installed plugin), and run /sterling:init there. That init replaces the clone launcher, deletes the clone\'s sterling-update.bat, and names this clone for you to delete by hand.');
 
   // Installed agents are what actually breaks on a pull: template content moves,
   // and the hook commands baked into each project's .claude/agents carry THIS
