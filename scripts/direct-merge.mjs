@@ -12,7 +12,8 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { arg, fail as baseFail, openProject } from './lib/project.mjs';
+import { fileURLToPath } from 'node:url';
+import { arg, fail as baseFail, openProject, resolveLinkedWorktree } from './lib/project.mjs';
 import { isGitRepo, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
 import { defaultExec } from './lib/update.mjs';
 import { mintSettlementReconcile, explainReconcileDebtLiveness, loadGeneratedProjections } from './hooks/lib/settlement.mjs';
@@ -27,6 +28,14 @@ import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal, inst
 // block above the merge action.
 import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
 const target = arg('--target') ?? process.cwd();
+// LINKED WORKTREE (board ks-dashboards-gap-1): .sterling/ is gitignored, so a
+// linked worktree never has the store or the config. The project's store, config
+// and mode live in the MAIN checkout (the parent of git's common dir); every
+// .sterling read and write below goes through storeRoot, while every git
+// operation and the branch's tree stay on `target`. Outside a worktree the two
+// are the same directory.
+const linkedWorktree = resolveLinkedWorktree(target);
+const storeRoot = linkedWorktree ? linkedWorktree.mainRoot : target;
 
 // PROJECT MODE decides the flow, read ONLY through readProjectMode (a missing
 // key is hobby), and read FIRST so a work-mode run can put every exit through
@@ -40,7 +49,7 @@ const target = arg('--target') ?? process.cwd();
 let mode;
 let modeError;
 try {
-  mode = readProjectMode(target);
+  mode = readProjectMode(storeRoot);
 } catch (e) {
   modeError = e;
 }
@@ -56,10 +65,29 @@ function fail(message, code = 1) {
 stage('git-repo');
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
 
+// HOBBY from a linked worktree cannot complete: the merge checks the base out,
+// and the base is normally checked out in the main tree (git refuses to check a
+// branch out in two worktrees). Refused here, before the store and the battery,
+// with the exact way out. WORK mode only pushes the branch and opens a PR, so it
+// proceeds. An unreadable mode keeps its own refusal below.
+if (linkedWorktree && !modeError && mode !== 'work') {
+  const head = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: target, encoding: 'utf8', timeout: 60_000 });
+  const wtBranch = head.status === 0 && head.stdout.trim() ? head.stdout.trim() : '<branch>';
+  fail(
+    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree of '${linkedWorktree.mainRoot}' — refusing before the battery.\n` +
+      `A hobby merge checks the base branch out, and the base is normally checked out in the main tree, so it cannot complete from a worktree.\n` +
+      `Free the branch, then run the merge from the main checkout:\n` +
+      `  git -C ${linkedWorktree.mainRoot} worktree remove ${linkedWorktree.worktree}   (or, to keep the worktree: git -C ${linkedWorktree.worktree} checkout --detach)\n` +
+      `  git -C ${linkedWorktree.mainRoot} checkout ${wtBranch}\n` +
+      `  node ${fileURLToPath(import.meta.url)} --target ${linkedWorktree.mainRoot}`,
+    2
+  );
+}
+
 // Pre-merge preflight: openProject fails loud on a missing store or malformed
 // config BEFORE anything lands (see the post-merge note below).
 stage('open-project');
-openProject(target).store.close();
+openProject(storeRoot).store.close();
 
 if (modeError) fail(`direct-merge: ${modeError?.message ?? modeError} — refusing; nothing was run.`, 2);
 // Work-only preconditions, cheap and before the battery: --no-push cannot ship
@@ -241,14 +269,14 @@ const reconcileChanged = new Set([...changed].filter((p) => !versionOnlyPaths.in
 // minutes, blocking the merge twice. The gate now reports every cleared row so
 // the close can be deliberate. It still closes NOTHING itself.
 stage('reconcile');
-const { store: settleStore } = openProject(target);
+const { store: settleStore } = openProject(storeRoot);
 // Settlement's ROOT is the normalized project root — the same projectRoot()
 // readStdin gives every hook as input.cwd — never the raw --target: settlement
 // decides whether a record's working_tree names THIS project (isForeignTree),
 // and a relative or trailing-slashed --target would read a self-rooted article
 // as a foreign tree and never mint its debt (Dome Farmer 454 fix round).
 // openProject just succeeded on target, so the store is there to be found.
-const settleRoot = projectRoot(target);
+const settleRoot = projectRoot(storeRoot);
 if (!settleRoot) fail(`direct-merge: no Sterling store found at or above '${target}' for reconcile settlement`);
 let debt;
 let cleared;
@@ -507,7 +535,7 @@ if (debt.length > 0) {
 // rulings-projection.mjs register their files in config.generated_projections
 // the same way handoff-projection.mjs does, and settlement exempts that list.
 stage('version');
-const GENERATED_ONLY = loadGeneratedProjections(target);
+const GENERATED_ONLY = loadGeneratedProjections(storeRoot);
 const pluginManifestRel = '.claude-plugin/plugin.json';
 if (existsSync(join(target, pluginManifestRel))) {
   const substantive = [...changed].filter((f) => !GENERATED_ONLY.has(f));
@@ -630,7 +658,7 @@ if (work) {
   // new head is owed a Copilot review. The PR exists either way, so a failed
   // write never fails the ship — it is announced loudly instead (P5).
   try {
-    armPrLoop(target, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
+    armPrLoop(storeRoot, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
     console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} — run the pr-review-loop skill (armed in ${PR_LOOP_REL}).`);
   } catch (e) {
     console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOP_REL}: ${e?.message ?? e}) — H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
@@ -685,7 +713,7 @@ try {
     // so this block must be exit-proof end-to-end and route any failure
     // through the catch below instead. Construct the store directly, the same
     // guard resolveProject uses, but throwing instead of exiting.
-    const dbPath = join(target, '.sterling', 'sterling.db');
+    const dbPath = join(storeRoot, '.sterling', 'sterling.db');
     if (!existsSync(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
     const nudgeStore = new SterlingStore(dbPath);
     let items;

@@ -13,7 +13,7 @@ import { existsSync as existsSync4, readFileSync as readFileSync2 } from "node:f
 import { spawnSync } from "node:child_process";
 
 // scripts/lib/project.mjs
-import { readFileSync, existsSync as existsSync3, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, existsSync as existsSync3, mkdtempSync, rmSync, realpathSync as realpathSync3 } from "node:fs";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
 // node_modules/zod/v3/external.js
