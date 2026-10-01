@@ -1,18 +1,24 @@
 // Consumer-machine update core [S] (decision foreign_e6240afe).
 //
-// WHY THIS EXISTS: Sterling is distributed as a clone of origin — no npm
-// package, no marketplace entry, no release artifact — and nothing on a machine
-// could answer "am I current?". The version strings never moved (0.1.0 since the
-// first commit), so a stale machine could only be diagnosed by comparing its
-// files against GitHub by hand. That spends judgment on a mechanical question
-// (P3), and it is exactly how one machine's update became a file-by-file
-// reconciliation.
+// WHY THIS EXISTS: Sterling was first distributed as a clone of origin, and
+// nothing on a machine could answer "am I current?". The version strings never
+// moved (0.1.0 since the first commit), so a stale machine could only be
+// diagnosed by comparing its files against GitHub by hand. That spends judgment
+// on a mechanical question (P3), and it is exactly how one machine's update
+// became a file-by-file reconciliation.
 //
-// THE POSTURE: every machine but the authoring one is a PURE CONSUMER of the
-// default branch. A consumer never authors, so an update is a FAST-FORWARD OR A
-// REFUSAL — never a merge, never a rebase, never a hand comparison. Divergence
-// is reported for a human to resolve on the authoring machine (P5); the refusals
-// below mutate nothing, which is what makes running this unattended safe.
+// SCOPE TODAY (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone):
+// the repo is also a /plugin marketplace, and a consumer machine installs from it
+// with no clone. /sterling:update serves a git CLONE only. On the authoring
+// machine it is SYNC-ONLY: no pull, it syncs the invoking project. On an installed
+// copy it is REFUSED and says to update via /plugin.
+//
+// THE POSTURE for a clone that is not the authoring machine (a legacy consumer):
+// it is a PURE CONSUMER of the default branch. A consumer never authors, so an
+// update is a FAST-FORWARD OR A REFUSAL — never a merge, never a rebase, never a
+// hand comparison. Divergence is reported for a human to resolve on the authoring
+// machine (P5); the refusals below mutate nothing, which is what makes running
+// this unattended safe.
 //
 // The logic lives here as pure-ish functions over an injected `exec` so the
 // refusal matrix and the step ordering are unit-testable without a network, an
@@ -1150,6 +1156,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // in this fan-out re-bakes them, so a consumer is told once. Only a consumer clone
   // reaches this point: the authoring branch above returns before any pull.
   log('\n▸ launchers — re-run /sterling:init in each Sterling project so its launchers run tui/sterling-tui.mjs (launchers baked before this version point at packages/tui/bundle/sterling-tui.mjs, which no longer ships).');
+  // S6 (decision s6-consumer-cutover-init-on-installed-copy-fixes-launchers): init run
+  // through a --plugin-dir launcher is the CLONE's init and re-bakes the clone launcher,
+  // so the route off the clone is named here too.
+  log('  To move this machine off the clone instead: run `claude plugin marketplace add Chulf58/sterling` and `claude plugin install sterling@sterling`, then in each project start `claude` directly, not through sterling-launch.sh (its --plugin-dir overrides the installed plugin), and run /sterling:init there. That init replaces the clone launcher, deletes the clone\'s sterling-update.bat, and names this clone for you to delete by hand.');
 
   // Installed agents are what actually breaks on a pull: template content moves,
   // and the hook commands baked into each project's .claude/agents carry THIS

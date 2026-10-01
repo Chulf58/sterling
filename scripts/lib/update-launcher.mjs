@@ -9,7 +9,7 @@
 // BOOTSTRAP INDEPENDENCE: imported by scripts/lib/update.mjs at load time, so
 // this file must import node builtins ONLY — it has to load on a clone where
 // nothing is built (see the consumer-update-path article).
-import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, appendFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
@@ -47,6 +47,36 @@ export function renderUpdateLauncher(pluginRoot) {
   return crlf(stampBody(body, 'rem'));
 }
 
+// The one command line every WSL-chain render has carried (templates/update-win.bat,
+// unchanged across its history): cd into the clone, run its update console.
+const UPDATE_COMMAND = /^"%LOCALAPPDATA%\\Microsoft\\WindowsApps\\wt\.exe" wsl\.exe --cd "([^"]+)" -- bash -lic "bash scripts\/update-console\.sh"$/;
+// C:\Users\x -> /mnt/c/Users/x (the inverse of toWindowsPath); an absolute POSIX path
+// passes through; anything else is not a path this template ever rendered.
+const toWslPath = (p) => {
+  const m = /^([A-Za-z]):\\(.*)$/.exec(p);
+  if (m) return `/mnt/${m[1].toLowerCase()}${m[2] ? '/' + m[2].replace(/\\/g, '/').replace(/\/+$/, '') : ''}`;
+  return p.startsWith('/') ? p : null;
+};
+
+/**
+ * S6 (decision s6-consumer-cutover-init-on-installed-copy-fixes-launchers): the clone a
+ * sterling-update.bat updates, or null. Recognised NARROWLY by content: every non-blank
+ * line is `@echo off`, a `rem` comment, or the ONE generated command line above, and
+ * its --cd target is a drive path or an absolute POSIX path. Anything else (an extra
+ * command, the retired native-Windows body, a hand-written updater) is null.
+ */
+export function cloneUpdateLauncherTarget(text) {
+  const lines = text.split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => l.length > 0);
+  let cdTarget = null;
+  for (const line of lines) {
+    if (line === '@echo off' || /^rem( |$)/.test(line)) continue;
+    const m = UPDATE_COMMAND.exec(line);
+    if (!m || cdTarget !== null) return null;
+    cdTarget = m[1];
+  }
+  return cdTarget === null ? null : toWslPath(cdTarget);
+}
+
 /**
  * Ensure semantics (§12): created / matches / refreshed / differs / skipped —
  * never overwrites content it cannot prove it generated. Also ensures the
@@ -70,9 +100,21 @@ export function ensureUpdateLauncher(target, pluginRoot) {
   // versions (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-
   // its-clone, ruling point 3), and the launcher's `cd` into a versioned cache
   // directory would break at the next update. Nothing is written, not even the
-  // .gitignore entry.
+  // .gitignore entry. S6 (decision s6-consumer-cutover-init-on-installed-copy-fixes-
+  // launchers): an updater that an earlier clone-run init wrote only leads into a clone
+  // that is going away, so the generated shape is deleted and its clone returned for
+  // init's manual clone-deletion step; any other content is left alone with a notice.
   if (isInstalledCopy(pluginRoot)) {
-    return { status: 'skipped', detail: 'installed plugin copy — updates come from the plugin manager, there is no clone to update' };
+    const launcherPath = join(target, UPDATE_LAUNCHER_NAME);
+    if (!existsSync(launcherPath)) {
+      return { status: 'skipped', detail: 'installed plugin copy — updates come from the plugin manager, there is no clone to update' };
+    }
+    const clonePath = cloneUpdateLauncherTarget(readFileSync(launcherPath, 'utf8'));
+    if (clonePath === null) {
+      return { status: 'differs', detail: 'left untouched — not the generated clone-updater shape; on an installed plugin copy /sterling:update refuses and updates come from the plugin manager, so delete it yourself if it only updated a Sterling clone' };
+    }
+    unlinkSync(launcherPath);
+    return { status: 'removed', detail: `deleted — it ran /sterling:update in the clone ${clonePath}; on an installed plugin copy updates come from the plugin manager`, clonePath };
   }
   // A clone missing the template skips loudly instead of throwing.
   if (!existsSync(join(pluginRoot, 'templates', UPDATE_TEMPLATE_WSL))) {

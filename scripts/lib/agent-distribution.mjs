@@ -189,13 +189,12 @@ export function renderInstalledAgent(templateContent, label, { pluginVersion, no
   const parsed = parseTemplate(substituted, label);
   const { name, body } = parsed;
   const frontmatter = appendExtraTools(parsed.frontmatter, name, label, config);
-  // WHOLE rendered template, not just the frontmatter: templates now carry
-  // substitution tokens in the BODY too ({{GIT_RO}} — the absolute path of the
-  // read-only git wrapper), and a forgotten body variable would otherwise
-  // ship silently as literal '{{GIT_RO}}' in an installed agent's prose, i.e. an
-  // instruction the agent cannot run. Same P5 refusal either way. Verified
-  // 2026-09-01 that no shipped template body carries a literal '{{…}}' as prose
-  // rather than as a variable, so nothing legitimate is caught by widening.
+  // WHOLE rendered template, not just the frontmatter: a substitution token in
+  // the BODY would otherwise ship silently as a literal '{{TOKEN}}' in an
+  // installed agent's prose, i.e. an instruction the agent cannot run. Same P5
+  // refusal either way. Verified 2026-09-01 that no shipped template body carries
+  // a literal '{{…}}' as prose rather than as a variable, so nothing legitimate
+  // is caught by widening.
   const unsubstituted = substituted.match(/\{\{[A-Z_]+\}\}/);
   if (unsubstituted) {
     throw new Error(`install substitution incomplete for ${label}: '${unsubstituted[0]}' has no value — refusing to install a half-baked agent (P5)`);

@@ -411,6 +411,27 @@ test('consumer update: one line tells the user to re-run /sterling:init per proj
   }
 });
 
+// S6 (decision s6-consumer-cutover-init-on-installed-copy-fixes-launchers): re-running
+// init through a --plugin-dir launcher runs the CLONE's init again, so the consumer hint
+// also names the route off the clone: install the plugin, start claude without the old
+// launcher, and run /sterling:init there.
+test('consumer update: the launcher hint names the move to the installed plugin and that init must run from a session without the old launcher', async () => {
+  const cwd = scratchCwd();
+  try {
+    const { exec } = fakeExec({ behind: 1, changed: ['scripts/prep.mjs'] });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(String(l)), projects: [], opts: {} });
+    assert.equal(report.exit, 0, lines.join('\n'));
+    const hint = lines.filter((l) => /claude plugin install sterling@sterling/.test(l));
+    assert.equal(hint.length, 1, lines.join('\n'));
+    assert.match(hint[0], /claude plugin marketplace add Chulf58\/sterling/);
+    assert.match(hint[0], /--plugin-dir/);
+    assert.match(hint[0], /\/sterling:init/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 // config_drift in the fan-out (decision 256d1059): a report, not a gate and not a
 // change — the project stays exit 0, the drift line reaches the log verbatim
 // (it carries the fix command), and it is not counted as a changed agent.
@@ -1394,6 +1415,9 @@ test('ensureUpdateLauncher: created / matches / differs / skipped — never over
 
     assert.equal(ensureUpdateLauncher(join(target, 'does-not-exist'), clone).status, 'skipped', 'a missing target skips, never throws');
     const bare = mkdtempSync(join(tmpdir(), 'sterling-launcher-bare-'));
+    // a .git makes it a clone, so the template-missing branch is what answers; without
+    // one the root is an installed copy and the installed-copy branch answers instead
+    mkdirSync(join(bare, '.git'));
     try {
       assert.equal(ensureUpdateLauncher(target, bare).status, 'skipped', 'a clone without the template skips, never throws');
     } finally {

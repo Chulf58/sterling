@@ -1,14 +1,16 @@
 // Installed-copy predicate (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
 // design point D). A /plugin-installed Sterling is a snapshot copied into
-// ~/.claude/plugins/cache/<mkt>/<plugin>/<version>/ with no git metadata; the
-// authoring machine and legacy consumer machines run a git CLONE (a `.git`
-// directory, or a `.git` FILE in a worktree). TWO INDEPENDENT SIGNALS, either one
-// sufficient: (1) no `.git` at the plugin root; (2) the root resolves (realpath)
-// under Claude Code's plugin cache, <CLAUDE_CONFIG_DIR or ~/.claude>/plugins/cache/.
-// Signal (1) alone rested on an unmeasured premise (that an install never carries
-// git metadata); signal (2) holds whatever the install copies. The predicate drives
-// H1's role text and post-update sync, and /sterling:update's refusal on an installed
-// copy.
+// ~/.claude/plugins/cache/<mkt>/<plugin>/<version>/. What the snapshot holds depends
+// on the marketplace source (findings 429e6526, 6308c991): a GitHub source carries
+// the tracked HEAD tree only; a directory source copies the working tree minus .git,
+// so gitignored files DO come along. The predicate therefore never reasons about
+// which files the copy holds. The authoring machine and legacy consumer machines run
+// a git CLONE (a `.git` directory, or a `.git` FILE in a worktree). TWO INDEPENDENT
+// SIGNALS, either one sufficient: (1) no `.git` at the plugin root (both measured
+// sources drop it); (2) the root resolves (realpath) under Claude Code's plugin
+// cache, <CLAUDE_CONFIG_DIR or ~/.claude>/plugins/cache/, which holds whatever the
+// install copies. The predicate drives H1's role text and post-update sync, and
+// /sterling:update's refusal on an installed copy.
 //
 // Builtins only: hooks bundle this module.
 import { existsSync, realpathSync } from 'node:fs';

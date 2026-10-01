@@ -9387,7 +9387,7 @@ import { dirname as dirname5, join as join12 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/update-launcher.mjs
-import { existsSync as existsSync2, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync as existsSync2, readFileSync, writeFileSync, appendFileSync, unlinkSync } from "node:fs";
 import { join as join2 } from "node:path";
 
 // scripts/lib/generated-marker.mjs
@@ -9452,12 +9452,38 @@ function renderUpdateLauncher(pluginRoot2) {
   const body = template.replaceAll("{{WIN_PLUGIN_DIR}}", cdPath);
   return crlf(stampBody(body, "rem"));
 }
+var UPDATE_COMMAND = /^"%LOCALAPPDATA%\\Microsoft\\WindowsApps\\wt\.exe" wsl\.exe --cd "([^"]+)" -- bash -lic "bash scripts\/update-console\.sh"$/;
+var toWslPath = (p) => {
+  const m = /^([A-Za-z]):\\(.*)$/.exec(p);
+  if (m) return `/mnt/${m[1].toLowerCase()}${m[2] ? "/" + m[2].replace(/\\/g, "/").replace(/\/+$/, "") : ""}`;
+  return p.startsWith("/") ? p : null;
+};
+function cloneUpdateLauncherTarget(text) {
+  const lines = text.split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => l.length > 0);
+  let cdTarget = null;
+  for (const line of lines) {
+    if (line === "@echo off" || /^rem( |$)/.test(line)) continue;
+    const m = UPDATE_COMMAND.exec(line);
+    if (!m || cdTarget !== null) return null;
+    cdTarget = m[1];
+  }
+  return cdTarget === null ? null : toWslPath(cdTarget);
+}
 function ensureUpdateLauncher(target2, pluginRoot2) {
   if (!existsSync2(target2)) {
     return { status: "skipped", detail: `target missing: ${target2}` };
   }
   if (isInstalledCopy(pluginRoot2)) {
-    return { status: "skipped", detail: "installed plugin copy \u2014 updates come from the plugin manager, there is no clone to update" };
+    const launcherPath2 = join2(target2, UPDATE_LAUNCHER_NAME);
+    if (!existsSync2(launcherPath2)) {
+      return { status: "skipped", detail: "installed plugin copy \u2014 updates come from the plugin manager, there is no clone to update" };
+    }
+    const clonePath = cloneUpdateLauncherTarget(readFileSync(launcherPath2, "utf8"));
+    if (clonePath === null) {
+      return { status: "differs", detail: "left untouched \u2014 not the generated clone-updater shape; on an installed plugin copy /sterling:update refuses and updates come from the plugin manager, so delete it yourself if it only updated a Sterling clone" };
+    }
+    unlinkSync(launcherPath2);
+    return { status: "removed", detail: `deleted \u2014 it ran /sterling:update in the clone ${clonePath}; on an installed plugin copy updates come from the plugin manager`, clonePath };
   }
   if (!existsSync2(join2(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL))) {
     return { status: "skipped", detail: `templates/${UPDATE_TEMPLATE_WSL} missing in the clone` };
@@ -9543,7 +9569,7 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
 import { join as join6, resolve as resolve4 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync2, readFileSync as readFileSync3, readdirSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, constants } from "node:fs";
+import { lstatSync as lstatSync2, readFileSync as readFileSync3, readdirSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync as unlinkSync2, constants } from "node:fs";
 import { join as join5, resolve as resolve3 } from "node:path";
 
 // scripts/lib/store-path.mjs
@@ -10456,6 +10482,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   }
   stampConsumerRoleIfAbsent(cwd, log);
   log("\n\u25B8 launchers \u2014 re-run /sterling:init in each Sterling project so its launchers run tui/sterling-tui.mjs (launchers baked before this version point at packages/tui/bundle/sterling-tui.mjs, which no longer ships).");
+  log("  To move this machine off the clone instead: run `claude plugin marketplace add Chulf58/sterling` and `claude plugin install sterling@sterling`, then in each project start `claude` directly, not through sterling-launch.sh (its --plugin-dir overrides the installed plugin), and run /sterling:init there. That init replaces the clone launcher, deletes the clone's sterling-update.bat, and names this clone for you to delete by hand.");
   const resolvedList = opts2.projects === false ? [] : await resolveProjects();
   const registryFailed = resolvedList === null;
   const projectList = resolvedList ?? [];
