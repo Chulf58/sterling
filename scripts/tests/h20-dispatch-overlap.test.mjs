@@ -167,6 +167,65 @@ test("a path listed under the brief's Out of scope / do-not-touch sections gets 
   }
 });
 
+test("a path named only as another lane's, or only to read for context, is not write territory; a claimed path still warns", () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegister(dir, [row(['scripts/lib/retry-queue.mjs'])]);
+    const briefs = [
+      'Another lane owns scripts/lib/retry-queue.mjs; you implement scripts/lib/parser.mjs.',
+      'Lane B is editing scripts/lib/retry-queue.mjs. You implement scripts/lib/parser.mjs.',
+      'Note that scripts/lib/retry-queue.mjs is being edited by another lane. Implement scripts/lib/parser.mjs.',
+      'scripts/lib/retry-queue.mjs belongs to the queue lane. Implement scripts/lib/parser.mjs.',
+      'Read scripts/lib/retry-queue.mjs for context, then implement scripts/lib/parser.mjs.',
+      'See scripts/lib/retry-queue.mjs for reference. Implement scripts/lib/parser.mjs.',
+    ];
+    for (const brief of briefs) {
+      const r = runHook(dispatch(dir, brief), dir);
+      assert.equal(r.code, 0);
+      assert.equal(r.stdout, '', `no warning for:\n${brief}\n---\n${r.stdout}`);
+    }
+    const claimed = [
+      'Read scripts/lib/parser.mjs for context, then implement the retry in scripts/lib/retry-queue.mjs.',
+      'Another lane owns scripts/lib/parser.mjs; you own and edit scripts/lib/retry-queue.mjs.',
+      'Files owned by you: scripts/lib/retry-queue.mjs.',
+    ];
+    for (const brief of claimed) {
+      const ctx = ctxOf(runHook(dispatch(dir, brief), dir));
+      assert.ok(ctx.includes(`scripts/lib/retry-queue.mjs ← implementor:${OWNER.slice(0, 8)}`), `claimed path warns for:\n${brief}\n---\n${ctx}`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('an absolute path inside the project maps to its repo-relative form and warns', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegister(dir, [row(['scripts/lib/retry-queue.mjs'])]);
+    const ctx = ctxOf(runHook(dispatch(dir, `Implement the retry in ${dir}/scripts/lib/retry-queue.mjs.`), dir));
+    assert.ok(ctx.includes(`scripts/lib/retry-queue.mjs ← implementor:${OWNER.slice(0, 8)}`), ctx);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a relevance failure with an overlap: stderr names the failure, the overlap is still delivered, exit 0', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegister(dir, [row(['scripts/lib/retry-queue.mjs'])]);
+    // A corrupt store makes openStore throw inside H20's relevance path.
+    writeFileSync(join(dir, '.sterling', 'sterling.db'), 'this is not a sqlite database');
+    const r = runHook(dispatch(dir, WRITE_BRIEF), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /H20: mechanism-axis delivery failed: /);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.ok(ctx.startsWith(`DISPATCH OVERLAP (advisory) — this brief names files a running agent owns: scripts/lib/retry-queue.mjs ← implementor:${OWNER.slice(0, 8)}`), ctx);
+    assert.match(ctx, /⚠ H20: mechanism-axis delivery failed: .* — relevance carriage was SKIPPED for this dispatch\./);
+  } finally {
+    cleanup();
+  }
+});
+
 test('a path named only as an argument of a command line is not write territory', () => {
   const { dir, cleanup } = makeProject();
   try {
