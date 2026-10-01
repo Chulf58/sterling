@@ -23,15 +23,23 @@
 //      "dir/sub/**" glob, so two sibling files never overlap each other.
 //   4. Live rows are presumed-active only (this session, inside the lease,
 //      not ended). A read-only-class row never contributes.
+//   5. OWNER-SIDE EXCLUSIONS AT READ TIME (the decision's point 5, user-ruled
+//      2026-09-30). H22 records a prose brief's `files` including the paths
+//      that brief told its own agent not to touch, and that stays so (decision
+//      h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round
+//      rejected filtering at the source). Here, for a row that would warn, the
+//      owner's brief is recovered from its dispatch-state record and the SAME
+//      prose rules (proseTerritory) decide which recorded paths it owns. A row
+//      whose files came from REVIEW-TERRITORY is used as recorded, and so is a
+//      row whose brief cannot be recovered (oversize prompt, no live record,
+//      e.g. a resumed round), which errs toward warning.
 //
-// NOT GUARANTEED: a live row's `files` is whatever H22 recorded, which for a
-// prose brief includes paths that brief told its own agent not to touch, so a
-// warning can name an owner that was told to keep off the path. Dispatches
-// sent in one message cannot see each other (H22 registers at SubagentStart).
+// NOT GUARANTEED: dispatches sent in one message cannot see each other (H22
+// registers at SubagentStart).
 import { repoRel } from './common.mjs';
 import { extractPathCandidates, parseReviewTerritory } from './dispatch-prompt.mjs';
 import { hasUnsuppressedMatch, escapeRe, extractGlobPrefixCandidates, isReviewerClass } from './dispatch-advisory.mjs';
-import { presumedActiveEntries } from '../../lib/dispatch-register.mjs';
+import { presumedActiveEntries, readDispatchState } from '../../lib/dispatch-register.mjs';
 
 export const OVERLAP_HEAD = 'DISPATCH OVERLAP (advisory)';
 export const OVERLAP_DISPLAY_CAP = 5;
@@ -153,17 +161,27 @@ export function exclusionSpans(prompt) {
 const dropGoverned = (norm) =>
   norm !== '.git' && !norm.startsWith('.git/') && !norm.startsWith('.sterling/') && !norm.startsWith('sterling/') && !norm.startsWith('git/');
 
-/** The paths this brief claims as write territory, repo-relative POSIX (a
- *  directory entry carries no trailing '/'). */
-export function briefTerritory(prompt, cwd) {
-  const text = String(prompt ?? '');
-  const norm = (raw) => {
-    const n = repoRel(String(raw).replace(/\/+$/, ''), cwd);
-    return n && dropGoverned(n) ? n : null;
-  };
-  const declared = parseReviewTerritory(text);
-  if (declared.present && declared.valid) return [...new Set(declared.files.map(norm).filter(Boolean))];
+const normFor = (cwd) => (raw) => {
+  const n = repoRel(String(raw).replace(/\/+$/, ''), cwd);
+  return n && dropGoverned(n) ? n : null;
+};
 
+/** The paths this brief claims as write territory, repo-relative POSIX (a
+ *  directory entry carries no trailing '/'): a valid REVIEW-TERRITORY
+ *  declaration as written, else the prose rules. */
+export function briefTerritory(prompt, cwd) {
+  const declared = parseReviewTerritory(String(prompt ?? ''));
+  if (declared.present && declared.valid) return [...new Set(declared.files.map(normFor(cwd)).filter(Boolean))];
+  return proseTerritory(prompt, cwd);
+}
+
+/** THE ONE COPY of the prose rules (rule 2): every path the brief's prose
+ *  names, minus negated-only and command-argument-only mentions, executables
+ *  and Out-of-scope / Do-not-touch spans. Used for the new brief and for each
+ *  live owner's brief (rule 5). */
+export function proseTerritory(prompt, cwd) {
+  const text = String(prompt ?? '');
+  const norm = normFor(cwd);
   const excludedFiles = new Set();
   const excludedDirs = new Set();
   for (const span of exclusionSpans(text)) {
@@ -200,6 +218,29 @@ export function pathsOverlap(a, b) {
   return short.split('/').length >= 2 && long.startsWith(`${short}/`);
 }
 
+/** Live dispatch-state records. When they cannot be read the rows are used
+ *  as recorded (rule 5's fallback, the warning direction) and `problem` says
+ *  why, so the advisory discloses it. An absent directory is not a problem. */
+function readOwnerState(cwd) {
+  try {
+    const s = readDispatchState(cwd);
+    // readDispatchState lists {key, file, record}; the record is the state.
+    if (s.availability === 'ok') return { records: s.records.map((x) => x.record).filter(Boolean), problem: null };
+    return { records: [], problem: s.availability === 'absent' ? null : `${s.availability}${s.reason ? ` (${s.reason})` : ''}` };
+  } catch (e) {
+    return { records: [], problem: String((e && e.message) || e).slice(0, 120) };
+  }
+}
+
+/** The owner's brief: the record bound to this round's tool_use_id, else the
+ *  ONE record bound to its agent_id. null when absent, ambiguous or oversize. */
+function ownerPrompt(records, entry) {
+  const byTool = entry.tool_use_id ? records.filter((r) => r.tool_use_id === entry.tool_use_id) : [];
+  const bound = (r) => [r.started?.agent_id, r.post_binding?.agent_id, r.derived_binding?.agent_id].includes(entry.agent_id);
+  const matches = byTool.length ? byTool : records.filter(bound);
+  return matches.length === 1 && typeof matches[0].prompt === 'string' ? matches[0].prompt : null;
+}
+
 /**
  * The advisory block for this dispatch, or null. `input` is the PreToolUse
  * stdin (tool_input.subagent_type/prompt, cwd, session_id). Never throws: a
@@ -219,13 +260,26 @@ export function dispatchOverlapNotice(input, { now = Date.now() } = {}) {
       return `${OVERLAP_HEAD} — degraded: the dispatch register could not be read, so this brief's files were not checked against running agents.`;
     }
     const hits = [];
+    let state;
     for (const e of live.entries) {
       if (isReadOnlyDispatchType(e.agent_type)) continue;
-      for (const owned of e.files) {
-        if (typeof owned !== 'string' || !owned) continue;
+      const overlapping = e.files.filter((owned) => typeof owned === 'string' && owned && files.some((f) => pathsOverlap(f, owned)));
+      if (!overlapping.length) continue;
+      // Rule 5, read only for a row that would warn, so a dispatch with no
+      // candidate overlap never touches the dispatch-state directory.
+      let owned = overlapping;
+      if (e.files_source !== 'review-territory') {
+        if (state === undefined) state = readOwnerState(input.cwd);
+        const prompt = ownerPrompt(state.records, e);
+        if (typeof prompt === 'string') {
+          const kept = new Set(proseTerritory(prompt, input.cwd));
+          owned = overlapping.filter((p) => kept.has(p));
+        }
+      }
+      for (const o of owned) {
         for (const f of files) {
-          if (!pathsOverlap(f, owned)) continue;
-          const shown = f.length >= owned.length ? f : owned;
+          if (!pathsOverlap(f, o)) continue;
+          const shown = f.length >= o.length ? f : o;
           hits.push(`${shown} ← ${e.agent_type ?? 'agent'}:${String(e.agent_id).slice(0, 8)}`);
         }
       }
@@ -234,9 +288,10 @@ export function dispatchOverlapNotice(input, { now = Date.now() } = {}) {
     if (!unique.length) return null;
     const shown = unique.slice(0, OVERLAP_DISPLAY_CAP);
     const more = unique.length > shown.length ? ` (+${unique.length - shown.length} more)` : '';
+    const degraded = state?.problem ? ` (Owner briefs unreadable: ${state.problem}; owners' recorded files used as is.)` : '';
     return (
       `${OVERLAP_HEAD} — this brief names files a running agent owns: ${shown.join(', ')}${more}. ` +
-      `Resume that agent, or wait for it and serialize — never two writers on one file.`
+      `Resume that agent, or wait for it and serialize — never two writers on one file.${degraded}`
     );
   } catch (e) {
     return `${OVERLAP_HEAD} — degraded: the overlap check failed (${String((e && e.message) || e).slice(0, 160)}), so this brief's files were not checked against running agents.`;

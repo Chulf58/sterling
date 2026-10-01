@@ -20,8 +20,10 @@ const SESSION = 's1';
 const OWNER = 'a1b2c3d4e5f6a7b8c9';
 
 let SterlingStore;
+let recordDispatchPost;
 before(async () => {
   ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+  ({ recordDispatchPost } = await import(pathToFileURL(join(root, 'scripts', 'lib', 'dispatch-register.mjs')).href));
 });
 
 function runHook(input, cwd) {
@@ -298,4 +300,69 @@ test('with a store match: the overlap block is appended to the same H20 delivery
     assert.ok(head >= 0 && overlap > head, `one delivery, overlap block after the H20 header:\n${ctx}`);
     assert.ok(ctx.includes(`game/ui/breach_countdown.gd ← implementor:${OWNER.slice(0, 8)}`));
   });
+});
+
+// OWNER-SIDE EXCLUSIONS AT READ TIME (decision point 5): H22 records every
+// path a prose brief names, including the ones it told its own agent not to
+// touch. The owner's brief is recovered from its dispatch-state record and the
+// same prose rules decide what it owns.
+async function ownerRecord(dir, prompt, toolUseId = 'toolu_owner_1') {
+  await recordDispatchPost(dir, {
+    hook_event_name: 'PostToolUse',
+    tool_name: 'Agent',
+    tool_use_id: toolUseId,
+    tool_input: { subagent_type: 'implementor', prompt, description: 'owner lane' },
+    tool_response: { isAsync: true, status: 'async_launched', agentId: OWNER, description: 'owner lane', prompt },
+    session_id: SESSION,
+    cwd: dir,
+  });
+}
+
+test('an owner whose own brief excluded the path gives no warning (span, negation, command argument)', async () => {
+  const ownerBriefs = [
+    'Fix scripts/lib/parser.mjs.\nDo not touch: scripts/lib/retry-queue.mjs (another lane owns it).',
+    'Fix scripts/lib/parser.mjs. Do NOT edit scripts/lib/retry-queue.mjs.',
+    'Fix scripts/lib/parser.mjs.\nAcceptance: `node --test --import ./scripts/lib/retry-queue.mjs scripts/tests/parser.test.mjs` green.',
+  ];
+  for (const brief of ownerBriefs) {
+    const { dir, cleanup } = makeProject();
+    try {
+      await ownerRecord(dir, brief);
+      // What H22 records from that prose today: every named path.
+      writeRegister(dir, [row(['scripts/lib/parser.mjs', 'scripts/lib/retry-queue.mjs', 'scripts/tests/parser.test.mjs'], { tool_use_id: 'toolu_owner_1' })]);
+      const r = runHook(dispatch(dir, WRITE_BRIEF), dir);
+      assert.equal(r.code, 0);
+      assert.equal(r.stdout, '', `owner brief:\n${brief}\n---\n${r.stdout}`);
+      // The path the owner really claims still warns.
+      const own = ctxOf(runHook(dispatch(dir, 'Refactor scripts/lib/parser.mjs.'), dir));
+      assert.ok(own.includes(`scripts/lib/parser.mjs ← implementor:${OWNER.slice(0, 8)}`), own);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+test("the owner's prompt is null (oversize): its recorded files are used as is", async () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    await ownerRecord(dir, `Do not touch: scripts/lib/retry-queue.mjs\n${'z'.repeat(512 * 1024 + 1)}`);
+    writeRegister(dir, [row(['scripts/lib/retry-queue.mjs'])]);
+    const ctx = ctxOf(runHook(dispatch(dir, WRITE_BRIEF), dir));
+    assert.ok(ctx.includes(`scripts/lib/retry-queue.mjs ← implementor:${OWNER.slice(0, 8)}`), ctx);
+    assert.ok(!ctx.includes('Owner briefs unreadable'), 'an oversize prompt is not a read failure');
+  } finally {
+    cleanup();
+  }
+});
+
+test('an owner with REVIEW-TERRITORY: its declared territory is used as is', async () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    await ownerRecord(dir, 'REVIEW-TERRITORY: ["scripts/lib/retry-queue.mjs"]\nDo not touch: scripts/lib/retry-queue.mjs');
+    writeRegister(dir, [row(['scripts/lib/retry-queue.mjs'], { files_source: 'review-territory', tool_use_id: 'toolu_owner_1' })]);
+    const ctx = ctxOf(runHook(dispatch(dir, WRITE_BRIEF), dir));
+    assert.ok(ctx.includes(`scripts/lib/retry-queue.mjs ← implementor:${OWNER.slice(0, 8)}`), ctx);
+  } finally {
+    cleanup();
+  }
 });
