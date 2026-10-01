@@ -7971,7 +7971,18 @@ function ignoredRemedy(ignored) {
 
 // scripts/handoff-projection.mjs
 var pluginRoot = resolve4(dirname2(fileURLToPath(new URL("../scripts/handoff-projection.mjs", import.meta.url).href)), "..");
-var target = resolve4(process.argv[2] ?? process.cwd());
+var USAGE = "Usage: node scripts/handoff-projection.mjs [<project root>]\nProjects the target project's store into architecture.md, rulings.md and docs/sterling/. The root defaults to the current directory.";
+var cliArg = process.argv[2];
+if (cliArg === "--help" || cliArg === "-h") {
+  console.log(USAGE);
+  process.exit(0);
+}
+if (cliArg?.startsWith("-")) {
+  console.error(`handoff projection: unknown option ${cliArg}
+${USAGE}`);
+  process.exit(2);
+}
+var target = resolve4(cliArg ?? process.cwd());
 var fwd2 = (p) => p.replace(/\\/g, "/");
 var STANDING = 2;
 var ACTIONABLE = 3;
