@@ -9182,13 +9182,26 @@ function gitTouches(root, now) {
     else return { ok: false, reason: "no_git" };
     const settled = readGitSettled(root);
     let base2 = settled?.sha;
-    if (base2 && base2 !== EMPTY_TREE && (spawnSync3("git", ["cat-file", "-e", `${base2}^{tree}`], { cwd: root, timeout: 3e4 }).status !== 0 || spawnSync3("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0)) base2 = null;
+    let mergeBase = null;
+    if (base2 && base2 !== EMPTY_TREE) {
+      if (spawnSync3("git", ["cat-file", "-e", `${base2}^{commit}`], { cwd: root, timeout: 3e4 }).status !== 0) base2 = null;
+      else if (spawnSync3("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0) {
+        const mb = spawnSync3("git", ["merge-base", base2, head], { cwd: root, encoding: "utf8", timeout: 3e4 });
+        mergeBase = mb.status === 0 ? mb.stdout.trim() || null : null;
+        if (!mergeBase) base2 = null;
+      }
+    }
     const hashOf = (p) => hashFile(root, p) ?? null;
     const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
     const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
-    if (!settled) return { ok: true, settled: null, candidates: [], changed: /* @__PURE__ */ new Set(), next };
+    if (!settled) return { ok: true, settled: null, candidates: [], changed: /* @__PURE__ */ new Set(), next, merge_base: null };
     const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
-    const pool = /* @__PURE__ */ new Set([...base2 ? changedSince(root, base2) : dirtyNow, ...Object.keys(settled.dirty)]);
+    let fromBase = base2 ? changedSince(root, base2) : dirtyNow;
+    if (mergeBase) {
+      const sinceMergeBase = changedSince(root, mergeBase);
+      fromBase = [...fromBase].filter((p) => sinceMergeBase.has(p));
+    }
+    const pool = /* @__PURE__ */ new Set([...fromBase, ...Object.keys(settled.dirty)]);
     const changed = new Set([...pool].filter((p) => !isMachinery(p) && differs(p)));
     const candidates = [...changed].map((path) => {
       let at = settled.at;
@@ -9198,7 +9211,7 @@ function gitTouches(root, now) {
       }
       return { path, at: typeof at === "string" ? at : now };
     });
-    return { ok: true, settled, candidates, changed, next, base_lost: Boolean(settled.sha && !base2) };
+    return { ok: true, settled, candidates, changed, next, base_lost: Boolean(settled.sha && !base2), merge_base: mergeBase };
   } catch (e) {
     return { ok: false, reason: String(e && e.message || e) };
   }

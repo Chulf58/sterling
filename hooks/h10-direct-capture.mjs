@@ -8264,13 +8264,26 @@ function gitTouches(root, now) {
     else return { ok: false, reason: "no_git" };
     const settled = readGitSettled(root);
     let base2 = settled?.sha;
-    if (base2 && base2 !== EMPTY_TREE && (spawnSync2("git", ["cat-file", "-e", `${base2}^{tree}`], { cwd: root, timeout: 3e4 }).status !== 0 || spawnSync2("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0)) base2 = null;
+    let mergeBase = null;
+    if (base2 && base2 !== EMPTY_TREE) {
+      if (spawnSync2("git", ["cat-file", "-e", `${base2}^{commit}`], { cwd: root, timeout: 3e4 }).status !== 0) base2 = null;
+      else if (spawnSync2("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0) {
+        const mb = spawnSync2("git", ["merge-base", base2, head], { cwd: root, encoding: "utf8", timeout: 3e4 });
+        mergeBase = mb.status === 0 ? mb.stdout.trim() || null : null;
+        if (!mergeBase) base2 = null;
+      }
+    }
     const hashOf = (p) => hashFile(root, p) ?? null;
     const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
     const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
-    if (!settled) return { ok: true, settled: null, candidates: [], changed: /* @__PURE__ */ new Set(), next };
+    if (!settled) return { ok: true, settled: null, candidates: [], changed: /* @__PURE__ */ new Set(), next, merge_base: null };
     const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
-    const pool = /* @__PURE__ */ new Set([...base2 ? changedSince(root, base2) : dirtyNow, ...Object.keys(settled.dirty)]);
+    let fromBase = base2 ? changedSince(root, base2) : dirtyNow;
+    if (mergeBase) {
+      const sinceMergeBase = changedSince(root, mergeBase);
+      fromBase = [...fromBase].filter((p) => sinceMergeBase.has(p));
+    }
+    const pool = /* @__PURE__ */ new Set([...fromBase, ...Object.keys(settled.dirty)]);
     const changed = new Set([...pool].filter((p) => !isMachinery(p) && differs(p)));
     const candidates = [...changed].map((path) => {
       let at = settled.at;
@@ -8280,7 +8293,7 @@ function gitTouches(root, now) {
       }
       return { path, at: typeof at === "string" ? at : now };
     });
-    return { ok: true, settled, candidates, changed, next, base_lost: Boolean(settled.sha && !base2) };
+    return { ok: true, settled, candidates, changed, next, base_lost: Boolean(settled.sha && !base2), merge_base: mergeBase };
   } catch (e) {
     return { ok: false, reason: String(e && e.message || e) };
   }
@@ -9427,6 +9440,9 @@ try {
     if (git.base_lost) {
       skipRow("h10-git-touches", `settled_sha_unreachable:${git.settled.sha}`);
       lostSettlementMessage = `\u26A0 H10 SETTLEMENT HISTORY REWRITTEN: persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}. Duties for commits between them could not be derived; reconcile them by hand from git log.`;
+    } else if (git.merge_base) {
+      disclose(`H10: settled SHA ${git.settled.sha.slice(0, 12)} is not an ancestor of HEAD ${git.next.sha.slice(0, 12)}; touches diffed from merge-base ${git.merge_base.slice(0, 12)}
+`);
     }
     const unchanged = [...new Set(touches.map((t) => t?.path).filter(Boolean))].filter((p) => !git.changed.has(p));
     const tracked = gitTrackedSubset(input.cwd, unchanged) ?? /* @__PURE__ */ new Set();
@@ -9770,7 +9786,7 @@ try {
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
   const generatedProjections = loadGeneratedProjections(input.cwd);
-  const releaseBase = git.ok && git.settled && !git.base_lost ? git.settled.sha : null;
+  const releaseBase = git.ok && git.settled && !git.base_lost ? git.merge_base ?? git.settled.sha : null;
   const isReleaseMechanics = (p) => generatedProjections.has(p) || VERSION_ONLY_CANDIDATES.includes(p) && !Object.hasOwn(git.settled?.dirty ?? {}, p) && isVersionOnlyInWorkingTree(input.cwd, releaseBase, p);
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t) && !isReleaseMechanics(t.path));
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync8(join12(input.cwd, p)));
@@ -9864,7 +9880,8 @@ try {
     return seen;
   };
   const ignoreGlobs = config.article_demand.ignore_globs;
-  let unowned = paths.filter((p) => !ignoreGlobs.some((g) => matchesGlob(p, g))).filter(isUnowned);
+  const exemptFromDemand = (p) => generatedProjections.has(p) || ignoreGlobs.some((g) => matchesGlob(p, g));
+  let unowned = paths.filter((p) => !exemptFromDemand(p)).filter(isUnowned);
   if (unowned.length) {
     const ignored = gitIgnored(unowned, input.cwd);
     if (ignored === null) skipRow("article-demand-gitignore", "no_git");
@@ -9911,7 +9928,9 @@ try {
     const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow("article-demand-carried-gitignore", "no_git");
-    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync8(join12(input.cwd, p))));
+    const prunable = new Set(
+      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync8(join12(input.cwd, p)))
+    );
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
       const big = new Set(b);
