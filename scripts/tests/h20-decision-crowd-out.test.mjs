@@ -613,12 +613,34 @@ test('reduced hold-back (review repro 2, cap 406): the hold is never sized from 
   assert.ok(namesIn(assembled.text) >= namesIn(assembleDelivery8965c63(parts, 406).text), 'no fewer names than 8965c63');
 });
 
+// Every record credited at 8965c63 (rendered whole) is still credited.
+const creditKeys = (r) => [...r.emittedSubstance.map((e) => `s:${e.identity}:${e.revision}`), ...r.emittedDiscovery.map((e) => `d:${e.identity}:${e.revision}`)];
+const lostCredits = (now, then) => { const kept = new Set(creditKeys(now)); return creditKeys(then).filter((key) => !kept.has(key)); };
+
+test('reduced hold-back (review repro 3, cap 728): a smaller hold never pushes a part that rendered whole at 8965c63 down to an excerpt', () => {
+  const parts = [
+    { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: 'H'.repeat(391) },
+    { kind: 'ordinary', contentClass: 'discovery', identity: '4700042a-0000-0000', revision: 'r', name: `long-0-${'y'.repeat(60)}`,
+      text: `BLOCK 0\n  line 0 ${'x'.repeat(19)}\n  line 1 ${'x'.repeat(20)}\n  line 2 ${'x'.repeat(28)}\n  line 3 ${'x'.repeat(8)}\n  line 4 ${'x'.repeat(34)}\n${'x'.repeat(1000)}`,
+      pointer: `PTR 0 knowledge_get 4700042a-0000-0000${' p'.repeat(38)}`, suffix: '  … rest of 0' },
+    { kind: 'ordinary', contentClass: 'discovery', identity: '27be7025-0000-0000', revision: 'r', name: 'n1-xxxx',
+      text: `BLOCK 1\n  line 0 xxxxx\n  line 1 ${'x'.repeat(17)}\n  line 2 ${'x'.repeat(36)}\n  line 3 ${'x'.repeat(22)}`,
+      pointer: `PTR 1 knowledge_get 27be7025-0000-0000${' p'.repeat(18)}`, suffix: '  … rest of 1' },
+    { kind: 'ordinary', contentClass: 'discovery', identity: '79283600-0000-0000', revision: 'r', name: `long-2-${'y'.repeat(110)}`, text: `BLOCK 2\n${'x'.repeat(1252)}` },
+    { kind: 'ordinary', contentClass: 'discovery', identity: '6b5f0719-0000-0000', revision: 'r', name: `long-3-${'y'.repeat(70)}`, text: `BLOCK 3\n${'x'.repeat(804)}` },
+  ];
+  const assembled = assembleDelivery(parts, 728);
+  assert.ok(bytes(assembled.text) <= 728, `the cap holds (was ${bytes(assembled.text)})`);
+  assert.deepEqual(assembled.emittedDiscovery.map((e) => e.identity), ['27be7025-0000-0000'], 'block 1 renders whole and is credited');
+  assert.deepEqual(lostCredits(assembled, assembleDelivery8965c63(parts, 728)), [], 'no credit lost against 8965c63');
+});
+
 // DIFFERENTIAL FUZZ against the frozen 8965c63 assembler. The generator mixes
 // suffix-bearing parts, parts whose disclosureIdentities outnumber what they
 // show, parts shorter than their own pointer, unpointered parts that can only
 // render whole or be omitted (so the omission set moves between placement
 // passes), hazards, and a custom aggregateLabel.
-test('reduced hold-back differential fuzz: 3000 seeded cases never render fewer names, never omit more records, never exceed the cap', () => {
+test('reduced hold-back differential fuzz: 3000 seeded cases never render fewer names, never omit more records, never lose a credit, never exceed the cap', () => {
   let seed = 20261001;
   const rnd = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
   const ri = (lo, hi) => lo + Math.floor(rnd() * (hi - lo + 1));
@@ -627,7 +649,7 @@ test('reduced hold-back differential fuzz: 3000 seeded cases never render fewer 
   const label = (count, ids) => `+${count} more pointer line(s) held back: ${ids.join(' ')}`;
   // Ordinary bytes only: hazards are uncharged against the configured cap.
   const ordinaryBytes = (text, hazards) => hazards.reduce((sum, h) => sum - (text.includes(h.text) ? bytes(h.text) : text.includes(h.pointer) ? bytes(h.pointer) : 0), bytes(text));
-  const seen = { hazards: 0, suffixes: 0, disclosureLists: 0, labels: 0, differs: 0, namedLines: 0 };
+  const seen = { hazards: 0, suffixes: 0, disclosureLists: 0, labels: 0, differs: 0, namedLines: 0, credits: 0, substanceCredits: 0 };
   for (let k = 0; k < 3000; k++) {
     const cap = ri(300, 1500);
     const parts = [];
@@ -643,7 +665,7 @@ test('reduced hold-back differential fuzz: 3000 seeded cases never render fewer 
       const name = rnd() < 0.8 ? (rnd() < 0.5 ? `n${i}-${'x'.repeat(ri(1, 20))}` : `long-${i}-${'y'.repeat(ri(60, 120))}`) : undefined;
       const shape = rnd();
       const text = shape < 0.25 ? 'z'.repeat(ri(30, 200)) : shape < 0.45 ? `BLOCK ${i}\n  line 0 ${'x'.repeat(ri(3, 15))}\n${'x'.repeat(ri(100, 1200))}` : lines(`BLOCK ${i}`, ri(1, 30));
-      const part = { kind: 'ordinary', contentClass: 'discovery', identity, revision: 'r', name, text };
+      const part = { kind: 'ordinary', contentClass: rnd() < 0.3 ? 'substance' : 'discovery', identity, revision: 'r', name, text };
       if (rnd() < 0.6) part.pointer = `PTR ${i} knowledge_get ${identity}${' p'.repeat(ri(0, 40))}`;
       if (rnd() < 0.35) part.suffix = `  … rest of ${i}`;
       if (rnd() < 0.2) part.disclosureIdentities = [{ identity, revision: 'r', name }, ...Array.from({ length: ri(1, 6) }, (_, j) => ({ identity: `${hex()}-dd-${j}`, revision: 'r', name: rnd() < 0.7 ? `extra-${j}-${'q'.repeat(ri(3, 50))}` : undefined }))];
@@ -661,6 +683,9 @@ test('reduced hold-back differential fuzz: 3000 seeded cases never render fewer 
     const at = `case ${k} (cap ${cap})`;
     assert.ok(namesIn(now.text) >= namesIn(then.text), `${at}: ${namesIn(now.text)} names < ${namesIn(then.text)} at 8965c63\nnow:  ${omissionLine(now.text)}\nthen: ${omissionLine(then.text)}`);
     assert.ok(now.omittedCount <= then.omittedCount, `${at}: omits ${now.omittedCount} records, 8965c63 omitted ${then.omittedCount}`);
+    assert.deepEqual(lostCredits(now, then), [], `${at}: records credited at 8965c63 are no longer credited`);
+    if (creditKeys(then).length) seen.credits++;
+    if (then.emittedSubstance.length) seen.substanceCredits++;
     assert.ok(ordinaryBytes(now.text, hazards) <= Math.max(cap, ordinaryBytes(then.text, hazards)), `${at}: ${ordinaryBytes(now.text, hazards)} ordinary bytes > cap`);
     if (!hazards.length) assert.ok(bytes(now.text) <= cap, `${at}: ${bytes(now.text)} > cap`);
   }

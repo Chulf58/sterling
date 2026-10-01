@@ -8309,7 +8309,13 @@ function assembleDelivery(parts, capBytes, options = {}) {
   const full = assembleOnce(parts, capBytes, options, false);
   if (!full.holdShrinks) return full.result;
   const reduced = assembleOnce(parts, capBytes, options, true);
-  return reduced.namesShown >= full.namesShown && reduced.result.omittedCount <= full.result.omittedCount ? reduced.result : full.result;
+  const creditKeys = (result) => [
+    ...result.emittedSubstance.map((e) => `substance\0${e.identity}\0${e.revision}`),
+    ...result.emittedDiscovery.map((e) => `discovery\0${e.identity}\0${e.revision}`)
+  ];
+  const reducedCredits = new Set(creditKeys(reduced.result));
+  const keepsEveryCredit = creditKeys(full.result).every((key) => reducedCredits.has(key));
+  return reduced.namesShown >= full.namesShown && reduced.result.omittedCount <= full.result.omittedCount && keepsEveryCredit ? reduced.result : full.result;
 }
 function assembleOnce(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}, reduceHold) {
   let namesShown = 0;

@@ -1462,15 +1462,26 @@ export function assembleDelivery(parts, capBytes, options = {}) {
   // from excerpts for the '+N more' line is first sized as at 8965c63, from the
   // fully-named line. Only when some pass could hold less (not even the names
   // it carries fit) is the placement re-run with the reduced hold, and that
-  // result is kept only if its line renders at least as many names and it omits
-  // no more records. A reduced hold predicted from one pass can be too small
-  // (a reserved pointer is a ceiling a part may not use; the final omission set
-  // can differ), so the comparison, not the prediction, is what guarantees an
-  // omitted record's name still outranks another block's extra excerpt lines.
+  // result is kept only if it is no worse on anything delivered: its line
+  // renders at least as many names, it omits no more records, and every record
+  // credited (rendered whole) under the full hold is still credited. A reduced
+  // hold predicted from one pass can be too small (a reserved pointer is a
+  // ceiling a part may not use; the final omission set can differ), and the
+  // room it frees can let an earlier part's excerpt push a later whole part
+  // down to an excerpt; the comparison, not the prediction, is what guarantees
+  // the extra excerpt lines cost no name, no record and no credit.
   const full = assembleOnce(parts, capBytes, options, false);
   if (!full.holdShrinks) return full.result;
   const reduced = assembleOnce(parts, capBytes, options, true);
-  return reduced.namesShown >= full.namesShown && reduced.result.omittedCount <= full.result.omittedCount ? reduced.result : full.result;
+  const creditKeys = (result) => [
+    ...result.emittedSubstance.map((e) => `substance\u0000${e.identity}\u0000${e.revision}`),
+    ...result.emittedDiscovery.map((e) => `discovery\u0000${e.identity}\u0000${e.revision}`),
+  ];
+  const reducedCredits = new Set(creditKeys(reduced.result));
+  const keepsEveryCredit = creditKeys(full.result).every((key) => reducedCredits.has(key));
+  return reduced.namesShown >= full.namesShown && reduced.result.omittedCount <= full.result.omittedCount && keepsEveryCredit
+    ? reduced.result
+    : full.result;
 }
 
 function assembleOnce(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}, reduceHold) {
