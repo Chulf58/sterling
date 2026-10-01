@@ -674,6 +674,11 @@ try {
     if (git.base_lost) {
       skipRow('h10-git-touches', `settled_sha_unreachable:${git.settled.sha}`);
       lostSettlementMessage = `⚠ H10 SETTLEMENT HISTORY REWRITTEN: persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}. Duties for commits between them could not be derived; reconcile them by hand from git log.`;
+    } else if (git.merge_base) {
+      // A sibling-branch checkout (board 54b775be): the settled SHA exists but
+      // is not an ancestor of HEAD. gitTouches already diffed from the
+      // merge-base, so this is a disclosure, not a rewrite.
+      disclose(`H10: settled SHA ${git.settled.sha.slice(0, 12)} is not an ancestor of HEAD ${git.next.sha.slice(0, 12)}; touches diffed from merge-base ${git.merge_base.slice(0, 12)}\n`);
     }
     const unchanged = [...new Set(touches.map((t) => t?.path).filter(Boolean))].filter((p) => !git.changed.has(p));
     const tracked = gitTrackedSubset(input.cwd, unchanged) ?? new Set();
@@ -1568,10 +1573,12 @@ try {
   // already hold a dependency edit committed this session, so the version-only
   // skip does not apply and the path still counts (Opus review LOW-4). A path
   // already dirty at the snapshot, or an unreachable snapshot, fails closed the
-  // same way. The generated-projection skip needs no base and always applies.
-  // Capture duty only — article demand and settlement are unchanged.
+  // same way. A settled SHA on a sibling branch proves against the merge-base
+  // gitTouches diffed from (board 54b775be). The generated-projection skip
+  // needs no base and always applies; the article demand below exempts
+  // generated projections too (board 3d3c9d81).
   const generatedProjections = loadGeneratedProjections(input.cwd);
-  const releaseBase = git.ok && git.settled && !git.base_lost ? git.settled.sha : null;
+  const releaseBase = git.ok && git.settled && !git.base_lost ? (git.merge_base ?? git.settled.sha) : null;
   const isReleaseMechanics = (p) =>
     generatedProjections.has(p) ||
     (VERSION_ONLY_CANDIDATES.includes(p) && !Object.hasOwn(git.settled?.dirty ?? {}, p) && isVersionOnlyInWorkingTree(input.cwd, releaseBase, p));
@@ -1877,9 +1884,13 @@ try {
   // PER PATH before the ownership join, so a generated sidecar (Godot's
   // `.gd.uid`) is never demanded while its sibling source still is. Only the
   // demand candidates are filtered — `paths` itself (the image-only release
-  // test, the live recompute's reach) is unchanged.
+  // test, the live recompute's reach) is unchanged. A path listed in
+  // config.generated_projections is regenerated from the store and can never
+  // own an article, so it is exempt the same way (board 3d3c9d81). The carried
+  // keys of an open item are pruned by the same predicate (prunable, below).
   const ignoreGlobs = config.article_demand.ignore_globs;
-  let unowned = paths.filter((p) => !ignoreGlobs.some((g) => matchesGlob(p, g))).filter(isUnowned);
+  const exemptFromDemand = (p) => generatedProjections.has(p) || ignoreGlobs.some((g) => matchesGlob(p, g));
+  let unowned = paths.filter((p) => !exemptFromDemand(p)).filter(isUnowned);
   // A gitignored path is never governed territory (board 1de3653b) — it cannot
   // be owned, so demanding an article for it is a false demand. A failed ignore
   // check degrades to the unfiltered list (toward signaling), recorded loudly.
@@ -1930,7 +1941,7 @@ try {
   // destroy. The cap's original purpose was mint-time NOISE control, and noise is
   // capped where it belongs: at the RENDERED list (capList, in the nag below),
   // never in what is persisted. The schema puts no cap on file_keys.
-  // A name therefore leaves this item for exactly three RULING-BACKED reasons,
+  // A name therefore leaves this item for exactly four RULING-BACKED reasons,
   // each of which means the debt is gone rather than lost — never for want of room:
   //   1. it gained an owning article/reference doc (isUnowned flips — the point);
   //   2. it is gitignored, i.e. never governed territory by ruling (board
@@ -1939,7 +1950,10 @@ try {
   //      only push toward under-report" justification was right about the
   //      under-report axis and wrong about this lane's over-report axis);
   //   3. it no longer exists on disk — a deleted/renamed path cannot be given an
-  //      owning article, and this is also the only thing bounding union growth.
+  //      owning article, and this is also the only thing bounding union growth;
+  //   4. project policy exempts it from the demand: an article_demand
+  //      ignore_globs entry or config.generated_projections covers it (board
+  //      3d3c9d81), the same exemption the live demand applies.
   // When the gitignore probe itself fails, reasons 2 is skipped and the name is
   // KEPT (toward signaling), recorded loudly — the same degradation the demand uses.
   //
@@ -2060,7 +2074,9 @@ try {
     const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow('article-demand-carried-gitignore', 'no_git');
-    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync(join(input.cwd, p))));
+    const prunable = new Set(
+      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync(join(input.cwd, p)))
+    );
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
       const big = new Set(b);

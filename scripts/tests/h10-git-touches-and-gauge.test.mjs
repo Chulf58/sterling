@@ -270,7 +270,7 @@ test('git touches (4): the settled snapshot does NOT advance when minting fails 
   }
 });
 
-test('git touches (5): rewritten settled history mints one loud capture_owed recovery item and advances only after it is durable', () => {
+test('git touches (5): rewritten settled history (the settled SHA no longer exists) mints one loud capture_owed recovery item and advances only after it is durable', () => {
   const { dir, store, g, cleanup } = makeGitProject();
   try {
     writeFile(dir, 'src/rewrite.mjs', 'export const v = 1;\n');
@@ -280,6 +280,11 @@ test('git touches (5): rewritten settled history mints one loud capture_owed rec
     const oldSha = g(['rev-parse', 'HEAD']).trim();
     writeFile(dir, 'src/rewrite.mjs', 'export const v = 2;\n');
     g(['add', '-A']); g(['commit', '--amend', '-qm', 'rewritten']);
+    // Expire the reflog and prune so the old commit is really gone. An amended
+    // commit git can still read is a diverged base (merge-base fallback, see
+    // h10-settlement-sibling-branch.test.mjs), not a rewrite.
+    g(['reflog', 'expire', '--expire=now', '--all']); g(['gc', '-q', '--prune=now']);
+    assert.notEqual(spawnSync('git', ['cat-file', '-e', `${oldSha}^{commit}`], { cwd: dir }).status, 0, 'fixture: the old SHA is gone');
     captureNow(store);
     const first = runStop(dir);
     assert.equal(first.code, 0, first.stderr);
