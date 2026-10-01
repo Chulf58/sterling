@@ -13,9 +13,7 @@
 //      is valid, else from its prose. Prose paths are kept only when at least
 //      one mention is neither negated ("do not touch X", "X ... do not edit
 //      those", via the shared hasUnsuppressedMatch) nor an argument of a
-//      command line ("node --test scripts/tests/x.test.mjs"), nor named as
-//      ANOTHER lane's ("Lane B owns X", "X is being edited by ..."), nor
-//      named to read ("Read X for context", "See X for reference"). Compiled
+//      command line ("node --test scripts/tests/x.test.mjs"). Compiled
 //      executables are never territory. Paths inside an "Out of scope:" or
 //      "Do not touch:" section are subtracted. An absolute path inside the
 //      project maps to its repo-relative form (H20 side only: the shared
@@ -37,6 +35,13 @@
 //      whose files came from REVIEW-TERRITORY is used as recorded, and so is a
 //      row whose brief cannot be recovered (oversize prompt, no live record,
 //      e.g. a resumed round), which errs toward warning.
+//
+// KNOWN FALSE-POSITIVE CLASS: a brief that names a path only to say another
+// lane owns it, or to read it for context, still warns. This is accepted,
+// because a miss is worse than a false alarm (decision 630389ad,
+// h20-warns-on-dispatch-file-overlap-with-live-agents). Phrase-based rules
+// for it were tried and removed: they silenced real claims ("This lane owns
+// X", "X is owned by you", a bullet after "Another lane owns Y").
 //
 // NOT GUARANTEED: dispatches sent in one message cannot see each other (H22
 // registers at SubagentStart).
@@ -108,49 +113,11 @@ function isRunMention(text, index) {
   return Boolean(nextToken) && FLAG_TOKEN_RE.test(nextToken);
 }
 
-// ---------------------------------------------------------------------------
-// Not-mine mentions (fix round, review MEDIUM-1): a path named to say another
-// lane owns it, or to read it for context, is not this lane's territory. Both
-// are judged inside the mention's clause: the text since the last sentence
-// break, ';', a spaced dash, or ', then/but/so/while/and you'.
-// ---------------------------------------------------------------------------
-const CLAUSE_BREAK_RE = /[.;!?\n](?=\s|$)|\s[—–]\s|,\s*(?:then|but|so|while|and\s+you)\b/g;
-// Before the path: a third party owns or is changing it. 'you' as the subject
-// is excluded, so "you own X" / "you are editing X" stay claims.
-const OTHER_OWNER_BEFORE_RE = /(?<!\byou\s)\b(?:owns|is\s+(?:editing|changing|writing|rewriting)|are\s+(?:editing|changing|writing|rewriting)|(?:is\s+|are\s+)?owned\s+by\s+(?!you\b|this\s+lane\b)\S+)\b/i;
-// After the path: "X is being edited by", "X is owned by", "X belongs to".
-const OTHER_OWNER_AFTER_RE = /^[`'")\]]*\s+(?:(?:is|are)\s+(?:already\s+)?(?:being\s+)?(?:edited|changed|written|rewritten|owned)\s+(?:by|in)\b|belongs?\s+to\b)/i;
-const READ_VERB_BEFORE_RE = /\b(?:read|reading|see|consult|study|skim|look\s+at|check)\b/i;
-const FOR_CONTEXT_AFTER_RE = /\b(?:for|as)\s+(?:context|reference|background)\b/i;
-
-function clauseAround(text, index, length) {
-  let start = 0;
-  let end = text.length;
-  CLAUSE_BREAK_RE.lastIndex = 0;
-  let m;
-  while ((m = CLAUSE_BREAK_RE.exec(text))) {
-    if (m.index < index) start = m.index + m[0].length;
-    else if (m.index >= index + length) {
-      end = m.index;
-      break;
-    }
-  }
-  return { before: text.slice(start, index), after: text.slice(index + length, end) };
-}
-
-function isNotMineMention(text, index, raw) {
-  const { before, after } = clauseAround(text, index, raw.length);
-  if (OTHER_OWNER_BEFORE_RE.test(before) || OTHER_OWNER_AFTER_RE.test(after)) return true;
-  return READ_VERB_BEFORE_RE.test(before) && FOR_CONTEXT_AFTER_RE.test(after);
-}
-
-/** True when at least one mention of `raw` is a claim: not a command
- *  argument, not another lane's, not a read-for-context. */
-function hasClaimMention(text, raw) {
+function hasNonRunMention(text, raw) {
   const re = new RegExp(escapeRe(raw), 'g');
   let m;
   while ((m = re.exec(text))) {
-    if (!isRunMention(text, m.index) && !isNotMineMention(text, m.index, raw)) return true;
+    if (!isRunMention(text, m.index)) return true;
     if (m.index === re.lastIndex) re.lastIndex++;
   }
   return false;
@@ -231,9 +198,8 @@ export function briefTerritory(prompt, cwd) {
 }
 
 /** THE ONE COPY of the prose rules (rule 2): every path the brief's prose
- *  names, minus negated-only, command-argument-only, another-lane's-only and
- *  read-for-context-only mentions, executables and Out-of-scope /
- *  Do-not-touch spans. Used for the new brief and for each
+ *  names, minus negated-only and command-argument-only mentions, executables
+ *  and Out-of-scope / Do-not-touch spans. Used for the new brief and for each
  *  live owner's brief (rule 5). */
 export function proseTerritory(prompt, cwd) {
   const text = String(prompt ?? '');
@@ -257,7 +223,7 @@ export function proseTerritory(prompt, cwd) {
   for (const raw of extractPathCandidates(text)) {
     const n = normCandidate(text, raw, cwd);
     if (!n || EXECUTABLE_EXT_RE.test(n) || excluded(n)) continue;
-    if (unsuppressed(raw) && hasClaimMention(text, raw)) out.add(n);
+    if (unsuppressed(raw) && hasNonRunMention(text, raw)) out.add(n);
   }
   for (const raw of extractGlobPrefixCandidates(text)) {
     const n = norm(raw);
