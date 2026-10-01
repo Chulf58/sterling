@@ -8404,12 +8404,24 @@ init_dist2();
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname5, join as join8 } from "node:path";
+import { delimiter, dirname as dirname5, join as join8 } from "node:path";
 var PR_ATTRIBUTION = "\u{1F916} Generated with [Claude Code](https://claude.com/claude-code)";
 function gh(cwd, args) {
   return spawnSync5("gh", args, { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
 }
 var streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? "")).trim();
+function resolveGhPath() {
+  const names = process.platform === "win32" ? ["gh.exe", "gh.cmd", "gh"] : ["gh", "gh.exe"];
+  for (const dir of String(process.env.PATH ?? "").split(delimiter)) {
+    if (!dir) continue;
+    for (const name of names) {
+      const candidate = join8(dir, name);
+      if (existsSync4(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+var compareUrl = (repo, base2, branch2) => `https://${repo}/compare/${base2.split("/").map(encodeURIComponent).join("/")}...${branch2.split("/").map(encodeURIComponent).join("/")}?expand=1`;
 function parseOriginRepo(url) {
   const u = String(url ?? "").trim();
   let host;
@@ -8670,6 +8682,9 @@ function shipAsPr({ cwd, repo, branch: branch2, base: base2, mergeBase: mergeBas
         `Check with: ${lookupCmd}`,
         `Then rerun /sterling:merge: it is safe \u2014 it reuses an open PR for this head and base, or creates one; the push is a no-op.`,
         `If you open the PR by hand instead, rerunning /sterling:merge on ${branch2} reuses it and arms the review loop.`,
+        `Create it by hand at: ${compareUrl(repo, base2, branch2)}`,
+        `Then rerun /sterling:merge on ${branch2}.`,
+        ...create.status !== 0 ? [`gh that ran: ${resolveGhPath() ?? "not found on PATH"}. On WSL a Windows gh.exe is a known cause of this failure ("gh: Invalid argument").`] : [],
         `gh api said: ${said}`
       ].join("\n")
     };

@@ -348,6 +348,10 @@ test('work: pushed but the PR create FAILED exits 1 naming what succeeded; the r
     assert.doesNotMatch(r1.stderr, /no PR exists/i, 'the gate never claims no PR exists');
     assert.match(r1.stderr, /Validation Failed/, 'gh\'s own stderr is printed, not swallowed');
     assert.match(r1.stderr, /by hand.*reuses it and arms the review loop/s, 'the message says a hand-opened PR is reused by the rerun, which arms the review loop');
+    assert.ok(r1.stderr.includes(`https://${ORIGIN_REPO}/compare/main...${p.branchName}?expand=1`), `the message names the exact by-hand create URL â€” ${oneLine(r1.stderr)}`);
+    assert.ok(r1.stderr.includes(`rerun /sterling:merge on ${p.branchName}`), 'the message names the exact rerun');
+    assert.ok(r1.stderr.includes(p.gh.bin), 'a non-zero gh exit prints the path of the gh that ran');
+    assert.match(r1.stderr, /WSL.*Windows gh\.exe/s, 'a non-zero gh exit says a Windows gh.exe on WSL is a known cause');
     assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the branch reached origin before the create failed');
     const out1 = parseSingleJson(r1.stdout, 'partial');
     assert.equal(out1.mode, 'work');
@@ -703,6 +707,8 @@ test('work: the create exits 0 but its answer is NOT a PR, and no PR is found â€
     assert.match(r.stderr, /PUSHED/);
     assert.doesNotMatch(r.stderr, /no PR exists/i);
     assert.match(r.stderr, /by hand.*reuses it and arms the review loop/s);
+    assert.ok(r.stderr.includes(`https://${ORIGIN_REPO}/compare/main...${p.branchName}?expand=1`), 'the by-hand create URL is named on this arm too');
+    assert.doesNotMatch(r.stderr, /Windows gh\.exe/, 'gh exited 0 here, so the WSL gh.exe note does not apply');
     const out = parseSingleJson(r.stdout, 'non-PR answer, no PR');
     assert.equal(out.ok, false);
     assert.equal(out.pushed, true);

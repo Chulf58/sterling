@@ -469,6 +469,23 @@ test('--settle accepts the full PR URL as --pr', () => {
   }
 });
 
+test('--settle refusal for a PR number that differs from the armed one prints the armed PR, its head, the re-arm command and the discard command', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    const r = run(f, ['--settle', 'clean', '--pr', '8']);
+    assert.equal(r.code, 1);
+    for (const text of [r.stderr, r.out.error]) {
+      assert.match(text, /armed.*PR #7/s, 'names the armed PR number');
+      assert.ok(text.includes(HEAD), 'names the armed head');
+      assert.match(text, /rerun \/sterling:merge on the branch this PR was opened from/, 'names the re-arm command');
+      assert.ok(text.includes(`rm ${loopPath(f)}`), 'names the exact discard command');
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('--settle refuses a loop armed for ANOTHER repo than origin, even with a matching PR number', () => {
   const f = makeFixture();
   try {
