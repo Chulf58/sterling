@@ -645,11 +645,29 @@ export const todoSchema = base
       .string()
       .regex(/^[0-9a-f]{40}$/, '40-hex commit sha required')
       .optional(),
+    // Semantic order between user asks (decision
+    // every-user-ask-is-boarded-at-intake-with-slim-blocked-by, rule 6): the
+    // SLUGS of the board items this one waits on. Slugs, never ids, because a
+    // slug is the immutable address (decision board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address). Lives in the JSON body
+    // like every other todo field, so it needs no migration. Existence of each
+    // blocker is checked at the tool layer when written; a blocker removed later
+    // reads as closed, it is never rewritten out of this list.
+    blocked_by: z.array(z.string().min(1)).optional(),
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
     if (rec.source === 'system' && !rec.system_reason) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "source 'system' requires system_reason (§3.2.7)" });
+    }
+    if (rec.blocked_by !== undefined && rec.source === 'system') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['blocked_by'],
+        message: "blocked_by orders source:'user' board tasks only — maintenance-queue items never carry it",
+      });
+    }
+    if (rec.slug !== undefined && rec.blocked_by?.includes(rec.slug)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['blocked_by'], message: `blocked_by lists '${rec.slug}', the item itself — an item cannot block itself` });
     }
   });
 

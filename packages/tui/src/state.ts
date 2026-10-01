@@ -998,6 +998,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
           kind: j === 0 ? ('title' as const) : ('body' as const),
         }));
         if (card.detail) lines.push({ text: `    ${pad}${card.detail}`, kind: 'meta' });
+        if (card.blocked) lines.push({ text: `    ${pad}${card.blocked}`, kind: 'meta' });
       } else {
         lines = [{ text: clipEllipsis(marker + pad + card.title, width), kind: 'title' }];
       }
