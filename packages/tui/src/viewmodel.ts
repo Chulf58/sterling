@@ -16,6 +16,8 @@ export interface Card {
   source?: string;
   /** indentation depth for grouped rows (objective children sit at 1); absent = 0 */
   depth?: number;
+  /** board item's open blockers as one line ('blocked by: a, b'); absent when none is open */
+  blocked?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -391,11 +393,21 @@ export function knowledgeSubgroups(records: unknown[]): { key: string; label: st
  * text profile does the Knowledge tree's count-then-fetch-per-source pattern
  * (decision foreign_5f8419c5) become genuinely required.
  */
+/**
+ * The card's one blocked-by line (decision
+ * every-user-ask-is-boarded-at-intake-with-slim-blocked-by, rule 6), given the
+ * blockers that are still open. No open blocker, no line: a blocker that was
+ * removed counts as closed and is left off.
+ */
+export function blockedByLine(openSlugs: readonly string[]): string | undefined {
+  return openSlugs.length ? `blocked by: ${openSlugs.join(', ')}` : undefined;
+}
+
 export function todoCards(store: SterlingStore, expanded: string[] = []): Card[] {
   const groups = new Map<string, Card[]>();
   const flat: Card[] = [];
   for (const t of store.query({ types: ['todo'], source: 'user', cap: 500 })) {
-    const todo = t as unknown as { id: string; text: string; slug?: string; priority?: string; file_keys?: string[]; objective?: string };
+    const todo = t as unknown as { id: string; text: string; slug?: string; priority?: string; file_keys?: string[]; objective?: string; blocked_by?: string[] };
     // `name (id8)` where a LABEL EXISTS (decision foreign_2e8c30e4; board 081508d0
     // review round 2). Gated on the derived LABEL, NOT on whether a slug was
     // ever minted (review round 2, HIGH finding): a legacy pre-mint item has
@@ -420,6 +432,9 @@ export function todoCards(store: SterlingStore, expanded: string[] = []): Card[]
         .filter(Boolean)
         .join(' · '),
     };
+    // A blocker is open while a live board item still carries its slug.
+    const blocked = blockedByLine((todo.blocked_by ?? []).filter((slug) => store.recordsBySlug(slug).some((r) => r.type === 'todo')));
+    if (blocked) card.blocked = blocked;
     if (todo.objective) {
       const list = groups.get(todo.objective) ?? [];
       list.push(card);
