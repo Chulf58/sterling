@@ -8,7 +8,7 @@ import { join as join2, resolve } from "node:path";
 
 // scripts/lib/work-pr.mjs
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 function parseOriginRepo(url) {
   const u = String(url ?? "").trim();
   let host;
@@ -66,9 +66,10 @@ function settlePrLoop(root, outcome, prRef, { originRepo, now = (/* @__PURE__ */
   if (!armed || armed.repo !== s.repo || armed.number !== s.pr_number) {
     throw new Error(`${PR_LOOP_REL} is incoherent (pr_url ${s.pr_url}, repo ${s.repo}, pr_number ${s.pr_number}) \u2014 nothing settled; rerun /sterling:merge to re-arm it`);
   }
-  if (s.repo !== originRepo) throw new Error(`the armed loop is for ${s.repo}, not origin's repo (${originRepo}) \u2014 nothing settled`);
+  const unstick = `armed head ${s.head_sha}; to re-arm it for the current PR, rerun /sterling:merge on the branch this PR was opened from; to discard the armed state, run: rm ${prLoopPath(root)}`;
+  if (s.repo !== originRepo) throw new Error(`the armed loop is for ${s.repo}, not origin's repo (${originRepo}) \u2014 nothing settled (${unstick})`);
   if (ref.number !== s.pr_number || ref.repo !== null && ref.repo !== s.repo) {
-    throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} \u2014 nothing settled`);
+    throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} \u2014 nothing settled (${unstick})`);
   }
   if (s.status !== "owed") throw new Error(`the loop for ${s.pr_url} is already settled '${s.status}' (${s.settled_at}); only an owed loop can be settled`);
   const next = { ...s, status: outcome, settled_at: now };
