@@ -116,12 +116,16 @@ test('conductor pressure thresholds (recalibrated 2026-08-11, user-decided): def
   assert.equal(shipped.context_watch.conductor.hard_pct, 50);
 });
 
-test('conductor pressure: shipped windows map carries verified per-model context windows (live probe 2026-08-09 — 200k default misclassified a 1M-window session)', () => {
+test('conductor pressure: the shared context-window table carries verified per-model windows (live probe 2026-08-09 — 200k default misclassified a 1M-window session)', () => {
+  // The per-model windows moved from the per-project seed (templates/default-config.json)
+  // to the one shared table H10 reads (templates/context-windows.json); the seed keeps only
+  // the default below.
+  const sharedWindows = JSON.parse(readFileSync(join(root, 'templates', 'context-windows.json'), 'utf8')).windows;
+  assert.equal(sharedWindows['claude-fable-5'], 1_000_000);
+  assert.equal(sharedWindows['claude-opus-5'], 1_000_000);
+  assert.equal(sharedWindows['claude-sonnet-5'], 1_000_000);
+  assert.equal(sharedWindows['claude-haiku-4-5'], 200_000);
   const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
-  assert.equal(shipped.context_watch.windows['claude-fable-5'], 1_000_000);
-  assert.equal(shipped.context_watch.windows['claude-opus-5'], 1_000_000);
-  assert.equal(shipped.context_watch.windows['claude-sonnet-5'], 1_000_000);
-  assert.equal(shipped.context_watch.windows['claude-haiku-4-5'], 200_000);
   // Reversed by decision context-window-default-is-a-real-fallback (user-ruled
   // 2026-09-22, "Make it real: fall back to 1M"): a model with no per-model
   // entry now falls back to this window rather than reporting the fill as

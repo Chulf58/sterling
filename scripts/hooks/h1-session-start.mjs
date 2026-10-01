@@ -7,8 +7,8 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { basename, dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, join } from 'node:path';
+import { pluginRoot as sharedPluginRoot, walkUpPluginRoot as sharedWalkUpPluginRoot } from './lib/plugin-root-walk.mjs';
 import { readStdin, allow, exitAfterWrite, openStore, loadConfig } from './lib/common.mjs';
 // Plan-lock primitives — ONE implementation, shared with h31-plan-lock.mjs,
 // h19-dispatch-staging.mjs and scripts/plan-lock.mjs. Aliased on import so the
@@ -141,41 +141,10 @@ function paint(rows) {
     .join('\n');
 }
 
-/** The plugin root — the dir holding .claude-plugin/plugin.json — by a bounded
- *  walk-up that works from scripts/hooks/ (source, tests) and hooks/ (bundle).
- *
- *  WALK-UP FIRST; THE ENV SEAM IS CONSULTED ONLY WHEN THE WALK-UP FINDS NO
- *  PLUGIN TREE (decision foreign_95c2c109 F2's shape, extended from H15 to H1 by board
- *  fb7c43fb N-3). This ordering is the security property, not a preference:
- *  every consumer of this root READS CODE from it (plugin.json, the agent
- *  template registry), RESOLVES THE SERVER against it, and — sharpest —
- *  SPAWNS GIT WITH cwd INSIDE IT, so an env-first value would let anything able
- *  to set this process's environment redirect all three at session start, and a
- *  planted `.git/config` in the named tree (core.fsmonitor, an `ext::` remote
- *  url) is CODE EXECUTION on that git spawn. STERLING_PLUGIN_ROOT survives as
- *  the TEST SEAM it was always documented to be: reachable only from a spawn
- *  location with no plugin tree above it (the bundle-into-a-temp-dir shape of
- *  scripts/tests/lib/seam-hook.mjs). Wherever a real plugin tree sits above the
- *  running hook — everywhere in production — the variable is INERT. */
-function pluginRoot() {
-  const walked = walkUpPluginRoot();
-  if (walked) return walked;
-  return process.env.STERLING_PLUGIN_ROOT || null;
-}
-/** The walk-up alone — never the env seam, not even as a last resort. Used
- *  where the root is about to be PRINTED AS A COMMAND (the receipt remedy
- *  below): an env-supplied value is agent-influenceable under the threat model
- *  decision foreign_95c2c109 F2 closed in H15, so the paste-ready line must come from
- *  the running hook's own location only, and an unresolvable walk-up prints the
- *  placeholder rather than falling back to anything. */
-function walkUpPluginRoot() {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  for (let i = 0; i < 4; i++) {
-    if (existsSync(join(dir, '.claude-plugin', 'plugin.json'))) return dir;
-    dir = dirname(dir);
-  }
-  return null;
-}
+// The plugin root resolvers live in lib/plugin-root-walk.mjs (shared with H10's
+// shared context-window table); H1 binds them to its own module URL.
+const pluginRoot = () => sharedPluginRoot(import.meta.url);
+const walkUpPluginRoot = () => sharedWalkUpPluginRoot(import.meta.url);
 
 /** POSIX-ish path equality for the self-hosted-clone check below: strips a
  *  trailing slash and normalizes backslashes, but does NOT resolve symlinks —

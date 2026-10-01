@@ -39,6 +39,7 @@ import { disclosure, render } from '../lib/review-errors.mjs';
 import { mintSettlementReconcile, withFileLock, parseTouchesContent, gitTouches, gitTrackedSubset, writeGitSettled, loadGeneratedProjections } from './lib/settlement.mjs';
 import { VERSION_ONLY_CANDIDATES, isVersionOnlyInWorkingTree } from '../lib/version-only.mjs';
 import { latestUsage, fillPct } from './lib/transcript.mjs';
+import { pluginRoot } from './lib/plugin-root-walk.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy, fileEntriesOf } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
@@ -258,6 +259,23 @@ try {
   // the once-per-session hard nag marker is spent-by-session_id, so a stale marker from a
   // prior session never suppresses and needs no clearing event (P4 by supersession).
   const pressureMarker = join(input.cwd, '.sterling', 'transient', 'pressure-nagged.json');
+  // The shared model-to-window table shipped in the plugin, read through the plugin-root
+  // walk-up (never a project path). Returns {windows} or {error} — a missing, unreadable
+  // or invalid file never throws: the caller announces it and carries on with the project
+  // table. Validated by the one windows schema (parseConfig) rather than a second copy.
+  const loadSharedWindows = () => {
+    try {
+      const pluginDir = pluginRoot(import.meta.url);
+      if (!pluginDir) return { error: 'the Sterling plugin root was not found' };
+      const raw = JSON.parse(readFileSync(join(pluginDir, 'templates', 'context-windows.json'), 'utf8'));
+      if (!raw || typeof raw.windows !== 'object' || raw.windows === null || Array.isArray(raw.windows)) {
+        return { error: 'templates/context-windows.json has no "windows" object' };
+      }
+      return { windows: parseConfig({ context_watch: { windows: raw.windows } }).context_watch.windows };
+    } catch (e) {
+      return { error: String((e && e.message) || e).replace(/\s+/g, ' ').slice(0, 300) };
+    }
+  };
   const pressure = (() => {
     try {
       const cw = config.context_watch;
@@ -267,37 +285,70 @@ try {
         store.recordCheckSkipped('conductor-pressure', reason ?? 'format_unparseable', undefined, now);
         sample = { session_id: input.session_id, level: 'unknown', fill_pct: null, reason, at: now };
       } else {
-        // WINDOW = windows[model] ?? windows[baseModel] ?? windows.default (decision
+        // WINDOW = project windows[model] ?? windows[baseModel], then the SHARED table
+        // shipped in the plugin (templates/context-windows.json) [model] ?? [baseModel],
+        // then project windows.default, then the shared default. The shared table is the
+        // one place a model's window is maintained for every project (board
+        // shared-model-context-window-table-for-h10-s-context-warning); a project entry
+        // only overrides it. A shared file that cannot be read rides the sample as
+        // shared_unavailable and is announced once (P5).
+        // The default is a real fallback (decision
         // context-window-default-is-a-real-fallback, user-ruled 2026-09-22, reversing
         // slice 4's "never a default"): a per-model entry always wins when present —
         // the wrong-denominator-with-a-believable-percentage risk that motivated slice 4
         // (2026-08-11: 48% accepted at ~10% of real capacity; 2026-09-19: 66.2% reported
         // for a claude-opus-5[1m] session at ~13%) is real, but the user ruled the
         // fallback worth having; a degraded path must still announce itself (P5), so a
-        // sample resolved through the default carries window_source: 'default' and the
-        // pressure line names it. A context-variant suffix ("claude-opus-5[1m]") falls
+        // sample resolved through a default carries window_source: 'default', one resolved
+        // through the shared table carries window_source: 'shared', and the pressure line
+        // names it (a project per-model entry is the unflagged case). A context-variant suffix ("claude-opus-5[1m]") falls
         // back to its base entry; the transcript usually carries the BASE id for both
         // variants, so the base entry must hold the window this project's sessions run.
         // No entry AND no default → the fill is UNRELIABLE: no percentage, no level, and
         // the unmapped model rides the sample so the release path says so once.
         const baseModel = model ? String(model).replace(/\[[^\]]*\]$/, '') : null;
-        const perModelWindow = model ? cw.windows[model] ?? cw.windows[baseModel] : undefined;
-        const windowSize = model ? perModelWindow ?? cw.windows.default : undefined;
-        const usedDefault = Boolean(model && perModelWindow === undefined && cw.windows.default !== undefined);
+        let windowSize;
+        let windowSource;
+        let defaultFrom;
+        let shared;
+        if (model) {
+          windowSize = cw.windows[model] ?? cw.windows[baseModel];
+          if (windowSize === undefined) {
+            shared = loadSharedWindows();
+            const sw = shared.windows;
+            const sharedWindow = sw ? sw[model] ?? sw[baseModel] : undefined;
+            if (sharedWindow !== undefined) {
+              windowSize = sharedWindow;
+              windowSource = 'shared';
+            } else if (cw.windows.default !== undefined) {
+              windowSize = cw.windows.default;
+              windowSource = 'default';
+            } else if (sw?.default !== undefined) {
+              windowSize = sw.default;
+              windowSource = 'default';
+              defaultFrom = 'shared';
+            }
+          }
+        }
+        const sourceFields = {
+          ...(windowSource ? { window_source: windowSource } : {}),
+          ...(defaultFrom ? { default_from: defaultFrom } : {}),
+          ...(shared?.error ? { shared_unavailable: shared.error } : {}),
+        };
         const fill = windowSize ? fillPct(usage, windowSize) : null;
         if (!windowSize) {
           store.recordCheckSkipped('conductor-pressure', `window_unmapped:${model ?? 'no-model-id'}`, undefined, now);
-          sample = { session_id: input.session_id, level: 'unknown', fill_pct: null, model: model ?? null, reason: 'window_unmapped', ...(model ? { unmapped_model: model } : {}), at: now };
+          sample = { session_id: input.session_id, level: 'unknown', fill_pct: null, model: model ?? null, reason: 'window_unmapped', ...(model ? { unmapped_model: model } : {}), ...sourceFields, at: now };
         } else if (fill > 100) {
           // Impossible with a correct denominator — the windows map lacks this model's true
           // window (observed live 2026-08-09: 129.3% on a fable session vs the 200k default).
           // Evidence of MISCONFIGURATION, not pressure: classify unknown + check_skipped
           // (loud, fail-open) instead of false-hard-blocking every session on this machine.
           store.recordCheckSkipped('conductor-pressure', `window_mismatch:${model ?? 'unknown-model'}:${fill.toFixed(1)}pct`, undefined, now);
-          sample = { session_id: input.session_id, level: 'unknown', fill_pct: fill, model: model ?? null, window: windowSize, reason: 'window_mismatch', ...(usedDefault ? { window_source: 'default' } : {}), at: now };
+          sample = { session_id: input.session_id, level: 'unknown', fill_pct: fill, model: model ?? null, window: windowSize, reason: 'window_mismatch', ...sourceFields, at: now };
         } else {
           const level = fill >= cw.conductor.hard_pct ? 'hard' : fill >= cw.conductor.soft_pct ? 'soft' : 'below_soft';
-          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...(usedDefault ? { window_source: 'default' } : {}), at: now };
+          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...sourceFields, at: now };
         }
       }
       mkdirSync(join(input.cwd, '.sterling', 'transient'), { recursive: true });
@@ -345,7 +396,14 @@ try {
   // denominator, not a mapped one — the pressure line says so briefly so a
   // reader can tell the two apart (decision context-window-default-is-a-real-
   // fallback, user-ruled 2026-09-22).
-  const defaultWindowNote = () => (pressure.window_source === 'default' ? ' (window from context_watch.windows.default)' : '');
+  const defaultWindowNote = () =>
+    pressure.window_source === 'shared'
+      ? ' (window from the shared table templates/context-windows.json)'
+      : pressure.window_source === 'default'
+        ? pressure.default_from === 'shared'
+          ? ' (window from the default in templates/context-windows.json)'
+          : ' (window from context_watch.windows.default)'
+        : '';
   const pressurePart = () =>
     pressure.level === 'hard'
       ? `H10 context warning: fill ${pressure.fill_pct.toFixed(1)}% of the ${pressure.window}-tok window is past the ${config.context_watch.conductor.hard_pct}% target → finish the open work and commit it; delegate reads & mechanical work to subagents (P1).${defaultWindowNote()}${boundaryLine()}`
@@ -375,7 +433,20 @@ try {
   };
   const spendGaugeMarker = () => writeFileSync(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const gaugePart = () =>
-    `H10 window gauge: model '${pressure.unmapped_model}' has no entry in context_watch.windows — context fill is UNRELIABLE and is not reported. Add context_watch.windows["${pressure.unmapped_model}"] = <window tokens> to .sterling/config.json. (once per session)`;
+    `H10 window gauge: model '${pressure.unmapped_model}' has no entry in the shared window table or context_watch.windows — context fill is UNRELIABLE and is not reported. Add "${pressure.unmapped_model}": <window tokens> to templates/context-windows.json in the Sterling plugin (one edit serves every project). (once per session)`;
+  // The shared table could not be read: said once per session, same marker pattern as the
+  // gauge (latest-value cell keyed by session_id; P4 by supersession).
+  const sharedWarnMarker = join(input.cwd, '.sterling', 'transient', 'shared-windows-warned.json');
+  const sharedWarnSpent = () => {
+    try {
+      return JSON.parse(readFileSync(sharedWarnMarker, 'utf8')).session_id === input.session_id;
+    } catch {
+      return false;
+    }
+  };
+  const spendSharedWarn = () => writeFileSync(sharedWarnMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const sharedWarnPart = () =>
+    `H10 window table: shared context-window table unavailable: ${pressure.shared_unavailable} — falling back to the project's context_watch.windows. (once per session)`;
   /**
    * Every direct-mode release path exits through here. At most TWO pressure blocks per
    * session, strictly escalating: soft+dirty fires the slice-boundary nudge once; hard
@@ -459,6 +530,10 @@ try {
       } else if (pressure.level === 'soft' && dirtyPaths > 0 && !spent) {
         parts.push(`${pressurePart()} (once per session)`);
         advisorySpends.push(() => spendPressureMarker('soft'));
+      }
+      if (pressure.shared_unavailable && !sharedWarnSpent()) {
+        parts.push(sharedWarnPart());
+        advisorySpends.push(spendSharedWarn);
       }
       if (pressure.unmapped_model && !gaugeSpent()) {
         parts.push(gaugePart());
