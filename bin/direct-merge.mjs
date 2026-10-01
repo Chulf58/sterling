@@ -9251,7 +9251,7 @@ ${check.stdout + check.stderr}`);
 stage("attestation");
 var attestationDisclosure = (() => {
   try {
-    const { globs: declaredGlobs, dropped } = readAttestationGlobs(target);
+    const { globs: declaredGlobs, dropped } = readAttestationGlobs(storeRoot);
     const hasDrop = dropped.invalid_container || dropped.non_string > 0 || dropped.empty > 0 || dropped.duplicates.length > 0;
     if (declaredGlobs.length === 0 && !hasDrop) return [];
     const d = spawnSync7("git", ["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", "--end-of-options", mergeBase, branchTip], {
@@ -9261,7 +9261,7 @@ var attestationDisclosure = (() => {
     });
     if (d.error) throw d.error;
     if (d.status !== 0) throw new Error(`git diff --no-renames ${mergeBase} ${branchTip} exited ${d.status}: ${(d.stderr || "").trim()}`);
-    const result = inspectAttestations({ projectRoot: target, touchedPaths: parseNulPathList(d.stdout), declaredGlobs });
+    const result = inspectAttestations({ projectRoot: storeRoot, touchedPaths: parseNulPathList(d.stdout), declaredGlobs });
     return attestationDisclosureLines({ tool: "direct-merge", result, declaredGlobs, subject: "the branch tree", dropped });
   } catch (e) {
     return [

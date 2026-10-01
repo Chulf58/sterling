@@ -161,3 +161,64 @@ test('H10 Stop after a sibling checkout: no rewrite message and no recovery capt
     r.cleanup();
   }
 });
+
+// The two tests below PIN ACCEPTED BEHAVIOUR, not desired behaviour. The
+// merge-base fallback cannot tell an amend or a rebase from a sibling checkout:
+// all three leave a settled SHA that git can still read but HEAD does not
+// descend from. They record what gitTouches measurably does today, so a change
+// to it is a deliberate decision rather than a silent drift.
+
+test('pin (accepted behaviour, non-guarantee): an amend while the old commit is still readable is not a rewrite, and the amended delta is a candidate', () => {
+  const r = makeRepo();
+  try {
+    r.write('src/base.mjs', 'export const b = 1;\n');
+    const parent = r.commit('base');
+    r.write('src/a.mjs', 'export const a = 1;\n');
+    const settled = r.commit('one');
+    r.settle();
+
+    r.write('src/a.mjs', 'export const a = 2;\n');
+    r.g(['add', '-A']);
+    r.g(['commit', '-q', '--amend', '-m', 'one (amended)']);
+    assert.equal(spawnSync('git', ['cat-file', '-e', `${settled}^{commit}`], { cwd: r.dir }).status, 0, 'fixture: the pre-amend commit is still readable');
+
+    const t = gitTouches(r.dir, NOW);
+    assert.equal(t.ok, true, t.reason);
+    assert.equal(t.base_lost, false, 'accepted: a readable pre-amend SHA takes the merge-base fallback, not the rewrite path');
+    assert.equal(t.merge_base, parent, "accepted: the effective base is the amended commit's parent");
+    assert.deepEqual(candidatePaths(t), ['src/a.mjs'], 'accepted: the amended delta is a candidate');
+  } finally {
+    r.cleanup();
+  }
+});
+
+test('pin (accepted behaviour, non-guarantee 3): a rebase onto one upstream commit is not a rewrite, and the upstream path is a candidate', () => {
+  const r = makeRepo();
+  try {
+    r.write('src/shared.mjs', 'export const s = 1;\n');
+    const fork = r.commit('fork point');
+    r.g(['checkout', '-qb', 'feat']);
+    r.write('src/feat.mjs', 'export const f = 1;\n');
+    const settled = r.commit('feat work');
+    r.settle();
+
+    r.g(['checkout', '-q', 'main']);
+    r.write('src/upstream.mjs', 'export const u = 1;\n');
+    r.commit('upstream work');
+    r.g(['checkout', '-q', 'feat']);
+    r.g(['rebase', '-q', 'main']);
+    assert.equal(spawnSync('git', ['cat-file', '-e', `${settled}^{commit}`], { cwd: r.dir }).status, 0, 'fixture: the pre-rebase commit is still readable');
+
+    const t = gitTouches(r.dir, NOW);
+    assert.equal(t.ok, true, t.reason);
+    assert.equal(t.base_lost, false, 'accepted: a readable pre-rebase SHA takes the merge-base fallback, not the rewrite path');
+    assert.equal(t.merge_base, fork, 'accepted: the effective base is the original fork point');
+    assert.deepEqual(
+      candidatePaths(t),
+      ['src/upstream.mjs'],
+      'accepted (non-guarantee 3): the path the upstream commit brought in is a candidate although this session did not write it'
+    );
+  } finally {
+    r.cleanup();
+  }
+});

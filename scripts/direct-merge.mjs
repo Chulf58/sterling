@@ -627,7 +627,9 @@ if (hasCheck) {
 stage('attestation');
 const attestationDisclosure = (() => {
   try {
-    const { globs: declaredGlobs, dropped } = readAttestationGlobs(target);
+    // The config and the store live under storeRoot (a linked worktree has no
+    // .sterling/); the touched set below is still diffed in the branch tree.
+    const { globs: declaredGlobs, dropped } = readAttestationGlobs(storeRoot);
     const hasDrop = dropped.invalid_container || dropped.non_string > 0 || dropped.empty > 0 || dropped.duplicates.length > 0;
     if (declaredGlobs.length === 0 && !hasDrop) return []; // DORMANT (shipped default) — no store read, no diff, no output
     const d = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-renames', '--name-only', '-z', '--end-of-options', mergeBase, branchTip], {
@@ -637,7 +639,7 @@ const attestationDisclosure = (() => {
     });
     if (d.error) throw d.error;
     if (d.status !== 0) throw new Error(`git diff --no-renames ${mergeBase} ${branchTip} exited ${d.status}: ${(d.stderr || '').trim()}`);
-    const result = inspectAttestations({ projectRoot: target, touchedPaths: parseNulPathList(d.stdout), declaredGlobs });
+    const result = inspectAttestations({ projectRoot: storeRoot, touchedPaths: parseNulPathList(d.stdout), declaredGlobs });
     return attestationDisclosureLines({ tool: 'direct-merge', result, declaredGlobs, subject: 'the branch tree', dropped });
   } catch (e) {
     return [

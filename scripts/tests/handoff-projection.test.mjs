@@ -13,6 +13,7 @@ import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SterlingStore } from '@sterling/store';
 import { buildHandoffFiles } from '../lib/handoff-projection.mjs';
+import { HOOK_NODE_FLAGS } from './lib/node-quiet.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const NOW = '2026-09-24T12:00:00.000Z';
@@ -470,7 +471,7 @@ test('record filenames are unique and case-insensitive-safe: duplicate slugs, sh
 // Gap 4 (board ks-dashboards-gap-4): argv[2] was read as the target path, so --help
 // became a project root. A help flag prints usage and exits 0; an unknown flag exits 2.
 function cli(args, cwd) {
-  const r = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(root, 'scripts', 'handoff-projection.mjs'), ...args], {
+  const r = spawnSync(process.execPath, [...HOOK_NODE_FLAGS, join(root, 'scripts', 'handoff-projection.mjs'), ...args], {
     encoding: 'utf8', cwd, timeout: 120_000,
   });
   return { code: r.status, stdout: r.stdout, stderr: r.stderr };

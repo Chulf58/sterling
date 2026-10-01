@@ -90,7 +90,7 @@ process.exit(r.status ?? 128);
 /** A main checkout on `main` (bare origin, .sterling/ with the given mode and an
  * initialised store, a `check` script that drops a marker file when it runs), and
  * a LINKED worktree of it on a feature branch with one commit. */
-function makeProject({ mode }) {
+function makeProject({ mode, config = {} }) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'sterling-dm-wt-')));
   const dir = join(base, 'repo');
   const wt = join(base, 'wt');
@@ -116,7 +116,7 @@ function makeProject({ mode }) {
   git(dir, ['remote', 'add', 'origin', ORIGIN_URL]);
   git(dir, ['push', 'origin', 'main'], env);
   mkdirSync(join(dir, '.sterling'), { recursive: true });
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode }));
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode, ...config }));
   new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
   git(dir, ['worktree', 'add', '-b', 'feat/sprockets', wt]);
   writeFileSync(join(wt, 'src', 'f0.mjs'), 'export const f0 = 0;\n');
@@ -188,7 +188,10 @@ test('hobby from a linked worktree: refuses with exit 2 BEFORE the battery, name
 });
 
 test('work from a linked worktree: the store and mode come from the main checkout; the branch is pushed and a PR opened; the PR-loop marker lands in the main checkout', () => {
-  const p = makeProject({ mode: 'work' });
+  // attestation_path_globs is declared ONLY in the main checkout's config: a
+  // linked worktree has no .sterling/, so a glob read against the worktree
+  // comes back empty and the attestation stage goes silent.
+  const p = makeProject({ mode: 'work', config: { attestation_path_globs: ['src/**'] } });
   try {
     const r = runFromWorktree(p);
     assert.equal(r.status, 0, `work merge from a worktree must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
@@ -202,6 +205,12 @@ test('work from a linked worktree: the store and mode come from the main checkou
     assert.ok(existsSync(marker), 'the PR review loop duty is armed in the MAIN checkout, where the hooks read it');
     assert.equal(JSON.parse(readFileSync(marker, 'utf8')).pr_number, 7);
     assert.equal(existsSync(join(p.wt, '.sterling')), false, 'nothing is written under the worktree');
+    assert.match(
+      r.stderr,
+      /direct-merge: ATTESTATION DISCLOSURE — declaration 'src\/\*\*': 1 touched path\(s\); 0 have a comparable human record/,
+      `the main checkout's attestation globs are read and disclosed against its store — stderr=${oneLine(r.stderr)}`
+    );
+    assert.ok(!/ATTESTATION DISCLOSURE UNAVAILABLE/.test(r.stderr), `the attestation store is the main checkout's, not the worktree's — stderr=${oneLine(r.stderr)}`);
   } finally {
     p.cleanup();
   }
