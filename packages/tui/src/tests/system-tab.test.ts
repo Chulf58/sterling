@@ -232,7 +232,7 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
   return {
     agents: ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
     // insertion order fixes the row order + the cursor index per key:
-    // implementor=0, researcher=1, scout=2, librarian=3, classifiers=4.
+    // implementor=0, researcher=1, scout=2, librarian=3, classifiers=4, reviewer=5.
     // LOW-3 (second Opus re-check round): the System tab now filters
     // config.models to exactly this 5-key set (the classless four-agent
     // roster, decision agent-roster-is-classless-four-agents f0893161, plus
@@ -249,6 +249,9 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
       scout: { model: 'claude-opus-4-8', effort: 'low' },
       librarian: { model: 'claude-opus-4-8', effort: 'low' },
       classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
+      // last, so the cursor indices above are unchanged (reviewer joined the
+      // roster in decision reviewer-agent-is-the-one-review-rubric-for-claude-and-codex)
+      reviewer: { model: 'claude-opus-4-8', effort: 'low' },
     },
     catalog: freshCatalog(),
     ...over,

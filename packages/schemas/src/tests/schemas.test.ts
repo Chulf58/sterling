@@ -757,6 +757,7 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DIS
     researcher: 'researcher',
     scout: 'scout',
     librarian: 'librarian',
+    reviewer: 'reviewer',
   });
 
   const lookup = map as Record<string, string>;

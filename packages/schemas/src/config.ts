@@ -216,6 +216,10 @@ export const configSchema = z.object({
       // roster is classless (decision agent-roster-is-classless-four-agents), and
       // the debugger role it rejected has no key here.
       librarian: modelEffort.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
+      // reviewer judges a diff (decision
+      // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
+      // dispatch pins its model explicitly; this is the install-time default.
+      reviewer: modelEffort.default({ model: 'claude-opus-5-5', effort: 'high' }),
     })
     .default({}),
   // Per-project agent tool extension (decision
