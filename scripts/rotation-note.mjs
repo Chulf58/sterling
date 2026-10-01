@@ -14,7 +14,6 @@ import { spawnSync } from 'node:child_process';
 import { dirname } from 'node:path';
 import { classifyRegister } from './lib/dispatch-register.mjs';
 import { readLock } from './hooks/lib/plan-lock.mjs';
-import { readSessionId } from './lib/dispatch-register.mjs';
 import { arg as sharedArg, fail as sharedFail } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
 
@@ -108,10 +107,15 @@ const lanes = readLanes();
 // PRE-CLEAR SESSION ID: the only way back to this session's subagents is
 // `claude --resume <id>` (or the rewind menu). CLAUDE_CODE_SESSION_ID is set by
 // Claude Code in the Bash tool's environment (measured 2026-10-01: equal to the
-// session_id H1 recorded for the same session); H1's own SessionStart marker is
-// the fallback. Neither present -> null. Never guessed, never derived from a
-// transcript filename.
-const sessionId = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim() || readSessionId(cwd);
+// session_id H1 recorded for the same session). It is the ONLY source: H1's
+// .sterling/transient/session.json marker is a latest-value cell that can hold
+// another session's id (stale, or a concurrent session in the same worktree), and
+// a wrong id sends the user to `claude --resume` the wrong session. A value that
+// is not id-shaped (^[A-Za-z0-9_-]{1,128}$) is refused to null, because H1 prints
+// it inside a runnable command. Absent or malformed -> null, never guessed.
+const SESSION_ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/;
+const envSessionId = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim();
+const sessionId = SESSION_ID_SHAPE.test(envSessionId) ? envSessionId : null;
 
 const git = (args) => {
   try {
@@ -264,7 +268,7 @@ process.stdout.write(
   `rotation note written (single slot — this supersedes any prior note).\n` +
     `next_slice: ${note.next_slice}\n` +
     `lanes: ${lanes.length}\n` +
-    (sessionId ? `session_id: ${sessionId}\n` : 'session_id: unavailable (no CLAUDE_CODE_SESSION_ID, no H1 session marker) — the restore cannot name the session to resume\n') +
+    (sessionId ? `session_id: ${sessionId}\n` : 'session_id: unavailable (CLAUDE_CODE_SESSION_ID unset or not id-shaped) — the restore cannot name the session to resume\n') +
     (note.branch ? `anchored: ${note.branch} @ ${note.head_sha?.slice(0, 8) ?? '?'}\n` : 'anchored: no git (drift disclosure unavailable)\n') +
     (note.commits_ahead !== null
       ? `commits_ahead: ${note.commits_ahead} (vs ${note.base_branch})\n`

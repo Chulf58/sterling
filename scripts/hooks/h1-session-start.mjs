@@ -1064,11 +1064,17 @@ try {
       // The plan leads the note's fields: it names the AUTHORITY over the next
       // slice, where every other field describes the residue.
       const planField = notePlanRaw ? [`- plan: ${notePlan}`] : [];
+      // The session id is printed inside a runnable `claude --resume <id>`
+      // command, so a hand-edited note must not smuggle shell text into it: only
+      // an id-shaped value (the same shape the writer accepts) is rendered;
+      // anything else is treated as absent.
+      const noteSessionId = typeof note.session_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(note.session_id) ? note.session_id : null;
       const fields = planField
         .concat(
           ['objective', 'next_slice', 'risks', 'pointers', 'branch', 'head_sha', 'session_id', 'at']
-            .filter((k) => note[k])
-            .map((k) => `- ${k}: ${planLockClean(String(note[k]), NOTE_FIELD_MAX[k])}`)
+            .map((k) => [k, k === 'session_id' ? noteSessionId : note[k]])
+            .filter(([, v]) => v)
+            .map(([k, v]) => `- ${k}: ${planLockClean(String(v), NOTE_FIELD_MAX[k])}`)
         )
         .concat(
           typeof note.commits_ahead === 'number'
@@ -1161,18 +1167,25 @@ try {
       // and the statement above them says so, so the conductor re-dispatches
       // fresh instead of trying to resume. Zero lanes or an absent field (a
       // legacy note) prints nothing (P1). Per-lane text is sanitised and
-      // clipped, the array is clipped, the COUNT stays exact.
-      const noteLanes = Array.isArray(note.lanes) ? note.lanes.filter((l) => typeof l === 'string' && l.trim()) : [];
+      // clipped, the array is clipped, the COUNT stays exact. Whitespace runs
+      // (newlines included) collapse to one space BEFORE the control-character
+      // sanitiser, so a lane is always exactly one bullet line and cannot open
+      // a line that reads like a block header; a lane that sanitises to nothing
+      // is dropped and not counted.
+      const noteLanes = (Array.isArray(note.lanes) ? note.lanes : [])
+        .filter((l) => typeof l === 'string')
+        .map((l) => planLockClean(l.replace(/\s+/g, ' '), LANE_HANDOFF_MAX))
+        .filter(Boolean);
       let lanesLine = '';
       if (noteLanes.length) {
-        const noteSession = typeof note.session_id === 'string' && note.session_id.trim() ? planLockClean(note.session_id, PLAN_LOCK_PATH_MAX) : null;
+        const noteSession = noteSessionId;
         const renderedLanes = noteLanes
           .slice(0, LIVE_DISPATCH_MAX)
-          .map((l) => `- ${planLockClean(l, LANE_HANDOFF_MAX)}`)
+          .map((l) => `- ${l}`)
           .join('\n');
         const omittedLanes = noteLanes.length - Math.min(noteLanes.length, LIVE_DISPATCH_MAX);
         lanesLine =
-          `\n${noteLanes.length} subagent lane(s) were live at rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. ` +
+          `\n${noteLanes.length} lane hand-off(s) carried across the rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. ` +
           (noteSession
             ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.`
             : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`) +
