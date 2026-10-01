@@ -190,7 +190,8 @@ test('R1-A72: H1 rotation restore re-prints a presumed-active dispatch with coun
     const ctx = h1(dir, { source: 'clear' }).out.hookSpecificOutput.additionalContext;
     assert.match(ctx, /ROTATION RESTORE/);
     assert.match(ctx, /1 dispatch\(es\) were live at rotation/i, 'names the count');
-    assert.match(ctx, /ListAgents/, 'names the remedy tool');
+    assert.match(ctx, /previous session[^\n]*cannot be resumed[^\n]*re-dispatch fresh/i, 'says these agents are not resumable and to re-dispatch fresh');
+    assert.doesNotMatch(ctx, /ListAgents/, 'ListAgents does not list pre-clear agents, so it is no remedy');
     assert.match(ctx, /coder/);
     assert.match(ctx, /agent-c7/);
     assert.match(ctx, /scripts\/foo\.mjs/);
@@ -247,6 +248,8 @@ test('R1-A74: H1 restore reports the unknown dispatch with [dispatch_status_unkn
     assert.match(ctx, /1 dispatch\(es\) were live at rotation/i, 'exactly the presumed-active one is counted as live');
     assert.match(ctx, /agent-uncertain/, 'the uncertain dispatch is still surfaced to the operator');
     assert.match(ctx, token('dispatch_status_unknown'), 'and it is surfaced as UNCERTAIN, carrying its code');
+    assert.match(ctx, /agent-uncertain[^\n]*cannot be resumed[^\n]*re-dispatch fresh/i, 'the uncertain line gives the same remedy');
+    assert.doesNotMatch(ctx, /ListAgents/);
     assert.doesNotMatch(ctx, /NaN/);
   } finally {
     cleanup();
@@ -332,7 +335,8 @@ test('R1-A78: H1 restore discloses an unreadable register with [register_unavail
     assert.match(ctx, /ROTATION RESTORE/);
     assert.doesNotMatch(ctx, /\d+ dispatch\(es\) were live at rotation/i, 'never a fabricated count for an unverifiable set');
     assert.match(ctx, token('register_unavailable'), 'the unavailability carries its code');
-    assert.match(ctx, /ListAgents/, 'and still points at the same remedy');
+    assert.match(ctx, /cannot be resumed[^\n]*re-dispatch fresh/i, 'and gives the same remedy: re-dispatch fresh');
+    assert.doesNotMatch(ctx, /ListAgents/);
   } finally {
     cleanup();
   }

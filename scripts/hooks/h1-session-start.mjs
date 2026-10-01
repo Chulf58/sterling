@@ -1078,10 +1078,13 @@ try {
         .join('\n');
       // LIVE DISPATCHES AT ROTATION (board efbddf09): the note's live_dispatches
       // is the only trace a fresh session has of a subagent that kept running
-      // across the /clear — re-print it so the conductor checks ListAgents
-      // instead of dispatching a second agent at the same slice (measured
-      // 2026-09-04). THREE STATES, deliberately distinct: a non-empty array is
-      // counted and enumerated; a CONFIRMED-EMPTY array prints NOTHING at all,
+      // across the /clear — re-print it so the conductor knows the territory
+      // may still be written to instead of dispatching a second agent at the
+      // same slice unawares (measured 2026-09-04). Those agents cannot be
+      // resumed or listed from the new session (finding
+      // warm-subagent-resume-across-clear-october-2026), so the remedy is a
+      // fresh re-dispatch, not ListAgents. THREE STATES, deliberately
+      // distinct: a non-empty array is counted and enumerated; a CONFIRMED-EMPTY array prints NOTHING at all,
       // not even a "0 dispatch(es)" line (P1 — no ceremony for a checked-clear);
       // null is UNKNOWN (the writer found a register it could not read) and is
       // disclosed as uncertainty, never as a fabricated count. An ABSENT field
@@ -1116,14 +1119,14 @@ try {
           .join('\n');
         const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
         liveLine =
-          `\n${liveDispatches.length} dispatch(es) were live at rotation — check ListAgents before re-dispatching:\n${rendered}` +
+          `\n${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and cannot be resumed from this one (agent lookup is scoped to the current session); re-dispatch fresh if the work is still needed, and mind the territory below, which they may still be writing:\n${rendered}` +
           (omitted > 0 ? `\n… (+${omitted} more)` : '');
       } else if (liveDispatches === null) {
         liveLine = `\n${render(
           disclosure(
             'register_unavailable',
             {},
-            'dispatch register unavailable — the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here: check ListAgents before re-dispatching.'
+            'dispatch register unavailable — the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed, and check git status for files it may still be writing.'
           )
         )}`;
       }
@@ -1142,7 +1145,7 @@ try {
             const id = planLockClean(String(d?.agent_id ?? 'unknown id'), PLAN_LOCK_PATH_MAX) || 'unknown id';
             const reason = planLockClean(String(d?.reason ?? 'unknown'), PLAN_LOCK_PATH_MAX) || 'unknown';
             return render(
-              disclosure('dispatch_status_unknown', {}, `${type}:${id} — ownership uncertain (${reason}); settle with ListAgents before re-dispatching`)
+              disclosure('dispatch_status_unknown', {}, `${type}:${id} — ownership uncertain (${reason}); belongs to the previous session and cannot be resumed from this one — re-dispatch fresh if still needed`)
             );
           })
           .join('\n');
@@ -1234,7 +1237,7 @@ try {
 const dispatchResidueContext = dispatchResidueLines.length
   ? `\n\nDEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary — its SubagentStop(s) never fired, so the register is about to be wiped (P4).` +
     (input.source === 'clear'
-      ? ` NOT PROOF THAT THESE DISPATCHES ENDED: a dispatch may still be RUNNING across a /clear — cross-check the LIVE DISPATCHES line in the rotation restore above, and ListAgents, before acting on these files or re-dispatching at them.`
+      ? ` NOT PROOF THAT THESE DISPATCHES ENDED: a dispatch may still be RUNNING across a /clear — cross-check the LIVE DISPATCHES line in the rotation restore above and git status before acting on these files. Those agents belong to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed.`
       : '') +
     `\n` +
     dispatchResidueLines.join('\n')

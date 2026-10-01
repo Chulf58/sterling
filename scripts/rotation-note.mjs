@@ -271,12 +271,12 @@ process.stdout.write(
       : 'commits_ahead: unavailable (no origin/HEAD, main, or master to diff against — pass --into to a future version if this recurs)\n') +
     // Silent when the set is a confirmed zero (P1 — nothing to check).
     (liveDispatches === null
-      ? 'live_dispatches: UNKNOWN — the dispatch register exists but could not be read; check ListAgents before re-dispatching\n'
+      ? 'live_dispatches: UNKNOWN — the dispatch register exists but could not be read; any subagent from this session cannot be resumed after the /clear — re-dispatch fresh if still needed\n'
       : liveDispatches.length
-        ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — still running across the /clear\n`
+        ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — still running across the /clear but cannot be resumed from the new session: re-dispatch fresh if still needed (pass a --lane hand-off for each worth continuing)\n`
         : '') +
     (uncertainDispatches && uncertainDispatches.length
-      ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — lease expired, not confirmed dead; settle with ListAgents\n`
+      ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — lease expired, not confirmed dead; cannot be resumed from the new session either: re-dispatch fresh if still needed\n`
       : '') +
     (note.reason === 'code-reload'
       ? `CODE RELOAD REQUIRED (--reason=code-reload) — /clear alone will NOT load it (MCP servers survive it). The sequence is:\n` +

@@ -230,3 +230,27 @@ test('H1: lane text is bounded and the array is bounded; the lane count stays ex
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------- CLI output
+
+// SABOTAGE: restore "check ListAgents" / "settle with ListAgents" in the CLI text.
+test('writer: CLI output for unreadable, live and uncertain dispatches says re-dispatch fresh, never ListAgents', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const regPath = join(dir, '.sterling', 'transient', 'dispatch-register.json');
+    mkdirSync(dirname(regPath), { recursive: true });
+    const entry = (id, agoMs) => ({ agent_id: id, agent_type: 'coder', session_id: 's-live', files: ['scripts/x.mjs'], attribution: 'block', at: new Date(Date.now() - agoMs).toISOString() });
+    writeFileSync(regPath, '{not valid json,,,\n');
+    const unreadable = runRotationNote(dir, ['--next-slice', 's']);
+    assert.equal(unreadable.status, 0, unreadable.stderr);
+    assert.match(unreadable.stdout, /live_dispatches: UNKNOWN[^\n]*re-dispatch fresh/);
+    writeFileSync(regPath, JSON.stringify([entry('agent-live', 1_000), entry('agent-stale', 5 * 60 * 60 * 1000)]));
+    const both = runRotationNote(dir, ['--next-slice', 's']);
+    assert.equal(both.status, 0, both.stderr);
+    assert.match(both.stdout, /live_dispatches: 1[^\n]*cannot be resumed[^\n]*re-dispatch fresh/);
+    assert.match(both.stdout, /uncertain_dispatches: 1[^\n]*cannot be resumed[^\n]*re-dispatch fresh/);
+    assert.doesNotMatch(unreadable.stdout + both.stdout, /ListAgents/);
+  } finally {
+    cleanup();
+  }
+});
