@@ -1,0 +1,14 @@
+{
+  "name": "sterling",
+  "description": "Sterling: a durable knowledge store and task board for Claude Code, installed as a plugin.",
+  "owner": {
+    "name": "Chulf58"
+  },
+  "plugins": [
+    {
+      "name": "sterling",
+      "source": ".",
+      "description": "Knowledge-compounding development suite: a durable knowledge store, task board, hooks and agents."
+    }
+  ]
+}
