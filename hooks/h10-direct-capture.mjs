@@ -4676,7 +4676,8 @@ var AGENT_MODEL_KEY = {
   implementor: "implementor",
   researcher: "researcher",
   scout: "scout",
-  librarian: "librarian"
+  librarian: "librarian",
+  reviewer: "reviewer"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
 var s = (v) => typeof v === "string" ? v : "";
@@ -4976,7 +4977,13 @@ var configSchema = external_exports.object({
   // unknown into a bounded, disclosed degradation instead of a duty deferred
   // forever (P5).
   dispatch_register: external_exports.object({
-    stale_minutes: external_exports.number().int().positive().default(60)
+    stale_minutes: external_exports.number().int().positive().default(60),
+    // H10 keeps holding a capture_pending declaration while any row of the
+    // current session ENDED within this many minutes, so a lane that parks
+    // on background work and resumes as a new round does not open a gap
+    // (decision capture-pending-hold-window-spans-resume-rounds). 0 turns
+    // the window off.
+    resume_hold_minutes: external_exports.number().int().nonnegative().default(10)
   }).default({}),
   // Concurrent-subagent ceiling (decision foreign_d7a0289f, board 18a22b56): every
   // surface that states the "N concurrent subagents" ceiling (H1's banner
@@ -5003,7 +5010,11 @@ var configSchema = external_exports.object({
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
-    librarian: modelEffort.default({ model: "claude-sonnet-5-5", effort: "low" })
+    librarian: modelEffort.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    // reviewer judges a diff (decision
+    // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
+    // dispatch pins its model explicitly; this is the install-time default.
+    reviewer: modelEffort.default({ model: "claude-opus-5-5", effort: "high" })
   }).default({}),
   // Per-project agent tool extension (decision
   // per-project-agent-extra-tools-config-appended-at-render, 587472e3):
@@ -9485,6 +9496,7 @@ try {
     return void 0;
   };
   const isDispatchEventLive = (e) => ownRegisterRow(e)?.status === "presumed-active";
+  const isLaneResearchEvent = (e) => e.kind === "agent_dispatch" || e.kind === "research_tool" && typeof e.agent_id === "string" && e.agent_id !== "";
   const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
   const joinKey = (p) => String(p ?? "").replace(WORKTREE_PREFIX_RE, "");
   const entryOwns = pathOwnedBy;
@@ -9712,7 +9724,13 @@ try {
   const dischargedOnResearchLane = (at) => dischargedByCutoff(at, researchLaneCutoff);
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail);
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
-  const pendingHeld = Boolean(pendingDetail) && liveDispatches.length > 0;
+  const resumeHoldMs = config.dispatch_register.resume_hold_minutes * 6e4;
+  const recentlyEndedDispatches = classified.availability === "ok" && typeof input.session_id === "string" && input.session_id ? classified.entries.filter((r) => {
+    if (r.status !== "inactive-confirmed" || r.entry.session_id !== input.session_id) return false;
+    const age = nowMs - Date.parse(r.entry.ended?.at);
+    return age >= 0 && age < resumeHoldMs;
+  }) : [];
+  const pendingHeld = Boolean(pendingDetail) && (liveDispatches.length > 0 || recentlyEndedDispatches.length > 0);
   const pendingDeclId = (e) => JSON.stringify([e.at ?? null, e.detail]);
   const graceSpentIds = (() => {
     if (!existsSync8(nagMarker)) return /* @__PURE__ */ new Set();
@@ -9740,21 +9758,21 @@ try {
     return row && row.status === "inactive-confirmed" && isValidAt(row.entry.ended?.at) ? row.entry.ended.at : null;
   };
   const dischargedOnResearchLaneForDispatch = (e) => {
-    if (e.kind !== "agent_dispatch") return dischargedOnResearchLane(e.at);
+    if (!isLaneResearchEvent(e)) return dischargedOnResearchLane(e.at);
     if (isDispatchEventLive(e)) return false;
     const returnAt = dispatchEventReturnAt(e);
     if (!returnAt) return false;
     return dischargedOnResearchLane(returnAt);
   };
   const activeResearchEvents = researchEvents.filter((e) => {
-    if (e.kind === "agent_dispatch" && isDispatchEventLive(e)) return false;
+    if (isLaneResearchEvent(e) && isDispatchEventLive(e)) return false;
     return !dischargedOnResearchLaneForDispatch(e);
   });
-  const hasLiveAgentDispatchEvents = researchEvents.some((e) => e.kind === "agent_dispatch" && isDispatchEventLive(e));
+  const hasLiveAgentDispatchEvents = researchEvents.some((e) => isLaneResearchEvent(e) && isDispatchEventLive(e));
   const researchSatisfyingRecords = hasLiveAgentDispatchEvents ? store.query({ types: ["research_finding", "decision", "anti_pattern"], cap: 1e3 }) : [];
   const individuallyResearchSatisfied = (at) => isValidAt(at) && researchSatisfyingRecords.some((r) => r.created_at >= at || r.updated_at >= at);
   const outstandingDeferredResearchEvents = researchEvents.filter(
-    (e) => e.kind === "agent_dispatch" && isDispatchEventLive(e) && !dischargedOnResearchLaneForDispatch(e) && !individuallyResearchSatisfied(e.at)
+    (e) => isLaneResearchEvent(e) && isDispatchEventLive(e) && !dischargedOnResearchLaneForDispatch(e) && !individuallyResearchSatisfied(e.at)
   );
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const owedKeys = activePaths.slice(0, 20);
