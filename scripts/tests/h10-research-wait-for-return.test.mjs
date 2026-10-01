@@ -25,9 +25,10 @@
 //       DISCHARGED by a no_capture declared after an UNRELATED dispatch's
 //       `ended.at` — evidence that says nothing about the lease-expired one.
 // `agent_dispatch` events in session-events.json now carry `agent_id` when
-// H16 recorded it; `research_tool` events (WebSearch/WebFetch) never carry
-// one and are never gated — those are synchronous conductor actions, already
-// complete by construction.
+// H16 recorded it. A conductor `research_tool` event (WebSearch/WebFetch)
+// carries none and is never gated — a synchronous conductor action, already
+// complete by construction. One made inside a subagent carries the lane's
+// agent_id and is gated like a dispatch (SUBAGENT WEBFETCH cases at the end).
 //
 // LEGACY-EVENT RULE (an `agent_dispatch` event with no `agent_id`, e.g. one
 // written by an H16 build before this fix shipped, mid-session): it has NO
@@ -893,6 +894,94 @@ test('CONTROL: an empty dispatch register behaves exactly as before — the rese
     assert.equal(nag.code, 2, 'CONTROL BROKEN: with no live register entry the pre-existing research duty must still nag immediately');
     assert.match(nag.stderr, /genesys webhook signature validation/, 'CONTROL BROKEN: the research_tool query is cited, unaffected by the gate');
     assert.match(nag.stderr, /researcher/, 'CONTROL BROKEN: the agent_dispatch detail is cited too');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// SUBAGENT WEB RESEARCH (decision subagent-web-research-is-tagged-and-gated-
+// on-lane-return, knowledge_get 39e03daf; finding a827c1a8). H16's matcher
+// also fires on a subagent's own WebSearch/WebFetch, and Claude Code puts
+// agent_id on every in-subagent hook event (docs/historical/PROBES.md, Layer
+// 0 probe). H16 records that agent_id on the research_tool event, and H10
+// gates the event on the lane's OWN register row exactly as it gates an
+// agent_dispatch event. A conductor web call carries no agent_id and stays an
+// immediate duty. These drive the real H16 hook so the field H10 joins on is
+// the one H16 actually writes.
+// ===========================================================================
+
+const webFetchPost = (dir, url, over = {}) =>
+  runHook(
+    'h16-event-register.mjs',
+    hookInput(dir, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'WebFetch',
+      tool_input: { url, prompt: 'read it' },
+      tool_response: { result: 'page text' },
+      tool_use_id: 'toolu_webfetch_1',
+      ...over,
+    }),
+    dir
+  );
+
+test('SUBAGENT WEBFETCH (RED at 5ba9d0f): a WebFetch made inside a lane that is still presumed-active is not nagged at Stop; the duty comes due once the lane returns', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [liveEntry('sub-researcher-1', 'researcher', 's1', { toolUseId: 'toolu_launch_1' })]);
+    const h16 = webFetchPost(dir, 'https://code.claude.com/docs/en/hooks', { agent_id: 'sub-researcher-1', agent_type: 'researcher' });
+    assert.equal(h16.code, 0, `H16 records the event: ${out(h16)}`);
+    const recorded = readSessionEvents(dir);
+    assert.equal(recorded.length, 1, 'one research_tool event');
+    assert.equal(recorded[0].kind, 'research_tool');
+    assert.equal(recorded[0].agent_id, 'sub-researcher-1', 'UNTAGGED SHAPE if undefined: H16 must record the subagent\'s agent_id on its web call');
+    assert.equal(recorded[0].tool_use_id, undefined, 'a web call\'s own tool_use_id is never a launch id, so it is not recorded as a join key');
+
+    const quiet = stopOnce(dir);
+    assert.equal(quiet.code, 0, 'PREMATURE-DEMAND SHAPE if this is 2: the lane that made the web call has not returned yet');
+    assert.doesNotMatch(out(quiet), /code\.claude\.com/, 'the lane\'s web call is not cited while the lane runs');
+    assert.equal(owed(store, 'research_owed').length, 0, 'nothing owed while the lane is live');
+    assert.equal(readSessionEvents(dir).length, 1, 'EVAPORATION SHAPE if 0: the deferred event survives the quiet Stop so the duty re-arms on return');
+
+    writeRegisterRaw(dir, [endedEntry('sub-researcher-1', 'researcher', 's1', agoISO(0), { toolUseId: 'toolu_launch_1' })]);
+    const nag = stopOnce(dir);
+    assert.equal(nag.code, 2, 'NEVER-RE-ARMS SHAPE if this is 0: once the lane returns with nothing captured the research duty nags');
+    assert.match(nag.stderr, /code\.claude\.com\/docs\/en\/hooks/, 'the nag cites the lane\'s web call');
+  } finally {
+    cleanup();
+  }
+});
+
+test('SUBAGENT WEBFETCH RETURN ANCHOR (RED at 5ba9d0f): a no_capture declared while the lane is still live does not discharge the lane\'s web call', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [liveEntry('sub-researcher-1', 'researcher')]);
+    webFetchPost(dir, 'https://example.com/spec', { agent_id: 'sub-researcher-1' });
+    writeSessionEvents(dir, [...readSessionEvents(dir), { kind: 'no_capture', detail: 'nothing yet', lane: 'research', at: new Date().toISOString() }]);
+
+    assert.equal(stopOnce(dir).code, 0, 'the lane is live, so the Stop is quiet');
+    writeRegisterRaw(dir, [endedEntry('sub-researcher-1', 'researcher', 's1', agoISO(-1))]);
+    const nag = stopOnce(dir);
+    assert.equal(nag.code, 2, 'PREMATURE-DISCHARGE SHAPE if this is 0: a no_capture made before the lane returned must not discharge its web call');
+    assert.match(nag.stderr, /example\.com\/spec/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('CONDUCTOR WEBFETCH (GUARD, green before and after): a WebFetch with no agent_id stays an immediate conductor duty, even while an unrelated lane is live', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [liveEntry('sub-researcher-1', 'researcher')]);
+    const h16 = webFetchPost(dir, 'https://example.com/conductor-read');
+    assert.equal(h16.code, 0, `H16 records the event: ${out(h16)}`);
+    const recorded = readSessionEvents(dir);
+    assert.equal(recorded.length, 1);
+    assert.equal(recorded[0].agent_id, undefined, 'a conductor web call carries no agent_id');
+
+    const nag = stopOnce(dir);
+    assert.equal(nag.code, 2, 'the conductor\'s own web call is due at once');
+    assert.match(nag.stderr, /example\.com\/conductor-read/, 'the nag cites the conductor\'s web call');
   } finally {
     cleanup();
   }

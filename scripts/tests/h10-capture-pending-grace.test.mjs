@@ -12,7 +12,10 @@
 // (3) While ANY dispatch is presumed-active in the H22 register, the
 //     declaration is neither converted nor re-demanded, whether or not its
 //     text names an agent_id. After the last one lands: one grace Stop, then
-//     conversion.
+//     conversion. Amended by decision
+//     capture-pending-hold-window-spans-resume-rounds (5f21707a): the hold
+//     also spans a row of this session that ended within
+//     dispatch_register.resume_hold_minutes (PG-c3, PG-c4).
 // A real capture still spends the declaration (decision b2474b26).
 //
 // NEW SIBLING FILE by the established precedent (the h10-*.test.mjs siblings
@@ -308,6 +311,84 @@ test('PG-c2 (hold at the second-pass site, RED at a0c0360): with research open a
     assert.equal(captureOwed(store).length, 0, 'one grace Stop after the hold');
     assert.equal(stopOnce(dir).code, 0, 'converting Stop');
     assert.equal(captureOwed(store).length, 1, 'then conversion');
+  } finally {
+    cleanup();
+  }
+});
+
+// RESUME-ROUND HOLD WINDOW (decision capture-pending-hold-window-spans-resume-rounds,
+// knowledge_get 5f21707a; finding 9f82a87d). A lane that parks on its own
+// background work ends a register round at each SubagentStop and resumes as a
+// new round minutes later. Between rounds no row is presumed-active, so the
+// declaration must also hold while any THIS-session row ended within
+// dispatch_register.resume_hold_minutes (default 10).
+const minutesAgo = (m) => new Date(Date.now() - m * 60_000).toISOString();
+const endedRound = (agentId, endedAt, sessionId = 's1') => ({
+  ...liveEntry(agentId, ['src/elsewhere/lane.mjs'], 'coder', sessionId),
+  at: minutesAgo(30),
+  ended: { at: endedAt, event: 'subagent-stop' },
+});
+
+function assertHeld(dir, store, label) {
+  const r = stopOnce(dir);
+  assert.equal(r.code, 0, `${label}: held, never re-demanded`);
+  assert.equal(captureOwed(store).length, 0, `${label}: GAP-CONVERTED SHAPE — a round of this session ended inside the hold window, so the declaration must not become debt`);
+  assert.equal(hasDeclaration(dir), true, `${label}: the held declaration survives on disk`);
+  assert.equal(existsSync(touchesPath(dir)), true, `${label}: the hold is non-terminal`);
+}
+
+test('PG-c3 (hold window across resume rounds, RED at 5ba9d0f): round 1 ended, Stop, Stop, round 2 starts and ends, Stop — all held; after the window lapses, one grace Stop, then conversion', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    touchRegister(dir, [WORKFILE]);
+    writeSessionEvents(dir, [cpEvent(DETAIL)]);
+    // Round 1 of a parked lane has just ended (SubagentStop); nothing is live.
+    writeRegisterRaw(dir, [endedRound('sub-parked-7', minutesAgo(0))]);
+
+    assertHeld(dir, store, 'gap Stop 1');
+    assertHeld(dir, store, 'gap Stop 2 (the old code converted here)');
+
+    // Round 2: the lane resumes (same agent_id, new row), then ends again.
+    writeRegisterRaw(dir, [endedRound('sub-parked-7', minutesAgo(1)), { ...liveEntry('sub-parked-7', ['src/elsewhere/lane.mjs']), tool_use_id: null }]);
+    assertHeld(dir, store, 'round 2 live');
+    writeRegisterRaw(dir, [endedRound('sub-parked-7', minutesAgo(1)), endedRound('sub-parked-7', minutesAgo(0))]);
+    assertHeld(dir, store, 'gap Stop after round 2');
+
+    // The lane has really finished: every round ended longer ago than the
+    // default 10-minute window.
+    writeRegisterRaw(dir, [endedRound('sub-parked-7', minutesAgo(12)), endedRound('sub-parked-7', minutesAgo(11))]);
+    assert.equal(stopOnce(dir).code, 0, 'first Stop after the window lapsed');
+    assert.equal(captureOwed(store).length, 0, 'NO-GRACE-AFTER-HOLD SHAPE if this is 1: the one-Stop grace applies once the window lapses');
+    assert.equal(hasDeclaration(dir), true, 'still declared through the grace Stop');
+
+    assert.equal(stopOnce(dir).code, 0, 'the converting Stop releases');
+    const items = captureOwed(store);
+    assert.equal(items.length, 1, 'EVAPORATION SHAPE if this is 0: after the window and the grace the lapsed declaration becomes debt');
+    assert.match(items[0].text, /commit-7f3a9c/);
+    assert.equal(existsSync(eventsPath(dir)), false, 'the conversion is terminal');
+  } finally {
+    cleanup();
+  }
+});
+
+test('PG-c4 (hold window scope, RED at 5ba9d0f for the config half): a FOREIGN session\'s recently ended row never holds, and dispatch_register.resume_hold_minutes sets the window', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ ...CONFIG, dispatch_register: { resume_hold_minutes: 30 } }));
+    touchRegister(dir, [WORKFILE]);
+    writeSessionEvents(dir, [cpEvent(DETAIL)]);
+    // Own round ended 20 minutes ago: outside the default 10, inside the configured 30.
+    writeRegisterRaw(dir, [endedRound('sub-own-1', minutesAgo(20))]);
+    assertHeld(dir, store, 'configured window Stop 1');
+    assertHeld(dir, store, 'configured window Stop 2');
+
+    // Only a foreign session's round ended just now: it says nothing about
+    // this session's lanes, so grace then conversion.
+    writeRegisterRaw(dir, [endedRound('sub-foreign-9', minutesAgo(0), 's2')]);
+    assert.equal(stopOnce(dir).code, 0, 'grace Stop');
+    assert.equal(captureOwed(store).length, 0, 'one grace Stop');
+    assert.equal(stopOnce(dir).code, 0, 'converting Stop');
+    assert.equal(captureOwed(store).length, 1, 'FOREIGN-HOLD SHAPE if this is 0: another session\'s ended row must not hold this declaration');
   } finally {
     cleanup();
   }

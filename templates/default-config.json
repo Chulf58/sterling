@@ -25,7 +25,8 @@
     "max_concurrent": 5
   },
   "dispatch_register": {
-    "stale_minutes": 60
+    "stale_minutes": 60,
+    "resume_hold_minutes": 10
   },
   "maintenance_queue": {
     "deep_threshold": 15
