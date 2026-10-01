@@ -84,6 +84,12 @@ export const TARGET_LEADS = [
 // hand-tuned old block is refused exactly like the normal replace path).
 export const RENAMED_LEADS = new Map([
   ['- **Knowledge is born structured.**', ["- **Notes are the user's surface.**"]],
+  // 2026-10-01: Sterling's own CLAUDE.md carried these two bullets under shorter leads
+  // that no template version ever used. Mapping them here means a sibling holding the
+  // old wording is refused (or replaced, if it ever matches a template variant) instead
+  // of getting a second copy through INSERT_AFTER.
+  ["- **Solve, don't board.**", ["- **Solve, don't board**"]],
+  ['- **Close-on-commit: a commit that fulfils a board item pays it**', ['- **Close-on-commit:**']],
 ]);
 
 // Every lead whose historical variants are collected: the tracked leads plus the old

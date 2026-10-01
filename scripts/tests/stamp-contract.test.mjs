@@ -475,3 +475,28 @@ test('stamp-contract: a valid anchor whose item continues with an INDENTED fence
     f.cleanup();
   }
 });
+
+const SOLVE_LEAD = "- **Solve, don't board.**";
+const CLOSE_LEAD = '- **Close-on-commit: a commit that fulfils a board item pays it**';
+test('stamp-contract: Solve and Close-on-commit bullets under their OLD leads are recognised through RENAMED_LEADS — refused as hand-tuned, never given a duplicate under the new lead, file byte-identical, exit 2', () => {
+  const f = stampFixture('old-board-leads', (complete) => {
+    const lines = complete.split('\n');
+    const solve = lines.findIndex((l) => l.startsWith(SOLVE_LEAD));
+    const close = lines.findIndex((l) => l.startsWith(CLOSE_LEAD));
+    assert.ok(solve >= 0 && close >= 0, 'fixture sanity: the render carries both new leads');
+    lines[solve] = "- **Solve, don't board** inside the current task's scope: fix a finding in-session, board only what cannot be done now and say why.";
+    lines[close] = '- **Close-on-commit:** a commit that fulfils a board item pays it — `board_remove` in the same breath, citing the commit.';
+    const planted = lines.join('\n');
+    return { planted, expected: planted };
+  });
+  try {
+    const r = runStampContract(f.regDb);
+    assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /HAND_TUNED_REFUSED\s+- \*\*Solve, don't board\./);
+    assert.match(r.stdout, /HAND_TUNED_REFUSED\s+- \*\*Close-on-commit: a commit/);
+    assert.ok(!/inserted|would_insert/.test(r.stdout), `no insert beside an old-lead bullet:\n${r.stdout}`);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'the old-lead bullets are left byte-for-byte untouched');
+  } finally {
+    f.cleanup();
+  }
+});
