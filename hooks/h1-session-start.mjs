@@ -8173,11 +8173,15 @@ var GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
 var PATH_SHAPED_TEST = new RegExp(`^(?:${PATH_CANDIDATE_RE.source}|${GLOB_PREFIX_RE.source})$`);
 
 // scripts/hooks/lib/dispatch-residue.mjs
-function pathOwnedBy(entry, path) {
+function pathOwnedBy(entry, path, isFile = false) {
   if (typeof entry !== "string" || entry === "" || typeof path !== "string") return false;
-  return path === entry || path.startsWith(`${entry}/`);
+  return path === entry || !isFile && path.startsWith(`${entry}/`);
 }
-function probeDirtyPaths(projectDir, files) {
+function fileEntriesOf(registerEntry) {
+  const list = registerEntry?.file_entries;
+  return new Set(Array.isArray(list) ? list.filter((f) => typeof f === "string" && f) : []);
+}
+function probeDirtyPaths(projectDir, files, fileEntries = []) {
   const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f);
   if (declared.length === 0) return { verified: true, dirty: [] };
   let r;
@@ -8207,9 +8211,11 @@ function probeDirtyPaths(projectDir, files) {
       i++;
     }
   }
+  const fileSet = new Set(Array.isArray(fileEntries) ? fileEntries : []);
   const dirty = [];
   for (const entry of declared) {
-    for (const path of flagged) if (pathOwnedBy(entry, path) && !dirty.includes(path)) dirty.push(path);
+    const isFile = fileSet.has(entry);
+    for (const path of flagged) if (pathOwnedBy(entry, path, isFile) && !dirty.includes(path)) dirty.push(path);
   }
   return { verified: true, dirty };
 }
@@ -9542,7 +9548,7 @@ function computeH1DeadDispatchResidue(cwd, source) {
   for (const entry of entries) {
     if (!entry || entry.residue_reported_at) continue;
     if (entry.ended) continue;
-    const probe = probeDirtyPaths(cwd, entry.files);
+    const probe = probeDirtyPaths(cwd, entry.files, [...fileEntriesOf(entry)]);
     const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
     if (probe.verified && dirty.length === 0) continue;
     lines.push(render(disclosure("dispatch_residue", {}, formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }))));
