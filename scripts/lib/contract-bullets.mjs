@@ -69,6 +69,13 @@ export const TARGET_LEADS = [
   // is AGENTS.md-homed, the de-ai-writing pass bullet is CLAUDE.md-homed.
   '- **Write plainly; no AI tells.**',
   '- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**',
+  // 2026-10-01: board every user ask at intake (decision
+  // every-user-ask-is-boarded-at-intake-with-slim-blocked-by). Both bullets already exist in
+  // most siblings under these same leads, so the REPLACE path carries the new wording; a
+  // sibling that predates them gets them through INSERT_AFTER. Solve stays BEFORE Close-on-commit
+  // here because Close-on-commit anchors on it.
+  "- **Solve, don't board.**",
+  '- **Close-on-commit: a commit that fulfils a board item pays it**',
 ];
 
 // Renamed bullets: new lead → the old lead(s) it replaced. When the new lead is
