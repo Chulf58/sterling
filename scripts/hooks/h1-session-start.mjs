@@ -22,7 +22,7 @@ import {
   readLock as readPlanLock,
   sanitizeForContext as planLockClean,
 } from './lib/plan-lock.mjs';
-import { probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
+import { probeDirtyPaths, formatResidueLine, fileEntriesOf } from './lib/dispatch-residue.mjs';
 import { withRegisterLock, readRegister, registerPath, sessionBoundarySweep } from '../lib/dispatch-register.mjs';
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
@@ -278,7 +278,7 @@ function computeH1DeadDispatchResidue(cwd, source) {
     // A1: an `ended` entry's Stop DID fire — it is inactive-confirmed, never
     // residue from a dispatch that never completed.
     if (entry.ended) continue;
-    const probe = probeDirtyPaths(cwd, entry.files);
+    const probe = probeDirtyPaths(cwd, entry.files, [...fileEntriesOf(entry)]);
     const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
     if (probe.verified && dirty.length === 0) continue; // clean — nothing to report
     lines.push(render(disclosure('dispatch_residue', {}, formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }))));

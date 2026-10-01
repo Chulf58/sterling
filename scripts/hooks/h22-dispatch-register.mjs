@@ -35,13 +35,13 @@
 // (H8/H27) ever clears its orphaned pending dispatch-state record before the
 // session boundary. NEVER A GATE: this hook is advisory and must never call
 // deny().
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
 import { extractPathCandidates, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
 import { deriveAgentTranscript } from './lib/transcript.mjs';
 import { isReviewerClass } from './lib/dispatch-advisory.mjs';
-import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/dispatch-residue.mjs';
+import { probeDirtyPaths, formatResidueLine, claimedResources, fileEntriesOf } from './lib/dispatch-residue.mjs';
 import {
   readRegister,
   registerPath,
@@ -100,6 +100,31 @@ function normalizeRegisterPaths(cands, cwd) {
   );
 }
 
+// The `files` entries that are regular files on disk right now, recorded as the
+// round's `file_entries`: H10 and the residue probe match those exactly and
+// never by '/' prefix (pathOwnedBy). A directory or a missing entry is not
+// recorded and keeps the prefix match, so a slash-less entry naming a
+// directory a lane has yet to create still owns its children (decision h22-
+// dispatch-files-from-review-territory-and-resume-inherits-prior-round). The
+// kind is taken here because a later stat cannot tell it: once another lane
+// creates `src/a/b`, `src/a` is a directory. A stat that fails for any reason
+// other than absence is announced, and the entry keeps the prefix match.
+function regularFileEntries(files, cwd) {
+  const out = [];
+  for (const f of files) {
+    let st;
+    try {
+      st = statSync(join(cwd, f), { throwIfNoEntry: false });
+    } catch (err) {
+      if (err?.code === 'ENOTDIR') continue; // a parent is a file: the entry does not exist
+      warnNonBlocking(`H22: could not stat territory entry '${f}' (${err?.code ?? err?.message ?? err}); it keeps the directory prefix match`);
+      continue;
+    }
+    if (st?.isFile()) out.push(f);
+  }
+  return out;
+}
+
 // SubagentStop dispatch-state fallback lookup key: when the primary agent_id
 // match inside finishDispatchAndRegisterEnd misses, it falls back to the
 // child transcript's .meta.json sidecar's toolUseId (survives the deleted
@@ -125,7 +150,7 @@ function sidecarForChildTranscript(childPath) {
 // KILL-DETECTION RESIDUE for a departing round: dirty declared files are
 // disclosed unless the probe VERIFIED the round left none.
 function residueLines(cwd, departing) {
-  const probe = probeDirtyPaths(cwd, departing.files);
+  const probe = probeDirtyPaths(cwd, departing.files, [...fileEntriesOf(departing)]);
   const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
   if (probe.verified && dirty.length === 0) return [];
   return [render(disclosure('dispatch_residue', {}, formatResidueLine(departing, dirty, { verified: probe.verified, reason: probe.reason })))];
@@ -312,7 +337,7 @@ try {
         );
       }
 
-      let files, attribution, filesSource;
+      let files, fileEntries, attribution, filesSource;
       if (matchedBlocks.length && positionalSafe) {
         const territory = parseReviewTerritory(matchedBlocks[0].prompt);
         if (territory.present && territory.valid) {
@@ -333,15 +358,19 @@ try {
             );
           }
         }
+        fileEntries = regularFileEntries(files, input.cwd);
         attribution = 'block';
       } else if (res.source === 'resume' && Array.isArray(res.inherited_files)) {
-        // A resumed agent keeps its prior round's territory; it still stages
-        // nothing and has no brief attributed (attribution 'none').
+        // A resumed agent keeps its prior round's territory, and the entry
+        // kinds that round recorded at its Start; it still stages nothing and
+        // has no brief attributed (attribution 'none').
         files = res.inherited_files;
+        fileEntries = Array.isArray(res.inherited_file_entries) ? res.inherited_file_entries : [];
         attribution = 'none';
         filesSource = 'resume-inherited';
       } else {
         files = [];
+        fileEntries = [];
         attribution = 'none';
         filesSource = 'unattributable';
       }
@@ -369,6 +398,7 @@ try {
         agent_type: typeof input.agent_type === 'string' ? input.agent_type : null,
         session_id: input.session_id,
         files,
+        file_entries: fileEntries,
         files_source: filesSource,
         attribution,
         attribution_case: res.case,

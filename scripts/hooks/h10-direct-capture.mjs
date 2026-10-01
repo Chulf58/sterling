@@ -39,7 +39,7 @@ import { disclosure, render } from '../lib/review-errors.mjs';
 import { mintSettlementReconcile, withFileLock, parseTouchesContent, gitTouches, gitTrackedSubset, writeGitSettled, loadGeneratedProjections } from './lib/settlement.mjs';
 import { VERSION_ONLY_CANDIDATES, isVersionOnlyInWorkingTree } from '../lib/version-only.mjs';
 import { latestUsage, fillPct } from './lib/transcript.mjs';
-import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy } from './lib/dispatch-residue.mjs';
+import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy, fileEntriesOf } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 import { isForeignTree } from './lib/working-tree.mjs';
@@ -102,7 +102,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
     if (entry.ended) continue;
     if (!isOrphan(entry, staleMinutes, nowMs)) continue;
     if (entry.residue_reported_at) continue; // print-once
-    const probe = probeDirtyPaths(cwd, entry.files);
+    const probe = probeDirtyPaths(cwd, entry.files, [...fileEntriesOf(entry)]);
     const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
     if (probe.verified && dirty.length === 0) continue; // clean — nothing to report
     lines.push(render(disclosure('dispatch_residue', {}, formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }))));
@@ -860,17 +860,23 @@ try {
   // resume-inherits-prior-round): a REVIEW-TERRITORY may declare a directory,
   // e.g. "game/farm", so every register `files` entry owns a path exactly or
   // on a '/' boundary ("game/farm/crop.gd", never "game/farmhouse.gd") — the
-  // shared matcher pathOwnedBy, the same one the residue probe uses.
+  // shared matcher pathOwnedBy, the same one the residue probe uses. An entry
+  // the round recorded in `file_entries` (a regular file at SubagentStart)
+  // owns only itself; a legacy row without the field keeps the prefix match.
   const entryOwns = pathOwnedBy;
-  const deferredOwners = new Map(); // repo-relative entry -> Set(owning agent_id)
+  const deferredOwners = new Map(); // repo-relative entry -> Map(owning agent_id -> isFile)
   const unknownRows = [];
   if (classified.availability === 'ok') {
     for (const row of classified.entries) {
       if (row.status === 'presumed-active') {
+        const fileEntries = fileEntriesOf(row.entry);
         for (const f of Array.isArray(row.entry.files) ? row.entry.files : []) {
           const k = joinKey(f);
-          if (!deferredOwners.has(k)) deferredOwners.set(k, new Set());
-          deferredOwners.get(k).add(row.entry.agent_id);
+          if (!deferredOwners.has(k)) deferredOwners.set(k, new Map());
+          const owners = deferredOwners.get(k);
+          const isFile = fileEntries.has(f);
+          // Two rounds of one agent that disagree on the kind keep the prefix match.
+          owners.set(row.entry.agent_id, (owners.get(row.entry.agent_id) ?? true) && isFile);
         }
       } else if (row.status === 'unknown') {
         unknownRows.push(row);
@@ -881,7 +887,7 @@ try {
   const ownersOf = (p) => {
     const k = joinKey(p);
     const owners = new Set();
-    for (const [entryKey, ids] of deferredOwners) if (entryOwns(entryKey, k)) for (const id of ids) owners.add(id);
+    for (const [entryKey, ids] of deferredOwners) for (const [id, isFile] of ids) if (entryOwns(entryKey, k, isFile)) owners.add(id);
     return owners;
   };
   const isDeferred = (p) => ownersOf(p).size > 0;
@@ -968,9 +974,12 @@ try {
   // once-per-session key dedup (point C) applies ON TOP of biting: a note
   // fires only when the row bites AND its key is not yet spent this session.
   const touchedKeys = new Set(touchedExisting.map(joinKey));
-  const bitingUnknown = unknownRows.filter((row) =>
-    (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => [...touchedKeys].some((k) => entryOwns(joinKey(f), k)))
-  );
+  const bitingUnknown = unknownRows.filter((row) => {
+    const fileEntries = fileEntriesOf(row.entry);
+    return (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) =>
+      [...touchedKeys].some((k) => entryOwns(joinKey(f), k, fileEntries.has(f)))
+    );
+  });
   const dispatchUnknownNotedPath = join(input.cwd, '.sterling', 'transient', 'dispatch-unknown-noted.json');
   const dispatchUnknownNotedKeys = (() => {
     if (!hasSession) return new Set(); // absent session_id: never salvaged (point E), read skipped entirely

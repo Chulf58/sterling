@@ -8483,11 +8483,15 @@ function isOrphan(entry, staleMinutes, nowMs = Date.now()) {
   if (Number.isNaN(t)) return true;
   return nowMs - t > staleMinutes * 6e4;
 }
-function pathOwnedBy(entry, path) {
+function pathOwnedBy(entry, path, isFile = false) {
   if (typeof entry !== "string" || entry === "" || typeof path !== "string") return false;
-  return path === entry || path.startsWith(`${entry}/`);
+  return path === entry || !isFile && path.startsWith(`${entry}/`);
 }
-function probeDirtyPaths(projectDir, files) {
+function fileEntriesOf(registerEntry) {
+  const list = registerEntry?.file_entries;
+  return new Set(Array.isArray(list) ? list.filter((f) => typeof f === "string" && f) : []);
+}
+function probeDirtyPaths(projectDir, files, fileEntries = []) {
   const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f);
   if (declared.length === 0) return { verified: true, dirty: [] };
   let r;
@@ -8517,9 +8521,11 @@ function probeDirtyPaths(projectDir, files) {
       i++;
     }
   }
+  const fileSet = new Set(Array.isArray(fileEntries) ? fileEntries : []);
   const dirty = [];
   for (const entry of declared) {
-    for (const path of flagged) if (pathOwnedBy(entry, path) && !dirty.includes(path)) dirty.push(path);
+    const isFile = fileSet.has(entry);
+    for (const path of flagged) if (pathOwnedBy(entry, path, isFile) && !dirty.includes(path)) dirty.push(path);
   }
   return { verified: true, dirty };
 }
@@ -9172,7 +9178,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
     if (entry.ended) continue;
     if (!isOrphan(entry, staleMinutes, nowMs)) continue;
     if (entry.residue_reported_at) continue;
-    const probe = probeDirtyPaths(cwd, entry.files);
+    const probe = probeDirtyPaths(cwd, entry.files, [...fileEntriesOf(entry)]);
     const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
     if (probe.verified && dirty.length === 0) continue;
     lines.push(render(disclosure("dispatch_residue", {}, formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }))));
@@ -9515,10 +9521,13 @@ try {
   if (classified.availability === "ok") {
     for (const row of classified.entries) {
       if (row.status === "presumed-active") {
+        const fileEntries = fileEntriesOf(row.entry);
         for (const f of Array.isArray(row.entry.files) ? row.entry.files : []) {
           const k = joinKey(f);
-          if (!deferredOwners.has(k)) deferredOwners.set(k, /* @__PURE__ */ new Set());
-          deferredOwners.get(k).add(row.entry.agent_id);
+          if (!deferredOwners.has(k)) deferredOwners.set(k, /* @__PURE__ */ new Map());
+          const owners = deferredOwners.get(k);
+          const isFile = fileEntries.has(f);
+          owners.set(row.entry.agent_id, (owners.get(row.entry.agent_id) ?? true) && isFile);
         }
       } else if (row.status === "unknown") {
         unknownRows.push(row);
@@ -9528,7 +9537,7 @@ try {
   const ownersOf = (p) => {
     const k = joinKey(p);
     const owners = /* @__PURE__ */ new Set();
-    for (const [entryKey, ids] of deferredOwners) if (entryOwns(entryKey, k)) for (const id of ids) owners.add(id);
+    for (const [entryKey, ids] of deferredOwners) for (const [id, isFile] of ids) if (entryOwns(entryKey, k, isFile)) owners.add(id);
     return owners;
   };
   const isDeferred = (p) => ownersOf(p).size > 0;
@@ -9564,9 +9573,12 @@ try {
     }
   };
   const touchedKeys = new Set(touchedExisting.map(joinKey));
-  const bitingUnknown = unknownRows.filter(
-    (row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => [...touchedKeys].some((k) => entryOwns(joinKey(f), k)))
-  );
+  const bitingUnknown = unknownRows.filter((row) => {
+    const fileEntries = fileEntriesOf(row.entry);
+    return (Array.isArray(row.entry.files) ? row.entry.files : []).some(
+      (f) => [...touchedKeys].some((k) => entryOwns(joinKey(f), k, fileEntries.has(f)))
+    );
+  });
   const dispatchUnknownNotedPath = join12(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
   const dispatchUnknownNotedKeys = (() => {
     if (!hasSession) return /* @__PURE__ */ new Set();

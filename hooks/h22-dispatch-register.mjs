@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h22-dispatch-register.mjs
-import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync3 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
 import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -5463,11 +5463,15 @@ function isReviewerClass(type) {
 
 // scripts/hooks/lib/dispatch-residue.mjs
 import { spawnSync } from "node:child_process";
-function pathOwnedBy(entry, path) {
+function pathOwnedBy(entry, path, isFile = false) {
   if (typeof entry !== "string" || entry === "" || typeof path !== "string") return false;
-  return path === entry || path.startsWith(`${entry}/`);
+  return path === entry || !isFile && path.startsWith(`${entry}/`);
 }
-function probeDirtyPaths(projectDir, files) {
+function fileEntriesOf(registerEntry) {
+  const list = registerEntry?.file_entries;
+  return new Set(Array.isArray(list) ? list.filter((f) => typeof f === "string" && f) : []);
+}
+function probeDirtyPaths(projectDir, files, fileEntries = []) {
   const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f);
   if (declared.length === 0) return { verified: true, dirty: [] };
   let r;
@@ -5497,9 +5501,11 @@ function probeDirtyPaths(projectDir, files) {
       i++;
     }
   }
+  const fileSet = new Set(Array.isArray(fileEntries) ? fileEntries : []);
   const dirty = [];
   for (const entry of declared) {
-    for (const path of flagged) if (pathOwnedBy(entry, path) && !dirty.includes(path)) dirty.push(path);
+    const isFile = fileSet.has(entry);
+    for (const path of flagged) if (pathOwnedBy(entry, path, isFile) && !dirty.includes(path)) dirty.push(path);
   }
   return { verified: true, dirty };
 }
@@ -6248,9 +6254,11 @@ function priorRoundFiles(root, sessionId, agentId) {
   for (const e of entries) {
     if (!e || e.agent_id !== agentId || e.session_id !== sessionId) continue;
     const round = typeof e.round === "number" ? e.round : 1;
-    if (latest === null || round >= latest.round) latest = { round, files: e.files };
+    if (latest === null || round >= latest.round) latest = { round, entry: e };
   }
-  return latest ? latest.files.slice() : null;
+  if (!latest) return null;
+  const fileEntries = Array.isArray(latest.entry.file_entries) ? latest.entry.file_entries.filter((f) => typeof f === "string") : [];
+  return { files: latest.entry.files.slice(), file_entries: fileEntries };
 }
 function appendStartedBy(record, consumer) {
   const prior = record.started;
@@ -6565,10 +6573,12 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
     ({ record }) => record.started?.agent_id === agent_id || record.post_binding?.agent_id === agent_id || record.derived_binding?.agent_id === agent_id
   ) || terminalResumeHit(root, scan, agent_id));
   if (resumeHit || hasRegisterRound(root, session_id, agent_id)) {
-    const inherited_files = priorRoundFiles(root, session_id, agent_id);
+    const prior = priorRoundFiles(root, session_id, agent_id);
+    const inherited_files = prior ? prior.files : null;
+    const inherited_file_entries = prior ? prior.file_entries : null;
     return {
       verdict: "resolved",
-      value: { source: "resume", case: "resume", prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null, inherited_files }
+      value: { source: "resume", case: "resume", prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null, inherited_files, inherited_file_entries }
     };
   }
   if (typeof agent_type !== "string" || agent_type === "") {
@@ -6729,6 +6739,21 @@ function normalizeRegisterPaths(cands, cwd) {
     (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/") && !r.startsWith("sterling/") && !r.startsWith("git/")
   );
 }
+function regularFileEntries(files, cwd) {
+  const out = [];
+  for (const f of files) {
+    let st;
+    try {
+      st = statSync2(join3(cwd, f), { throwIfNoEntry: false });
+    } catch (err) {
+      if (err?.code === "ENOTDIR") continue;
+      warnNonBlocking(`H22: could not stat territory entry '${f}' (${err?.code ?? err?.message ?? err}); it keeps the directory prefix match`);
+      continue;
+    }
+    if (st?.isFile()) out.push(f);
+  }
+  return out;
+}
 function sidecarForChildTranscript(childPath) {
   if (!childPath.endsWith(".jsonl")) return { ok: false };
   const sidecarPath = `${childPath.slice(0, -".jsonl".length)}.meta.json`;
@@ -6744,7 +6769,7 @@ function sidecarForChildTranscript(childPath) {
   return { ok: true, meta };
 }
 function residueLines(cwd, departing) {
-  const probe = probeDirtyPaths(cwd, departing.files);
+  const probe = probeDirtyPaths(cwd, departing.files, [...fileEntriesOf(departing)]);
   const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
   if (probe.verified && dirty.length === 0) return [];
   return [render(disclosure("dispatch_residue", {}, formatResidueLine(departing, dirty, { verified: probe.verified, reason: probe.reason })))];
@@ -6868,7 +6893,7 @@ try {
           )
         );
       }
-      let files, attribution, filesSource;
+      let files, fileEntries, attribution, filesSource;
       if (matchedBlocks.length && positionalSafe) {
         const territory = parseReviewTerritory(matchedBlocks[0].prompt);
         if (territory.present && territory.valid) {
@@ -6889,13 +6914,16 @@ try {
             );
           }
         }
+        fileEntries = regularFileEntries(files, input.cwd);
         attribution = "block";
       } else if (res.source === "resume" && Array.isArray(res.inherited_files)) {
         files = res.inherited_files;
+        fileEntries = Array.isArray(res.inherited_file_entries) ? res.inherited_file_entries : [];
         attribution = "none";
         filesSource = "resume-inherited";
       } else {
         files = [];
+        fileEntries = [];
         attribution = "none";
         filesSource = "unattributable";
       }
@@ -6915,6 +6943,7 @@ try {
         agent_type: typeof input.agent_type === "string" ? input.agent_type : null,
         session_id: input.session_id,
         files,
+        file_entries: fileEntries,
         files_source: filesSource,
         attribution,
         attribution_case: res.case,

@@ -35,13 +35,26 @@ export function isOrphan(entry, staleMinutes, nowMs = Date.now()) {
  * entry owns a path when they are equal, or when the path lies under the
  * entry on a '/' boundary. A REVIEW-TERRITORY may declare a directory, and
  * nothing tells a directory from a file by its name ("vendor/cache.v2",
- * ".claude"), so EVERY entry is matched this way — a file has no
- * descendants, so a file entry still only matches itself. Shared by H10's
- * deferral join and by this module's residue probe (H1, H10, H22).
+ * ".claude"), so an entry is matched this way UNLESS `isFile` says H22 saw it
+ * as a regular file at SubagentStart (the round's `file_entries`). A file
+ * entry owns only itself: once a lane deletes the file `src/a` and another
+ * lane creates `src/a/b`, `src/a` is a directory on disk, so only the
+ * Start-time record can tell. Shared by H10's deferral join and by this
+ * module's residue probe (H1, H10, H22).
  */
-export function pathOwnedBy(entry, path) {
+export function pathOwnedBy(entry, path, isFile = false) {
   if (typeof entry !== 'string' || entry === '' || typeof path !== 'string') return false;
-  return path === entry || path.startsWith(`${entry}/`);
+  return path === entry || (!isFile && path.startsWith(`${entry}/`));
+}
+
+/**
+ * The round's `file_entries` as a Set: the `files` entries H22 saw as regular
+ * files at SubagentStart. A register row written before the field existed
+ * carries none, so every one of its entries keeps the prefix match.
+ */
+export function fileEntriesOf(registerEntry) {
+  const list = registerEntry?.file_entries;
+  return new Set(Array.isArray(list) ? list.filter((f) => typeof f === 'string' && f) : []);
 }
 
 /**
@@ -52,8 +65,10 @@ export function pathOwnedBy(entry, path) {
  * fails — the CALLER must still report residue then, marked
  * tree-state-unverified, never silently drop it (SPEC A item 7).
  * No declared files → { verified: true, dirty: [] } (nothing can be held).
+ * `fileEntries` names the declared entries that are files (the round's
+ * `file_entries`): those report only themselves, never paths beneath them.
  */
-export function probeDirtyPaths(projectDir, files) {
+export function probeDirtyPaths(projectDir, files, fileEntries = []) {
   const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === 'string' && f);
   if (declared.length === 0) return { verified: true, dirty: [] };
   let r;
@@ -93,9 +108,11 @@ export function probeDirtyPaths(projectDir, files) {
       i++; // consume the original-path field so it is never re-parsed as its own status record
     }
   }
+  const fileSet = new Set(Array.isArray(fileEntries) ? fileEntries : []);
   const dirty = [];
   for (const entry of declared) {
-    for (const path of flagged) if (pathOwnedBy(entry, path) && !dirty.includes(path)) dirty.push(path);
+    const isFile = fileSet.has(entry);
+    for (const path of flagged) if (pathOwnedBy(entry, path, isFile) && !dirty.includes(path)) dirty.push(path);
   }
   return { verified: true, dirty };
 }
