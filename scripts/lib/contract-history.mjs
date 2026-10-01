@@ -24,13 +24,16 @@ import { isInstalledCopy } from './installed-copy.mjs';
 export const CONTRACT_HISTORY_REL = 'bin/contract-history.json';
 
 // lead → Set of every block found in every committed version of every template, or
-// null when there is no git repository at repoRoot.
+// null when there is no git repository at repoRoot. An installed copy returns null
+// before git runs: nested inside some unrelated repo, `git log -- <rel>` would walk up
+// to that repo, exit 0 with no commits, and hide the missing history.
 function gitVariants({ repoRoot, templateRels, leads, extractBlock, git }) {
+  if (isInstalledCopy(repoRoot)) return null;
   const variants = new Map(leads.map((l) => [l, new Set()]));
   for (const rel of templateRels) {
     const log = git(['log', '--format=%H', '--', rel]);
     if (log.status !== 0) {
-      if (isInstalledCopy(repoRoot) || /not a git repository/i.test(log.stderr ?? '')) return null;
+      if (/not a git repository/i.test(log.stderr ?? '')) return null;
       throw new Error(`stamp-contract: git log failed in ${repoRoot}: ${log.stderr}`);
     }
     for (const sha of log.stdout.split('\n').filter(Boolean)) {

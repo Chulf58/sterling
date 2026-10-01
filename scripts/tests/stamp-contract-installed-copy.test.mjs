@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -91,11 +91,11 @@ function withSibling(fn) {
     rmSync(sibling, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 }
-const runStamp = (dir, regDb) =>
+const runStamp = (dir, regDb, env = process.env) =>
   spawnSync(process.execPath, [join(dir, 'scripts', 'stamp-contract.mjs'), '--apply'], {
     cwd: dir,
     encoding: 'utf8',
-    env: { ...process.env, STERLING_REGISTRY_DB: regDb },
+    env: { ...env, STERLING_REGISTRY_DB: regDb },
   });
 
 test('installed copy (no .git) with bin/contract-history.json: an older template-descended bullet is replaced cleanly, exit 0', () => {
@@ -115,6 +115,39 @@ test('installed copy (no .git) with bin/contract-history.json: an older template
     });
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('installed copy nested inside an unrelated git repo: git log there is empty, so the snapshot is still used, exit 0', () => {
+  const dir = makePluginRoot();
+  const parent = mkdtempSync(join(tmpdir(), 'sterling-installed-parent-'));
+  try {
+    commitCurrentTemplates(dir);
+    mkdirSync(join(dir, 'bin'));
+    writeFileSync(join(dir, 'bin', 'contract-history.json'), contractHistoryJson(dir));
+    rmSync(join(dir, '.git'), { recursive: true, force: true });
+    git(parent, ['init', '-q']);
+    git(parent, ['config', 'user.email', 'test@example.com']);
+    git(parent, ['config', 'user.name', 'test']);
+    git(parent, ['config', 'core.autocrlf', 'false']);
+    writeFileSync(join(parent, 'README.md'), 'unrelated\n');
+    git(parent, ['add', 'README.md']);
+    git(parent, ['commit', '-q', '-m', 'unrelated parent']);
+    const nested = join(parent, 'plugin');
+    renameSync(dir, nested);
+    // No GIT_CEILING_DIRECTORIES: git discovery walks up into the parent repo.
+    const env = { ...process.env };
+    delete env.GIT_CEILING_DIRECTORIES;
+    withSibling(({ sibling, regDb }) => {
+      const r = runStamp(nested, regDb, env);
+      assert.equal(r.status, 0, `clean replace expected:\n${r.stdout}\n${r.stderr}`);
+      assert.match(r.stdout, /updated\s+- \*\*Reconcile/);
+      assert.ok(!/REFUSED/.test(r.stdout), r.stdout);
+      assert.equal(readFileSync(join(sibling, 'CLAUDE.md'), 'utf8'), renderTemplate(CLAUDE_REL), 'the old bullet became the current one');
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(parent, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
 
