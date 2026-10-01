@@ -986,3 +986,67 @@ test('CONDUCTOR WEBFETCH (GUARD, green before and after): a WebFetch with no age
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// MULTI-ROUND LANE (fix round on decision subagent-web-research-is-tagged-and-
+// gated-on-lane-return, review HIGH). Every SendMessage resume, and the
+// parked-lane shape, gives one agent_id 2+ rounds in a session, so the
+// singleton join is ambiguous for a tagged web call. A tagged web call is
+// live while ANY same-session round of its lane is presumed-active (H22
+// refuses an unended duplicate per (session, agent_id), so at most one is),
+// and once none is live its return anchor is the LATEST same-session ended.at.
+// ---------------------------------------------------------------------------
+
+const taggedWeb = (url, at, agentId = 'sub-researcher-1') => ({ kind: 'research_tool', detail: url, at, agent_id: agentId });
+const researchNoCapture = (at) => ({ kind: 'no_capture', detail: 'nothing durable in the lane', lane: 'research', at });
+
+test('MULTI-ROUND LIVE (RED before the fix round): round 1 ended and round 2 live — the lane\'s tagged web call is quiet at Stop', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeSessionEvents(dir, [taggedWeb('https://example.com/round-two', agoISO(1))]);
+    writeRegisterRaw(dir, [endedEntry('sub-researcher-1', 'researcher', 's1', agoISO(5), { toolUseId: 'toolu_launch_1' }), liveEntry('sub-researcher-1', 'researcher')]);
+
+    const r = stopOnce(dir);
+    assert.equal(r.code, 0, 'PREMATURE-DEMAND SHAPE if this is 2: round 2 of the lane is still running');
+    assert.doesNotMatch(out(r), /example\.com\/round-two/);
+    assert.equal(readSessionEvents(dir).length, 1, 'EVAPORATION SHAPE if 0: the deferred event survives so the duty re-arms on return');
+    assert.equal(owed(store, 'research_owed').length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('MULTI-ROUND DISCHARGE (RED before the fix round): both rounds ended and a research no_capture made after the LAST ended.at discharges the tagged web call', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeSessionEvents(dir, [taggedWeb('https://example.com/done-lane', agoISO(4)), researchNoCapture(agoISO(1))]);
+    writeRegisterRaw(dir, [
+      endedEntry('sub-researcher-1', 'researcher', 's1', agoISO(5), { toolUseId: 'toolu_launch_1' }),
+      endedEntry('sub-researcher-1', 'researcher', 's1', agoISO(2)),
+    ]);
+
+    const r = stopOnce(dir);
+    assert.equal(r.code, 0, 'STUCK-ARMED SHAPE if this is 2: a no_capture after the lane\'s last return must discharge its web call');
+    assert.doesNotMatch(r.stderr, /example\.com\/done-lane/);
+    assert.equal(owed(store, 'research_owed').length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('MULTI-ROUND EARLY NO_CAPTURE (GUARD): a research no_capture made between round 1\'s end and round 2\'s end does not discharge the tagged web call', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeSessionEvents(dir, [taggedWeb('https://example.com/mid-lane', agoISO(4)), researchNoCapture(agoISO(3))]);
+    writeRegisterRaw(dir, [
+      endedEntry('sub-researcher-1', 'researcher', 's1', agoISO(5), { toolUseId: 'toolu_launch_1' }),
+      endedEntry('sub-researcher-1', 'researcher', 's1', agoISO(1)),
+    ]);
+
+    const nag = stopOnce(dir);
+    assert.equal(nag.code, 2, 'PREMATURE-DISCHARGE SHAPE if this is 0: the declaration predates the lane\'s last return');
+    assert.match(nag.stderr, /example\.com\/mid-lane/);
+  } finally {
+    cleanup();
+  }
+});

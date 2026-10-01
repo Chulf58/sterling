@@ -727,9 +727,13 @@ try {
   // lane-return) and is gated exactly like an agent_dispatch event, through
   // the same `ownRegisterRow` join below: the lane's web research is owed only
   // once the lane returns. H16 records no tool_use_id on it (a web call's own
-  // id is never a launch id), so it always joins by the (session_id,
-  // agent_id) singleton rule; a lane with 2+ rounds in this session is
-  // ambiguous and falls to the legacy rule, i.e. due at once, as before.
+  // id is never a launch id), and the singleton join cannot serve it: a lane
+  // with 2+ rounds in this session (every SendMessage resume, every parked
+  // lane) is ambiguous there. So a tagged web event joins the LANE instead of
+  // one round (`taggedWebLaneRows` below): it is live while ANY same-session
+  // row with its agent_id is presumed-active, which is unambiguous because H22
+  // refuses an unended duplicate per (session_id, agent_id); once none is
+  // live, its return anchor is the LATEST same-session ended.at of that lane.
   //
   // JOIN KEY (Sol review HIGH, round 2 of this fix): `agent_id` ALONE is NOT
   // unique per dispatch — H22 permits the SAME agent_id across ROUNDS (a
@@ -827,7 +831,19 @@ try {
     }
     return undefined;
   };
-  const isDispatchEventLive = (e) => ownRegisterRow(e)?.status === 'presumed-active';
+  // A tagged web event (research_tool with agent_id, no tool_use_id): every
+  // same-session register row of its lane, or undefined for any other event.
+  const taggedWebLaneRows = (e) => {
+    if (e.kind !== 'research_tool' || typeof e.agent_id !== 'string' || !e.agent_id) return undefined;
+    if (typeof e.tool_use_id === 'string' && e.tool_use_id !== '') return undefined;
+    if (typeof input.session_id !== 'string' || !input.session_id) return [];
+    return (registerRowsBySession.get(input.session_id) ?? []).filter((r) => r.entry.agent_id === e.agent_id);
+  };
+  const isDispatchEventLive = (e) => {
+    const laneRows = taggedWebLaneRows(e);
+    if (laneRows) return laneRows.some((r) => r.status === 'presumed-active');
+    return ownRegisterRow(e)?.status === 'presumed-active';
+  };
   // Which research events wait on a lane's return: every agent_dispatch event,
   // and a research_tool event tagged with the subagent's agent_id.
   const isLaneResearchEvent = (e) =>
@@ -1532,6 +1548,15 @@ try {
   // keep their existing, unrelated satisfaction rule — only the no_capture
   // DISCHARGE anchor changes here.
   const dispatchEventReturnAt = (e) => {
+    const laneRows = taggedWebLaneRows(e);
+    if (laneRows) {
+      // The lane's LATEST return. Every round must be inactive-confirmed with
+      // a valid ended.at: a round that is live, or lease-expired with no
+      // SubagentStop ('unknown'), has no return yet, and an earlier round's
+      // ended.at says nothing about it (the DEFECT 2 shape).
+      if (!laneRows.length || !laneRows.every((r) => r.status === 'inactive-confirmed' && isValidAt(r.entry.ended?.at))) return null;
+      return laneRows.map((r) => r.entry.ended.at).reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a));
+    }
     const row = ownRegisterRow(e);
     return row && row.status === 'inactive-confirmed' && isValidAt(row.entry.ended?.at) ? row.entry.ended.at : null;
   };
