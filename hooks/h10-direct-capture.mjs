@@ -9495,7 +9495,17 @@ try {
     }
     return void 0;
   };
-  const isDispatchEventLive = (e) => ownRegisterRow(e)?.status === "presumed-active";
+  const taggedWebLaneRows = (e) => {
+    if (e.kind !== "research_tool" || typeof e.agent_id !== "string" || !e.agent_id) return void 0;
+    if (typeof e.tool_use_id === "string" && e.tool_use_id !== "") return void 0;
+    if (typeof input.session_id !== "string" || !input.session_id) return [];
+    return (registerRowsBySession.get(input.session_id) ?? []).filter((r) => r.entry.agent_id === e.agent_id);
+  };
+  const isDispatchEventLive = (e) => {
+    const laneRows = taggedWebLaneRows(e);
+    if (laneRows) return laneRows.some((r) => r.status === "presumed-active");
+    return ownRegisterRow(e)?.status === "presumed-active";
+  };
   const isLaneResearchEvent = (e) => e.kind === "agent_dispatch" || e.kind === "research_tool" && typeof e.agent_id === "string" && e.agent_id !== "";
   const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
   const joinKey = (p) => String(p ?? "").replace(WORKTREE_PREFIX_RE, "");
@@ -9754,6 +9764,11 @@ try {
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync8(join12(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const dispatchEventReturnAt = (e) => {
+    const laneRows = taggedWebLaneRows(e);
+    if (laneRows) {
+      if (!laneRows.length || !laneRows.every((r) => r.status === "inactive-confirmed" && isValidAt(r.entry.ended?.at))) return null;
+      return laneRows.map((r) => r.entry.ended.at).reduce((a, b) => Date.parse(b) > Date.parse(a) ? b : a);
+    }
     const row = ownRegisterRow(e);
     return row && row.status === "inactive-confirmed" && isValidAt(row.entry.ended?.at) ? row.entry.ended.at : null;
   };
