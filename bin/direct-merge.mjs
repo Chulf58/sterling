@@ -7709,12 +7709,15 @@ CREATE TABLE IF NOT EXISTS activity_log (
 });
 
 // scripts/direct-merge.mjs
-import { spawnSync as spawnSync6 } from "node:child_process";
+import { spawnSync as spawnSync7 } from "node:child_process";
 import { existsSync as existsSync6, readFileSync as readFileSync7 } from "node:fs";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
-import { readFileSync, existsSync as existsSync2, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, existsSync as existsSync2, mkdtempSync, rmSync, realpathSync as realpathSync3 } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { join as join3, resolve as resolve2, dirname as dirname2, basename as basename2 } from "node:path";
 init_dist();
 init_dist2();
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
@@ -7881,6 +7884,16 @@ function fail(message, code = 1) {
   console.error(message);
   process.exit(code);
 }
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = realpathSync3(resolve2(cwd, gitDir));
+  const commonReal = realpathSync3(resolve2(cwd, commonDir));
+  if (gitDirReal === commonReal || basename2(commonReal) !== ".git") return null;
+  return { worktree: realpathSync3(toplevel), mainRoot: dirname2(commonReal) };
+}
 function resolveProject(cwd) {
   let dbPath, configPath;
   try {
@@ -7904,9 +7917,9 @@ function openProject(cwd = process.cwd()) {
 }
 
 // scripts/lib/branch-manager.mjs
-import { spawnSync } from "node:child_process";
+import { spawnSync as spawnSync2 } from "node:child_process";
 function git(cwd, args, { allowFail = false } = {}) {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 6e4 });
+  const r = spawnSync2("git", args, { cwd, encoding: "utf8", timeout: 6e4 });
   if (r.status !== 0 && !allowFail) {
     const spawnState = r.error ? `spawn-error ${r.error.code ?? r.error.message}` : r.signal ? `killed by ${r.signal}` : `exit ${r.status}`;
     throw new Error(`git ${args.join(" ")} failed (${spawnState}): ${(r.stderr || r.stdout || "").trim()}`);
@@ -7914,7 +7927,7 @@ function git(cwd, args, { allowFail = false } = {}) {
   return (r.stdout ?? "").trim();
 }
 function isGitRepo(cwd) {
-  return spawnSync("git", ["rev-parse", "--git-dir"], { cwd, encoding: "utf8", timeout: 3e4 }).status === 0;
+  return spawnSync2("git", ["rev-parse", "--git-dir"], { cwd, encoding: "utf8", timeout: 3e4 }).status === 0;
 }
 function currentBranch(cwd) {
   return git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -7960,15 +7973,15 @@ function sweepMergedBranches({ cwd, into: into2 }) {
 }
 
 // scripts/lib/update.mjs
-import { spawnSync as spawnSync2 } from "node:child_process";
-import { dirname as dirname2, join as join5 } from "node:path";
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { dirname as dirname3, join as join6 } from "node:path";
 
 // scripts/lib/handoff-projection.mjs
-import { join as join4, resolve as resolve3 } from "node:path";
+import { join as join5, resolve as resolve4 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
 import { lstatSync as lstatSync2, readFileSync as readFileSync2, readdirSync, mkdirSync as mkdirSync2, openSync, writeSync, closeSync, unlinkSync, constants } from "node:fs";
-import { join as join3, resolve as resolve2 } from "node:path";
+import { join as join4, resolve as resolve3 } from "node:path";
 var ContainmentError = class extends Error {
   constructor(message) {
     super(message);
@@ -7986,9 +7999,9 @@ var lstatOrNull = (p) => {
 function containedPath(root, rel, leaf) {
   const segments = rel.split("/").filter(Boolean);
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
-  let cursor = resolve2(root);
+  let cursor = resolve3(root);
   for (const [index, part] of segments.entries()) {
-    cursor = join3(cursor, part);
+    cursor = join4(cursor, part);
     const st = lstatOrNull(cursor);
     if (!st) break;
     const isLeaf = index === segments.length - 1;
@@ -8019,7 +8032,7 @@ var ProjectModeError = class extends Error {
 };
 function readProjectMode(root) {
   const rel = ".sterling/config.json";
-  const where = `${fwd(resolve3(root))}/${rel}`;
+  const where = `${fwd(resolve4(root))}/${rel}`;
   if (!existsContained(root, rel, "file")) return "hobby";
   let parsed;
   try {
@@ -8049,7 +8062,7 @@ var STEP_TIMEOUT_MS = 9e5;
 function defaultExec(cmd, args, { cwd, timeout = STEP_TIMEOUT_MS } = {}) {
   const shell = process.platform === "win32";
   const q = (s2) => shell && /[\s"]/.test(s2) ? `"${s2}"` : s2;
-  const r = spawnSync2(q(cmd), args.map(q), { cwd, encoding: "utf8", timeout, shell });
+  const r = spawnSync3(q(cmd), args.map(q), { cwd, encoding: "utf8", timeout, shell });
   return {
     status: r.error ? 1 : r.status ?? 1,
     stdout: r.stdout ?? "",
@@ -8057,13 +8070,13 @@ function defaultExec(cmd, args, { cwd, timeout = STEP_TIMEOUT_MS } = {}) {
   };
 }
 var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed-By-Agent", "review-ledger", "frozen-test"]);
-var UPDATE_MARKER_RELATIVE_PATH = join5(".sterling", "update-complete.json");
+var UPDATE_MARKER_RELATIVE_PATH = join6(".sterling", "update-complete.json");
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
 import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync2, renameSync } from "node:fs";
 init_dist2();
-import { join as join6, dirname as dirname3 } from "node:path";
+import { join as join7, dirname as dirname4 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
 init_dist();
@@ -8076,7 +8089,7 @@ function isForeignTree(record, root) {
 // scripts/hooks/lib/settlement.mjs
 function hashFile(root, rel) {
   try {
-    return createHash("sha256").update(readFileSync3(join6(root, rel))).digest("hex");
+    return createHash("sha256").update(readFileSync3(join7(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -8090,7 +8103,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync3(join6(root, ".sterling", "config.json"), "utf8");
+    const raw = readFileSync3(join7(root, ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -8158,7 +8171,7 @@ function explainReconcileDebtLiveness(store, root, item) {
 }
 
 // scripts/lib/version-only.mjs
-import { spawnSync as spawnSync3 } from "node:child_process";
+import { spawnSync as spawnSync4 } from "node:child_process";
 var LOCKFILE = "package-lock.json";
 var ALLOWED_FIELDS = /* @__PURE__ */ new Map([
   [".claude-plugin/plugin.json", [["version"]]],
@@ -8228,7 +8241,7 @@ function isVersionOnlyText(path, baseContent, tipContent) {
   return JSON.stringify(tip) === JSON.stringify(base2);
 }
 function lsTreeEntry(root, sha, path) {
-  const r = spawnSync3("git", ["ls-tree", sha, "--", path], { cwd: root, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync4("git", ["ls-tree", sha, "--", path], { cwd: root, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) return null;
   const line = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean)[0];
   if (!line) return null;
@@ -8237,7 +8250,7 @@ function lsTreeEntry(root, sha, path) {
 }
 var isRegularBlob = (e) => !!e && e.type === "blob" && (e.mode === "100644" || e.mode === "100755");
 function showBlobText(root, sha, path) {
-  const r = spawnSync3("git", ["show", `${sha}:${path}`], { cwd: root, encoding: "buffer", timeout: 3e4 });
+  const r = spawnSync4("git", ["show", `${sha}:${path}`], { cwd: root, encoding: "buffer", timeout: 3e4 });
   return r.status === 0 ? strictUtf8(r.stdout) : null;
 }
 function readVersionAtCommit(root, sha, path) {
@@ -8259,15 +8272,15 @@ function isVersionOnlyBetweenCommits(root, baseSha, tipSha, path) {
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync4, existsSync as existsSync3 } from "node:fs";
-import { dirname as dirname4, join as join7, resolve as resolve4 } from "node:path";
+import { dirname as dirname5, join as join8, resolve as resolve5 } from "node:path";
 init_dist();
 init_dist2();
 function projectRoot(from) {
   if (!from) return null;
-  let dir = resolve4(String(from));
+  let dir = resolve5(String(from));
   for (; ; ) {
-    if (existsSync3(join7(dir, ".sterling", "sterling.db"))) return dir;
-    const parent = dirname4(dir);
+    if (existsSync3(join8(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname5(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -8380,9 +8393,9 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
 });
 
 // scripts/lib/parked-close.mjs
-import { spawnSync as spawnSync4 } from "node:child_process";
+import { spawnSync as spawnSync5 } from "node:child_process";
 function deletedBetween(cwd, fromSha, toSha) {
-  const r = spawnSync4("git", ["diff", "--name-only", "--diff-filter=D", "--no-renames", "-z", fromSha, toSha], {
+  const r = spawnSync5("git", ["diff", "--name-only", "--diff-filter=D", "--no-renames", "-z", fromSha, toSha], {
     cwd,
     encoding: "utf8",
     timeout: 6e4
@@ -8402,12 +8415,12 @@ function parkedItemResolved(paths, deletedSet, existsFn) {
 init_dist2();
 
 // scripts/lib/work-pr.mjs
-import { spawnSync as spawnSync5 } from "node:child_process";
+import { spawnSync as spawnSync6 } from "node:child_process";
 import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname5, join as join8 } from "node:path";
+import { dirname as dirname6, join as join9 } from "node:path";
 var PR_ATTRIBUTION = "\u{1F916} Generated with [Claude Code](https://claude.com/claude-code)";
 function gh(cwd, args) {
-  return spawnSync5("gh", args, { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+  return spawnSync6("gh", args, { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
 }
 var streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? "")).trim();
 function parseOriginRepo(url) {
@@ -8426,7 +8439,7 @@ function parseOriginRepo(url) {
   return { host, repo: `${host}/${owner}/${name}` };
 }
 function workPreflight(cwd) {
-  const url = spawnSync5("git", ["remote", "get-url", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const url = spawnSync6("git", ["remote", "get-url", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (url.status !== 0) {
     return { refusal: "direct-merge: work mode opens a PR against the 'origin' remote, and this repository has none. Add it: git remote add origin <url>" };
   }
@@ -8436,7 +8449,7 @@ function workPreflight(cwd) {
       refusal: `direct-merge: origin's URL '${url.stdout.trim()}' is not a GitHub repository URL (https://host/owner/repo, ssh://host/owner/repo or host:owner/repo) \u2014 work mode derives the PR repo from origin and will not guess one.`
     };
   }
-  const pushUrls = spawnSync5("git", ["remote", "get-url", "--push", "--all", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const pushUrls = spawnSync6("git", ["remote", "get-url", "--push", "--all", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (pushUrls.status !== 0) {
     return { refusal: `direct-merge: could not read origin's push URLs (git remote get-url --push --all origin, exit ${pushUrls.status}): ${streams(pushUrls)}` };
   }
@@ -8468,13 +8481,13 @@ Run: gh auth login --hostname ${origin.host}` };
   return { repo: origin.repo };
 }
 function localBranchRefusal(cwd, branch2) {
-  const fmt = spawnSync5("git", ["check-ref-format", "--branch", branch2], { cwd, encoding: "utf8", timeout: 3e4 });
-  const ref = spawnSync5("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch2}`], { cwd, encoding: "utf8", timeout: 3e4 });
+  const fmt = spawnSync6("git", ["check-ref-format", "--branch", branch2], { cwd, encoding: "utf8", timeout: 3e4 });
+  const ref = spawnSync6("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch2}`], { cwd, encoding: "utf8", timeout: 3e4 });
   if (fmt.status === 0 && ref.status === 0) return null;
   return `direct-merge: '${branch2}' is not a local branch (no refs/heads/${branch2}) \u2014 work mode pushes a local branch to open its PR. Check out the branch, or pass --branch <local branch>.`;
 }
 function prTextFromCommits(cwd, mergeBase2, branchTip2, branch2) {
-  const log = spawnSync5("git", ["log", "--no-merges", "--reverse", "--format=%s%x1f%b%x1e", `${mergeBase2}..${branchTip2}`], {
+  const log = spawnSync6("git", ["log", "--no-merges", "--reverse", "--format=%s%x1f%b%x1e", `${mergeBase2}..${branchTip2}`], {
     cwd,
     encoding: "utf8",
     timeout: 3e4
@@ -8518,7 +8531,7 @@ function findOpenPr(cwd, repo, branch2, base2) {
   return matches.length ? { url: matches[0].url, number: matches[0].number } : null;
 }
 function pushWithWindowsRetry(cwd, pushArgs, log) {
-  const tryPush = (cmd) => spawnSync5(cmd, ["push", ...pushArgs], {
+  const tryPush = (cmd) => spawnSync6(cmd, ["push", ...pushArgs], {
     cwd,
     encoding: "utf8",
     timeout: 12e4,
@@ -8609,7 +8622,7 @@ function shipAsPr({ cwd, repo, branch: branch2, base: base2, mergeBase: mergeBas
   state.pushed = true;
   log(`direct-merge: pushed ${branch2} (${branchTip2}) to origin.`);
   for (const [key, value] of [[`branch.${branch2}.remote`, "origin"], [`branch.${branch2}.merge`, `refs/heads/${branch2}`]]) {
-    const set = spawnSync5("git", ["config", key, value], { cwd, encoding: "utf8", timeout: 3e4 });
+    const set = spawnSync6("git", ["config", key, value], { cwd, encoding: "utf8", timeout: 3e4 });
     if (set.status !== 0) log(`direct-merge: could not set the upstream (${key}); the push and PR are unaffected. Set it with: git branch --set-upstream-to=origin/${branch2} ${branch2}`);
   }
   if (existing) {
@@ -8684,9 +8697,9 @@ function shipAsPr({ cwd, repo, branch: branch2, base: base2, mergeBase: mergeBas
   return null;
 }
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
-var prLoopPath = (root) => join8(root, PR_LOOP_REL);
+var prLoopPath = (root) => join9(root, PR_LOOP_REL);
 function writeAtomic(file, value) {
-  mkdirSync4(dirname5(file), { recursive: true });
+  mkdirSync4(dirname6(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync2(tmp, JSON.stringify(value, null, 2) + "\n");
   renameSync2(tmp, file);
@@ -8700,7 +8713,7 @@ function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE_
 // scripts/lib/attestation-inspection.mjs
 init_dist();
 import { existsSync as existsSync5, readFileSync as readFileSync6 } from "node:fs";
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 var EXAMPLE_CAP = 5;
 var EXAMPLE_PRIORITY = ["rejected", "needs_rework", "uncovered", "approved"];
@@ -8716,7 +8729,7 @@ function parseNulPathList(stdout) {
 function readAttestationGlobs(projectRoot2) {
   const dropped = { invalid_container: false, non_string: 0, empty: 0, duplicates: [] };
   try {
-    const configPath = join9(projectRoot2, ".sterling", "config.json");
+    const configPath = join10(projectRoot2, ".sterling", "config.json");
     if (!existsSync5(configPath)) return { globs: [], dropped };
     const raw = JSON.parse(readFileSync6(configPath, "utf8"));
     const declared = raw && typeof raw === "object" ? raw.attestation_path_globs : void 0;
@@ -8762,7 +8775,7 @@ function inspectAttestations({ projectRoot: projectRoot2, touchedPaths, declared
   }
   const touched = Array.isArray(touchedPaths) ? [...new Set(touchedPaths.filter((p) => typeof p === "string" && p).map(normalizePath))] : [];
   const globs = Array.isArray(declaredGlobs) ? declaredGlobs.filter((g) => typeof g === "string" && g) : [];
-  const dbPath = join9(projectRoot2, ".sterling", "sterling.db");
+  const dbPath = join10(projectRoot2, ".sterling", "sterling.db");
   if (!existsSync5(dbPath)) {
     return { available: false, reason: `no Sterling store at ${dbPath} \u2014 nothing to compare against` };
   }
@@ -8880,10 +8893,12 @@ function attestationDisclosureLines({ tool, result, declaredGlobs, subject, drop
 
 // scripts/direct-merge.mjs
 var target = arg("--target") ?? process.cwd();
+var linkedWorktree = resolveLinkedWorktree(target);
+var storeRoot = linkedWorktree ? linkedWorktree.mainRoot : target;
 var mode;
 var modeError;
 try {
-  mode = readProjectMode(target);
+  mode = readProjectMode(storeRoot);
 } catch (e) {
   modeError = e;
 }
@@ -8897,8 +8912,21 @@ function fail2(message, code = 1) {
 }
 stage("git-repo");
 if (!isGitRepo(target)) fail2(`direct-merge: not a git repository: '${target}'`);
+if (linkedWorktree && !modeError && mode !== "work") {
+  const head = spawnSync7("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
+  const wtBranch = head.status === 0 && head.stdout.trim() ? head.stdout.trim() : "<branch>";
+  fail2(
+    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree of '${linkedWorktree.mainRoot}' \u2014 refusing before the battery.
+A hobby merge checks the base branch out, and the base is normally checked out in the main tree, so it cannot complete from a worktree.
+Free the branch, then run the merge from the main checkout:
+  git -C ${linkedWorktree.mainRoot} worktree remove ${linkedWorktree.worktree}   (or, to keep the worktree: git -C ${linkedWorktree.worktree} checkout --detach)
+  git -C ${linkedWorktree.mainRoot} checkout ${wtBranch}
+  node ${fileURLToPath(new URL("../scripts/direct-merge.mjs", import.meta.url).href)} --target ${linkedWorktree.mainRoot}`,
+    2
+  );
+}
 stage("open-project");
-openProject(target).store.close();
+openProject(storeRoot).store.close();
 if (modeError) fail2(`direct-merge: ${modeError?.message ?? modeError} \u2014 refusing; nothing was run.`, 2);
 var workRepo;
 if (mode === "work") {
@@ -8915,7 +8943,7 @@ if (mode === "work") {
 }
 stage("branch");
 var into = arg("--into") ?? defaultBranch(target);
-var symbolic = spawnSync6("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
+var symbolic = spawnSync7("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
 if (symbolic.error || symbolic.status !== 0 && !(symbolic.status === 1 && !(symbolic.stderr ?? "").trim())) {
   fail2(
     `direct-merge: could not determine the checked-out branch (git symbolic-ref HEAD ${symbolic.error ? `failed to run: ${symbolic.error.message}` : `exited ${symbolic.status ?? `by signal ${symbolic.signal}`}: ${(symbolic.stderr || symbolic.stdout || "").trim()}`}) \u2014 refusing before the battery.`
@@ -8952,7 +8980,7 @@ if (mode === "work") {
   if (notBranch) fail2(notBranch, 2);
 }
 stage("dirty-tree");
-var dirtyCheck = spawnSync6("git", ["status", "--porcelain"], { cwd: target, encoding: "utf8", timeout: 6e4 });
+var dirtyCheck = spawnSync7("git", ["status", "--porcelain"], { cwd: target, encoding: "utf8", timeout: 6e4 });
 if (dirtyCheck.status !== 0) {
   fail2(`direct-merge: git status --porcelain failed (${dirtyCheck.status}): ${(dirtyCheck.stderr || dirtyCheck.stdout || "").trim()}`);
 }
@@ -8989,23 +9017,23 @@ ${untracked.length} untracked path(s):`,
 }
 stage("resolve");
 var resolveSha = (ref, label) => {
-  const r = spawnSync6("git", ["rev-parse", ref], { cwd: target, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync7("git", ["rev-parse", ref], { cwd: target, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) fail2(`direct-merge: git rev-parse ${label} ('${ref}') failed: ${(r.stderr || "").trim()}`);
   return r.stdout.trim();
 };
 var intoTip = resolveSha(into, "into");
 var branchTip = resolveSha(branch, "branch");
-var mergeBaseR = spawnSync6("git", ["merge-base", intoTip, branchTip], { cwd: target, encoding: "utf8", timeout: 3e4 });
+var mergeBaseR = spawnSync7("git", ["merge-base", intoTip, branchTip], { cwd: target, encoding: "utf8", timeout: 3e4 });
 if (mergeBaseR.status !== 0) fail2(`direct-merge: git merge-base ${intoTip} ${branchTip} failed: ${(mergeBaseR.stderr || "").trim()}`);
 var mergeBase = mergeBaseR.stdout.trim();
-var diff = spawnSync6("git", ["-c", "core.quotePath=false", "diff", "--name-only", "--end-of-options", mergeBase, branchTip], { cwd: target, encoding: "utf8", timeout: 6e4 });
+var diff = spawnSync7("git", ["-c", "core.quotePath=false", "diff", "--name-only", "--end-of-options", mergeBase, branchTip], { cwd: target, encoding: "utf8", timeout: 6e4 });
 if (diff.status !== 0) fail2(`direct-merge: git diff ${mergeBase} ${branchTip} failed: ${(diff.stderr || "").trim()}`);
 var changed = new Set(diff.stdout.split("\n").map((l) => l.trim()).filter(Boolean));
 var versionOnlyPaths = VERSION_ONLY_CANDIDATES.filter((p) => changed.has(p) && isVersionOnlyBetweenCommits(target, mergeBase, branchTip, p));
 var reconcileChanged = new Set([...changed].filter((p) => !versionOnlyPaths.includes(p)));
 stage("reconcile");
-var { store: settleStore } = openProject(target);
-var settleRoot = projectRoot(target);
+var { store: settleStore } = openProject(storeRoot);
+var settleRoot = projectRoot(storeRoot);
 if (!settleRoot) fail2(`direct-merge: no Sterling store found at or above '${target}' for reconcile settlement`);
 var debt;
 var cleared;
@@ -9161,9 +9189,9 @@ direct-merge: RECONCILE DEBT DISCLOSED \u2014 ${headline} cover files this branc
 ` + grouped + "\n" + remedy.join("\n") + "\n");
 }
 stage("version");
-var GENERATED_ONLY = loadGeneratedProjections(target);
+var GENERATED_ONLY = loadGeneratedProjections(storeRoot);
 var pluginManifestRel = ".claude-plugin/plugin.json";
-if (existsSync6(join10(target, pluginManifestRel))) {
+if (existsSync6(join11(target, pluginManifestRel))) {
   const substantive = [...changed].filter((f) => !GENERATED_ONLY.has(f));
   if (substantive.length > 0 && !process.argv.includes("--allow-same-version")) {
     const readVersion = (raw, label) => {
@@ -9173,10 +9201,10 @@ if (existsSync6(join10(target, pluginManifestRel))) {
         fail2(`direct-merge: could not parse ${label} while checking the version bump`);
       }
     };
-    const pkgPath = join10(target, "package.json");
-    const branchPlugin = readVersion(readFileSync7(join10(target, pluginManifestRel), "utf8"), pluginManifestRel);
+    const pkgPath = join11(target, "package.json");
+    const branchPlugin = readVersion(readFileSync7(join11(target, pluginManifestRel), "utf8"), pluginManifestRel);
     const branchPkg = existsSync6(pkgPath) ? readVersion(readFileSync7(pkgPath, "utf8"), "package.json") : null;
-    const baseShow = spawnSync6("git", ["show", `${into}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
+    const baseShow = spawnSync7("git", ["show", `${into}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
     const basePlugin = baseShow.status === 0 ? readVersion(baseShow.stdout, `${into}:${pluginManifestRel}`) : null;
     if (branchPkg !== null && branchPlugin !== branchPkg) {
       fail2(
@@ -9193,7 +9221,7 @@ The version is the clone-currency signal consumers read: bump BOTH ${pluginManif
   }
 }
 stage("battery");
-var pkgJsonPath = join10(target, "package.json");
+var pkgJsonPath = join11(target, "package.json");
 var hasCheck = existsSync6(pkgJsonPath) && !!JSON.parse(readFileSync7(pkgJsonPath, "utf8")).scripts?.check;
 if (hasCheck) {
   console.error("direct-merge: running the consistency-check battery (npm run check)\u2026");
@@ -9211,7 +9239,7 @@ var attestationDisclosure = (() => {
     const { globs: declaredGlobs, dropped } = readAttestationGlobs(target);
     const hasDrop = dropped.invalid_container || dropped.non_string > 0 || dropped.empty > 0 || dropped.duplicates.length > 0;
     if (declaredGlobs.length === 0 && !hasDrop) return [];
-    const d = spawnSync6("git", ["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", "--end-of-options", mergeBase, branchTip], {
+    const d = spawnSync7("git", ["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", "--end-of-options", mergeBase, branchTip], {
       cwd: target,
       encoding: "utf8",
       timeout: 6e4
@@ -9231,7 +9259,7 @@ if (work) {
   const shipped = shipAsPr({ cwd: target, repo: workRepo, branch, base: into, mergeBase, branchTip, state: work.state, log: (m) => console.error(m) });
   if (shipped) work.fail(shipped.error, shipped.exitCode);
   try {
-    armPrLoop(target, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
+    armPrLoop(storeRoot, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
     console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} \u2014 run the pr-review-loop skill (armed in ${PR_LOOP_REL}).`);
   } catch (e) {
     console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOP_REL}: ${e?.message ?? e}) \u2014 H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
@@ -9248,7 +9276,7 @@ try {
 merged.attestation_disclosure = attestationDisclosure;
 try {
   if (changed.size > 0) {
-    const dbPath = join10(target, ".sterling", "sterling.db");
+    const dbPath = join11(storeRoot, ".sterling", "sterling.db");
     if (!existsSync6(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
     const nudgeStore = new SterlingStore(dbPath);
     let items;
@@ -9289,7 +9317,7 @@ try {
   console.log(JSON.stringify({ ...merged, branches_swept: null, sweep_failed: true }, null, 2));
   process.exit(1);
 }
-var bundleChecker = join10(target, "scripts", "check-bundles-fresh.mjs");
+var bundleChecker = join11(target, "scripts", "check-bundles-fresh.mjs");
 if (existsSync6(bundleChecker)) {
   console.error("direct-merge: rebuilding packages so the post-merge bundle check compares against MERGED source\u2026");
   const rebuilt = defaultExec("npm", ["run", "build"], { cwd: target, timeout: 6e5 });
@@ -9307,7 +9335,7 @@ if (existsSync6(bundleChecker)) {
     console.log(JSON.stringify({ ...merged, branches_swept: swept, bundles_unverified: true }, null, 2));
     process.exit(1);
   }
-  const bundles = spawnSync6(process.execPath, [bundleChecker], { cwd: target, encoding: "utf8", timeout: 3e5 });
+  const bundles = spawnSync7(process.execPath, [bundleChecker], { cwd: target, encoding: "utf8", timeout: 3e5 });
   if (bundles.status !== 0) {
     console.error(
       [
@@ -9327,14 +9355,14 @@ if (existsSync6(bundleChecker)) {
 }
 var parkedClosed = 0;
 try {
-  const postMergeHead = spawnSync6("git", ["rev-parse", "HEAD"], { cwd: target, encoding: "utf8", timeout: 3e4 });
+  const postMergeHead = spawnSync7("git", ["rev-parse", "HEAD"], { cwd: target, encoding: "utf8", timeout: 3e4 });
   const deletedSet = postMergeHead.status === 0 ? deletedBetween(target, intoTip, postMergeHead.stdout.trim()) : null;
   const { store: post } = openProject(target);
   try {
     for (const t of post.query({ types: ["todo"], cap: 1e3 })) {
       if (t.source !== "system" || t.system_reason !== "file_parked") continue;
       const paths = t.file_keys ?? [];
-      if (parkedItemResolved(paths, deletedSet, (k) => existsSync6(join10(target, k)))) {
+      if (parkedItemResolved(paths, deletedSet, (k) => existsSync6(join11(target, k)))) {
         post.remove(t.id, (/* @__PURE__ */ new Date()).toISOString());
         parkedClosed += 1;
       }
@@ -9349,7 +9377,7 @@ var pushed = false;
 if (process.argv.includes("--no-push")) {
   console.error("direct-merge: push to origin SKIPPED (--no-push) \u2014 consumers cannot see this merge until you push.");
 } else {
-  const remotes = spawnSync6("git", ["remote"], { cwd: target, encoding: "utf8", timeout: 3e4 });
+  const remotes = spawnSync7("git", ["remote"], { cwd: target, encoding: "utf8", timeout: 3e4 });
   const hasOrigin = remotes.status === 0 && remotes.stdout.split("\n").map((r) => r.trim()).includes("origin");
   if (!hasOrigin) {
     console.error("direct-merge: no 'origin' remote \u2014 push skipped (loud).");

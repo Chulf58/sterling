@@ -5247,7 +5247,7 @@ var runtimeMarkerSchema = external_exports.object({
 }).strict();
 
 // scripts/lib/project.mjs
-import { readFileSync, existsSync as existsSync2, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, existsSync as existsSync2, mkdtempSync, rmSync, realpathSync as realpathSync3 } from "node:fs";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
 // packages/store/dist/index.js
