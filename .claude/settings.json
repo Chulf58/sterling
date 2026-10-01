@@ -1,4 +1,5 @@
 {
   "agent": "conductor",
-  "autoMemoryEnabled": false
+  "autoMemoryEnabled": false,
+  "subagentPromptCacheTtl": "1h"
 }
