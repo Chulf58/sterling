@@ -46,6 +46,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { HOOK_NODE_FLAGS } from './lib/node-quiet.mjs';
 import { registerLockPath, terminalFileName, dispatchStateKey } from '../lib/dispatch-register.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -100,7 +101,7 @@ function makeProject() {
 }
 
 function runHook(scriptPath, input, cwd) {
-  const r = spawnSync(process.execPath, [scriptPath], {
+  const r = spawnSync(process.execPath, [...HOOK_NODE_FLAGS, scriptPath], {
     input: JSON.stringify(input),
     encoding: 'utf8',
     cwd,
@@ -765,7 +766,7 @@ test('DSH-11: a PostToolUseFailure on a pending dispatch tombstones it, so its t
 // (NO_COLOR / STERLING_NO_BANNER / STERLING_PLUGIN_ROOT) so the banner cannot
 // interfere; copied from that TEST, never from the hook.
 function runH1(dir, source) {
-  const r = spawnSync(process.execPath, [join(HOOKS, 'h1-session-start.mjs')], {
+  const r = spawnSync(process.execPath, [...HOOK_NODE_FLAGS, join(HOOKS, 'h1-session-start.mjs')], {
     input: JSON.stringify({
       hook_event_name: 'SessionStart',
       source,

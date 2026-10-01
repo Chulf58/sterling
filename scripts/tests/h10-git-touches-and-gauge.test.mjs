@@ -44,8 +44,16 @@ before(async () => {
 
 const sha256hex = (content) => createHash('sha256').update(content, 'utf8').digest('hex');
 
-// The SHIPPED window map — the pins below must hold for what a consumer gets.
-const SHIPPED_WINDOWS = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')).context_watch.windows;
+// The SHIPPED window map — the pins below must hold for what a consumer gets. Per-model
+// windows now ship in templates/context-windows.json (the shared table), not in the
+// per-project seed, so the map is the shared table plus the seed's default, supplied
+// here as the PROJECT table: gauges (1), (2) and (4) keep exercising the project-entry
+// path with the same inputs as before. The shared-table path is pinned in
+// h10-shared-context-windows.test.mjs.
+const SHIPPED_WINDOWS = {
+  ...JSON.parse(readFileSync(join(root, 'templates', 'context-windows.json'), 'utf8')).windows,
+  ...JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')).context_watch.windows,
+};
 
 function makeGitProject(windows = { default: 200_000 }) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-slice4-'));
@@ -262,7 +270,7 @@ test('git touches (4): the settled snapshot does NOT advance when minting fails 
   }
 });
 
-test('git touches (5): rewritten settled history mints one loud capture_owed recovery item and advances only after it is durable', () => {
+test('git touches (5): rewritten settled history (the settled SHA no longer exists) mints one loud capture_owed recovery item and advances only after it is durable', () => {
   const { dir, store, g, cleanup } = makeGitProject();
   try {
     writeFile(dir, 'src/rewrite.mjs', 'export const v = 1;\n');
@@ -272,6 +280,11 @@ test('git touches (5): rewritten settled history mints one loud capture_owed rec
     const oldSha = g(['rev-parse', 'HEAD']).trim();
     writeFile(dir, 'src/rewrite.mjs', 'export const v = 2;\n');
     g(['add', '-A']); g(['commit', '--amend', '-qm', 'rewritten']);
+    // Expire the reflog and prune so the old commit is really gone. An amended
+    // commit git can still read is a diverged base (merge-base fallback, see
+    // h10-settlement-sibling-branch.test.mjs), not a rewrite.
+    g(['reflog', 'expire', '--expire=now', '--all']); g(['gc', '-q', '--prune=now']);
+    assert.notEqual(spawnSync('git', ['cat-file', '-e', `${oldSha}^{commit}`], { cwd: dir }).status, 0, 'fixture: the old SHA is gone');
     captureNow(store);
     const first = runStop(dir);
     assert.equal(first.code, 0, first.stderr);

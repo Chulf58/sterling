@@ -13,7 +13,7 @@
 // finds no open PR, pushes again (a no-op) and creates it.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 
 export const PR_ATTRIBUTION = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
 
@@ -22,6 +22,23 @@ function gh(cwd, args) {
 }
 
 const streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? '')).trim();
+
+/** Where `gh` resolves on PATH (the first hit), or null. Reported when a gh
+ * call fails, because on WSL the one that runs is often a Windows gh.exe. */
+function resolveGhPath() {
+  const names = process.platform === 'win32' ? ['gh.exe', 'gh.cmd', 'gh'] : ['gh', 'gh.exe'];
+  for (const dir of String(process.env.PATH ?? '').split(delimiter)) {
+    if (!dir) continue;
+    for (const name of names) {
+      const candidate = join(dir, name);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+/** The web page that opens a PR for `branch` into `base` by hand. */
+const compareUrl = (repo, base, branch) => `https://${repo}/compare/${base.split('/').map(encodeURIComponent).join('/')}...${branch.split('/').map(encodeURIComponent).join('/')}?expand=1`;
 
 /** origin's GitHub identity from its fetch URL: `https://host/owner/repo(.git)`,
  * `ssh://[user@]host[:port]/owner/repo(.git)` or `[user@]host:owner/repo(.git)`.
@@ -338,6 +355,11 @@ export function shipAsPr({ cwd, repo, branch, base, mergeBase, branchTip, state,
         `Check with: ${lookupCmd}`,
         `Then rerun /sterling:merge: it is safe — it reuses an open PR for this head and base, or creates one; the push is a no-op.`,
         `If you open the PR by hand instead, rerunning /sterling:merge on ${branch} reuses it and arms the review loop.`,
+        `Create it by hand at: ${compareUrl(repo, base, branch)}`,
+        `Then rerun /sterling:merge on ${branch}.`,
+        ...(create.status !== 0
+          ? [`gh that ran: ${resolveGhPath() ?? 'not found on PATH'}. On WSL a Windows gh.exe is a known cause of this failure ("gh: Invalid argument").`]
+          : []),
         `gh api said: ${said}`,
       ].join('\n'),
     };
@@ -426,9 +448,12 @@ export function settlePrLoop(root, outcome, prRef, { originRepo, now = new Date(
   if (!armed || armed.repo !== s.repo || armed.number !== s.pr_number) {
     throw new Error(`${PR_LOOP_REL} is incoherent (pr_url ${s.pr_url}, repo ${s.repo}, pr_number ${s.pr_number}) — nothing settled; rerun /sterling:merge to re-arm it`);
   }
-  if (s.repo !== originRepo) throw new Error(`the armed loop is for ${s.repo}, not origin's repo (${originRepo}) — nothing settled`);
+  // A stuck loop (armed for a PR other than the one being settled, typically
+  // because the PR was opened by hand after a failed create) names its way out.
+  const unstick = `armed head ${s.head_sha}; to re-arm it for the current PR, rerun /sterling:merge on the branch this PR was opened from; to discard the armed state, run: rm ${prLoopPath(root)}`;
+  if (s.repo !== originRepo) throw new Error(`the armed loop is for ${s.repo}, not origin's repo (${originRepo}) — nothing settled (${unstick})`);
   if (ref.number !== s.pr_number || (ref.repo !== null && ref.repo !== s.repo)) {
-    throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} — nothing settled`);
+    throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} — nothing settled (${unstick})`);
   }
   if (s.status !== 'owed') throw new Error(`the loop for ${s.pr_url} is already settled '${s.status}' (${s.settled_at}); only an owed loop can be settled`);
   const next = { ...s, status: outcome, settled_at: now };

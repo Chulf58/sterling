@@ -447,7 +447,10 @@ export function readGitSettled(root) {
  * { ok: true, settled, candidates: [{path, at}], changed: Set, next } or
  * { ok: false, reason }. `changed` is every path differing from the settled
  * snapshot (the caller filters register entries against it); `next` is the
- * snapshot to persist once settlement succeeds.
+ * snapshot to persist once settlement succeeds. `base_lost` is true when the
+ * settled SHA is a rewrite (missing, or no common history with HEAD);
+ * `merge_base` is the effective base when the settled SHA exists but is not
+ * an ancestor of HEAD, else null.
  */
 export function gitTouches(root, now) {
   let head;
@@ -458,18 +461,36 @@ export function gitTouches(root, now) {
     else return { ok: false, reason: 'no_git' };
     const settled = readGitSettled(root);
     let base = settled?.sha;
-    // An object can remain readable through reflog/object retention after an
-    // amend or rebase while no longer being reachable from HEAD.  It is still
-    // an invalid settlement baseline: treating `git diff base..HEAD` as a
-    // trustworthy commit interval would silently skip rewritten duties.
-    if (base && base !== EMPTY_TREE && (spawnSync('git', ['cat-file', '-e', `${base}^{tree}`], { cwd: root, timeout: 30_000 }).status !== 0
-      || spawnSync('git', ['merge-base', '--is-ancestor', base, head], { cwd: root, timeout: 30_000 }).status !== 0)) base = null;
+    // A settled SHA that is not an ancestor of HEAD (board 54b775be): the
+    // checkout moved to a sibling branch, or an amend/rebase left the old
+    // commit readable. Diffing from it would count every difference between
+    // the two lines as this session's work, so the base becomes
+    // `git merge-base <settled> HEAD` and the pool keeps only paths that
+    // differ from BOTH the merge-base and the settled snapshot. A path whose
+    // content still matches the settled snapshot (a cherry-picked or
+    // squash-merged change) owes nothing; a path the settled line changed and
+    // HEAD's line did not is not a candidate either. A SHA git cannot find,
+    // or one sharing no history with HEAD, is a rewrite: base null, base_lost.
+    let mergeBase = null;
+    if (base && base !== EMPTY_TREE) {
+      if (spawnSync('git', ['cat-file', '-e', `${base}^{commit}`], { cwd: root, timeout: 30_000 }).status !== 0) base = null;
+      else if (spawnSync('git', ['merge-base', '--is-ancestor', base, head], { cwd: root, timeout: 30_000 }).status !== 0) {
+        const mb = spawnSync('git', ['merge-base', base, head], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+        mergeBase = mb.status === 0 ? mb.stdout.trim() || null : null;
+        if (!mergeBase) base = null;
+      }
+    }
     const hashOf = (p) => hashFile(root, p) ?? null;
     const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
     const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
-    if (!settled) return { ok: true, settled: null, candidates: [], changed: new Set(), next };
+    if (!settled) return { ok: true, settled: null, candidates: [], changed: new Set(), next, merge_base: null };
     const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
-    const pool = new Set([...(base ? changedSince(root, base) : dirtyNow), ...Object.keys(settled.dirty)]);
+    let fromBase = base ? changedSince(root, base) : dirtyNow;
+    if (mergeBase) {
+      const sinceMergeBase = changedSince(root, mergeBase);
+      fromBase = [...fromBase].filter((p) => sinceMergeBase.has(p));
+    }
+    const pool = new Set([...fromBase, ...Object.keys(settled.dirty)]);
     const changed = new Set([...pool].filter((p) => !isMachinery(p) && differs(p)));
     const candidates = [...changed].map((path) => {
       let at = settled.at;
@@ -480,7 +501,7 @@ export function gitTouches(root, now) {
       }
       return { path, at: typeof at === 'string' ? at : now };
     });
-    return { ok: true, settled, candidates, changed, next, base_lost: Boolean(settled.sha && !base) };
+    return { ok: true, settled, candidates, changed, next, base_lost: Boolean(settled.sha && !base), merge_base: mergeBase };
   } catch (e) {
     return { ok: false, reason: String((e && e.message) || e) };
   }

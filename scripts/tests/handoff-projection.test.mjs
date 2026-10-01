@@ -13,6 +13,7 @@ import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SterlingStore } from '@sterling/store';
 import { buildHandoffFiles } from '../lib/handoff-projection.mjs';
+import { HOOK_NODE_FLAGS } from './lib/node-quiet.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const NOW = '2026-09-24T12:00:00.000Z';
@@ -465,4 +466,53 @@ test('record filenames are unique and case-insensitive-safe: duplicate slugs, sh
   assert.ok(recordFiles.includes('docs/sterling/decisions/no-slug-here-77777777.md')); // not-a-citation: fixture id
   assert.ok(recordFiles.every((f) => f.split('/').pop().length <= 100), 'a long slug is truncated');
   assert.deepEqual([...buildHandoffFiles([...records].reverse()).files.keys()], [...files.keys()], 'deterministic whatever the input order');
+});
+
+// Gap 4 (board ks-dashboards-gap-4): argv[2] was read as the target path, so --help
+// became a project root. A help flag prints usage and exits 0; an unknown flag exits 2.
+function cli(args, cwd) {
+  const r = spawnSync(process.execPath, [...HOOK_NODE_FLAGS, join(root, 'scripts', 'handoff-projection.mjs'), ...args], {
+    encoding: 'utf8', cwd, timeout: 120_000,
+  });
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+}
+
+test('--help and -h print usage and exit 0 without resolving a target or touching a project', () => {
+  const dir = fixture();
+  try {
+    const before = snapshot(dir);
+    for (const flag of ['--help', '-h']) {
+      const r = cli([flag], dir);
+      assert.equal(r.code, 0, `${flag}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout, /^Usage: node scripts\/handoff-projection\.mjs \[<project root>\]/m, flag);
+      assert.doesNotMatch(r.stdout, /handoff projection:/, `${flag} is not a projection run`);
+    }
+    assert.deepEqual(snapshot(dir), before, 'help writes nothing into the cwd project');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unknown --flag is an error with exit 2, never read as a project root', () => {
+  const dir = fixture();
+  try {
+    const r = cli(['--bogus'], dir);
+    assert.equal(r.code, 2, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /unknown option --bogus/);
+    assert.match(r.stderr, /Usage: node scripts\/handoff-projection\.mjs/);
+    assert.deepEqual(listTree(dir), [], 'nothing was projected');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a plain path argument still selects the target project', () => {
+  const dir = fixture();
+  try {
+    const r = cli([dir], tmpdir());
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /^handoff projection: written/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

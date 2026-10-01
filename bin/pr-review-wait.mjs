@@ -8,7 +8,7 @@ import { join as join2, resolve } from "node:path";
 
 // scripts/lib/work-pr.mjs
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 function parseOriginRepo(url) {
   const u = String(url ?? "").trim();
   let host;
@@ -66,9 +66,10 @@ function settlePrLoop(root, outcome, prRef, { originRepo, now = (/* @__PURE__ */
   if (!armed || armed.repo !== s.repo || armed.number !== s.pr_number) {
     throw new Error(`${PR_LOOP_REL} is incoherent (pr_url ${s.pr_url}, repo ${s.repo}, pr_number ${s.pr_number}) \u2014 nothing settled; rerun /sterling:merge to re-arm it`);
   }
-  if (s.repo !== originRepo) throw new Error(`the armed loop is for ${s.repo}, not origin's repo (${originRepo}) \u2014 nothing settled`);
+  const unstick = `armed head ${s.head_sha}; to re-arm it for the current PR, rerun /sterling:merge on the branch this PR was opened from; to discard the armed state, run: rm ${prLoopPath(root)}`;
+  if (s.repo !== originRepo) throw new Error(`the armed loop is for ${s.repo}, not origin's repo (${originRepo}) \u2014 nothing settled (${unstick})`);
   if (ref.number !== s.pr_number || ref.repo !== null && ref.repo !== s.repo) {
-    throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} \u2014 nothing settled`);
+    throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} \u2014 nothing settled (${unstick})`);
   }
   if (s.status !== "owed") throw new Error(`the loop for ${s.pr_url} is already settled '${s.status}' (${s.settled_at}); only an owed loop can be settled`);
   const next = { ...s, status: outcome, settled_at: now };
@@ -85,11 +86,12 @@ var flag = (name2) => {
 var target = resolve(flag("--target") ?? process.cwd());
 var COPILOT_LOGIN = /copilot/i;
 var COMPLETED_STATES = /* @__PURE__ */ new Set(["COMMENTED", "APPROVED", "CHANGES_REQUESTED"]);
+var COPILOT_REQUEST_LOGIN = "copilot-pull-request-reviewer[bot]";
 var GH_CALL_TIMEOUT_MS = 6e4;
 var DEFAULT_TIMEOUT_S = 540;
 var DEFAULT_INTERVAL_S = 30;
 var MAX_INTERVAL_S = 120;
-var result = { status: "error", head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review_ignored: false, identity_confirmed: false };
+var result = { status: "error", head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review_ignored: false, identity_confirmed: false, previously_missed: [], body_findings_without_comments: false, copilot_request: null };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + "\n");
@@ -131,7 +133,7 @@ if (argv.includes("--settle")) {
 }
 var valued = /* @__PURE__ */ new Set(["--repo", "--since-review", "--head", "--timeout", "--interval", "--target"]);
 var positional = argv.filter((a, i) => !a.startsWith("--") && !valued.has(argv[i - 1]));
-if (positional.length !== 1) error("usage: pr-review-wait.mjs <pr-url|number> [--repo host/owner/repo] [--since-review <id>] [--head <sha>] [--timeout <s>]");
+if (positional.length !== 1) error("usage: pr-review-wait.mjs <pr-url|number> [--repo host/owner/repo] [--since-review <id>] [--head <sha>] [--timeout <s>] [--request-copilot]");
 var seconds = (name2, dflt) => {
   const raw = flag(name2);
   if (raw === void 0) return dflt;
@@ -144,7 +146,10 @@ var intervalS = seconds("--interval", DEFAULT_INTERVAL_S);
 var sinceRaw = flag("--since-review");
 if (sinceRaw !== void 0 && !/^\d+$/.test(sinceRaw)) error(`--since-review must be a review id, got '${sinceRaw}'`);
 var sinceReview = sinceRaw === void 0 ? null : Number(sinceRaw);
-var expectedHead = flag("--head") ?? null;
+var headRaw = flag("--head");
+if (headRaw !== void 0 && !/^[0-9a-f]{7,40}$/i.test(headRaw)) error(`--head must be 7-40 hex characters of a commit sha, got '${headRaw}'`);
+var expectedHead = headRaw === void 0 ? null : headRaw.toLowerCase();
+var requestCopilot = argv.includes("--request-copilot");
 var pinnedLogins = readPinnedLogins();
 result.identity_confirmed = pinnedLogins.length > 0;
 var originUrl = spawnSync("git", ["remote", "get-url", "origin"], { cwd: target, encoding: "utf8", timeout: 3e4 });
@@ -167,16 +172,49 @@ var [, owner, name] = origin.repo.split("/");
 var base = `repos/${owner}/${name}/pulls/${prNumber}`;
 var DeadlineReached = class extends Error {
 };
-function ghApi(path, { paginate = false } = {}) {
+function ghApi(path, { paginate = false, extra = [] } = {}) {
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw new DeadlineReached();
-  const args = ["api", "--hostname", origin.host, ...paginate ? ["--paginate"] : [], path];
+  const args = ["api", "--hostname", origin.host, ...paginate ? ["--paginate"] : [], ...extra, path];
   const r = spawnSync("gh", args, { cwd: target, encoding: "utf8", timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
   if (r.error?.code === "ETIMEDOUT" && Date.now() >= deadline) throw new DeadlineReached();
   if (r.error || r.status !== 0) {
     throw new Error(`gh ${args.join(" ")} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || r.stdout || "").trim()}`);
   }
   return r.stdout;
+}
+function parsePreviouslyMissed(body) {
+  const items = [];
+  let inSection = false;
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    const plain = line.replace(/<[^>]*>/g, "").replace(/^[\s#*_]+/, "");
+    const isHeading = /^\s{0,3}#{1,6}\s/.test(line);
+    if (/^previously missed/i.test(plain) && (isHeading || /^\s*(\*\*|__|<summary|<details)/i.test(line))) {
+      inSection = true;
+      continue;
+    }
+    if (!inSection) continue;
+    if (isHeading || /<\/details>/i.test(line)) break;
+    const item = line.match(/^\s*(?:[-*+]|\d+[.)])\s+(.*\S)\s*$/);
+    if (item) items.push(item[1]);
+    else if (items.length && /^\s+\S/.test(line)) items[items.length - 1] += ` ${line.trim()}`;
+  }
+  return items;
+}
+function requestCopilotReview() {
+  try {
+    const nodeId = ghApi(base, { extra: ["--jq", ".node_id"] }).trim();
+    if (!/^[A-Za-z0-9_=-]+$/.test(nodeId) || nodeId === "null") throw new Error(`gh api ${base} returned no usable node_id (got '${nodeId}')`);
+    const query = `mutation { requestReviewsByLogin(input:{pullRequestId:"${nodeId}", botLogins:["${COPILOT_REQUEST_LOGIN}"], union:true}) { pullRequest { id } } }`;
+    const reply = JSON.parse(ghApi("graphql", { extra: ["-f", `query=${query}`] }));
+    if (Array.isArray(reply?.errors) && reply.errors.length) throw new Error(`requestReviewsByLogin returned errors: ${reply.errors.map((e) => e?.message ?? JSON.stringify(e)).join("; ")}`);
+    result.copilot_request = { requested: true };
+  } catch (e) {
+    const message = e instanceof DeadlineReached ? "the --timeout budget ran out before the request completed" : e.message;
+    result.copilot_request = { requested: false, error: `requestReviewsByLogin failed: ${message}` };
+    process.stderr.write(`pr-review-wait: --request-copilot failed \u2014 ${message}
+`);
+  }
 }
 function parsePages(text) {
   const values = [];
@@ -213,7 +251,7 @@ function poll() {
   const copilot = reviews.filter((r) => isCopilot(r, pinnedLogins));
   if (copilot.length) result.observed_copilot_login = copilot.reduce((a, b) => b.id > a.id ? b : a).user.login;
   const fresh = copilot.filter((r) => COMPLETED_STATES.has(r.state) && (sinceReview === null || r.id > sinceReview));
-  const current = expectedHead === null || expectedHead === head ? fresh.filter((r) => r.commit_id === head) : [];
+  const current = expectedHead === null || head.toLowerCase().startsWith(expectedHead) ? fresh.filter((r) => r.commit_id === head) : [];
   result.stale_review_ignored = result.stale_review_ignored || fresh.some((r) => r.commit_id !== head);
   if (!current.length) return null;
   const review = current.reduce((a, b) => b.id < a.id ? b : a);
@@ -223,11 +261,15 @@ function poll() {
     result.head_sha = typeof again?.head?.sha === "string" ? again.head.sha : head;
     return null;
   }
+  const body = review.body ?? "";
   return {
-    review: { id: review.id, commit_id: review.commit_id, author: review.user.login, state: review.state, body: review.body ?? "" },
-    comments
+    review: { id: review.id, commit_id: review.commit_id, author: review.user.login, state: review.state, body },
+    comments,
+    previously_missed: parsePreviouslyMissed(body),
+    body_findings_without_comments: body.trim() !== "" && comments.length === 0
   };
 }
+if (requestCopilot) requestCopilotReview();
 var sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 for (; ; ) {
   let found;

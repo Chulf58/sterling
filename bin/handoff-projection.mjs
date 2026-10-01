@@ -11,7 +11,7 @@ import { dirname as dirname2, join as join5, resolve as resolve4 } from "node:pa
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
-import { readFileSync, existsSync as existsSync2, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, existsSync as existsSync2, mkdtempSync, rmSync, realpathSync as realpathSync3 } from "node:fs";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
 // node_modules/zod/v3/external.js
@@ -7971,7 +7971,18 @@ function ignoredRemedy(ignored) {
 
 // scripts/handoff-projection.mjs
 var pluginRoot = resolve4(dirname2(fileURLToPath(new URL("../scripts/handoff-projection.mjs", import.meta.url).href)), "..");
-var target = resolve4(process.argv[2] ?? process.cwd());
+var USAGE = "Usage: node scripts/handoff-projection.mjs [<project root>]\nProjects the target project's store into architecture.md, rulings.md and docs/sterling/. The root defaults to the current directory.";
+var cliArg = process.argv[2];
+if (cliArg === "--help" || cliArg === "-h") {
+  console.log(USAGE);
+  process.exit(0);
+}
+if (cliArg?.startsWith("-")) {
+  console.error(`handoff projection: unknown option ${cliArg}
+${USAGE}`);
+  process.exit(2);
+}
+var target = resolve4(cliArg ?? process.cwd());
 var fwd2 = (p) => p.replace(/\\/g, "/");
 var STANDING = 2;
 var ACTIONABLE = 3;
