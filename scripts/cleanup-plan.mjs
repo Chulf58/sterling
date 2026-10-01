@@ -12,9 +12,11 @@
 //   keep     no live owner, but another file references it, or the reference
 //            check could not run. Fails closed: unmeasured means kept.
 //   delete   on disk, no live owner, no reference from any other file.
+// A reference is a mention of the filename, the stem, the stem's PascalCase or
+// camelCase form, or (for a .gd file) the class_name the file declares.
 // Only `delete` paths reach the top-level delete_paths list. The planner opens
 // a read-only copy of the store and never writes to it.
-import { lstatSync, realpathSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { arg, openProjectReadOnly } from './lib/project.mjs';
@@ -47,18 +49,51 @@ function gitUnavailable() {
   return null;
 }
 
-// Other files (tracked, plus untracked files git does not ignore) that mention
-// the path's basename, or its basename without the extension. Fixed-string
-// match, no regex over file text. Returns { refs } or { error }.
-function referencesTo(path) {
+// What a reference to the path looks like: its basename, the basename without
+// the extension, that stem in PascalCase and camelCase (foo_bar -> FooBar,
+// fooBar), and for a .gd file every `class_name` it declares, which is the name
+// other scripts use and `extends`. Returns { needles } or { error } when the
+// file cannot be read for its class_name.
+function needlesFor(path) {
   const base = basename(path);
   const dot = base.lastIndexOf('.');
-  const needles = dot > 0 ? [base, base.slice(0, dot)] : [base];
-  const r = runGit(['grep', '-l', '-z', '--untracked', '--fixed-strings', ...needles.flatMap((n) => ['-e', n]), '--']);
-  if (r.error) return { error: `git grep could not be run (${r.error.message})` };
-  if (r.status === 1) return { refs: [] };
-  if (r.status !== 0) return { error: `git grep failed (exit ${r.status}): ${firstLine(r.stderr)}` };
-  return { refs: r.stdout.split('\0').filter((f) => f && f !== path) };
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  const words = stem.split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const pascal = words.map((w) => w[0].toUpperCase() + w.slice(1)).join('');
+  const camel = pascal ? pascal[0].toLowerCase() + pascal.slice(1) : '';
+  const needles = [base, stem, pascal, camel];
+  if (base.endsWith('.gd')) {
+    let text;
+    try {
+      text = readFileSync(join(target, path), 'utf8');
+    } catch (e) {
+      return { error: `could not read the file to find its class_name (${e.code ?? e.message})` };
+    }
+    for (const m of text.matchAll(/^\s*class_name\s+([A-Za-z_][A-Za-z0-9_]*)/gm)) needles.push(m[1]);
+  }
+  return { needles: [...new Set(needles.filter(Boolean))] };
+}
+
+// Other files (tracked, plus untracked files git does not ignore) that mention
+// any needle. Fixed-string match, no regex over file text, one git grep per
+// needle so the reason can say which needle matched. Returns { refs, matched }
+// or { error }.
+function referencesTo(path) {
+  const n = needlesFor(path);
+  if (n.error) return { error: n.error };
+  const refs = new Set();
+  const matched = [];
+  for (const needle of n.needles) {
+    const r = runGit(['grep', '-l', '-z', '--untracked', '--fixed-strings', '-e', needle, '--']);
+    if (r.error) return { error: `git grep could not be run (${r.error.message})` };
+    if (r.status === 1) continue;
+    if (r.status !== 0) return { error: `git grep failed (exit ${r.status}): ${firstLine(r.stderr)}` };
+    const hits = r.stdout.split('\0').filter((f) => f && f !== path);
+    if (!hits.length) continue;
+    matched.push(needle);
+    for (const f of hits) refs.add(f);
+  }
+  return { refs: [...refs], matched };
 }
 
 function buildPlan(store) {
@@ -94,10 +129,10 @@ function buildPlan(store) {
     if (!st.isFile()) return ['keep', 'not a regular file (a directory or a link); fs-remove deletes files only'];
     if (gitWhy === undefined) gitWhy = gitUnavailable();
     if (gitWhy) return ['keep', `reference check could not run: ${gitWhy}`];
-    const { refs, error } = referencesTo(path);
+    const { refs, matched, error } = referencesTo(path);
     if (error) return ['keep', `reference check could not run: ${error}`];
-    if (refs.length) return ['keep', `referenced by ${refs.length} other file(s): ${listed(refs)}`];
-    return ['delete', 'on disk, no live owner, and no other file references it'];
+    if (refs.length) return ['keep', `referenced by ${refs.length} other file(s): ${listed(refs)} (matched ${listed(matched)})`];
+    return ['delete', 'on disk, no live owner, and no other tracked file references its filename, stem or declared class'];
   };
 
   const candidates = articles

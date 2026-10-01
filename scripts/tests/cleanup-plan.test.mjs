@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -158,7 +158,9 @@ test('cleanup-plan: a sole-owned file no other file references is delete', () =>
     const dead = store.create(articleRec('dead-feat', ['src/dead_feature.mjs'], { state: 'deprecated' }));
     const p = plan(dir);
     const c = p.candidates.find((x) => x.article === dead.id);
-    assert.equal(bucketOf(c, 'src/dead_feature.mjs').bucket, 'delete', 'the file referencing itself does not keep it');
+    const deadEntry = bucketOf(c, 'src/dead_feature.mjs');
+    assert.equal(deadEntry.bucket, 'delete', 'the file referencing itself does not keep it');
+    assert.match(deadEntry.reason, /filename, stem or declared class/, 'the reason says what was checked');
     assert.deepEqual(p.delete_paths, ['src/dead_feature.mjs']);
   } finally {
     cleanup();
@@ -213,6 +215,77 @@ test('cleanup-plan: the planner never writes to the project store', () => {
     assert.equal(digest(), before, 'the store files are byte-identical after a planner run');
     assert.ok(!existsSync(`${db}-journal`), 'no rollback journal left behind');
   } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a file referenced only by the PascalCase form of its stem is keep, and the reason names the needle', () => {
+  const { dir, store, cleanup } = makeProject({
+    'game/foo_bar.gd': 'class_name FooBar\nextends Node\n',
+    'game/user.gd': 'extends Node\nvar x = FooBar.new()\n',
+  });
+  try {
+    const dead = store.create(articleRec('old-foo', ['game/foo_bar.gd'], { state: 'deprecated' }));
+    store.create(articleRec('user-feat', ['game/user.gd']));
+    const p = plan(dir);
+    const c = p.candidates.find((x) => x.article === dead.id);
+    const foo = bucketOf(c, 'game/foo_bar.gd');
+    assert.equal(foo.bucket, 'keep');
+    assert.match(foo.reason, /game\/user\.gd/);
+    assert.match(foo.reason, /FooBar/, 'the reason names the matched needle');
+    assert.deepEqual(p.delete_paths, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a file referenced only by the camelCase form of its stem is keep', () => {
+  const { dir, store, cleanup } = makeProject({
+    'src/order_queue.mjs': 'export const make = () => [];\n',
+    'src/app.mjs': 'const orderQueue = globalThis.queues.get(1);\n',
+  });
+  try {
+    const dead = store.create(articleRec('old-queue', ['src/order_queue.mjs'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const q = bucketOf(p.candidates.find((x) => x.article === dead.id), 'src/order_queue.mjs');
+    assert.equal(q.bucket, 'keep');
+    assert.match(q.reason, /orderQueue/);
+    assert.deepEqual(p.delete_paths, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a .gd file referenced only by its declared class_name is keep', () => {
+  const { dir, store, cleanup } = makeProject({
+    'game/run/timer_logic.gd': 'class_name CropTimer extends Node\n',
+    'game/farm.gd': 'extends CropTimer\n',
+  });
+  try {
+    const dead = store.create(articleRec('old-timer', ['game/run/timer_logic.gd'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const t = bucketOf(p.candidates.find((x) => x.article === dead.id), 'game/run/timer_logic.gd');
+    assert.equal(t.bucket, 'keep');
+    assert.match(t.reason, /game\/farm\.gd/);
+    assert.match(t.reason, /CropTimer/);
+    assert.deepEqual(p.delete_paths, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a .gd file that cannot be read for its class_name fails closed: keep', { skip: process.getuid?.() === 0 && 'root reads a mode-000 file' }, () => {
+  const { dir, store, cleanup } = makeProject({ 'game/secret_node.gd': 'class_name Hidden\n', 'game/other.gd': 'extends Hidden\n' });
+  try {
+    chmodSync(join(dir, 'game', 'secret_node.gd'), 0o000);
+    const dead = store.create(articleRec('old-secret', ['game/secret_node.gd'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const s = bucketOf(p.candidates.find((x) => x.article === dead.id), 'game/secret_node.gd');
+    assert.equal(s.bucket, 'keep');
+    assert.match(s.reason, /could not read/);
+    assert.deepEqual(p.delete_paths, []);
+  } finally {
+    chmodSync(join(dir, 'game', 'secret_node.gd'), 0o644);
     cleanup();
   }
 });
