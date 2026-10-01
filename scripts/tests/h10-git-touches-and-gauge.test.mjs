@@ -44,8 +44,16 @@ before(async () => {
 
 const sha256hex = (content) => createHash('sha256').update(content, 'utf8').digest('hex');
 
-// The SHIPPED window map — the pins below must hold for what a consumer gets.
-const SHIPPED_WINDOWS = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')).context_watch.windows;
+// The SHIPPED window map — the pins below must hold for what a consumer gets. Per-model
+// windows now ship in templates/context-windows.json (the shared table), not in the
+// per-project seed, so the map is the shared table plus the seed's default, supplied
+// here as the PROJECT table: gauges (1), (2) and (4) keep exercising the project-entry
+// path with the same inputs as before. The shared-table path is pinned in
+// h10-shared-context-windows.test.mjs.
+const SHIPPED_WINDOWS = {
+  ...JSON.parse(readFileSync(join(root, 'templates', 'context-windows.json'), 'utf8')).windows,
+  ...JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')).context_watch.windows,
+};
 
 function makeGitProject(windows = { default: 200_000 }) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-slice4-'));
