@@ -38,17 +38,16 @@ test('marketplace.json carries the required top-level fields with valid names', 
   assert.ok(Array.isArray(marketplace.plugins));
   assert.ok(marketplace.plugins.length >= 1);
   assert.equal(typeof marketplace.description, 'string', 'validate warns when description is missing');
+  assert.ok(marketplace.description.length > 0, 'description must be non-empty');
 });
 
-test('the plugin entry matches plugin.json by name and (when declared) version', () => {
+test('the plugin entry matches plugin.json by name and carries no version of its own', () => {
   const entries = marketplace.plugins.filter((p) => p.name === plugin.name);
   assert.equal(entries.length, 1, `exactly one entry named "${plugin.name}" (the install id is entry-name@marketplace)`);
   const entry = entries[0];
   assert.match(entry.name, NAME_RE);
   assert.equal(new Set(marketplace.plugins.map((p) => p.name)).size, marketplace.plugins.length, 'no duplicate plugin names');
-  if ('version' in entry) {
-    assert.equal(entry.version, plugin.version, 'entry version must equal plugin.json version (plugin.json wins at install)');
-  }
+  assert.ok(!('version' in entry), 'entry must not set version: plugin.json is the single version source (a second copy drifts on every bump)');
 });
 
 test('the entry source resolves to the repo root, which holds the plugin manifest', () => {
