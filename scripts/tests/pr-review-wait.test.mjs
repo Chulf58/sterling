@@ -39,6 +39,8 @@ function oneLine(s) {
 //                         later poll. endpoint: pull | reviews | comments.
 //   With --paginate every page is printed back to back (gh's own output for
 //   array endpoints); without it, only the first page.
+//   `gh api graphql ...` answers graphql.json (default: a success payload) or
+//   exits 1 when fail_graphql exists; `--jq .node_id` prints the pull's node_id.
 //   A path whose repo is not acme/widget answers 404; a file named
 //   fail_<endpoint> makes that endpoint exit 1; delay_ms delays every answer.
 const FAKE_GH_IMPL = `
@@ -48,7 +50,14 @@ const state = process.env.FAKE_GH_STATE;
 const argv = process.argv.slice(2);
 appendFileSync(join(state, 'log.jsonl'), JSON.stringify(argv) + '\\n');
 if (argv[0] !== 'api') { console.error('fake gh: unhandled ' + JSON.stringify(argv)); process.exit(3); }
-const path = argv.filter((a, i) => i > 0 && !a.startsWith('--') && argv[i - 1] !== '--hostname').pop();
+const VALUED = new Set(['--hostname', '--jq', '-f', '-F']);
+const path = argv.filter((a, i) => i > 0 && !a.startsWith('-') && !VALUED.has(argv[i - 1])).pop();
+if (path === 'graphql') {
+  if (existsSync(join(state, 'fail_graphql'))) { console.error('gh: GraphQL: Could not resolve to a Bot (requestReviewsByLogin)'); process.exit(1); }
+  const gql = join(state, 'graphql.json');
+  process.stdout.write(existsSync(gql) ? readFileSync(gql, 'utf8') : '{"data":{"requestReviewsByLogin":{"pullRequest":{"id":"PR_node_7"}}}}');
+  process.exit(0);
+}
 const m = path.match(/^repos\\/([^/]+)\\/([^/]+)\\/pulls\\/(\\d+)(?:\\/(reviews|comments))?(?:\\?.*)?$/);
 if (!m) { console.error('fake gh: unexpected path ' + path); process.exit(3); }
 if (m[1] + '/' + m[2] !== 'acme/widget') { console.error('gh: Not Found (HTTP 404)'); process.exit(1); }
@@ -62,6 +71,7 @@ let pick = null;
 for (let k = 0; k <= count; k++) if (existsSync(join(state, endpoint + '.' + k + '.json'))) pick = k;
 const pages = pick === null ? [[]] : JSON.parse(readFileSync(join(state, endpoint + '.' + pick + '.json'), 'utf8'));
 const out = argv.includes('--paginate') ? pages : pages.slice(0, 1);
+if (argv[argv.indexOf('--jq') + 1] === '.node_id') { process.stdout.write(String(pages[0]?.node_id ?? null) + '\\n'); process.exit(0); }
 process.stdout.write(out.map((p) => JSON.stringify(p)).join(''));
 process.exit(0);
 `;
@@ -141,6 +151,9 @@ test('a NEW Copilot review on the CURRENT head is returned with its comments (pa
       observed_copilot_login: COPILOT,
       stale_review_ignored: false,
       identity_confirmed: false,
+      previously_missed: [],
+      body_findings_without_comments: false,
+      copilot_request: null,
     });
   } finally {
     f.cleanup();
@@ -509,6 +522,179 @@ test('--settle refuses to RE-settle: only an owed loop can be settled', () => {
     assert.equal(again.code, 1, oneLine(again.stdout + again.stderr));
     assert.match(again.out.error, /owed/);
     assert.equal(readFileSync(loopPath(f), 'utf8'), settled);
+  } finally {
+    f.cleanup();
+  }
+});
+
+// ------------------------------------------------- --head accepts a short sha
+test('--head: a 7-char prefix of the PR head matches (upper case too); a short sha that is not a prefix does not', () => {
+  for (const [head, status] of [[HEAD.slice(0, 7), 'review'], [HEAD.slice(0, 12).toUpperCase(), 'review'], [HEAD, 'review'], ['aaaaaab', 'timeout']]) {
+    const f = makeFixture();
+    try {
+      f.put('reviews', 0, [[review(600)]]);
+      f.put('comments', 0, [[comment(1, 600)]]);
+      const r = run(f, ['7', '--head', head, ...FAST]);
+      assert.equal(r.out.status, status, `${head}: ${oneLine(r.stdout)}`);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('--head: a value that is not 7-40 hex characters is an error naming the value, with no gh call', () => {
+  const f = makeFixture();
+  try {
+    for (const bad of ['abc123', 'a'.repeat(41), 'main', 'zzzzzzz', '']) {
+      const r = run(f, ['7', '--head', bad, ...FAST]);
+      assert.equal(r.code, 1, `'${bad}'`);
+      assert.equal(r.out?.status, 'error', oneLine(r.stdout));
+      assert.ok(r.out.error.includes('--head'), r.out.error);
+      assert.ok(r.out.error.includes(`'${bad}'`), `names the value: ${r.out.error}`);
+    }
+    assert.equal(calls(f).length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+// ------------------------------------------------------- previously missed
+const MISSED_BODY = [
+  '## Pull request overview',
+  'Copilot reviewed 3 out of 3 changed files and generated no comments.',
+  '',
+  '## Previously missed',
+  '- `src/a.mjs:10` unchecked null on the parse path',
+  '* second finding, wrapped',
+  '  onto a continuation line',
+  '1. numbered third finding',
+  '',
+  '## Tips',
+  '- not a finding',
+].join('\n');
+
+test('previously_missed: list items under the "Previously missed" heading are parsed; a review with no inline comments flags body_findings_without_comments', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(700, { body: MISSED_BODY })]]);
+    const r = run(f, ['7', ...FAST]);
+    assert.equal(r.out.status, 'review', oneLine(r.stdout));
+    assert.deepEqual(r.out.comments, []);
+    assert.deepEqual(r.out.previously_missed, ['`src/a.mjs:10` unchecked null on the parse path', 'second finding, wrapped onto a continuation line', 'numbered third finding']);
+    assert.equal(r.out.body_findings_without_comments, true);
+    assert.equal(r.out.review.body, MISSED_BODY, 'the raw body is still returned');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('previously_missed: a bold or <summary> heading form is found, and the section ends at </details>', () => {
+  const f = makeFixture();
+  try {
+    const body = ['Overview', '<details><summary>Previously missed (2)</summary>', '', '- one', '- two', '</details>', '- outside'].join('\n');
+    f.put('reviews', 0, [[review(701, { body })]]);
+    const r = run(f, ['7', ...FAST]);
+    assert.deepEqual(r.out.previously_missed, ['one', 'two']);
+    f.put('reviews', 0, [[review(701, { body: '**Previously missed**\n- bold one' })]]);
+    assert.deepEqual(run(f, ['7', ...FAST]).out.previously_missed, ['bold one']);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('previously_missed is [] when the section is absent; body_findings_without_comments is true for any non-empty body without comments, false with comments or an empty body', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(702, { body: 'Looks fine, a free-form note.' })]]);
+    let r = run(f, ['7', ...FAST]);
+    assert.deepEqual(r.out.previously_missed, []);
+    assert.equal(r.out.body_findings_without_comments, true, 'format is Copilot\'s and may change: any non-empty body with no comments is flagged');
+    f.put('reviews', 0, [[review(702, { body: '   ' })]]);
+    r = run(f, ['7', ...FAST]);
+    assert.equal(r.out.body_findings_without_comments, false, 'a blank body is not a finding');
+    f.put('reviews', 0, [[review(702, { body: 'Looks fine' })]]);
+    f.put('comments', 0, [[comment(1, 702)]]);
+    r = run(f, ['7', ...FAST]);
+    assert.equal(r.out.body_findings_without_comments, false, 'inline comments present');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// ----------------------------------------------------------- --request-copilot
+const mutationCalls = (f) => calls(f).filter((a) => a.includes('graphql'));
+
+test('--request-copilot: fires requestReviewsByLogin ONCE before polling, using the PR node id, and records success', () => {
+  const f = makeFixture();
+  try {
+    f.put('pull', 0, [{ number: 7, node_id: 'PR_node_7', head: { sha: HEAD } }]);
+    f.put('reviews', 0, [[]]);
+    f.put('reviews', 1, [[review(800)]]);
+    f.put('comments', 0, [[comment(1, 800)]]);
+    const r = run(f, ['7', '--request-copilot', ...FAST]);
+    assert.equal(r.out.status, 'review', oneLine(r.stdout));
+    assert.deepEqual(r.out.copilot_request, { requested: true });
+    const all = calls(f);
+    const idCall = all.find((a) => a.includes('--jq'));
+    assert.ok(idCall && idCall.includes('.node_id') && idCall.includes('repos/acme/widget/pulls/7'), JSON.stringify(idCall));
+    assert.equal(mutationCalls(f).length, 1, 'fired exactly once');
+    const q = mutationCalls(f)[0].find((a) => a.startsWith('query='));
+    assert.match(q, /requestReviewsByLogin/);
+    assert.ok(q.includes('pullRequestId:"PR_node_7"'), q);
+    assert.ok(q.includes('botLogins:["copilot-pull-request-reviewer[bot]"]'), q);
+    assert.match(q, /union:\s*true/);
+    assert.ok(all.indexOf(mutationCalls(f)[0]) < all.findIndex((a) => a.some((x) => x.endsWith('/reviews'))), 'before the first reviews poll');
+    assert.ok(mutationCalls(f)[0].includes('github.com'), 'names the host');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--request-copilot: without the flag no mutation is fired and copilot_request is null', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(801)]]);
+    const r = run(f, ['7', ...FAST]);
+    assert.equal(r.out.copilot_request, null);
+    assert.equal(mutationCalls(f).length, 0);
+    assert.equal(calls(f).filter((a) => a.includes('--jq')).length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--request-copilot: a failing mutation is reported loudly in the output and on stderr, and the wait still completes', () => {
+  const f = makeFixture();
+  try {
+    f.put('pull', 0, [{ number: 7, node_id: 'PR_node_7', head: { sha: HEAD } }]);
+    writeFileSync(join(f.state, 'fail_graphql'), '');
+    f.put('reviews', 0, [[review(802)]]);
+    const r = run(f, ['7', '--request-copilot', ...FAST]);
+    assert.equal(r.out.status, 'review', 'the wait is not aborted');
+    assert.equal(r.code, 0);
+    assert.equal(r.out.copilot_request.requested, false);
+    assert.match(r.out.copilot_request.error, /requestReviewsByLogin|Could not resolve/);
+    assert.match(r.stderr, /request-copilot/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--request-copilot: a missing node id (jq prints null) is a recorded failure, no mutation, wait continues; a GraphQL errors payload is a failure too', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(803)]]);
+    let r = run(f, ['7', '--request-copilot', ...FAST]);
+    assert.equal(r.out.status, 'review');
+    assert.equal(r.out.copilot_request.requested, false);
+    assert.match(r.out.copilot_request.error, /node_id/);
+    assert.equal(mutationCalls(f).length, 0);
+    f.put('pull', 0, [{ number: 7, node_id: 'PR_node_7', head: { sha: HEAD } }]);
+    writeFileSync(join(f.state, 'graphql.json'), JSON.stringify({ errors: [{ message: 'nope' }] }));
+    r = run(f, ['7', '--request-copilot', ...FAST]);
+    assert.equal(r.out.status, 'review');
+    assert.equal(r.out.copilot_request.requested, false);
+    assert.match(r.out.copilot_request.error, /nope/);
   } finally {
     f.cleanup();
   }
