@@ -17,7 +17,7 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -108,10 +108,15 @@ function touch(dir, paths) {
 const stop = (dir) =>
   runHook('h10-direct-capture.mjs', { session_id: 's1', transcript_path: join(dir, 't', 's1.jsonl'), cwd: dir, permission_mode: 'default', hook_event_name: 'Stop' }, dir);
 
-// The H10 disclosure names the owning agent_ids, then the deferred paths.
-function deferralLine(r) {
-  const line = out(r).split(/\\n|\n/).find((l) => /deferred: \d+ file\(s\) owned by live dispatch/.test(l));
-  assert.ok(line, `H10 disclosed a deferral: ${out(r)}`);
+// The H10 disclosure names the owning agent_ids, then the deferred paths. On a
+// non-blocking release it is a notice, not stdout/stderr (decision
+// h10-deferral-is-conductor-facing-degradations-stay-loud), so both are read.
+function deferralLine(r, dir) {
+  const notices = join(dir, '.sterling', 'transient', 'notices');
+  const noticeTexts = existsSync(notices) ? readdirSync(notices).map((n) => JSON.parse(readFileSync(join(notices, n), 'utf8')).text) : [];
+  const text = [out(r), ...noticeTexts].join('\n');
+  const line = text.split(/\\n|\n/).find((l) => /deferred: \d+ file\(s\) owned by live dispatch/.test(l));
+  assert.ok(line, `H10 disclosed a deferral: ${text}`);
   return line;
 }
 
@@ -303,7 +308,7 @@ test('the incident end to end: H10 defers the held files to the RESUMED fix roun
 
     touch(dir, [...HELD, 'game/farm/crop.gd']);
     const r = stop(dir);
-    const line = deferralLine(r);
+    const line = deferralLine(r, dir);
     assert.match(line, /deferred: 4 file\(s\)/, `all four touched files are owned by a live dispatch: ${line}`);
     assert.match(line, /\[fix-round, lane-f\]|\[lane-f, fix-round\]/, `both owners are named: ${line}`);
 
@@ -322,7 +327,7 @@ test('H10 matches a declared directory on a "/" boundary only: game/farm owns ga
   try {
     dispatch(dir, { tool_use_id: 'toolu_laneF', agent_id: 'lane-f', prompt: LANE_F_BRIEF });
     touch(dir, ['game/farm/crop.gd', 'game/farmhouse.gd']);
-    const line = deferralLine(stop(dir));
+    const line = deferralLine(stop(dir), dir);
     assert.match(line, /deferred: 1 file\(s\) owned by live dispatch\(es\) \[lane-f\]: game\/farm\/crop\.gd/, line);
     assert.doesNotMatch(line, /farmhouse/, 'a sibling that merely shares the prefix string is not inside the directory');
   } finally {
@@ -335,7 +340,7 @@ test('H10 keeps EXACT matching for a file entry: game/a.gd owns game/a.gd and no
   try {
     dispatch(dir, { tool_use_id: 'toolu_f', agent_id: 'lane-file', prompt: 'Own game/a.gd and game/b.gd.' });
     touch(dir, ['game/a.gd', 'game/c.gd']);
-    const line = deferralLine(stop(dir));
+    const line = deferralLine(stop(dir), dir);
     assert.match(line, /deferred: 1 file\(s\) owned by live dispatch\(es\) \[lane-file\]: game\/a\.gd/, line);
   } finally {
     cleanup();
@@ -347,7 +352,7 @@ test('H10 matches a DOTTED directory entry too: vendor/cache.v2 owns vendor/cach
   try {
     dispatch(dir, { tool_use_id: 'toolu_v', agent_id: 'lane-v', prompt: 'Lane V.\nREVIEW-TERRITORY: ["vendor/cache.v2"]' });
     touch(dir, ['vendor/cache.v2/blob.bin', 'vendor/other.bin']);
-    const line = deferralLine(stop(dir));
+    const line = deferralLine(stop(dir), dir);
     assert.match(line, /deferred: 1 file\(s\) owned by live dispatch\(es\) \[lane-v\]: vendor\/cache\.v2\/blob\.bin/, line);
   } finally {
     cleanup();

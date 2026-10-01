@@ -80,7 +80,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -112,6 +112,14 @@ function runHook(script, input, cwd, env = {}) {
 // the union avoids anchoring the oracle to an unstated delivery channel.
 function out(r) {
   return `${r.stdout}\n${r.stderr}`;
+}
+// The deferral line on a non-blocking release reaches the conductor through the
+// notice channel, not stdout/stderr (decision h10-deferral-is-conductor-facing-
+// degradations-stay-loud), so the union now includes the published notices.
+function disclosed(r, dir) {
+  const notices = join(dir, '.sterling', 'transient', 'notices');
+  const texts = existsSync(notices) ? readdirSync(notices).map((n) => readFileSync(join(notices, n), 'utf8')) : [];
+  return [out(r), ...texts].join('\n');
 }
 
 function envelope(type, at = NOW) {
@@ -590,9 +598,9 @@ test('H10 deferral: a single touched file wholly owned by a LIVE entry — nothi
 
     assert.equal(r.code, 0, 'the sole trigger file is fully deferred — nothing left to nag about');
     assert.doesNotMatch(r.stderr, /nothing was captured/, 'the capture duty itself never fires for a deferred file');
-    assert.match(out(r), /defer/i, 'the release discloses the deferral');
-    assert.match(out(r), /sub-1/, 'the disclosure names the owning agent_id');
-    assert.match(out(r), /\b1\b/, 'the disclosure names the deferred count');
+    assert.match(disclosed(r, dir), /defer/i, 'the release discloses the deferral');
+    assert.match(disclosed(r, dir), /sub-1/, 'the disclosure names the owning agent_id');
+    assert.match(disclosed(r, dir), /\b1\b/, 'the disclosure names the deferred count');
 
     assert.equal(existsSync(join(dir, '.sterling', 'transient', 'touches.json')), true, 'a non-terminal release never clears touches.json');
     assert.deepEqual(readTouches(dir), [{ path: 'src/x.mjs', at: NOW }], 'touches.json content is untouched by the deferred release');
@@ -696,9 +704,9 @@ test('H10 deferral (article demand): all 3 unowned touched files are owned by on
 
     assert.equal(r.code, 0, 'capture already satisfied and the 3 unowned files are wholly deferred — nothing demands');
     assert.doesNotMatch(out(r), /article demand/i);
-    assert.match(out(r), /defer/i);
-    assert.match(out(r), /sub-3/);
-    assert.match(out(r), /\b3\b/, 'the disclosure names the deferred count (3)');
+    assert.match(disclosed(r, dir), /defer/i);
+    assert.match(disclosed(r, dir), /sub-3/);
+    assert.match(disclosed(r, dir), /\b3\b/, 'the disclosure names the deferred count (3)');
     assert.equal(articleMissingItems(store).length, 0, 'no article_missing minted while the territory is deferred');
     assert.equal(existsSync(join(dir, '.sterling', 'transient', 'touches.json')), true, 'non-terminal release — touches.json preserved');
     assert.deepEqual(readRegister(dir), [sub3Entry], 'H10 leaves the dispatch register untouched');

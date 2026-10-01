@@ -8533,13 +8533,14 @@ import { join as join6, dirname as dirname5 } from "node:path";
 function noticesDir(cwd) {
   return join6(cwd, ".sterling", "transient", "notices");
 }
-function publishNotice(cwd, text) {
+function publishNotice(cwd, text, { sessionId } = {}) {
   const dir = noticesDir(cwd);
   mkdirSync4(dir, { recursive: true });
   const name = `h10-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
   const target = join6(dir, name);
   const tmp = `${target}.tmp`;
-  writeFileSync3(tmp, JSON.stringify({ text: String(text) }), { flag: "wx" });
+  const body = typeof sessionId === "string" && sessionId ? { text: String(text), session_id: sessionId } : { text: String(text) };
+  writeFileSync3(tmp, JSON.stringify(body), { flag: "wx" });
   renameSync3(tmp, target);
   return target;
 }
@@ -9341,9 +9342,17 @@ try {
 `);
       }
     }
-    if (prLoop?.blockDue) writeThenSpend(disclosureParts.join("\n\n"), [prLoop.spend, spendDispatchUnknownKeys]);
-    if (disclosureParts.length || advisoryText) {
-      exitAfterWrite(JSON.stringify({ systemMessage: [...disclosureParts, advisoryText].filter(Boolean).join("\n\n") }), 0, {
+    if (deferralKey && !deferralNoted) {
+      try {
+        publishNotice(input.cwd, deferralLine(8), { sessionId: hasSession ? input.session_id : void 0 });
+        spendDeferralNoted();
+      } catch (e) {
+        degradationParts.push(`H10: deferral notice publish failed \u2014 ${String(e && e.message || e)}; ${deferralLine(8)}`);
+      }
+    }
+    if (prLoop?.blockDue) writeThenSpend(degradationParts.join("\n\n"), [prLoop.spend, spendDispatchUnknownKeys]);
+    if (degradationParts.length || advisoryText) {
+      exitAfterWrite(JSON.stringify({ systemMessage: [...degradationParts, advisoryText].filter(Boolean).join("\n\n") }), 0, {
         onWritten: spendDispatchUnknownKeys
       });
       throw Object.assign(new Error("h10-release-in-flight"), { h10ReleaseInFlight: true });
@@ -9487,21 +9496,37 @@ try {
   const deferredPaths = allTouchedPaths.filter(isDeferred);
   const settlementCandidates = allTouchedPaths.filter((p) => !isDeferred(p));
   const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...ownersOf(p)]))];
-  const disclosureParts = [];
-  if (lostSettlementMessage) disclosureParts.push(lostSettlementMessage);
-  if (residueLines.length) disclosureParts.push(...residueLines);
-  if (deferredPaths.length) {
-    const PATH_DISPLAY_CAP = 8;
-    const pathsDisplay = deferredPaths.length > PATH_DISPLAY_CAP ? `${deferredPaths.slice(0, PATH_DISPLAY_CAP).join(", ")} +${deferredPaths.length - PATH_DISPLAY_CAP} more` : deferredPaths.join(", ");
-    disclosureParts.push(
-      `\u2022 deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(", ")}]: ${pathsDisplay} \u2014 duty re-arms when they land (repeats by design while the dispatch(es) stay live \u2014 fan-out-aware duty deferral; not a stuck nag)`
-    );
-  }
+  const degradationParts = [];
+  if (lostSettlementMessage) degradationParts.push(lostSettlementMessage);
+  if (residueLines.length) degradationParts.push(...residueLines);
+  const deferralLine = (cap) => {
+    if (!deferredPaths.length) return "";
+    const pathsDisplay = deferredPaths.length > cap ? `${deferredPaths.slice(0, cap).join(", ")} +${deferredPaths.length - cap} more` : deferredPaths.join(", ");
+    return `\u2022 deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(", ")}]: ${pathsDisplay} \u2014 duty re-arms when they land`;
+  };
+  const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
+  const deferralNotedPath = join12(input.cwd, ".sterling", "transient", "deferral-noted.json");
+  const deferralKey = deferredPaths.length ? createHash3("sha256").update(JSON.stringify({ owners: [...deferredAgents].sort(), paths: [...deferredPaths].sort() })).digest("hex") : null;
+  const deferralNoted = (() => {
+    if (!deferralKey || !hasSession) return false;
+    try {
+      const raw = JSON.parse(readFileSync9(deferralNotedPath, "utf8"));
+      return raw.session_id === input.session_id && raw.key === deferralKey;
+    } catch {
+      return false;
+    }
+  })();
+  const spendDeferralNoted = () => {
+    if (!deferralKey || !hasSession) return;
+    try {
+      writeFileSync6(deferralNotedPath, JSON.stringify({ session_id: input.session_id, key: deferralKey }));
+    } catch {
+    }
+  };
   const touchedKeys = new Set(touchedExisting.map(joinKey));
   const bitingUnknown = unknownRows.filter(
     (row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => [...touchedKeys].some((k) => entryOwns(joinKey(f), k)))
   );
-  const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
   const dispatchUnknownNotedPath = join12(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
   const dispatchUnknownNotedKeys = (() => {
     if (!hasSession) return /* @__PURE__ */ new Set();
@@ -9520,7 +9545,7 @@ try {
     const key = dispatchUnknownKey(row);
     if (dispatchUnknownNotedKeys.has(key)) continue;
     pendingDispatchUnknownKeys.push(key);
-    disclosureParts.push(
+    degradationParts.push(
       render(
         disclosure(
           "dispatch_status_unknown",
@@ -9541,7 +9566,7 @@ try {
     }
   };
   if (classified.availability === "corrupt") {
-    disclosureParts.push(
+    degradationParts.push(
       render(
         disclosure(
           "register_unavailable",
@@ -9558,7 +9583,7 @@ try {
       mode = readProjectMode(input.cwd);
     } catch (e) {
       if (existsSync8(join12(input.cwd, PR_LOOP_REL))) {
-        disclosureParts.push(
+        degradationParts.push(
           `\u2022 PR review loop: the project mode is unreadable (${String(e && e.message || e)}) \u2014 ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
         );
       }
@@ -9569,7 +9594,7 @@ try {
     try {
       state = readPrLoop(input.cwd);
     } catch (e) {
-      disclosureParts.push(`\u2022 PR review loop: ${PR_LOOP_REL} is unreadable (${String(e && e.message || e)}) \u2014 whether a loop is owed is UNKNOWN; rerun /sterling:merge to re-arm it, or delete the file if no PR is open.`);
+      degradationParts.push(`\u2022 PR review loop: ${PR_LOOP_REL} is unreadable (${String(e && e.message || e)}) \u2014 whether a loop is owed is UNKNOWN; rerun /sterling:merge to re-arm it, or delete the file if no PR is open.`);
       return null;
     }
     if (!state || state.status !== "owed") return null;
@@ -9597,7 +9622,7 @@ try {
       }
     };
   })();
-  if (prLoop) disclosureParts.push(prLoop.blockDue ? prLoop.text : prLoop.reminder);
+  if (prLoop) degradationParts.push(prLoop.blockDue ? prLoop.text : prLoop.reminder);
   const clearRegisters = ({ preservePendingDeclaration = false, outstandingResearchEvents = [], retainedCaptureEvents = null } = {}) => {
     if (deferredPaths.length || settlementFailed || retainedCaptureEvents) {
       releaseTouchesClaim();
@@ -9960,7 +9985,7 @@ try {
   }
   const H10_HEADER = "H10 \u25B8 act, then Stop again:";
   if (!input.stop_hook_active && !existsSync8(nagMarker)) {
-    const parts = [...disclosureParts];
+    const parts = [deferralLine(3), ...degradationParts].filter(Boolean);
     const hasDebug = activeDebugEvents.length > 0;
     const captureLaneOpen = hasCaptureDuty && !captured && !pendingDetail;
     const researchLaneOpen = hasResearchDuty && !researchSatisfied;
@@ -10076,7 +10101,10 @@ ${parts.join("\n\n")}`;
         writeFileSync6(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
       },
       spendDispatchUnknownKeys,
-      // The PR review loop text rode disclosureParts into this block.
+      // The nag showed the conductor this deferral set, so the release that
+      // follows does not publish it again as a notice.
+      spendDeferralNoted,
+      // The PR review loop text rode degradationParts into this block.
       () => prLoop?.blockDue && prLoop.spend()
     ]);
   }

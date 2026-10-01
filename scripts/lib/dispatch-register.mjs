@@ -550,6 +550,23 @@ export function classifyRegister(root, ctx) {
   return { availability: 'ok', entries: rows };
 }
 
+// presumedActiveEntries(root, {now?, sessionId, staleMinutes?}) — the live
+// rows only (status presumed-active: this session, inside the lease, not
+// ended), for a consumer asking "who is running NOW" (H20's dispatch-overlap
+// advisory). unknown and inactive-confirmed rows are left out. staleMinutes
+// defaults to config.dispatch_register.stale_minutes (60 when unset).
+// `availability` is passed through so a corrupt register is never read as an
+// empty one.
+export function presumedActiveEntries(root, ctx) {
+  const classified = classifyRegister(root, {
+    now: ctx.now ?? Date.now(),
+    sessionId: ctx.sessionId,
+    staleMinutes: ctx.staleMinutes ?? readStaleMinutesDefault(root),
+  });
+  if (classified.availability !== 'ok') return { availability: classified.availability, entries: [] };
+  return { availability: 'ok', entries: classified.entries.filter((r) => r.status === 'presumed-active').map((r) => r.entry) };
+}
+
 function formatAge(ageMs) {
   if (ageMs === null || ageMs === undefined || Number.isNaN(ageMs)) return 'age unreadable';
   const mins = Math.floor(ageMs / 60_000);

@@ -15,9 +15,19 @@ try {
   catch (e) { if (e?.code !== 'ENOENT') throw e; }
   const files = names.map((name) => join(dir, name));
   const texts = [];
+  const hasSession = typeof input.session_id === 'string' && input.session_id.length > 0;
   for (const file of files) {
     try {
-      const text = JSON.parse(readFileSync(file, 'utf8')).text;
+      const notice = JSON.parse(readFileSync(file, 'utf8'));
+      // A session-keyed notice (H10's fan-out deferral) describes live
+      // dispatches of the session that wrote it; nothing prunes notices at
+      // session start, so in any other session it is stale: removed, never
+      // delivered (decision h10-deferral-is-conductor-facing-degradations-stay-loud).
+      if (hasSession && typeof notice.session_id === 'string' && notice.session_id !== input.session_id) {
+        rmSync(file, { force: true });
+        continue;
+      }
+      const text = notice.text;
       if (typeof text === 'string' && text) texts.push(text);
       else texts.push('ⓘ STERLING: removed malformed immutable notice; its contents were unreadable.');
     } catch (e) {
