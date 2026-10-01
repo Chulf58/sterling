@@ -5289,9 +5289,15 @@ try {
   }
   const files = names.map((name) => join4(dir, name));
   const texts = [];
+  const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
   for (const file of files) {
     try {
-      const text = JSON.parse(readFileSync3(file, "utf8")).text;
+      const notice = JSON.parse(readFileSync3(file, "utf8"));
+      if (hasSession && typeof notice.session_id === "string" && notice.session_id !== input.session_id) {
+        rmSync2(file, { force: true });
+        continue;
+      }
+      const text = notice.text;
       if (typeof text === "string" && text) texts.push(text);
       else texts.push("\u24D8 STERLING: removed malformed immutable notice; its contents were unreadable.");
     } catch (e) {

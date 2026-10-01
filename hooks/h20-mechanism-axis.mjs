@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h20-mechanism-axis.mjs
-import { existsSync as existsSync5 } from "node:fs";
-import { join as join5 } from "node:path";
+import { existsSync as existsSync6 } from "node:fs";
+import { join as join6 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -4085,6 +4085,20 @@ var repoPath = external_exports.string().transform((value, ctx) => {
     return external_exports.NEVER;
   }
 });
+var normSep = (p) => String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+function foldPairForCompare(a, b) {
+  const drivePrefixed = /^[A-Za-z]:/.test(a) || /^[A-Za-z]:/.test(b);
+  return drivePrefixed ? [a.toLowerCase(), b.toLowerCase()] : [a, b];
+}
+function toRepoRelative(absolutePath, repoRoot) {
+  const abs = normSep(absolutePath);
+  const root = normSep(repoRoot);
+  const [a, r] = foldPairForCompare(abs, root);
+  if (!(a === r || a.startsWith(r + "/"))) {
+    throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
+  }
+  return normalizeRepoPath(abs.slice(root.length + 1));
+}
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
@@ -7882,6 +7896,16 @@ function openStore(cwd) {
   const p = join2(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
+function repoRel(toolPath, cwd) {
+  if (!toolPath) return null;
+  const fwd = String(toolPath).replace(/\\/g, "/");
+  try {
+    if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) return toRepoRelative(fwd, cwd);
+    return normalizeRepoPath(fwd);
+  } catch {
+    return null;
+  }
+}
 
 // scripts/hooks/lib/advisory-counter.mjs
 import { appendFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "node:fs";
@@ -8058,8 +8082,8 @@ function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes, matchLabel = "for
 function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel, pointerOnly = false, capLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
   const blocks = shown.map((ap) => pointerOnly ? hazardHeaderLine(ap, { matchLabel }) : wholeHazardBlock(ap, charCap, matchLabel));
-  const disclosure = hazardDisclosureLine(hazards, shown, { cap, fileKeys, remedy, total, suppressed, capLabel });
-  if (disclosure) blocks.push(disclosure);
+  const disclosure2 = hazardDisclosureLine(hazards, shown, { cap, fileKeys, remedy, total, suppressed, capLabel });
+  if (disclosure2) blocks.push(disclosure2);
   return blocks;
 }
 function wholeHazardBlock(ap, charCap, matchLabel) {
@@ -8172,8 +8196,8 @@ function hazardLeadParts(hazards, shown, { cap, fileKeys, remedy, total, suppres
       }))
     );
   }
-  const disclosure = hazardDisclosureLine(hazards, shown, { cap, fileKeys, remedy, total, suppressed });
-  if (disclosure) parts.push({ kind: "hazard", contentClass: "chrome", text: `  ${disclosure}` });
+  const disclosure2 = hazardDisclosureLine(hazards, shown, { cap, fileKeys, remedy, total, suppressed });
+  if (disclosure2) parts.push({ kind: "hazard", contentClass: "chrome", text: `  ${disclosure2}` });
   return parts;
 }
 function hazardOverflowPointer(record, matchLabel = "for this path") {
@@ -8308,7 +8332,7 @@ function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}
     if (suffix) {
       const lines = part.text.split("\n");
       const carriesSuffix = lines[0] === suffix;
-      const render = (candidate) => carriesSuffix ? candidate : `${candidate}
+      const render2 = (candidate) => carriesSuffix ? candidate : `${candidate}
 ${suffix}`;
       let clipped = "";
       let best = "";
@@ -8316,10 +8340,10 @@ ${suffix}`;
       for (const line of lines) {
         const candidate = clipped ? `${clipped}
 ${line}` : line;
-        selected.set(part, { text: render(candidate), full: false });
+        selected.set(part, { text: render2(candidate), full: false });
         if (!fitsFn("excerpt")) break;
         clipped = candidate;
-        best = render(candidate);
+        best = render2(candidate);
         bestLines += 1;
       }
       if (best && bestLines === 1 && lines.length > 1 && part.suffix && part.suffix !== ptr) {
@@ -8381,7 +8405,7 @@ ${line}` : line;
   const ordinaryParts = items.filter((part) => !isHazard(part) && !isChrome(part));
   const baseOmitted = [...omitted];
   const reserved = /* @__PURE__ */ new Map();
-  const placeOrdinary = (disclosure) => {
+  const placeOrdinary = (disclosure2) => {
     for (const part of ordinaryParts) selected.delete(part);
     omitted.length = 0;
     omitted.push(...baseOmitted);
@@ -8398,7 +8422,7 @@ ${line}` : line;
       room -= cost;
     }
     const roomFor = (size) => size > 0 ? Math.max(0, Math.min(room, size + bytes(sep))) : 0;
-    const disclosureRoom = { whole: roomFor(disclosure.ids), excerpt: roomFor(disclosure.named), pointer: 0 };
+    const disclosureRoom = { whole: roomFor(disclosure2.ids), excerpt: roomFor(disclosure2.named), pointer: 0 };
     ordinaryParts.forEach((part, i) => {
       const later = ordinaryParts.slice(i + 1).reduce((sum, next) => sum + (reserved.get(next) ?? 0), 0);
       tryDegradeOrdinary(part, (stage) => {
@@ -8504,6 +8528,806 @@ function decisionPointerPart(rel, decisions, { widen, cap = DECISION_POINTER_CAP
   };
 }
 
+// scripts/hooks/lib/dispatch-prompt.mjs
+var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
+function extractPathCandidates(text) {
+  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
+  return [...new Set(found)];
+}
+var REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
+var GLOB_METACHAR_RE = /[*?[\]]/;
+function canonicalTerritoryEntry(p) {
+  if (typeof p !== "string") return { reason: "not a string" };
+  if (p === "") return { reason: "empty string" };
+  if (GLOB_METACHAR_RE.test(p)) return { reason: "glob pattern; the declaration names files or directories, never patterns" };
+  const stripped = p.endsWith("/") ? p.slice(0, -1) : p;
+  let normalized;
+  try {
+    normalized = normalizeRepoPath(stripped);
+  } catch (e) {
+    return { reason: String(e?.message ?? e).replace(/^path invariant violation: /, "") };
+  }
+  if (normalized !== stripped) return { reason: `not canonical repo-relative POSIX form (canonical: '${normalized}')` };
+  return { path: normalized };
+}
+function parseReviewTerritory(text) {
+  const match = REVIEW_TERRITORY_RE.exec(String(text ?? ""));
+  if (!match) return { present: false };
+  const raw = match[0];
+  let parsed;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch (e) {
+    return { present: true, valid: false, raw, reason: `not valid JSON (${e.message})` };
+  }
+  if (!Array.isArray(parsed)) return { present: true, valid: false, raw, reason: "not a JSON array" };
+  const files = [];
+  for (const [i, entry] of parsed.entries()) {
+    const c = canonicalTerritoryEntry(entry);
+    if (c.reason) return { present: true, valid: false, raw, reason: `entry ${i} (${JSON.stringify(entry)}): ${c.reason}` };
+    files.push(c.path);
+  }
+  return { present: true, valid: true, files: [...new Set(files)] };
+}
+
+// scripts/hooks/lib/dispatch-advisory.mjs
+var HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
+var TERRITORY_VERB_RE = String.raw`(?:touch(?:es|ed|ing)?|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|change(?:s|d|ing)?|writ(?:e|es|ing|ten)|alter(?:s|ed|ing)?)`;
+var ANAPHOR_RE = String.raw`(?:those|these|them|it|that)`;
+var PLURAL_ANAPHOR_TEST = /^(?:those|these|them)$/i;
+var PROHIBITION_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
+var BARE_NEGATOR_RE = String.raw`\b(?:never|no|without)\b`;
+var SUBJECT_VERB_RE = String.raw`(?:\bimplement(?:ing|ed|s)?\b|\bfix(?:ing|ed|es)?\b|\breview(?:ing|ed|s)?\b)`;
+var PROHIBITION_TEST = new RegExp(PROHIBITION_RE, "i");
+var BARE_NEGATOR_TEST = new RegExp(BARE_NEGATOR_RE, "gi");
+var SUBJECT_VERB_TEST = new RegExp(SUBJECT_VERB_RE, "i");
+var TRAILING_PROHIBITION_TEST = new RegExp(
+  `${PROHIBITION_RE}\\s*(?:[\\w'\u2019-]+\\s+){0,2}\\b${TERRITORY_VERB_RE}\\b\\s*(?:[\\w'\u2019-]+\\s+){0,2}\\b(${ANAPHOR_RE})\\b`,
+  "i"
+);
+var SUBJECT_VERB_WINDOW = 40;
+var BARE_NEGATOR_WINDOW = 5;
+function scanClauses(text) {
+  const s2 = String(text ?? "");
+  const clauses = [];
+  let clauseStart = 0;
+  HARD_BOUNDARY_RE.lastIndex = 0;
+  let m;
+  while (m = HARD_BOUNDARY_RE.exec(s2)) {
+    const boundaryStart = m.index;
+    const boundaryEnd = boundaryStart + m[0].length;
+    const isParagraph = m[1] !== void 0;
+    const isHard = isParagraph || m[2] !== void 0 || m[3] !== void 0;
+    if (isHard) {
+      clauses.push({ text: s2.slice(clauseStart, boundaryStart), endedByParagraphBreak: isParagraph });
+      clauseStart = boundaryEnd;
+      continue;
+    }
+    const soFar = s2.slice(clauseStart, boundaryStart);
+    if (PROHIBITION_TEST.test(soFar)) continue;
+    clauses.push({ text: soFar, endedByParagraphBreak: false });
+    clauseStart = boundaryEnd;
+  }
+  clauses.push({ text: s2.slice(clauseStart), endedByParagraphBreak: false });
+  return clauses;
+}
+function anaphoricProhibitionNumber(clause) {
+  const text = String(clause ?? "");
+  const m = text.match(TRAILING_PROHIBITION_TEST);
+  if (!m) return null;
+  if (text.match(PATH_CANDIDATE_RE)) return null;
+  if (text.match(GLOB_PREFIX_RE)) return null;
+  return PLURAL_ANAPHOR_TEST.test(m[1]) ? "plural" : "singular";
+}
+function distinctTerritoryMentions(clause) {
+  const text = String(clause ?? "");
+  return (/* @__PURE__ */ new Set([...extractPathCandidates(text), ...extractGlobPrefixCandidates(text)])).size;
+}
+function isNegatedContext(clause, index) {
+  const text = String(clause ?? "");
+  const before = text.slice(0, Math.max(0, index));
+  if (PROHIBITION_TEST.test(before)) return true;
+  BARE_NEGATOR_TEST.lastIndex = 0;
+  let m;
+  while (m = BARE_NEGATOR_TEST.exec(before)) {
+    const gap = before.slice(m.index + m[0].length);
+    if (gap.includes(",")) continue;
+    const tokenCount = (gap.match(/\S+/g) || []).length;
+    if (tokenCount <= BARE_NEGATOR_WINDOW) return true;
+  }
+  return false;
+}
+function isSubjectOfChangeContext(clause, index) {
+  const text = String(clause ?? "");
+  const before = text.slice(0, Math.max(0, index));
+  const near = before.slice(Math.max(0, before.length - SUBJECT_VERB_WINDOW));
+  return SUBJECT_VERB_TEST.test(near);
+}
+function isSuppressedContext(clause, index, checkSubjectVerb = true) {
+  if (isNegatedContext(clause, index)) return true;
+  return checkSubjectVerb && isSubjectOfChangeContext(clause, index);
+}
+function hasUnsuppressedMatch(text, pattern, { checkSubjectVerb = true } = {}) {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const global = new RegExp(pattern.source, flags);
+  const clauses = scanClauses(text);
+  for (let i = 0; i < clauses.length; i++) {
+    const clause = clauses[i].text;
+    const number = clauses[i].endedByParagraphBreak ? null : anaphoricProhibitionNumber(clauses[i + 1]?.text);
+    const trailingSuppresses = number === "plural" || number === "singular" && distinctTerritoryMentions(clause) === 1;
+    global.lastIndex = 0;
+    let m;
+    while (m = global.exec(clause)) {
+      const suppressedByTrailing = trailingSuppresses && isPathShapedMention(m[0]);
+      if (!suppressedByTrailing && !isSuppressedContext(clause, m.index, checkSubjectVerb)) return true;
+      if (m.index === global.lastIndex) global.lastIndex++;
+    }
+  }
+  return false;
+}
+function escapeRe(s2) {
+  return String(s2).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+var GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
+var PATH_SHAPED_TEST = new RegExp(`^(?:${PATH_CANDIDATE_RE.source}|${GLOB_PREFIX_RE.source})$`);
+function isPathShapedMention(token) {
+  return PATH_SHAPED_TEST.test(String(token ?? "").trim());
+}
+function extractGlobPrefixCandidates(text) {
+  const found = String(text ?? "").match(GLOB_PREFIX_RE) ?? [];
+  return [...new Set(found.map((m) => m.slice(0, -2)))];
+}
+function isReviewerClass(type) {
+  return !!type && type.startsWith("reviewer-");
+}
+
+// scripts/lib/dispatch-register.mjs
+import { mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync2, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync5, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join5, resolve as resolve2, dirname as dirname4, isAbsolute } from "node:path";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { randomBytes, createHash } from "node:crypto";
+
+// scripts/lib/review-errors.mjs
+var CODES = /* @__PURE__ */ new Set([
+  // §1.4 ledger verbs
+  "ledger_corrupt",
+  "ledger_absent",
+  "ledger_digest_mismatch",
+  "compatibility_lock_held",
+  "entry_not_found",
+  "entry_selector_ambiguous",
+  "entry_not_active",
+  "class_unknown",
+  "class_not_applicable",
+  "superseder_not_found",
+  "superseder_not_reviewer_class",
+  "superseder_not_newer",
+  "superseder_branch_mismatch",
+  "superseder_lifecycle_unacceptable",
+  "superseder_coverage_incomplete",
+  "superseder_commit_not_ancestor",
+  "superseder_commit_trailer_not_roster",
+  "superseder_commit_receipt_unbound",
+  "superseder_commit_blob_mismatch",
+  "covering_not_allowed",
+  "covering_receipt_invalid",
+  "no_live_territory_disproved",
+  "reconcile_no_match",
+  "reconcile_ambiguous",
+  "reconcile_nonce_split",
+  "reconcile_unresolved",
+  "record_external_duplicate",
+  "argument_invalid",
+  // commit operation
+  "nothing_staged",
+  "message_missing",
+  "no_spendable_receipt",
+  "receipt_bytes_mismatch",
+  "coverage_incomplete",
+  "reservation_conflict",
+  "commit_failed",
+  "finalize_failed",
+  "waiver_reason_missing",
+  // A13 additions
+  "target_sha_prior_receipt_unbound",
+  "commit_verify_failed",
+  "not_sterling_project",
+  "receipt_unscoped",
+  // §1.4 disclosures (never refuse)
+  "receipt_unattributable",
+  "receipt_foreign",
+  "receipt_identity_unknown",
+  "receipt_deferred",
+  "receipt_stale",
+  "receipt_age_unverifiable",
+  "receipt_no_overlap",
+  "multi_spend",
+  "bytes_waived",
+  "legacy_entries_present",
+  "receipt_not_spent_stale_bytes",
+  "register_unavailable",
+  "dispatch_status_unknown",
+  // A9 register/ledger additions
+  "register_entry_malformed",
+  "register_agent_id_duplicate",
+  "register_lock_held",
+  "receipt_not_active",
+  "receipt_foreign_session",
+  "receipt_foreign_branch",
+  // A9 --target-sha amend mode
+  "target_sha_unresolvable",
+  "target_sha_not_head",
+  "target_sha_tree_dirty",
+  "target_sha_published",
+  "target_sha_publication_unprovable",
+  // A11 additions
+  "territory_declaration_missing",
+  "territory_declaration_malformed",
+  "dispatch_overlap",
+  "dispatch_residue",
+  // ledger entry classification
+  "ledger_entry_malformed",
+  // A19 (security review): an env override of identity is disclosed, never silent
+  "session_identity_override",
+  // dispatch state machine (decision dispatch-state-machine-pre-slot-post-
+  // binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
+  "dispatch_state_collision",
+  "dispatch_post_late",
+  "dispatch_post_mismatch",
+  "dispatch_post_refused",
+  "dispatch_state_poisoned",
+  "dispatch_unattributable",
+  "dispatch_lock_held",
+  "dispatch_post_only"
+]);
+function assertCode(code) {
+  if (!CODES.has(code)) {
+    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
+  }
+}
+function disclosure(code, facts = {}, message = code) {
+  assertCode(code);
+  return { kind: "disclosure", code, facts, message };
+}
+function render(x) {
+  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
+  return `${label} [${x?.code}] ${x?.message ?? ""}`;
+}
+
+// scripts/lib/dispatch-register.mjs
+function registerPath(root) {
+  return join5(root, ".sterling", "transient", "dispatch-register.json");
+}
+function configPath(root) {
+  return join5(root, ".sterling", "config.json");
+}
+function readStaleMinutesDefault(root) {
+  try {
+    const cfg = JSON.parse(readFileSync4(configPath(root), "utf8"));
+    const v = cfg?.dispatch_register?.stale_minutes;
+    return typeof v === "number" && v > 0 ? v : 60;
+  } catch {
+    return 60;
+  }
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync5(p)) return { availability: "absent", arr: [] };
+  let raw;
+  try {
+    raw = readFileSync4(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+function statusReason(entry, ctx) {
+  if (!entry) return "clock-unreadable";
+  const t = Date.parse(entry.at);
+  if (Number.isNaN(t)) return "clock-unreadable";
+  if (ctx.sessionId !== null && entry.session_id !== ctx.sessionId) return "other-session";
+  const age = ctx.now - t;
+  const lease = ctx.staleMinutes * 6e4;
+  if (age >= 0 && age < lease) return null;
+  return "lease-expired";
+}
+function dispatchStatus(entry, ctx) {
+  if (entry?.ended) return "inactive-confirmed";
+  return statusReason(entry, ctx) === null ? "presumed-active" : "unknown";
+}
+function classifyRegister(root, ctx) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return { availability, entries: [] };
+  const rows = entries.map((entry) => {
+    const status = dispatchStatus(entry, ctx);
+    const reason = statusReason(entry, ctx);
+    const t = Date.parse(entry.at);
+    const ageMs = Number.isNaN(t) ? null : ctx.now - t;
+    return { entry, status, reason, ageMs };
+  });
+  return { availability: "ok", entries: rows };
+}
+function presumedActiveEntries(root, ctx) {
+  const classified = classifyRegister(root, {
+    now: ctx.now ?? Date.now(),
+    sessionId: ctx.sessionId,
+    staleMinutes: ctx.staleMinutes ?? readStaleMinutesDefault(root)
+  });
+  if (classified.availability !== "ok") return { availability: classified.availability, entries: [] };
+  return { availability: "ok", entries: classified.entries.filter((r) => r.status === "presumed-active").map((r) => r.entry) };
+}
+var MAX_PROMPT_BYTES = 512 * 1024;
+var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
+var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
+var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+function dispatchStateDir(root) {
+  return join5(root, ".sterling", "transient", "dispatch-state");
+}
+var LIVE_PREFIX = "live-";
+var DONE_PREFIX = "done-";
+var IDS_DELIMITER = "~";
+var ID_SEPARATOR = ".";
+var EMPTY_IDS = "none";
+var MAX_FILENAME_LENGTH = 254;
+var STATE_KEY_RE = /^(?:raw-[A-Za-z0-9_-]{1,80}|sha256-[0-9a-f]{64})$/;
+var ID_HASH_RE = /^[A-Za-z0-9_-]{43}$/;
+function liveFileName(key) {
+  return `${LIVE_PREFIX}${key}.json`;
+}
+function agentIdHash(agentId) {
+  return createHash("sha256").update(String(agentId), "utf8").digest("base64url");
+}
+function recordAgentIds(record) {
+  return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
+}
+function terminalFileName(key, record) {
+  const hashes = [...new Set(recordAgentIds(record).map(agentIdHash))].sort();
+  const name = `${DONE_PREFIX}${key}${IDS_DELIMITER}${hashes.length ? hashes.join(ID_SEPARATOR) : EMPTY_IDS}.json`;
+  if (name.length > MAX_FILENAME_LENGTH) throw new Error(`dispatch-state: terminal filename for ${key} is ${name.length} characters \u2014 over the ${MAX_FILENAME_LENGTH} limit`);
+  return name;
+}
+function parseStateFileName(name) {
+  if (name.includes(".json.tmp-")) return { kind: "tmp" };
+  if (!name.endsWith(".json")) return { kind: "other" };
+  const stem = name.slice(0, -".json".length);
+  if (stem.startsWith(LIVE_PREFIX)) {
+    const key = stem.slice(LIVE_PREFIX.length);
+    return STATE_KEY_RE.test(key) ? { kind: "live", key } : { kind: "malformed-live" };
+  }
+  if (stem.startsWith(DONE_PREFIX)) {
+    const parts = stem.slice(DONE_PREFIX.length).split(IDS_DELIMITER);
+    const malformed = STATE_KEY_RE.test(parts[0]) ? { kind: "malformed-done", key: parts[0] } : { kind: "malformed-done" };
+    if (parts.length !== 2 || !STATE_KEY_RE.test(parts[0])) return malformed;
+    const idHashes = parts[1] === EMPTY_IDS ? [] : parts[1].split(ID_SEPARATOR);
+    const canonical = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
+    return canonical ? { kind: "done", key: parts[0], idHashes } : malformed;
+  }
+  return STATE_KEY_RE.test(stem) ? { kind: "legacy", key: stem } : { kind: "unknown-json" };
+}
+var warnedStateFiles = /* @__PURE__ */ new Set();
+function warnStateFile(file, text) {
+  const tag = `${file}\0${text}`;
+  if (warnedStateFiles.has(tag)) return;
+  warnedStateFiles.add(tag);
+  process.stderr.write(`${render(disclosure("dispatch_state_poisoned", { file }, text))}
+`);
+}
+function dispatchStateKey(toolUseId) {
+  if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
+  return `sha256-${createHash("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+}
+function isNonEmptyString(v) {
+  return typeof v === "string" && v !== "";
+}
+function isPlainObject(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function validatePostBinding(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at);
+}
+function validateDerivedBinding(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && isNonEmptyString(v.by);
+}
+function validateStarted(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && Array.isArray(v.by) && v.by.every((x) => typeof x === "string");
+}
+function validateTerminal(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.at) && isNonEmptyString(v.reason);
+}
+function validateRecordShape(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) return { ok: false, reason: "not-an-object" };
+  if (r.schema !== 1) return { ok: false, reason: "unknown-schema-version" };
+  if (typeof r.tool_use_id !== "string" || !r.tool_use_id) return { ok: false, reason: "tool_use_id" };
+  if (typeof r.session_id !== "string" && r.session_id !== null) return { ok: false, reason: "session_id" };
+  if (!ORIGINS.has(r.origin)) return { ok: false, reason: "origin" };
+  if (typeof r.prompt_bytes !== "number") return { ok: false, reason: "prompt_bytes" };
+  if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
+  if (typeof r.prompt === "string") {
+    const bytes = Buffer.byteLength(r.prompt, "utf8");
+    const sha = createHash("sha256").update(r.prompt, "utf8").digest("hex");
+    if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
+  } else if (r.prompt !== null) {
+    return { ok: false, reason: "prompt-type" };
+  }
+  if (!validatePostBinding(r.post_binding)) return { ok: false, reason: "post_binding-shape" };
+  if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
+  if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
+  if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
+  return { ok: true };
+}
+function classifyRecordFile(file) {
+  let st;
+  try {
+    st = lstatSync(file);
+  } catch {
+    return { exists: false };
+  }
+  if (st.isSymbolicLink()) return { exists: true, poisoned: true, reason: "symlink" };
+  if (!st.isFile()) return { exists: true, poisoned: true, reason: "non-regular-file" };
+  let buf;
+  try {
+    buf = readFileSync4(file);
+  } catch {
+    return { exists: true, poisoned: true, reason: "unreadable" };
+  }
+  const text = buf.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(buf)) return { exists: true, poisoned: true, reason: "invalid-utf8" };
+  let record;
+  try {
+    record = JSON.parse(text);
+  } catch {
+    return { exists: true, poisoned: true, reason: "unparseable-json" };
+  }
+  const v = validateRecordShape(record);
+  if (!v.ok) return { exists: true, poisoned: true, reason: v.reason };
+  return { exists: true, poisoned: false, record };
+}
+function checkDispatchStateContainment(root, { create }) {
+  const dir = dispatchStateDir(root);
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch (e) {
+    if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
+    if (!create) return { ok: true, availability: "absent" };
+    mkdirSync4(dir, { recursive: true });
+    return { ok: true, availability: "ok" };
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    return { ok: false, availability: "poisoned", reason: st.isSymbolicLink() ? "symlink" : "non-regular-file" };
+  }
+  return { ok: true, availability: "ok" };
+}
+function finishTerminalRename(root, key, record) {
+  const dir = dispatchStateDir(root);
+  const from = liveFileName(key);
+  const to = terminalFileName(key, record);
+  let occupied = false;
+  try {
+    lstatSync(join5(dir, to));
+    occupied = true;
+  } catch (e) {
+    if (e?.code !== "ENOENT") occupied = true;
+  }
+  if (occupied) {
+    warnStateFile(from, `dispatch-state: terminal record ${from} NOT renamed \u2014 ${to} already exists; never overwritten, the live source is kept for an operator`);
+    return from;
+  }
+  try {
+    renameSync2(join5(dir, from), join5(dir, to));
+    return to;
+  } catch (e) {
+    warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
+    return from;
+  }
+}
+function listStateDir(root) {
+  const containment = checkDispatchStateContainment(root, { create: false });
+  if (!containment.ok) return { availability: "unavailable", reason: "containment", names: [] };
+  if (containment.availability === "absent") return { availability: "absent", names: [] };
+  try {
+    return { availability: "ok", names: readdirSync(dispatchStateDir(root)) };
+  } catch (e) {
+    return { availability: "unavailable", reason: "unlistable", code: e?.code, names: [] };
+  }
+}
+function readDispatchState(root) {
+  return scanLiveState(root, { repair: false });
+}
+function scanLiveState(root, { repair }) {
+  const dir = dispatchStateDir(root);
+  const listing = listStateDir(root);
+  if (listing.availability !== "ok") return { availability: listing.availability, ...listing.reason ? { reason: listing.reason } : {}, records: [], poisoned: [], done: [] };
+  const records = [];
+  const poisoned = [];
+  const done = [];
+  for (const name of listing.names) {
+    const parsed = parseStateFileName(name);
+    if (parsed.kind === "other") continue;
+    if (parsed.kind === "tmp") {
+      poisoned.push({ file: name, reason: "orphan-tmp-file" });
+      continue;
+    }
+    if (parsed.kind === "legacy") {
+      poisoned.push({ file: name, reason: "legacy-unmigrated" });
+      continue;
+    }
+    if (parsed.kind === "malformed-live") {
+      poisoned.push({ file: name, reason: "malformed-filename" });
+      continue;
+    }
+    if (parsed.kind === "malformed-done" || parsed.kind === "unknown-json") {
+      warnStateFile(name, `dispatch-state: '${name}' is not a live-<key>.json or done-<key>~<ids>.json name \u2014 ignored by the live scan, never read as a record`);
+      continue;
+    }
+    if (parsed.kind === "done") {
+      done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
+      continue;
+    }
+    const classified = classifyRecordFile(join5(dir, name));
+    if (!classified.exists) continue;
+    if (classified.poisoned) {
+      poisoned.push({ file: name, reason: classified.reason });
+      continue;
+    }
+    if (dispatchStateKey(classified.record.tool_use_id) !== parsed.key) {
+      poisoned.push({ file: name, reason: "key-mismatch" });
+      continue;
+    }
+    records.push({ key: parsed.key, file: name, record: classified.record });
+  }
+  const doneKeys = new Set(done.map((d) => d.key));
+  const kept = [];
+  for (const entry of records) {
+    if (doneKeys.has(entry.key)) {
+      if (!entry.record.terminal) {
+        poisoned.push({ file: entry.file, reason: "duplicate-key" });
+        continue;
+      }
+      warnStateFile(entry.file, `dispatch-state: terminal record ${entry.file} cannot be renamed: a done- file for the same key already exists \u2014 left under its live name for an operator, never renamed over it`);
+      kept.push(entry);
+      continue;
+    }
+    if (repair && entry.record.terminal) entry.file = finishTerminalRename(root, entry.key, entry.record);
+    kept.push(entry);
+  }
+  return { availability: "ok", records: kept, poisoned, done };
+}
+
+// scripts/hooks/lib/dispatch-overlap.mjs
+var OVERLAP_HEAD = "DISPATCH OVERLAP (advisory)";
+var OVERLAP_DISPLAY_CAP = 5;
+var READ_ONLY_TYPES = /* @__PURE__ */ new Set(["researcher", "scout", "reviewer", "explore", "explorer", "plan", "librarian"]);
+function isReadOnlyDispatchType(type) {
+  if (typeof type !== "string" || !type) return false;
+  if (isReviewerClass(type)) return true;
+  return READ_ONLY_TYPES.has(type.toLowerCase());
+}
+var READ_ONLY_BRIEF_RES = [
+  /\b(?:you are|you're|this is|this lane is|this task is|as)\s+an?\s+read[- ]only\s+(?:lane|task|dispatch|review|investigation|research|audit|pass|agent)\b/i,
+  /\b(?:you are|you're|this lane is|this task is|this dispatch is|stay|remain)\s+(?:strictly\s+|entirely\s+)?read[- ]only\b/i,
+  /^[\s>*_#-]*read[- ]only\b[\s*_]*[:.—–]/im,
+  /\b(?:do not|don['’]t|never)\s+(?:edit|modify|write|change)\s+any\s+(?:files?|code)\s*(?:[.;,)\n]|$|at all)/i,
+  /\bmake no (?:edits|changes|file changes)\b/i
+];
+function briefStatesReadOnly(prompt) {
+  const text = String(prompt ?? "");
+  return READ_ONLY_BRIEF_RES.some((re) => re.test(text));
+}
+var EXECUTABLE_EXT_RE = /\.(?:exe|dll|so|dylib)$/i;
+var RUNNER_HEAD_RE = /^(?:node|npm|npx|pnpm|yarn|deno|bun|python3?|bash|sh|zsh|pwsh|powershell|dotnet|cargo)$/i;
+var COMMAND_SEPARATOR_RE = /^(?:&&|\|\||[|;])$/;
+var FLAG_TOKEN_RE = /^-{1,2}[A-Za-z0-9]/;
+function isRunMention(text, index) {
+  const lineStart = text.lastIndexOf("\n", Math.max(index - 1, 0)) + 1;
+  const tokens = text.slice(lineStart, index).split(/\s+/).filter(Boolean);
+  if (index > lineStart && !/\s/.test(text[index - 1])) tokens.pop();
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const token = tokens[i].replace(/^[`'"([]+/, "").replace(/[`'")\]]+$/, "");
+    if (!token || token === ".") continue;
+    if (COMMAND_SEPARATOR_RE.test(token)) return false;
+    if (EXECUTABLE_EXT_RE.test(token) || RUNNER_HEAD_RE.test(token)) return true;
+    if (token.startsWith("-")) continue;
+    return false;
+  }
+  const rest = text.slice(index).split("\n", 1)[0];
+  const nextToken = rest.split(/\s+/).filter(Boolean)[1];
+  return Boolean(nextToken) && FLAG_TOKEN_RE.test(nextToken);
+}
+function hasNonRunMention(text, raw) {
+  const re = new RegExp(escapeRe(raw), "g");
+  let m;
+  while (m = re.exec(text)) {
+    if (!isRunMention(text, m.index)) return true;
+    if (m.index === re.lastIndex) re.lastIndex++;
+  }
+  return false;
+}
+var EXCLUSION_MARKER = String.raw`(?:out[- ]of[- ]scope|do\s+not\s+(?:touch|edit|modify|write)|don['’]t\s+(?:touch|edit|modify|write)|never\s+(?:touch|edit|modify|write))`;
+var EXCLUSION_INLINE_RE = new RegExp(`${EXCLUSION_MARKER}[^:\\n]{0,40}:`, "gi");
+var EXCLUSION_LINE_START_RE = new RegExp(`^[\\s>*_#-]*${EXCLUSION_MARKER}`, "i");
+var EXCLUSION_HEADING_RE = new RegExp(`^[\\s>*_#-]*${EXCLUSION_MARKER}[\\s*_]*$`, "i");
+var LABEL_LINE_RE = /^[\s>*_#-]*[A-Z][\w /'()-]{0,40}:(?:\s|$)/;
+var NEXT_LABEL_RE = /\.\s+[A-Z][\w /'()-]{0,30}:(?:\s|$)/;
+function exclusionSpans(prompt) {
+  const lines = String(prompt ?? "").split(/\r?\n/);
+  const spans = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const heading = EXCLUSION_HEADING_RE.test(line);
+    if (heading || EXCLUSION_LINE_START_RE.test(line)) {
+      const colon = line.indexOf(":");
+      if (!heading && colon === -1) continue;
+      const body = [heading ? "" : line.slice(colon + 1)];
+      for (let j = i + 1; j < lines.length; j++) {
+        if (!lines[j].trim() || LABEL_LINE_RE.test(lines[j])) break;
+        body.push(lines[j]);
+        i = j;
+      }
+      spans.push(body.join("\n"));
+      continue;
+    }
+    EXCLUSION_INLINE_RE.lastIndex = 0;
+    let m;
+    while (m = EXCLUSION_INLINE_RE.exec(line)) {
+      const rest = line.slice(m.index + m[0].length);
+      const stop = rest.search(NEXT_LABEL_RE);
+      spans.push(stop === -1 ? rest : rest.slice(0, stop + 1));
+    }
+  }
+  return spans;
+}
+var dropGoverned = (norm) => norm !== ".git" && !norm.startsWith(".git/") && !norm.startsWith(".sterling/") && !norm.startsWith("sterling/") && !norm.startsWith("git/");
+var normFor = (cwd) => (raw) => {
+  const n = repoRel(String(raw).replace(/\/+$/, ""), cwd);
+  return n && dropGoverned(n) ? n : null;
+};
+function normCandidate(text, raw, cwd) {
+  const norm = normFor(cwd);
+  if (text.includes(`/${raw}`)) {
+    const abs = norm(`/${raw}`);
+    if (abs) return abs;
+  }
+  return norm(raw);
+}
+function briefTerritory(prompt, cwd) {
+  const declared = parseReviewTerritory(String(prompt ?? ""));
+  if (declared.present && declared.valid) return [...new Set(declared.files.map(normFor(cwd)).filter(Boolean))];
+  return proseTerritory(prompt, cwd);
+}
+function proseTerritory(prompt, cwd) {
+  const text = String(prompt ?? "");
+  const norm = normFor(cwd);
+  const excludedFiles = /* @__PURE__ */ new Set();
+  const excludedDirs = /* @__PURE__ */ new Set();
+  for (const span of exclusionSpans(text)) {
+    for (const raw of extractPathCandidates(span)) {
+      const n = normCandidate(span, raw, cwd);
+      if (n) excludedFiles.add(n);
+    }
+    for (const raw of extractGlobPrefixCandidates(span)) {
+      const n = norm(raw);
+      if (n) excludedDirs.add(n);
+    }
+  }
+  const excluded = (p) => excludedFiles.has(p) || excludedDirs.has(p) || [...excludedDirs].some((d) => p.startsWith(`${d}/`));
+  const unsuppressed = (raw) => hasUnsuppressedMatch(text, new RegExp(escapeRe(raw)), { checkSubjectVerb: false });
+  const out = /* @__PURE__ */ new Set();
+  for (const raw of extractPathCandidates(text)) {
+    const n = normCandidate(text, raw, cwd);
+    if (!n || EXECUTABLE_EXT_RE.test(n) || excluded(n)) continue;
+    if (unsuppressed(raw) && hasNonRunMention(text, raw)) out.add(n);
+  }
+  for (const raw of extractGlobPrefixCandidates(text)) {
+    const n = norm(raw);
+    if (!n || excluded(n)) continue;
+    if (unsuppressed(`${raw}**`)) out.add(n);
+  }
+  return [...out];
+}
+function pathsOverlap(a, b) {
+  if (a === b) return true;
+  const [short, long] = a.length < b.length ? [a, b] : [b, a];
+  return short.split("/").length >= 2 && long.startsWith(`${short}/`);
+}
+function readOwnerState(cwd) {
+  try {
+    const s2 = readDispatchState(cwd);
+    if (s2.availability === "ok") return { records: s2.records.map((x) => x.record).filter(Boolean), problem: null };
+    return { records: [], problem: s2.availability === "absent" ? null : `${s2.availability}${s2.reason ? ` (${s2.reason})` : ""}` };
+  } catch (e) {
+    return { records: [], problem: String(e && e.message || e).slice(0, 120) };
+  }
+}
+function ownerPrompt(records, entry) {
+  const byTool = entry.tool_use_id ? records.filter((r) => r.tool_use_id === entry.tool_use_id) : [];
+  const bound = (r) => [r.started?.agent_id, r.post_binding?.agent_id, r.derived_binding?.agent_id].includes(entry.agent_id);
+  const matches = byTool.length ? byTool : records.filter(bound);
+  return matches.length === 1 && typeof matches[0].prompt === "string" ? matches[0].prompt : null;
+}
+function dispatchOverlapNotice(input2, { now = Date.now() } = {}) {
+  try {
+    const type = input2?.tool_input?.subagent_type;
+    const prompt = input2?.tool_input?.prompt;
+    if (typeof prompt !== "string" || !prompt) return null;
+    if (isReadOnlyDispatchType(type) || briefStatesReadOnly(prompt)) return null;
+    const files = briefTerritory(prompt, input2.cwd);
+    if (!files.length) return null;
+    const live = presumedActiveEntries(input2.cwd, { now, sessionId: input2.session_id });
+    if (live.availability === "corrupt") {
+      return `${OVERLAP_HEAD} \u2014 degraded: the dispatch register could not be read, so this brief's files were not checked against running agents.`;
+    }
+    const hits = [];
+    let state;
+    for (const e of live.entries) {
+      if (isReadOnlyDispatchType(e.agent_type)) continue;
+      const overlapping = e.files.filter((owned2) => typeof owned2 === "string" && owned2 && files.some((f) => pathsOverlap(f, owned2)));
+      if (!overlapping.length) continue;
+      let owned = overlapping;
+      if (e.files_source !== "review-territory") {
+        if (state === void 0) state = readOwnerState(input2.cwd);
+        const prompt2 = ownerPrompt(state.records, e);
+        if (typeof prompt2 === "string") {
+          const kept = new Set(proseTerritory(prompt2, input2.cwd));
+          owned = overlapping.filter((p) => kept.has(p));
+        }
+      }
+      for (const o of owned) {
+        for (const f of files) {
+          if (!pathsOverlap(f, o)) continue;
+          const shown2 = f.length >= o.length ? f : o;
+          hits.push(`${shown2} \u2190 ${e.agent_type ?? "agent"}:${String(e.agent_id).slice(0, 8)}`);
+        }
+      }
+    }
+    const unique = [...new Set(hits)];
+    if (!unique.length) return null;
+    const shown = unique.slice(0, OVERLAP_DISPLAY_CAP);
+    const more = unique.length > shown.length ? ` (+${unique.length - shown.length} more)` : "";
+    const degraded = state?.problem ? ` (Owner briefs unreadable: ${state.problem}; owners' recorded files used as is.)` : "";
+    return `${OVERLAP_HEAD} \u2014 this brief names files a running agent owns: ${shown.join(", ")}${more}. Resume that agent, or wait for it and serialize \u2014 never two writers on one file.${degraded}`;
+  } catch (e) {
+    return `${OVERLAP_HEAD} \u2014 degraded: the overlap check failed (${String(e && e.message || e).slice(0, 160)}), so this brief's files were not checked against running agents.`;
+  }
+}
+
 // scripts/hooks/h20-mechanism-axis.mjs
 var MAX_DECISIONS = 5;
 var QUESTION_WORDS_RE = /\b(where|what|which|who|whom|whose|when|why|how|does|do|did|is|are|was|were|can|could|would|will|should)\b/i;
@@ -8520,8 +9344,8 @@ function buildModelPin(inp) {
   };
   if (typeof inp.tool_name !== "string" || !inp.tool_name.startsWith("mcp__codex__")) return null;
   const root = inp.cwd ? String(inp.cwd) : "";
-  const sterling = join5(root, ".sterling");
-  if (!existsSync5(join5(sterling, "sterling.db")) && !existsSync5(join5(sterling, "config.json"))) return null;
+  const sterling = join6(root, ".sterling");
+  if (!existsSync6(join6(sterling, "sterling.db")) && !existsSync6(join6(sterling, "config.json"))) return null;
   if (inp.tool_name !== "mcp__codex__codex") {
     return {
       line: `STERLING CODEX MODEL (H20) \u2014 this tool takes no model argument, so the thread keeps the model its opener started with. Sterling changes nothing on this call; to move a conversation onto a different model, open a NEW consult.`
@@ -8587,10 +9411,19 @@ function envelopeFor(extraContext) {
 function emitEnvelope(extraContext, opts) {
   return exitAfterWrite(JSON.stringify(envelopeFor(extraContext)), 0, opts);
 }
+var overlapMemo;
+function overlapNotice() {
+  if (overlapMemo === void 0) {
+    const onDispatch = !Array.isArray(input.tool_input?.questions) && !(typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__"));
+    overlapMemo = onDispatch ? dispatchOverlapNotice(input) : null;
+  }
+  return overlapMemo;
+}
 function finish(extraContext) {
   const pin = modelPin();
-  if (!pin?.line && !pin?.updatedInput && !extraContext) return allow();
-  return emitEnvelope(extraContext);
+  const context = [extraContext, overlapNotice()].filter(Boolean).join("\n\n");
+  if (!pin?.line && !pin?.updatedInput && !context) return allow();
+  return emitEnvelope(context);
 }
 var isQuestion = Array.isArray(input.tool_input?.questions);
 var isConsult = typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__");
@@ -8785,7 +9618,11 @@ function main(input2) {
       // 2026-09-24): a standing decision can answer the question outright,
       // while a hazard only warns against a mistake the question is not yet
       // making. On a change-shaped prompt the order is unchanged.
-      ...promptIsQuestionShaped ? [...priorParts, ...articleParts, ...decisionBlocks, ...hazardBlocks] : [...hazardBlocks, ...decisionBlocks, ...priorParts, ...articleParts]
+      ...promptIsQuestionShaped ? [...priorParts, ...articleParts, ...decisionBlocks, ...hazardBlocks] : [...hazardBlocks, ...decisionBlocks, ...priorParts, ...articleParts],
+      // DISPATCH OVERLAP, appended and PINNED: it is about this dispatch's
+      // write territory, not a record, so the cap must not trade it away for
+      // a pointer. Absent when there is no overlap, leaving the rest unchanged.
+      ...overlapNotice() ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: overlapNotice() }] : []
     ];
     const assembled = assembleDelivery([...pinPart, ...blocks], resolveTotalCap(input2.cwd));
     const carriage = assembled.text;
@@ -8809,6 +9646,13 @@ function main(input2) {
   } catch (e) {
     const failure = `H20: mechanism-axis delivery failed: ${e && e.message || e}`;
     const pin = modelPin();
+    const overlap = overlapNotice();
+    if (overlap && !pin?.line && !pin?.updatedInput) {
+      process.stderr.write(failure);
+      return emitEnvelope(`${overlap}
+
+\u26A0 ${failure} \u2014 relevance carriage was SKIPPED for this dispatch.`);
+    }
     if (pin?.line || pin?.updatedInput) {
       process.stderr.write(failure);
       return emitEnvelope(`\u26A0 ${failure} \u2014 the model pin above still applies; relevance carriage was SKIPPED for this consult.`);
