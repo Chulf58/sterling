@@ -8305,7 +8305,15 @@ function resolveTotalCap(cwd) {
     return DELIVERY_TOTAL_CAP_DEFAULT;
   }
 }
-function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}) {
+function assembleDelivery(parts, capBytes, options = {}) {
+  const full = assembleOnce(parts, capBytes, options, false);
+  if (!full.holdShrinks) return full.result;
+  const reduced = assembleOnce(parts, capBytes, options, true);
+  return reduced.namesShown >= full.namesShown && reduced.result.omittedCount <= full.result.omittedCount ? reduced.result : full.result;
+}
+function assembleOnce(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}, reduceHold) {
+  let namesShown = 0;
+  let holdShrinks = false;
   const items = (parts ?? []).filter((part) => part && typeof part.text === "string" && part.text).map((part) => ({
     ...part,
     kind: part.kind === "hazard" ? "hazard" : "ordinary",
@@ -8432,7 +8440,6 @@ ${line}` : line;
   };
   const achievableNamedSize = (list, limit) => {
     if (!list.length) return 0;
-    if (aggregateLabel) return disclosureSize(list, true);
     const count = disclosureCount(list);
     const entries = disclosureEntries(list);
     let line = renderDisclosure(count, entries);
@@ -8464,7 +8471,9 @@ ${line}` : line;
       room -= cost;
     }
     const roomFor = (size) => size > 0 ? Math.max(0, Math.min(room, size + bytes(sep))) : 0;
-    const namedHeld = disclosure2.list ? Math.min(disclosure2.named, achievableNamedSize(disclosure2.list, room)) : disclosure2.named;
+    const achievable = disclosure2.list && !aggregateLabel ? achievableNamedSize(disclosure2.list, room) : disclosure2.named;
+    if (achievable < disclosure2.named) holdShrinks = true;
+    const namedHeld = reduceHold ? Math.min(disclosure2.named, achievable) : disclosure2.named;
     const disclosureRoom = { whole: roomFor(disclosure2.ids), excerpt: roomFor(namedHeld), pointer: 0 };
     ordinaryParts.forEach((part, i) => {
       const later = ordinaryParts.slice(i + 1).reduce((sum, next) => sum + (reserved.get(next) ?? 0), 0);
@@ -8497,7 +8506,10 @@ ${line}` : line;
           ids.pop();
           line2 = aggregateLabel(count, ids);
         }
-        if (bytes(line2) <= ordinaryCeiling) return line2;
+        if (bytes(line2) <= ordinaryCeiling) {
+          namesShown = 0;
+          return line2;
+        }
       }
       const sepBytes = sepCost([...selected.keys()].filter((part) => part !== aggregatePart).length);
       const room = Math.min(ordinaryCeiling - ordinaryBytesUsed() - sepBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes() - sepBytes);
@@ -8511,6 +8523,7 @@ ${line}` : line;
         entries.pop();
         line = renderDisclosure(count, entries);
       }
+      namesShown = entries.filter((e) => e.name).length;
       return line;
     };
     while (true) {
@@ -8541,7 +8554,7 @@ ${line}` : line;
   const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
   const omittedEntries = dedupeEntries(omitted.flatMap(disclosureIdsOf));
   const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
-  return {
+  const result = {
     text: output().join(sep),
     emittedSubstance,
     emittedDiscovery,
@@ -8549,6 +8562,7 @@ ${line}` : line;
     omittedCount: omittedEntries.length,
     degraded: omitted.length > 0 || partial
   };
+  return { result, namesShown, holdShrinks };
 }
 function decisionBlockPointer(count, widen, top) {
   const name = top ? clipToBytes(String(top.slug || top.title || "").replace(/\s+/g, " ").trim(), 120) : "";

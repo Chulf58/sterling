@@ -1456,7 +1456,26 @@ export function resolveTotalCap(cwd) {
  * 92088a62: "Omitted, pointer-only, unavailable and transport-overflow
  * content never consumes a substance-delivery mark").
  */
-export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}) {
+export function assembleDelivery(parts, capBytes, options = {}) {
+  // NAMED HOLD-BACK, TWO PLACEMENTS (decision delivery-total-cap-and-axis-
+  // generic-floor, "Known residual"; review of 4e1c6d9): the room held back
+  // from excerpts for the '+N more' line is first sized as at 8965c63, from the
+  // fully-named line. Only when some pass could hold less (not even the names
+  // it carries fit) is the placement re-run with the reduced hold, and that
+  // result is kept only if its line renders at least as many names and it omits
+  // no more records. A reduced hold predicted from one pass can be too small
+  // (a reserved pointer is a ceiling a part may not use; the final omission set
+  // can differ), so the comparison, not the prediction, is what guarantees an
+  // omitted record's name still outranks another block's extra excerpt lines.
+  const full = assembleOnce(parts, capBytes, options, false);
+  if (!full.holdShrinks) return full.result;
+  const reduced = assembleOnce(parts, capBytes, options, true);
+  return reduced.namesShown >= full.namesShown && reduced.result.omittedCount <= full.result.omittedCount ? reduced.result : full.result;
+}
+
+function assembleOnce(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}, reduceHold) {
+  let namesShown = 0;
+  let holdShrinks = false;
   const items = (parts ?? [])
     .filter((part) => part && typeof part.text === 'string' && part.text)
     .map((part) => ({
@@ -1671,10 +1690,10 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
   // the room held back for the line is never more than a render can use. `list`
   // is the omitted parts themselves — the same list `aggregate` discloses, read
   // through `disclosureIdsOf`, so `disclosureIdentities` (the full list a part
-  // stands for) counts here as it does there. A custom label is sized as given.
+  // stands for) counts here as it does there. A custom label carries no names,
+  // so it is never sized here (its hold stays `disclosureSize`'s).
   const achievableNamedSize = (list, limit) => {
     if (!list.length) return 0;
-    if (aggregateLabel) return disclosureSize(list, true);
     const count = disclosureCount(list);
     const entries = disclosureEntries(list);
     let line = renderDisclosure(count, entries);
@@ -1726,10 +1745,13 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
       room -= cost;
     }
     const roomFor = (size) => (size > 0 ? Math.max(0, Math.min(room, size + bytes(sep))) : 0);
-    // The named line is held back only as far as it can render: when not even
-    // one name fits `room`, the held room is the ids-only line's, and the rest
-    // goes to the excerpts (a name outranks excerpt lines only while it fits).
-    const namedHeld = disclosure.list ? Math.min(disclosure.named, achievableNamedSize(disclosure.list, room)) : disclosure.named;
+    // With `reduceHold`, the named line is held back only as far as it can
+    // render against `room`; the rest goes to the excerpts. Without it the hold
+    // is the fully-named size, and `holdShrinks` records whether the reduced
+    // placement could differ at all (see `assembleDelivery`).
+    const achievable = disclosure.list && !aggregateLabel ? achievableNamedSize(disclosure.list, room) : disclosure.named;
+    if (achievable < disclosure.named) holdShrinks = true;
+    const namedHeld = reduceHold ? Math.min(disclosure.named, achievable) : disclosure.named;
     const disclosureRoom = { whole: roomFor(disclosure.ids), excerpt: roomFor(namedHeld), pointer: 0 };
     ordinaryParts.forEach((part, i) => {
       const later = ordinaryParts.slice(i + 1).reduce((sum, next) => sum + (reserved.get(next) ?? 0), 0);
@@ -1783,7 +1805,10 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
           ids.pop();
           line = aggregateLabel(count, ids);
         }
-        if (bytes(line) <= ordinaryCeiling) return line;
+        if (bytes(line) <= ordinaryCeiling) {
+          namesShown = 0;
+          return line;
+        }
       }
       const sepBytes = sepCost([...selected.keys()].filter((part) => part !== aggregatePart).length);
       const room = Math.min(ordinaryCeiling - ordinaryBytesUsed() - sepBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes() - sepBytes);
@@ -1797,6 +1822,7 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
         entries.pop();
         line = renderDisclosure(count, entries);
       }
+      namesShown = entries.filter((e) => e.name).length;
       return line;
     };
     // THE DISCLOSURE ITSELF MUST NEVER SILENTLY VANISH (fix-round HIGH 1,
@@ -1869,7 +1895,7 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
   const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
   const omittedEntries = dedupeEntries(omitted.flatMap(disclosureIdsOf));
   const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
-  return {
+  const result = {
     text: output().join(sep),
     emittedSubstance,
     emittedDiscovery,
@@ -1877,6 +1903,7 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
     omittedCount: omittedEntries.length,
     degraded: omitted.length > 0 || partial,
   };
+  return { result, namesShown, holdShrinks };
 }
 
 /** The capped-delivery pointer for an owning record: its rendered header line

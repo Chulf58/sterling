@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { assembleDelivery, DELIVERY_TRANSPORT_VISIBLE_BYTES, decisionBlockPointer, decisionPointerPart, renderDecisionPointers } from '../hooks/lib/delivery.mjs';
+import { assembleDelivery as assembleDelivery8965c63 } from './fixtures/assemble-delivery-8965c63.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -563,4 +564,107 @@ test('hold-back fuzz pin: 4000 seeded cases never exceed the cap and never leave
   }
   assert.ok(idsOnlyLines > 100, `the fuzz exercised the ids-only omission line (${idsOnlyLines} cases)`);
   assert.equal(wasted, 0, 'no case leaves free room that the top omitted name would fit in');
+});
+
+// ---------------------------------------------------------------------------
+// 4. The reduced hold-back never costs a name (review of 4e1c6d9). The hold
+// sized against what one placement pass predicts was too small in two ways: a
+// reserved pointer is a ceiling, so a part rendering shorter than its pointer
+// gives room back that the aggregate then has; and the omission set a pass
+// predicts can differ from the one the final placement discloses. Either way
+// names were shed so an excerpt line could take their room. The assembler now
+// keeps the reduced placement only when it renders at least as many names and
+// omits no more records than the hold at 8965c63 (the frozen fixture).
+// ---------------------------------------------------------------------------
+
+const omissionLine = (text) => text.split('\n').find((l) => /^\+\d+ more records/.test(l));
+const namesIn = (text) => { const line = omissionLine(text); return line ? (line.match(/ \([0-9a-f]{8}\)/g) || []).length : 0; };
+
+test('reduced hold-back (review repro 1, cap 562): a part shorter than its reserved pointer gives room back, and the name still renders', () => {
+  const parts = [
+    { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: 'H'.repeat(269) },
+    { kind: 'ordinary', contentClass: 'discovery', identity: 'ae36dab2-0000-0000', revision: 'r',
+      text: `BLOCK 0\n  line 0 ${'x'.repeat(12)}\n  line 1 ${'x'.repeat(37)}\n${'x'.repeat(1100)}`,
+      pointer: `PTR 0 knowledge_get ae36dab2-0000-0000${' p'.repeat(24)}`, suffix: '  … rest of 0' },
+    { kind: 'ordinary', contentClass: 'discovery', identity: '3c17a0e9-0000-0000', revision: 'r', name: `n1-${'x'.repeat(19)}`,
+      text: `BLOCK 1\n${'x'.repeat(1233)}`, pointer: `PTR 1 knowledge_get 3c17a0e9-0000-0000${' p'.repeat(32)}` },
+    { kind: 'ordinary', contentClass: 'discovery', identity: 'e8c2b330-0000-0000', revision: 'r', name: `long-2-${'y'.repeat(66)}`, text: 'z'.repeat(145) },
+  ];
+  const assembled = assembleDelivery(parts, 562);
+  assert.ok(bytes(assembled.text) <= 562, `the cap holds (was ${bytes(assembled.text)})`);
+  assert.equal(omissionLine(assembled.text), `+1 more records: knowledge_query; knowledge_get long-2-${'y'.repeat(66)} (e8c2b330)`);
+  assert.ok(namesIn(assembled.text) >= namesIn(assembleDelivery8965c63(parts, 562).text), 'no fewer names than 8965c63');
+});
+
+test('reduced hold-back (review repro 2, cap 406): the hold is never sized from an omission set the final placement does not disclose', () => {
+  const parts = [
+    { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: 'H'.repeat(241) },
+    { kind: 'ordinary', contentClass: 'discovery', identity: 'd6ea1d3d-0000-0000', revision: 'r', name: 'n0-xxxxxxx',
+      text: `BLOCK 0\n  line 0 xxxxx\n${'x'.repeat(559)}`, suffix: '  … rest of 0',
+      disclosureIdentities: [
+        { identity: 'd6ea1d3d-0000-0000', revision: 'r', name: 'n0-xxxxxxx' }, { identity: '3d2de929-dd-0', revision: 'r' },
+        { identity: '6c848e9e-dd-1', revision: 'r', name: `extra-1-${'q'.repeat(34)}` }, { identity: '4043c324-dd-2', revision: 'r', name: `extra-2-${'q'.repeat(30)}` },
+        { identity: '1bc67470-dd-3', revision: 'r', name: `extra-3-${'q'.repeat(47)}` }, { identity: 'cc7930ad-dd-4', revision: 'r', name: 'extra-4-qqqqqqqqqqqq' }] },
+    { kind: 'ordinary', contentClass: 'discovery', identity: '745dadcc-0000-0000', revision: 'r', name: `long-1-${'y'.repeat(90)}`, text: `BLOCK 1\n${'x'.repeat(328)}` },
+  ];
+  const assembled = assembleDelivery(parts, 406);
+  assert.ok(bytes(assembled.text) <= 406, `the cap holds (was ${bytes(assembled.text)})`);
+  assert.ok(namesIn(assembled.text) >= 1, `the omission line keeps a name:\n${omissionLine(assembled.text)}`);
+  assert.ok(namesIn(assembled.text) >= namesIn(assembleDelivery8965c63(parts, 406).text), 'no fewer names than 8965c63');
+});
+
+// DIFFERENTIAL FUZZ against the frozen 8965c63 assembler. The generator mixes
+// suffix-bearing parts, parts whose disclosureIdentities outnumber what they
+// show, parts shorter than their own pointer, unpointered parts that can only
+// render whole or be omitted (so the omission set moves between placement
+// passes), hazards, and a custom aggregateLabel.
+test('reduced hold-back differential fuzz: 3000 seeded cases never render fewer names, never omit more records, never exceed the cap', () => {
+  let seed = 20261001;
+  const rnd = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const ri = (lo, hi) => lo + Math.floor(rnd() * (hi - lo + 1));
+  const hex = () => Array.from({ length: 8 }, () => '0123456789abcdef'[ri(0, 15)]).join('');
+  const lines = (head, n) => [head, ...Array.from({ length: n }, (_, i) => `  line ${i} ${'x'.repeat(ri(5, 60))}`)].join('\n');
+  const label = (count, ids) => `+${count} more pointer line(s) held back: ${ids.join(' ')}`;
+  // Ordinary bytes only: hazards are uncharged against the configured cap.
+  const ordinaryBytes = (text, hazards) => hazards.reduce((sum, h) => sum - (text.includes(h.text) ? bytes(h.text) : text.includes(h.pointer) ? bytes(h.pointer) : 0), bytes(text));
+  const seen = { hazards: 0, suffixes: 0, disclosureLists: 0, labels: 0, differs: 0, namedLines: 0 };
+  for (let k = 0; k < 3000; k++) {
+    const cap = ri(300, 1500);
+    const parts = [];
+    const hazards = [];
+    if (rnd() < 0.7) parts.push({ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: 'H'.repeat(ri(50, Math.floor(cap * 0.8))) });
+    if (rnd() < 0.2) {
+      const hazard = { kind: 'hazard', contentClass: 'substance', identity: `${hex()}-hz`, revision: 'r', text: `HAZARD ${k} ${'h'.repeat(ri(20, 300))}`, pointer: `HZ ${k} pointer` };
+      hazards.push(hazard);
+      parts.push(hazard);
+    }
+    for (let i = 0, n = ri(1, 7); i < n; i++) {
+      const identity = `${hex()}-0000-0000`;
+      const name = rnd() < 0.8 ? (rnd() < 0.5 ? `n${i}-${'x'.repeat(ri(1, 20))}` : `long-${i}-${'y'.repeat(ri(60, 120))}`) : undefined;
+      const shape = rnd();
+      const text = shape < 0.25 ? 'z'.repeat(ri(30, 200)) : shape < 0.45 ? `BLOCK ${i}\n  line 0 ${'x'.repeat(ri(3, 15))}\n${'x'.repeat(ri(100, 1200))}` : lines(`BLOCK ${i}`, ri(1, 30));
+      const part = { kind: 'ordinary', contentClass: 'discovery', identity, revision: 'r', name, text };
+      if (rnd() < 0.6) part.pointer = `PTR ${i} knowledge_get ${identity}${' p'.repeat(ri(0, 40))}`;
+      if (rnd() < 0.35) part.suffix = `  … rest of ${i}`;
+      if (rnd() < 0.2) part.disclosureIdentities = [{ identity, revision: 'r', name }, ...Array.from({ length: ri(1, 6) }, (_, j) => ({ identity: `${hex()}-dd-${j}`, revision: 'r', name: rnd() < 0.7 ? `extra-${j}-${'q'.repeat(ri(3, 50))}` : undefined }))];
+      if (part.suffix) seen.suffixes++;
+      if (part.disclosureIdentities) seen.disclosureLists++;
+      parts.push(part);
+    }
+    const options = rnd() < 0.15 ? { aggregateLabel: label } : {};
+    const now = assembleDelivery(parts, cap, options);
+    const then = assembleDelivery8965c63(parts, cap, options);
+    if (hazards.length) seen.hazards++;
+    if (options.aggregateLabel) seen.labels++;
+    if (now.text !== then.text) seen.differs++;
+    if (namesIn(then.text)) seen.namedLines++;
+    const at = `case ${k} (cap ${cap})`;
+    assert.ok(namesIn(now.text) >= namesIn(then.text), `${at}: ${namesIn(now.text)} names < ${namesIn(then.text)} at 8965c63\nnow:  ${omissionLine(now.text)}\nthen: ${omissionLine(then.text)}`);
+    assert.ok(now.omittedCount <= then.omittedCount, `${at}: omits ${now.omittedCount} records, 8965c63 omitted ${then.omittedCount}`);
+    assert.ok(ordinaryBytes(now.text, hazards) <= Math.max(cap, ordinaryBytes(then.text, hazards)), `${at}: ${ordinaryBytes(now.text, hazards)} ordinary bytes > cap`);
+    if (!hazards.length) assert.ok(bytes(now.text) <= cap, `${at}: ${bytes(now.text)} > cap`);
+  }
+  for (const [what, count] of Object.entries(seen)) assert.ok(count > 50, `the fuzz exercised ${what} (${count} cases)`);
+  // The waste the reduced hold recovers is kept: test (a)'s shape still gains its excerpt line.
+  assert.ok(excerptLines(assembleDelivery(holdBackParts(330), 500).text) > excerptLines(assembleDelivery8965c63(holdBackParts(330), 500).text), 'the demo shape gains an excerpt line over 8965c63');
 });
