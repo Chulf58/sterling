@@ -6,8 +6,16 @@ var __export = (target2, all) => {
     __defProp(target2, name, { get: all[name], enumerable: true });
 };
 
+// scripts/cleanup-plan.mjs
+import { lstatSync as lstatSync2, readFileSync as readFileSync2, realpathSync as realpathSync3 } from "node:fs";
+import { basename as basename2, join as join4 } from "node:path";
+import { spawnSync } from "node:child_process";
+
 // scripts/lib/project.mjs
-import { readFileSync, existsSync as existsSync2 } from "node:fs";
+import { readFileSync, existsSync as existsSync2, mkdtempSync, rmSync } from "node:fs";
+import { join as join3 } from "node:path";
+import { tmpdir } from "node:os";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -4536,11 +4544,29 @@ var todoSchema = base.extend({
   // re-stamped on a board_update that changes text/file_keys; a caller MAY
   // supply it, and the tool layer refuses an unresolvable sha by name rather
   // than silently replacing it with HEAD (P5).
-  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional()
+  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional(),
+  // Semantic order between user asks (decision
+  // every-user-ask-is-boarded-at-intake-with-slim-blocked-by, rule 6): the
+  // SLUGS of the board items this one waits on. Slugs, never ids, because a
+  // slug is the immutable address (decision board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address). Lives in the JSON body
+  // like every other todo field, so it needs no migration. Existence of each
+  // blocker is checked at the tool layer when written; a blocker removed later
+  // reads as closed, it is never rewritten out of this list.
+  blocked_by: external_exports.array(external_exports.string().min(1)).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "source 'system' requires system_reason (\xA73.2.7)" });
+  }
+  if (rec.blocked_by !== void 0 && rec.source === "system") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      path: ["blocked_by"],
+      message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+    });
+  }
+  if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["blocked_by"], message: `blocked_by lists '${rec.slug}', the item itself \u2014 an item cannot block itself` });
   }
 });
 var briefSchema = base.extend({
@@ -7650,19 +7676,131 @@ function resolveProject(cwd) {
   }
   return { dbPath, config };
 }
-function openProject(cwd = process.cwd()) {
+function openProjectReadOnly(cwd = process.cwd()) {
   const { dbPath, config } = resolveProject(cwd);
-  return { cwd, store: new SterlingStore(dbPath), config };
+  const dir = mkdtempSync(join3(tmpdir(), "sterling-readonly-"));
+  const snapshot = join3(dir, "sterling.db");
+  let store2;
+  try {
+    const ro = new DatabaseSync3(dbPath, { readOnly: true });
+    try {
+      ro.exec(`VACUUM INTO '${snapshot.replace(/'/g, "''")}'`);
+    } finally {
+      ro.close();
+    }
+    store2 = new SterlingStore(snapshot);
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    fail(`read-only snapshot of ${dbPath} failed \u2014 ${e.message}`);
+  }
+  const close2 = () => {
+    store2.close();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return { cwd, store: store2, config, close: close2 };
 }
 
 // scripts/cleanup-plan.mjs
+var ARTICLE_CAP = 1e4;
+var GIT_MAX_BUFFER = 64 * 1024 * 1024;
+var LIST_LIMIT = 5;
 var target = arg("--target") ?? process.cwd();
-var { store } = openProject(target);
-try {
-  const articles = store.query({ types: ["feature_article"], cap: 1e3 });
-  const activeById = new Map(articles.filter((a) => a.state !== "deprecated" && a.state !== "dormant").map((a) => [a.id, a]));
+var firstLine = (s2) => (s2 ?? "").trim().split("\n")[0] || "no output";
+var listed = (items) => items.length > LIST_LIMIT ? `${items.slice(0, LIST_LIMIT).join(", ")} and ${items.length - LIST_LIMIT} more` : items.join(", ");
+var runGit = (args) => spawnSync("git", args, { cwd: target, encoding: "utf8", maxBuffer: GIT_MAX_BUFFER });
+function gitUnavailable() {
+  const r = runGit(["rev-parse", "--show-toplevel"]);
+  if (r.error) return `git could not be run (${r.error.message})`;
+  if (r.status !== 0) return `git rev-parse failed: ${firstLine(r.stderr)}`;
+  const top = r.stdout.trim();
+  if (realpathSync3(top) !== realpathSync3(target)) return `the project root is not the git top level (${top})`;
+  const ls = runGit(["ls-files", "-z"]);
+  if (ls.error) return `git ls-files could not be run (${ls.error.message})`;
+  if (ls.status !== 0) return `git ls-files failed: ${firstLine(ls.stderr)}`;
+  return null;
+}
+function needlesFor(path) {
+  const base2 = basename2(path);
+  const dot = base2.lastIndexOf(".");
+  const stem = dot > 0 ? base2.slice(0, dot) : base2;
+  const words = stem.split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const pascal = words.map((w) => w[0].toUpperCase() + w.slice(1)).join("");
+  const camel = pascal ? pascal[0].toLowerCase() + pascal.slice(1) : "";
+  const needles = [base2, stem, pascal, camel];
+  if (base2.endsWith(".gd")) {
+    let text;
+    try {
+      text = readFileSync2(join4(target, path), "utf8");
+    } catch (e) {
+      return { error: `could not read the file to find its class_name (${e.code ?? e.message})` };
+    }
+    for (const m of text.matchAll(/^\s*class_name\s+([A-Za-z_][A-Za-z0-9_]*)/gm)) needles.push(m[1]);
+  }
+  return { needles: [...new Set(needles.filter(Boolean))] };
+}
+function referencesTo(path) {
+  const n = needlesFor(path);
+  if (n.error) return { error: n.error };
+  const refs = /* @__PURE__ */ new Set();
+  const matched = [];
+  for (const needle of n.needles) {
+    const r = runGit(["grep", "-l", "-z", "--untracked", "--fixed-strings", "-e", needle, "--"]);
+    if (r.error) return { error: `git grep could not be run (${r.error.message})` };
+    if (r.status === 1) continue;
+    if (r.status !== 0) return { error: `git grep failed (exit ${r.status}): ${firstLine(r.stderr)}` };
+    const hits = r.stdout.split("\0").filter((f) => f && f !== path);
+    if (!hits.length) continue;
+    matched.push(needle);
+    for (const f of hits) refs.add(f);
+  }
+  return { refs: [...refs], matched };
+}
+function buildPlan(store2) {
+  const articles = store2.query({ types: ["feature_article"], cap: ARTICLE_CAP });
+  if (articles.length >= ARTICLE_CAP) {
+    throw new Error(`cleanup-plan REFUSED: ${articles.length} articles filled the ${ARTICLE_CAP} query window, so the live-owner set may be incomplete`);
+  }
+  const isActive = (a) => a.state !== "deprecated" && a.state !== "dormant";
+  const bySlugOrId = new Map(articles.flatMap((a) => [[a.slug, a], [a.id, a]]));
+  const liveOwners = /* @__PURE__ */ new Map();
+  for (const a of articles) {
+    if (a.state === "deprecated") continue;
+    for (const f of a.files) {
+      if (!liveOwners.has(f.path)) liveOwners.set(f.path, []);
+      liveOwners.get(f.path).push(a);
+    }
+  }
+  let gitWhy;
+  const classify = (a, path) => {
+    const owners = (liveOwners.get(path) ?? []).filter((o) => o.id !== a.id).map((o) => o.slug);
+    if (owners.length) return ["release", `also owned by live article(s) ${listed(owners)}; only this article's ownership goes`];
+    let st;
+    try {
+      st = lstatSync2(join4(target, path));
+    } catch (e) {
+      if (e.code === "ENOENT") return ["absent", "not on disk; only the store entry goes"];
+      return ["keep", `could not stat the file (${e.code ?? e.message})`];
+    }
+    if (!st.isFile()) return ["keep", "not a regular file (a directory or a link); fs-remove deletes files only"];
+    if (gitWhy === void 0) gitWhy = gitUnavailable();
+    if (gitWhy) return ["keep", `reference check could not run: ${gitWhy}`];
+    const { refs, matched, error } = referencesTo(path);
+    if (error) return ["keep", `reference check could not run: ${error}`];
+    if (refs.length) return ["keep", `referenced by ${refs.length} other file(s): ${listed(refs)} (matched ${listed(matched)})`];
+    return ["delete", "on disk, no live owner, and no other tracked file references its filename, stem or declared class"];
+  };
   const candidates = articles.filter((a) => a.state === "deprecated" || a.state === "dormant").map((a) => {
-    const active_dependents = articles.filter((other) => other.id !== a.id && activeById.has(other.id) && (other.dependencies.relies_on.includes(a.slug) || other.dependencies.relies_on.includes(a.id))).map((d) => ({ id: d.id, slug: d.slug }));
+    const active_dependents = articles.filter((other) => other.id !== a.id && isActive(other) && (other.dependencies.relies_on.includes(a.slug) || other.dependencies.relies_on.includes(a.id))).map((d) => ({ id: d.id, slug: d.slug }));
+    const active_relied_by = a.dependencies.relied_by.map((ref) => bySlugOrId.get(ref)).filter((d) => d && d.id !== a.id && isActive(d)).map((d) => ({ id: d.id, slug: d.slug }));
+    const deletable = active_dependents.length === 0 && active_relied_by.length === 0;
+    let buckets = null;
+    if (deletable) {
+      buckets = { delete: [], release: [], absent: [], keep: [] };
+      for (const path of new Set(a.files.map((f) => f.path))) {
+        const [bucket, reason] = classify(a, path);
+        buckets[bucket].push({ path, reason });
+      }
+    }
     return {
       article: a.id,
       slug: a.slug,
@@ -7674,11 +7812,21 @@ try {
       // traced tests rather than throwing on .flatMap.
       traced_tests: Array.isArray(a.live_test_refs) ? a.live_test_refs.flatMap((r) => r.test_paths) : [],
       active_dependents,
-      deletable: active_dependents.length === 0
+      active_relied_by,
+      deletable,
+      buckets
     };
   });
-  const queue = store.query({ types: ["todo"], cap: 1e3 }).filter((t) => t.source === "system" && t.system_reason === "deletion_candidate").map((t) => ({ id: t.id, text: t.text, file_keys: t.file_keys ?? [] }));
-  console.log(JSON.stringify({ candidates, queue }, null, 2));
+  const delete_paths = [...new Set(candidates.flatMap((c) => c.buckets ? c.buckets.delete.map((e) => e.path) : []))].sort();
+  const queue = store2.query({ types: ["todo"], cap: 1e3 }).filter((t) => t.source === "system" && t.system_reason === "deletion_candidate").map((t) => ({ id: t.id, text: t.text, file_keys: t.file_keys ?? [] }));
+  return { candidates, delete_paths, queue };
+}
+var { store, close } = openProjectReadOnly(target);
+try {
+  console.log(JSON.stringify(buildPlan(store), null, 2));
+} catch (e) {
+  console.error(e.message);
+  process.exitCode = 1;
 } finally {
-  store.close();
+  close();
 }

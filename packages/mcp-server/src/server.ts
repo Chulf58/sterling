@@ -488,7 +488,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_add',
     {
       description:
-        "Add a task to the board (source:\"user\") or the maintenance queue (source:\"system\", requires system_reason). User items declare `objective`: the shared name of the larger objective a slice belongs to, or \"standalone\" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. measured_at_head is stamped to HEAD unless you pass a resolvable 40-hex sha (an unresolvable one is refused). The echo defaults to a digest; projection:\"full\" returns the stored record.",
+        "Add a task to the board (source:\"user\") or the maintenance queue (source:\"system\", requires system_reason). User items declare `objective`: the shared name of the larger objective a slice belongs to, or \"standalone\" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on — slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. measured_at_head is stamped to HEAD unless you pass a resolvable 40-hex sha (an unresolvable one is refused). The echo defaults to a digest; projection:\"full\" returns the stored record.",
       inputSchema: strict({
         text: z.string(),
         source: z.enum(['user', 'system']),
@@ -499,6 +499,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         system_reason: z.string().optional(),
         stack_tags: z.array(z.string()).optional(),
         measured_at_head: z.string().optional(),
+        blocked_by: z.array(z.string()).optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
@@ -509,7 +510,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_query',
     {
       description:
-        "List open board items. source:\"user\" is the board, source:\"system\" the maintenance queue. Filters (AND): objective (exact; \"standalone\" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched — raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: \"text\" (default) — id, slug, objective, source, system_reason, status, priority, feature_link, updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; \"headline\" — id, name, priority, objective/system_reason, 80-char text; \"digest\" — one clipped line per item; \"full\" — whole records with file_keys, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id — a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane.",
+        "List open board items. source:\"user\" is the board, source:\"system\" the maintenance queue. Filters (AND): objective (exact; \"standalone\" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched — raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: \"text\" (default) — id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; \"headline\" — id, name, priority, objective/system_reason, 80-char text; \"digest\" — one clipped line per item; \"full\" — whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id — a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane.",
       inputSchema: strict({
         source: z.enum(['user', 'system']).optional(),
         objective: z.string().optional(),
@@ -548,7 +549,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_update',
     {
       description:
-        "Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head. Never closes an item (use board_remove). objective (re)groups a task; \"standalone\" ungroups it. A text or file_keys change re-stamps measured_at_head to HEAD; pass a resolvable 40-hex sha to set it explicitly (unresolvable is refused). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:\"full\" returns the stored record.",
+        "Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; \"standalone\" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). A text or file_keys change re-stamps measured_at_head to HEAD; pass a resolvable 40-hex sha to set it explicitly (unresolvable is refused). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:\"full\" returns the stored record.",
       inputSchema: strict({
         id: z.string(),
         text: z.string().optional(),
@@ -556,6 +557,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         file_keys: z.array(z.string()).optional(),
         objective: z.string().optional(),
         measured_at_head: z.string().optional(),
+        blocked_by: z.array(z.string()).optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
@@ -566,7 +568,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_get',
     {
       description:
-        "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` — the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering.",
+        "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` — the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed).",
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.boardGet(id))

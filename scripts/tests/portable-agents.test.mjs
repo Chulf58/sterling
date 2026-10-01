@@ -118,7 +118,7 @@ const FENCE_BASELINE = '703a327';
 // agent-templates-dual-lane-audit-september-2026), which changed Claude-visible prose
 // in every template on purpose.
 const BASELINE_OVERRIDES = {
-  'conductor.md': '1501adf', // moved 2026-09-29: deliberate review-cadence prose (f1fd5d9, 1501adf; decision review-sparsely-before-commit-ledger-kept)
+  'conductor.md': 'fc054b1', // moved 2026-10-01: deliberate board-intake, parallel-planning and Fable-fallback prose (462c4f8, fc054b1; decision every-user-ask-is-boarded-at-intake-with-slim-blocked-by); before that 1501adf, review-cadence prose (decision review-sparsely-before-commit-ledger-kept)
   'implementor.md': 'edbb9f8', // moved 2026-09-30: knowledge_line_ref_fix added to disallowedTools (store writes stay the conductor's; roster.test.mjs)
   'researcher.md': '87aa5ff',
   'scout.md': '87aa5ff',

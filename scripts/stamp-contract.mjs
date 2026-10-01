@@ -18,6 +18,18 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { historicalVariants } from './lib/contract-history.mjs';
+import {
+  AGENTS_TEMPLATE_REL,
+  CLAUDE_TEMPLATE_REL,
+  TEMPLATE_RELS,
+  TARGET_LEADS,
+  RENAMED_LEADS,
+  HISTORY_LEADS,
+  FENCE,
+  fenceSpans,
+  extractBlock,
+  readTemplateBullets,
+} from './lib/contract-bullets.mjs';
 
 const APPLY = process.argv.includes('--apply');
 const VERBOSE = process.argv.includes('--verbose');
@@ -26,68 +38,13 @@ for (let i = 2; i < process.argv.length; i++) {
   if (process.argv[i] === '--project' && process.argv[i + 1]) onlyProjects.push(resolve(process.argv[++i]));
 }
 
+// The plugin root, from this file's location: scripts/.. in a clone, and the same root
+// when run as bin/stamp-contract.mjs, whose bundle rewrites import.meta.url to this source
+// path (sourceIdentityPlugin in scripts/lib/bundled-artifacts.mjs).
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
-// AGENTS.md/CLAUDE.md split (decision agents-md-is-the-instructions-file-claude-md-is-a-one-line-import,
-// 161e2972): each TARGET_LEADS bullet lives in whichever template currently contains it, and
-// propagates into the SAME layer file in a sibling. TEMPLATE_RELS is searched in this order to
-// find a lead's home; historical ancestry is searched across BOTH files (a bullet may have moved
-// from target-claude-md.md to target-agents-md.md at the split commit and keeps its ancestry).
-const AGENTS_TEMPLATE_REL = 'templates/target-agents-md.md';
-const CLAUDE_TEMPLATE_REL = 'templates/target-claude-md.md';
-const TEMPLATE_RELS = [AGENTS_TEMPLATE_REL, CLAUDE_TEMPLATE_REL];
-
-// The propagated bullets, identified by their bold lead at line start.
-const TARGET_LEADS = [
-  '- **Reconcile _every affected_ article, not just the primary one**',
-  '- **Concept articles — capture design the moment it settles',
-  '- **Wired, not just asked:**',
-  // Added 2026-07-26 so the H19-delivery caveat reaches already-initialized
-  // siblings. It rides INSIDE this existing bullet rather than arriving as a new
-  // top-level one, so the REPLACE path carries it.
-  //
-  // CORRECTED 2026-07-26: an earlier version of this comment claimed a new bullet "would need an
-  // insert capability this script does not have". That was FALSE — the insert path
-  // exists at :127-137. What is true is narrower: that path is INDEX-PINNED, firing
-  // only for TARGET_LEADS[1] and anchoring on TARGET_LEADS[0]. A lead appended at
-  // any other index gets ANCHOR_MISSING_REFUSED, so folding was still the right
-  // call for THIS bullet — but for that reason, not the one first written down.
-  // [2026-09-26: the index pinning is gone — inserts are now declared per lead in
-  // INSERT_AFTER, the {lead, insertAfter} generalization this note once tracked.]
-  '- **Stage retrieval before acting**',
-  // Added 2026-07-27. The mirror rule says the template is the SOURCE, but the two
-  // had diverged and the stronger text was in Sterling's own CLAUDE.md — so seven
-  // siblings were running weaker conduct rules than the repo that ships them. Both
-  // bullets ALREADY EXIST in every sibling (they were generated from this template),
-  // so these ride the REPLACE path; neither depends on the index-pinned insert above.
-  // (The APPEND-ONLY constraint this note once stated died with the index pinning.)
-  '- **Anti-speculation:**',
-  '- **No false action claims:**',
-  // 2026-08-11: the note surface was retired (decision 'note-surface-retired')
-  // and the bullet's lead was renamed from "- **Notes are the user's surface.**"
-  // to the one below. A renamed lead matches nothing in an already-stamped
-  // sibling by itself, so RENAMED_LEADS below carries the old lead: a sibling
-  // block found under the OLD lead is replaced by the new bullet under the SAME
-  // template-descended guard as the normal replace path.
-  '- **Knowledge is born structured.**',
-  // 2026-09-26: the Codex and READY TO CLEAR bullets are NEW to older siblings, so they
-  // arrive through the insert path — see INSERT_AFTER below. Codex stays BEFORE
-  // READY TO CLEAR here: leads are processed in order, and READY TO CLEAR anchors on
-  // the Codex bullet, so a sibling missing both gets them back in template order.
-  '- **Codex runs through the MCP tool, never the shell.**',
-  '- **Say `READY TO CLEAR` plainly when it is time.**',
-  // 2026-09-28: auto-memory is off (decision sterling-projects-run-with-claude-code-auto-memory-off),
-  // and the new bullet replacing it reads right after "Ask, don't guess" in the template, so
-  // that bullet is tracked here too (it was not before) purely to serve as this insert's anchor —
-  // its own wording was already stable and unchanged, so tracking it adds no drift risk.
-  "- **Ask, don't guess — through the AskUserQuestion tool.**",
-  '- **Instruction-file proposals replace memory.**',
-  // 2026-09-30: the plain-writing pair (decision write-plainly-everywhere-de-ai-pass-on-prose-deliverables).
-  // Both are NEW to every sibling, so both arrive through INSERT_AFTER; the plain-writing bullet
-  // is AGENTS.md-homed, the de-ai-writing pass bullet is CLAUDE.md-homed.
-  '- **Write plainly; no AI tells.**',
-  '- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**',
-];
-
+// The tracked leads, the template files and block extraction live in
+// scripts/lib/contract-bullets.mjs, shared with build:bin's bin/contract-history.json.
+//
 // Insertable bullets: lead → the anchor lead(s) it goes after, tried in order. A lead
 // absent from a sibling (and not renamed) is inserted after the FIRST anchor the sibling
 // carries; with no anchor present it is ANCHOR_MISSING_REFUSED. Declared per lead, so
@@ -101,14 +58,8 @@ const INSERT_AFTER = new Map([
   ['- **Instruction-file proposals replace memory.**', ["- **Ask, don't guess — through the AskUserQuestion tool.**"]],
   ['- **Write plainly; no AI tells.**', ['- **No false action claims:**', '- **Anti-speculation:**']],
   ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', ['- **Instruction-file proposals replace memory.**', "- **Ask, don't guess — through the AskUserQuestion tool.**"]],
-]);
-
-// Renamed bullets: new lead → the old lead(s) it replaced. When the new lead is
-// absent from a sibling, a block under an old lead is replaced by the new bullet
-// ONLY if it matches a historical template variant of that old lead (P5 — a
-// hand-tuned old block is refused exactly like the normal replace path).
-const RENAMED_LEADS = new Map([
-  ['- **Knowledge is born structured.**', ["- **Notes are the user's surface.**"]],
+  ["- **Solve, don't board.**", ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', '- **Instruction-file proposals replace memory.**', "- **Ask, don't guess — through the AskUserQuestion tool.**"]],
+  ['- **Close-on-commit: a commit that fulfils a board item pays it**', ["- **Solve, don't board.**"]],
 ]);
 
 // CRLF handling (Sol review fix round, finding 6): comparisons run on a CR-stripped copy so a
@@ -117,44 +68,6 @@ const RENAMED_LEADS = new Map([
 const normalizeEol = (text) => text.replace(/\r\n/g, '\n');
 const detectEol = (text) => (text.includes('\r\n') ? '\r\n' : '\n');
 const withEol = (lfText, eol) => (eol === '\r\n' ? lfText.replace(/\n/g, '\r\n') : lfText);
-
-// A block = the bullet line plus continuation lines until the next top-level
-// bullet, heading, or blank line (template bullets are single long lines today;
-// the continuation rule keeps this robust if they ever wrap).
-// Lines inside a fenced code block (``` or ~~~) are examples, never bullets (Sol review of
-// b41f29d..f32c48a, HIGH): a lead is only ever located outside every fence.
-// A fence closes only on a line of the SAME character with a run at least as long as its
-// opener's (CommonMark; Sol re-check of af99713) — a ~~~ line inside a ``` fence is content.
-// An unclosed fence runs to the end of the text, as in CommonMark.
-const FENCE = /^\s*(```|~~~)/;
-// fenceSpans(lines) → Map(openerIndex → closerIndex) for every fenced block.
-function fenceSpans(lines) {
-  const spans = new Map();
-  for (let i = 0; i < lines.length; i++) {
-    const open = /^\s*(`{3,}|~{3,})/.exec(lines[i]);
-    if (!open) continue;
-    const ch = open[1][0];
-    const closer = new RegExp(`^\\s*\\${ch}{${open[1].length},}\\s*$`);
-    let j = i + 1;
-    while (j < lines.length && !closer.test(lines[j])) j++;
-    spans.set(i, Math.min(j, lines.length - 1));
-    i = j;
-  }
-  return spans;
-}
-function unfencedLineIndexes(lines) {
-  const fenced = new Set();
-  for (const [open, close] of fenceSpans(lines)) for (let k = open; k <= close; k++) fenced.add(k);
-  return lines.map((_, i) => i).filter((i) => !fenced.has(i));
-}
-function extractBlock(text, lead) {
-  const lines = text.split('\n');
-  const start = unfencedLineIndexes(lines).find((i) => lines[i].startsWith(lead)) ?? -1;
-  if (start === -1) return null;
-  let end = start + 1;
-  while (end < lines.length && !/^(- |#|\s*$)/.test(lines[end]) && !FENCE.test(lines[end])) end++;
-  return { start, end, block: lines.slice(start, end).join('\n') };
-}
 
 // Where to INSERT after a list item: past its whole extent, including blank-separated INDENTED
 // continuation paragraphs, so an insert never lands inside an item. extractBlock's stop at the
@@ -186,21 +99,15 @@ function itemEnd(text, start) {
   return end;
 }
 
-const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync(join(repoRoot, rel), 'utf8')]));
-const current = new Map();
-const leadLayer = new Map(); // lead -> template rel it currently lives in (= the sibling file it propagates to)
-for (const lead of TARGET_LEADS) {
-  const home = TEMPLATE_RELS.find((rel) => extractBlock(templates.get(rel), lead));
-  if (!home) throw new Error(`stamp-contract: no template carries target bullet '${lead}' — refusing (P5)`);
-  leadLayer.set(lead, home);
-  current.set(lead, extractBlock(templates.get(home), lead).block);
-}
+// leadLayer: lead -> template rel it currently lives in (= the sibling file it propagates to).
+const { leadLayer, current } = readTemplateBullets(repoRoot);
 // Historical variants (scripts/lib/contract-history.mjs): the git history of both
-// templates, or on an installed copy with no history only the current text.
+// templates, or on an installed copy with no history bin/contract-history.json plus the
+// current text.
 const variants = historicalVariants({
   repoRoot,
   templateRels: TEMPLATE_RELS,
-  leads: [...TARGET_LEADS, ...[...RENAMED_LEADS.values()].flat()],
+  leads: HISTORY_LEADS,
   extractBlock,
   currentBlocks: current,
 });

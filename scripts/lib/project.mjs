@@ -1,7 +1,9 @@
 // Shared plumbing for conductor-invoked [S] scripts: target-project resolution,
 // config, store, args.
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { parseConfig } from '@sterling/schemas';
 import { SterlingStore, MountedStores, resolveDomainMounts } from '@sterling/store';
 import { resolveStoreWritePath } from './store-path.mjs';
@@ -159,6 +161,38 @@ export function openProject(cwd = process.cwd()) {
 export function openMounted(cwd = process.cwd()) {
   const { dbPath, config } = resolveProject(cwd);
   return { cwd, store: new MountedStores(dbPath, resolveDomainMounts(config)), config };
+}
+
+// Read-only project store, for scripts that must never write (cleanup-plan).
+// openProject is NOT read-only: the SterlingStore constructor sets the journal
+// mode and runs its DDL and additive migrations, which write to a store whose
+// schema lags the code. This copies the live store through a readOnly SQLite
+// connection (VACUUM INTO a temp file) and opens SterlingStore on the copy, so
+// every store read works and the live file is never opened for writing. A
+// readOnly open of a WAL store may still create the -shm index file; it never
+// changes the database. close() closes the copy and deletes it.
+export function openProjectReadOnly(cwd = process.cwd()) {
+  const { dbPath, config } = resolveProject(cwd);
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-readonly-'));
+  const snapshot = join(dir, 'sterling.db');
+  let store;
+  try {
+    const ro = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      ro.exec(`VACUUM INTO '${snapshot.replace(/'/g, "''")}'`);
+    } finally {
+      ro.close();
+    }
+    store = new SterlingStore(snapshot);
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    fail(`read-only snapshot of ${dbPath} failed — ${e.message}`);
+  }
+  const close = () => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return { cwd, store, config, close };
 }
 
 // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-

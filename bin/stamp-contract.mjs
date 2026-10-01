@@ -7,8 +7,8 @@ var __export = (target, all) => {
 };
 
 // scripts/stamp-contract.mjs
-import { readFileSync, writeFileSync, existsSync as existsSync2, realpathSync as realpathSync2 } from "node:fs";
-import { join as join3, dirname as dirname2, resolve as resolve2 } from "node:path";
+import { readFileSync as readFileSync3, writeFileSync, existsSync as existsSync2, realpathSync as realpathSync2 } from "node:fs";
+import { join as join5, dirname as dirname2, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // packages/store/dist/index.js
@@ -4541,11 +4541,29 @@ var todoSchema = base.extend({
   // re-stamped on a board_update that changes text/file_keys; a caller MAY
   // supply it, and the tool layer refuses an unresolvable sha by name rather
   // than silently replacing it with HEAD (P5).
-  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional()
+  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional(),
+  // Semantic order between user asks (decision
+  // every-user-ask-is-boarded-at-intake-with-slim-blocked-by, rule 6): the
+  // SLUGS of the board items this one waits on. Slugs, never ids, because a
+  // slug is the immutable address (decision board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address). Lives in the JSON body
+  // like every other todo field, so it needs no migration. Existence of each
+  // blocker is checked at the tool layer when written; a blocker removed later
+  // reads as closed, it is never rewritten out of this list.
+  blocked_by: external_exports.array(external_exports.string().min(1)).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "source 'system' requires system_reason (\xA73.2.7)" });
+  }
+  if (rec.blocked_by !== void 0 && rec.source === "system") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      path: ["blocked_by"],
+      message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+    });
+  }
+  if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["blocked_by"], message: `blocked_by lists '${rec.slug}', the item itself \u2014 an item cannot block itself` });
   }
 });
 var briefSchema = base.extend({
@@ -5172,6 +5190,8 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
 
 // scripts/lib/contract-history.mjs
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join as join3 } from "node:path";
 
 // scripts/lib/installed-copy.mjs
 import { existsSync, realpathSync } from "node:fs";
@@ -5199,23 +5219,14 @@ function isInstalledCopy(root, { env = process.env, home = homedir2() } = {}) {
 }
 
 // scripts/lib/contract-history.mjs
-function historicalVariants({
-  repoRoot: repoRoot2,
-  templateRels,
-  leads,
-  extractBlock: extractBlock2,
-  currentBlocks,
-  warn = (line) => console.error(line),
-  git = (args) => spawnSync("git", args, { cwd: repoRoot2, encoding: "utf8" })
-}) {
+var CONTRACT_HISTORY_REL = "bin/contract-history.json";
+function gitVariants({ repoRoot: repoRoot2, templateRels, leads, extractBlock: extractBlock2, git }) {
+  if (isInstalledCopy(repoRoot2)) return null;
   const variants2 = new Map(leads.map((l) => [l, /* @__PURE__ */ new Set()]));
   for (const rel of templateRels) {
     const log = git(["log", "--format=%H", "--", rel]);
     if (log.status !== 0) {
-      if (isInstalledCopy(repoRoot2) || /not a git repository/i.test(log.stderr ?? "")) {
-        warn(`stamp-contract: no git history at ${repoRoot2} (installed plugin copy) \u2014 only the current template text counts as template-descended; older bullets read as drift`);
-        return new Map(leads.map((l) => [l, new Set(currentBlocks.has(l) ? [currentBlocks.get(l)] : [])]));
-      }
+      if (/not a git repository/i.test(log.stderr ?? "")) return null;
       throw new Error(`stamp-contract: git log failed in ${repoRoot2}: ${log.stderr}`);
     }
     for (const sha of log.stdout.split("\n").filter(Boolean)) {
@@ -5229,15 +5240,53 @@ function historicalVariants({
   }
   return variants2;
 }
-
-// scripts/stamp-contract.mjs
-var APPLY = process.argv.includes("--apply");
-var VERBOSE = process.argv.includes("--verbose");
-var onlyProjects = [];
-for (let i = 2; i < process.argv.length; i++) {
-  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve2(process.argv[++i]));
+function loadSnapshot(path) {
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT") return { ok: false, reason: `${path} is missing` };
+    throw err;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return { ok: false, reason: `${path} is unparseable (${err.message})` };
+  }
+  const valid = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && Object.values(parsed).every((v) => Array.isArray(v) && v.every((b) => typeof b === "string"));
+  if (!valid) return { ok: false, reason: `${path} is unparseable (expected an object of lead \u2192 string[])` };
+  return { ok: true, blocks: parsed };
 }
-var repoRoot = join3(dirname2(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+function historicalVariants({
+  repoRoot: repoRoot2,
+  templateRels,
+  leads,
+  extractBlock: extractBlock2,
+  currentBlocks,
+  warn = (line) => console.error(line),
+  git = (args) => spawnSync("git", args, { cwd: repoRoot2, encoding: "utf8" })
+}) {
+  const fromGit = gitVariants({ repoRoot: repoRoot2, templateRels, leads, extractBlock: extractBlock2, git });
+  if (fromGit) return fromGit;
+  const currentOnly = () => new Map(leads.map((l) => [l, new Set(currentBlocks.has(l) ? [currentBlocks.get(l)] : [])]));
+  const snapshot = loadSnapshot(join3(repoRoot2, CONTRACT_HISTORY_REL));
+  if (!snapshot.ok) {
+    warn(`stamp-contract: DEGRADED \u2014 no git history at ${repoRoot2} (installed plugin copy) and ${snapshot.reason} \u2014 only the current template text counts as template-descended; older bullets read as drift`);
+    return currentOnly();
+  }
+  const variants2 = currentOnly();
+  const absent = leads.filter((l) => !Object.hasOwn(snapshot.blocks, l));
+  if (absent.length) {
+    warn(`stamp-contract: DEGRADED \u2014 ${join3(repoRoot2, CONTRACT_HISTORY_REL)} has no entry for ${absent.length} lead(s) (${absent.join(" | ")}) \u2014 only their current template text counts as template-descended`);
+  }
+  for (const lead of leads) for (const block of snapshot.blocks[lead] ?? []) variants2.get(lead).add(block);
+  return variants2;
+}
+
+// scripts/lib/contract-bullets.mjs
+import { readFileSync as readFileSync2 } from "node:fs";
+import { join as join4 } from "node:path";
 var AGENTS_TEMPLATE_REL = "templates/target-agents-md.md";
 var CLAUDE_TEMPLATE_REL = "templates/target-claude-md.md";
 var TEMPLATE_RELS = [AGENTS_TEMPLATE_REL, CLAUDE_TEMPLATE_REL];
@@ -5256,7 +5305,8 @@ var TARGET_LEADS = [
   // any other index gets ANCHOR_MISSING_REFUSED, so folding was still the right
   // call for THIS bullet — but for that reason, not the one first written down.
   // [2026-09-26: the index pinning is gone — inserts are now declared per lead in
-  // INSERT_AFTER, the {lead, insertAfter} generalization this note once tracked.]
+  // INSERT_AFTER (scripts/stamp-contract.mjs), the {lead, insertAfter} generalization this
+  // note once tracked.]
   "- **Stage retrieval before acting**",
   // Added 2026-07-27. The mirror rule says the template is the SOURCE, but the two
   // had diverged and the stronger text was in Sterling's own CLAUDE.md — so seven
@@ -5274,9 +5324,9 @@ var TARGET_LEADS = [
   // template-descended guard as the normal replace path.
   "- **Knowledge is born structured.**",
   // 2026-09-26: the Codex and READY TO CLEAR bullets are NEW to older siblings, so they
-  // arrive through the insert path — see INSERT_AFTER below. Codex stays BEFORE
-  // READY TO CLEAR here: leads are processed in order, and READY TO CLEAR anchors on
-  // the Codex bullet, so a sibling missing both gets them back in template order.
+  // arrive through the insert path — see INSERT_AFTER in scripts/stamp-contract.mjs. Codex
+  // stays BEFORE READY TO CLEAR here: leads are processed in order, and READY TO CLEAR
+  // anchors on the Codex bullet, so a sibling missing both gets them back in template order.
   "- **Codex runs through the MCP tool, never the shell.**",
   "- **Say `READY TO CLEAR` plainly when it is time.**",
   // 2026-09-28: auto-memory is off (decision sterling-projects-run-with-claude-code-auto-memory-off),
@@ -5289,22 +5339,25 @@ var TARGET_LEADS = [
   // Both are NEW to every sibling, so both arrive through INSERT_AFTER; the plain-writing bullet
   // is AGENTS.md-homed, the de-ai-writing pass bullet is CLAUDE.md-homed.
   "- **Write plainly; no AI tells.**",
-  "- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**"
+  "- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**",
+  // 2026-10-01: board every user ask at intake (decision
+  // every-user-ask-is-boarded-at-intake-with-slim-blocked-by). Both bullets already exist in
+  // most siblings under these same leads, so the REPLACE path carries the new wording; a
+  // sibling that predates them gets them through INSERT_AFTER. Solve stays BEFORE Close-on-commit
+  // here because Close-on-commit anchors on it.
+  "- **Solve, don't board.**",
+  "- **Close-on-commit: a commit that fulfils a board item pays it**"
 ];
-var INSERT_AFTER = /* @__PURE__ */ new Map([
-  ["- **Concept articles \u2014 capture design the moment it settles", ["- **Reconcile _every affected_ article, not just the primary one**"]],
-  ["- **Codex runs through the MCP tool, never the shell.**", ["- **Knowledge is born structured.**"]],
-  ["- **Say `READY TO CLEAR` plainly when it is time.**", ["- **Codex runs through the MCP tool, never the shell.**", "- **Knowledge is born structured.**"]],
-  ["- **Instruction-file proposals replace memory.**", ["- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
-  ["- **Write plainly; no AI tells.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
-  ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", ["- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]]
-]);
 var RENAMED_LEADS = /* @__PURE__ */ new Map([
-  ["- **Knowledge is born structured.**", ["- **Notes are the user's surface.**"]]
+  ["- **Knowledge is born structured.**", ["- **Notes are the user's surface.**"]],
+  // 2026-10-01: Sterling's own CLAUDE.md carried these two bullets under shorter leads
+  // that no template version ever used. Mapping them here means a sibling holding the
+  // old wording is refused (or replaced, if it ever matches a template variant) instead
+  // of getting a second copy through INSERT_AFTER.
+  ["- **Solve, don't board.**", ["- **Solve, don't board**"]],
+  ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Close-on-commit:**"]]
 ]);
-var normalizeEol = (text) => text.replace(/\r\n/g, "\n");
-var detectEol = (text) => text.includes("\r\n") ? "\r\n" : "\n";
-var withEol = (lfText, eol) => eol === "\r\n" ? lfText.replace(/\n/g, "\r\n") : lfText;
+var HISTORY_LEADS = [...TARGET_LEADS, ...[...RENAMED_LEADS.values()].flat()];
 var FENCE = /^\s*(```|~~~)/;
 function fenceSpans(lines) {
   const spans = /* @__PURE__ */ new Map();
@@ -5333,6 +5386,40 @@ function extractBlock(text, lead) {
   while (end < lines.length && !/^(- |#|\s*$)/.test(lines[end]) && !FENCE.test(lines[end])) end++;
   return { start, end, block: lines.slice(start, end).join("\n") };
 }
+function readTemplateBullets(repoRoot2) {
+  const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync2(join4(repoRoot2, rel), "utf8")]));
+  const leadLayer2 = /* @__PURE__ */ new Map();
+  const current2 = /* @__PURE__ */ new Map();
+  for (const lead of TARGET_LEADS) {
+    const home = TEMPLATE_RELS.find((rel) => extractBlock(templates.get(rel), lead));
+    if (!home) throw new Error(`stamp-contract: no template carries target bullet '${lead}' \u2014 refusing (P5)`);
+    leadLayer2.set(lead, home);
+    current2.set(lead, extractBlock(templates.get(home), lead).block);
+  }
+  return { templates, leadLayer: leadLayer2, current: current2 };
+}
+
+// scripts/stamp-contract.mjs
+var APPLY = process.argv.includes("--apply");
+var VERBOSE = process.argv.includes("--verbose");
+var onlyProjects = [];
+for (let i = 2; i < process.argv.length; i++) {
+  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve2(process.argv[++i]));
+}
+var repoRoot = join5(dirname2(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+var INSERT_AFTER = /* @__PURE__ */ new Map([
+  ["- **Concept articles \u2014 capture design the moment it settles", ["- **Reconcile _every affected_ article, not just the primary one**"]],
+  ["- **Codex runs through the MCP tool, never the shell.**", ["- **Knowledge is born structured.**"]],
+  ["- **Say `READY TO CLEAR` plainly when it is time.**", ["- **Codex runs through the MCP tool, never the shell.**", "- **Knowledge is born structured.**"]],
+  ["- **Instruction-file proposals replace memory.**", ["- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
+  ["- **Write plainly; no AI tells.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", ["- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
+  ["- **Solve, don't board.**", ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", "- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
+  ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Solve, don't board.**"]]
+]);
+var normalizeEol = (text) => text.replace(/\r\n/g, "\n");
+var detectEol = (text) => text.includes("\r\n") ? "\r\n" : "\n";
+var withEol = (lfText, eol) => eol === "\r\n" ? lfText.replace(/\n/g, "\r\n") : lfText;
 function itemEnd(text, start) {
   const lines = text.split("\n");
   const spans = fenceSpans(lines);
@@ -5357,19 +5444,11 @@ function itemEnd(text, start) {
   }
   return end;
 }
-var templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync(join3(repoRoot, rel), "utf8")]));
-var current = /* @__PURE__ */ new Map();
-var leadLayer = /* @__PURE__ */ new Map();
-for (const lead of TARGET_LEADS) {
-  const home = TEMPLATE_RELS.find((rel) => extractBlock(templates.get(rel), lead));
-  if (!home) throw new Error(`stamp-contract: no template carries target bullet '${lead}' \u2014 refusing (P5)`);
-  leadLayer.set(lead, home);
-  current.set(lead, extractBlock(templates.get(home), lead).block);
-}
+var { leadLayer, current } = readTemplateBullets(repoRoot);
 var variants = historicalVariants({
   repoRoot,
   templateRels: TEMPLATE_RELS,
-  leads: [...TARGET_LEADS, ...[...RENAMED_LEADS.values()].flat()],
+  leads: HISTORY_LEADS,
   extractBlock,
   currentBlocks: current
 });
@@ -5392,8 +5471,8 @@ for (const p of projects) {
     continue;
   }
   if (realpathSync2(repo) === selfPath) continue;
-  const agentsMd = join3(repo, "AGENTS.md");
-  const claudeMd = join3(repo, "CLAUDE.md");
+  const agentsMd = join5(repo, "AGENTS.md");
+  const claudeMd = join5(repo, "CLAUDE.md");
   if (!existsSync2(agentsMd)) {
     results.push({ project: p.name, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node scripts/init.mjs --target ${repo}` });
     drift++;
@@ -5405,7 +5484,7 @@ for (const p of projects) {
     continue;
   }
   const loadSibling = (path) => {
-    const raw = readFileSync(path, "utf8");
+    const raw = readFileSync3(path, "utf8");
     return { path, eol: detectEol(raw), text: normalizeEol(raw) };
   };
   const siblingFiles = /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, loadSibling(agentsMd)], [CLAUDE_TEMPLATE_REL, loadSibling(claudeMd)]]);
