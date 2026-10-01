@@ -1,5 +1,5 @@
 ---
-description: Merge the current conductor-direct branch into the base and sweep merged branches — the human-invoked merge-to-main gate for direct work.
+description: Merge the current conductor-direct branch into the base and sweep merged branches — the merge-to-main gate for direct work; in hobby mode the conductor runs it once a task is ready, in work mode it opens the PR.
 ---
 
 Invoking this is the merge-to-main decision, so run it only once the change is committed and every affected article is reconciled. From the feature branch:
