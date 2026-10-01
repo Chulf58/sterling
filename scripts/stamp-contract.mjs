@@ -81,6 +81,11 @@ const TARGET_LEADS = [
   // its own wording was already stable and unchanged, so tracking it adds no drift risk.
   "- **Ask, don't guess — through the AskUserQuestion tool.**",
   '- **Instruction-file proposals replace memory.**',
+  // 2026-09-30: the plain-writing pair (decision write-plainly-everywhere-de-ai-pass-on-prose-deliverables).
+  // Both are NEW to every sibling, so both arrive through INSERT_AFTER; the plain-writing bullet
+  // is AGENTS.md-homed, the de-ai-writing pass bullet is CLAUDE.md-homed.
+  '- **Write plainly; no AI tells.**',
+  '- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**',
 ];
 
 // Insertable bullets: lead → the anchor lead(s) it goes after, tried in order. A lead
@@ -94,6 +99,8 @@ const INSERT_AFTER = new Map([
   ['- **Codex runs through the MCP tool, never the shell.**', ['- **Knowledge is born structured.**']],
   ['- **Say `READY TO CLEAR` plainly when it is time.**', ['- **Codex runs through the MCP tool, never the shell.**', '- **Knowledge is born structured.**']],
   ['- **Instruction-file proposals replace memory.**', ["- **Ask, don't guess — through the AskUserQuestion tool.**"]],
+  ['- **Write plainly; no AI tells.**', ['- **No false action claims:**', '- **Anti-speculation:**']],
+  ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', ['- **Instruction-file proposals replace memory.**', "- **Ask, don't guess — through the AskUserQuestion tool.**"]],
 ]);
 
 // Renamed bullets: new lead → the old lead(s) it replaced. When the new lead is
