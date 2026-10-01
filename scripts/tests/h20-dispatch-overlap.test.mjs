@@ -167,27 +167,21 @@ test("a path listed under the brief's Out of scope / do-not-touch sections gets 
   }
 });
 
-test("a path named only as another lane's, or only to read for context, is not write territory; a claimed path still warns", () => {
+// KNOWN FALSE-POSITIVE CLASS, accepted (decision 630389ad: a miss is worse
+// than a false alarm): a path named only to say another lane owns it, or to
+// read it for context, still warns. These are claim phrasings that must warn.
+test('a path the brief claims warns', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeRegister(dir, [row(['scripts/lib/retry-queue.mjs'])]);
-    const briefs = [
-      'Another lane owns scripts/lib/retry-queue.mjs; you implement scripts/lib/parser.mjs.',
-      'Lane B is editing scripts/lib/retry-queue.mjs. You implement scripts/lib/parser.mjs.',
-      'Note that scripts/lib/retry-queue.mjs is being edited by another lane. Implement scripts/lib/parser.mjs.',
-      'scripts/lib/retry-queue.mjs belongs to the queue lane. Implement scripts/lib/parser.mjs.',
-      'Read scripts/lib/retry-queue.mjs for context, then implement scripts/lib/parser.mjs.',
-      'See scripts/lib/retry-queue.mjs for reference. Implement scripts/lib/parser.mjs.',
-    ];
-    for (const brief of briefs) {
-      const r = runHook(dispatch(dir, brief), dir);
-      assert.equal(r.code, 0);
-      assert.equal(r.stdout, '', `no warning for:\n${brief}\n---\n${r.stdout}`);
-    }
     const claimed = [
       'Read scripts/lib/parser.mjs for context, then implement the retry in scripts/lib/retry-queue.mjs.',
       'Another lane owns scripts/lib/parser.mjs; you own and edit scripts/lib/retry-queue.mjs.',
       'Files owned by you: scripts/lib/retry-queue.mjs.',
+      'This lane owns scripts/lib/retry-queue.mjs.',
+      'scripts/lib/retry-queue.mjs is owned by you.',
+      'Lane A owns the schema work and you edit scripts/lib/retry-queue.mjs.',
+      'Another lane owns scripts/lib/parser.mjs\n- edit scripts/lib/retry-queue.mjs',
     ];
     for (const brief of claimed) {
       const ctx = ctxOf(runHook(dispatch(dir, brief), dir));
