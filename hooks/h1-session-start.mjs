@@ -9915,8 +9915,10 @@ var NOTE_FIELD_MAX = {
   pointers: NOTE_PROSE_MAX,
   branch: PATH_MAX,
   head_sha: PATH_MAX,
+  session_id: PATH_MAX,
   at: PATH_MAX
 };
+var LANE_HANDOFF_MAX = 1e3;
 var rotationContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {
@@ -9973,8 +9975,9 @@ try {
         cautions.push(`the note names a plan (${notePlan}) but no plan lock is live now \u2014 it was released, or .sterling/ was recreated`);
       }
       const planField = notePlanRaw ? [`- plan: ${notePlan}`] : [];
+      const noteSessionId = typeof note.session_id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(note.session_id) ? note.session_id : null;
       const fields = planField.concat(
-        ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "at"].filter((k) => note[k]).map((k) => `- ${k}: ${sanitizeForContext(String(note[k]), NOTE_FIELD_MAX[k])}`)
+        ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "session_id", "at"].map((k) => [k, k === "session_id" ? noteSessionId : note[k]]).filter(([, v]) => v).map(([k, v]) => `- ${k}: ${sanitizeForContext(String(v), NOTE_FIELD_MAX[k])}`)
       ).concat(
         typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${noteBaseBranch || "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
       ).join("\n");
@@ -9995,7 +9998,7 @@ try {
         }).join("\n");
         const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
         liveLine = `
-${liveDispatches.length} dispatch(es) were live at rotation \u2014 check ListAgents before re-dispatching:
+${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and cannot be resumed from this one (agent lookup is scoped to the current session); re-dispatch fresh if the work is still needed, and mind the territory below, which they may still be writing:
 ${rendered}` + (omitted > 0 ? `
 \u2026 (+${omitted} more)` : "");
       } else if (liveDispatches === null) {
@@ -10004,7 +10007,7 @@ ${render(
           disclosure(
             "register_unavailable",
             {},
-            "dispatch register unavailable \u2014 the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here: check ListAgents before re-dispatching."
+            "dispatch register unavailable \u2014 the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed, and check git status for files it may still be writing."
           )
         )}`;
       }
@@ -10016,7 +10019,7 @@ ${render(
           const id = sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id";
           const reason = sanitizeForContext(String(d?.reason ?? "unknown"), PATH_MAX) || "unknown";
           return render(
-            disclosure("dispatch_status_unknown", {}, `${type}:${id} \u2014 ownership uncertain (${reason}); settle with ListAgents before re-dispatching`)
+            disclosure("dispatch_status_unknown", {}, `${type}:${id} \u2014 ownership uncertain (${reason}); belongs to the previous session and cannot be resumed from this one \u2014 re-dispatch fresh if still needed`)
           );
         }).join("\n");
         const omittedUncertain = uncertainDispatches.length - Math.min(uncertainDispatches.length, LIVE_DISPATCH_MAX);
@@ -10025,11 +10028,22 @@ ${uncertainDispatches.length} dispatch(es) UNCERTAIN at rotation (lease expired,
 ${renderedUncertain}` + (omittedUncertain > 0 ? `
 \u2026 (+${omittedUncertain} more)` : "");
       }
+      const noteLanes = (Array.isArray(note.lanes) ? note.lanes : []).filter((l) => typeof l === "string").map((l) => sanitizeForContext(l.replace(/\s+/g, " "), LANE_HANDOFF_MAX)).filter(Boolean);
+      let lanesLine = "";
+      if (noteLanes.length) {
+        const noteSession = noteSessionId;
+        const renderedLanes = noteLanes.slice(0, LIVE_DISPATCH_MAX).map((l) => `- ${l}`).join("\n");
+        const omittedLanes = noteLanes.length - Math.min(noteLanes.length, LIVE_DISPATCH_MAX);
+        lanesLine = `
+${noteLanes.length} lane hand-off(s) carried across the rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. ` + (noteSession ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.` : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`) + `
+${renderedLanes}` + (omittedLanes > 0 ? `
+\u2026 (+${omittedLanes} more)` : "");
+      }
       const isClear = input.source === "clear";
       rotationContext = `
 
 ROTATION RESTORE (H1, source=${input.source}): a rotation note was prepared before this ${isClear ? "/clear" : "restart"}; this injection CONSUMES it (single-shot).` + (cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "") + `
-${fields}${liveLine}${uncertainLine}
+${fields}${liveLine}${uncertainLine}${lanesLine}
 Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. ` + (note.reason === "code-reload" ? isClear ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.` : `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 this restore is happening at session STARTUP, which already implies the exit-and-relaunch that reloads server/hook code.` : isClear ? `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.` : `If next_slice depends on a server/hook code change (migration, update, rebuild), this STARTUP already reloaded it.`);
     }
   }
@@ -10044,7 +10058,7 @@ try {
 }
 var dispatchResidueContext = dispatchResidueLines.length ? `
 
-DEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary \u2014 its SubagentStop(s) never fired, so the register is about to be wiped (P4).` + (input.source === "clear" ? ` NOT PROOF THAT THESE DISPATCHES ENDED: a dispatch may still be RUNNING across a /clear \u2014 cross-check the LIVE DISPATCHES line in the rotation restore above, and ListAgents, before acting on these files or re-dispatching at them.` : "") + `
+DEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary \u2014 its SubagentStop(s) never fired, so the register is about to be wiped (P4).` + (input.source === "clear" ? ` NOT PROOF THAT THESE DISPATCHES ENDED: a dispatch may still be RUNNING across a /clear \u2014 cross-check the LIVE DISPATCHES line in the rotation restore above and git status before acting on these files. Those agents belong to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed.` : "") + `
 ` + dispatchResidueLines.join("\n") : "";
 await deleteRegisterUnderLock(input.cwd);
 var residueContext = "";

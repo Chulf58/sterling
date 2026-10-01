@@ -964,8 +964,12 @@ const NOTE_FIELD_MAX = {
   pointers: NOTE_PROSE_MAX,
   branch: PLAN_LOCK_PATH_MAX,
   head_sha: PLAN_LOCK_PATH_MAX,
+  session_id: PLAN_LOCK_PATH_MAX,
   at: PLAN_LOCK_PATH_MAX,
 };
+// One lane's hand-off is a few sentences; a note cannot spend more of the
+// injection than that per lane (the lane COUNT stays exact, see below).
+const LANE_HANDOFF_MAX = 1000;
 let rotationContext = '';
 try {
   if (input.source === 'startup' || input.source === 'clear') {
@@ -1060,11 +1064,17 @@ try {
       // The plan leads the note's fields: it names the AUTHORITY over the next
       // slice, where every other field describes the residue.
       const planField = notePlanRaw ? [`- plan: ${notePlan}`] : [];
+      // The session id is printed inside a runnable `claude --resume <id>`
+      // command, so a hand-edited note must not smuggle shell text into it: only
+      // an id-shaped value (the same shape the writer accepts) is rendered;
+      // anything else is treated as absent.
+      const noteSessionId = typeof note.session_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(note.session_id) ? note.session_id : null;
       const fields = planField
         .concat(
-          ['objective', 'next_slice', 'risks', 'pointers', 'branch', 'head_sha', 'at']
-            .filter((k) => note[k])
-            .map((k) => `- ${k}: ${planLockClean(String(note[k]), NOTE_FIELD_MAX[k])}`)
+          ['objective', 'next_slice', 'risks', 'pointers', 'branch', 'head_sha', 'session_id', 'at']
+            .map((k) => [k, k === 'session_id' ? noteSessionId : note[k]])
+            .filter(([, v]) => v)
+            .map(([k, v]) => `- ${k}: ${planLockClean(String(v), NOTE_FIELD_MAX[k])}`)
         )
         .concat(
           typeof note.commits_ahead === 'number'
@@ -1074,10 +1084,13 @@ try {
         .join('\n');
       // LIVE DISPATCHES AT ROTATION (board efbddf09): the note's live_dispatches
       // is the only trace a fresh session has of a subagent that kept running
-      // across the /clear — re-print it so the conductor checks ListAgents
-      // instead of dispatching a second agent at the same slice (measured
-      // 2026-09-04). THREE STATES, deliberately distinct: a non-empty array is
-      // counted and enumerated; a CONFIRMED-EMPTY array prints NOTHING at all,
+      // across the /clear — re-print it so the conductor knows the territory
+      // may still be written to instead of dispatching a second agent at the
+      // same slice unawares (measured 2026-09-04). Those agents cannot be
+      // resumed or listed from the new session (finding
+      // warm-subagent-resume-across-clear-october-2026), so the remedy is a
+      // fresh re-dispatch, not ListAgents. THREE STATES, deliberately
+      // distinct: a non-empty array is counted and enumerated; a CONFIRMED-EMPTY array prints NOTHING at all,
       // not even a "0 dispatch(es)" line (P1 — no ceremony for a checked-clear);
       // null is UNKNOWN (the writer found a register it could not read) and is
       // disclosed as uncertainty, never as a fabricated count. An ABSENT field
@@ -1112,14 +1125,14 @@ try {
           .join('\n');
         const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
         liveLine =
-          `\n${liveDispatches.length} dispatch(es) were live at rotation — check ListAgents before re-dispatching:\n${rendered}` +
+          `\n${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and cannot be resumed from this one (agent lookup is scoped to the current session); re-dispatch fresh if the work is still needed, and mind the territory below, which they may still be writing:\n${rendered}` +
           (omitted > 0 ? `\n… (+${omitted} more)` : '');
       } else if (liveDispatches === null) {
         liveLine = `\n${render(
           disclosure(
             'register_unavailable',
             {},
-            'dispatch register unavailable — the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here: check ListAgents before re-dispatching.'
+            'dispatch register unavailable — the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed, and check git status for files it may still be writing.'
           )
         )}`;
       }
@@ -1138,7 +1151,7 @@ try {
             const id = planLockClean(String(d?.agent_id ?? 'unknown id'), PLAN_LOCK_PATH_MAX) || 'unknown id';
             const reason = planLockClean(String(d?.reason ?? 'unknown'), PLAN_LOCK_PATH_MAX) || 'unknown';
             return render(
-              disclosure('dispatch_status_unknown', {}, `${type}:${id} — ownership uncertain (${reason}); settle with ListAgents before re-dispatching`)
+              disclosure('dispatch_status_unknown', {}, `${type}:${id} — ownership uncertain (${reason}); belongs to the previous session and cannot be resumed from this one — re-dispatch fresh if still needed`)
             );
           })
           .join('\n');
@@ -1146,6 +1159,38 @@ try {
         uncertainLine =
           `\n${uncertainDispatches.length} dispatch(es) UNCERTAIN at rotation (lease expired, not confirmed dead — never counted as live):\n${renderedUncertain}` +
           (omittedUncertain > 0 ? `\n… (+${omittedUncertain} more)` : '');
+      }
+      // LANE HAND-OFFS (finding warm-subagent-resume-across-clear-october-2026):
+      // measured 2026-10-01, SendMessage to a pre-clear agent id fails with "No
+      // transcript found for agent ID" — agent lookup is scoped to the current
+      // session. The note's lanes are therefore the only continuity a lane has,
+      // and the statement above them says so, so the conductor re-dispatches
+      // fresh instead of trying to resume. Zero lanes or an absent field (a
+      // legacy note) prints nothing (P1). Per-lane text is sanitised and
+      // clipped, the array is clipped, the COUNT stays exact. Whitespace runs
+      // (newlines included) collapse to one space BEFORE the control-character
+      // sanitiser, so a lane is always exactly one bullet line and cannot open
+      // a line that reads like a block header; a lane that sanitises to nothing
+      // is dropped and not counted.
+      const noteLanes = (Array.isArray(note.lanes) ? note.lanes : [])
+        .filter((l) => typeof l === 'string')
+        .map((l) => planLockClean(l.replace(/\s+/g, ' '), LANE_HANDOFF_MAX))
+        .filter(Boolean);
+      let lanesLine = '';
+      if (noteLanes.length) {
+        const noteSession = noteSessionId;
+        const renderedLanes = noteLanes
+          .slice(0, LIVE_DISPATCH_MAX)
+          .map((l) => `- ${l}`)
+          .join('\n');
+        const omittedLanes = noteLanes.length - Math.min(noteLanes.length, LIVE_DISPATCH_MAX);
+        lanesLine =
+          `\n${noteLanes.length} lane hand-off(s) carried across the rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. ` +
+          (noteSession
+            ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.`
+            : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`) +
+          `\n${renderedLanes}` +
+          (omittedLanes > 0 ? `\n… (+${omittedLanes} more)` : '');
       }
       // SOURCE-AWARE CLOSING PARAGRAPH: the `clear` wording below is UNCHANGED
       // from before startup consumption was added (scripts/tests/rotation-
@@ -1158,7 +1203,7 @@ try {
       rotationContext =
         `\n\nROTATION RESTORE (H1, source=${input.source}): a rotation note was prepared before this ${isClear ? '/clear' : 'restart'}; this injection CONSUMES it (single-shot).` +
         (cautions.length ? ` CAUTION: ${cautions.join('; ')}.` : '') +
-        `\n${fields}${liveLine}${uncertainLine}\nResume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions — the note carries only the residue they cannot hold. ` +
+        `\n${fields}${liveLine}${uncertainLine}${lanesLine}\nResume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions — the note carries only the residue they cannot hold. ` +
         (note.reason === 'code-reload'
           ? (isClear
               ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) — the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.`
@@ -1205,7 +1250,7 @@ try {
 const dispatchResidueContext = dispatchResidueLines.length
   ? `\n\nDEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary — its SubagentStop(s) never fired, so the register is about to be wiped (P4).` +
     (input.source === 'clear'
-      ? ` NOT PROOF THAT THESE DISPATCHES ENDED: a dispatch may still be RUNNING across a /clear — cross-check the LIVE DISPATCHES line in the rotation restore above, and ListAgents, before acting on these files or re-dispatching at them.`
+      ? ` NOT PROOF THAT THESE DISPATCHES ENDED: a dispatch may still be RUNNING across a /clear — cross-check the LIVE DISPATCHES line in the rotation restore above and git status before acting on these files. Those agents belong to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed.`
       : '') +
     `\n` +
     dispatchResidueLines.join('\n')

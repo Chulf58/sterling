@@ -69,6 +69,54 @@ if (reasonArg !== null && reasonArg !== 'code-reload') {
 }
 const reason = reasonArg; // null, or 'code-reload'
 
+// --lane "<text>" (repeatable): one live lane's hand-off — agent type, territory,
+// what it found or changed, what is left. A subagent cannot be resumed after a
+// /clear (finding warm-subagent-resume-across-clear-october-2026), so this text
+// is all the fresh session has to brief a replacement with. The shared arg()
+// parser refuses a repeated flag by design, so the repeatable scan lives here;
+// it keeps that parser's two refusals (a flag-shaped value, a missing value) and
+// adds the one a hand-off needs: an empty or whitespace-only value is refused
+// rather than dropped (P5 — a silently missing lane is a lane the fresh
+// session never knows it lost).
+function readLanes(argv = process.argv.slice(2)) {
+  const found = [];
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    let value;
+    if (tok === '--lane') {
+      value = argv[i + 1];
+      if (value !== undefined && /^-{1,2}[A-Za-z]/.test(value)) {
+        fail(`--lane: the value '${value}' looks like another flag — refusing to read it as a lane hand-off`);
+      }
+      i++;
+    } else if (tok.startsWith('--lane=')) {
+      value = tok.slice('--lane='.length);
+    } else {
+      continue;
+    }
+    const text = (value ?? '').trim();
+    if (!text) {
+      fail('--lane "<agent type; territory; found/changed; what is left>" must be non-empty — an empty hand-off restores nothing');
+    }
+    found.push(text);
+  }
+  return found;
+}
+const lanes = readLanes();
+
+// PRE-CLEAR SESSION ID: the only way back to this session's subagents is
+// `claude --resume <id>` (or the rewind menu). CLAUDE_CODE_SESSION_ID is set by
+// Claude Code in the Bash tool's environment (measured 2026-10-01: equal to the
+// session_id H1 recorded for the same session). It is the ONLY source: H1's
+// .sterling/transient/session.json marker is a latest-value cell that can hold
+// another session's id (stale, or a concurrent session in the same worktree), and
+// a wrong id sends the user to `claude --resume` the wrong session. A value that
+// is not id-shaped (^[A-Za-z0-9_-]{1,128}$) is refused to null, because H1 prints
+// it inside a runnable command. Absent or malformed -> null, never guessed.
+const SESSION_ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/;
+const envSessionId = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim();
+const sessionId = SESSION_ID_SHAPE.test(envSessionId) ? envSessionId : null;
+
 const git = (args) => {
   try {
     const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 5_000 });
@@ -190,6 +238,8 @@ const planPath = (() => {
 const note = {
   plan_path: planPath,
   next_slice: nextSlice,
+  lanes,
+  session_id: sessionId,
   objective: (arg('objective') ?? '').trim() || null,
   risks: (arg('risks') ?? '').trim() || null,
   pointers: (arg('pointers') ?? '').trim() || null,
@@ -217,18 +267,20 @@ writeFileSync(notePath, JSON.stringify(note, null, 2) + '\n');
 process.stdout.write(
   `rotation note written (single slot — this supersedes any prior note).\n` +
     `next_slice: ${note.next_slice}\n` +
+    `lanes: ${lanes.length}\n` +
+    (sessionId ? `session_id: ${sessionId}\n` : 'session_id: unavailable (CLAUDE_CODE_SESSION_ID unset or not id-shaped) — the restore cannot name the session to resume\n') +
     (note.branch ? `anchored: ${note.branch} @ ${note.head_sha?.slice(0, 8) ?? '?'}\n` : 'anchored: no git (drift disclosure unavailable)\n') +
     (note.commits_ahead !== null
       ? `commits_ahead: ${note.commits_ahead} (vs ${note.base_branch})\n`
       : 'commits_ahead: unavailable (no origin/HEAD, main, or master to diff against — pass --into to a future version if this recurs)\n') +
     // Silent when the set is a confirmed zero (P1 — nothing to check).
     (liveDispatches === null
-      ? 'live_dispatches: UNKNOWN — the dispatch register exists but could not be read; check ListAgents before re-dispatching\n'
+      ? 'live_dispatches: UNKNOWN — the dispatch register exists but could not be read; any subagent from this session cannot be resumed after the /clear — re-dispatch fresh if still needed\n'
       : liveDispatches.length
-        ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — still running across the /clear\n`
+        ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — still running across the /clear but cannot be resumed from the new session: re-dispatch fresh if still needed (pass a --lane hand-off for each worth continuing)\n`
         : '') +
     (uncertainDispatches && uncertainDispatches.length
-      ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — lease expired, not confirmed dead; settle with ListAgents\n`
+      ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — lease expired, not confirmed dead; cannot be resumed from the new session either: re-dispatch fresh if still needed\n`
       : '') +
     (note.reason === 'code-reload'
       ? `CODE RELOAD REQUIRED (--reason=code-reload) — /clear alone will NOT load it (MCP servers survive it). The sequence is:\n` +

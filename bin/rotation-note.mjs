@@ -5509,6 +5509,34 @@ if (reasonArg !== null && reasonArg !== "code-reload") {
   fail2(`--reason '${reasonArg}' is not recognized \u2014 the only supported value is 'code-reload' (flags that a server/hook code reload is required before the next slice can proceed)`);
 }
 var reason = reasonArg;
+function readLanes(argv = process.argv.slice(2)) {
+  const found = [];
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    let value;
+    if (tok === "--lane") {
+      value = argv[i + 1];
+      if (value !== void 0 && /^-{1,2}[A-Za-z]/.test(value)) {
+        fail2(`--lane: the value '${value}' looks like another flag \u2014 refusing to read it as a lane hand-off`);
+      }
+      i++;
+    } else if (tok.startsWith("--lane=")) {
+      value = tok.slice("--lane=".length);
+    } else {
+      continue;
+    }
+    const text = (value ?? "").trim();
+    if (!text) {
+      fail2('--lane "<agent type; territory; found/changed; what is left>" must be non-empty \u2014 an empty hand-off restores nothing');
+    }
+    found.push(text);
+  }
+  return found;
+}
+var lanes = readLanes();
+var SESSION_ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/;
+var envSessionId = (process.env.CLAUDE_CODE_SESSION_ID ?? "").trim();
+var sessionId = SESSION_ID_SHAPE.test(envSessionId) ? envSessionId : null;
 var git = (args) => {
   try {
     const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 5e3 });
@@ -5567,6 +5595,8 @@ var planPath = (() => {
 var note = {
   plan_path: planPath,
   next_slice: nextSlice,
+  lanes,
+  session_id: sessionId,
   objective: (arg2("objective") ?? "").trim() || null,
   risks: (arg2("risks") ?? "").trim() || null,
   pointers: (arg2("pointers") ?? "").trim() || null,
@@ -5590,11 +5620,13 @@ writeFileSync3(notePath, JSON.stringify(note, null, 2) + "\n");
 process.stdout.write(
   `rotation note written (single slot \u2014 this supersedes any prior note).
 next_slice: ${note.next_slice}
-` + (note.branch ? `anchored: ${note.branch} @ ${note.head_sha?.slice(0, 8) ?? "?"}
+lanes: ${lanes.length}
+` + (sessionId ? `session_id: ${sessionId}
+` : "session_id: unavailable (CLAUDE_CODE_SESSION_ID unset or not id-shaped) \u2014 the restore cannot name the session to resume\n") + (note.branch ? `anchored: ${note.branch} @ ${note.head_sha?.slice(0, 8) ?? "?"}
 ` : "anchored: no git (drift disclosure unavailable)\n") + (note.commits_ahead !== null ? `commits_ahead: ${note.commits_ahead} (vs ${note.base_branch})
 ` : "commits_ahead: unavailable (no origin/HEAD, main, or master to diff against \u2014 pass --into to a future version if this recurs)\n") + // Silent when the set is a confirmed zero (P1 — nothing to check).
-  (liveDispatches === null ? "live_dispatches: UNKNOWN \u2014 the dispatch register exists but could not be read; check ListAgents before re-dispatching\n" : liveDispatches.length ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? "agent"}:${d.agent_id ?? "?"}`).join(", ")}) \u2014 still running across the /clear
-` : "") + (uncertainDispatches && uncertainDispatches.length ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? "agent"}:${d.agent_id ?? "?"}`).join(", ")}) \u2014 lease expired, not confirmed dead; settle with ListAgents
+  (liveDispatches === null ? "live_dispatches: UNKNOWN \u2014 the dispatch register exists but could not be read; any subagent from this session cannot be resumed after the /clear \u2014 re-dispatch fresh if still needed\n" : liveDispatches.length ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? "agent"}:${d.agent_id ?? "?"}`).join(", ")}) \u2014 still running across the /clear but cannot be resumed from the new session: re-dispatch fresh if still needed (pass a --lane hand-off for each worth continuing)
+` : "") + (uncertainDispatches && uncertainDispatches.length ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? "agent"}:${d.agent_id ?? "?"}`).join(", ")}) \u2014 lease expired, not confirmed dead; cannot be resumed from the new session either: re-dispatch fresh if still needed
 ` : "") + (note.reason === "code-reload" ? `CODE RELOAD REQUIRED (--reason=code-reload) \u2014 /clear alone will NOT load it (MCP servers survive it). The sequence is:
   1. exit and relaunch the Claude Code CLI now \u2014 H1 restores and consumes this note automatically at that very startup
   2. THEN /clear \u2014 H1 restores and consumes this note automatically if step 1 hasn't already delivered it (single-shot: whichever of startup/clear happens first wins, and the other becomes a no-op)
