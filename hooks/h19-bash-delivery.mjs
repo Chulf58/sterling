@@ -8627,6 +8627,19 @@ ${line}` : line;
     const custom2 = aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : Infinity;
     return custom2 <= ordinaryCeiling ? custom2 : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => named ? e : { id8: e.id8 })));
   };
+  const achievableNamedSize = (list, limit) => {
+    if (!list.length) return 0;
+    if (aggregateLabel) return disclosureSize(list, true);
+    const count = disclosureCount(list);
+    const entries = disclosureEntries(list);
+    let line = renderDisclosure(count, entries);
+    for (let i = entries.length - 1; i >= 0 && bytes(line) + bytes(sep2) > limit; i--) {
+      if (!entries[i].name) continue;
+      entries[i].name = void 0;
+      line = renderDisclosure(count, entries);
+    }
+    return bytes(line);
+  };
   const sepCost = (renderedBefore) => renderedBefore > 0 ? bytes(sep2) : 0;
   const ordinaryParts = items.filter((part) => !isHazard(part) && !isChrome(part));
   const baseOmitted = [...omitted];
@@ -8648,7 +8661,8 @@ ${line}` : line;
       room -= cost;
     }
     const roomFor = (size) => size > 0 ? Math.max(0, Math.min(room, size + bytes(sep2))) : 0;
-    const disclosureRoom = { whole: roomFor(disclosure2.ids), excerpt: roomFor(disclosure2.named), pointer: 0 };
+    const namedHeld = disclosure2.list ? Math.min(disclosure2.named, achievableNamedSize(disclosure2.list, room)) : disclosure2.named;
+    const disclosureRoom = { whole: roomFor(disclosure2.ids), excerpt: roomFor(namedHeld), pointer: 0 };
     ordinaryParts.forEach((part, i) => {
       const later = ordinaryParts.slice(i + 1).reduce((sum, next) => sum + (reserved.get(next) ?? 0), 0);
       tryDegradeOrdinary(part, (stage) => {
@@ -8663,7 +8677,7 @@ ${line}` : line;
     for (let pass = 0; pass < 3 && omitted.length; pass++) {
       const need = { ids: disclosureSize(omitted, false), named: disclosureSize(omitted, true) };
       if (need.ids <= wanted.ids && need.named <= wanted.named) break;
-      wanted = { ids: Math.max(need.ids, wanted.ids), named: Math.max(need.named, wanted.named) };
+      wanted = { ids: Math.max(need.ids, wanted.ids), named: Math.max(need.named, wanted.named), list: [...omitted] };
       placeOrdinary(wanted);
     }
   }

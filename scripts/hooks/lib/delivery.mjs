@@ -1666,6 +1666,25 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
       ? custom
       : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => (named ? e : { id8: e.id8 }))));
   };
+  // The largest disclosure line that fits `limit` (separator included): names
+  // are shed lowest-ranked first, in the order `aggregate` below sheds them, so
+  // the room held back for the line is never more than a render can use. `list`
+  // is the omitted parts themselves — the same list `aggregate` discloses, read
+  // through `disclosureIdsOf`, so `disclosureIdentities` (the full list a part
+  // stands for) counts here as it does there. A custom label is sized as given.
+  const achievableNamedSize = (list, limit) => {
+    if (!list.length) return 0;
+    if (aggregateLabel) return disclosureSize(list, true);
+    const count = disclosureCount(list);
+    const entries = disclosureEntries(list);
+    let line = renderDisclosure(count, entries);
+    for (let i = entries.length - 1; i >= 0 && bytes(line) + bytes(sep) > limit; i--) {
+      if (!entries[i].name) continue;
+      entries[i].name = undefined;
+      line = renderDisclosure(count, entries);
+    }
+    return bytes(line);
+  };
   const sepCost = (renderedBefore) => (renderedBefore > 0 ? bytes(sep) : 0);
 
   // RESERVED POINTERS (decision 301d8a0a: "Each later block's pointer is
@@ -1707,7 +1726,11 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
       room -= cost;
     }
     const roomFor = (size) => (size > 0 ? Math.max(0, Math.min(room, size + bytes(sep))) : 0);
-    const disclosureRoom = { whole: roomFor(disclosure.ids), excerpt: roomFor(disclosure.named), pointer: 0 };
+    // The named line is held back only as far as it can render: when not even
+    // one name fits `room`, the held room is the ids-only line's, and the rest
+    // goes to the excerpts (a name outranks excerpt lines only while it fits).
+    const namedHeld = disclosure.list ? Math.min(disclosure.named, achievableNamedSize(disclosure.list, room)) : disclosure.named;
+    const disclosureRoom = { whole: roomFor(disclosure.ids), excerpt: roomFor(namedHeld), pointer: 0 };
     ordinaryParts.forEach((part, i) => {
       const later = ordinaryParts.slice(i + 1).reduce((sum, next) => sum + (reserved.get(next) ?? 0), 0);
       tryDegradeOrdinary(part, (stage) => {
@@ -1720,7 +1743,8 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
     // The disclosure's room, from what the reserved pointers leave: its
     // ids-only size is held back from whole renderings and its fully-NAMED
     // size from excerpts (an omitted record's name outranks another block's
-    // extra excerpt lines), never from a reserved pointer. When even that
+    // extra excerpt lines while at least one name fits; see `namedHeld`), never
+    // from a reserved pointer. When even that
     // room is missing, the eviction loop below takes an unreserved part
     // before a reserved one.
     let wanted = { ids: 0, named: 0 };
@@ -1728,7 +1752,7 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
     for (let pass = 0; pass < 3 && omitted.length; pass++) {
       const need = { ids: disclosureSize(omitted, false), named: disclosureSize(omitted, true) };
       if (need.ids <= wanted.ids && need.named <= wanted.named) break;
-      wanted = { ids: Math.max(need.ids, wanted.ids), named: Math.max(need.named, wanted.named) };
+      wanted = { ids: Math.max(need.ids, wanted.ids), named: Math.max(need.named, wanted.named), list: [...omitted] };
       placeOrdinary(wanted);
     }
   }

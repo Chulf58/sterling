@@ -437,3 +437,130 @@ test('residual 3 (H20 E2E): a sixth matching decision is counted and disclosed, 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// 3. Named hold-back waste (board 6c0c848f sub-item 4, decision
+// delivery-total-cap-and-axis-generic-floor, "Known residual"). The room held
+// back from excerpts for the '+N more' line was sized from the line carrying
+// EVERY name, though the aggregate sheds names lowest-ranked first to fit what
+// is left, so a line that could not hold even one name still starved the
+// excerpts. "An omitted record's name outranks another block's extra excerpt
+// lines" holds only while a name FITS; otherwise the room belongs to the excerpt.
+// ---------------------------------------------------------------------------
+
+const LONG_NAME = 'an-omitted-record-whose-slug-is-long-enough-to-hit-the-eighty-byte-name-clip-xxxxx';
+const excerptLines = (text) => (text.match(/^ {2}line \d/gm) || []).length;
+
+// Chrome of `h` bytes; block A (8 excerpt lines + pointer); block B (5000 B,
+// unpointered, carrying an 80-byte name) that can only be omitted.
+function holdBackParts(h) {
+  return [
+    { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: 'H'.repeat(h) },
+    {
+      kind: 'ordinary', contentClass: 'discovery', identity: 'aaaaaaaa-1', revision: 'r', name: 'excerpted',
+      text: ['BLOCK A', ...Array.from({ length: 8 }, (_, i) => `  line ${i} ${'a'.repeat(20)}`)].join('\n'),
+      pointer: 'PTR A knowledge_get aaaaaaaa',
+    },
+    { kind: 'ordinary', contentClass: 'discovery', identity: 'bbbbbbbb-1', revision: 'r', name: LONG_NAME, text: 'b'.repeat(5000) },
+  ];
+}
+
+test('hold-back: room reserved for a named line that cannot fit even one name goes to the excerpt lines instead', () => {
+  const assembled = assembleDelivery(holdBackParts(330), 500);
+  assert.ok(bytes(assembled.text) <= 500, `the cap holds (was ${bytes(assembled.text)})`);
+  assert.ok(excerptLines(assembled.text) >= 1, `block A keeps at least one excerpt line:\n${assembled.text.slice(330)}`);
+  assert.match(assembled.text, /\+1 more records: knowledge_query; knowledge_get bbbbbbbb\b/, 'the omission is still disclosed by id8');
+});
+
+test('hold-back: when one name fits, the name renders and the excerpt room does not crowd it out', () => {
+  const assembled = assembleDelivery(holdBackParts(300), 500);
+  assert.ok(bytes(assembled.text) <= 500, `the cap holds (was ${bytes(assembled.text)})`);
+  assert.match(assembled.text, /\+1 more records: knowledge_query; knowledge_get an-omitted-record-whose-slug-is-long-enough-to-hit-the-eighty-byte-name-clip-… \(bbbbbbbb\)/, `the name renders:\n${assembled.text.slice(300)}`);
+});
+
+test('hold-back: names are shed lowest-ranked first, and a name that fits is held back from the excerpt', () => {
+  const parts = [
+    { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: 'H'.repeat(360) },
+    {
+      kind: 'ordinary', contentClass: 'discovery', identity: 'aaaaaaaa-1', revision: 'r', name: 'excerpted',
+      text: ['BLOCK A', ...Array.from({ length: 8 }, (_, i) => `  line ${i} ${'a'.repeat(20)}`)].join('\n'),
+      pointer: 'PTR A knowledge_get aaaaaaaa',
+    },
+    { kind: 'ordinary', contentClass: 'discovery', identity: 'bbbbbbbb-1', revision: 'r', name: 'first-omitted-record-name', text: 'b'.repeat(5000) },
+    { kind: 'ordinary', contentClass: 'discovery', identity: 'cccccccc-1', revision: 'r', name: 'second-omitted-record-name', text: 'c'.repeat(5000) },
+  ];
+  const assembled = assembleDelivery(parts, 500);
+  assert.ok(bytes(assembled.text) <= 500, `the cap holds (was ${bytes(assembled.text)})`);
+  assert.match(assembled.text, /\+2 more records: knowledge_query; knowledge_get first-omitted-record-name \(bbbbbbbb\) cccccccc\b/, `the higher-ranked name survives, the lower sheds first:\n${assembled.text.slice(360)}`);
+});
+
+test('hold-back: a decision part whose disclosureIdentities outnumber its shown identities is held back from the FULL list', () => {
+  const decisions = Array.from({ length: 10 }, (_, i) => ({ id: `dddddd0${i}-aaaa-bbbb`, slug: `decision-${i}-slug`, title: `Decision ${i}`, rationale: 'r'.repeat(300), status: 'active' }));
+  const block = decisionPointerPart('some/file.mjs', decisions, { widen: 'knowledge_query x' });
+  assert.equal(block.identities.length, 8, 'the renderer shows only DECISION_POINTER_CAP');
+  assert.equal(block.disclosureIdentities.length, 10, 'the disclosure carries every decision');
+  // Unpointered, so the block can only render whole or be omitted and named.
+  const omittedBlock = { ...block, pointer: undefined };
+  // Block A's excerpt lines are tiny (4 bytes each) so the room held back for the
+  // omission line is measured to the byte: an excerpt may take only what is left
+  // after the line, so its presence never changes the names the line carries.
+  const tiny = ['BLOCK A', ...Array.from({ length: 40 }, () => '  x')].join('\n');
+  const pointer = 'PTR A knowledge_get aaaaaaaa';
+  const a = (text) => ({ kind: 'ordinary', contentClass: 'discovery', identity: 'aaaaaaaa-1', revision: 'r', name: 'excerpted', text, pointer });
+  const chrome = (h) => ({ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: 'H'.repeat(h) });
+  const namesOf = (text) => (text.match(/ \(dddddd0\d\)/g) || []).length;
+  let sawNames = 0;
+  for (let h = 100; h <= 340; h += 3) {
+    const withExcerpts = assembleDelivery([chrome(h), a(tiny), omittedBlock], 500);
+    const pointerOnly = assembleDelivery([chrome(h), a(`BLOCK A\n${pointer}`), omittedBlock], 500);
+    assert.ok(bytes(withExcerpts.text) <= 500, `the cap holds at h=${h} (was ${bytes(withExcerpts.text)})`);
+    const line = withExcerpts.text.split('\n').find((l) => l.startsWith('+') && / more records/.test(l));
+    if (!line) continue;
+    const count = Number(line.match(/^\+(\d+) /)[1]);
+    assert.ok(count >= 10, `the count covers all ten decisions at h=${h} (was ${count})`);
+    assert.equal(withExcerpts.omittedCount, count);
+    assert.ok(namesOf(withExcerpts.text) >= namesOf(pointerOnly.text), `excerpt lines never cost the omission line a name at h=${h}:\n${withExcerpts.text.slice(h)}`);
+    sawNames += namesOf(withExcerpts.text);
+  }
+  assert.ok(sawNames > 0, 'the sweep reached an omission line that carries names');
+});
+
+
+// SEEDED FUZZ PIN: never over the cap, and the top-ranked omitted name is never
+// shed while it fits in the room left (no hazards, so every byte is ordinary and the cap binds).
+test('hold-back fuzz pin: 4000 seeded cases never exceed the cap and never leave room the top omitted name would fit in', () => {
+  let seed = 20260930;
+  const rnd = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const ri = (lo, hi) => lo + Math.floor(rnd() * (hi - lo + 1));
+  const hex = () => Array.from({ length: 8 }, () => '0123456789abcdef'[ri(0, 15)]).join('');
+  const nameCost = (n) => bytes(n) + 3;
+  let idsOnlyLines = 0;
+  let wasted = 0;
+  for (let k = 0; k < 4000; k++) {
+    const cap = ri(500, 3000);
+    const parts = [];
+    if (rnd() < 0.5) parts.push({ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: blockOf('HEADER', ri(100, Math.floor(cap / 3)), 'h') });
+    const names = new Map();
+    const n = ri(2, 8);
+    for (let i = 0; i < n; i++) {
+      const identity = `${hex()}-0000-0000`;
+      const name = rnd() < 0.85 ? `record-name-${i}-${'n'.repeat(ri(5, 70))}` : undefined;
+      if (name) names.set(identity, name);
+      const part = { kind: 'ordinary', contentClass: 'discovery', identity, revision: 'r', name, text: blockOf(`BLOCK ${i}`, ri(200, 6000), 'x') };
+      if (rnd() < 0.7) part.pointer = `PTR ${i} knowledge_get ${identity} ${'p'.repeat(ri(0, 150))}`;
+      if (rnd() < 0.3) part.suffix = `  … rest of ${i} held back`;
+      parts.push(part);
+    }
+    const assembled = assembleDelivery(parts, cap);
+    assert.ok(bytes(assembled.text) <= cap, `case ${k}: ${bytes(assembled.text)} > cap ${cap}`);
+    const line = assembled.text.split('\n').find((l) => /^\+\d+ more records/.test(l));
+    if (!line || / \([0-9a-f]{8}\)/.test(line)) continue;
+    idsOnlyLines++;
+    // Names shed lowest-ranked first, so the one that must survive room for it is
+    // the HIGHEST-ranked named record, first in `omitted`.
+    const top = assembled.omitted.map((e) => names.get(e.identity)).find(Boolean);
+    if (top && cap - bytes(assembled.text) >= nameCost(top)) wasted++;
+  }
+  assert.ok(idsOnlyLines > 100, `the fuzz exercised the ids-only omission line (${idsOnlyLines} cases)`);
+  assert.equal(wasted, 0, 'no case leaves free room that the top omitted name would fit in');
+});
