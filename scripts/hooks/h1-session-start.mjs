@@ -964,8 +964,12 @@ const NOTE_FIELD_MAX = {
   pointers: NOTE_PROSE_MAX,
   branch: PLAN_LOCK_PATH_MAX,
   head_sha: PLAN_LOCK_PATH_MAX,
+  session_id: PLAN_LOCK_PATH_MAX,
   at: PLAN_LOCK_PATH_MAX,
 };
+// One lane's hand-off is a few sentences; a note cannot spend more of the
+// injection than that per lane (the lane COUNT stays exact, see below).
+const LANE_HANDOFF_MAX = 1000;
 let rotationContext = '';
 try {
   if (input.source === 'startup' || input.source === 'clear') {
@@ -1062,7 +1066,7 @@ try {
       const planField = notePlanRaw ? [`- plan: ${notePlan}`] : [];
       const fields = planField
         .concat(
-          ['objective', 'next_slice', 'risks', 'pointers', 'branch', 'head_sha', 'at']
+          ['objective', 'next_slice', 'risks', 'pointers', 'branch', 'head_sha', 'session_id', 'at']
             .filter((k) => note[k])
             .map((k) => `- ${k}: ${planLockClean(String(note[k]), NOTE_FIELD_MAX[k])}`)
         )
@@ -1147,6 +1151,31 @@ try {
           `\n${uncertainDispatches.length} dispatch(es) UNCERTAIN at rotation (lease expired, not confirmed dead — never counted as live):\n${renderedUncertain}` +
           (omittedUncertain > 0 ? `\n… (+${omittedUncertain} more)` : '');
       }
+      // LANE HAND-OFFS (finding warm-subagent-resume-across-clear-october-2026):
+      // measured 2026-10-01, SendMessage to a pre-clear agent id fails with "No
+      // transcript found for agent ID" — agent lookup is scoped to the current
+      // session. The note's lanes are therefore the only continuity a lane has,
+      // and the statement above them says so, so the conductor re-dispatches
+      // fresh instead of trying to resume. Zero lanes or an absent field (a
+      // legacy note) prints nothing (P1). Per-lane text is sanitised and
+      // clipped, the array is clipped, the COUNT stays exact.
+      const noteLanes = Array.isArray(note.lanes) ? note.lanes.filter((l) => typeof l === 'string' && l.trim()) : [];
+      let lanesLine = '';
+      if (noteLanes.length) {
+        const noteSession = typeof note.session_id === 'string' && note.session_id.trim() ? planLockClean(note.session_id, PLAN_LOCK_PATH_MAX) : null;
+        const renderedLanes = noteLanes
+          .slice(0, LIVE_DISPATCH_MAX)
+          .map((l) => `- ${planLockClean(l, LANE_HANDOFF_MAX)}`)
+          .join('\n');
+        const omittedLanes = noteLanes.length - Math.min(noteLanes.length, LIVE_DISPATCH_MAX);
+        lanesLine =
+          `\n${noteLanes.length} subagent lane(s) were live at rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. ` +
+          (noteSession
+            ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.`
+            : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`) +
+          `\n${renderedLanes}` +
+          (omittedLanes > 0 ? `\n… (+${omittedLanes} more)` : '');
+      }
       // SOURCE-AWARE CLOSING PARAGRAPH: the `clear` wording below is UNCHANGED
       // from before startup consumption was added (scripts/tests/rotation-
       // code-reload.test.mjs PIN 1/2/4/4-CONTROL pin it verbatim) — only the
@@ -1158,7 +1187,7 @@ try {
       rotationContext =
         `\n\nROTATION RESTORE (H1, source=${input.source}): a rotation note was prepared before this ${isClear ? '/clear' : 'restart'}; this injection CONSUMES it (single-shot).` +
         (cautions.length ? ` CAUTION: ${cautions.join('; ')}.` : '') +
-        `\n${fields}${liveLine}${uncertainLine}\nResume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions — the note carries only the residue they cannot hold. ` +
+        `\n${fields}${liveLine}${uncertainLine}${lanesLine}\nResume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions — the note carries only the residue they cannot hold. ` +
         (note.reason === 'code-reload'
           ? (isClear
               ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) — the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.`

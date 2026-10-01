@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname } from 'node:path';
 import { classifyRegister } from './lib/dispatch-register.mjs';
 import { readLock } from './hooks/lib/plan-lock.mjs';
+import { readSessionId } from './lib/dispatch-register.mjs';
 import { arg as sharedArg, fail as sharedFail } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
 
@@ -68,6 +69,49 @@ if (reasonArg !== null && reasonArg !== 'code-reload') {
   fail(`--reason '${reasonArg}' is not recognized — the only supported value is 'code-reload' (flags that a server/hook code reload is required before the next slice can proceed)`);
 }
 const reason = reasonArg; // null, or 'code-reload'
+
+// --lane "<text>" (repeatable): one live lane's hand-off — agent type, territory,
+// what it found or changed, what is left. A subagent cannot be resumed after a
+// /clear (finding warm-subagent-resume-across-clear-october-2026), so this text
+// is all the fresh session has to brief a replacement with. The shared arg()
+// parser refuses a repeated flag by design, so the repeatable scan lives here;
+// it keeps that parser's two refusals (a flag-shaped value, a missing value) and
+// adds the one a hand-off needs: an empty or whitespace-only value is refused
+// rather than dropped (P5 — a silently missing lane is a lane the fresh
+// session never knows it lost).
+function readLanes(argv = process.argv.slice(2)) {
+  const found = [];
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    let value;
+    if (tok === '--lane') {
+      value = argv[i + 1];
+      if (value !== undefined && /^-{1,2}[A-Za-z]/.test(value)) {
+        fail(`--lane: the value '${value}' looks like another flag — refusing to read it as a lane hand-off`);
+      }
+      i++;
+    } else if (tok.startsWith('--lane=')) {
+      value = tok.slice('--lane='.length);
+    } else {
+      continue;
+    }
+    const text = (value ?? '').trim();
+    if (!text) {
+      fail('--lane "<agent type; territory; found/changed; what is left>" must be non-empty — an empty hand-off restores nothing');
+    }
+    found.push(text);
+  }
+  return found;
+}
+const lanes = readLanes();
+
+// PRE-CLEAR SESSION ID: the only way back to this session's subagents is
+// `claude --resume <id>` (or the rewind menu). CLAUDE_CODE_SESSION_ID is set by
+// Claude Code in the Bash tool's environment (measured 2026-10-01: equal to the
+// session_id H1 recorded for the same session); H1's own SessionStart marker is
+// the fallback. Neither present -> null. Never guessed, never derived from a
+// transcript filename.
+const sessionId = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim() || readSessionId(cwd);
 
 const git = (args) => {
   try {
@@ -190,6 +234,8 @@ const planPath = (() => {
 const note = {
   plan_path: planPath,
   next_slice: nextSlice,
+  lanes,
+  session_id: sessionId,
   objective: (arg('objective') ?? '').trim() || null,
   risks: (arg('risks') ?? '').trim() || null,
   pointers: (arg('pointers') ?? '').trim() || null,
@@ -217,6 +263,8 @@ writeFileSync(notePath, JSON.stringify(note, null, 2) + '\n');
 process.stdout.write(
   `rotation note written (single slot — this supersedes any prior note).\n` +
     `next_slice: ${note.next_slice}\n` +
+    `lanes: ${lanes.length}\n` +
+    (sessionId ? `session_id: ${sessionId}\n` : 'session_id: unavailable (no CLAUDE_CODE_SESSION_ID, no H1 session marker) — the restore cannot name the session to resume\n') +
     (note.branch ? `anchored: ${note.branch} @ ${note.head_sha?.slice(0, 8) ?? '?'}\n` : 'anchored: no git (drift disclosure unavailable)\n') +
     (note.commits_ahead !== null
       ? `commits_ahead: ${note.commits_ahead} (vs ${note.base_branch})\n`
