@@ -76,7 +76,7 @@ test('the tarball carries the runtime tree and none of the sources, tests or mac
   }
   const forbidden = paths.filter((p) => /^(packages|docs|\.sterling|\.claude|node_modules|scripts\/tests|opencode\/sterling-tui\/tests)\//.test(p) || /(^|\/)node_modules\//.test(p));
   assert.deepEqual(forbidden, []);
-  for (const src of ['opencode/sterling-tui/tui.tsx', 'opencode/sterling-tui/view.ts', 'package-lock.json']) {
+  for (const src of ['opencode/sterling-tui/tui.tsx', 'opencode/sterling-tui/view.ts', 'package-lock.json', '.npmrc']) {
     assert.ok(!paths.includes(src), `source shipped: ${src}`);
   }
 });
