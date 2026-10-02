@@ -53,7 +53,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
-import { SterlingStore, MountedStores } from '@sterling/store';
+import { SterlingStore, MountedStores, createDomain } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
 
 type Loose = Record<string, unknown>;
@@ -172,6 +172,7 @@ test('collision refusal survives the dead-slug fallthrough: two LIVE records sha
 test('cross-store newest carrier: a dead slug carried by tombstones in TWO mounted stores resolves to the NEWER one, regardless of project-first store ordering', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-dead-slug-hardening-crossstore-'));
   const domainDb = join(dir, 'domains', 'genesys', 'sterling.db');
+  createDomain('genesys', 'test domain', domainDb);
   const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: 'genesys', dbPath: domainDb }]);
   const config = parseConfig({ stack_tags: ['genesys'] });
   let clock = '2026-08-20T09:00:00.000Z';

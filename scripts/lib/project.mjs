@@ -6,7 +6,7 @@ import { join, resolve, dirname, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { parseConfig } from '@sterling/schemas';
-import { SterlingStore, MountedStores, resolveDomainMounts } from '@sterling/store';
+import { SterlingStore, MountedStores, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { resolveStoreWritePath } from './store-path.mjs';
 
 // ONE exact-token flag parser for every sanctioned CLI (decision
@@ -179,10 +179,14 @@ export function openProject(cwd = process.cwd()) {
 // resolver the MCP server uses). For retrieval that must see
 // shared knowledge — prep's knowledge_pack. Run/board/transient writes still
 // land in the project store (MountedStores forwards them). Same return shape as
-// openProject, so callers swap one for the other.
+// openProject, so callers swap one for the other. A configured domain whose
+// store is missing is skipped and announced on stderr, never a failure (board
+// 675daf9d (c) ruling); store.missingDomains lists the skipped ones.
 export function openMounted(cwd = process.cwd()) {
   const { dbPath, config } = resolveProject(cwd);
-  return { cwd, store: new MountedStores(dbPath, resolveDomainMounts(config)), config };
+  const store = new MountedStores(dbPath, resolveDomainMounts(config), { skipMissing: true });
+  for (const m of store.missingDomains) process.stderr.write(missingDomainWarning(m) + '\n');
+  return { cwd, store, config };
 }
 
 // Read-only project store, for scripts that must never write (cleanup-plan).

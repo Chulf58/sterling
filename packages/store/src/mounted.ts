@@ -3,16 +3,18 @@
 // store holds project-scoped knowledge + all run/board/transient state; domain
 // stores (at ~/.sterling/domains/<name>/, resolved by the caller) hold shared,
 // cross-project knowledge. One retrieval interface (§3.4) fans across the mounted
-// set PROJECT-FIRST; writes route by the record's `scope` (project | domain:<name>).
+// set, project first, with each store's share of the cap set by allocateShares
+// (shares.ts); writes route by the record's `scope` (project | domain:<name>).
 //
 // Mechanism (decision 2026-06-16, store-internals are the implementor's choice
 // per §12): composition over SQLite ATTACH — each store is a self-contained,
 // already-tested SterlingStore; this layer only mounts, routes, and merges.
-import { mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { SterlingStore, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions } from './index.js';
 import { validateRecord, type DurableRecord, type SterlingConfig } from '@sterling/schemas';
+import { allocateShares } from './shares.js';
 
 /** A domain store to mount: its manifest name + its already-resolved DB path. */
 export interface DomainMount {
@@ -20,12 +22,14 @@ export interface DomainMount {
   dbPath: string;
 }
 
-/** §3.3: the project's stack_tags ARE the domain mount manifest — the SAME list
- *  that filters retrieval (§3.4) mounts the shared domain stores, so the mounted
- *  set and the filter align by construction. Each tag mounts a store at
+/** §3.3: the project's config.stack_tags list is the domain mount manifest and
+ *  nothing else. It does NOT filter retrieval: a query's own `stack_tags` option
+ *  is a separate, caller-supplied filter (decision
+ *  projects-mount-domains-and-sibling-projects corrected the older claim that
+ *  the two were the same list). Each tag mounts a store at
  *  ~/.sterling/domains/<tag>/sterling.db by default; config.domain_paths overrides
- *  the path per tag (spec line 94). The ONE resolver the MCP server AND dispose-run
- *  share, so the mounted set and the snapshotted set can never drift apart. */
+ *  the path per tag (spec line 94). The ONE resolver every MountedStores caller
+ *  uses, so the mounted set and the snapshotted set can never drift apart. */
 export function resolveDomainMounts(config: SterlingConfig): DomainMount[] {
   return config.stack_tags.map((name) => ({
     name,
@@ -33,12 +37,72 @@ export function resolveDomainMounts(config: SterlingConfig): DomainMount[] {
   }));
 }
 
-/** Open (and thereby lazily create — §2.3) a store at dbPath. SterlingStore opens
- *  the file directly; the parent dir is ensured here so a first-mount of a domain
- *  at ~/.sterling/domains/<name>/ (or a fresh project .sterling/) just works. */
+/** Open a store at dbPath, creating the file and its parent dir when absent.
+ *  MountedStores uses this for the PROJECT store and for domain stores that
+ *  already exist; a missing domain is never created here (see createDomain). */
 function open(dbPath: string): SterlingStore {
   mkdirSync(dirname(dbPath), { recursive: true });
   return new SterlingStore(dbPath);
+}
+
+/** The store_meta key that holds a domain's description. */
+export const DOMAIN_DESCRIPTION_KEY = 'description';
+
+/** A mounted domain whose store does not exist yet. Domains are no longer created
+ *  lazily on first mount: a new domain needs a description, and only
+ *  createDomain takes one (board 675daf9d (c), decision
+ *  projects-mount-domains-and-sibling-projects: "creating a domain without one
+ *  fails loud"). */
+export class DomainNotCreatedError extends Error {
+  readonly domain: string;
+  readonly db_path: string;
+  constructor(domain: string, dbPath: string) {
+    super(
+      `domain '${domain}' has no store at '${dbPath}'. Domain stores are not created on first mount: create it with ` +
+        `createDomain('${domain}', <description>, <dbPath>), where the description says which knowledge belongs in this domain. ` +
+        `To mount only the domains that already exist, pass { skipMissing: true }.`
+    );
+    this.name = 'DomainNotCreatedError';
+    this.domain = domain;
+    this.db_path = dbPath;
+  }
+}
+
+/** The one-line warning for a configured domain that was skipped because its
+ *  store does not exist. Shared by every caller that mounts with skipMissing
+ *  and announces the skip, so the wording cannot drift between them. */
+export function missingDomainWarning(m: DomainMount): string {
+  return (
+    `sterling: domain '${m.name}' is configured but has no store at '${m.dbPath}'; it is NOT mounted, ` +
+    `so its knowledge is not read and writes to scope domain:${m.name} are refused. ` +
+    `Create it with createDomain (a description is required), or run init to set it up.`
+  );
+}
+
+/**
+ * Create a NEW domain store at dbPath and record its description (store_meta key
+ * 'description'). The one way a domain store comes into being. Fails loud, with
+ * no file left behind, when the description is missing or blank or when a store
+ * already exists at dbPath (an existing domain is described with setMeta on its
+ * store, not re-created).
+ */
+export function createDomain(name: string, description: string, dbPath: string): void {
+  if (typeof name !== 'string' || name.trim().length === 0) throw new Error('createDomain: a domain name is required');
+  if (typeof description !== 'string' || description.trim().length === 0) {
+    throw new Error(`createDomain: domain '${name}' needs a description saying which knowledge belongs in it; none was given, so nothing was created`);
+  }
+  if (existsSync(dbPath)) {
+    throw new Error(`createDomain: a store for domain '${name}' already exists at '${dbPath}'; set its description on that store instead of re-creating it`);
+  }
+  const store = open(dbPath);
+  try {
+    store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
+  } catch (e) {
+    store.close();
+    for (const suffix of ['', '-wal', '-shm', '-journal']) rmSync(dbPath + suffix, { force: true });
+    throw e;
+  }
+  store.close();
 }
 
 export class MountedStores {
@@ -77,18 +141,43 @@ export class MountedStores {
   readonly project: SterlingStore;
   private readonly domains = new Map<string, SterlingStore>();
 
-  /** Opening a store creates its file + schema (§2.3 lazy creation): a domain
-   *  store comes into being the first time a project's manifest mounts it.
-   *  When options.skipMissing is true, domain mounts whose db file does NOT
-   *  already exist on disk are SKIPPED — never created. Existing siblings that
-   *  DO exist are still mounted. The default (no options / skipMissing false)
-   *  always lazily creates missing stores (§2.3 backward-compatible default). */
+  /** Configured domains skipped under skipMissing because their store does not
+   *  exist, in manifest order. Kept so a caller (boot, a tool response, H1) can
+   *  disclose the skip instead of the domain silently vanishing. */
+  readonly missingDomains: DomainMount[] = [];
+
+  /** The project store is opened, and created when absent. A domain store is
+   *  only ever OPENED here, never created: a mount whose db file does not exist
+   *  throws DomainNotCreatedError naming createDomain (board 675daf9d (c)), with
+   *  every handle opened so far closed and no file written for the missing
+   *  domain. When options.skipMissing is true such a mount is skipped instead,
+   *  and the existing siblings are still mounted. An existing domain store opens
+   *  as it is, whether or not it has a description. */
   constructor(projectDbPath: string, mounts: DomainMount[] = [], options?: { skipMissing?: boolean }) {
     this.project = open(projectDbPath);
-    for (const m of mounts) {
-      if (options?.skipMissing && !existsSync(m.dbPath)) continue;
-      this.domains.set(m.name, open(m.dbPath));
+    try {
+      for (const m of mounts) {
+        if (!existsSync(m.dbPath)) {
+          if (options?.skipMissing) {
+            this.missingDomains.push({ name: m.name, dbPath: m.dbPath });
+            continue;
+          }
+          throw new DomainNotCreatedError(m.name, m.dbPath);
+        }
+        this.domains.set(m.name, new SterlingStore(m.dbPath));
+      }
+    } catch (e) {
+      this.close();
+      throw e;
     }
+  }
+
+  /** A mounted domain's description (store_meta 'description'), or undefined
+   *  when that existing store has none. An unmounted name is refused. */
+  domainDescription(name: string): string | undefined {
+    const store = this.domains.get(name);
+    if (!store) throw new Error(`domainDescription: domain '${name}' is not mounted`);
+    return store.getMeta(DOMAIN_DESCRIPTION_KEY);
   }
 
   /** Scope-routed write (§3.3): project → the project store; domain:<name> → that
@@ -147,14 +236,18 @@ export class MountedStores {
     throw new Error(`unroutable scope '${scope}'`);
   }
 
-  /** Cross-store retrieval (§3.4): every mounted store runs the full
-   *  filter→join→rank→cap; results concatenate PROJECT-FIRST then domains (each
-   *  internally bm25-ranked — §3.3 project-store-first bias) and the overall cap
-   *  re-applies. A unified cross-store bm25 re-rank is a later refinement. */
+  /** Cross-store retrieval (§3.4) with read shares (board 675daf9d (b)): every
+   *  mounted store runs the full filter→join→rank→cap on its own, allocateShares
+   *  decides how many of each store's results make the cap (the project up to
+   *  ceil(0.6 x cap) when a domain has matches, the rest split across domains,
+   *  unused share spilling over), and each store's top-N is concatenated project
+   *  first, then domains in manifest order. Scores are never compared across
+   *  databases. When only the project matches it fills the cap, as before. */
   query(opts: QueryOptions = {}): DurableRecord[] {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-    const merged = this.all().flatMap((s) => s.query(opts));
-    return merged.slice(0, cap);
+    const perStore = this.all().map((s) => s.query({ ...opts, cap }));
+    const shares = allocateShares(perStore.map((r) => r.length), cap);
+    return perStore.flatMap((records, i) => records.slice(0, shares[i]));
   }
 
   /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of

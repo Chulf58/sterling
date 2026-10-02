@@ -49,7 +49,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SterlingStore, MountedStores } from '@sterling/store';
+import { SterlingStore, MountedStores, createDomain } from '@sterling/store';
 import { parseConfig } from '@sterling/schemas';
 import { SterlingTools } from '../tools.js';
 
@@ -123,6 +123,7 @@ function inboundEntries(record: Loose): Loose[] {
 function domainHarness(domainName = 'genesys') {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-inbound-supersedes-domain-'));
   const domainDb = join(dir, 'domains', domainName, 'sterling.db');
+  createDomain(domainName, 'test domain', domainDb);
   const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: domainName, dbPath: domainDb }]);
   const config = parseConfig({ stack_tags: [domainName] });
   const tools = new SterlingTools({ store, config, now: () => NOW, newId: randomUUID });
