@@ -9,7 +9,7 @@ import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync,
 import { spawnSync } from 'node:child_process';
 import { basename, join } from 'node:path';
 import { pluginRoot as sharedPluginRoot, walkUpPluginRoot as sharedWalkUpPluginRoot } from './lib/plugin-root-walk.mjs';
-import { readStdin, allow, exitAfterWrite, openStore, loadConfig } from './lib/common.mjs';
+import { readStdin, allow, exitAfterWrite, openStore } from './lib/common.mjs';
 // Plan-lock primitives — ONE implementation, shared with h31-plan-lock.mjs,
 // h19-dispatch-staging.mjs and scripts/plan-lock.mjs. Aliased on import so the
 // PLAN LOCK section's names read locally while the definitions stay shared.
@@ -27,6 +27,7 @@ import { withRegisterLock, readRegister, registerPath, sessionBoundarySweep } fr
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { consumeRotationNote, renderRotationRestore } from './lib/rotation-restore.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
+import { machineRoleLine, projectModeLine, readProjectConfig, tddPostureLine } from './lib/operating-state.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
 import { ProjectRegistry, registryPath, SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
@@ -35,7 +36,7 @@ import { gitTouches, writeInitialGitSettled } from './lib/settlement.mjs';
 import { isInstalledCopy } from '../lib/installed-copy.mjs';
 import { pluginScript, postUpdateSync, samePath } from '../lib/post-update-sync.mjs';
 import { machineStores, probeSchemaVersion } from '../lib/update.mjs';
-import { owesProseVerdicts, isJudgedOwesProse, workerStatus, workerBreakage, ageText } from './lib/maintenance-worker.mjs';
+import { queueDepthLine, readMaintenanceState, reconcileBacklog } from './lib/maintenance-state.mjs';
 
 // IN-FLIGHT DISPATCH REGISTER DELETION — COOPERATING WRITER (decision
 // register-writers-cooperating-lock, 1e0ba0d0). H1 is a register writer like
@@ -412,148 +413,35 @@ if (!store) {
 // and falls back to the schema default rather than throwing. Contrast the gates
 // (H3/H5/H14/H15), which fail CLOSED on exactly this input — a hook that cannot
 // evaluate must deny only where denying is its job (anti_pattern foreign_e13f0fb5).
-let config = null;
-let configUnreadable = false;
-try {
-  config = loadConfig(input.cwd);
-} catch {
-  config = null;
-  configUnreadable = true;
-}
-// A config that PARSES but is not an object (`[]`, `true`, `false`, `0`, `""`,
-// `"x"`, `5`) is unusable in exactly the way a throw is: every `config?.x?.y`
-// read below optional-chains to undefined, which the posture line would
-// otherwise render as the documented default. That is the same false-posture
-// defect the UNKNOWN branch closes, reached through a JSON-LEGAL corruption
-// instead of a malformed one, so it takes the same branch (review 2026-09-06).
-//
-// `null` IS DELIBERATELY EXCLUDED: loadConfig returns null for an ABSENT file,
-// which must keep rendering the documented default; a file whose content is
-// literally `null` parses to that same value and is therefore indistinguishable
-// from absent, so it shares that outcome as an accepted limitation (pinned as
-// such in h1-tdd-posture-line.test.mjs).
-//
-// THE COMPARISON MUST STAY A NULL TEST, NOT A TRUTHINESS TEST. Rewriting it as
-// `if (config && ...)` swallows `false`, `0` and `""` — three JSON-legal
-// non-object configs that would silently return to a confident ON — and the
-// four truthy non-object arms (`[]`, `true`, `"x"`, `5`) plus the null-trap arm all
-// stay GREEN under that rewrite, which is why those three falsy shapes are
-// pinned explicitly. Measured, not assumed: the truthiness rewrite reddens
-// exactly those three arms and nothing else. `!=` vs `!==` here is NOT the
-// hazard — they differ only for `undefined`, which loadConfig never returns, so
-// that swap is behaviourally inert and correctly leaves the suite green.
-//
-// It does NOT change any other consumer: `config` stays null-or-as-parsed and
-// roleContext / the queue threshold / the concurrency ceiling all keep
-// degrading to their own defaults as before.
-if (config !== null && (typeof config !== 'object' || Array.isArray(config))) {
-  configUnreadable = true;
-}
-
-// MACHINE ROLE (todo cabbc10f, decision foreign_a9b98b7d): stated ONLY when this
-// session's project IS a Sterling clone itself — comparing the normalized
-// input.cwd to pluginRoot(). Every OTHER Sterling project (a consumer of the
-// plugin, not a clone of it) never sees this line; it exists because the
-// committed CLAUDE.md's "this machine authors" prose travels with every
-// clone and misleads a session opened inside one. Guarded exactly like the
-// config read above — H1 is soft, so a malformed config costs this line, never
-// the conventions injection.
+// The three-state read (absent / unreadable / non-object) and the MACHINE ROLE,
+// TDD posture and Project mode lines below live in lib/operating-state.mjs, shared
+// with the OpenCode context hook; the rationale for each travels with its function.
+const { config, configUnreadable } = readProjectConfig(input.cwd);
+// `config` stays null-or-as-parsed, so the queue threshold and the concurrency
+// ceiling keep degrading to their own defaults. Each line below is guarded like
+// every other H1 read: a malformed config or unresolved plugin root costs only
+// that line (fail-open).
 let roleContext = '';
 try {
   const root = pluginRoot();
-  if (root && !samePath(input.cwd, root) && isInstalledCopy(root)) {
-    // An installed copy (no .git — decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
-    // design D) is never a project's cwd, so the line is stated in EVERY project: it is the
-    // only place a session learns that /plugin, not /sterling:update, moves this machine.
-    roleContext =
-      '\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.';
-  } else if (root && samePath(input.cwd, root)) {
-    const role = config?.machine_role;
-    if (role === 'authoring') {
-      roleContext =
-        '\n\nMACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) — Sterling work lands and merges here; the Sterling layer in CLAUDE.md\'s authoring contract applies.';
-    } else if (role === 'consumer') {
-      roleContext =
-        '\n\nMACHINE ROLE: CONSUMER — this clone consumes via /sterling:update. The Sterling layer in CLAUDE.md\'s "this machine authors" language does NOT apply on this machine: never commit here, never hand-reconcile drift; a dirty generated file is discarded (git checkout -- <path>); currency comes only from /sterling:update.';
-    } else {
-      roleContext =
-        '\n\nMACHINE ROLE: UNDECLARED — treat as CONSUMER (the safe posture) until declared. The authoring machine declares machine_role:"authoring" in .sterling/config.json once; a successful /sterling:update stamps "consumer" automatically.';
-    }
-  }
+  const installedCopy = Boolean(root && !samePath(input.cwd, root) && isInstalledCopy(root));
+  const atClone = Boolean(root && samePath(input.cwd, root));
+  const line = machineRoleLine({ atClone, installedCopy, config });
+  if (line) roleContext = `\n\n${line}`;
 } catch {
   // fail-open — a malformed config or unresolved plugin root costs only this line
 }
 
-// TDD POSTURE (decision foreign_752caf98
-// tdd-and-mutation-toggles-in-system-tab, board 7e7279c4 slice 3C): mechanizes
-// the "check what this machine is set to" instruction CLAUDE.md states in
-// prose by reading the LIVE per-project toggle at every SessionStart, rather
-// than leaving the conductor to consult a value it cannot see. loadConfig
-// (above) returns the raw parsed .sterling/config.json with NO zod defaults
-// applied (unlike the MCP server's parseConfig) — a project whose config
-// predates this toggle, or config === null on a malformed read, leaves
-// config?.tdd?.enabled undefined here. Undefined is treated as the
-// DOCUMENTED SCHEMA DEFAULT (the field defaults true, decision foreign_752caf98)
-// rather than invented: only an explicit `false` reads as OFF. Positioned
-// immediately after roleContext in the output concatenation below. Guarded
-// like every other H1 read — H1 is soft, so a malformed config costs only
-// this one line, never the conventions injection.
-//
-// AN UNREADABLE CONFIG REPORTS UNKNOWN, NEVER THE DEFAULT (external review
-// 2026-09-06, Codex thread 01a075e9, which caught this where two roster
-// reviewers did not). ABSENT and UNREADABLE are different facts and this line
-// must not collapse them: an absent key genuinely IS the schema default, but a
-// config that could not be PARSED tells us nothing about the toggle, and
-// rendering that as "ON" asserts a posture the hook never read. That is
-// the worst failure available here — worse than printing nothing — because
-// this line exists precisely to stop the conductor assuming a posture, and in
-// a project where the toggle is OFF (this clone, today) a corrupt config
-// would confidently state the exact opposite of the truth. loadConfig returns
-// null for an ABSENT file and THROWS on a malformed one, which is what makes
-// the two distinguishable at all.
 let tddPostureContext = '';
 try {
-  if (configUnreadable) {
-    tddPostureContext =
-      '\n\nTDD posture: UNKNOWN — the project config could not be read, so ' +
-      'config.tdd.enabled could not be determined. ' +
-      'This is NOT the default posture: repair the config, or state your posture explicitly.';
-  } else {
-    const tddOn = config?.tdd?.enabled !== false;
-    tddPostureContext =
-      `\n\nTDD posture: tests-first ${tddOn ? 'ON' : 'OFF'} ` +
-      `(config.tdd.enabled — TUI System tab; explicit asks still work)`;
-  }
+  tddPostureContext = `\n\n${tddPostureLine({ config, configUnreadable })}`;
 } catch {
   // fail-open — a malformed config costs only this line
 }
 
-// PROJECT MODE (decision project-mode-hobby-work-toggle-decides-flow, slice S1):
-// informational only — states this project's config.mode next to the role and
-// TDD lines so the session knows which flow applies. Same three states as the
-// TDD line above: an absent key IS the schema default (hobby); an unreadable
-// config is UNKNOWN, never the default; and a value outside hobby/work reads
-// INVALID, never as either flow (the surfaces that act on the mode refuse it).
 let modeContext = '';
 try {
-  if (configUnreadable) {
-    modeContext =
-      '\n\nProject mode: UNKNOWN — the project config could not be read, so config.mode could not be determined. ' +
-      'This is NOT the hobby default: repair the config.';
-  } else {
-    const mode = config?.mode;
-    if (mode === undefined || mode === 'hobby' || mode === 'work') {
-      modeContext =
-        `\n\nProject mode: ${mode === 'work' ? 'WORK' : 'HOBBY'} (config.mode — TUI System tab) — ` +
-        (mode === 'work'
-          ? 'the OpenCode agents and handoff files are written and maintained.'
-          : 'the OpenCode agents and handoff files are not written or maintained in hobby mode; existing ones may remain from an earlier work period.');
-    } else {
-      modeContext =
-        `\n\nProject mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) — config.mode must be 'hobby' or 'work'; ` +
-        'init, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).';
-    }
-  }
+  modeContext = `\n\n${projectModeLine({ config, configUnreadable })}`;
 } catch {
   // fail-open — a malformed config costs only this line
 }
@@ -1040,150 +928,28 @@ try {
   counts.groupedTodos = grouped.length;
   counts.objectives = new Set(grouped.map((t) => t.objective)).size;
 
-  const systemTotal = store.count({ types: ['todo'], source: 'system' });
-  counts.maintenance = systemTotal;
-  const system = systemTotal > 0 ? store.query({ types: ['todo'], source: 'system', cap: systemTotal }) : [];
-  // file_parked closes at branch merge (direct-merge sweeps it), never by
-  // draining — counting it toward the deep-queue threshold makes H1 cry wolf
-  // about items no drain can touch, and a standing warning about undrainable
-  // items trains the operator to ignore the warning (2026-08-09 consuming
-  // project: 15 by-design-open file_parked items tripped this every session
-  // start). It stays in counts.maintenance (the human's banner shows the true
-  // total); only the DRAIN signal excludes it.
-  // RECONCILE BACKLOG AGE (decision maintenance-queue-background-haiku-worker-
-  // simple-redesign point (5)): the count and the oldest created_at, so a
-  // backlog nobody drains shows its age instead of only its size.
-  const reconcileItems = system.filter((t) => t.system_reason === 'reconcile_needed');
-  reconcile.count = reconcileItems.length;
-  // 'owes prose' is judged per (item id, current file_keys) in the worker's
-  // JSONL, never marked on the item itself.
-  try {
-    const verdicts = owesProseVerdicts(input.cwd);
-    reconcile.owesProse = reconcileItems.filter((t) => isJudgedOwesProse(t, verdicts)).length;
-  } catch {
-    reconcile.owesProse = null; // unreadable journal: say so below, never a confident 0
-  }
-  reconcile.oldest = reconcileItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
-  const drainableItems = system.filter((t) => t.system_reason !== 'file_parked');
-  drainable = drainableItems.length;
-  parked = system.length - drainable;
-  // Lane breakdown for the deep-queue signal below: a bare total says "drain",
-  // a per-lane split says WHAT is owed, which is what decides how to drain it.
-  // Phrased as "N item(s) in lane <reason>" (not "<reason> ×N"): a lane
-  // legitimately landing on a round number (e.g. 100) must read unambiguously
-  // as a per-lane count, never as evidence of a silent truncation to some
-  // common cap literal.
-  const byReason = new Map();
-  for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
-  queueReasonEntries = [...byReason.entries()].sort((a, b) => b[1] - a[1]);
-  queueReasons = queueReasonEntries.map(([r, n]) => `${n} item${n === 1 ? '' : 's'} in lane ${r}`);
+  const m = readMaintenanceState(store, input.cwd);
+  counts.maintenance = m.total;
+  reconcile = m.reconcile;
+  drainable = m.drainable;
+  parked = m.parked;
+  queueReasonEntries = m.queueReasonEntries;
+  queueReasons = m.queueReasons;
 } finally {
   store.close();
 }
 
-// DEEP-QUEUE SIGNAL TO THE CONDUCTOR (config.maintenance_queue.deep_threshold).
-// The counts above go to the human as a systemMessage, which the MODEL never
-// sees — correct while the queue is shallow and event-drained, wrong once it is
-// deep, because the human is not the one who drains it. A consuming project
-// reached 63 items, most of them work finished days earlier and never closed,
-// with nothing anywhere prompting a drain (reported 2026-07-29). Silent below the
-// threshold (P1); above it, states the depth, the lanes, and the remedy.
-//
-// TWO TIERS (board 91fc3d6f): "drain it before taking new work" is an honest ask
-// at a few dozen items, but not at hundreds — a consuming project measured 247
-// drainable items against 5 closed in one drain pass, i.e. an instruction whose
-// only honest response was to ignore it ("is not a drain, it is evaporation").
-// TOO_DEEP_MULTIPLIER anchors the second tier off the SAME deep_threshold that
-// gates the first: at 10x threshold (default 150), naming every lane is no
-// longer readable and a blanket "drain it" is no longer actionable, so the
-// message switches to naming the top few lanes by count with a BOUNDED ask
-// (drain the biggest lane, or board a dedicated drain slice for the rest)
-// instead of repeating the same unattainable instruction at a larger number.
-const TOO_DEEP_MULTIPLIER = 10;
-let queueContext = '';
-// Clamped to >= 1 (reviewer F1): a corrupt/hostile deep_threshold <= 0 would
-// otherwise make BOTH tier conditions true even on an EMPTY drainable queue —
-// queueReasonEntries[0] would then be undefined and the destructure below
-// would throw OUTSIDE this try/finally, crashing H1 non-zero and losing the
-// whole injection (including an already-consumed rotation note — unrecoverable).
-const deepThreshold = Math.max(1, config?.maintenance_queue?.deep_threshold ?? 15);
-if (drainable >= deepThreshold) {
-  const parkedNote =
-    parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain — excluded from this count)` : '';
-  // Second guard (reviewer F1, belt-and-suspenders alongside the clamp above):
-  // never take the very-deep branch with an empty lane breakdown — fall back
-  // to the modest-tier wording instead of destructuring an undefined entry.
-  if (drainable >= deepThreshold * TOO_DEEP_MULTIPLIER && queueReasonEntries.length) {
-    // Every count named below stays in the "N item(s) in lane X" shape (never a
-    // bare number) — the same phrasing the moderate tier already uses — so a
-    // lane count can never be misread as a truncated/capped total.
-    const topLanes = queueReasons.slice(0, 3);
-    const [topReason, topCount] = queueReasonEntries[0];
-    const topPhrase = `${topCount} item${topCount === 1 ? '' : 's'} in lane ${topReason}`;
-    // "too many to name in full" is only true past the top-3 we actually show
-    // (reviewer cosmetic note: it read as false with exactly 2 lanes).
-    const laneLead =
-      queueReasonEntries.length > topLanes.length
-        ? `Too many lanes to name in full, and "drain it all before new work" is not a workable ask at this size. The biggest lanes: ${topLanes.join(', ')}. `
-        : `"Drain it all before new work" is not a workable ask at this size. The lane split: ${topLanes.join(', ')}. `;
-    queueContext =
-      `\n\nMAINTENANCE QUEUE IS VERY DEEP — ${drainable} drainable items across ${queueReasonEntries.length} lane(s)${parkedNote}.\n` +
-      laneLead +
-      `Drain the biggest lane now (${topPhrase}), or board a dedicated drain slice for the rest — don't try to clear the whole queue in one pass. ` +
-      `Expect much of it to be ALREADY DONE work never closed, so verify each item against HEAD before writing anything back ` +
-      `(an already-paid item closes with board_remove and NO knowledge_update). ` +
-      `A queue this deep is itself a signal: items are arriving faster than anyone is closing them.`;
-  } else {
-    queueContext =
-      `\n\nMAINTENANCE QUEUE IS DEEP — ${drainable} drainable items (${queueReasons.join(', ')})${parkedNote}.\n` +
-      `Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: ` +
-      `the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first ` +
-      `(an already-paid item closes with board_remove and NO knowledge_update — a version bump claiming a reconcile that added nothing is itself drift). ` +
-      `A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
-  }
-  // The maintenance-item COUNT itself (in the systemMessage banner above) is a
-  // persistent visibility count by design: items close only at their
-  // lane-specific events (e.g. file_parked only at merge), so a stable count
-  // is not a failed drain — that attribution belongs here, on the surface
-  // that carries prose, not on the banner's pinned counts-only contract.
-  queueContext +=
-    ' This is a persistent visibility count by design — items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.';
-}
+// DEEP-QUEUE SIGNAL TO THE CONDUCTOR (config.maintenance_queue.deep_threshold): the
+// two-tier text and its rationale live in lib/maintenance-state.mjs queueDepthLine.
+const queueLine = queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: config?.maintenance_queue?.deep_threshold });
+const queueContext = queueLine ? `\n\n${queueLine}` : '';
 
-// RECONCILE BACKLOG LINE: one '·' segment on the human banner (after the
-// maintenance clause, so that clause's text is unchanged) and one line for the
-// conductor, who drafts the prose the worker leaves owed. Silent when there
-// is no reconcile item (P1). Worker state comes from its lockfile. A BROKEN
-// last run (workerBreakage: non-zero exit, error result, permission denials,
-// MCP not connected) adds one clause naming its reason and the log; routine
-// states (back-off, nothing eligible, no progress) add nothing, because the
-// worker's routine status is not the session's business (decision
-// maintenance-worker-notices-session-start-only-and-no-sliver-launch).
-let reconcileBanner = '';
-let reconcileContext = '';
-if (reconcile.count > 0) {
-  let worker = 'worker not running';
-  let lastRunNote = '';
-  try {
-    const ws = workerStatus(input.cwd);
-    if (ws.running) worker = `worker running (pid ${ws.pid}, since ${ws.since})`;
-    const broken = workerBreakage(ws.lastRun);
-    if (broken) lastRunNote = `; last worker run FAILED at ${broken.at}: ${broken.reason} (log: .sterling/maintenance-worker.log)`;
-  } catch (e) {
-    worker = `worker state unreadable (${e?.message ?? e})`;
-  }
-  const age = ageText(reconcile.oldest);
-  // Counts keep H1's "N item(s) in lane <reason>" shape, so a round number
-  // can never read as a truncated cap (h1-accuracy AC1).
-  const inLane = (n) => `${n} item${n === 1 ? '' : 's'} in lane reconcile_needed`;
-  reconcileBanner = ` · ${inLane(reconcile.count)}, oldest ${age}, ${worker}${lastRunNote}`;
-  reconcileContext =
-    `\n\nRECONCILE BACKLOG: ${inLane(reconcile.count)}, the oldest open since ${reconcile.oldest ?? 'unknown'} (${age}). ` +
-    (reconcile.owesProse === null
-      ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items owe prose is unknown. `
-      : `Of these, ${inLane(reconcile.owesProse)} are judged 'owes prose' by the background worker (.sterling/maintenance-worker.jsonl) and wait on you to draft the article change. `) +
-    `${worker}${lastRunNote}.`;
-}
+
+// RECONCILE BACKLOG: the banner segment and the conductor line come from the shared
+// lib (lib/maintenance-state.mjs reconcileBacklog), which carries the rationale.
+const backlog = reconcileBacklog({ reconcile, cwd: input.cwd });
+const reconcileBanner = backlog.banner;
+const reconcileContext = backlog.line ? `\n\n${backlog.line}` : '';
 
 // shared project registry (decision foreign_8f9e6db2): touch THIS project's last_seen
 // for the session, and make the CONDUCTOR aware of sibling projects via
