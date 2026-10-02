@@ -201,13 +201,14 @@ test('an OpenCode provider error or a non-zero exit is a FAILED run with a named
   }
 });
 
-test('with no model configured the OpenCode runner passes no --model and no config model (OpenCode uses its own default); --dry-run prints the opencode argv and env', async () => {
+test('[decision opencode-maintenance-worker-refuses-without-a-configured-model] with no model recorded the OpenCode runner refuses: nothing spawned, a failed run naming the key, never OpenCode\'s default model; --dry-run prints the opencode argv and env', async () => {
   const fx = fixture();
   try {
     const child = fakeOpencode([text('{"verdict":"none","reason":"x"}')]);
-    await runWorker({ ...opencodeRun(fx, [ITEM], { model: null }), spawn: child.fn });
-    assert.ok(!child.calls[0].args.includes('--model'));
-    assert.equal(JSON.parse(child.calls[0].opts.env.OPENCODE_CONFIG_CONTENT).model, undefined);
+    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM], { model: null }), spawn: child.fn }), 1);
+    assert.equal(child.calls.length, 0, 'no opencode run starts without a model');
+    assert.equal(lastRun(fx).ok, false);
+    assert.match(lastRun(fx).error, /maintenance_worker\.opencode_model is not set/);
 
     const printed = [];
     opencodeRun(fx, [ITEM]);
@@ -276,6 +277,9 @@ test('the launcher records the opencode host, binary and configured model in the
 test('the launcher refuses loudly an opencode host with no binary, a malformed opencode_model, or an unknown host: recorded as a failed launch, nothing spawned', () => {
   for (const [over, re] of [
     [{ host: 'opencode' }, /needs the path of the opencode binary/],
+    // Decision opencode-maintenance-worker-refuses-without-a-configured-model: no fallback to OpenCode's default model.
+    [{ host: 'opencode', opencodeBin: '/opt/oc/opencode.exe' }, /maintenance_worker\.opencode_model is not set/],
+    [{ host: 'opencode', opencodeBin: '/opt/oc/opencode.exe', config: { maintenance_worker: {} } }, /maintenance_worker\.opencode_model is not set/],
     [{ host: 'opencode', opencodeBin: '/opt/oc/opencode.exe', config: { maintenance_worker: { opencode_model: 42 } } }, /opencode_model must be a provider\/model string/],
     [{ host: 'gemini' }, /unknown runner host 'gemini'/],
   ]) {
@@ -310,6 +314,7 @@ test('the OpenCode plugin picks the host: claude on PATH -> claude; else the Ope
       return { launched: true, reason: 'launched' };
     };
     const at = new Date(NOW).toISOString();
+    writeFileSync(join(fx.project, '.sterling', 'config.json'), JSON.stringify({ maintenance_worker: { opencode_model: 'openai/gpt-5.6-terra' } }));
     worker.createWorkerLaunch({ openStore, claudeOnPath: () => true, launchWorker, execPath: '/opt/oc/opencode.exe', nodeOnPath: () => true })(fx.project, at);
     worker.createWorkerLaunch({ openStore, claudeOnPath: () => false, launchWorker, execPath: '/opt/oc/opencode.exe', nodeOnPath: () => true })(fx.project, at);
     assert.deepEqual(seen, [{ host: undefined, opencodeBin: undefined }, { host: 'opencode', opencodeBin: '/opt/oc/opencode.exe' }]);
@@ -326,6 +331,33 @@ test('the OpenCode plugin picks the host: claude on PATH -> claude; else the Ope
     assert.equal(skip.length, 1, 'one notice per process');
     assert.match(skip[0], /neither `claude` nor an OpenCode binary/);
     assert.match(readFileSync(join(fx.project, '.sterling', 'transient', 'opencode-plugin.log'), 'utf8'), /no maintenance runner on this machine/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[decision opencode-maintenance-worker-refuses-without-a-configured-model] on the opencode host with no maintenance_worker.opencode_model the plugin refuses loudly: no launch, one notice naming the key, one log line; the claude host needs no model', () => {
+  const fx = fixture();
+  try {
+    const openStore = () => ({ close() {} });
+    const seen = [];
+    const launchWorker = (o) => {
+      seen.push(o.host ?? 'claude');
+      return { launched: true, reason: 'launched' };
+    };
+    const at = new Date(NOW).toISOString();
+    const noModel = worker.createWorkerLaunch({ openStore, claudeOnPath: () => false, launchWorker, execPath: '/opt/oc/opencode.exe', nodeOnPath: () => true });
+    noModel(fx.project, at);
+    noModel(fx.project, at);
+    assert.deepEqual(seen, [], 'nothing launches without a configured model');
+    const refused = notices(fx.project).filter((t) => /maintenance worker did not run/.test(t));
+    assert.equal(refused.length, 1, 'one notice per process');
+    assert.match(refused[0], /maintenance_worker\.opencode_model/);
+    const log = readFileSync(join(fx.project, '.sterling', 'transient', 'opencode-plugin.log'), 'utf8');
+    assert.equal(log.match(/opencode_model is not set/g).length, 1, 'one log line');
+
+    worker.createWorkerLaunch({ openStore, claudeOnPath: () => true, launchWorker, execPath: '/opt/oc/opencode.exe', nodeOnPath: () => true })(fx.project, at);
+    assert.deepEqual(seen, ['claude'], 'the claude path is unchanged: no model needed');
   } finally {
     fx.cleanup();
   }

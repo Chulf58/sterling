@@ -123,10 +123,16 @@ export const WORKER_DISALLOWED_TOOLS = [
  *  not on PATH. */
 export const WORKER_HOSTS = ['claude', 'opencode'];
 /** Config key (in maintenance_worker) naming the OpenCode runner's model as
- *  provider/model. Unset: OpenCode's own configured default model. It is a
- *  config choice because Anthropic OAuth through OpenCode bills as extra usage
- *  (finding opencode-2-plugin-spike-hooks-and-sidebar-october-2026). */
+ *  provider/model. It is a config choice because Anthropic OAuth through
+ *  OpenCode bills as extra usage (finding
+ *  opencode-2-plugin-spike-hooks-and-sidebar-october-2026). Unset, the OpenCode
+ *  runner REFUSES and never falls back to OpenCode's default model (user-ruled,
+ *  decision opencode-maintenance-worker-refuses-without-a-configured-model). */
 export const OPENCODE_MODEL_KEY = 'opencode_model';
+/** Is a usable OpenCode model configured? (`config` raw or parsed, as the launcher takes it.) */
+export const opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
+export const OPENCODE_MODEL_UNSET =
+  `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
 
 export function workerPaths(root) {
   const sterling = join(root, '.sterling');
@@ -590,9 +596,10 @@ function launchWorker(opts) {
 
     const host = opts.host ?? 'claude';
     if (!WORKER_HOSTS.includes(host)) return { launched: false, reason: 'error', detail: failDetail(`unknown runner host '${host}'`) };
-    const model = opts.config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
+    const model = opencodeModelOf(opts.config);
     if (host === 'opencode') {
       if (typeof opts.opencodeBin !== 'string' || !opts.opencodeBin) return { launched: false, reason: 'error', detail: failDetail('the opencode host needs the path of the opencode binary') };
+      if (model === null) return { launched: false, reason: 'error', detail: failDetail(OPENCODE_MODEL_UNSET) };
       if (model !== null && (typeof model !== 'string' || !model.trim())) return { launched: false, reason: 'error', detail: failDetail(`config maintenance_worker.${OPENCODE_MODEL_KEY} must be a provider/model string, got ${JSON.stringify(model)}`) };
     }
     const pluginRoot = opts.pluginRoot ?? pluginRootFrom();
@@ -611,7 +618,7 @@ function launchWorker(opts) {
     writeFileSync(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
     // The child judges ONLY these (PARTIAL 2); the runner checks the token.
     // The runner host travels with the eligible list, bound to this launch by the token.
-    const runnerHost = host === 'opencode' ? { host, opencode_bin: opts.opencodeBin, opencode_model: model ? model.trim() : null } : { host };
+    const runnerHost = host === 'opencode' ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
     writeFileSync(paths.eligible, JSON.stringify({ token, head: git.head, ...runnerHost, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
 
     let logFd;
@@ -857,6 +864,7 @@ export async function runWorker(opts) {
       const ocBin = opts.opencodeBin ?? eligible?.opencode_bin;
       if (!ocBin) throw new Error('the opencode host was chosen but no opencode binary was recorded for this launch');
       const model = opts.opencodeModel ?? eligible?.opencode_model ?? null;
+      if (typeof model !== 'string' || !model.trim()) throw new Error(OPENCODE_MODEL_UNSET);
       const config = buildOpencodeConfig({ mcpConfig, model });
       return { host, bin: ocBin, args: buildOpencodeArgs({ prompt: prompt + OPENCODE_PROMPT_NOTE, model }), env: opencodeEnv({ root: opts.root, config }) };
     }

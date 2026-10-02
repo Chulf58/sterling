@@ -11,7 +11,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
-import { maybeLaunchMaintenanceWorker } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
+import { maybeLaunchMaintenanceWorker, OPENCODE_MODEL_UNSET, opencodeModelOf } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
 import { errText, logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
 
@@ -70,6 +70,14 @@ export function createWorkerLaunch({
       skipOnce(root, at, 'maintenance worker skipped: no maintenance runner on this machine (`claude` is not on PATH and no OpenCode binary was found)', NO_RUNNER_TEXT);
       return;
     }
+    const config = loadConfig(root);
+    // No model, no OpenCode run (decision
+    // opencode-maintenance-worker-refuses-without-a-configured-model): one loud
+    // notice per process, like the no-runner skip, never OpenCode's default model.
+    if (ocBin && opencodeModelOf(config) === null) {
+      skipOnce(root, at, `maintenance worker skipped: ${OPENCODE_MODEL_UNSET}`, `Sterling: the maintenance worker did not run. ${OPENCODE_MODEL_UNSET}.`);
+      return;
+    }
     const nodeCmd = isNodeBinary(execPath) ? execPath : nodeOnPath() ? 'node' : null;
     if (!nodeCmd) {
       skipOnce(
@@ -85,7 +93,7 @@ export function createWorkerLaunch({
     let workerStore;
     try {
       workerStore = openStore(join(root, '.sterling', 'sterling.db'));
-      const result = launchWorker({ root, config: loadConfig(root), store: workerStore, trigger: 'stop', spawn: spawnNode, ...runnerHost });
+      const result = launchWorker({ root, config, store: workerStore, trigger: 'stop', spawn: spawnNode, ...runnerHost });
       if (result?.reason === 'error') {
         logLine(root, `maintenance worker launch failed: ${result.detail ?? 'no detail'}`);
         addNotice(root, `Sterling: the maintenance worker could not be launched (${result.detail ?? 'no detail'}).`, at);

@@ -52,7 +52,9 @@ export const OPENCODE_PROMPT_NOTE =
 
 /** The OpenCode config for the child (passed as OPENCODE_CONFIG_CONTENT):
  *  the sterling MCP server from the plugin's wiring (`mcpConfig` is the JSON
- *  resolveMcpConfig returns), the deny list, and the model when one is set. */
+ *  resolveMcpConfig returns), the deny list, and the model. runWorker refuses
+ *  before this without a model (decision
+ *  opencode-maintenance-worker-refuses-without-a-configured-model). */
 export function buildOpencodeConfig({ mcpConfig, model = null }) {
   const entry = JSON.parse(mcpConfig).mcpServers[SERVER];
   const permission = Object.fromEntries([...OPENCODE_DENIED_BUILTINS, ...OPENCODE_DENIED_MCP].map((k) => [k, 'deny']));
@@ -61,8 +63,7 @@ export function buildOpencodeConfig({ mcpConfig, model = null }) {
 
 /** `opencode run` argv. --standalone runs a private server (no background
  *  service, no port); --auto approves what is not explicitly denied, so the
- *  run never waits on a prompt nobody will answer. No --model when the config
- *  names none: OpenCode then uses its own configured default. */
+ *  run never waits on a prompt nobody will answer. */
 export function buildOpencodeArgs({ prompt, model = null }) {
   return ['run', '--standalone', '--format', 'json', '--auto', ...(model ? ['--model', model] : []), prompt];
 }
