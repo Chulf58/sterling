@@ -54,6 +54,22 @@ test('host fences: nesting, a mismatched close and a misspelled marker are refus
   }
 });
 
+test('host fences: an empty claude-only or opencode-only block is refused, a blank-only one too', () => {
+  const cases = {
+    'empty claude-only': ['a', '<!-- claude-only -->', '<!-- /claude-only -->', '<!-- opencode-only -->', 'o', '<!-- /opencode-only -->'],
+    'claude-only holding only the no-counterpart marker': ['a', '<!-- claude-only -->', '<!-- no-opencode-counterpart -->', '<!-- /claude-only -->'],
+    'blank-only claude-only': ['a', '<!-- claude-only -->', '', '<!-- /claude-only -->', '<!-- opencode-only -->', 'o', '<!-- /opencode-only -->'],
+    'empty opencode-only': ['a', '<!-- claude-only -->', 'c', '<!-- /claude-only -->', '<!-- opencode-only -->', '<!-- /opencode-only -->'],
+  };
+  for (const [name, lines] of Object.entries(cases)) {
+    const text = `${lines.join('\n')}\n`;
+    const v = validateFences(text, 'f.md');
+    assert.deepEqual(v.map((x) => x.kind), ['fence_empty_block'], name);
+    assert.match(v[0].detail, /^f\.md:\d+: the (claude|opencode)-only block is empty/, name);
+    assert.throws(() => renderOpenCodeFullText(text, 'f.md'), /fence_empty_block/, name);
+  }
+});
+
 test('the Claude-rendered conductor is byte-identical to its render before the host fences', () => {
   const r = spawnSync('git', ['show', `${PRE_HOST_FENCE_COMMIT}:agent-templates/conductor.md`], { cwd: repoRoot, encoding: 'utf8' });
   assert.equal(r.status, 0, `git show ${PRE_HOST_FENCE_COMMIT}: ${r.stderr}`);

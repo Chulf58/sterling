@@ -7,6 +7,7 @@
 // could not map.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -197,4 +198,23 @@ test('stamp-contract reads the Claude render: no tracked bullet carries a fence 
     if (claude.includes(lead)) assert.ok(claude.includes(block), `${lead}: the propagated block is the Claude render's`);
   }
   assert.equal(extractTemplateBlock(template(), '- **Say `READY TO CLEAR` plainly when it is time.**').block.includes('READY FOR NEW SESSION'), false);
+});
+
+test('swapBlocks refuses a pair with no claude lines instead of looping on it', () => {
+  // [].every() is true at every index, so an unguarded swap of an empty claude block splices
+  // forever. Run it in a child with a timeout: a hang fails the test instead of the suite.
+  const layerUrl = pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'layer.mjs')).href;
+  const script = `const { swapBlocks } = await import(${JSON.stringify(layerUrl)});
+try { swapBlocks(['a', 'b'], [{ claude: [], opencode: ['x'] }]); console.log('RETURNED'); }
+catch (err) { console.log('THREW ' + err.message); }`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(r.signal, null, `swapBlocks did not finish within the timeout (killed by ${r.signal})`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^THREW .*no claude lines/m);
+});
+
+test('swapBlocks still swaps every occurrence of a non-empty block', () => {
+  const lines = ['a', 'c1', 'c2', 'b', 'c1', 'c2'];
+  assert.deepEqual(layer.swapBlocks(lines, [{ claude: ['c1', 'c2'], opencode: ['o'] }, { claude: ['missing'], opencode: [] }]), ['missing']);
+  assert.deepEqual(lines, ['a', 'o', 'b', 'o']);
 });

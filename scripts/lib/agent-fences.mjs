@@ -86,6 +86,15 @@ export function validateFences(text, label) {
     } else if (openFence.kind !== marker.kind) {
       violations.push({ kind: 'fence_mismatched', detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
     } else {
+      // An empty claude-only or opencode-only block has nothing to swap: the OpenCode layer's
+      // whole-line swap of an empty claude block matches at every index and never ends, and an
+      // empty opencode block deletes its claude text without saying so.
+      if (marker.kind === 'claude-only' || marker.kind === 'opencode-only') {
+        const body = lines.slice(openFence.line, index).filter((l) => l !== NO_COUNTERPART_MARKER);
+        if (!body.some((l) => l.trim() !== '')) {
+          violations.push({ kind: 'fence_empty_block', detail: `${label}:${openFence.line}: the ${marker.kind} block is empty; give it the text that replaces its partner, or remove the pair` });
+        }
+      }
       if (marker.kind === 'claude-only') {
         const first = lines[openFence.line]; // openFence.line is 1-based, so this is the line after the open marker
         const next = lines.slice(index + 1).find((l) => l.trim() !== '');

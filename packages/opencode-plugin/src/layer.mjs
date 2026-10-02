@@ -87,10 +87,13 @@ export function hostBlockPairs(templateText, label = 'templates/target-claude-md
 }
 
 // Replace every whole-line occurrence of each pair's claude lines with its opencode lines.
-// Returns the first line of each pair that was found nowhere.
-function swapBlocks(lines, pairs) {
+// Returns the first line of each pair that was found nowhere. A pair with no claude lines
+// throws: [].every() is true at every index, so it would splice forever (validateFences
+// refuses such a block, so reaching this is a caller bug).
+export function swapBlocks(lines, pairs) {
   const unmatched = [];
   for (const { claude, opencode } of pairs) {
+    if (!claude.length) throw new Error('Sterling layer: a host block pair has no claude lines, so it cannot be swapped');
     let found = false;
     for (let i = 0; i + claude.length <= lines.length; i++) {
       if (!claude.every((l, k) => lines[i + k] === l)) continue;
