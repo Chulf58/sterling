@@ -17,9 +17,11 @@
 //    finds in Claude Code's plugin cache or OpenCode's npm cache, so no versioned install
 //    path is ever written to disk. A file of the same name that Sterling did not write,
 //    or one edited since, is refused, never overwritten. When the Sterling in use is the
-//    npm package from `opencode plugin add`, the TUI shim is not installed; instead the
-//    package goes into <config dir>/cli.json `plugins`, which `plugin add` does not
-//    write (finding f3adf829).
+//    npm package from `opencode plugin add`, neither shim is installed: `plugin add`
+//    registers the server (a shim would load it twice), and the package goes into
+//    <config dir>/cli.json `plugins` for the TUI, which `plugin add` does not write
+//    (finding f3adf829). Shims an earlier init wrote are removed when their stamps
+//    verify, and kept with a KEPT row otherwise.
 //    Also once per machine: a `codex` entry under mcp.servers in <config dir>/opencode.json,
 //    written only for a Codex whose `mcp-server --help` prints mcp-server help.
 // 2. PER PROJECT: <project>/.opencode/opencode.json gets the store-guard edit-deny rules
@@ -41,7 +43,7 @@
 // OpenCode not installed, or not 2.x: one loud skip line, nothing written.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -293,20 +295,60 @@ export function ensureTuiCliEntry({ env = process.env, home = homedir() } = {}) 
   return { item: label, status: before === null ? 'created' : 'refreshed', detail: `${STERLING_NPM_PACKAGE} added, because opencode plugin add registers only the server half` };
 }
 
-/** npmCopy: the Sterling in use is the `opencode plugin add` package, whose TUI loads through cli.json instead of the shim. */
+const TWICE = 'the npm package is registered too, so Sterling would load twice; remove it unless you mean it to';
+
+// Npm copy: `opencode plugin add` registers the server, so the global server shim
+// would load it a second time. One an earlier init wrote and nobody edited (its stamp
+// verifies) is removed; anything else is kept, loudly.
+function retireServerShim(path) {
+  const item = fwd(path);
+  if (!existsSync(path)) return { item, status: 'skipped', detail: `not installed: opencode plugin add registers the ${STERLING_NPM_PACKAGE} server itself, so a shim would load it twice` };
+  if (!statSync(path).isFile()) return { item, status: 'skipped', detail: `KEPT: ${item} is not a file, so it stays; ${TWICE}` };
+  const stamp = verifyStamp(normalize(readFileSync(path, 'utf8')), '//');
+  if (stamp === null) return { item, status: 'skipped', detail: `KEPT: ${item} exists and Sterling did not write it, so it stays; if it loads Sterling, ${TWICE}` };
+  if (!stamp.unmodified) return { item, status: 'skipped', detail: `KEPT: ${item} was edited after Sterling wrote it, so it stays; ${TWICE}` };
+  unlinkSync(path);
+  return { item, status: 'removed', detail: `the server shim an earlier init wrote: opencode plugin add registers the ${STERLING_NPM_PACKAGE} server, so the shim would load it twice` };
+}
+
+// Npm copy: the package's TUI loads through cli.json, so the shim TUI directory goes when
+// it holds only Sterling's two files, both unedited. Anything else is kept, loudly.
+function retireTuiShim(tuiDir) {
+  const item = `${fwd(tuiDir)}/`;
+  if (!existsSync(tuiDir)) return { item, status: 'skipped', detail: `not installed: the npm-installed ${STERLING_NPM_PACKAGE} loads its own TUI through cli.json` };
+  if (!statSync(tuiDir).isDirectory()) return { item, status: 'skipped', detail: `KEPT: ${item} is not a directory, so it stays; ${TWICE}` };
+  const others = readdirSync(tuiDir).filter((n) => n !== 'package.json' && n !== 'tui.tsx');
+  if (others.length) return { item, status: 'skipped', detail: `KEPT: ${item} holds files Sterling did not write (${others.join(', ')}), so it stays; ${TWICE}` };
+  const pkgPath = join(tuiDir, 'package.json');
+  if (existsSync(pkgPath) && tuiPackageState(normalize(readFileSync(pkgPath, 'utf8'))) !== 'ours') {
+    return { item, status: 'skipped', detail: `KEPT: ${fwd(pkgPath)} is not the one Sterling wrote, so ${item} stays; ${TWICE}` };
+  }
+  const shimPath = join(tuiDir, 'tui.tsx');
+  if (existsSync(shimPath) && !verifyStamp(normalize(readFileSync(shimPath, 'utf8')), '//')?.unmodified) {
+    return { item, status: 'skipped', detail: `KEPT: ${fwd(shimPath)} is not the one Sterling wrote, or was edited since, so ${item} stays; ${TWICE}` };
+  }
+  rmSync(tuiDir, { recursive: true });
+  return { item, status: 'removed', detail: `the TUI shim an earlier init wrote: the npm-installed ${STERLING_NPM_PACKAGE} loads its own TUI through cli.json` };
+}
+
+/** npmCopy: the Sterling in use is the `opencode plugin add` package, which registers its own server and loads its TUI through cli.json, so no shim is installed and earlier unedited shims are removed. */
 export function installGlobal({ pluginRoot, installed, npmCopy = false, env = process.env, home = homedir() }) {
   const pluginsDir = join(opencodeConfigDir({ env, home }), 'plugins');
   const rows = [];
-  rows.push(ensureStampedFile(join(pluginsDir, 'sterling.js'), renderServerShim(pluginRoot, installed, join(pluginsDir, 'sterling.js')), `${fwd(pluginsDir)}/sterling.js`));
   const tuiDir = join(pluginsDir, 'sterling-tui');
   const pkgPath = join(tuiDir, 'package.json');
   const pkgLabel = `${fwd(tuiDir)}/package.json`;
   const pkg = renderTuiPackageJson();
-  const pkgState = existsSync(pkgPath) && statSync(pkgPath).isFile() ? tuiPackageState(normalize(readFileSync(pkgPath, 'utf8'))) : null;
   if (npmCopy) {
-    rows.push({ item: `${fwd(tuiDir)}/`, status: 'skipped', detail: `not installed: the npm-installed ${STERLING_NPM_PACKAGE} loads its own TUI through cli.json` });
+    rows.push(retireServerShim(join(pluginsDir, 'sterling.js')));
+    rows.push(retireTuiShim(tuiDir));
     rows.push(ensureTuiCliEntry({ env, home }));
-  } else if (existsSync(tuiDir) && !statSync(tuiDir).isDirectory()) {
+    rows.push(ensureStampedFile(mcpLauncherPath({ home }), renderMcpLauncher(pluginRoot, installed), fwd(mcpLauncherPath({ home }))));
+    return rows;
+  }
+  rows.push(ensureStampedFile(join(pluginsDir, 'sterling.js'), renderServerShim(pluginRoot, installed, join(pluginsDir, 'sterling.js')), `${fwd(pluginsDir)}/sterling.js`));
+  const pkgState = existsSync(pkgPath) && statSync(pkgPath).isFile() ? tuiPackageState(normalize(readFileSync(pkgPath, 'utf8'))) : null;
+  if (existsSync(tuiDir) && !statSync(tuiDir).isDirectory()) {
     rows.push(refusal(`${fwd(tuiDir)}/`, `${fwd(tuiDir)} exists and is not a directory`, 'move it aside, then rerun /sterling:update'));
   } else if (pkgState === 'foreign') {
     rows.push(refusal(pkgLabel, `${fwd(tuiDir)}/ holds a package.json Sterling did not write`, `rename or remove ${fwd(tuiDir)}/, then rerun /sterling:update`));
@@ -673,7 +715,7 @@ export function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
 /**
  * Steps 1-3 for one project. Returns { skipped } when OpenCode is absent or not 2.x,
  * else { rows } — every row { item, status, detail?, refused?, instruction? }, with
- * status created | matches | refreshed | skipped | refused.
+ * status created | matches | refreshed | removed | skipped | refused.
  */
 export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home = homedir(), installed, probe = probeOpenCode }) {
   if (!isAbsolute(projectDir)) throw new TypeError(`setupOpenCode: projectDir must be absolute, got ${projectDir}`);

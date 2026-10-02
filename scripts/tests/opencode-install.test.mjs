@@ -507,6 +507,9 @@ test('npm-installed copy: @chulf58/sterling goes into cli.json plugins, idempote
   assert.deepEqual(JSON.parse(readFileSync(cliJson(home), 'utf8')), { plugins: ['@chulf58/sterling'] });
   assert.equal(existsSync(join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling-tui')), false, 'no shim TUI beside the package TUI');
   assert.equal(statusOf(first, 'sterling-tui/'), 'skipped');
+  assert.equal(existsSync(join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling.js')), false, 'no server shim: plugin add registers the server, a shim would load it twice');
+  assert.equal(statusOf(first, '/sterling.js'), 'skipped');
+  assert.match(first.rows.find((x) => x.item.endsWith('/sterling.js')).detail, /opencode plugin add registers .*server/);
   assert.equal(statusOf(runNpm(dir, home), 'cli.json plugins'), 'matches');
   assert.deepEqual(JSON.parse(readFileSync(cliJson(home), 'utf8')), { plugins: ['@chulf58/sterling'] }, 'not added twice');
 });
@@ -538,6 +541,49 @@ test('npm-installed copy: an invalid cli.json, or one whose plugins is not an ar
     assert.match(row.instruction, /^REFUSED: .*Remedy: /);
     assert.equal(readFileSync(cliJson(home), 'utf8'), body);
   }
+});
+
+test('npm-installed copy: server and TUI shims an earlier init wrote, unedited, are removed', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home, { installed: true });
+  const plugins = join(opencodeConfigDir({ env: {}, home }), 'plugins');
+  writeFileSync(join(plugins, 'neighbour.js'), 'export default {};\n');
+  assert.ok(existsSync(join(plugins, 'sterling.js')) && existsSync(join(plugins, 'sterling-tui', 'tui.tsx')), 'precondition: the earlier shims exist');
+  const r = runNpm(dir, home);
+  assert.equal(statusOf(r, '/sterling.js'), 'removed');
+  assert.equal(statusOf(r, 'sterling-tui/'), 'removed');
+  assert.equal(existsSync(join(plugins, 'sterling.js')), false);
+  assert.equal(existsSync(join(plugins, 'sterling-tui')), false);
+  assert.equal(readFileSync(join(plugins, 'neighbour.js'), 'utf8'), 'export default {};\n', 'nothing else in plugins/ is touched');
+  assert.equal(statusOf(runNpm(dir, home), '/sterling.js'), 'skipped', 'a second run has nothing left to remove');
+});
+
+test('npm-installed copy: an edited or foreign shim, or a TUI dir holding other files, is KEPT with a loud row and left untouched', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home, { installed: true });
+  const plugins = join(opencodeConfigDir({ env: {}, home }), 'plugins');
+  const server = join(plugins, 'sterling.js');
+  const edited = readFileSync(server, 'utf8') + '// my tweak\n';
+  writeFileSync(server, edited);
+  writeFileSync(join(plugins, 'sterling-tui', 'mine.ts'), 'x\n');
+  const r = runNpm(dir, home);
+  for (const suffix of ['/sterling.js', 'sterling-tui/']) {
+    const row = r.rows.find((x) => x.item.endsWith(suffix));
+    assert.equal(row.status, 'skipped', suffix);
+    assert.match(row.detail, /^KEPT: .*loads? .*twice/, suffix);
+  }
+  assert.equal(readFileSync(server, 'utf8'), edited);
+  assert.ok(existsSync(join(plugins, 'sterling-tui', 'tui.tsx')) && existsSync(join(plugins, 'sterling-tui', 'mine.ts')));
+
+  const home2 = tmp('oc-home-');
+  const plugins2 = join(opencodeConfigDir({ env: {}, home: home2 }), 'plugins');
+  mkdirSync(plugins2, { recursive: true });
+  writeFileSync(join(plugins2, 'sterling.js'), 'export default { id: "mine" };\n');
+  const r2 = runNpm(project('hobby'), home2);
+  assert.match(r2.rows.find((x) => x.item.endsWith('/sterling.js')).detail, /^KEPT: .*Sterling did not write it/);
+  assert.equal(readFileSync(join(plugins2, 'sterling.js'), 'utf8'), 'export default { id: "mine" };\n');
 });
 
 test('a clone or Claude-cache copy keeps the shim TUI and writes no cli.json', () => {
