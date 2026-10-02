@@ -11,7 +11,9 @@
 //      advance the settled snapshot), the maintenance worker, and a notice the
 //      model sees at the next turn;
 //   4. the prompt hook: a record selected in the dashboard is taken once from
-//      the store and appended to the next prompt, as H2 does on Claude Code.
+//      the store and appended to the next prompt, as H2 does on Claude Code;
+//   5. the compaction hook: the session's delivery receipts are removed, so
+//      delivery fires again after compaction drops context.
 // The store guard (edit deny on .sterling/sterling.db) is not here: the
 // installer writes it into .opencode/opencode.json (scripts/lib/opencode-install.mjs).
 // Every handler is fenced: a throw is logged to .sterling/transient and turned
@@ -28,6 +30,7 @@ import {
   assembleDelivery,
   budgetKnownGaps,
   decisionPointerPart,
+  deliverySessionDir,
   guardPath,
   hazardParts,
   isDiscoveryDelivered,
@@ -64,7 +67,7 @@ export const BUSY_TIMEOUT_MS = 1000;
 
 // Per-handler budgets. The store calls are synchronous and cannot be cut off
 // mid-call; the budget bounds the awaited part and logs any overrun.
-export const BUDGET_MS = { context: 4000, delivery: 4000, settle: 30000, prompt: 4000 };
+export const BUDGET_MS = { context: 4000, delivery: 4000, settle: 30000, prompt: 4000, compaction: 4000 };
 
 export const NOTICES_REL = '.sterling/transient/opencode-notices.json';
 export const LOG_REL = '.sterling/transient/opencode-plugin.log';
@@ -473,6 +476,21 @@ export function createSterlingServer(deps = {}) {
     });
   }
 
+  /**
+   * Compaction can drop a delivered article from the model's window, so the
+   * session's delivery receipts go with it and delivery fires again, as
+   * h19-clear-session does on Claude Code. Never sets input.result.
+   */
+  async function onCompaction(input) {
+    const root = rootOf();
+    if (!root) return;
+    await fenced('compaction', root, () => {
+      const dir = deliverySessionDir(root, input?.sessionID);
+      if (!dir) throw new Error(`compaction input has no usable sessionID (${typeof input?.sessionID}); delivery receipts were not reset`);
+      rmSync(dir, { recursive: true, force: true });
+    });
+  }
+
   async function onAfter(input) {
     const delivery = pending.get(input?.id);
     if (!delivery) return;
@@ -559,7 +577,7 @@ export function createSterlingServer(deps = {}) {
     await fenced('settle', root, () => settle(root));
   }
 
-  const handlers = { context: onContext, prompt: onPrompt, before: onBefore, after: onAfter, event: onEvent };
+  const handlers = { context: onContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };
 
   return {
     id: PLUGIN_ID,
@@ -574,6 +592,7 @@ export function createSterlingServer(deps = {}) {
       directory = ctx?.location?.directory ?? process.cwd();
       await ctx.session.hook('context', onContext);
       await ctx.session.hook('prompt', onPrompt);
+      await ctx.session.hook('compaction', onCompaction);
       await ctx.tool.hook('execute.before', onBefore);
       await ctx.tool.hook('execute.after', onAfter);
       const abort = new AbortController();

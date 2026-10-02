@@ -272,6 +272,32 @@ test('an internal error in a tool hook is swallowed, logged and surfaced as a no
   }
 });
 
+test('compaction resets that session\'s delivery receipts, so delivery fires again after context loss; other sessions keep theirs', async () => {
+  const p = makeProject();
+  try {
+    const { ctx, cleanup } = await setupPlugin(p.dir);
+    assert.equal(typeof ctx.hooks.session.compaction, 'function', 'the compaction hook is registered');
+    const deliver = async (sessionID, id) => {
+      const call = { tool: 'read', sessionID, id, input: { path: 'src/a.mjs' } };
+      await ctx.hooks.tool['execute.before'](call);
+      const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'read' }] } };
+      await ctx.hooks.tool['execute.after'](after);
+      return after.result.content.length === 2;
+    };
+    assert.equal(await deliver('ses_1', 'k1'), true);
+    assert.equal(await deliver('ses_2', 'k2'), true);
+    assert.equal(await deliver('ses_1', 'k3'), false, 'delivered once per session');
+    const compaction = { sessionID: 'ses_1', agent: 'build', system: [], messages: [], tools: {}, options: {} };
+    await ctx.hooks.session.compaction(compaction);
+    assert.equal(compaction.result, undefined, 'the hook never supplies a compaction result');
+    assert.equal(await deliver('ses_1', 'k4'), true, 'after compaction the article is delivered again');
+    assert.equal(await deliver('ses_2', 'k5'), false, 'another session keeps its receipts');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('edit, write and read deliver the owning knowledge onto the tool result once per session', async () => {
   const p = makeProject();
   try {
