@@ -558,9 +558,9 @@ var require_unicode = __commonJS({
       }
       return output;
     };
-    unicode.fromCells = (cells) => {
+    unicode.fromCells = (cells2) => {
       var cell, str = "";
-      for (cell of cells) {
+      for (cell of cells2) {
         if (!cell.filler) {
           str += cell.char;
         }
@@ -4380,23 +4380,23 @@ var require_core = __commonJS({
       return this;
     };
     Promise2.callback = function(fn) {
-      return new Promise2((resolve2, reject) => {
+      return new Promise2((resolve3, reject) => {
         fn((error, arg) => {
           if (error) {
             reject(error);
           } else {
-            resolve2(arg);
+            resolve3(arg);
           }
         });
       });
     };
     Promise2.callbackAll = function(fn) {
-      return new Promise2((resolve2, reject) => {
+      return new Promise2((resolve3, reject) => {
         fn((error, ...args2) => {
           if (error) {
             reject(error);
           } else {
-            resolve2(args2);
+            resolve3(args2);
           }
         });
       });
@@ -4449,19 +4449,19 @@ var require_core = __commonJS({
       setTimeout(() => this.resolve(value), timeout);
     };
     Promise2.resolveTimeout = Promise2.fulfillTimeout = function(timeout, value) {
-      return new Promise2((resolve2) => setTimeout(() => resolve2(value), timeout));
+      return new Promise2((resolve3) => setTimeout(() => resolve3(value), timeout));
     };
     Promise2.prototype.rejectTimeout = function(timeout, error) {
       setTimeout(() => this.reject(error), timeout);
     };
     Promise2.rejectTimeout = function(timeout, error) {
-      return new Promise2((resolve2, reject) => setTimeout(() => reject(error), timeout));
+      return new Promise2((resolve3, reject) => setTimeout(() => reject(error), timeout));
     };
     Promise2.resolveNextTick = Promise2.fulfillNextTick = function(value) {
-      return new Promise2((resolve2) => nextTick(() => resolve2(value)));
+      return new Promise2((resolve3) => nextTick(() => resolve3(value)));
     };
     Promise2.rejectNextTick = function(error) {
-      return new Promise2((resolve2, reject) => nextTick(() => reject(error)));
+      return new Promise2((resolve3, reject) => nextTick(() => reject(error)));
     };
     Promise2.dormant = function(fn) {
       var promise = new Promise2();
@@ -4482,10 +4482,10 @@ var require_core = __commonJS({
       if (thenable instanceof Promise2) {
         return thenable;
       }
-      return new Promise2((resolve2, reject) => {
+      return new Promise2((resolve3, reject) => {
         thenable.then(
           (value) => {
-            resolve2(value);
+            resolve3(value);
           },
           (error) => {
             reject(error);
@@ -4580,10 +4580,10 @@ var require_core = __commonJS({
         window.requestAnimationFrame(() => this.reject(error));
       };
       Promise2.resolveAtAnimationFrame = function(value) {
-        return new Promise2((resolve2) => window.requestAnimationFrame(() => resolve2(value)));
+        return new Promise2((resolve3) => window.requestAnimationFrame(() => resolve3(value)));
       };
       Promise2.rejectAtAnimationFrame = function(error) {
-        return new Promise2((resolve2, reject) => window.requestAnimationFrame(() => reject(error)));
+        return new Promise2((resolve3, reject) => window.requestAnimationFrame(() => reject(error)));
       };
     }
   }
@@ -5039,11 +5039,11 @@ var require_wrapper = __commonJS({
     "use strict";
     var Promise2 = require_seventh();
     Promise2.timeLimit = (timeout, asyncFnOrPromise) => {
-      return new Promise2((resolve2, reject) => {
+      return new Promise2((resolve3, reject) => {
         if (typeof asyncFnOrPromise === "function") {
           asyncFnOrPromise = asyncFnOrPromise();
         }
-        Promise2.resolve(asyncFnOrPromise).then(resolve2, reject);
+        Promise2.resolve(asyncFnOrPromise).then(resolve3, reject);
         setTimeout(() => reject(new Error("Timeout")), timeout);
       });
     };
@@ -5065,13 +5065,13 @@ var require_wrapper = __commonJS({
       return oneTry();
     };
     Promise2.onceEvent = (emitter, eventName) => {
-      return new Promise2((resolve2) => emitter.once(eventName, resolve2));
+      return new Promise2((resolve3) => emitter.once(eventName, resolve3));
     };
     Promise2.onceEventAll = (emitter, eventName) => {
-      return new Promise2((resolve2) => emitter.once(eventName, (...args2) => resolve2(args2)));
+      return new Promise2((resolve3) => emitter.once(eventName, (...args2) => resolve3(args2)));
     };
     Promise2.onceEventOrError = (emitter, eventName, excludeEvents, _internalAllArgs = false) => {
-      return new Promise2((resolve2, reject) => {
+      return new Promise2((resolve3, reject) => {
         var altRejects;
         var resolve_ = (...args2) => {
           emitter.removeListener("error", reject_);
@@ -5080,7 +5080,7 @@ var require_wrapper = __commonJS({
               emitter.removeListener(event2, altRejects[event2]);
             }
           }
-          resolve2(_internalAllArgs ? args2 : args2[0]);
+          resolve3(_internalAllArgs ? args2 : args2[0]);
         };
         var reject_ = (arg) => {
           emitter.removeListener(eventName, resolve_);
@@ -5128,7 +5128,7 @@ var require_decorators = __commonJS({
     Promise2.promisifyAll = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
         return (...args2) => {
-          return new Promise2((resolve2, reject) => {
+          return new Promise2((resolve3, reject) => {
             nodeAsyncFn.call(thisBinding, ...args2, (error, ...cbArgs) => {
               if (error) {
                 if (cbArgs.length && error instanceof Error) {
@@ -5136,14 +5136,14 @@ var require_decorators = __commonJS({
                 }
                 reject(error);
               } else {
-                resolve2(cbArgs);
+                resolve3(cbArgs);
               }
             });
           });
         };
       }
       return function(...args2) {
-        return new Promise2((resolve2, reject) => {
+        return new Promise2((resolve3, reject) => {
           nodeAsyncFn.call(this, ...args2, (error, ...cbArgs) => {
             if (error) {
               if (cbArgs.length && error instanceof Error) {
@@ -5151,7 +5151,7 @@ var require_decorators = __commonJS({
               }
               reject(error);
             } else {
-              resolve2(cbArgs);
+              resolve3(cbArgs);
             }
           });
         });
@@ -5160,7 +5160,7 @@ var require_decorators = __commonJS({
     Promise2.promisify = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
         return (...args2) => {
-          return new Promise2((resolve2, reject) => {
+          return new Promise2((resolve3, reject) => {
             nodeAsyncFn.call(thisBinding, ...args2, (error, cbArg) => {
               if (error) {
                 if (cbArg !== void 0 && error instanceof Error) {
@@ -5168,14 +5168,14 @@ var require_decorators = __commonJS({
                 }
                 reject(error);
               } else {
-                resolve2(cbArg);
+                resolve3(cbArg);
               }
             });
           });
         };
       }
       return function(...args2) {
-        return new Promise2((resolve2, reject) => {
+        return new Promise2((resolve3, reject) => {
           nodeAsyncFn.call(this, ...args2, (error, cbArg) => {
             if (error) {
               if (cbArg !== void 0 && error instanceof Error) {
@@ -5183,7 +5183,7 @@ var require_decorators = __commonJS({
               }
               reject(error);
             } else {
-              resolve2(cbArg);
+              resolve3(cbArg);
             }
           });
         });
@@ -5876,9 +5876,9 @@ var require_misc3 = __commonJS({
           listener(exitCode, timeout);
           return Promise2.dummy;
         }
-        return new Promise2((resolve2) => {
+        return new Promise2((resolve3) => {
           listener(exitCode, timeout, () => {
-            resolve2();
+            resolve3();
           });
         });
       };
@@ -5886,11 +5886,11 @@ var require_misc3 = __commonJS({
       setTimeout(() => process.exit(exitCode), timeout);
     };
     Promise2.resolveSafeTimeout = function(timeout, value) {
-      return new Promise2((resolve2) => {
+      return new Promise2((resolve3) => {
         setTimeout(() => {
           setTimeout(() => {
             setTimeout(() => {
-              setTimeout(() => resolve2(value), 0);
+              setTimeout(() => resolve3(value), 0);
             }, timeout / 2);
           }, timeout / 2);
         }, 0);
@@ -6065,7 +6065,7 @@ var require_detectTerminal = __commonJS({
     };
     function getParentProcess(pid) {
       var parentPid, appName;
-      return new Promise2((resolve2, reject) => {
+      return new Promise2((resolve3, reject) => {
         exec("ps -h -o ppid -p " + pid, (error, stdout) => {
           if (error) {
             reject(error);
@@ -6082,7 +6082,7 @@ var require_detectTerminal = __commonJS({
               return;
             }
             appName = stdout_.trim();
-            resolve2({ pid: parentPid, appName });
+            resolve3({ pid: parentPid, appName });
           });
         });
       });
@@ -9601,13 +9601,13 @@ var require_NextGenEvents = __commonJS({
       return this.addListener(eventName, fn, options);
     };
     NextGenEvents.prototype.waitFor = function(eventName) {
-      return new Promise((resolve2) => {
-        this.addListener(eventName, (firstArg) => resolve2(firstArg), { once: true });
+      return new Promise((resolve3) => {
+        this.addListener(eventName, (firstArg) => resolve3(firstArg), { once: true });
       });
     };
     NextGenEvents.prototype.waitForAll = function(eventName) {
-      return new Promise((resolve2) => {
-        this.addListener(eventName, (...args2) => resolve2(args2), { once: true });
+      return new Promise((resolve3) => {
+        this.addListener(eventName, (...args2) => resolve3(args2), { once: true });
       });
     };
     NextGenEvents.prototype.removeListener = function(eventName, id) {
@@ -9751,8 +9751,8 @@ var require_NextGenEvents = __commonJS({
       return NextGenEvents.emitEvent(event2);
     };
     NextGenEvents.prototype.waitForEmit = function(...args2) {
-      return new Promise((resolve2) => {
-        this.emit(...args2, (interrupt) => resolve2(interrupt));
+      return new Promise((resolve3) => {
+        this.emit(...args2, (interrupt) => resolve3(interrupt));
       });
     };
     NextGenEvents.createEvent = function(emitter, ...args2) {
@@ -10119,13 +10119,13 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForFirst = function(emitters, eventName) {
-      return new Promise((resolve2) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (firstArg) => resolve2(firstArg));
+      return new Promise((resolve3) => {
+        NextGenEvents.groupOnceFirst(emitters, eventName, (firstArg) => resolve3(firstArg));
       });
     };
     NextGenEvents.groupWaitForFirstAll = function(emitters, eventName) {
-      return new Promise((resolve2) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (...args2) => resolve2(args2));
+      return new Promise((resolve3) => {
+        NextGenEvents.groupOnceFirst(emitters, eventName, (...args2) => resolve3(args2));
       });
     };
     NextGenEvents.groupOnceLast = function(emitters, eventName, fn, options) {
@@ -10155,13 +10155,13 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForLast = function(emitters, eventName) {
-      return new Promise((resolve2) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (firstArg) => resolve2(firstArg));
+      return new Promise((resolve3) => {
+        NextGenEvents.groupOnceLast(emitters, eventName, (firstArg) => resolve3(firstArg));
       });
     };
     NextGenEvents.groupWaitForLastAll = function(emitters, eventName) {
-      return new Promise((resolve2) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (...args2) => resolve2(args2));
+      return new Promise((resolve3) => {
+        NextGenEvents.groupOnceLast(emitters, eventName, (...args2) => resolve3(args2));
       });
     };
     NextGenEvents.groupRemoveListener = function(emitters, eventName, id) {
@@ -10210,8 +10210,8 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForEmit = function(emitters, ...args2) {
-      return new Promise((resolve2) => {
-        NextGenEvents.groupEmit(emitters, ...args2, (interrupt) => resolve2(interrupt));
+      return new Promise((resolve3) => {
+        NextGenEvents.groupEmit(emitters, ...args2, (interrupt) => resolve3(interrupt));
       });
     };
     NextGenEvents.groupDefineStates = function(emitters, ...args2) {
@@ -16107,14 +16107,14 @@ var require_Terminal = __commonJS({
         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
         (register) => this.getColor(register)
       ).then(
-        (palette) => {
+        (palette2) => {
           if (!wasGrabbing) {
             this.grabInput(false);
           }
           if (callback) {
-            callback(void 0, palette);
+            callback(void 0, palette2);
           } else {
-            return palette;
+            return palette2;
           }
         },
         (error) => {
@@ -16156,26 +16156,26 @@ var require_Terminal = __commonJS({
       };
       this.setColorLL(register, r, g, b);
     };
-    notChainable.setPalette = function(palette) {
+    notChainable.setPalette = function(palette2) {
       var i;
-      if (typeof palette === "string") {
+      if (typeof palette2 === "string") {
         try {
-          palette = globRequire_colorScheme_json("./colorScheme/" + palette + ".json");
+          palette2 = globRequire_colorScheme_json("./colorScheme/" + palette2 + ".json");
         } catch (error) {
-          throw new Error("[terminal] .setPalette(): color scheme not found: " + palette);
+          throw new Error("[terminal] .setPalette(): color scheme not found: " + palette2);
         }
       }
-      if (!Array.isArray(palette)) {
+      if (!Array.isArray(palette2)) {
         throw new Error("[terminal] .setPalette(): argument #0 should be an Array of RGB Object or a built-in color scheme");
       }
       if (this.setColorLL.na) {
         return;
       }
       for (i = 0; i <= 15; i++) {
-        if (!palette[i] || typeof palette[i] !== "object") {
+        if (!palette2[i] || typeof palette2[i] !== "object") {
           continue;
         }
-        this.setColor(i, palette[i]);
+        this.setColor(i, palette2[i]);
       }
     };
     notChainable.getClipboard = function(source = "c") {
@@ -17796,11 +17796,11 @@ var require_bitmapper = __commonJS({
 var require_format_normaliser = __commonJS({
   "node_modules/pngjs/lib/format-normaliser.js"(exports, module) {
     "use strict";
-    function dePalette(indata, outdata, width, height, palette) {
+    function dePalette(indata, outdata, width, height, palette2) {
       let pxPos = 0;
       for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
-          let color = palette[indata[pxPos]];
+          let color = palette2[indata[pxPos]];
           if (!color) {
             throw new Error("index " + indata[pxPos] + " not in palette");
           }
@@ -17853,10 +17853,10 @@ var require_format_normaliser = __commonJS({
       let height = imageData.height;
       let colorType = imageData.colorType;
       let transColor = imageData.transColor;
-      let palette = imageData.palette;
+      let palette2 = imageData.palette;
       let outdata = indata;
       if (colorType === 3) {
-        dePalette(indata, outdata, width, height, palette);
+        dePalette(indata, outdata, width, height, palette2);
       } else {
         if (transColor) {
           replaceTransparentColor(indata, outdata, width, height, transColor);
@@ -17962,8 +17962,8 @@ var require_parser_async = __commonJS({
     ParserAsync.prototype._handleTransColor = function(transColor) {
       this._bitmapInfo.transColor = transColor;
     };
-    ParserAsync.prototype._handlePalette = function(palette) {
-      this._bitmapInfo.palette = palette;
+    ParserAsync.prototype._handlePalette = function(palette2) {
+      this._bitmapInfo.palette = palette2;
     };
     ParserAsync.prototype._simpleTransparency = function() {
       this._metaData.alpha = true;
@@ -18668,8 +18668,8 @@ var require_parser_sync = __commonJS({
       function handleTransColor(transColor) {
         metaData.transColor = transColor;
       }
-      function handlePalette(palette) {
-        metaData.palette = palette;
+      function handlePalette(palette2) {
+        metaData.palette = palette2;
       }
       function handleSimpleTransparency() {
         metaData.alpha = true;
@@ -21649,8 +21649,8 @@ var require_omggif = __commonJS({
       var global_palette = gopts.palette === void 0 ? null : gopts.palette;
       if (width <= 0 || height <= 0 || width > 65535 || height > 65535)
         throw new Error("Width/Height invalid.");
-      function check_palette_and_num_colors(palette) {
-        var num_colors = palette.length;
+      function check_palette_and_num_colors(palette2) {
+        var num_colors = palette2.length;
         if (num_colors < 2 || num_colors > 256 || num_colors & num_colors - 1) {
           throw new Error(
             "Invalid code/color length, must be power of 2 and 2 .. 256."
@@ -21732,14 +21732,14 @@ var require_omggif = __commonJS({
         if (indexed_pixels.length < w * h)
           throw new Error("Not enough pixels for the frame size.");
         var using_local_palette = true;
-        var palette = opts.palette;
-        if (palette === void 0 || palette === null) {
+        var palette2 = opts.palette;
+        if (palette2 === void 0 || palette2 === null) {
           using_local_palette = false;
-          palette = global_palette;
+          palette2 = global_palette;
         }
-        if (palette === void 0 || palette === null)
+        if (palette2 === void 0 || palette2 === null)
           throw new Error("Must supply either a local or global palette.");
-        var num_colors = check_palette_and_num_colors(palette);
+        var num_colors = check_palette_and_num_colors(palette2);
         var min_code_size = 0;
         while (num_colors >>= 1) ++min_code_size;
         num_colors = 1 << min_code_size;
@@ -21776,8 +21776,8 @@ var require_omggif = __commonJS({
         buf[p++] = h >> 8 & 255;
         buf[p++] = using_local_palette === true ? 128 | min_code_size - 1 : 0;
         if (using_local_palette === true) {
-          for (var i2 = 0, il2 = palette.length; i2 < il2; ++i2) {
-            var rgb2 = palette[i2];
+          for (var i2 = 0, il2 = palette2.length; i2 < il2; ++i2) {
+            var rgb2 = palette2[i2];
             buf[p++] = rgb2 >> 16 & 255;
             buf[p++] = rgb2 >> 8 & 255;
             buf[p++] = rgb2 & 255;
@@ -22637,16 +22637,16 @@ var require_bitmap = __commonJS({
       throw new Error("unknown bitCount: " + bitCount);
     };
     Bitmap.prototype.readRGBQUAD = function(count, startPos) {
-      var palette = [];
+      var palette2 = [];
       for (var i = startPos, len = startPos + 4 * count; i < len; i += 4) {
-        palette.push({
+        palette2.push({
           rgbBlue: this.read(this.buffer, i, 1).readUInt8(0),
           rgbGreen: this.read(this.buffer, i + 1, 1).readUInt8(0),
           rgbRed: this.read(this.buffer, i + 2, 1).readUInt8(0),
           rgbReserved: this.read(this.buffer, i + 3, 1).readUInt8(0)
         });
       }
-      this.colorPalette = palette;
+      this.colorPalette = palette2;
     };
     Bitmap.prototype.initDataPos = function() {
       var bitCount = this.coreHeader.__bitCount__;
@@ -22720,8 +22720,8 @@ var require_bitmap = __commonJS({
           bin = new Array(8 - bin.length).join("0") + bin;
           for (var j = 0; j < bin.length; ++j) {
             var paletteIndex = parseInt(bin.substring(j, j + 1), 10);
-            var palette = this.colorPalette[paletteIndex];
-            colorData.push(this.mapRGBA(palette.rgbRed, palette.rgbGreen, palette.rgbBlue, -1));
+            var palette2 = this.colorPalette[paletteIndex];
+            colorData.push(this.mapRGBA(palette2.rgbRed, palette2.rgbGreen, palette2.rgbBlue, -1));
           }
         }
         return colorData;
@@ -22732,8 +22732,8 @@ var require_bitmap = __commonJS({
           var paletteLow = bmpBuf.readUInt8(i + 1);
           var indexes = [paletteHigh, paletteLow];
           indexes.forEach(function(paletteIndex2) {
-            var palette2 = this.colorPalette[paletteIndex2];
-            colorData.push(this.mapRGBA(palette2.rgbRed, palette2.rgbGreen, palette2.rgbBlue, -1));
+            var palette3 = this.colorPalette[paletteIndex2];
+            colorData.push(this.mapRGBA(palette3.rgbRed, palette3.rgbGreen, palette3.rgbBlue, -1));
           });
         }
         return colorData;
@@ -22741,8 +22741,8 @@ var require_bitmap = __commonJS({
       if (this.BITCOUNT_256 == bitCount) {
         for (var i = 0; i < length; ++i) {
           var paletteIndex = bmpBuf.readUInt16LE(i);
-          var palette = this.colorPalette[paletteIndex];
-          colorData.push(this.mapRGBA(palette.rgbRed, palette.rgbGreen, palette.rgbBlue, -1));
+          var palette2 = this.colorPalette[paletteIndex];
+          colorData.push(this.mapRGBA(palette2.rgbRed, palette2.rgbGreen, palette2.rgbBlue, -1));
         }
         return colorData;
       }
@@ -24506,8 +24506,8 @@ var require_ScreenBuffer = __commonJS({
       return buffer.write(char, at + this.ATTR_SIZE, this.CHAR_SIZE);
     };
     ScreenBuffer.prototype.generateEscapeSequence = function(term2, attr) {
-      var palette = this.palette || term2.palette;
-      var esc = term2.optimized.styleReset + (attr & FG_DEFAULT_COLOR ? term2.optimized.defaultColor : palette.escape[attr & 255]) + (attr & BG_DEFAULT_COLOR ? term2.optimized.bgDefaultColor : palette.bgEscape[attr >>> 8 & 255]);
+      var palette2 = this.palette || term2.palette;
+      var esc = term2.optimized.styleReset + (attr & FG_DEFAULT_COLOR ? term2.optimized.defaultColor : palette2.escape[attr & 255]) + (attr & BG_DEFAULT_COLOR ? term2.optimized.bgDefaultColor : palette2.bgEscape[attr >>> 8 & 255]);
       if (attr & BOLD) {
         esc += term2.optimized.bold;
       }
@@ -24535,21 +24535,21 @@ var require_ScreenBuffer = __commonJS({
       return esc;
     };
     ScreenBuffer.prototype.generateDeltaEscapeSequence = function(term2, attr, lastAttr) {
-      var palette = this.palette || term2.palette;
+      var palette2 = this.palette || term2.palette;
       var esc = "", color = attr & 255, lastColor = lastAttr & 255, bgColor = attr >>> 8 & 255, lastBgColor = lastAttr >>> 8 & 255;
       if (attr & FG_DEFAULT_COLOR) {
         if (!(lastAttr & FG_DEFAULT_COLOR)) {
           esc += term2.optimized.defaultColor;
         }
       } else if (color !== lastColor || lastAttr & FG_DEFAULT_COLOR) {
-        esc += palette.escape[color];
+        esc += palette2.escape[color];
       }
       if (attr & BG_DEFAULT_COLOR) {
         if (!(lastAttr & BG_DEFAULT_COLOR)) {
           esc += term2.optimized.bgDefaultColor;
         }
       } else if (bgColor !== lastBgColor || lastAttr & BG_DEFAULT_COLOR) {
-        esc += palette.bgEscape[bgColor];
+        esc += palette2.bgEscape[bgColor];
       }
       if ((attr & STYLE_MASK) !== (lastAttr & STYLE_MASK)) {
         if ((attr & BOLD_DIM) !== (lastAttr & BOLD_DIM)) {
@@ -26032,9 +26032,9 @@ var require_TextBuffer = __commonJS({
       }
       return this.getCellsCharCount(this.buffer[y]);
     };
-    TextBuffer.prototype.getCellsCharCount = function(cells) {
+    TextBuffer.prototype.getCellsCharCount = function(cells2) {
       var count = 0;
-      for (let cell of cells) {
+      for (let cell of cells2) {
         if (!cell.filler) {
           count++;
         }
@@ -26129,7 +26129,7 @@ var require_TextBuffer = __commonJS({
       if (!parser) {
         return string.unicode.toCells(Cell, line, this.tabWidth, offset, baseAttr);
       }
-      var attr, attrObject, cells = [];
+      var attr, attrObject, cells2 = [];
       const defaultAttrObject = this.ScreenBuffer.attr2object(this.ScreenBuffer.DEFAULT_ATTR);
       const baseAttrObject = this.ScreenBuffer.attr2object(baseAttr);
       parser(line).forEach((part) => {
@@ -26143,10 +26143,10 @@ var require_TextBuffer = __commonJS({
         }
         attr = this.object2attr(attrObject, void 0, legacyColor);
         if (part.text) {
-          cells.push(...string.unicode.toCells(Cell, part.text, this.tabWidth, offset + cells.length, attr));
+          cells2.push(...string.unicode.toCells(Cell, part.text, this.tabWidth, offset + cells2.length, attr));
         }
       });
-      return cells;
+      return cells2;
     };
     TextBuffer.prototype.setHidden = function(value) {
       this.hidden = typeof value === "string" && value.length ? value[0] : value ? termkit2.spChars.password : false;
@@ -26975,10 +26975,10 @@ var require_TextBuffer = __commonJS({
       this.insert(text, hasMarkup, attr);
     };
     TextBuffer.prototype.inlineInsert = function(text, parser, attr, legacyColor = false) {
-      var currentLine, currentLineLength, hasNL, nlCell, tabIndex, fillSize, cells, cellsCharCount, count = 0;
+      var currentLine, currentLineLength, hasNL, nlCell, tabIndex, fillSize, cells2, cellsCharCount, count = 0;
       this.moveForward(void 0, true);
-      cells = this.lineToCells(text, parser, attr, this.cx, legacyColor);
-      cellsCharCount = this.getCellsCharCount(cells);
+      cells2 = this.lineToCells(text, parser, attr, this.cx, legacyColor);
+      cellsCharCount = this.getCellsCharCount(cells2);
       if (this.cy >= this.buffer.length) {
         while (this.buffer.length < this.cy) {
           this.buffer.push([new Cell("\n", 1, this.defaultAttr)]);
@@ -26995,14 +26995,14 @@ var require_TextBuffer = __commonJS({
       hasNL = currentLineLength && currentLine[currentLineLength - 1].char === "\n";
       if (this.cx === currentLineLength) {
         if (hasNL) {
-          currentLine.splice(currentLineLength - 1, 0, new Cell(" ", 1, this.defaultAttr), ...cells);
+          currentLine.splice(currentLineLength - 1, 0, new Cell(" ", 1, this.defaultAttr), ...cells2);
           count += 1 + cellsCharCount;
         } else {
-          currentLine.push(...cells);
+          currentLine.push(...cells2);
           count += cellsCharCount;
         }
       } else if (this.cx < currentLineLength) {
-        currentLine.splice(this.cx, 0, ...cells);
+        currentLine.splice(this.cx, 0, ...cells2);
         count += cellsCharCount;
       } else if (hasNL) {
         fillSize = this.cx - currentLineLength + 1;
@@ -27011,7 +27011,7 @@ var require_TextBuffer = __commonJS({
           currentLine.push(new Cell(" ", 1, this.defaultAttr));
           count++;
         }
-        currentLine.push(...cells, nlCell);
+        currentLine.push(...cells2, nlCell);
         count += cellsCharCount;
       } else {
         fillSize = this.cx - currentLineLength;
@@ -27019,11 +27019,11 @@ var require_TextBuffer = __commonJS({
           currentLine.push(new Cell(" ", 1, this.defaultAttr));
           count++;
         }
-        currentLine.push(...cells);
+        currentLine.push(...cells2);
         count += cellsCharCount;
       }
       tabIndex = this.indexOfCharInLine(currentLine, "	", this.cx);
-      this.cx += cells.length;
+      this.cx += cells2.length;
       if (this.lineWrapWidth) {
         this.wrapLine();
       }
@@ -27406,16 +27406,16 @@ var require_TextBuffer = __commonJS({
       termkit2.Rect[iterator](tr, iteratorCallback);
     };
     TextBuffer.prototype.blitterLineIterator = function(p) {
-      var srcRShift, srcX, srcXmax, srcExistingXmax, dstOffset, cells, cell, attr, char, charCode, invRegion = p.context.inverseRegion, invXmin = Infinity, invXmax = -Infinity;
+      var srcRShift, srcX, srcXmax, srcExistingXmax, dstOffset, cells2, cell, attr, char, charCode, invRegion = p.context.inverseRegion, invXmin = Infinity, invXmax = -Infinity;
       srcRShift = p.srcY ? 0 : p.context.srcFirstLineRightShift;
       srcX = p.srcXmin - srcRShift;
       srcXmax = p.srcXmax - srcRShift;
       dstOffset = p.dstStart;
-      cells = p.context.srcBuffer[p.srcY];
-      if (cells) {
+      cells2 = p.context.srcBuffer[p.srcY];
+      if (cells2) {
         srcExistingXmax = srcXmax;
-        if (srcExistingXmax >= cells.length) {
-          srcExistingXmax = cells.length - 1;
+        if (srcExistingXmax >= cells2.length) {
+          srcExistingXmax = cells2.length - 1;
         }
         if (invRegion && p.srcY >= invRegion.ymin && p.srcY <= invRegion.ymax) {
           invXmin = p.srcY === invRegion.ymin ? invRegion.xmin : -Infinity;
@@ -27425,7 +27425,7 @@ var require_TextBuffer = __commonJS({
           if (srcX < 0) {
             continue;
           }
-          cell = cells[srcX];
+          cell = cells2[srcX];
           if (p.context.forceChar) {
             attr = cell.attr;
             char = p.context.forceChar;
@@ -27441,17 +27441,17 @@ var require_TextBuffer = __commonJS({
         }
       }
       if (p.context.srcAltBuffer) {
-        cells = p.context.srcAltBuffer[p.srcY];
-        if (cells) {
+        cells2 = p.context.srcAltBuffer[p.srcY];
+        if (cells2) {
           srcExistingXmax = srcXmax;
-          if (srcExistingXmax >= cells.length) {
-            srcExistingXmax = cells.length - 1;
+          if (srcExistingXmax >= cells2.length) {
+            srcExistingXmax = cells2.length - 1;
           }
           for (; srcX <= srcExistingXmax; srcX++, dstOffset += this.ScreenBuffer.prototype.ITEM_SIZE) {
             if (srcX < 0) {
               continue;
             }
-            cell = cells[srcX];
+            cell = cells2[srcX];
             attr = cell.width === 2 ? cell.attr | this.ScreenBuffer.prototype.LEADING_FULLWIDTH : cell.width === 0 ? cell.attr | this.ScreenBuffer.prototype.TRAILING_FULLWIDTH : cell.attr;
             char = (charCode = cell.char.charCodeAt(0)) < 32 || charCode === 127 ? " " : cell.char;
             p.context.writeAttr(p.context.dstBuffer, attr, dstOffset);
@@ -36428,7 +36428,7 @@ var require_chroma = __commonJS({
       };
       var round$5 = Math.round;
       var hsl2rgb = function() {
-        var assign;
+        var assign2;
         var args2 = [], len = arguments.length;
         while (len--) args2[len] = arguments[len];
         args2 = unpack(args2, "hsl");
@@ -36464,7 +36464,7 @@ var require_chroma = __commonJS({
               c[i2] = t1;
             }
           }
-          assign = [round$5(c[0] * 255), round$5(c[1] * 255), round$5(c[2] * 255)], r = assign[0], g = assign[1], b = assign[2];
+          assign2 = [round$5(c[0] * 255), round$5(c[1] * 255), round$5(c[2] * 255)], r = assign2[0], g = assign2[1], b = assign2[2];
         }
         if (args2.length > 3) {
           return [r, g, b, args2[3]];
@@ -36577,7 +36577,7 @@ var require_chroma = __commonJS({
       };
       var floor$3 = Math.floor;
       var hcg2rgb = function() {
-        var assign, assign$1, assign$2, assign$3, assign$4, assign$5;
+        var assign2, assign$1, assign$2, assign$3, assign$4, assign$5;
         var args2 = [], len = arguments.length;
         while (len--) args2[len] = arguments[len];
         args2 = unpack(args2, "hcg");
@@ -36608,7 +36608,7 @@ var require_chroma = __commonJS({
           var v = p + _c;
           switch (i2) {
             case 0:
-              assign = [v, t, p], r = assign[0], g = assign[1], b = assign[2];
+              assign2 = [v, t, p], r = assign2[0], g = assign2[1], b = assign2[2];
               break;
             case 1:
               assign$1 = [q, v, p], r = assign$1[0], g = assign$1[1], b = assign$1[2];
@@ -36881,7 +36881,7 @@ var require_chroma = __commonJS({
       });
       var floor$2 = Math.floor;
       var hsv2rgb = function() {
-        var assign, assign$1, assign$2, assign$3, assign$4, assign$5;
+        var assign2, assign$1, assign$2, assign$3, assign$4, assign$5;
         var args2 = [], len = arguments.length;
         while (len--) args2[len] = arguments[len];
         args2 = unpack(args2, "hsv");
@@ -36910,7 +36910,7 @@ var require_chroma = __commonJS({
           var t = v * (1 - s2 * (1 - f));
           switch (i2) {
             case 0:
-              assign = [v, t, p], r = assign[0], g = assign[1], b = assign[2];
+              assign2 = [v, t, p], r = assign2[0], g = assign2[1], b = assign2[2];
               break;
             case 1:
               assign$1 = [q, v, p], r = assign$1[0], g = assign$1[1], b = assign$1[2];
@@ -37854,7 +37854,7 @@ var require_chroma = __commonJS({
       };
       index.lab = lab;
       function interpolate_hsx(col1, col2, f, m) {
-        var assign, assign$1;
+        var assign2, assign$1;
         var xyz0, xyz1;
         if (m === "hsl") {
           xyz0 = col1.hsl();
@@ -37878,7 +37878,7 @@ var require_chroma = __commonJS({
         }
         var hue0, hue1, sat0, sat1, lbv0, lbv1;
         if (m.substr(0, 1) === "h" || m === "oklch") {
-          assign = xyz0, hue0 = assign[0], sat0 = assign[1], lbv0 = assign[2];
+          assign2 = xyz0, hue0 = assign2[0], sat0 = assign2[1], lbv0 = assign2[2];
           assign$1 = xyz1, hue1 = assign$1[0], sat1 = assign$1[1], lbv1 = assign$1[2];
         }
         var sat, hue, lbv, dh;
@@ -38401,15 +38401,15 @@ var require_chroma = __commonJS({
         return row;
       };
       var bezier = function(colors) {
-        var assign, assign$1, assign$2;
+        var assign2, assign$1, assign$2;
         var I, lab0, lab1, lab2;
         colors = colors.map(function(c) {
           return new Color(c);
         });
         if (colors.length === 2) {
-          assign = colors.map(function(c) {
+          assign2 = colors.map(function(c) {
             return c.lab();
-          }), lab0 = assign[0], lab1 = assign[1];
+          }), lab0 = assign2[0], lab1 = assign2[1];
           I = function(t) {
             var lab4 = [0, 1, 2].map(function(i2) {
               return lab0[i2] + t * (lab1[i2] - lab0[i2]);
@@ -39067,7 +39067,7 @@ var require_termkit_no_lazy_require = __commonJS({
 });
 
 // packages/tui/dist/main.js
-import { dirname as dirname6, join as join7 } from "node:path";
+import { dirname as dirname7, join as join9 } from "node:path";
 
 // packages/tui/dist/controller.js
 import { readFileSync as readFileSync6, writeFileSync as writeFileSync4, existsSync as existsSync5 } from "node:fs";
@@ -47615,7 +47615,7 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   const snap = snapshot ?? EMPTY_ROSTER;
   const keys = Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
   const selector = ui.selector;
-  const clip = (s2) => clipEllipsis(s2, width);
+  const clip2 = (s2) => clipEllipsis(s2, width);
   const rows = keys.map((key, i) => {
     const config = snap.configModels[key];
     const governed = snap.agents.filter((a) => AGENT_MODEL_KEY[a.name] === key);
@@ -47627,20 +47627,20 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
     const marker = selected ? "\u203A " : "  ";
     const label = key.charAt(0).toUpperCase() + key.slice(1);
     const lines = [
-      { text: clip(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? "  drift" : ""}`), kind: "title", selected }
+      { text: clip2(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? "  drift" : ""}`), kind: "title", selected }
     ];
     for (const name of agentNames)
-      lines.push({ text: clip(`    ${name}`), kind: "body" });
+      lines.push({ text: clip2(`    ${name}`), kind: "body" });
     if (selector && selector.key === key) {
       if (selector.stage === "model") {
         snap.catalog.entries.forEach((e, oi) => {
           const m = oi === selector.highlight ? "\u203A " : "  ";
-          lines.push({ text: clip(`  ${m}${e.id} ${e.label}`), kind: "option", selected: oi === selector.highlight });
+          lines.push({ text: clip2(`  ${m}${e.id} ${e.label}`), kind: "option", selected: oi === selector.highlight });
         });
       } else {
         effortOptions(key).forEach((eff, oi) => {
           const m = oi === selector.highlight ? "\u203A " : "  ";
-          lines.push({ text: clip(`  ${m}effort ${eff}`), kind: "option", selected: oi === selector.highlight });
+          lines.push({ text: clip2(`  ${m}effort ${eff}`), kind: "option", selected: oi === selector.highlight });
         });
       }
     }
@@ -47648,22 +47648,22 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   });
   const shown = selector ? rows.filter((r) => r.key === selector.key) : rows;
   const catBanner = catalogBanner(snap.catalog, width);
-  const banner = ui.notice ? [clip(`\u26A0 ${ui.notice}`), ...catBanner] : catBanner;
+  const banner = ui.notice ? [clip2(`\u26A0 ${ui.notice}`), ...catBanner] : catBanner;
   const sparringRows = selector ? [] : sparringPartnerRows(snap, ui, width, keys.length);
   const tddRows = selector ? [] : [tddToggleRow(snap, ui, width, keys.length + 2)];
   const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
   return { rows: shown, banner, sparringRows, tddRows, modeRows };
 }
 function catalogBanner(catalog, width) {
-  const clip = (s2) => clipEllipsis(s2, width);
+  const clip2 = (s2) => clipEllipsis(s2, width);
   if (!catalog.present)
-    return [clip("catalog: none found")];
+    return [clip2("catalog: none found")];
   if (catalog.stale)
-    return [clip(`catalog stale (as of ${catalog.staleDate ?? "?"})`)];
-  return [clip("catalog: current")];
+    return [clip2(`catalog stale (as of ${catalog.staleDate ?? "?"})`)];
+  return [clip2("catalog: current")];
 }
 function sparringPartnerRows(snap, ui, width, cursorBase) {
-  const clip = (s2) => clipEllipsis(s2, width);
+  const clip2 = (s2) => clipEllipsis(s2, width);
   const sparringPartner = snap.sparringPartner ?? { enabled: true };
   const codexWired = snap.codexWired ?? false;
   const toggleSelected = ui.cursor === cursorBase;
@@ -47674,31 +47674,31 @@ function sparringPartnerRows(snap, ui, width, cursorBase) {
   const wiredSuffix = codexWired ? "" : "  (not wired on this machine)";
   const toggleRow = {
     id: "sys:sparring_enabled",
-    lines: [{ text: clip(`${toggleMarker}Sparring partner: ${onOff}${wiredSuffix}`), kind: "title", selected: toggleSelected }]
+    lines: [{ text: clip2(`${toggleMarker}Sparring partner: ${onOff}${wiredSuffix}`), kind: "title", selected: toggleSelected }]
   };
   const editing = ui.sparringModelEdit !== void 0 && modelSelected;
   const modelText = editing ? `${ui.sparringModelEdit}\u258C` : sparringPartner.model && sparringPartner.model.length ? sparringPartner.model : "(CLI default)";
   const modelRow = {
     id: "sys:sparring_model",
-    lines: [{ text: clip(`${modelMarker}Default Codex model: ${modelText}`), kind: "title", selected: modelSelected }]
+    lines: [{ text: clip2(`${modelMarker}Default Codex model: ${modelText}`), kind: "title", selected: modelSelected }]
   };
   return [toggleRow, modelRow];
 }
 function tddToggleRow(snap, ui, width, cursorIndex) {
-  const clip = (s2) => clipEllipsis(s2, width);
+  const clip2 = (s2) => clipEllipsis(s2, width);
   const tdd = snap.tdd ?? { enabled: true };
   const selected = ui.cursor === cursorIndex;
   const marker = selected ? "\u203A " : "  ";
   const onOff = tdd.enabled ? "ON" : "OFF";
-  return { id: "sys:tdd_enabled", lines: [{ text: clip(`${marker}TDD: ${onOff}`), kind: "title", selected }] };
+  return { id: "sys:tdd_enabled", lines: [{ text: clip2(`${marker}TDD: ${onOff}`), kind: "title", selected }] };
 }
 function modeToggleRow(snap, ui, width, cursorIndex) {
-  const clip = (s2) => clipEllipsis(s2, width);
+  const clip2 = (s2) => clipEllipsis(s2, width);
   const mode = snap.mode === void 0 ? "hobby" : snap.mode;
   const selected = ui.cursor === cursorIndex;
   const marker = selected ? "\u203A " : "  ";
   const shown = mode === null ? "UNKNOWN (config unreadable)" : mode === "hobby" || mode === "work" ? mode.toUpperCase() : `INVALID ('${mode}')`;
-  return { id: "sys:project_mode", lines: [{ text: clip(`${marker}Project mode: ${shown}`), kind: "title", selected }] };
+  return { id: "sys:project_mode", lines: [{ text: clip2(`${marker}Project mode: ${shown}`), kind: "title", selected }] };
 }
 function tabsFor(store, activeTab) {
   let taskCount = null;
@@ -48849,7 +48849,11 @@ function openDashboard(storePath2, options = {}) {
 }
 
 // packages/tui/dist/render.js
-function draw(screen2, state) {
+function blockTop(screenHeight, block) {
+  return screenHeight - 2 - block.height;
+}
+function draw(screen2, state, opts = {}) {
+  const blockHeight = opts.block?.height ?? 0;
   screen2.fill({ attr: {} });
   const top = state.banner.length;
   const bw = Math.max(1, ...state.banner.map((row) => row.length));
@@ -48871,7 +48875,7 @@ function draw(screen2, state) {
   if (state.searchLine) {
     screen2.put({ x: 0, y: top + 2, attr: { dim: true } }, state.searchLine);
   }
-  const lastBodyLine = screen2.height - 3;
+  const lastBodyLine = screen2.height - 3 - blockHeight;
   let y = state.bodyTop;
   if (state.emptyMessage && y <= lastBodyLine) {
     screen2.put({ x: 0, y, attr: { dim: true } }, state.emptyMessage);
@@ -48920,8 +48924,62 @@ function draw(screen2, state) {
       }
     }
   }
-  screen2.put({ x: 0, y: Math.min(y + 1, screen2.height - 1), attr: { dim: true } }, state.footer);
+  if (opts.block && blockHeight > 0) {
+    const top2 = blockTop(screen2.height, opts.block);
+    for (const p of opts.block.puts)
+      screen2.put({ x: p.x, y: top2 + p.y, attr: p.attr }, p.text);
+  }
+  const footerY = blockHeight > 0 ? screen2.height - 1 : Math.min(y + 1, screen2.height - 1);
+  screen2.put({ x: 0, y: footerY, attr: { dim: true } }, state.footer);
   screen2.draw({ delta: true });
+}
+function clearPixels(term2, prev, next) {
+  const keep = new Set(next.map((p) => `${p.x},${p.y}`));
+  let wrote = false;
+  for (const key of prev.keys()) {
+    if (keep.has(key))
+      continue;
+    const [x, y] = key.split(",").map(Number);
+    if (!wrote)
+      term2.styleReset();
+    term2.moveTo(x + 1, y + 1);
+    term2.noFormat(" ");
+    wrote = true;
+  }
+}
+function sgr24(hex, background) {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return `\x1B[${background ? 48 : 38};2;${n >> 16 & 255};${n >> 8 & 255};${n & 255}m`;
+}
+function paintPixels(term2, pixels, prev, trueColor2 = false) {
+  const next = /* @__PURE__ */ new Map();
+  let wrote = false;
+  for (const p of pixels) {
+    const key = `${p.x},${p.y}`;
+    const sig = `${p.ch}|${p.fg ?? ""}|${p.bg ?? ""}`;
+    next.set(key, sig);
+    if (prev?.get(key) === sig)
+      continue;
+    term2.styleReset();
+    term2.moveTo(p.x + 1, p.y + 1);
+    if (p.fg !== void 0) {
+      if (trueColor2)
+        term2.noFormat(sgr24(p.fg, false));
+      else
+        term2.colorRgbHex(p.fg);
+    }
+    if (p.bg !== void 0) {
+      if (trueColor2)
+        term2.noFormat(sgr24(p.bg, true));
+      else
+        term2.bgColorRgbHex(p.bg);
+    }
+    term2.noFormat(p.ch);
+    wrote = true;
+  }
+  if (wrote)
+    term2.styleReset();
+  return next;
 }
 function keyToEvent(name) {
   switch (name) {
@@ -48965,9 +49023,3878 @@ function mouseToEvent(name, data) {
   }
 }
 
+// packages/tui/dist/subagents.js
+import { existsSync as existsSync8, readFileSync as readFileSync8, readdirSync as readdirSync6, statSync as statSync5 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join8 } from "node:path";
+
+// scripts/lib/dispatch-register.mjs
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync7, writeFileSync as writeFileSync5, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync6, lstatSync as lstatSync3, readdirSync as readdirSync4, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join7, resolve as resolve2, dirname as dirname5, isAbsolute as isAbsolute2 } from "node:path";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { randomBytes, createHash as createHash2 } from "node:crypto";
+function registerPath(root) {
+  return join7(root, ".sterling", "transient", "dispatch-register.json");
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync6(p)) return { availability: "absent", arr: [] };
+  let raw;
+  try {
+    raw = readFileSync7(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+var MAX_PROMPT_BYTES = 512 * 1024;
+var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
+var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+function dispatchStateDir(root) {
+  return join7(root, ".sterling", "transient", "dispatch-state");
+}
+function dispatchStateKey(toolUseId) {
+  if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
+  return `sha256-${createHash2("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+}
+
+// scripts/hooks/lib/transcript.mjs
+import { openSync as openSync2, readSync, closeSync as closeSync2, fstatSync, existsSync as existsSync7, statSync as statSync4, readdirSync as readdirSync5 } from "node:fs";
+var TAIL_BYTES = 1024 * 1024;
+function deriveAgentTranscript(parentTranscriptPath, agentId) {
+  const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
+  const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
+  if (existsSync7(flat)) return flat;
+  const wfRoot = `${sessionDir}/subagents/workflows`;
+  try {
+    for (const d of readdirSync5(wfRoot)) {
+      const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
+      if (existsSync7(candidate)) return candidate;
+    }
+  } catch {
+  }
+  return flat;
+}
+function readTail(path, bytes = TAIL_BYTES) {
+  if (!existsSync7(path)) return null;
+  const fd = openSync2(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, bytes);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    return buf.toString("utf8");
+  } finally {
+    closeSync2(fd);
+  }
+}
+function latestUsage(path) {
+  const tail = readTail(path);
+  if (tail === null) return { usage: null, reason: "transcript_missing" };
+  const lines = tail.split("\n");
+  let sawAssistant = false;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (entry.type !== "assistant") continue;
+    sawAssistant = true;
+    const usage = entry.message?.usage;
+    if (usage && typeof usage.input_tokens === "number") {
+      return { usage, model: entry.message?.model, reason: null };
+    }
+  }
+  if (sawAssistant) return { usage: null, reason: "format_unparseable" };
+  const exhausted = statSync4(path).size > TAIL_BYTES;
+  return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
+}
+function fillPct(usage, windowSize) {
+  const used = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+  return 100 * used / windowSize;
+}
+
+// packages/tui/dist/avatars/assign.js
+function assign(liveIds, current, rng, { poolSize = 48, freed = [] } = {}) {
+  const live = new Set(liveIds);
+  const next = /* @__PURE__ */ new Map();
+  for (const id of liveIds) {
+    const idx = current.get(id);
+    if (idx !== void 0)
+      next.set(id, idx);
+  }
+  const held = () => new Set(next.values());
+  let order = freed.filter((i) => i >= 0 && i < poolSize);
+  const heldNow = held();
+  for (const [id, idx] of current) {
+    if (live.has(id) || heldNow.has(idx))
+      continue;
+    order = order.filter((i) => i !== idx);
+    order.push(idx);
+  }
+  for (const id of liveIds) {
+    if (next.has(id))
+      continue;
+    const taken = held();
+    const open2 = [];
+    for (let i = 0; i < poolSize; i++)
+      if (!taken.has(i))
+        open2.push(i);
+    let pick;
+    if (open2.length > 0)
+      pick = open2[Math.floor(rng() * open2.length)];
+    else if (order.length > 0)
+      pick = order[0];
+    else
+      pick = Math.floor(rng() * poolSize);
+    next.set(id, pick);
+  }
+  return { current: next, freed: order };
+}
+
+// packages/tui/dist/avatars/pool.json
+var pool_default = {
+  palette: {
+    A: "#8a4fa8",
+    B: "#6c3a86",
+    C: "#f0d6bd",
+    D: "#1d1e1c",
+    E: "#e9c8b0",
+    F: "#f0c040",
+    G: "#a08c52",
+    H: "#bfa96a",
+    I: "#e0731f",
+    J: "#2b2830",
+    K: "#1c1a20",
+    L: "#efc9a6",
+    M: "#e2b792",
+    N: "#8eaac8",
+    O: "#a9c3de",
+    P: "#25252b",
+    Q: "#7a4a2a",
+    R: "#5f391f",
+    S: "#2a3150",
+    T: "#3a4363",
+    U: "#f4f1ea",
+    V: "#7a45a8",
+    W: "#d9732a",
+    X: "#b45a1a",
+    Y: "#e88aa0",
+    Z: "#e8c547",
+    a: "#a8472a",
+    b: "#85361f",
+    c: "#1b8f84",
+    d: "#2ec4b6",
+    e: "#b0801e",
+    f: "#9e7322",
+    g: "#f7e4d4",
+    h: "#ecd3bf",
+    i: "#cfd2d6",
+    j: "#2e8b57",
+    k: "#e8d9a0",
+    l: "#2f5fa8",
+    m: "#234781",
+    n: "#e8dcc0",
+    o: "#cbbd9c",
+    p: "#a0764a",
+    q: "#b8322e",
+    r: "#8c2420",
+    s: "#4a3326",
+    t: "#6e5fa2",
+    u: "#8b7bbd",
+    v: "#baae96",
+    w: "#c8b9a3",
+    x: "#96261f",
+    y: "#36251b",
+    z: "#86603a",
+    "0": "#3f7d4a",
+    "1": "#2c5a36",
+    "2": "#c9ced6",
+    "3": "#9aa1ad",
+    "4": "#cdbd80"
+  },
+  avatars: [
+    {
+      parts: {
+        style: "cap",
+        hair: 8,
+        hat: 3,
+        skin: 0,
+        clothes: 3,
+        acc: "earrings",
+        extra: "none"
+      },
+      frames: [
+        [
+          "...AAAAA....",
+          "..AAAAAAAA..",
+          "..BBBBBBBBB.",
+          "..CCCCCCCC..",
+          "..CCDCCDCC..",
+          ".ECCCCCCCCE.",
+          ".FCCCEECCCF.",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "...AAAAA....",
+          "..AAAAAAAA..",
+          "..BBBBBBBBB.",
+          "..CCCCCCCC..",
+          "..CCCCCCCC..",
+          ".ECCCCCCCCE.",
+          ".FCCCEECCCF.",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "....AAAAA...",
+          "..AAAAAAAA..",
+          "..BBBBBBBBB.",
+          "..CCCCCCCC..",
+          "..CCDCCDCC..",
+          ".ECCCCCCCCE.",
+          ".FCCCEECCCF.",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "....AAAAA...",
+          "...AAAAAAAA.",
+          "...BBBBBBBBB",
+          "...CCCCCCCC.",
+          "...CCDCCDCC.",
+          "..ECCCCCCCCE",
+          "..FCCCEECCCF",
+          "....CCCCCC..",
+          ".....CCCE...",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bob",
+        hair: 5,
+        hat: 2,
+        skin: 2,
+        clothes: 2,
+        acc: "none",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "............",
+          "..JJJJJJJK..",
+          ".JJJJJJJJJJ.",
+          ".JJLLLLLLJJ.",
+          ".JJLDLLDLJJ.",
+          ".JJLLLLLLJJ.",
+          ".JKLMLLMLKJ.",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "..JJJJJJJK..",
+          ".JJJJJJJJJJ.",
+          ".JJLLLLLLJJ.",
+          ".JJLLLLLLJJ.",
+          ".JJLLLLLLJJ.",
+          ".JKLMLLMLKJ.",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "...JJJJJJJK.",
+          ".JJJJJJJJJJ.",
+          ".JJLLLLLLJJ.",
+          ".JJLDLLDLJJ.",
+          ".JJLLLLLLJJ.",
+          ".JKLMLLMLKJ.",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "...JJJJJJJK.",
+          "..JJJJJJJJJJ",
+          "..JJLLLLLLJJ",
+          "..JJLDLLDLJJ",
+          "..JJLLLLLLJJ",
+          "..JKLMLLMLKJ",
+          "....LLMMLL..",
+          ".....LLLM...",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "long",
+        hair: 3,
+        hat: 2,
+        skin: 0,
+        clothes: 5,
+        acc: "none",
+        extra: "beard"
+      },
+      frames: [
+        [
+          "............",
+          "..QQQQQQQR..",
+          "..QQQQQQQR..",
+          ".QQCCCCCCQQ.",
+          ".QQCDCCDCQQ.",
+          ".QQCCCCCCQQ.",
+          ".QQQCEECQQQ.",
+          ".QQQQQQQQQQ.",
+          ".QQ.CCCE.QQ.",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "............",
+          "..QQQQQQQR..",
+          "..QQQQQQQR..",
+          ".QQCCCCCCQQ.",
+          ".QQCCCCCCQQ.",
+          ".QQCCCCCCQQ.",
+          ".QQQCEECQQQ.",
+          ".QQQQQQQQQQ.",
+          ".QQ.CCCE.QQ.",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "............",
+          "...QQQQQQQR.",
+          "..QQQQQQQR..",
+          ".QQCCCCCCQQ.",
+          ".QQCDCCDCQQ.",
+          ".QQCCCCCCQQ.",
+          ".QQQCEECQQQ.",
+          ".QQQQQQQQQQ.",
+          ".QQ.CCCE.QQ.",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "............",
+          "...QQQQQQQR.",
+          "...QQQQQQQR.",
+          "..QQCCCCCCQQ",
+          "..QQCDCCDCQQ",
+          "..QQCCCCCCQQ",
+          "..QQQCEECQQQ",
+          "..QQQQQQQQQQ",
+          "..QQ.CCCE.QQ",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bob",
+        hair: 7,
+        hat: 3,
+        skin: 2,
+        clothes: 2,
+        acc: "pencil",
+        extra: "beard"
+      },
+      frames: [
+        [
+          "............",
+          "..WWWWWWWX..",
+          ".WWWWWWWWWW.",
+          ".WWLLLLLLWY.",
+          ".WWLDLLDLWZ.",
+          ".WWLLLLLLWW.",
+          ".WWWLMMLWWW.",
+          "...WWWWWW...",
+          "....LLLM....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "..WWWWWWWX..",
+          ".WWWWWWWWWW.",
+          ".WWLLLLLLWY.",
+          ".WWLLLLLLWZ.",
+          ".WWLLLLLLWW.",
+          ".WWWLMMLWWW.",
+          "...WWWWWW...",
+          "....LLLM....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "...WWWWWWWX.",
+          ".WWWWWWWWWW.",
+          ".WWLLLLLLWY.",
+          ".WWLDLLDLWZ.",
+          ".WWLLLLLLWW.",
+          ".WWWLMMLWWW.",
+          "...WWWWWW...",
+          "....LLLM....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "...WWWWWWWX.",
+          "..WWWWWWWWWW",
+          "..WWLLLLLLWY",
+          "..WWLDLLDLWZ",
+          "..WWLLLLLLWW",
+          "..WWWLMMLWWW",
+          "....WWWWWW..",
+          ".....LLLM...",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "spikes",
+        hair: 6,
+        hat: 2,
+        skin: 2,
+        clothes: 5,
+        acc: "pencil",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "..a..a.a....",
+          "..aaaaaaab..",
+          "..aaaaaaab..",
+          "..bLLLLLLbY.",
+          "..LLDLLDLLZ.",
+          ".MLLLLLLLLM.",
+          "..LLMLLMLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "..a..a.a....",
+          "..aaaaaaab..",
+          "..aaaaaaab..",
+          "..bLLLLLLbY.",
+          "..LLLLLLLLZ.",
+          ".MLLLLLLLLM.",
+          "..LLMLLMLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "...a..a.a...",
+          "..aaaaaaab..",
+          "..aaaaaaab..",
+          "..bLLLLLLbY.",
+          "..LLDLLDLLZ.",
+          ".MLLLLLLLLM.",
+          "..LLMLLMLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "...a..a.a...",
+          "...aaaaaaab.",
+          "...aaaaaaab.",
+          "...bLLLLLLbY",
+          "...LLDLLDLLZ",
+          "..MLLLLLLLLM",
+          "...LLMLLMLL.",
+          "....LLMMLL..",
+          ".....LLLM...",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "spikes",
+        hair: 3,
+        hat: 4,
+        skin: 2,
+        clothes: 2,
+        acc: "feather",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "cdQ..Q.Q....",
+          "..QQQQQQQR..",
+          "..QQQQQQQR..",
+          "..RLLLLLLR..",
+          "..LLDLLDLL..",
+          ".MLLLLLLLLM.",
+          "..LLMLLMLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "cdQ..Q.Q....",
+          "..QQQQQQQR..",
+          "..QQQQQQQR..",
+          "..RLLLLLLR..",
+          "..LLLLLLLL..",
+          ".MLLLLLLLLM.",
+          "..LLMLLMLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "ccdQ..Q.Q...",
+          "..QQQQQQQR..",
+          "..QQQQQQQR..",
+          "..RLLLLLLR..",
+          "..LLDLLDLL..",
+          ".MLLLLLLLLM.",
+          "..LLMLLMLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          ".cdQ..Q.Q...",
+          "...QQQQQQQR.",
+          "...QQQQQQQR.",
+          "...RLLLLLLR.",
+          "...LLDLLDLL.",
+          "..MLLLLLLLLM",
+          "...LLMLLMLL.",
+          "....LLMMLL..",
+          ".....LLLM...",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bald",
+        hair: 8,
+        hat: 3,
+        skin: 0,
+        clothes: 3,
+        acc: "feather",
+        extra: "none"
+      },
+      frames: [
+        [
+          "............",
+          ".ccdCCCC....",
+          "...CCCCCC...",
+          "..CCCCCCCC..",
+          "..CCDCCDCC..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "............",
+          ".ccdCCCC....",
+          "...CCCCCC...",
+          "..CCCCCCCC..",
+          "..CCCCCCCC..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "............",
+          "..ccdCCCC...",
+          "...CCCCCC...",
+          "..CCCCCCCC..",
+          "..CCDCCDCC..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "............",
+          "..ccdCCCC...",
+          "....CCCCCC..",
+          "...CCCCCCCC.",
+          "...CCDCCDCC.",
+          "..ECCCCCCCCE",
+          "...CCCEECCC.",
+          "....CCCCCC..",
+          ".....CCCE...",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "sidepart",
+        hair: 0,
+        hat: 0,
+        skin: 1,
+        clothes: 1,
+        acc: "feather",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "............",
+          "ccdeeeeeef..",
+          "..eeeeeeeef.",
+          "..eeeggggf..",
+          "..fgDggDgf..",
+          ".hggggggggh.",
+          "..ggeeeegg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "............",
+          "ccdeeeeeef..",
+          "..eeeeeeeef.",
+          "..eeeggggf..",
+          "..fggggggf..",
+          ".hggggggggh.",
+          "..ggeeeegg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "............",
+          ".ccdeeeeeef.",
+          "..eeeeeeeef.",
+          "..eeeggggf..",
+          "..fgDggDgf..",
+          ".hggggggggh.",
+          "..ggeeeegg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "............",
+          ".ccdeeeeeef.",
+          "...eeeeeeeef",
+          "...eeeggggf.",
+          "...fgDggDgf.",
+          "..hggggggggh",
+          "...ggeeeegg.",
+          "....gghhgg..",
+          ".....gggh...",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "curly",
+        hair: 1,
+        hat: 2,
+        skin: 0,
+        clothes: 5,
+        acc: "earrings",
+        extra: "beard"
+      },
+      frames: [
+        [
+          "...k.kk.....",
+          "..kkkkkkkk..",
+          ".kkkkkkkkkk.",
+          ".kkCCCCCCkk.",
+          ".kCCDCCDCCk.",
+          ".ECCCCCCCCE.",
+          ".FkkCEECkkF.",
+          "...kkkkkk...",
+          "....CCCE....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "...k.kk.....",
+          "..kkkkkkkk..",
+          ".kkkkkkkkkk.",
+          ".kkCCCCCCkk.",
+          ".kCCCCCCCCk.",
+          ".ECCCCCCCCE.",
+          ".FkkCEECkkF.",
+          "...kkkkkk...",
+          "....CCCE....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "....k.kk....",
+          "..kkkkkkkk..",
+          ".kkkkkkkkkk.",
+          ".kkCCCCCCkk.",
+          ".kCCDCCDCCk.",
+          ".ECCCCCCCCE.",
+          ".FkkCEECkkF.",
+          "...kkkkkk...",
+          "....CCCE....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "....k.kk....",
+          "...kkkkkkkk.",
+          "..kkkkkkkkkk",
+          "..kkCCCCCCkk",
+          "..kCCDCCDCCk",
+          "..ECCCCCCCCE",
+          "..FkkCEECkkF",
+          "....kkkkkk..",
+          ".....CCCE...",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "beanie",
+        hair: 6,
+        hat: 2,
+        skin: 0,
+        clothes: 2,
+        acc: "feather",
+        extra: "wide"
+      },
+      frames: [
+        [
+          ".ccdllll....",
+          "..llllllll..",
+          "..mmmmmmmm..",
+          "..CCCCCCCC..",
+          "..CDCCCCDC..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          ".ccdllll....",
+          "..llllllll..",
+          "..mmmmmmmm..",
+          "..CCCCCCCC..",
+          "..CCCCCCCC..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "..ccdllll...",
+          "..llllllll..",
+          "..mmmmmmmm..",
+          "..CCCCCCCC..",
+          "..CDCCCCDC..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "..ccdllll...",
+          "...llllllll.",
+          "...mmmmmmmm.",
+          "...CCCCCCCC.",
+          "...CDCCCCDC.",
+          "..ECCCCCCCCE",
+          "...CCCEECCC.",
+          "....CCCCCC..",
+          ".....CCCE...",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bun",
+        hair: 6,
+        hat: 2,
+        skin: 1,
+        clothes: 3,
+        acc: "pencil",
+        extra: "smile"
+      },
+      frames: [
+        [
+          ".....aa.....",
+          "..aaaaaaab..",
+          "..aaaaaaab..",
+          "..bggggggbY.",
+          "..ggDggDggZ.",
+          ".hggggggggh.",
+          "..gghgghgg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          ".....aa.....",
+          "..aaaaaaab..",
+          "..aaaaaaab..",
+          "..bggggggbY.",
+          "..ggggggggZ.",
+          ".hggggggggh.",
+          "..gghgghgg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "......aa....",
+          "..aaaaaaab..",
+          "..aaaaaaab..",
+          "..bggggggbY.",
+          "..ggDggDggZ.",
+          ".hggggggggh.",
+          "..gghgghgg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "......aa....",
+          "...aaaaaaab.",
+          "...aaaaaaab.",
+          "...bggggggbY",
+          "...ggDggDggZ",
+          "..hggggggggh",
+          "...gghgghgg.",
+          "....gghhgg..",
+          ".....gggh...",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "hat",
+        hair: 2,
+        hat: 4,
+        skin: 1,
+        clothes: 1,
+        acc: "earrings",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "....nnnn....",
+          "...nnnnnn...",
+          ".oooooooooo.",
+          "..gggggggg..",
+          "..ggDggDgg..",
+          ".hggggggggh.",
+          ".FggppppggF.",
+          "...gghhgg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "....nnnn....",
+          "...nnnnnn...",
+          ".oooooooooo.",
+          "..gggggggg..",
+          "..gggggggg..",
+          ".hggggggggh.",
+          ".FggppppggF.",
+          "...gghhgg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          ".....nnnn...",
+          "...nnnnnn...",
+          ".oooooooooo.",
+          "..gggggggg..",
+          "..ggDggDgg..",
+          ".hggggggggh.",
+          ".FggppppggF.",
+          "...gghhgg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          ".....nnnn...",
+          "....nnnnnn..",
+          "..oooooooooo",
+          "...gggggggg.",
+          "...ggDggDgg.",
+          "..hggggggggh",
+          "..FggppppggF",
+          "....gghhgg..",
+          ".....gggh...",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "cap",
+        hair: 4,
+        hat: 1,
+        skin: 0,
+        clothes: 3,
+        acc: "earrings",
+        extra: "beard"
+      },
+      frames: [
+        [
+          "...qqqqq....",
+          "..qqqqqqqq..",
+          "..rrrrrrrrr.",
+          "..CCCCCCCC..",
+          "..CCDCCDCC..",
+          ".ECCCCCCCCE.",
+          ".FssCEECssF.",
+          "...ssssss...",
+          "....CCCE....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "...qqqqq....",
+          "..qqqqqqqq..",
+          "..rrrrrrrrr.",
+          "..CCCCCCCC..",
+          "..CCCCCCCC..",
+          ".ECCCCCCCCE.",
+          ".FssCEECssF.",
+          "...ssssss...",
+          "....CCCE....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "....qqqqq...",
+          "..qqqqqqqq..",
+          "..rrrrrrrrr.",
+          "..CCCCCCCC..",
+          "..CCDCCDCC..",
+          ".ECCCCCCCCE.",
+          ".FssCEECssF.",
+          "...ssssss...",
+          "....CCCE....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "....qqqqq...",
+          "...qqqqqqqq.",
+          "...rrrrrrrrr",
+          "...CCCCCCCC.",
+          "...CCDCCDCC.",
+          "..ECCCCCCCCE",
+          "..FssCEECssF",
+          "....ssssss..",
+          ".....CCCE...",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "long",
+        hair: 0,
+        hat: 2,
+        skin: 0,
+        clothes: 2,
+        acc: "pencil",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "............",
+          "..eeeeeeef..",
+          "..eeeeeeef..",
+          ".eeCCCCCCeY.",
+          ".eeCDCCDCeZ.",
+          ".eeCCCCCCee.",
+          ".efCECCECfe.",
+          ".eeCCEECCee.",
+          ".ee.CCCE.ee.",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "..eeeeeeef..",
+          "..eeeeeeef..",
+          ".eeCCCCCCeY.",
+          ".eeCCCCCCeZ.",
+          ".eeCCCCCCee.",
+          ".efCECCECfe.",
+          ".eeCCEECCee.",
+          ".ee.CCCE.ee.",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "...eeeeeeef.",
+          "..eeeeeeef..",
+          ".eeCCCCCCeY.",
+          ".eeCDCCDCeZ.",
+          ".eeCCCCCCee.",
+          ".efCECCECfe.",
+          ".eeCCEECCee.",
+          ".ee.CCCE.ee.",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "...eeeeeeef.",
+          "...eeeeeeef.",
+          "..eeCCCCCCeY",
+          "..eeCDCCDCeZ",
+          "..eeCCCCCCee",
+          "..efCECCECfe",
+          "..eeCCEECCee",
+          "..ee.CCCE.ee",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "beanie",
+        hair: 1,
+        hat: 3,
+        skin: 1,
+        clothes: 1,
+        acc: "earrings",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "....AAAA....",
+          "..AAAAAAAA..",
+          "..BBBBBBBB..",
+          "..gggggggg..",
+          "..gDggggDg..",
+          ".hggggggggh.",
+          ".FggghhgggF.",
+          "...gggggg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "....AAAA....",
+          "..AAAAAAAA..",
+          "..BBBBBBBB..",
+          "..gggggggg..",
+          "..gggggggg..",
+          ".hggggggggh.",
+          ".FggghhgggF.",
+          "...gggggg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          ".....AAAA...",
+          "..AAAAAAAA..",
+          "..BBBBBBBB..",
+          "..gggggggg..",
+          "..gDggggDg..",
+          ".hggggggggh.",
+          ".FggghhgggF.",
+          "...gggggg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          ".....AAAA...",
+          "...AAAAAAAA.",
+          "...BBBBBBBB.",
+          "...gggggggg.",
+          "...gDggggDg.",
+          "..hggggggggh",
+          "..FggghhgggF",
+          "....gggggg..",
+          ".....gggh...",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bald",
+        hair: 1,
+        hat: 2,
+        skin: 2,
+        clothes: 4,
+        acc: "earrings",
+        extra: "none"
+      },
+      frames: [
+        [
+          "............",
+          "....LLLL....",
+          "...LLLLLL...",
+          "..LLLLLLLL..",
+          "..LLDLLDLL..",
+          ".MLLLLLLLLM.",
+          ".FLLLMMLLLF.",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ],
+        [
+          "............",
+          "....LLLL....",
+          "...LLLLLL...",
+          "..LLLLLLLL..",
+          "..LLLLLLLL..",
+          ".MLLLLLLLLM.",
+          ".FLLLMMLLLF.",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ],
+        [
+          "............",
+          ".....LLLL...",
+          "...LLLLLL...",
+          "..LLLLLLLL..",
+          "..LLDLLDLL..",
+          ".MLLLLLLLLM.",
+          ".FLLLMMLLLF.",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ],
+        [
+          "............",
+          ".....LLLL...",
+          "....LLLLLL..",
+          "...LLLLLLLL.",
+          "...LLDLLDLL.",
+          "..MLLLLLLLLM",
+          "..FLLLMMLLLF",
+          "....LLLLLL..",
+          ".....LLLM...",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "hat",
+        hair: 4,
+        hat: 2,
+        skin: 2,
+        clothes: 0,
+        acc: "none",
+        extra: "none"
+      },
+      frames: [
+        [
+          "....llll....",
+          "...llllll...",
+          ".mmmmmmmmmm.",
+          "..LLLLLLLL..",
+          "..LLDLLDLL..",
+          ".MLLLLLLLLM.",
+          "..LLLMMLLL..",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "....llll....",
+          "...llllll...",
+          ".mmmmmmmmmm.",
+          "..LLLLLLLL..",
+          "..LLLLLLLL..",
+          ".MLLLLLLLLM.",
+          "..LLLMMLLL..",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          ".....llll...",
+          "...llllll...",
+          ".mmmmmmmmmm.",
+          "..LLLLLLLL..",
+          "..LLDLLDLL..",
+          ".MLLLLLLLLM.",
+          "..LLLMMLLL..",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          ".....llll...",
+          "....llllll..",
+          "..mmmmmmmmmm",
+          "...LLLLLLLL.",
+          "...LLDLLDLL.",
+          "..MLLLLLLLLM",
+          "...LLLMMLLL.",
+          "....LLLLLL..",
+          ".....LLLM...",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "tuft",
+        hair: 5,
+        hat: 0,
+        skin: 1,
+        clothes: 3,
+        acc: "feather",
+        extra: "beard"
+      },
+      frames: [
+        [
+          "ccdJ........",
+          "..JJJJJJK...",
+          "..JJJJJJJK..",
+          "..KggggggK..",
+          "..KgDggDgK..",
+          ".hggggggggh.",
+          "..JJghhgJJ..",
+          "...JJJJJJ...",
+          "....gggh....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "ccdJ........",
+          "..JJJJJJK...",
+          "..JJJJJJJK..",
+          "..KggggggK..",
+          "..KggggggK..",
+          ".hggggggggh.",
+          "..JJghhgJJ..",
+          "...JJJJJJ...",
+          "....gggh....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          ".ccdJ.......",
+          "..JJJJJJK...",
+          "..JJJJJJJK..",
+          "..KggggggK..",
+          "..KgDggDgK..",
+          ".hggggggggh.",
+          "..JJghhgJJ..",
+          "...JJJJJJ...",
+          "....gggh....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          ".ccdJ.......",
+          "...JJJJJJK..",
+          "...JJJJJJJK.",
+          "...KggggggK.",
+          "...KgDggDgK.",
+          "..hggggggggh",
+          "...JJghhgJJ.",
+          "....JJJJJJ..",
+          ".....gggh...",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bob",
+        hair: 4,
+        hat: 1,
+        skin: 0,
+        clothes: 2,
+        acc: "feather",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "............",
+          "cdsssssssy..",
+          ".ssssssssss.",
+          ".ssCCCCCCss.",
+          ".ssCDCCDCss.",
+          ".ssCCCCCCss.",
+          ".syCECCECys.",
+          "...CCEECC...",
+          "....CCCE....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "cdsssssssy..",
+          ".ssssssssss.",
+          ".ssCCCCCCss.",
+          ".ssCCCCCCss.",
+          ".ssCCCCCCss.",
+          ".syCECCECys.",
+          "...CCEECC...",
+          "....CCCE....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "ccdsssssssy.",
+          ".ssssssssss.",
+          ".ssCCCCCCss.",
+          ".ssCDCCDCss.",
+          ".ssCCCCCCss.",
+          ".syCECCECys.",
+          "...CCEECC...",
+          "....CCCE....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          ".cdsssssssy.",
+          "..ssssssssss",
+          "..ssCCCCCCss",
+          "..ssCDCCDCss",
+          "..ssCCCCCCss",
+          "..syCECCECys",
+          "....CCEECC..",
+          ".....CCCE...",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "beanie",
+        hair: 8,
+        hat: 2,
+        skin: 2,
+        clothes: 5,
+        acc: "none",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "....llll....",
+          "..llllllll..",
+          "..mmmmmmmm..",
+          "..LLLLLLLL..",
+          "..LDLLLLDL..",
+          ".MLLLLLLLLM.",
+          "..LLLMMLLL..",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "....llll....",
+          "..llllllll..",
+          "..mmmmmmmm..",
+          "..LLLLLLLL..",
+          "..LLLLLLLL..",
+          ".MLLLLLLLLM.",
+          "..LLLMMLLL..",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          ".....llll...",
+          "..llllllll..",
+          "..mmmmmmmm..",
+          "..LLLLLLLL..",
+          "..LDLLLLDL..",
+          ".MLLLLLLLLM.",
+          "..LLLMMLLL..",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          ".....llll...",
+          "...llllllll.",
+          "...mmmmmmmm.",
+          "...LLLLLLLL.",
+          "...LDLLLLDL.",
+          "..MLLLLLLLLM",
+          "...LLLMMLLL.",
+          "....LLLLLL..",
+          ".....LLLM...",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bun",
+        hair: 0,
+        hat: 1,
+        skin: 1,
+        clothes: 4,
+        acc: "feather",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "..ccdee.....",
+          "..eeeeeeef..",
+          "..eeeeeeef..",
+          "..fggggggf..",
+          "..gDggggDg..",
+          ".hggggggggh.",
+          "..ggghhggg..",
+          "...gggggg...",
+          "....gggh....",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ],
+        [
+          "..ccdee.....",
+          "..eeeeeeef..",
+          "..eeeeeeef..",
+          "..fggggggf..",
+          "..gggggggg..",
+          ".hggggggggh.",
+          "..ggghhggg..",
+          "...gggggg...",
+          "....gggh....",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ],
+        [
+          "...ccdee....",
+          "..eeeeeeef..",
+          "..eeeeeeef..",
+          "..fggggggf..",
+          "..gDggggDg..",
+          ".hggggggggh.",
+          "..ggghhggg..",
+          "...gggggg...",
+          "....gggh....",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ],
+        [
+          "...ccdee....",
+          "...eeeeeeef.",
+          "...eeeeeeef.",
+          "...fggggggf.",
+          "...gDggggDg.",
+          "..hggggggggh",
+          "...ggghhggg.",
+          "....gggggg..",
+          ".....gggh...",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "hat",
+        hair: 5,
+        hat: 4,
+        skin: 0,
+        clothes: 3,
+        acc: "pencil",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "....nnnn....",
+          "...nnnnnn...",
+          ".oooooooooo.",
+          "..CCCCCCCCY.",
+          "..CDCCCCDCZ.",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "....nnnn....",
+          "...nnnnnn...",
+          ".oooooooooo.",
+          "..CCCCCCCCY.",
+          "..CCCCCCCCZ.",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          ".....nnnn...",
+          "...nnnnnn...",
+          ".oooooooooo.",
+          "..CCCCCCCCY.",
+          "..CDCCCCDCZ.",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          ".....nnnn...",
+          "....nnnnnn..",
+          "..oooooooooo",
+          "...CCCCCCCCY",
+          "...CDCCCCDCZ",
+          "..ECCCCCCCCE",
+          "...CCCEECCC.",
+          "....CCCCCC..",
+          ".....CCCE...",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "long",
+        hair: 2,
+        hat: 2,
+        skin: 2,
+        clothes: 2,
+        acc: "earrings",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "............",
+          "..pppppppz..",
+          "..pppppppz..",
+          ".ppLLLLLLpp.",
+          ".ppLDLLDLpp.",
+          ".ppLLLLLLpp.",
+          ".FzLppppLzF.",
+          ".ppLLMMLLpp.",
+          ".pp.LLLM.pp.",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "..pppppppz..",
+          "..pppppppz..",
+          ".ppLLLLLLpp.",
+          ".ppLLLLLLpp.",
+          ".ppLLLLLLpp.",
+          ".FzLppppLzF.",
+          ".ppLLMMLLpp.",
+          ".pp.LLLM.pp.",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "...pppppppz.",
+          "..pppppppz..",
+          ".ppLLLLLLpp.",
+          ".ppLDLLDLpp.",
+          ".ppLLLLLLpp.",
+          ".FzLppppLzF.",
+          ".ppLLMMLLpp.",
+          ".pp.LLLM.pp.",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "...pppppppz.",
+          "...pppppppz.",
+          "..ppLLLLLLpp",
+          "..ppLDLLDLpp",
+          "..ppLLLLLLpp",
+          "..FzLppppLzF",
+          "..ppLLMMLLpp",
+          "..pp.LLLM.pp",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bun",
+        hair: 2,
+        hat: 3,
+        skin: 0,
+        clothes: 2,
+        acc: "none",
+        extra: "wide"
+      },
+      frames: [
+        [
+          ".....pp.....",
+          "..pppppppz..",
+          "..pppppppz..",
+          "..zCCCCCCz..",
+          "..CDCCCCDC..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          ".....pp.....",
+          "..pppppppz..",
+          "..pppppppz..",
+          "..zCCCCCCz..",
+          "..CCCCCCCC..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "......pp....",
+          "..pppppppz..",
+          "..pppppppz..",
+          "..zCCCCCCz..",
+          "..CDCCCCDC..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "......pp....",
+          "...pppppppz.",
+          "...pppppppz.",
+          "...zCCCCCCz.",
+          "...CDCCCCDC.",
+          "..ECCCCCCCCE",
+          "...CCCEECCC.",
+          "....CCCCCC..",
+          ".....CCCE...",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "beanie",
+        hair: 4,
+        hat: 0,
+        skin: 2,
+        clothes: 3,
+        acc: "pencil",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "....0000....",
+          "..00000000..",
+          "..11111111..",
+          "..LLLLLLLLY.",
+          "..LLDLLDLLZ.",
+          ".MLLLLLLLLM.",
+          "..LLssssLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "....0000....",
+          "..00000000..",
+          "..11111111..",
+          "..LLLLLLLLY.",
+          "..LLLLLLLLZ.",
+          ".MLLLLLLLLM.",
+          "..LLssssLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          ".....0000...",
+          "..00000000..",
+          "..11111111..",
+          "..LLLLLLLLY.",
+          "..LLDLLDLLZ.",
+          ".MLLLLLLLLM.",
+          "..LLssssLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          ".....0000...",
+          "...00000000.",
+          "...11111111.",
+          "...LLLLLLLLY",
+          "...LLDLLDLLZ",
+          "..MLLLLLLLLM",
+          "...LLssssLL.",
+          "....LLMMLL..",
+          ".....LLLM...",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "tuft",
+        hair: 2,
+        hat: 2,
+        skin: 0,
+        clothes: 0,
+        acc: "none",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "...p........",
+          "..ppppppz...",
+          "..pppppppz..",
+          "..zCCCCCCz..",
+          "..zDCCCCDz..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "...p........",
+          "..ppppppz...",
+          "..pppppppz..",
+          "..zCCCCCCz..",
+          "..zCCCCCCz..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "....p.......",
+          "..ppppppz...",
+          "..pppppppz..",
+          "..zCCCCCCz..",
+          "..zDCCCCDz..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "....p.......",
+          "...ppppppz..",
+          "...pppppppz.",
+          "...zCCCCCCz.",
+          "...zDCCCCDz.",
+          "..ECCCCCCCCE",
+          "...CCCEECCC.",
+          "....CCCCCC..",
+          ".....CCCE...",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "cap",
+        hair: 6,
+        hat: 2,
+        skin: 2,
+        clothes: 0,
+        acc: "pencil",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "...lllll....",
+          "..llllllll..",
+          "..mmmmmmmmm.",
+          "..LLLLLLLLY.",
+          "..LLDLLDLLZ.",
+          ".MLLLLLLLLM.",
+          "..LLaaaaLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "...lllll....",
+          "..llllllll..",
+          "..mmmmmmmmm.",
+          "..LLLLLLLLY.",
+          "..LLLLLLLLZ.",
+          ".MLLLLLLLLM.",
+          "..LLaaaaLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "....lllll...",
+          "..llllllll..",
+          "..mmmmmmmmm.",
+          "..LLLLLLLLY.",
+          "..LLDLLDLLZ.",
+          ".MLLLLLLLLM.",
+          "..LLaaaaLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "....lllll...",
+          "...llllllll.",
+          "...mmmmmmmmm",
+          "...LLLLLLLLY",
+          "...LLDLLDLLZ",
+          "..MLLLLLLLLM",
+          "...LLaaaaLL.",
+          "....LLMMLL..",
+          ".....LLLM...",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "ponytail",
+        hair: 2,
+        hat: 3,
+        skin: 2,
+        clothes: 3,
+        acc: "none",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "............",
+          "..pppppppp..",
+          "..ppppppppp.",
+          "..zLLLLLLzp.",
+          "..zLDLLDLLp.",
+          ".MLLLLLLLLp.",
+          "..LLMLLMLLp.",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "............",
+          "..pppppppp..",
+          "..ppppppppp.",
+          "..zLLLLLLzp.",
+          "..zLLLLLLLp.",
+          ".MLLLLLLLLp.",
+          "..LLMLLMLLp.",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "............",
+          "...pppppppp.",
+          "..ppppppppp.",
+          "..zLLLLLLzp.",
+          "..zLDLLDLLp.",
+          ".MLLLLLLLLp.",
+          "..LLMLLMLLp.",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "............",
+          "...pppppppp.",
+          "...ppppppppp",
+          "...zLLLLLLzp",
+          "...zLDLLDLLp",
+          "..MLLLLLLLLp",
+          "...LLMLLMLLp",
+          "....LLMMLL..",
+          ".....LLLM...",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "tuft",
+        hair: 8,
+        hat: 3,
+        skin: 2,
+        clothes: 3,
+        acc: "pencil",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "...2........",
+          "..2222223...",
+          "..22222223..",
+          "..3LLLLLL3Y.",
+          "..3LDLLDL3Z.",
+          ".MLLLLLLLLM.",
+          "..LL2222LL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "...2........",
+          "..2222223...",
+          "..22222223..",
+          "..3LLLLLL3Y.",
+          "..3LLLLLL3Z.",
+          ".MLLLLLLLLM.",
+          "..LL2222LL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "....2.......",
+          "..2222223...",
+          "..22222223..",
+          "..3LLLLLL3Y.",
+          "..3LDLLDL3Z.",
+          ".MLLLLLLLLM.",
+          "..LL2222LL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "....2.......",
+          "...2222223..",
+          "...22222223.",
+          "...3LLLLLL3Y",
+          "...3LDLLDL3Z",
+          "..MLLLLLLLLM",
+          "...LL2222LL.",
+          "....LLMMLL..",
+          ".....LLLM...",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "sidepart",
+        hair: 1,
+        hat: 2,
+        skin: 1,
+        clothes: 1,
+        acc: "earrings",
+        extra: "none"
+      },
+      frames: [
+        [
+          "............",
+          "...kkkkkk4..",
+          "..kkkkkkkk4.",
+          "..kkkgggg4..",
+          "..4gDggDg4..",
+          ".hggggggggh.",
+          ".FggghhgggF.",
+          "...gggggg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "............",
+          "...kkkkkk4..",
+          "..kkkkkkkk4.",
+          "..kkkgggg4..",
+          "..4gggggg4..",
+          ".hggggggggh.",
+          ".FggghhgggF.",
+          "...gggggg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "............",
+          "....kkkkkk4.",
+          "..kkkkkkkk4.",
+          "..kkkgggg4..",
+          "..4gDggDg4..",
+          ".hggggggggh.",
+          ".FggghhgggF.",
+          "...gggggg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "............",
+          "....kkkkkk4.",
+          "...kkkkkkkk4",
+          "...kkkgggg4.",
+          "...4gDggDg4.",
+          "..hggggggggh",
+          "..FggghhgggF",
+          "....gggggg..",
+          ".....gggh...",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bald",
+        hair: 8,
+        hat: 4,
+        skin: 0,
+        clothes: 0,
+        acc: "earrings",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "............",
+          "....CCCC....",
+          "...CCCCCC...",
+          "..CCCCCCCC..",
+          "..CCDCCDCC..",
+          ".ECCCCCCCCE.",
+          ".FCC2222CCF.",
+          "...CCEECC...",
+          "....CCCE....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "............",
+          "....CCCC....",
+          "...CCCCCC...",
+          "..CCCCCCCC..",
+          "..CCCCCCCC..",
+          ".ECCCCCCCCE.",
+          ".FCC2222CCF.",
+          "...CCEECC...",
+          "....CCCE....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "............",
+          ".....CCCC...",
+          "...CCCCCC...",
+          "..CCCCCCCC..",
+          "..CCDCCDCC..",
+          ".ECCCCCCCCE.",
+          ".FCC2222CCF.",
+          "...CCEECC...",
+          "....CCCE....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "............",
+          ".....CCCC...",
+          "....CCCCCC..",
+          "...CCCCCCCC.",
+          "...CCDCCDCC.",
+          "..ECCCCCCCCE",
+          "..FCC2222CCF",
+          "....CCEECC..",
+          ".....CCCE...",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "sidepart",
+        hair: 6,
+        hat: 3,
+        skin: 0,
+        clothes: 0,
+        acc: "earrings",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "............",
+          "...aaaaaab..",
+          "..aaaaaaaab.",
+          "..aaaCCCCb..",
+          "..bDCCCCDb..",
+          ".ECCCCCCCCE.",
+          ".FCCCEECCCF.",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "............",
+          "...aaaaaab..",
+          "..aaaaaaaab.",
+          "..aaaCCCCb..",
+          "..bCCCCCCb..",
+          ".ECCCCCCCCE.",
+          ".FCCCEECCCF.",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "............",
+          "....aaaaaab.",
+          "..aaaaaaaab.",
+          "..aaaCCCCb..",
+          "..bDCCCCDb..",
+          ".ECCCCCCCCE.",
+          ".FCCCEECCCF.",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "............",
+          "....aaaaaab.",
+          "...aaaaaaaab",
+          "...aaaCCCCb.",
+          "...bDCCCCDb.",
+          "..ECCCCCCCCE",
+          "..FCCCEECCCF",
+          "....CCCCCC..",
+          ".....CCCE...",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bald",
+        hair: 0,
+        hat: 2,
+        skin: 1,
+        clothes: 1,
+        acc: "feather",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "............",
+          ".ccdgggg....",
+          "...gggggg...",
+          "..gggggggg..",
+          "..ggDggDgg..",
+          ".hggggggggh.",
+          "..gghgghgg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "............",
+          ".ccdgggg....",
+          "...gggggg...",
+          "..gggggggg..",
+          "..gggggggg..",
+          ".hggggggggh.",
+          "..gghgghgg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "............",
+          "..ccdgggg...",
+          "...gggggg...",
+          "..gggggggg..",
+          "..ggDggDgg..",
+          ".hggggggggh.",
+          "..gghgghgg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "............",
+          "..ccdgggg...",
+          "....gggggg..",
+          "...gggggggg.",
+          "...ggDggDgg.",
+          "..hggggggggh",
+          "...gghgghgg.",
+          "....gghhgg..",
+          ".....gggh...",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "ponytail",
+        hair: 1,
+        hat: 0,
+        skin: 1,
+        clothes: 3,
+        acc: "none",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "............",
+          "..kkkkkkkk..",
+          "..kkkkkkkkk.",
+          "..4gggggg4k.",
+          "..4DggggDgk.",
+          ".hggggggggk.",
+          "..ggghhgggk.",
+          "...gggggg...",
+          "....gggh....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "............",
+          "..kkkkkkkk..",
+          "..kkkkkkkkk.",
+          "..4gggggg4k.",
+          "..4gggggggk.",
+          ".hggggggggk.",
+          "..ggghhgggk.",
+          "...gggggg...",
+          "....gggh....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "............",
+          "...kkkkkkkk.",
+          "..kkkkkkkkk.",
+          "..4gggggg4k.",
+          "..4DggggDgk.",
+          ".hggggggggk.",
+          "..ggghhgggk.",
+          "...gggggg...",
+          "....gggh....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "............",
+          "...kkkkkkkk.",
+          "...kkkkkkkkk",
+          "...4gggggg4k",
+          "...4DggggDgk",
+          "..hggggggggk",
+          "...ggghhgggk",
+          "....gggggg..",
+          ".....gggh...",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "tuft",
+        hair: 7,
+        hat: 2,
+        skin: 0,
+        clothes: 2,
+        acc: "none",
+        extra: "none"
+      },
+      frames: [
+        [
+          "...W........",
+          "..WWWWWWX...",
+          "..WWWWWWWX..",
+          "..XCCCCCCX..",
+          "..XCDCCDCX..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "...W........",
+          "..WWWWWWX...",
+          "..WWWWWWWX..",
+          "..XCCCCCCX..",
+          "..XCCCCCCX..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "....W.......",
+          "..WWWWWWX...",
+          "..WWWWWWWX..",
+          "..XCCCCCCX..",
+          "..XCDCCDCX..",
+          ".ECCCCCCCCE.",
+          "..CCCEECCC..",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "....W.......",
+          "...WWWWWWX..",
+          "...WWWWWWWX.",
+          "...XCCCCCCX.",
+          "...XCDCCDCX.",
+          "..ECCCCCCCCE",
+          "...CCCEECCC.",
+          "....CCCCCC..",
+          ".....CCCE...",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "cap",
+        hair: 5,
+        hat: 0,
+        skin: 1,
+        clothes: 4,
+        acc: "pencil",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "...00000....",
+          "..00000000..",
+          "..111111111.",
+          "..ggggggggY.",
+          "..gDggggDgZ.",
+          ".hggggggggh.",
+          "..ggghhggg..",
+          "...gggggg...",
+          "....gggh....",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ],
+        [
+          "...00000....",
+          "..00000000..",
+          "..111111111.",
+          "..ggggggggY.",
+          "..ggggggggZ.",
+          ".hggggggggh.",
+          "..ggghhggg..",
+          "...gggggg...",
+          "....gggh....",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ],
+        [
+          "....00000...",
+          "..00000000..",
+          "..111111111.",
+          "..ggggggggY.",
+          "..gDggggDgZ.",
+          ".hggggggggh.",
+          "..ggghhggg..",
+          "...gggggg...",
+          "....gggh....",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ],
+        [
+          "....00000...",
+          "...00000000.",
+          "...111111111",
+          "...ggggggggY",
+          "...gDggggDgZ",
+          "..hggggggggh",
+          "...ggghhggg.",
+          "....gggggg..",
+          ".....gggh...",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "ponytail",
+        hair: 2,
+        hat: 0,
+        skin: 0,
+        clothes: 5,
+        acc: "pencil",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "............",
+          "..pppppppp..",
+          "..ppppppppp.",
+          "..zCCCCCCzY.",
+          "..zDCCCCDCZ.",
+          ".ECCCCCCCCp.",
+          "..CCCEECCCp.",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "............",
+          "..pppppppp..",
+          "..ppppppppp.",
+          "..zCCCCCCzY.",
+          "..zCCCCCCCZ.",
+          ".ECCCCCCCCp.",
+          "..CCCEECCCp.",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "............",
+          "...pppppppp.",
+          "..ppppppppp.",
+          "..zCCCCCCzY.",
+          "..zDCCCCDCZ.",
+          ".ECCCCCCCCp.",
+          "..CCCEECCCp.",
+          "...CCCCCC...",
+          "....CCCE....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "............",
+          "...pppppppp.",
+          "...ppppppppp",
+          "...zCCCCCCzY",
+          "...zDCCCCDCZ",
+          "..ECCCCCCCCp",
+          "...CCCEECCCp",
+          "....CCCCCC..",
+          ".....CCCE...",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "sidepart",
+        hair: 7,
+        hat: 3,
+        skin: 2,
+        clothes: 3,
+        acc: "earrings",
+        extra: "none"
+      },
+      frames: [
+        [
+          "............",
+          "...WWWWWWX..",
+          "..WWWWWWWWX.",
+          "..WWWLLLLX..",
+          "..XLDLLDLX..",
+          ".MLLLLLLLLM.",
+          ".FLLLMMLLLF.",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "............",
+          "...WWWWWWX..",
+          "..WWWWWWWWX.",
+          "..WWWLLLLX..",
+          "..XLLLLLLX..",
+          ".MLLLLLLLLM.",
+          ".FLLLMMLLLF.",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "............",
+          "....WWWWWWX.",
+          "..WWWWWWWWX.",
+          "..WWWLLLLX..",
+          "..XLDLLDLX..",
+          ".MLLLLLLLLM.",
+          ".FLLLMMLLLF.",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "............",
+          "....WWWWWWX.",
+          "...WWWWWWWWX",
+          "...WWWLLLLX.",
+          "...XLDLLDLX.",
+          "..MLLLLLLLLM",
+          "..FLLLMMLLLF",
+          "....LLLLLL..",
+          ".....LLLM...",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "curly",
+        hair: 0,
+        hat: 2,
+        skin: 2,
+        clothes: 5,
+        acc: "earrings",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "...e.ee.....",
+          "..eeeeeeee..",
+          ".eeeeeeeeee.",
+          ".eeLLLLLLee.",
+          ".eLDLLLLDLe.",
+          ".MLLLLLLLLM.",
+          ".FLLLMMLLLF.",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "...e.ee.....",
+          "..eeeeeeee..",
+          ".eeeeeeeeee.",
+          ".eeLLLLLLee.",
+          ".eLLLLLLLLe.",
+          ".MLLLLLLLLM.",
+          ".FLLLMMLLLF.",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "....e.ee....",
+          "..eeeeeeee..",
+          ".eeeeeeeeee.",
+          ".eeLLLLLLee.",
+          ".eLDLLLLDLe.",
+          ".MLLLLLLLLM.",
+          ".FLLLMMLLLF.",
+          "...LLLLLL...",
+          "....LLLM....",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ],
+        [
+          "....e.ee....",
+          "...eeeeeeee.",
+          "..eeeeeeeeee",
+          "..eeLLLLLLee",
+          "..eLDLLLLDLe",
+          "..MLLLLLLLLM",
+          "..FLLLMMLLLF",
+          "....LLLLLL..",
+          ".....LLLM...",
+          ".STTUVVUTTS.",
+          "STTTUUVUTTTS",
+          "STTTTUVUTTTS"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "ponytail",
+        hair: 7,
+        hat: 4,
+        skin: 1,
+        clothes: 2,
+        acc: "feather",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "............",
+          "cdWWWWWWWW..",
+          "..WWWWWWWWW.",
+          "..XggggggXW.",
+          "..XgDggDggW.",
+          ".hggggggggW.",
+          "..gghgghggW.",
+          "...gghhgg...",
+          "....gggh....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "cdWWWWWWWW..",
+          "..WWWWWWWWW.",
+          "..XggggggXW.",
+          "..XgggggggW.",
+          ".hggggggggW.",
+          "..gghgghggW.",
+          "...gghhgg...",
+          "....gggh....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          "ccdWWWWWWWW.",
+          "..WWWWWWWWW.",
+          "..XggggggXW.",
+          "..XgDggDggW.",
+          ".hggggggggW.",
+          "..gghgghggW.",
+          "...gghhgg...",
+          "....gggh....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "............",
+          ".cdWWWWWWWW.",
+          "...WWWWWWWWW",
+          "...XggggggXW",
+          "...XgDggDggW",
+          "..hggggggggW",
+          "...gghgghggW",
+          "....gghhgg..",
+          ".....gggh...",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bun",
+        hair: 0,
+        hat: 2,
+        skin: 2,
+        clothes: 0,
+        acc: "none",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          ".....ee.....",
+          "..eeeeeeef..",
+          "..eeeeeeef..",
+          "..fLLLLLLf..",
+          "..LLDLLDLL..",
+          ".MLLLLLLLLM.",
+          "..LLeeeeLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          ".....ee.....",
+          "..eeeeeeef..",
+          "..eeeeeeef..",
+          "..fLLLLLLf..",
+          "..LLLLLLLL..",
+          ".MLLLLLLLLM.",
+          "..LLeeeeLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "......ee....",
+          "..eeeeeeef..",
+          "..eeeeeeef..",
+          "..fLLLLLLf..",
+          "..LLDLLDLL..",
+          ".MLLLLLLLLM.",
+          "..LLeeeeLL..",
+          "...LLMMLL...",
+          "....LLLM....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "......ee....",
+          "...eeeeeeef.",
+          "...eeeeeeef.",
+          "...fLLLLLLf.",
+          "...LLDLLDLL.",
+          "..MLLLLLLLLM",
+          "...LLeeeeLL.",
+          "....LLMMLL..",
+          ".....LLLM...",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "curly",
+        hair: 4,
+        hat: 1,
+        skin: 1,
+        clothes: 2,
+        acc: "none",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "...s.ss.....",
+          "..ssssssss..",
+          ".ssssssssss.",
+          ".ssggggggss.",
+          ".sggDggDggs.",
+          ".hggggggggh.",
+          "..gghgghgg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "...s.ss.....",
+          "..ssssssss..",
+          ".ssssssssss.",
+          ".ssggggggss.",
+          ".sggggggggs.",
+          ".hggggggggh.",
+          "..gghgghgg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "....s.ss....",
+          "..ssssssss..",
+          ".ssssssssss.",
+          ".ssggggggss.",
+          ".sggDggDggs.",
+          ".hggggggggh.",
+          "..gghgghgg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ],
+        [
+          "....s.ss....",
+          "...ssssssss.",
+          "..ssssssssss",
+          "..ssggggggss",
+          "..sggDggDggs",
+          "..hggggggggh",
+          "...gghgghgg.",
+          "....gghhgg..",
+          ".....gggh...",
+          ".NNOOPPOONN.",
+          "NNOOOOPOOONN",
+          "NNOOOOPOOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "long",
+        hair: 3,
+        hat: 4,
+        skin: 1,
+        clothes: 0,
+        acc: "feather",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "............",
+          "cdQQQQQQQR..",
+          "..QQQQQQQR..",
+          ".QQggggggQQ.",
+          ".QQgDggDgQQ.",
+          ".QQggggggQQ.",
+          ".QRgQQQQgRQ.",
+          ".QQgghhggQQ.",
+          ".QQ.gggh.QQ.",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "............",
+          "cdQQQQQQQR..",
+          "..QQQQQQQR..",
+          ".QQggggggQQ.",
+          ".QQggggggQQ.",
+          ".QQggggggQQ.",
+          ".QRgQQQQgRQ.",
+          ".QQgghhggQQ.",
+          ".QQ.gggh.QQ.",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "............",
+          "ccdQQQQQQQR.",
+          "..QQQQQQQR..",
+          ".QQggggggQQ.",
+          ".QQgDggDgQQ.",
+          ".QQggggggQQ.",
+          ".QRgQQQQgRQ.",
+          ".QQgghhggQQ.",
+          ".QQ.gggh.QQ.",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "............",
+          ".cdQQQQQQQR.",
+          "...QQQQQQQR.",
+          "..QQggggggQQ",
+          "..QQgDggDgQQ",
+          "..QQggggggQQ",
+          "..QRgQQQQgRQ",
+          "..QQgghhggQQ",
+          "..QQ.gggh.QQ",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "curly",
+        hair: 5,
+        hat: 2,
+        skin: 2,
+        clothes: 3,
+        acc: "feather",
+        extra: "beard"
+      },
+      frames: [
+        [
+          "ccdJ.JJ.....",
+          "..JJJJJJJJ..",
+          ".JJJJJJJJJJ.",
+          ".JJLLLLLLJJ.",
+          ".JLLDLLDLLJ.",
+          ".MLLLLLLLLM.",
+          "..JJLMMLJJ..",
+          "...JJJJJJ...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          "ccdJ.JJ.....",
+          "..JJJJJJJJ..",
+          ".JJJJJJJJJJ.",
+          ".JJLLLLLLJJ.",
+          ".JLLLLLLLLJ.",
+          ".MLLLLLLLLM.",
+          "..JJLMMLJJ..",
+          "...JJJJJJ...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          ".ccdJ.JJ....",
+          "..JJJJJJJJ..",
+          ".JJJJJJJJJJ.",
+          ".JJLLLLLLJJ.",
+          ".JLLDLLDLLJ.",
+          ".MLLLLLLLLM.",
+          "..JJLMMLJJ..",
+          "...JJJJJJ...",
+          "....LLLM....",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ],
+        [
+          ".ccdJ.JJ....",
+          "...JJJJJJJJ.",
+          "..JJJJJJJJJJ",
+          "..JJLLLLLLJJ",
+          "..JLLDLLDLLJ",
+          "..MLLLLLLLLM",
+          "...JJLMMLJJ.",
+          "....JJJJJJ..",
+          ".....LLLM...",
+          ".GGHIIIIHGG.",
+          "GGHHHIIHHHGG",
+          "GGHHHHIHHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bob",
+        hair: 1,
+        hat: 1,
+        skin: 1,
+        clothes: 1,
+        acc: "pencil",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "............",
+          "..kkkkkkk4..",
+          ".kkkkkkkkkk.",
+          ".kkggggggkY.",
+          ".kkgDggDgkZ.",
+          ".kkggggggkk.",
+          ".k4ghgghg4k.",
+          "...gghhgg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "............",
+          "..kkkkkkk4..",
+          ".kkkkkkkkkk.",
+          ".kkggggggkY.",
+          ".kkggggggkZ.",
+          ".kkggggggkk.",
+          ".k4ghgghg4k.",
+          "...gghhgg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "............",
+          "...kkkkkkk4.",
+          ".kkkkkkkkkk.",
+          ".kkggggggkY.",
+          ".kkgDggDgkZ.",
+          ".kkggggggkk.",
+          ".k4ghgghg4k.",
+          "...gghhgg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "............",
+          "...kkkkkkk4.",
+          "..kkkkkkkkkk",
+          "..kkggggggkY",
+          "..kkgDggDgkZ",
+          "..kkggggggkk",
+          "..k4ghgghg4k",
+          "....gghhgg..",
+          ".....gggh...",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "spikes",
+        hair: 3,
+        hat: 0,
+        skin: 0,
+        clothes: 4,
+        acc: "pencil",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "..Q..Q.Q....",
+          "..QQQQQQQR..",
+          "..QQQQQQQR..",
+          "..RCCCCCCRY.",
+          "..CCDCCDCCZ.",
+          ".ECCCCCCCCE.",
+          "..CCQQQQCC..",
+          "...CCEECC...",
+          "....CCCE....",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ],
+        [
+          "..Q..Q.Q....",
+          "..QQQQQQQR..",
+          "..QQQQQQQR..",
+          "..RCCCCCCRY.",
+          "..CCCCCCCCZ.",
+          ".ECCCCCCCCE.",
+          "..CCQQQQCC..",
+          "...CCEECC...",
+          "....CCCE....",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ],
+        [
+          "...Q..Q.Q...",
+          "..QQQQQQQR..",
+          "..QQQQQQQR..",
+          "..RCCCCCCRY.",
+          "..CCDCCDCCZ.",
+          ".ECCCCCCCCE.",
+          "..CCQQQQCC..",
+          "...CCEECC...",
+          "....CCCE....",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ],
+        [
+          "...Q..Q.Q...",
+          "...QQQQQQQR.",
+          "...QQQQQQQR.",
+          "...RCCCCCCRY",
+          "...CCDCCDCCZ",
+          "..ECCCCCCCCE",
+          "...CCQQQQCC.",
+          "....CCEECC..",
+          ".....CCCE...",
+          ".tuuUUUUuut.",
+          "ttuuuUUuuutt",
+          "ttuuuuUuuutt"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "hat",
+        hair: 3,
+        hat: 0,
+        skin: 1,
+        clothes: 1,
+        acc: "none",
+        extra: "none"
+      },
+      frames: [
+        [
+          "....0000....",
+          "...000000...",
+          ".1111111111.",
+          "..gggggggg..",
+          "..ggDggDgg..",
+          ".hggggggggh.",
+          "..ggghhggg..",
+          "...gggggg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          "....0000....",
+          "...000000...",
+          ".1111111111.",
+          "..gggggggg..",
+          "..gggggggg..",
+          ".hggggggggh.",
+          "..ggghhggg..",
+          "...gggggg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          ".....0000...",
+          "...000000...",
+          ".1111111111.",
+          "..gggggggg..",
+          "..ggDggDgg..",
+          ".hggggggggh.",
+          "..ggghhggg..",
+          "...gggggg...",
+          "....gggh....",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ],
+        [
+          ".....0000...",
+          "....000000..",
+          "..1111111111",
+          "...gggggggg.",
+          "...ggDggDgg.",
+          "..hggggggggh",
+          "...ggghhggg.",
+          "....gggggg..",
+          ".....gggh...",
+          ".iiUUjjUUii.",
+          "iiUUUUjUUUii",
+          "iiUUUUjUUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "spikes",
+        hair: 7,
+        hat: 3,
+        skin: 1,
+        clothes: 0,
+        acc: "feather",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "cdW..W.W....",
+          "..WWWWWWWX..",
+          "..WWWWWWWX..",
+          "..XggggggX..",
+          "..ggDggDgg..",
+          ".hggggggggh.",
+          "..gghgghgg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "cdW..W.W....",
+          "..WWWWWWWX..",
+          "..WWWWWWWX..",
+          "..XggggggX..",
+          "..gggggggg..",
+          ".hggggggggh.",
+          "..gghgghgg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          "ccdW..W.W...",
+          "..WWWWWWWX..",
+          "..WWWWWWWX..",
+          "..XggggggX..",
+          "..ggDggDgg..",
+          ".hggggggggh.",
+          "..gghgghgg..",
+          "...gghhgg...",
+          "....gggh....",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ],
+        [
+          ".cdW..W.W...",
+          "...WWWWWWWX.",
+          "...WWWWWWWX.",
+          "...XggggggX.",
+          "...ggDggDgg.",
+          "..hggggggggh",
+          "...gghgghgg.",
+          "....gghhgg..",
+          ".....gggh...",
+          ".vvwwxxwwvv.",
+          "vvwwwwxwwwvv",
+          "vvwwwwxwwwvv"
+        ]
+      ]
+    }
+  ]
+};
+
+// packages/tui/dist/avatars/sprite.js
+var POOL_SIZE = pool_default.avatars.length;
+var SPRITE_ROWS = 6;
+var SPRITE_COLS = 12;
+var FRAME_COUNT = 4;
+var palette = pool_default.palette;
+function colourAt(rows, r, c) {
+  const ch = rows[r]?.[c];
+  return ch === void 0 || ch === "." ? void 0 : palette[ch];
+}
+function cells(avatarIndex, frame) {
+  const av = pool_default.avatars[(avatarIndex % POOL_SIZE + POOL_SIZE) % POOL_SIZE];
+  const rows = av.frames[(frame % FRAME_COUNT + FRAME_COUNT) % FRAME_COUNT];
+  const out = [];
+  for (let r = 0; r < SPRITE_ROWS; r++) {
+    const line = [];
+    for (let c = 0; c < SPRITE_COLS; c++) {
+      const top = colourAt(rows, r * 2, c);
+      const bottom = colourAt(rows, r * 2 + 1, c);
+      if (top && bottom)
+        line.push({ ch: "\u2580", fg: top, bg: bottom });
+      else if (top)
+        line.push({ ch: "\u2580", fg: top });
+      else if (bottom)
+        line.push({ ch: "\u2584", fg: bottom });
+      else
+        line.push({ ch: " " });
+    }
+    out.push(line);
+  }
+  return out;
+}
+var SEQUENCE = [0, 0, 1, 0, 2, 0, 3, 0];
+function phaseFor(avatarIndex) {
+  return (avatarIndex * 3 % SEQUENCE.length + SEQUENCE.length) % SEQUENCE.length;
+}
+function frameAt(tick, phase, running) {
+  if (!running)
+    return 0;
+  const n = SEQUENCE.length;
+  return SEQUENCE[((Math.trunc(tick) + Math.trunc(phase)) % n + n) % n];
+}
+
+// packages/tui/dist/subagents.js
+var DONE_LINGER_MS = 5 * 6e4;
+function roundOf(e) {
+  return typeof e.round === "number" ? e.round : 1;
+}
+function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
+  const reg = readRegister(projectRoot);
+  if (reg.availability !== "ok")
+    return { availability: reg.availability, rows: [] };
+  const byAgent = /* @__PURE__ */ new Map();
+  for (const e of reg.entries) {
+    const list = byAgent.get(e.agent_id) ?? [];
+    list.push(e);
+    byAgent.set(e.agent_id, list);
+  }
+  const rows = [];
+  for (const [agentId, rounds] of byAgent) {
+    rounds.sort((a, b) => roundOf(b) - roundOf(a) || Date.parse(b.at) - Date.parse(a.at));
+    const latest = rounds[0];
+    const startedAt = Date.parse(latest.at);
+    if (Number.isNaN(startedAt))
+      continue;
+    const endedAt = latest.ended ? Date.parse(latest.ended.at) : null;
+    if (endedAt !== null && (Number.isNaN(endedAt) || now - endedAt > lingerMs))
+      continue;
+    const withId = rounds.find((r) => typeof r.tool_use_id === "string" && r.tool_use_id !== "");
+    rows.push({
+      agentId,
+      sessionId: latest.session_id,
+      agentType: typeof latest.agent_type === "string" && latest.agent_type ? latest.agent_type : null,
+      status: endedAt === null ? "running" : "done",
+      startedAt,
+      endedAt,
+      elapsedMs: Math.max(0, (endedAt ?? now) - startedAt),
+      toolUseId: withId?.tool_use_id ?? null
+    });
+  }
+  rows.sort((a, b) => {
+    if (a.status !== b.status)
+      return a.status === "running" ? -1 : 1;
+    return a.status === "running" ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0);
+  });
+  return { availability: "ok", rows };
+}
+function readDispatchDescription(projectRoot, toolUseId) {
+  const dir = dispatchStateDir(projectRoot);
+  const key = dispatchStateKey(toolUseId);
+  let file = join8(dir, `live-${key}.json`);
+  try {
+    if (!existsSync8(file)) {
+      const done = readdirSync6(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
+      if (!done)
+        return null;
+      file = join8(dir, done);
+    }
+    const rec = JSON.parse(readFileSync8(file, "utf8"));
+    return rec.tool_use_id === toolUseId && typeof rec.description === "string" && rec.description ? rec.description : null;
+  } catch {
+    return null;
+  }
+}
+function readAgentModel(projectRoot, type) {
+  try {
+    const content = readFileSync8(join8(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
+    const model = content.match(/^---\n([\s\S]*?)\n---\n/)?.[1]?.match(/^model:\s*(\S+)/m)?.[1];
+    if (model)
+      return model;
+  } catch {
+  }
+  const key = AGENT_MODEL_KEY[type];
+  if (!key)
+    return null;
+  try {
+    const raw = JSON.parse(readFileSync8(join8(projectRoot, ".sterling", "config.json"), "utf8"));
+    const model = raw.models?.[key]?.model;
+    return typeof model === "string" && model ? model : null;
+  } catch {
+    return null;
+  }
+}
+function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir = defaultClaudeConfigDir()) {
+  const projects = join8(claudeConfigDir, "projects");
+  const slug = projectRoot.replace(/[^A-Za-z0-9]/g, "-");
+  const sessionUnder = (dir2) => existsSync8(join8(projects, dir2, sessionId));
+  let dir = sessionUnder(slug) ? slug : void 0;
+  if (!dir) {
+    let all;
+    try {
+      all = readdirSync6(projects);
+    } catch {
+      return null;
+    }
+    dir = all.find((d) => d !== slug && sessionUnder(d));
+  }
+  return dir ? deriveAgentTranscript(join8(projects, dir, `${sessionId}.jsonl`), agentId) : null;
+}
+function defaultClaudeConfigDir() {
+  return process.env.CLAUDE_CONFIG_DIR || join8(homedir3(), ".claude");
+}
+function readContextUsage(path) {
+  try {
+    const { usage, model } = latestUsage(path);
+    if (!usage)
+      return null;
+    return { tokens: Math.round(fillPct(usage, 100)), model: typeof model === "string" && model ? model : null };
+  } catch {
+    return null;
+  }
+}
+function contextWindowFor(model, project, shared) {
+  const base2 = model.replace(/\[[^\]]*\]$/, "");
+  return project[model] ?? project[base2] ?? shared?.[model] ?? shared?.[base2] ?? project.default ?? shared?.default ?? null;
+}
+function contextPercent(tokens, window2) {
+  const pct = 100 * tokens / window2;
+  return pct > 100 ? null : Math.round(pct);
+}
+function readSharedWindows() {
+  try {
+    const raw = JSON.parse(readFileSync8(join8(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
+    return parseConfig({ context_watch: { windows: raw.windows } }).context_watch.windows;
+  } catch {
+    return null;
+  }
+}
+function readProjectWindows(projectRoot) {
+  try {
+    const raw = JSON.parse(readFileSync8(join8(projectRoot, ".sterling", "config.json"), "utf8"));
+    return parseConfig(raw).context_watch.windows;
+  } catch {
+    return {};
+  }
+}
+function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs = 1e3, lingerMs = DONE_LINGER_MS, claudeConfigDir = defaultClaudeConfigDir() } = {}) {
+  let avatars = { current: /* @__PURE__ */ new Map(), freed: [] };
+  const descriptions = /* @__PURE__ */ new Map();
+  let lastRead = -Infinity;
+  let source = { availability: "absent", rows: [] };
+  let models = /* @__PURE__ */ new Map();
+  const sharedWindows = readSharedWindows();
+  const transcripts = /* @__PURE__ */ new Map();
+  const usage = /* @__PURE__ */ new Map();
+  let context = /* @__PURE__ */ new Map();
+  function contextOf(r, windows) {
+    let path = transcripts.get(r.agentId);
+    if (!path) {
+      path = subagentTranscriptPath(projectRoot, r.sessionId, r.agentId, claudeConfigDir) ?? void 0;
+      if (path)
+        transcripts.set(r.agentId, path);
+    }
+    if (!path)
+      return { model: null, pct: null };
+    let stamp;
+    try {
+      const st = statSync5(path);
+      stamp = `${st.size}:${st.mtimeMs}`;
+    } catch {
+      return { model: null, pct: null };
+    }
+    let cached = usage.get(r.agentId);
+    if (cached?.stamp !== stamp) {
+      cached = { stamp, value: readContextUsage(path) };
+      usage.set(r.agentId, cached);
+    }
+    const u = cached.value;
+    if (!u)
+      return { model: null, pct: null };
+    const model = u.model ?? (r.agentType ? models.get(r.agentType) ?? null : null);
+    const window2 = model ? contextWindowFor(model, windows, sharedWindows) : null;
+    return { model: u.model, pct: window2 ? contextPercent(u.tokens, window2) : null };
+  }
+  function refresh(now) {
+    lastRead = now;
+    source = readSubagents(projectRoot, now, lingerMs);
+    if (source.availability === "corrupt")
+      return;
+    avatars = assign(source.rows.map((r) => r.agentId), avatars.current, rng, { poolSize: POOL_SIZE, freed: avatars.freed });
+    models = /* @__PURE__ */ new Map();
+    for (const r of source.rows) {
+      if (r.toolUseId && !descriptions.has(r.toolUseId))
+        descriptions.set(r.toolUseId, readDispatchDescription(projectRoot, r.toolUseId));
+      if (r.agentType && !models.has(r.agentType))
+        models.set(r.agentType, readAgentModel(projectRoot, r.agentType));
+    }
+    const windows = source.rows.length ? readProjectWindows(projectRoot) : {};
+    context = new Map(source.rows.map((r) => [r.agentId, contextOf(r, windows)]));
+  }
+  return {
+    view(now) {
+      if (now - lastRead >= readIntervalMs)
+        refresh(now);
+      const agents = source.rows.map((r) => ({
+        agentId: r.agentId,
+        avatar: avatars.current.get(r.agentId) ?? 0,
+        type: r.agentType ?? "agent",
+        description: r.toolUseId ? descriptions.get(r.toolUseId) ?? null : null,
+        model: context.get(r.agentId)?.model ?? (r.agentType ? models.get(r.agentType) ?? null : null),
+        status: r.status,
+        elapsedMs: r.status === "running" ? Math.max(0, now - r.startedAt) : r.elapsedMs,
+        contextPct: context.get(r.agentId)?.pct ?? null
+      }));
+      return { availability: source.availability, active: agents.filter((a) => a.status === "running").length, agents };
+    }
+  };
+}
+function formatElapsed(ms) {
+  const s2 = Math.max(0, Math.floor(ms / 1e3));
+  if (s2 < 60)
+    return `${s2}s`;
+  const m = Math.floor(s2 / 60);
+  if (m < 60)
+    return `${m}m${String(s2 % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
+var FRAME_W = SPRITE_COLS + 2;
+var TILE_H = SPRITE_ROWS + 2;
+var TEXT_GAP = 1;
+var TEXT_MAX = 36;
+var TEXT_MIN = 8;
+var TILE_GAP = 2;
+var HEAD_ROWS = 2;
+function clip(text, width) {
+  const chars = [...text];
+  if (chars.length <= width)
+    return text;
+  return width <= 1 ? chars.slice(0, width).join("") : chars.slice(0, width - 1).join("") + "\u2026";
+}
+function composeSubagentBlock(view, width, maxHeight, tick) {
+  const empty = { height: 0, puts: [], pixels: [] };
+  if (maxHeight < HEAD_ROWS || width < 1)
+    return empty;
+  if (view.availability === "corrupt") {
+    return { height: HEAD_ROWS, puts: [{ x: 0, y: 1, attr: { dim: true }, text: clip("Sub-agents: unknown \u2014 the dispatch register could not be read", width) }], pixels: [] };
+  }
+  if (view.agents.length === 0)
+    return empty;
+  const textW = Math.min(TEXT_MAX, width - FRAME_W - TEXT_GAP);
+  const fitsTile = textW >= TEXT_MIN;
+  const tileW = FRAME_W + TEXT_GAP + textW;
+  const perRow = fitsTile ? Math.max(1, Math.floor((width + TILE_GAP) / (tileW + TILE_GAP))) : 0;
+  const tileRows = fitsTile ? Math.min(Math.ceil(view.agents.length / perRow), Math.floor((maxHeight - HEAD_ROWS) / TILE_H)) : 0;
+  const shown = Math.min(view.agents.length, tileRows * perRow);
+  const hidden = view.agents.length - shown;
+  const puts = [];
+  const pixels = [];
+  const header = `Sub-agents (${view.active} active)` + (hidden > 0 ? ` \xB7 ${hidden} more not shown` : "");
+  puts.push({ x: 0, y: 1, attr: { bold: true }, text: clip(header, width) });
+  for (let i = 0; i < shown; i++) {
+    const a = view.agents[i];
+    const x0 = i % perRow * (tileW + TILE_GAP);
+    const y0 = HEAD_ROWS + Math.floor(i / perRow) * TILE_H;
+    const frame = { dim: true };
+    puts.push({ x: x0, y: y0, attr: frame, text: "\u250C" + "\u2500".repeat(SPRITE_COLS) + "\u2510" });
+    for (let r = 1; r <= SPRITE_ROWS; r++) {
+      puts.push({ x: x0, y: y0 + r, attr: frame, text: "\u2502" });
+      puts.push({ x: x0 + FRAME_W - 1, y: y0 + r, attr: frame, text: "\u2502" });
+    }
+    puts.push({ x: x0, y: y0 + TILE_H - 1, attr: frame, text: "\u2514" + "\u2500".repeat(SPRITE_COLS) + "\u2518" });
+    const grid = cells(a.avatar, frameAt(tick, phaseFor(a.avatar), a.status === "running"));
+    grid.forEach((line, r) => line.forEach((cell, c) => {
+      const px = { x: x0 + 1 + c, y: y0 + 1 + r, ch: cell.ch };
+      if (cell.fg !== void 0)
+        px.fg = cell.fg;
+      if (cell.bg !== void 0)
+        px.bg = cell.bg;
+      pixels.push(px);
+    }));
+    const tx = x0 + FRAME_W + TEXT_GAP;
+    puts.push({ x: tx, y: y0 + 1, attr: { bold: true }, text: clip(a.type, textW) });
+    if (a.description)
+      puts.push({ x: tx, y: y0 + 2, attr: {}, text: clip(a.description, textW) });
+    puts.push({ x: tx, y: y0 + 3, attr: { dim: true }, text: clip(a.model ?? "model unknown", textW) });
+    const status = `${a.status} \xB7 ${a.contextPct === null ? "?" : `${a.contextPct}%`} ctx`;
+    const timed = `${status} \xB7 ${formatElapsed(a.elapsedMs)}`;
+    puts.push({ x: tx, y: y0 + 4, attr: a.status === "running" ? { color: "green" } : { dim: true }, text: clip([...timed].length <= textW ? timed : status, textW) });
+  }
+  return { height: HEAD_ROWS + tileRows * TILE_H, puts, pixels };
+}
+
 // packages/tui/dist/lock.js
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync7, rmSync, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname5 } from "node:path";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync9, rmSync as rmSync2, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname6 } from "node:path";
 function pidIsAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0)
     return false;
@@ -48980,7 +52907,7 @@ function pidIsAlive(pid) {
 }
 function procStartTime(pid) {
   try {
-    const stat = readFileSync7(`/proc/${pid}/stat`, "utf8");
+    const stat = readFileSync9(`/proc/${pid}/stat`, "utf8");
     const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
     return fields[19] ?? null;
   } catch {
@@ -48993,12 +52920,12 @@ function ownerStillHolds(storedToken, currentToken) {
   return storedToken === currentToken;
 }
 function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = procStartTime) {
-  mkdirSync6(dirname5(lockPath2), { recursive: true });
+  mkdirSync7(dirname6(lockPath2), { recursive: true });
   const token = startTimeOf(pid);
   const content = token ? `${pid} ${token}` : String(pid);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      writeFileSync5(lockPath2, content, { flag: "wx" });
+      writeFileSync6(lockPath2, content, { flag: "wx" });
       return null;
     } catch (e) {
       if (e.code !== "EEXIST")
@@ -49006,7 +52933,7 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
     }
     let parts;
     try {
-      parts = readFileSync7(lockPath2, "utf8").trim().split(/\s+/);
+      parts = readFileSync9(lockPath2, "utf8").trim().split(/\s+/);
     } catch {
       continue;
     }
@@ -49017,19 +52944,19 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
     if (isAlive(owner2) && ownerStillHolds(parts[1], startTimeOf(owner2)))
       return owner2;
     try {
-      const cur = readFileSync7(lockPath2, "utf8").trim().split(/\s+/)[0];
+      const cur = readFileSync9(lockPath2, "utf8").trim().split(/\s+/)[0];
       if (cur === ownerRaw)
-        rmSync(lockPath2, { force: true });
+        rmSync2(lockPath2, { force: true });
     } catch {
     }
   }
   try {
-    const owner2 = Number(readFileSync7(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    const owner2 = Number(readFileSync9(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 !== pid && isAlive(owner2))
       return owner2;
   } catch {
     try {
-      writeFileSync5(lockPath2, content, { flag: "wx" });
+      writeFileSync6(lockPath2, content, { flag: "wx" });
     } catch {
     }
   }
@@ -49037,9 +52964,9 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
 }
 function releaseTuiLock(lockPath2, pid) {
   try {
-    const owner2 = Number(readFileSync7(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    const owner2 = Number(readFileSync9(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 === pid)
-      rmSync(lockPath2, { force: true });
+      rmSync2(lockPath2, { force: true });
   } catch {
   }
 }
@@ -49063,7 +52990,7 @@ if (smoke) {
   console.error(`sterling-tui smoke: terminal stack loaded (${term.width}x${term.height})`);
   process.exit(0);
 }
-var lockPath = join7(dirname6(storePath), "transient", "tui.lock");
+var lockPath = join9(dirname7(storePath), "transient", "tui.lock");
 var owner = acquireTuiLock(lockPath, process.pid);
 if (owner !== null) {
   console.error(`sterling-tui: already running (pid ${owner}) for this store \u2014 exiting politely (\xA711)`);
@@ -49072,12 +52999,59 @@ if (owner !== null) {
 var ctl = openDashboard(storePath);
 var showBanner = process.env.STERLING_NO_BANNER !== "1";
 var screen = new termkit.default.ScreenBuffer({ dst: term });
+var subagents = createSubagentTracker(dirname7(dirname7(storePath)));
+var shownView = { availability: "absent", active: 0, agents: [] };
+var MIN_BODY_LINES = 8;
+var ANIMATION_MS = 333;
+function fullBodyLines() {
+  return visibleBodyLines(term.height, bannerLines(term.width, showBanner).length);
+}
+function subagentBlock(tick) {
+  if (ctl.ui().tab !== TASKS_TAB)
+    return { height: 0, puts: [], pixels: [] };
+  return composeSubagentBlock(shownView, term.width, fullBodyLines() - MIN_BODY_LINES, tick);
+}
 function viewport() {
-  const bannerHeight = bannerLines(term.width, showBanner).length;
-  return { width: term.width, maxBodyLines: visibleBodyLines(term.height, bannerHeight), showBanner };
+  return { width: term.width, maxBodyLines: Math.max(0, fullBodyLines() - subagentBlock(0).height), showBanner };
+}
+var painted;
+var pixelLayout = "";
+var forceFull = true;
+var animation;
+var trueColor = /^(truecolor|24bits?)$/.test(process.env.COLORTERM ?? "") || process.env.TERM_PROGRAM === "tmux" || term.support?.trueColor === true;
+function layoutKey(block) {
+  return `${term.width}x${term.height}|` + block.pixels.map((p) => `${p.x},${p.y}`).join(";");
+}
+function screenPixels(block) {
+  const top = blockTop(term.height, block);
+  return block.pixels.map((p) => ({ ...p, y: p.y + top }));
+}
+function animate() {
+  const block = subagentBlock(Math.floor(Date.now() / ANIMATION_MS));
+  if (layoutKey(block) !== pixelLayout)
+    return;
+  painted = paintPixels(term, screenPixels(block), painted, trueColor);
 }
 function redraw() {
-  draw(screen, ctl.state(viewport()));
+  const now = Date.now();
+  shownView = subagents.view(now);
+  const block = subagentBlock(Math.floor(now / ANIMATION_MS));
+  const key = layoutKey(block);
+  const full = forceFull || key !== pixelLayout;
+  pixelLayout = key;
+  forceFull = false;
+  const pixels = screenPixels(block);
+  if (full && painted)
+    clearPixels(term, painted, pixels);
+  draw(screen, ctl.state(viewport()), { block });
+  painted = paintPixels(term, pixels, full ? void 0 : painted, trueColor);
+  const running = shownView.active > 0 && block.pixels.length > 0;
+  if (running && !animation)
+    animation = setInterval(animate, ANIMATION_MS);
+  else if (!running && animation) {
+    clearInterval(animation);
+    animation = void 0;
+  }
 }
 async function handle(event2) {
   if (!event2)
@@ -49131,6 +53105,7 @@ term.on("key", (name) => void handle(keyToEvent(name)));
 term.on("mouse", (name, data) => void handle(mouseToEvent(name, data)));
 term.on("resize", () => {
   screen = new termkit.default.ScreenBuffer({ dst: term });
+  forceFull = true;
   redraw();
 });
 setInterval(redraw, 1e3);
