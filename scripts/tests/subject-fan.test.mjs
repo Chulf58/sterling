@@ -198,11 +198,72 @@ test('fan: every store is opened through the given opener, and close closes them
   }
 });
 
-test('fan: a malformed stack_tags fails loud instead of reading as no domains', () => {
+test('fan: a malformed stack_tags is a loud config error, never a silent "no domains"', () => {
+  // Was: openSubjectFan threw, which took the project store's delivery down with it
+  // (task-end review 2026-10-03). It now mounts the project store only and the
+  // error rides configError, which every caller prints through fanDegradedLine.
   const p = makeProject();
   try {
     writeFileSync(join(p.dir, '.sterling', 'config.json'), JSON.stringify({ stack_tags: 'node' }));
-    assert.throws(() => fanLib.openSubjectFan(p.dir));
+    const fan = fanLib.openSubjectFan(p.dir);
+    try {
+      assert.deepEqual(fan.domainNames, []);
+      assert.ok(fan.configError, 'the malformed field is recorded');
+      assert.match(fanLib.fanDegradedLine(fan, 'H20'), /^H20: DEGRADED subject fan: config\.json unreadable/);
+    } finally {
+      fan.close();
+    }
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('fan: a domain file that is not SQLite is dropped and listed unreadable; the project store still answers', () => {
+  const p = makeProject({ alpha: 'Alpha subject knowledge', junk: 'placeholder' });
+  try {
+    writeFileSync(p.domain_paths.junk, 'this is not a sqlite database, just text '.repeat(50));
+    for (const ext of ['-wal', '-shm']) rmSync(p.domain_paths.junk + ext, { force: true });
+    p.withStore('project', (s) => s.create(antiPattern('PROJECT breach countdown hazard')));
+    p.withStore('alpha', (s) => s.create(antiPattern('ALPHA breach countdown hazard', 'domain:alpha')));
+    const fan = fanLib.openSubjectFan(p.dir);
+    try {
+      assert.deepEqual(fan.domainNames, ['alpha']);
+      assert.deepEqual(fan.unreadableDomains.map((d) => [d.name, d.dbPath]), [['junk', p.domain_paths.junk]]);
+      assert.ok(fan.unreadableDomains[0].error, 'the error is recorded');
+      assert.deepEqual(fan.query({ rank_terms: terms }).map((r) => r.source_store).sort(), ['alpha', 'project']);
+      assert.match(fanLib.fanDegradedLine(fan, 'H23'), /domain 'junk' unreadable at .*junk/);
+    } finally {
+      fan.close();
+    }
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('fan: a domain whose query throws is dropped from the fan and reported; the project and other domains still answer', () => {
+  const p = makeProject({ alpha: 'Alpha subject knowledge', beta: 'Beta subject knowledge' });
+  try {
+    p.withStore('project', (s) => s.create(antiPattern('PROJECT breach countdown hazard')));
+    p.withStore('alpha', (s) => s.create(antiPattern('ALPHA breach countdown hazard', 'domain:alpha')));
+    const fan = fanLib.openSubjectFan(p.dir, {
+      opener: (dbPath) => {
+        const s = new SterlingStore(dbPath);
+        if (dbPath === p.domain_paths.beta) {
+          s.query = () => { throw new Error('database is locked'); };
+          s.inboundSupersedes = () => { throw new Error('database is locked'); };
+        }
+        return s;
+      },
+    });
+    try {
+      assert.deepEqual(fan.query({ rank_terms: terms }).map((r) => r.source_store).sort(), ['alpha', 'project']);
+      assert.deepEqual(fan.domainNames, ['alpha'], 'beta is dropped after its query threw');
+      assert.deepEqual(fan.unreadableDomains.map((d) => [d.name, d.error]), [['beta', 'database is locked']]);
+      assert.deepEqual(fan.inboundSupersedes(randomUUID()), [], 'later reads skip the dropped domain');
+      assert.equal(fan.unreadableDomains.length, 1, 'a dropped domain is reported once');
+    } finally {
+      fan.close();
+    }
   } finally {
     p.cleanup();
   }
@@ -276,6 +337,74 @@ test('H19 staging: the subject arm reads a mounted domain while the path arm sta
     assert.ok(staged, 'something is staged');
     assert.match(staged.text, /ALPHA subject staging hazard/, 'the subject arm reads the domain');
     assert.doesNotMatch(staged.text, /FOREIGN path staging hazard/, "a domain record's file_keys never drive path delivery");
+  } finally {
+    p.cleanup();
+  }
+});
+
+// ---- a degraded fan never takes the project store's delivery down -------------
+// Task-end review 2026-10-03: one bad domain file, or a truncated config.json, made
+// openSubjectFan throw, so H20/H23/H19 lost the PROJECT hazard too.
+
+const H20_INPUT = (dir) => ({ hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type: 'implementor', prompt: `Fix the breach alarm: ${MATCHING}` }, session_id: 's1', cwd: dir });
+
+function projectWithBadDomain() {
+  const p = makeProject({ junk: 'placeholder' });
+  writeFileSync(p.domain_paths.junk, 'this is not a sqlite database, just text '.repeat(50));
+  for (const ext of ['-wal', '-shm']) rmSync(p.domain_paths.junk + ext, { force: true });
+  p.withStore('project', (s) => s.create(antiPattern('PROJECT breach countdown hazard')));
+  return p;
+}
+
+test('H20: a configured domain file that is not SQLite still delivers the project hazard, with one stderr line', () => {
+  const p = projectWithBadDomain();
+  try {
+    const r = runHook('h20-mechanism-axis.mjs', H20_INPUT(p.dir), p.dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, /PROJECT breach countdown hazard/);
+    const lines = r.stderr.split('\n').filter((l) => l.includes('DEGRADED subject fan'));
+    assert.equal(lines.length, 1, r.stderr);
+    assert.match(lines[0], /^H20: DEGRADED subject fan: domain 'junk' unreadable at .*junk/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('H20: a truncated config.json still delivers the project hazard, with one stderr line naming the config error', () => {
+  const p = makeProject({ alpha: 'Alpha subject knowledge' });
+  try {
+    p.withStore('project', (s) => s.create(antiPattern('PROJECT breach countdown hazard')));
+    writeFileSync(join(p.dir, '.sterling', 'config.json'), '{"stack_tags": ["al');
+    const r = runHook('h20-mechanism-axis.mjs', H20_INPUT(p.dir), p.dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, /PROJECT breach countdown hazard/);
+    const lines = r.stderr.split('\n').filter((l) => l.includes('DEGRADED subject fan'));
+    assert.equal(lines.length, 1, r.stderr);
+    assert.match(lines[0], /^H20: DEGRADED subject fan: config\.json unreadable, no domains mounted \(/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('H23: a configured domain file that is not SQLite still points at the project hazard, with one stderr line', () => {
+  const p = projectWithBadDomain();
+  try {
+    const r = runHook('h23-output-axis.mjs', { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'node scripts/reactor.mjs' }, tool_response: { stdout: MATCHING }, session_id: 's1', cwd: p.dir }, p.dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, /PROJECT breach countdown hazard/);
+    assert.equal(r.stderr.split('\n').filter((l) => /^H23: DEGRADED subject fan: domain 'junk'/.test(l)).length, 1, r.stderr);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('H19 staging: a configured domain file that is not SQLite prints one stderr line and the hook exits 0', () => {
+  const p = projectWithBadDomain();
+  try {
+    const r = runHook('h19-dispatch-staging.mjs', { hook_event_name: 'SubagentStart', agent_id: 'a1', agent_type: 'implementor', session_id: 's1', cwd: p.dir }, p.dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stderr.split('\n').filter((l) => /^H19: DEGRADED subject fan: domain 'junk'/.test(l)).length, 1, r.stderr);
+    assert.doesNotMatch(r.stderr, /dispatch staging failed/, 'the fan degraded; staging itself did not fail');
   } finally {
     p.cleanup();
   }

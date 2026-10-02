@@ -35,7 +35,7 @@ import { agentRole } from './agent-name.mjs';
 import { isListingCommand } from '../../../scripts/hooks/lib/listing-command.mjs';
 import { guardPath, markDiscoveryDelivered, markSubstanceDelivered, outgoingProposalText, readGuard, writeGuard } from '../../../scripts/hooks/lib/delivery.mjs';
 import { appendToResult } from './delivery.mjs';
-import { openSubjectFan } from '../../../scripts/hooks/lib/subject-fan.mjs';
+import { openSubjectFan, warnFanDegraded } from '../../../scripts/hooks/lib/subject-fan.mjs';
 
 const CODEX_OPENERS = new Set(['codex_codex', 'codex.codex']);
 const CODEX_TOOL = /^codex[._]/;
@@ -150,6 +150,7 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced }) {
         }
       } finally {
         store.close();
+        warnFanDegraded(store, 'H20');
       }
     });
     if (!built) {
@@ -191,6 +192,7 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced }) {
         block = buildOutputAxis(store, root, { tool: input.tool, args: input.input ?? {}, content, sessionID: input.sessionID, directory: directory() });
       } finally {
         store.close();
+        warnFanDegraded(store, 'H23');
       }
       if (!block) return;
       appendToResult(input.result, block.text);

@@ -59,7 +59,7 @@
 // theirs — this hook's own contract requires exit 0 even there), a missing
 // tool_response, an unrecognised tool name, and any internal failure.
 import { readStdin, allow, repoRel, exitAfterWrite, warnNonBlocking } from './lib/common.mjs';
-import { openSubjectFan } from './lib/subject-fan.mjs';
+import { openSubjectFan, warnFanDegraded } from './lib/subject-fan.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { isListingCommand } from './lib/listing-command.mjs';
 import { guardPath, readGuard, writeGuard } from './lib/delivery.mjs';
@@ -88,7 +88,10 @@ try {
 
   // READ SEAM OWNERSHIP GATE — lib/axis-compose.mjs outputAxisReadGated, which
   // carries the rationale (H19 owns governed territory; .git and .sterling are excluded).
-  if (toolName === 'Read' && outputAxisReadGated(store, repoRel(input.tool_input?.file_path, input.cwd), input.cwd)) allow();
+  if (toolName === 'Read' && outputAxisReadGated(store, repoRel(input.tool_input?.file_path, input.cwd), input.cwd)) {
+    warnFanDegraded(store, 'H23');
+    allow();
+  }
 
   // Stringify an object-shaped tool_response (e.g. a structured Bash result)
   // before matching; a string tool_response is matched as-is.
@@ -98,6 +101,9 @@ try {
   // plugin): the three floors, the guard.output_axis dedup and the pointer block.
   const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
   const composed = composeOutputAxis(store, { content, guardFor: () => readGuard(gPath) });
+  // A domain or config.json the fan could not read is one loud stderr line; the
+  // project store's delivery is unaffected.
+  warnFanDegraded(store, 'H23');
   if (!composed) allow();
   const { text: payload, guard, seen, shown } = composed;
 

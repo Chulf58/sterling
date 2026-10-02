@@ -36,7 +36,7 @@
 // file's existing try/warnNonBlocking shape — the fold does not change h19's
 // own failure posture.
 import { readStdin, allow, warnNonBlocking, exitAfterWrite } from './lib/common.mjs';
-import { openSubjectFan } from './lib/subject-fan.mjs';
+import { openSubjectFan, warnFanDegraded } from './lib/subject-fan.mjs';
 import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
 // Path extraction, the path and subject channels, the delivery assembler, the plan
 // and TDD lines and the return contract all live in lib/stage-brief.mjs — one
@@ -151,6 +151,9 @@ async function main(input) {
         ...(!EXEMPT_AGENT_TYPES.has(input.agent_type) ? [RETURN_CONTRACT] : []),
       ],
     });
+    // A domain or config.json the fan could not read is one loud stderr line; the
+    // project store's staging above is unaffected.
+    warnFanDegraded(store, 'H19');
     if (!staged) return finish('');
     const out = staged.text;
 

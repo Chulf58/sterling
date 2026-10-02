@@ -56,7 +56,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, exitAfterWrite } from './lib/common.mjs';
-import { openSubjectFan } from './lib/subject-fan.mjs';
+import { openSubjectFan, warnFanDegraded } from './lib/subject-fan.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import {
   guardPath,
@@ -244,6 +244,9 @@ function main(input) {
       overlap: overlapNotice(),
       host: 'claude',
     });
+    // A domain or config.json the fan could not read is one loud stderr line; the
+    // project store's delivery above is unaffected.
+    warnFanDegraded(store, 'H20');
     if (!composed) return finish();
     const { assembled, guard } = composed;
     const pin = modelPin();

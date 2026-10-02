@@ -8,6 +8,9 @@
 //   store path, resolved by @sterling/store's resolveDomainMounts (the resolver the
 //   MCP server uses). A configured domain whose store does not exist is skipped and
 //   listed on missingDomains; no domain store is ever created here.
+// - A domain that cannot be opened or read is dropped and listed on
+//   unreadableDomains; a config.json that does not parse mounts the project store
+//   only and sets configError. The project store's delivery always survives.
 // - A query with no file_keys reads every open store at the full cap, and
 //   allocateShares decides how many of each store's own ranked list make the cap
 //   (project first). Scores are never compared across databases.
@@ -41,54 +44,93 @@ export function domainMountsFromConfig(config) {
 
 const tag = (records, source) => records.map((r) => ({ ...r, source_store: source }));
 
+const errorText = (e) => String((e && e.message) || e);
+
 /**
  * Open the subject fan for the project at `cwd`, or null when the project has no
  * store (not Sterling-initialized; nothing is created). `opener(dbPath)` opens one
- * store and defaults to `new SterlingStore(dbPath)`. Any open failure closes the
- * handles opened so far and throws.
+ * store and defaults to `new SterlingStore(dbPath)`.
+ *
+ * Failures are isolated per domain: the project store is the delivery, so a
+ * domain can never take it down. A domain that fails to open (not SQLite,
+ * pre-v2, locked) or whose query throws is dropped from the fan and listed on
+ * unreadableDomains as {name, dbPath, error}. A config.json that does not parse,
+ * or whose domain fields are malformed, mounts the project store only and sets
+ * configError. Neither is silent: the caller prints fanDegradedLine. Only a
+ * failure to open the PROJECT store throws.
  */
 export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
   const projectPath = join(cwd, '.sterling', 'sterling.db');
   if (!existsSync(projectPath)) return null;
-  const mounts = domainMountsFromConfig(loadConfig(cwd));
-  const project = opener(projectPath);
-  const domains = [];
-  const missingDomains = [];
+  let mounts = [];
+  let configError = null;
   try {
-    for (const m of mounts) {
-      if (!existsSync(m.dbPath)) {
-        missingDomains.push({ name: m.name, dbPath: m.dbPath });
-        continue;
-      }
-      domains.push({ name: m.name, store: opener(m.dbPath) });
-    }
+    mounts = domainMountsFromConfig(loadConfig(cwd));
   } catch (e) {
-    for (const d of domains) d.store.close();
-    project.close();
-    throw e;
+    configError = errorText(e);
   }
-  const sources = [{ name: 'project', store: project }, ...domains];
+  const project = opener(projectPath);
+  let domains = [];
+  const missingDomains = [];
+  const unreadableDomains = [];
+  const drop = (d, e) => {
+    unreadableDomains.push({ name: d.name, dbPath: d.dbPath, error: errorText(e) });
+    domains = domains.filter((x) => x !== d);
+    try {
+      d.store.close();
+    } catch {
+      /* the domain is already reported unreadable; a failed close adds nothing */
+    }
+  };
+  for (const m of mounts) {
+    if (!existsSync(m.dbPath)) {
+      missingDomains.push({ name: m.name, dbPath: m.dbPath });
+      continue;
+    }
+    try {
+      domains.push({ name: m.name, dbPath: m.dbPath, store: opener(m.dbPath) });
+    } catch (e) {
+      unreadableDomains.push({ name: m.name, dbPath: m.dbPath, error: errorText(e) });
+    }
+  }
+  /** Run fn on each domain store; a domain whose read throws is dropped and reported. */
+  const eachDomain = (fn) => {
+    const out = [];
+    for (const d of [...domains]) {
+      try {
+        out.push([d, fn(d.store)]);
+      } catch (e) {
+        drop(d, e);
+      }
+    }
+    return out;
+  };
 
   return {
     project,
-    domainNames: domains.map((d) => d.name),
+    get domainNames() {
+      return domains.map((d) => d.name);
+    },
     missingDomains,
+    unreadableDomains,
+    configError,
     query(opts = {}) {
       if (opts.file_keys !== undefined || !domains.length) return tag(project.query(opts), 'project');
       const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-      const perStore = sources.map((s) => s.store.query({ ...opts, cap }));
-      const shares = allocateShares(perStore.map((r) => r.length), cap);
-      return perStore.flatMap((records, i) => tag(records.slice(0, shares[i]), sources[i].name));
+      const perStore = [['project', project.query({ ...opts, cap })], ...eachDomain((s) => s.query({ ...opts, cap })).map(([d, r]) => [d.name, r])];
+      const shares = allocateShares(perStore.map(([, r]) => r.length), cap);
+      return perStore.flatMap(([name, records], i) => tag(records.slice(0, shares[i]), name));
     },
     /** Supersedes edges live with their SOURCE record, so every mount is read; first seen wins. */
     inboundSupersedes(id) {
       const seen = new Set();
       const out = [];
-      for (const s of sources) {
-        for (const r of s.store.inboundSupersedes(id)) {
+      const lists = [['project', project.inboundSupersedes(id)], ...eachDomain((s) => s.inboundSupersedes(id)).map(([d, r]) => [d.name, r])];
+      for (const [name, records] of lists) {
+        for (const r of records) {
           if (seen.has(r.id)) continue;
           seen.add(r.id);
-          out.push({ ...r, source_store: s.name });
+          out.push({ ...r, source_store: name });
         }
       }
       return out;
@@ -98,9 +140,9 @@ export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
     },
     close() {
       let first;
-      for (const s of sources) {
+      for (const s of [project, ...domains.map((d) => d.store)]) {
         try {
-          s.store.close();
+          s.close();
         } catch (e) {
           first ??= e;
         }
@@ -108,6 +150,31 @@ export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
       if (first) throw first;
     },
   };
+}
+
+/**
+ * The one loud line for a degraded fan, or null when nothing degraded: the
+ * config error, then every unreadable domain with its path and error. `who`
+ * names the hook. Delivery from the project store is unaffected.
+ */
+export function fanDegradedLine(fan, who) {
+  if (!fan) return null;
+  const parts = [];
+  if (fan.configError) parts.push(`config.json unreadable, no domains mounted (${fan.configError})`);
+  for (const d of fan.unreadableDomains) parts.push(`domain '${d.name}' unreadable at ${d.dbPath} (${d.error})`);
+  if (!parts.length) return null;
+  return `${who}: DEGRADED subject fan: ${parts.join('; ')}. Delivering from the project store only.`;
+}
+
+/** Print fanDegradedLine on stderr. A failed write must not change the delivery outcome. */
+export function warnFanDegraded(fan, who) {
+  const line = fanDegradedLine(fan, who);
+  if (!line) return;
+  try {
+    process.stderr.write(`${line}\n`);
+  } catch {
+    /* stderr is the only channel left; the delivery still goes out */
+  }
 }
 
 /**

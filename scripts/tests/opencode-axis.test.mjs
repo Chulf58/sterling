@@ -190,6 +190,32 @@ test('H20 and H23 read the mounted domains through the subject fan, with the plu
   }
 });
 
+test('a configured domain file that is not SQLite: H20 and H23 still deliver the project hazard, each with one stderr line', async () => {
+  // Task-end review 2026-10-03: a bad domain made openSubjectFan throw, so the project hazard was lost too.
+  const domainDb = join(tmpdir(), `sterling-oc-axis-junk-${randomUUID()}`, 'sterling.db');
+  const p = makeProject({ records: ['hazard'], config: { stack_tags: ['junk'], domain_paths: { junk: domainDb } } });
+  const writes = [];
+  const realWrite = process.stderr.write;
+  try {
+    mkdirSync(dirname(domainDb), { recursive: true });
+    writeFileSync(domainDb, 'this is not a sqlite database, just text '.repeat(50));
+    const { ctx, cleanup } = await setup(p.dir);
+    process.stderr.write = (chunk, ...rest) => (String(chunk).includes('DEGRADED subject fan') ? (writes.push(String(chunk)), true) : realWrite.call(process.stderr, chunk, ...rest));
+    const { after } = await call(ctx, { tool: 'subagent', input: { agent: 'sterling/implementor', description: 'fix', prompt: `Fix the breach alarm: ${MATCHING}` }, metadata: { sessionID: 'ses_child1', status: 'completed' } });
+    const read = await call(ctx, { tool: 'read', sessionID: 'ses_other', input: { path: join(p.dir, 'notes.txt') }, content: MATCHING });
+    process.stderr.write = realWrite;
+    assert.match(appended(after), /ALPHA breach countdown widget flywheel ballast klaxon failure/, 'H20 still delivers the project hazard');
+    assert.match(appended(read.after), /→ HAZARD anti_pattern 'ALPHA breach countdown/, 'H23 still points at the project hazard');
+    assert.equal(writes.filter((w) => /^H20: DEGRADED subject fan: domain 'junk'/.test(w)).length, 1, writes.join(''));
+    assert.equal(writes.filter((w) => /^H23: DEGRADED subject fan: domain 'junk'/.test(w)).length, 1, writes.join(''));
+    await cleanup?.();
+  } finally {
+    process.stderr.write = realWrite;
+    p.cleanup();
+    rmSync(dirname(domainDb), { recursive: true, force: true });
+  }
+});
+
 test('H20 on the question tool: a ruling match is a post-answer audit and never denies (Claude H20 removed its deny rung, h20-mechanism-axis.mjs:435-441)', async () => {
   const p = makeProject();
   try {
