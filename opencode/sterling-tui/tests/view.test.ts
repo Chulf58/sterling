@@ -6,8 +6,9 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { SterlingStore } from '@sterling/store';
 import { initialUi } from '@sterling/tui/dist/state.js';
+import { mulberry32, POOL_SIZE, SEQUENCE } from '@sterling/tui/dist/avatars/index.js';
 import * as view from '../view.ts';
-import { SIDEBAR_WIDTH, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, readSubagents, sidebarLines, subagentLines, type SidebarSummary, type SubagentSource } from '../view.ts';
+import { SIDEBAR_WIDTH, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, readSubagents, sidebarLines, bodyLinesFor, emptyAvatars, portraitLines, stepAvatars, subagentRowLines, subagentSpanLines, PORTRAIT_HEIGHT, PORTRAIT_WIDTH, type SpanLine, type SubagentRow, type SidebarSummary, type SubagentSource } from '../view.ts';
 
 const ID = '0123abcd-0000-4000-8000-000000000000';
 
@@ -167,17 +168,99 @@ test('subagents: the session model is used when no turn has a model yet; a blank
   assert.equal(rows[0].model, 'gpt-x');
 });
 
-test('subagent lines: heading counts the active ones, titles clip but ids never, all within the width', () => {
-  const long = 'A very long sub-agent title that cannot possibly fit in the sidebar column';
-  const rows = readSubagents(source({ sessions: [{ id: ROOT }, { id: kid(2), parentID: ROOT, title: long }] }));
-  const lines = subagentLines(rows, SIDEBAR_WIDTH);
-  assert.equal(lines[0], 'Sub-agents (1 active)');
-  const row = lines.find((l) => l.includes(`(${kid(2).slice(-8)})`));
-  assert.ok(row && /…/.test(row), lines.join('\n'));
-  assert.ok(lines.some((l) => /active · 25% ctx · big-pickle/.test(l)), lines.join('\n'));
-  assert.ok(lines.every((l) => l.length <= SIDEBAR_WIDTH), lines.join('\n'));
+// ---- animated portraits (board animated-avatars-for-each-subagent-in-sterling-s-opencode-2) ----
+
+const plain = (line: SpanLine) => line.map((sp) => sp.text).join('');
+const widthOf = (line: SpanLine) => [...plain(line)].length;
+const row = (over: Partial<SubagentRow> = {}): SubagentRow => ({ id: kid(2), title: 'review the diff', status: 'active', context: '25%', model: 'big-pickle', ...over });
+
+test('portrait: a framed 12x6 half-block sprite, border muted, transparent pixels carry no colour', () => {
+  const lines = portraitLines(5, 0);
+  assert.equal(lines.length, PORTRAIT_HEIGHT);
+  assert.ok(lines.every((l) => widthOf(l) === PORTRAIT_WIDTH), lines.map(plain).join('\n'));
+  assert.equal(plain(lines[0]!), '┌────────────┐');
+  assert.equal(plain(lines.at(-1)!), '└────────────┘');
+  const inner = lines.slice(1, -1).flat().filter((sp) => !sp.dim);
+  assert.ok(inner.some((sp) => sp.fg && sp.bg), 'a pixel pair with both halves set has fg and bg');
+  assert.ok(inner.every((sp) => /^[▀▄ ]+$/.test(sp.text)));
+  assert.ok(inner.some((sp) => !sp.fg && !sp.bg && /^ +$/.test(sp.text)), 'a fully transparent run leaves fg and bg unset');
+  assert.ok(inner.every((sp) => !sp.bg || sp.fg), 'a bg is only ever set together with an fg');
 });
 
-test('subagent lines: none says so in one line', () => {
-  assert.deepEqual(subagentLines([], SIDEBAR_WIDTH), ['Sub-agents (0 active)', 'no sub-agents']);
+test('subagent row: portrait left with title, status, context and model on its right, and no avatar number', () => {
+  const lines = subagentRowLines(row(), 7, 0, SIDEBAR_WIDTH);
+  assert.equal(lines.length, PORTRAIT_HEIGHT);
+  assert.ok(lines.every((l) => widthOf(l) <= SIDEBAR_WIDTH), lines.map(plain).join('\n'));
+  const text = lines.map(plain).join('\n');
+  assert.match(text, /review the diff/);
+  assert.match(text, /active · 25% ctx/);
+  assert.match(text, /big-pickle/);
+  const side = lines.filter((l) => widthOf(l) > PORTRAIT_WIDTH);
+  assert.equal(side.length, 3, 'three text lines beside the portrait');
+  assert.ok(!/#\d|avatar|\b7\b/.test(text), 'no avatar number anywhere');
+});
+
+test('subagent row: a long title and model clip to the text column', () => {
+  const lines = subagentRowLines(row({ title: 'A very long sub-agent title that cannot possibly fit', model: 'a-very-long-model-name-indeed' }), 7, 0, SIDEBAR_WIDTH);
+  assert.ok(lines.every((l) => widthOf(l) <= SIDEBAR_WIDTH), lines.map(plain).join('\n'));
+  assert.match(lines.map(plain).join('\n'), /…/);
+});
+
+test('subagent row: too narrow for portrait plus text puts the text under the portrait', () => {
+  const lines = subagentRowLines(row(), 7, 0, PORTRAIT_WIDTH + 4);
+  assert.equal(lines.length, PORTRAIT_HEIGHT + 3);
+  assert.ok(lines.slice(0, PORTRAIT_HEIGHT).every((l) => widthOf(l) === PORTRAIT_WIDTH));
+  assert.deepEqual(lines.slice(PORTRAIT_HEIGHT).map(plain).map((t) => t.length <= PORTRAIT_WIDTH + 4), [true, true, true]);
+  assert.match(lines.slice(PORTRAIT_HEIGHT).map(plain).join('\n'), /review/);
+});
+
+test('subagent row: animates only while active, idle is always frame 0', () => {
+  const frames = (status: SubagentRow['status']) => new Set(Array.from({ length: SEQUENCE.length }, (_, t) => subagentRowLines(row({ status }), 7, t, SIDEBAR_WIDTH).slice(0, PORTRAIT_HEIGHT).map(plain).join('\n')));
+  assert.equal(frames('idle').size, 1);
+  assert.ok(frames('active').size > 1, 'a running portrait changes frame over time');
+  const rest = subagentRowLines(row({ status: 'idle' }), 7, 0, SIDEBAR_WIDTH).map(plain).join('\n');
+  assert.equal(subagentRowLines(row({ status: 'idle' }), 7, 5, SIDEBAR_WIDTH).map(plain).join('\n'), rest);
+});
+
+test('subagent block: heading counts active ones, one portrait row each, none says so', () => {
+  const rows = readSubagents(source());
+  const lines = subagentSpanLines(rows, new Map(rows.map((r, i) => [r.id, i])), 0, SIDEBAR_WIDTH);
+  assert.equal(plain(lines[0]!), 'Sub-agents (1 active)');
+  assert.equal(lines.length, 1 + rows.length * PORTRAIT_HEIGHT);
+  assert.ok(lines.every((l) => widthOf(l) <= SIDEBAR_WIDTH));
+  assert.deepEqual(subagentSpanLines([], new Map(), 0).map(plain), ['Sub-agents (0 active)', 'no sub-agents']);
+  // the full view draws the same rows at its wider width: portrait and text side by side
+  assert.equal(subagentSpanLines(rows, new Map(), 0, 100).length, lines.length);
+});
+
+test('avatars: a sub-agent keeps its portrait across refreshes, warm or idle, and distinct live ones differ', () => {
+  const rng = mulberry32(42);
+  let st = stepAvatars(emptyAvatars(), [kid(1), kid(2)], rng);
+  const first = new Map(st.current);
+  assert.notEqual(first.get(kid(1)), first.get(kid(2)));
+  for (let i = 0; i < 20; i++) st = stepAvatars(st, [kid(1), kid(2)], rng);
+  assert.deepEqual(st.current, first);
+  st = stepAvatars(st, [kid(1), kid(2), kid(3)], rng);
+  assert.equal(st.current.get(kid(1)), first.get(kid(1)));
+  assert.equal(st.current.get(kid(2)), first.get(kid(2)));
+  assert.ok(st.current.get(kid(3))! < POOL_SIZE);
+});
+
+test('avatars: leaving the family frees the portrait for the next arrival', () => {
+  const rng = mulberry32(7);
+  let st = stepAvatars(emptyAvatars(), Array.from({ length: POOL_SIZE }, (_, i) => `ses_${i}`), rng);
+  const gone = st.current.get('ses_0')!;
+  const keep = new Map(st.current);
+  keep.delete('ses_0');
+  st = stepAvatars(st, Array.from({ length: POOL_SIZE - 1 }, (_, i) => `ses_${i + 1}`), rng);
+  assert.deepEqual(st.current, keep, 'the others keep theirs');
+  assert.deepEqual(st.freed, [gone]);
+  st = stepAvatars(st, [...keep.keys(), 'ses_new'], rng);
+  assert.equal(st.current.get('ses_new'), gone, 'with the pool full, a newcomer takes the freed portrait');
+});
+
+test('full view: the controller body window shrinks by the sub-agent block so the cursor stays visible', () => {
+  assert.equal(bodyLinesFor(40, 0), 32);
+  assert.equal(bodyLinesFor(40, 1 + 1 + 2 * PORTRAIT_HEIGHT), 32 - 18);
+  assert.equal(bodyLinesFor(20, 50), 3, 'never below three rows');
 });

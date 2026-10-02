@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { boardDisplayLabel } from '@sterling/schemas';
 import type { SterlingStore } from '@sterling/store';
 import { KNOWLEDGE_TAB, type UiEvent, type UiState } from '@sterling/tui/dist/state.js';
+import { assign, cells, frameAt, phaseFor, POOL_SIZE, SPRITE_COLS, SPRITE_ROWS, type AssignState } from '@sterling/tui/dist/avatars/index.js';
 
 /** OpenCode 2.0.21's sidebar content width, measured: a session title wraps at 34 columns. */
 export const SIDEBAR_WIDTH = 34;
@@ -166,16 +167,95 @@ export function readSubagents(src: SubagentSource): SubagentRow[] {
   return rows.sort((a, b) => Number(b.status === 'active') - Number(a.status === 'active'));
 }
 
-/** The sub-agent block: a heading with the active count, then per row
- *  `title (id8)` and a dim `status · N% ctx · model` line. */
-export function subagentLines(rows: readonly SubagentRow[], width = SIDEBAR_WIDTH): string[] {
-  const active = rows.filter((r) => r.status === 'active').length;
-  const lines = [`Sub-agents (${active} active)`];
-  if (rows.length === 0) return [...lines, 'no sub-agents'];
-  for (const r of rows) {
-    lines.push(tagged(r.title, shortId(r.id), width));
-    lines.push(clip(`  ${r.status} · ${r.context} ctx · ${r.model}`, width));
+/** One run of text in one style. `dim` asks for the host's muted colour; `fg`
+ *  and `bg` are hex colours, unset meaning the host's own (transparent). */
+export interface Span {
+  text: string;
+  fg?: string;
+  bg?: string;
+  dim?: boolean;
+}
+/** One screen line as styled runs; the host draws them left to right. */
+export type SpanLine = Span[];
+
+/** A portrait's outer size: the 12x6 half-block sprite plus a one-cell frame. */
+export const PORTRAIT_WIDTH = SPRITE_COLS + 2;
+export const PORTRAIT_HEIGHT = SPRITE_ROWS + 2;
+/** Columns the text beside a portrait needs (the model name is the long one); narrower puts the text underneath. */
+const SIDE_TEXT_MIN = 16;
+const GAP = 1;
+/** where the three text lines start beside a portrait: roughly centred on its 8 rows */
+const SIDE_TEXT_TOP = 2;
+
+/** Board rows the full view's Tasks body may show. Above the body sit the
+ *  header, tab bar and spacer; below it the sub-agent block (`extraLines`),
+ *  the blank, footer and Esc hint. The controller scrolls its window by this
+ *  number, so it must be as short as the body really is or the cursor falls
+ *  below the visible rows. */
+export function bodyLinesFor(terminalHeight: number, extraLines: number): number {
+  return Math.max(3, terminalHeight - 8 - extraLines);
+}
+
+/** The avatar assignment kept for one session tree for the plugin's lifetime. */
+export type AvatarState = AssignState;
+export const emptyAvatars = (): AvatarState => ({ current: new Map(), freed: [] });
+
+/** Next assignment for the sub-agents under a root: a child that is still in
+ *  the family (running, warm or idle) keeps its portrait; one that left frees
+ *  its portrait for later arrivals. Pure; the caller stores the result. */
+export function stepAvatars(prev: AvatarState, familyIds: readonly string[], rng: () => number): AvatarState {
+  return assign(familyIds, prev.current, rng, { poolSize: POOL_SIZE, freed: prev.freed });
+}
+
+/** A framed portrait: border cells muted, the sprite as half blocks with a
+ *  fg and bg span per colour run. Transparent pixels carry no colour at all. */
+export function portraitLines(avatar: number, frame: number): SpanLine[] {
+  const inner = '─'.repeat(SPRITE_COLS);
+  const out: SpanLine[] = [[{ text: `┌${inner}┐`, dim: true }]];
+  for (const row of cells(avatar, frame)) {
+    const line: SpanLine = [{ text: '│', dim: true }];
+    for (const c of row) {
+      const last = line[line.length - 1]!;
+      if (line.length > 1 && last.fg === c.fg && last.bg === c.bg) last.text += c.ch;
+      else line.push({ text: c.ch, fg: c.fg, bg: c.bg });
+    }
+    line.push({ text: '│', dim: true });
+    out.push(line);
   }
+  out.push([{ text: `└${inner}┘`, dim: true }]);
+  return out;
+}
+
+/** The text of a row: title, `status · N% ctx`, model, each clipped to `width`. */
+function rowText(r: SubagentRow, width: number): SpanLine[] {
+  return [
+    [{ text: clip(r.title, width) }],
+    [{ text: clip(`${r.status} · ${r.context} ctx`, width), dim: true }],
+    [{ text: clip(r.model, width), dim: true }],
+  ];
+}
+
+/** One sub-agent row: the portrait on the left with the text beside it, or the
+ *  text under the portrait when `width` cannot hold both. No avatar number is shown. */
+export function subagentRowLines(r: SubagentRow, avatar: number, tick: number, width: number): SpanLine[] {
+  const portrait = portraitLines(avatar, frameAt(tick, phaseFor(avatar), r.status === 'active'));
+  const sideWidth = width - PORTRAIT_WIDTH - GAP;
+  if (sideWidth < SIDE_TEXT_MIN) return [...portrait, ...rowText(r, width)];
+  const text = rowText(r, sideWidth);
+  return portrait.map((line, i) => {
+    const t = text[i - SIDE_TEXT_TOP];
+    return t ? [...line, { text: ' '.repeat(GAP) }, ...t] : line;
+  });
+}
+
+/** The sub-agent block: a heading with the active count, then a portrait row
+ *  per sub-agent. `avatars` maps session id to pool index; a row without one
+ *  (it should not happen) falls back to index 0 rather than dropping the row. */
+export function subagentSpanLines(rows: readonly SubagentRow[], avatars: ReadonlyMap<string, number>, tick: number, width = SIDEBAR_WIDTH): SpanLine[] {
+  const active = rows.filter((r) => r.status === 'active').length;
+  const lines: SpanLine[] = [[{ text: `Sub-agents (${active} active)` }]];
+  if (rows.length === 0) return [...lines, [{ text: 'no sub-agents', dim: true }]];
+  for (const r of rows) lines.push(...subagentRowLines(r, avatars.get(r.id) ?? 0, tick, width));
   return lines;
 }
 
