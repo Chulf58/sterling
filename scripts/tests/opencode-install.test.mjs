@@ -132,7 +132,7 @@ test('project config: merged into an existing .opencode/opencode.json without cl
   const got = JSON.parse(readFileSync(cfg, 'utf8'));
   assert.equal(got.theme, 'dark');
   assert.deepEqual(got.mcp.other, { type: 'local', command: ['x'] });
-  assert.deepEqual(got.mcp.sterling, { type: 'local', command: ['node', '--disable-warning=ExperimentalWarning', mcpLauncherPath({ home }).replace(/\\/g, '/'), '--store', '.sterling/sterling.db'] });
+  assert.equal(got.mcp.sterling, undefined, 'no per-project sterling MCP entry: the plugin injects it (decision sterling-opencode-plugin-injects-its-own-mcp-entry)');
   assert.equal(got.permission.bash, 'ask');
   assert.deepEqual(got.permission.edit, { '*': 'ask', '**/.sterling/sterling.db*': 'deny', '.sterling/sterling.db*': 'deny' });
   assert.equal(got.default_agent, 'build', "the user's default_agent is kept");
@@ -444,4 +444,107 @@ test('storeWriteTools throws, naming the template, when disallowedTools has no m
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// Decision sterling-opencode-plugin-injects-its-own-mcp-entry: init no longer writes
+// mcp.sterling per project. An entry an earlier init wrote goes only when it is exactly
+// Sterling's; anything else is kept, with a loud row.
+const earlierSterlingEntry = (home) => ({ type: 'local', command: ['node', '--disable-warning=ExperimentalWarning', mcpLauncherPath({ home }).replace(/\\/g, '/'), '--store', '.sterling/sterling.db'] });
+
+test('project config: an mcp.sterling entry exactly as an earlier init wrote it is removed; other mcp entries stay', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  mkdirSync(join(dir, '.opencode'));
+  const cfg = join(dir, '.opencode', 'opencode.json');
+  writeFileSync(cfg, JSON.stringify({ mcp: { other: { type: 'local', command: ['x'] }, sterling: earlierSterlingEntry(home) } }, null, 2));
+  const r = run(dir, home);
+  assert.equal(statusOf(r, 'opencode.json'), 'refreshed');
+  assert.match(r.rows.find((x) => x.item.endsWith('opencode.json')).detail, /removed the sterling MCP entry an earlier init wrote/);
+  const got = JSON.parse(readFileSync(cfg, 'utf8'));
+  assert.equal(got.mcp.sterling, undefined);
+  assert.deepEqual(got.mcp.other, { type: 'local', command: ['x'] });
+
+  const dir2 = project('hobby');
+  mkdirSync(join(dir2, '.opencode'));
+  writeFileSync(join(dir2, '.opencode', 'opencode.json'), JSON.stringify({ mcp: { sterling: earlierSterlingEntry(home) } }));
+  run(dir2, home);
+  assert.equal('mcp' in JSON.parse(readFileSync(join(dir2, '.opencode', 'opencode.json'), 'utf8')), false, 'an mcp object left empty by the removal goes too');
+});
+
+test('project config: an mcp.sterling entry that differs from what Sterling wrote is kept, with a loud row', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  mkdirSync(join(dir, '.opencode'));
+  const cfg = join(dir, '.opencode', 'opencode.json');
+  const mine = { type: 'local', command: ['node', '/my/own/sterling-mcp.mjs'] };
+  writeFileSync(cfg, JSON.stringify({ mcp: { sterling: mine } }));
+  const r = run(dir, home);
+  const loud = r.rows.find((x) => x.item.endsWith('opencode.json mcp.sterling'));
+  assert.ok(loud, 'a row of its own for the kept entry');
+  assert.equal(loud.status, 'skipped');
+  assert.match(loud.detail, /^KEPT: .*differs from the entry Sterling wrote.*the Sterling plugin now adds its own sterling MCP entry/);
+  assert.ok(formatOpenCodeRows(r).some((l) => /mcp\.sterling — KEPT/.test(l)), 'the kept entry is printed');
+  assert.deepEqual(JSON.parse(readFileSync(cfg, 'utf8')).mcp.sterling, mine);
+});
+
+// Finding f3adf829: the TUI half of the npm package needs an entry in
+// <XDG_CONFIG_HOME or ~/.config>/opencode/cli.json, which `opencode plugin add` does not write.
+function npmCopyRoot(home) {
+  const root = join(home, '.cache', 'opencode', 'npm', '@chulf58', 'sterling@latest', '1759500000000', 'node_modules', '@chulf58', 'sterling');
+  stubSterlingRoot(root, 'npm');
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@chulf58/sterling', version: '1.0.0' }));
+  cpSync(join(repoRoot, 'agent-templates'), join(root, 'agent-templates'), { recursive: true });
+  return root;
+}
+const runNpm = (dir, home, env = { HOME: home }) => setupOpenCode({ projectDir: dir, pluginRoot: npmCopyRoot(home), env, home, probe: OC2 });
+const cliJson = (home, env = {}) => join(opencodeConfigDir({ env, home }), 'cli.json');
+
+test('npm-installed copy: @chulf58/sterling goes into cli.json plugins, idempotently, and the TUI shim is not installed', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  const first = runNpm(dir, home);
+  assert.equal(statusOf(first, 'cli.json plugins'), 'created');
+  assert.deepEqual(JSON.parse(readFileSync(cliJson(home), 'utf8')), { plugins: ['@chulf58/sterling'] });
+  assert.equal(existsSync(join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling-tui')), false, 'no shim TUI beside the package TUI');
+  assert.equal(statusOf(first, 'sterling-tui/'), 'skipped');
+  assert.equal(statusOf(runNpm(dir, home), 'cli.json plugins'), 'matches');
+  assert.deepEqual(JSON.parse(readFileSync(cliJson(home), 'utf8')), { plugins: ['@chulf58/sterling'] }, 'not added twice');
+});
+
+test('npm-installed copy: cli.json keeps its other keys and plugins; a versioned spec of the package counts as present', () => {
+  const home = tmp('oc-home-');
+  const xdg = tmp('oc-xdg-');
+  const env = { HOME: home, XDG_CONFIG_HOME: xdg };
+  const dir = project('hobby');
+  mkdirSync(join(xdg, 'opencode'), { recursive: true });
+  writeFileSync(cliJson(home, env), JSON.stringify({ theme: 'x', plugins: ['other-tui'] }));
+  assert.equal(statusOf(runNpm(dir, home, env), 'cli.json plugins'), 'refreshed');
+  assert.deepEqual(JSON.parse(readFileSync(cliJson(home, env), 'utf8')), { theme: 'x', plugins: ['other-tui', '@chulf58/sterling'] });
+
+  writeFileSync(cliJson(home, env), JSON.stringify({ plugins: ['@chulf58/sterling@1.2.3'] }));
+  assert.equal(statusOf(runNpm(dir, home, env), 'cli.json plugins'), 'matches');
+  assert.deepEqual(JSON.parse(readFileSync(cliJson(home, env), 'utf8')), { plugins: ['@chulf58/sterling@1.2.3'] });
+});
+
+test('npm-installed copy: an invalid cli.json, or one whose plugins is not an array, is refused and left unchanged', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  mkdirSync(opencodeConfigDir({ env: {}, home }), { recursive: true });
+  for (const body of ['{ nope', '{"plugins":"@chulf58/sterling"}', '[]']) {
+    writeFileSync(cliJson(home), body);
+    const r = runNpm(dir, home);
+    const row = r.rows.find((x) => x.item.endsWith('cli.json plugins'));
+    assert.equal(row.status, 'refused', body);
+    assert.match(row.instruction, /^REFUSED: .*Remedy: /);
+    assert.equal(readFileSync(cliJson(home), 'utf8'), body);
+  }
+});
+
+test('a clone or Claude-cache copy keeps the shim TUI and writes no cli.json', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  const r = run(dir, home, { installed: true });
+  assert.equal(statusOf(r, 'sterling-tui/tui.tsx'), 'created');
+  assert.equal(r.rows.some((x) => x.item.endsWith('cli.json plugins')), false);
+  assert.equal(existsSync(cliJson(home)), false);
 });
