@@ -38,7 +38,7 @@ import * as viewmodel from '../viewmodel.js';
 // SABOTAGE DISCIPLINE: each test names the one-line change that must redden it.
 // ===========================================================================
 
-const SYS_TAB = 3;
+const SYS_TAB = 4;
 
 const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over });
 

@@ -4,9 +4,9 @@
 // the bundle test uses it to prove runtime resolution works.
 import { dirname, join } from 'node:path';
 import { openDashboard } from './controller.js';
-import { visibleBodyLines, TASKS_TAB } from './state.js';
+import { visibleBodyLines, AGENTS_TAB } from './state.js';
 import { bannerLines } from './banner.js';
-import { blockTop, clearPixels, draw, keyToEvent, mouseToEvent, paintPixels } from './render.js';
+import { clearPixels, draw, keyToEvent, mouseToEvent, paintPixels } from './render.js';
 import { composeSubagentBlock, createSubagentTracker, type BlockPixel, type SubagentBlock, type SubagentView } from './subagents.js';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
 
@@ -54,14 +54,15 @@ const showBanner = process.env.STERLING_NO_BANNER !== '1';
 // frame against the previous one and writes only the changed cells.
 let screen = new termkit.default.ScreenBuffer({ dst: term });
 
-// Sub-agents block (Tasks tab): live subagents from H22's dispatch register,
-// one animated portrait each. The tracker holds the portrait assignment for
+// Agents tab: live subagents from H22's dispatch register, one card each with
+// an animated portrait. The tracker holds the portrait assignment for
 // the TUI's lifetime and reads the register at most once a second.
 const subagents = createSubagentTracker(dirname(dirname(storePath)));
 // the view the last redraw drew; the hit-test and the animation reuse it, so
 // they always agree with what is on screen
 let shownView: SubagentView = { availability: 'absent', active: 0, agents: [] };
-const MIN_BODY_LINES = 8; // the block never squeezes the board below this
+// the screen row the body starts on, taken from the last drawn state: the cards start there
+let bodyTop = 0;
 const ANIMATION_MS = 333; // about 3 Hz, only while a subagent is running
 
 function fullBodyLines(): number {
@@ -69,16 +70,16 @@ function fullBodyLines(): number {
 }
 
 function subagentBlock(tick: number): SubagentBlock {
-  if (ctl.ui().tab !== TASKS_TAB) return { height: 0, puts: [], pixels: [] };
-  return composeSubagentBlock(shownView, term.width, fullBodyLines() - MIN_BODY_LINES, tick);
+  if (ctl.ui().tab !== AGENTS_TAB) return { height: 0, puts: [], pixels: [] };
+  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2, tick);
 }
 
 // One viewport snapshot for both the draw and the click hit-test (the sync
 // constraint: reduce must see the same width/visibleBodyLines the renderer drew
 // with). bodyTop follows the banner height, so it is threaded as showBanner.
-// The Sub-agents block takes its rows from the bottom of the body.
+// The Agents tab is enabled here, and its label carries the running count.
 function viewport() {
-  return { width: term.width, maxBodyLines: Math.max(0, fullBodyLines() - subagentBlock(0).height), showBanner };
+  return { width: term.width, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active } };
 }
 
 // Portrait pixels are painted outside the ScreenBuffer (truecolour): when
@@ -98,8 +99,7 @@ function layoutKey(block: SubagentBlock): string {
 }
 
 function screenPixels(block: SubagentBlock): BlockPixel[] {
-  const top = blockTop(term.height, block);
-  return block.pixels.map((p) => ({ ...p, y: p.y + top }));
+  return block.pixels.map((p) => ({ ...p, y: p.y + bodyTop }));
 }
 
 function animate(): void {
@@ -112,6 +112,8 @@ function animate(): void {
 function redraw(): void {
   const now = Date.now();
   shownView = subagents.view(now);
+  const state = ctl.state(viewport());
+  bodyTop = state.bodyTop;
   const block = subagentBlock(Math.floor(now / ANIMATION_MS));
   const key = layoutKey(block);
   const full = forceFull || key !== pixelLayout;
@@ -120,7 +122,7 @@ function redraw(): void {
   const pixels = screenPixels(block);
   if (full && painted) clearPixels(term, painted, pixels);
   // the roster is the cached activation snapshot — the 1 Hz redraw never re-reads it
-  draw(screen, ctl.state(viewport()), { block });
+  draw(screen, state, { block });
   painted = paintPixels(term, pixels, full ? undefined : painted, trueColor);
   const running = shownView.active > 0 && block.pixels.length > 0;
   if (running && !animation) animation = setInterval(animate, ANIMATION_MS);

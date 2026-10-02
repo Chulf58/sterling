@@ -7,7 +7,10 @@ import { join } from 'node:path';
 import { SterlingStore, MountedStores, MAX_RANK_TERMS } from '@sterling/store';
 import { todoCards } from '../viewmodel.js';
 import * as viewmodel from '../viewmodel.js';
-import { buildDashboardState, initialUi, reduce, screenLineToRow, visibleBodyLines, wrapText, QUEUE_TAB, TABS, type UiState, type DashboardState } from '../state.js';
+import { buildDashboardState, initialUi, reduce, screenLineToRow, visibleBodyLines, wrapText, AGENTS_TAB, QUEUE_TAB, SYSTEM_TAB, TABS, type UiState, type DashboardState } from '../state.js';
+
+/** The tabs a host that does not paint the Agents cards reaches (the default viewport). */
+const HOST_TABS = TABS.filter((t) => t !== 'Agents');
 import * as stateMod from '../state.js';
 import { bannerLines, bannerPaletteIndex, ART_WIDTH, WORDMARK, BANNER_ROWS } from '../banner.js';
 import { keyToEvent, mouseToEvent, draw } from '../render.js';
@@ -67,6 +70,7 @@ const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over })
 interface TabCell {
   label?: string;
   active?: boolean;
+  index?: number;
 }
 const tabCells = (s: DashboardState): TabCell[] => s.tabs as unknown as TabCell[];
 
@@ -491,7 +495,7 @@ test('reduce: keys — tab cycling, cursor clamp, enter selects + toggles expand
     assert.equal(ui.tab, 1);
     ({ ui } = reduce(store, ui, { kind: 'key', name: 'LEFT' }));
     ({ ui } = reduce(store, ui, { kind: 'key', name: 'LEFT' }));
-    assert.equal(ui.tab, TABS.length - 1, 'left wraps');
+    assert.equal(ui.tab, SYSTEM_TAB, 'left wraps to the last tab this host reaches');
     ({ ui } = reduce(store, ui, { kind: 'key', name: 'TAB' }));
     assert.equal(ui.tab, 0, 'tab key cycles forward');
 
@@ -522,19 +526,21 @@ test('reduce: digit hotkeys select tabs directly; out-of-range digits are a no-o
   const { store, cleanup } = fixture();
   try {
     let ui: UiState = st({ cursor: 1 });
-    ({ ui } = reduce(store, ui, { kind: 'tab', index: TABS.length - 1 }));
-    assert.equal(ui.tab, TABS.length - 1, 'last tab reachable by its digit');
+    ({ ui } = reduce(store, ui, { kind: 'tab', index: SYSTEM_TAB }));
+    assert.equal(ui.tab, SYSTEM_TAB, 'last tab reachable by its digit');
     assert.equal(ui.cursor, 0, 'tab switch resets the cursor');
 
     ({ ui } = reduce(store, ui, { kind: 'tab', index: 0 }));
     assert.equal(ui.tab, 0);
 
-    ({ ui } = reduce(store, ui, { kind: 'char', ch: String(TABS.length) }));
-    assert.equal(ui.tab, TABS.length - 1, 'digit chars switch tabs outside search input');
+    ({ ui } = reduce(store, ui, { kind: 'char', ch: String(HOST_TABS.length) }));
+    assert.equal(ui.tab, SYSTEM_TAB, 'digit chars switch tabs outside search input');
 
     const before = ui;
     ({ ui } = reduce(store, ui, { kind: 'tab', index: TABS.length }));
     assert.deepEqual(ui, before, 'digit past the registered tab count is ignored');
+    ({ ui } = reduce(store, ui, { kind: 'tab', index: AGENTS_TAB }));
+    assert.deepEqual(ui, before, 'the Agents tab is unreachable on a host that does not paint it');
     ({ ui } = reduce(store, ui, { kind: 'char', ch: '9' }));
     assert.deepEqual(ui, before, 'out-of-range digit char is ignored too');
   } finally {
@@ -610,7 +616,7 @@ test('tab labels: the Tasks tab carries its OPEN-TASK COUNT — "Tasks (N)" coun
     const labels = tabCells(buildDashboardState(mixed.store, initialUi)).map((c) => c.label);
     assert.equal(labels[0], 'Tasks (3)', 'the Tasks label counts the 3 open user todos and EXCLUDES the 2 system items');
     // only the Tasks label is rewritten — every other tab keeps its registry label
-    assert.deepEqual(labels.slice(1), TABS.slice(1), 'no other tab label gains a count');
+    assert.deepEqual(labels.slice(1), HOST_TABS.slice(1), 'no other tab label gains a count');
     assert.ok(labels[0]!.startsWith(TABS[0]), 'the Tasks label still begins with its registry label');
   } finally {
     mixed.cleanup();
@@ -645,9 +651,9 @@ test('tab hit-test tracks the RENDERED tab labels: with a non-empty Tasks count,
       for (const [arm, x] of [['label start', ext.labelStart], ['nearEnd', ext.nearEnd]] as const) {
         // start from a DIFFERENT tab every time, so a no-op click can never be
         // mistaken for a correct selection
-        const from = st({ tab: (i + 1) % cells.length });
+        const from = st({ tab: cells[(i + 1) % cells.length]!.index! });
         const r = reduce(store, from, { kind: 'click', x, y: 2 });
-        assert.equal(r.ui.tab, i, `a click at tab ${i}'s ${arm} (x=${x}, label "${ext.label}") selects tab ${i}`);
+        assert.equal(r.ui.tab, cells[i]!.index, `a click at tab ${i}'s ${arm} (x=${x}, label "${ext.label}") selects tab ${i}`);
       }
     }
   } finally {

@@ -1,6 +1,6 @@
-// The terminal dashboard's Sub-agents block: a read-only view of H22's
+// The terminal dashboard's Agents tab: a read-only view of H22's
 // dispatch register (.sterling/transient/dispatch-register.json) and the
-// composition of one animated portrait on a tinted tile per subagent.
+// composition of the Agents tab's cards: an animated portrait on a tinted tile per subagent.
 //
 // The register is read WITHOUT its lock: readRegister is a plain file read,
 // and the register is rewritten by an atomic rename, so the dashboard never
@@ -25,7 +25,7 @@ import { AGENT_MODEL_KEY, parseConfig } from '@sterling/schemas';
 import { readRegister, dispatchStateDir, dispatchStateKey, type RegisterEntry } from '../../../scripts/lib/dispatch-register.mjs';
 import { deriveAgentTranscript, fillPct, latestUsage } from '../../../scripts/hooks/lib/transcript.mjs';
 import { sterlingRootFrom } from '../../../scripts/lib/opencode-install.mjs';
-import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS, type AssignState } from './avatars/index.js';
+import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_BG, type AssignState } from './avatars/index.js';
 
 /** How long a missing subagent transcript is left unsearched before the next look. */
 const TRANSCRIPT_RETRY_MS = 10_000;
@@ -352,10 +352,11 @@ export function formatElapsed(ms: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Composition. Coordinates are relative to the block's top-left corner; the
-// renderer offsets them. Row 0 is a blank separator, row 1 the header, then
-// tile rows (SPRITE_ROWS high, a blank row between them) with three text
-// lines beside each tile: type, `status · N% ctx · model`, description.
+// Composition. Coordinates are relative to the block's top-left corner, which
+// the renderer puts at the top of the Agents tab's body. The agents are cards
+// side by side in one row, wrapping to the next row only when the pane is too
+// narrow: each card is the 8x3 portrait tile with three text lines below it
+// (type, `status · N% ctx · model`, description), clipped to the card.
 // ---------------------------------------------------------------------------
 
 export interface BlockAttr {
@@ -369,7 +370,7 @@ export interface BlockPut {
   attr: BlockAttr;
   text: string;
 }
-/** One half-block portrait cell; no fg/bg means the default background. */
+/** One portrait cell: a quadrant block character; no fg/bg means the default background. */
 export interface BlockPixel {
   x: number;
   y: number;
@@ -384,12 +385,12 @@ export interface SubagentBlock {
 }
 
 const TILE_H = SPRITE_ROWS;
+const CARD_W = 24;
+const CARD_H = TILE_H + 3;
+const CARD_GAP = 2;
 const ROW_GAP = 1;
-const TEXT_GAP = 1;
-const TEXT_MAX = 36;
-const TEXT_MIN = 8;
-const TILE_GAP = 2;
-const HEAD_ROWS = 2;
+/** a done card's portrait is blended this far toward the tile colour */
+const DONE_FADE = 0.55;
 
 function clip(text: string, width: number): string {
   const chars = [...text];
@@ -397,53 +398,66 @@ function clip(text: string, width: number): string {
   return width <= 1 ? chars.slice(0, width).join('') : chars.slice(0, width - 1).join('') + '…';
 }
 
-/** Lay out the block in at most maxHeight rows of a width-column area.
- *  Nothing is drawn for a readable register with no agents. */
+function rgb(hex: string): [number, number, number] {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** `hex` blended toward the tile colour by `amount` (0 keeps it, 1 is the tile colour). */
+function fadeToTile(hex: string, amount: number): string {
+  const [a, b] = [rgb(hex), rgb(TILE_BG)];
+  const mix = a.map((v, i) => Math.round(v + (b[i]! - v) * amount));
+  return `#${mix.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** Lay the cards out in at most maxHeight rows of a width-column area. A readable
+ *  register with no agents draws one dim line, so the tab is never blank. */
 export function composeSubagentBlock(view: SubagentView, width: number, maxHeight: number, tick: number): SubagentBlock {
   const empty: SubagentBlock = { height: 0, puts: [], pixels: [] };
-  if (maxHeight < HEAD_ROWS || width < 1) return empty;
-  if (view.availability === 'corrupt') {
-    return { height: HEAD_ROWS, puts: [{ x: 0, y: 1, attr: { dim: true }, text: clip('Sub-agents: unknown — the dispatch register could not be read', width) }], pixels: [] };
-  }
-  if (view.agents.length === 0) return empty;
+  if (maxHeight < 1 || width < 1) return empty;
+  const note = (text: string): SubagentBlock => ({ height: 1, puts: [{ x: 0, y: 0, attr: { dim: true }, text: clip(text, width) }], pixels: [] });
+  if (view.availability === 'corrupt') return note('Sub-agents: unknown — the dispatch register could not be read');
+  if (view.agents.length === 0) return note('(no sub-agents)');
 
-  const textW = Math.min(TEXT_MAX, width - TILE_COLS - TEXT_GAP);
-  const fitsTile = textW >= TEXT_MIN;
-  const tileW = TILE_COLS + TEXT_GAP + textW;
-  const perRow = fitsTile ? Math.max(1, Math.floor((width + TILE_GAP) / (tileW + TILE_GAP))) : 0;
-  const tileRows = fitsTile ? Math.min(Math.ceil(view.agents.length / perRow), Math.floor((maxHeight - HEAD_ROWS + ROW_GAP) / (TILE_H + ROW_GAP))) : 0;
-  const shown = Math.min(view.agents.length, tileRows * perRow);
+  const cardW = Math.min(CARD_W, width);
+  const perRow = Math.max(1, Math.floor((width + CARD_GAP) / (cardW + CARD_GAP)));
+  const rowsFit = Math.floor((maxHeight + ROW_GAP) / (CARD_H + ROW_GAP));
+  const cardRows = Math.max(0, Math.min(Math.ceil(view.agents.length / perRow), rowsFit));
+  if (cardRows === 0) return note(`${view.agents.length} sub-agents, no room to show them`);
+  const shown = Math.min(view.agents.length, cardRows * perRow);
   const hidden = view.agents.length - shown;
 
   const puts: BlockPut[] = [];
   const pixels: BlockPixel[] = [];
-  const header = `Sub-agents (${view.active} active)` + (hidden > 0 ? ` · ${hidden} more not shown` : '');
-  puts.push({ x: 0, y: 1, attr: { bold: true }, text: clip(header, width) });
-
   for (let i = 0; i < shown; i++) {
     const a = view.agents[i]!;
-    const x0 = (i % perRow) * (tileW + TILE_GAP);
-    const y0 = HEAD_ROWS + Math.floor(i / perRow) * (TILE_H + ROW_GAP);
-
-    // the tile: every cell carries a bg, so the tint covers the padding and the transparent pixels
-    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), a.status === 'running')).forEach((line, r) =>
+    const done = a.status === 'done';
+    const x0 = (i % perRow) * (cardW + CARD_GAP);
+    const y0 = Math.floor(i / perRow) * (CARD_H + ROW_GAP);
+    // the tile: every cell carries a bg, so the tint covers the padding and the transparent pixels.
+    // A done agent rests on frame 0 and its portrait is faded.
+    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done)).forEach((line, r) =>
       line.forEach((cell, c) => {
         const px: BlockPixel = { x: x0 + c, y: y0 + r, ch: cell.ch };
-        if (cell.fg !== undefined) px.fg = cell.fg;
-        if (cell.bg !== undefined) px.bg = cell.bg;
+        if (cell.fg !== undefined) px.fg = done ? fadeToTile(cell.fg, DONE_FADE) : cell.fg;
+        if (cell.bg !== undefined) px.bg = done ? fadeToTile(cell.bg, DONE_FADE) : cell.bg;
         pixels.push(px);
       }),
     );
-
-    const tx = x0 + TILE_COLS + TEXT_GAP;
-    puts.push({ x: tx, y: y0, attr: { bold: true }, text: clip(a.type, textW) });
+    const ty = y0 + TILE_H;
+    puts.push({ x: x0, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, cardW) });
     // status and context in the status colour, the model dim after them
     const status = `${a.status} · ${a.contextPct === null ? '?' : `${a.contextPct}%`} ctx`;
-    const line = [...clip(`${status} · ${a.model ?? 'model unknown'}`, textW)];
+    const line = [...clip(`${status} · ${a.model ?? 'model unknown'}`, cardW)];
     const statusLen = Math.min(line.length, [...status].length);
-    puts.push({ x: tx, y: y0 + 1, attr: a.status === 'running' ? { color: 'green' } : { dim: true }, text: line.slice(0, statusLen).join('') });
-    if (line.length > statusLen) puts.push({ x: tx + statusLen, y: y0 + 1, attr: { dim: true }, text: line.slice(statusLen).join('') });
-    if (a.description) puts.push({ x: tx, y: y0 + 2, attr: { dim: true }, text: clip(a.description, textW) });
+    puts.push({ x: x0, y: ty + 1, attr: done ? { dim: true } : { color: 'green' }, text: line.slice(0, statusLen).join('') });
+    if (line.length > statusLen) puts.push({ x: x0 + statusLen, y: ty + 1, attr: { dim: true }, text: line.slice(statusLen).join('') });
+    if (a.description) puts.push({ x: x0, y: ty + 2, attr: { dim: true }, text: clip(a.description, cardW) });
   }
-  return { height: HEAD_ROWS + tileRows * TILE_H + Math.max(0, tileRows - 1) * ROW_GAP, puts, pixels };
+  const height = cardRows * CARD_H + (cardRows - 1) * ROW_GAP;
+  if (hidden > 0 && height + 1 <= maxHeight) {
+    puts.push({ x: 0, y: height, attr: { dim: true }, text: clip(`${hidden} more not shown`, width) });
+    return { height: height + 1, puts, pixels };
+  }
+  return { height, puts, pixels };
 }

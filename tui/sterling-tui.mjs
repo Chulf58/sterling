@@ -8007,8 +8007,8 @@ var require_xterm2 = __commonJS({
           if (fg < 0 || fg > 255 || bg < 0 || bg > 255) {
             return "";
           }
-          var rgb = this.root.rgbForRegister(bg);
-          return string.format(this.root.esc.setCursorColorRgb.on, rgb.r, rgb.g, rgb.b);
+          var rgb2 = this.root.rgbForRegister(bg);
+          return string.format(this.root.esc.setCursorColorRgb.on, rgb2.r, rgb2.g, rgb2.b);
         }
       }
     };
@@ -8465,8 +8465,8 @@ var require_xterm_256color = __commonJS({
           if (fg < 0 || fg > 255 || bg < 0 || bg > 255) {
             return "";
           }
-          var rgb = this.root.rgbForRegister(bg);
-          return string.format(this.root.esc.setCursorColorRgb.on, rgb.r, rgb.g, rgb.b);
+          var rgb2 = this.root.rgbForRegister(bg);
+          return string.format(this.root.esc.setCursorColorRgb.on, rgb2.r, rgb2.g, rgb2.b);
         }
       }
     });
@@ -15540,12 +15540,12 @@ var require_Terminal = __commonJS({
       }
     };
     function colorRgbHandler(r, g, b) {
-      var c, rgb;
+      var c, rgb2;
       if (typeof r === "string") {
-        rgb = termkit2.hexToRgba(r);
-        r = rgb.r;
-        g = rgb.g;
-        b = rgb.b;
+        rgb2 = termkit2.hexToRgba(r);
+        r = rgb2.r;
+        g = rgb2.g;
+        b = rgb2.b;
       }
       if (typeof r !== "number" || isNaN(r) || typeof g !== "number" || isNaN(g) || typeof b !== "number" || isNaN(b) || r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255) {
         return "";
@@ -15564,12 +15564,12 @@ var require_Terminal = __commonJS({
       return this.root.format(this.root.esc.color.on, c);
     }
     function bgColorRgbHandler(r, g, b) {
-      var c, rgb;
+      var c, rgb2;
       if (typeof r === "string") {
-        rgb = termkit2.hexToRgba(r);
-        r = rgb.r;
-        g = rgb.g;
-        b = rgb.b;
+        rgb2 = termkit2.hexToRgba(r);
+        r = rgb2.r;
+        g = rgb2.g;
+        b = rgb2.b;
       }
       if (typeof r !== "number" || isNaN(r) || typeof g !== "number" || isNaN(g) || typeof b !== "number" || isNaN(b) || r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255) {
         return "";
@@ -16357,9 +16357,9 @@ var require_Terminal = __commonJS({
       return this._registerForRgb(r, g, b, minRegister, maxRegister);
     };
     notChainable._registerForRgb = function(r, g, b, minRegister, maxRegister) {
-      var register, delta, minDelta = Infinity, rgb = [r, g, b];
+      var register, delta, minDelta = Infinity, rgb2 = [r, g, b];
       for (register = minRegister; register <= maxRegister; register++) {
-        delta = termkit2.chroma.distance(rgb, this.colorRegister[register], "hcl");
+        delta = termkit2.chroma.distance(rgb2, this.colorRegister[register], "hcl");
         if (delta < minDelta) {
           minDelta = delta;
           minRegister = register;
@@ -21689,10 +21689,10 @@ var require_omggif = __commonJS({
       buf[p++] = 0;
       if (global_palette !== null) {
         for (var i = 0, il = global_palette.length; i < il; ++i) {
-          var rgb = global_palette[i];
-          buf[p++] = rgb >> 16 & 255;
-          buf[p++] = rgb >> 8 & 255;
-          buf[p++] = rgb & 255;
+          var rgb2 = global_palette[i];
+          buf[p++] = rgb2 >> 16 & 255;
+          buf[p++] = rgb2 >> 8 & 255;
+          buf[p++] = rgb2 & 255;
         }
       }
       if (loop_count !== null) {
@@ -21777,10 +21777,10 @@ var require_omggif = __commonJS({
         buf[p++] = using_local_palette === true ? 128 | min_code_size - 1 : 0;
         if (using_local_palette === true) {
           for (var i2 = 0, il2 = palette2.length; i2 < il2; ++i2) {
-            var rgb2 = palette2[i2];
-            buf[p++] = rgb2 >> 16 & 255;
-            buf[p++] = rgb2 >> 8 & 255;
-            buf[p++] = rgb2 & 255;
+            var rgb3 = palette2[i2];
+            buf[p++] = rgb3 >> 16 & 255;
+            buf[p++] = rgb3 >> 8 & 255;
+            buf[p++] = rgb3 & 255;
           }
         }
         p = GifWriterOutputLZWCodeStream(
@@ -23236,7 +23236,7 @@ var require_Palette = __commonJS({
     };
     var FIX_STEP = 1.1;
     Palette.prototype.clStep = function(chromaColor, cAdjust, lAdjust, fixRgb = true) {
-      var c, l, rgb, avg, sortedChannels, preserveLOverC;
+      var c, l, rgb2, avg, sortedChannels, preserveLOverC;
       if (!cAdjust && !lAdjust) {
         return chromaColor;
       }
@@ -23250,12 +23250,12 @@ var require_Palette = __commonJS({
       }
       preserveLOverC = Math.abs(lAdjust) >= cAdjust;
       for (; ; ) {
-        rgb = chromaColor._rgb._unclipped;
-        rgb.length = 3;
-        if (rgb.every((channel) => channel > -5 && channel < 260)) {
+        rgb2 = chromaColor._rgb._unclipped;
+        rgb2.length = 3;
+        if (rgb2.every((channel) => channel > -5 && channel < 260)) {
           return chromaColor;
         }
-        sortedChannels = [...rgb].sort((a, b) => a - b);
+        sortedChannels = [...rgb2].sort((a, b) => a - b);
         if (sortedChannels[2] >= 256) {
           avg = (sortedChannels[0] + sortedChannels[1] + sortedChannels[2]) / 3;
           if (preserveLOverC) {
@@ -28673,12 +28673,12 @@ var require_Vte = __commonJS({
     };
     Vte.prototype.emitRegisterColor = function(register) {
       logRed("emitRegisterColor", register);
-      var rgb = this.screenBuffer.palette.getRgb(register);
-      logRed("emitRegisterColor >>> ", rgb);
-      if (!rgb) {
+      var rgb2 = this.screenBuffer.palette.getRgb(register);
+      logRed("emitRegisterColor >>> ", rgb2);
+      if (!rgb2) {
         return;
       }
-      this.emit("input", string.format(toInputSequence.reports.registerColor, register, rgb.r, rgb.g, rgb.b));
+      this.emit("input", string.format(toInputSequence.reports.registerColor, register, rgb2.r, rgb2.g, rgb2.b));
     };
     Vte.prototype.emitMouseSGR = function(type, data) {
       var code = 0, released = false;
@@ -36173,20 +36173,20 @@ var require_chroma = __commonJS({
         if (high === void 0) high = 1;
         return min$3(max$3(low, x), high);
       }
-      function clip_rgb(rgb2) {
-        rgb2._clipped = false;
-        rgb2._unclipped = rgb2.slice(0);
+      function clip_rgb(rgb3) {
+        rgb3._clipped = false;
+        rgb3._unclipped = rgb3.slice(0);
         for (var i2 = 0; i2 <= 3; i2++) {
           if (i2 < 3) {
-            if (rgb2[i2] < 0 || rgb2[i2] > 255) {
-              rgb2._clipped = true;
+            if (rgb3[i2] < 0 || rgb3[i2] > 255) {
+              rgb3._clipped = true;
             }
-            rgb2[i2] = limit(rgb2[i2], 0, 255);
+            rgb3[i2] = limit(rgb3[i2], 0, 255);
           } else if (i2 === 3) {
-            rgb2[i2] = limit(rgb2[i2], 0, 1);
+            rgb3[i2] = limit(rgb3[i2], 0, 1);
           }
         }
-        return rgb2;
+        return rgb3;
       }
       var classToType = {};
       for (var i$1 = 0, list$1 = [
@@ -36267,11 +36267,11 @@ var require_chroma = __commonJS({
           }
         }
         if (input.format[mode]) {
-          var rgb2 = input.format[mode].apply(
+          var rgb3 = input.format[mode].apply(
             null,
             autodetect ? args2 : args2.slice(0, -1)
           );
-          me._rgb = clip_rgb(rgb2);
+          me._rgb = clip_rgb(rgb3);
         } else {
           throw new Error("unknown format: " + args2);
         }
@@ -36488,12 +36488,12 @@ var require_chroma = __commonJS({
           }
         }
         if (m = css.match(RE_RGB)) {
-          var rgb2 = m.slice(1, 4);
+          var rgb3 = m.slice(1, 4);
           for (var i2 = 0; i2 < 3; i2++) {
-            rgb2[i2] = +rgb2[i2];
+            rgb3[i2] = +rgb3[i2];
           }
-          rgb2[3] = 1;
-          return rgb2;
+          rgb3[3] = 1;
+          return rgb3;
         }
         if (m = css.match(RE_RGBA)) {
           var rgb$1 = m.slice(1, 5);
@@ -36560,11 +36560,11 @@ var require_chroma = __commonJS({
       input.format.gl = function() {
         var args2 = [], len = arguments.length;
         while (len--) args2[len] = arguments[len];
-        var rgb2 = unpack(args2, "rgba");
-        rgb2[0] *= 255;
-        rgb2[1] *= 255;
-        rgb2[2] *= 255;
-        return rgb2;
+        var rgb3 = unpack(args2, "rgba");
+        rgb3[0] *= 255;
+        rgb3[1] *= 255;
+        rgb3[2] *= 255;
+        return rgb3;
       };
       chroma.gl = function() {
         var args2 = [], len = arguments.length;
@@ -36572,8 +36572,8 @@ var require_chroma = __commonJS({
         return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["gl"])))();
       };
       Color.prototype.gl = function() {
-        var rgb2 = this._rgb;
-        return [rgb2[0] / 255, rgb2[1] / 255, rgb2[2] / 255, rgb2[3]];
+        var rgb3 = this._rgb;
+        return [rgb3[0] / 255, rgb3[1] / 255, rgb3[2] / 255, rgb3[3]];
       };
       var floor$3 = Math.floor;
       var hcg2rgb = function() {
@@ -37469,8 +37469,8 @@ var require_chroma = __commonJS({
       var rgb2temperature = function() {
         var args2 = [], len = arguments.length;
         while (len--) args2[len] = arguments[len];
-        var rgb2 = unpack(args2, "rgb");
-        var r = rgb2[0], b = rgb2[2];
+        var rgb3 = unpack(args2, "rgb");
+        var r = rgb3[0], b = rgb3[2];
         var minTemp = 1e3;
         var maxTemp = 4e4;
         var eps = 0.4;
@@ -37689,8 +37689,8 @@ var require_chroma = __commonJS({
             }
             return lm > lum ? test(low, mid) : test(mid, high);
           };
-          var rgb2 = (cur_lum > lum ? test(new Color([0, 0, 0]), this) : test(this, new Color([255, 255, 255]))).rgb();
-          return new Color(rgb2.concat([this._rgb[3]]));
+          var rgb3 = (cur_lum > lum ? test(new Color([0, 0, 0]), this) : test(this, new Color([255, 255, 255]))).rgb();
+          return new Color(rgb3.concat([this._rgb[3]]));
         }
         return rgb2luminance.apply(void 0, this._rgb.slice(0, 3));
       };
@@ -37734,13 +37734,13 @@ var require_chroma = __commonJS({
       };
       Color.prototype.premultiply = function(mutate) {
         if (mutate === void 0) mutate = false;
-        var rgb2 = this._rgb;
-        var a = rgb2[3];
+        var rgb3 = this._rgb;
+        var a = rgb3[3];
         if (mutate) {
-          this._rgb = [rgb2[0] * a, rgb2[1] * a, rgb2[2] * a, a];
+          this._rgb = [rgb3[0] * a, rgb3[1] * a, rgb3[2] * a, a];
           return this;
         } else {
-          return new Color([rgb2[0] * a, rgb2[1] * a, rgb2[2] * a, a], "rgb");
+          return new Color([rgb3[0] * a, rgb3[1] * a, rgb3[2] * a, a], "rgb");
         }
       };
       Color.prototype.saturate = function(amount) {
@@ -37812,7 +37812,7 @@ var require_chroma = __commonJS({
         while (len-- > 0) rest[len] = arguments[len + 1];
         return mix.apply(void 0, [this, "black", f].concat(rest));
       };
-      var rgb = function(col1, col2, f) {
+      var rgb2 = function(col1, col2, f) {
         var xyz0 = col1._rgb;
         var xyz1 = col2._rgb;
         return new Color(
@@ -37822,7 +37822,7 @@ var require_chroma = __commonJS({
           "rgb"
         );
       };
-      index.rgb = rgb;
+      index.rgb = rgb2;
       var sqrt$2 = Math.sqrt;
       var pow$5 = Math.pow;
       var lrgb = function(col1, col2, f) {
@@ -38033,11 +38033,11 @@ var require_chroma = __commonJS({
         for (var i2 = 0; i2 < colors.length; i2++) {
           var col = colors[i2];
           var f = weights[i2] / l;
-          var rgb2 = col._rgb;
-          xyz[0] += pow$4(rgb2[0], 2) * f;
-          xyz[1] += pow$4(rgb2[1], 2) * f;
-          xyz[2] += pow$4(rgb2[2], 2) * f;
-          xyz[3] += rgb2[3] * f;
+          var rgb3 = col._rgb;
+          xyz[0] += pow$4(rgb3[0], 2) * f;
+          xyz[1] += pow$4(rgb3[1], 2) * f;
+          xyz[2] += pow$4(rgb3[2], 2) * f;
+          xyz[3] += rgb3[3] * f;
         }
         xyz[0] = sqrt$1(xyz[0]);
         xyz[1] = sqrt$1(xyz[1]);
@@ -47477,10 +47477,11 @@ function defaultResolveHeadSha() {
     return void 0;
   }
 }
-var TABS = ["Tasks", "Knowledge", "Queue", "System"];
+var TABS = ["Tasks", "Knowledge", "Queue", "Agents", "System"];
 var TASKS_TAB = TABS.indexOf("Tasks");
 var KNOWLEDGE_TAB = TABS.indexOf("Knowledge");
 var QUEUE_TAB = TABS.indexOf("Queue");
+var AGENTS_TAB = TABS.indexOf("Agents");
 var SYSTEM_TAB = TABS.indexOf("System");
 var initialUi = { tab: 0, cursor: 0, expanded: [], searchQuery: "", scroll: 0 };
 var EMPTY_ROSTER = {
@@ -47500,6 +47501,9 @@ function effortOptions(key) {
   return ["low", "medium", "high"];
 }
 var MODEL_VALUE_RE = /^claude-/;
+function visibleTabs(agents) {
+  return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== void 0);
+}
 function cardsFor(store, tab, expanded = []) {
   if (tab === 0)
     return todoCards(store, expanded);
@@ -47700,19 +47704,23 @@ function modeToggleRow(snap, ui, width, cursorIndex) {
   const shown = mode === null ? "UNKNOWN (config unreadable)" : mode === "hobby" || mode === "work" ? mode.toUpperCase() : `INVALID ('${mode}')`;
   return { id: "sys:project_mode", lines: [{ text: clip2(`${marker}Project mode: ${shown}`), kind: "title", selected }] };
 }
-function tabsFor(store, activeTab) {
+function tabsFor(store, activeTab, agents) {
   let taskCount = null;
   try {
     taskCount = store.count({ types: ["todo"], source: "user" });
   } catch {
     taskCount = null;
   }
-  return TABS.map((label, i) => ({
-    label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label,
-    active: i === activeTab
-  }));
+  return visibleTabs(agents).map((i) => {
+    const label = TABS[i];
+    return {
+      label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running})` : label,
+      active: i === activeTab,
+      index: i
+    };
+  });
 }
-function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster) {
+function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents) {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows = [];
   let screenRow = 0;
@@ -47751,19 +47759,19 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, max
     tabs,
     rows,
     emptyMessage: view.rows.length ? void 0 : "(no configured models)",
-    footer: `\u2190/\u2192 or 1-${TABS.length} tabs \xB7 \u2191/\u2193 rows \xB7 enter change model/effort \xB7 esc cancel \xB7 q quit`,
+    footer: `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 rows \xB7 enter change model/effort \xB7 esc cancel \xB7 q quit`,
     banner,
     projectName,
-    bodyTop,
+    bodyTop: bodyTop2,
     scroll
   };
 }
-function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster) {
+function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents) {
   const banner = bannerLines(width, showBanner2);
-  const bodyTop = banner.length + CHROME_BELOW_BANNER;
-  const tabs = tabsFor(store, ui.tab);
+  const bodyTop2 = banner.length + CHROME_BELOW_BANNER;
+  const tabs = tabsFor(store, ui.tab, agents);
   if (ui.tab === SYSTEM_TAB)
-    return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster);
+    return systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents);
   const nodes = nodesFor(store, ui, knowledge);
   const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
   let rows = [];
@@ -47869,7 +47877,7 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
   return {
     tabs,
     rows,
-    emptyMessage: nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
+    emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
     footer: (
       // Fix round (Opus review of 71c1f41): a Tasks-tab board_edit notice
       // (lost-update refusal, vanished item, failed HEAD resolve) must be
@@ -47877,14 +47885,14 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
       // state.footer unconditionally, so this is the one line available to
       // this scope's two files without touching render.ts. Mirrors the
       // System tab's own '⚠ ' convention (buildSystemTab's banner).
-      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : `\u2190/\u2192 or 1-${TABS.length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
+      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : ui.tab === AGENTS_TAB ? `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 q quit` : `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
     ),
     searchLine: searchActive ? `search: ${ui.searchQuery}` : void 0,
     queueCompleted,
     queueActivity,
     banner,
     projectName,
-    bodyTop,
+    bodyTop: bodyTop2,
     scroll
   };
 }
@@ -47906,8 +47914,10 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
   const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects = [];
   const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
+  const reachable = visibleTabs(viewport2.agents);
+  const stepTab = (dir) => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0];
   const scrollable = ui.tab !== QUEUE_TAB;
-  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster);
+  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents);
   const revealAt = (cursor) => {
     if (!scrollable || !Number.isFinite(maxBodyLines))
       return { ...ui, cursor };
@@ -48110,10 +48120,10 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
           }
           return { ui, effects };
         case "LEFT":
-          return { ui: switchTab((ui.tab + TABS.length - 1) % TABS.length), effects };
+          return { ui: switchTab(stepTab(-1)), effects };
         case "RIGHT":
         case "TAB":
-          return { ui: switchTab((ui.tab + 1) % TABS.length), effects };
+          return { ui: switchTab(stepTab(1)), effects };
         case "UP":
           return { ui: moveCursor(-1), effects };
         case "DOWN":
@@ -48157,13 +48167,13 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
       }
       if (/^[1-9]$/.test(ch)) {
         const index = Number(ch) - 1;
-        if (index < TABS.length)
-          return { ui: switchTab(index), effects };
+        if (index < reachable.length)
+          return { ui: switchTab(reachable[index]), effects };
       }
       return { ui, effects };
     }
     case "tab":
-      if (event2.index < 0 || event2.index >= TABS.length)
+      if (!reachable.includes(event2.index))
         return { ui, effects };
       return { ui: switchTab(event2.index), effects };
     case "wheel": {
@@ -48174,13 +48184,13 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
       return { ui: { ...ui, scroll: st.scroll }, effects };
     }
     case "click": {
-      const state = buildDashboardState(store, ui, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster);
+      const state = buildDashboardState(store, ui, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents);
       if (event2.y === state.bodyTop - 1) {
         let x = 1;
         for (let i = 0; i < state.tabs.length; i++) {
           const width = state.tabs[i].label.length + 2;
           if (event2.x >= x && event2.x < x + width)
-            return { ui: switchTab(i), effects };
+            return { ui: switchTab(state.tabs[i].index), effects };
           x += width;
         }
         return { ui, effects };
@@ -48834,7 +48844,7 @@ function openDashboard(storePath2, options = {}) {
     configPath: configPath2,
     ui: () => ui,
     roster: () => roster,
-    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster),
+    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents),
     async handle(event2, vp) {
       const prevTab = ui.tab;
       const result = reduce(store, ui, event2, vp, stores, roster, resolveProjectHeadSha);
@@ -48849,9 +48859,6 @@ function openDashboard(storePath2, options = {}) {
 }
 
 // packages/tui/dist/render.js
-function blockTop(screenHeight, block) {
-  return screenHeight - 2 - block.height;
-}
 function draw(screen2, state, opts = {}) {
   const blockHeight = opts.block?.height ?? 0;
   screen2.fill({ attr: {} });
@@ -48875,7 +48882,7 @@ function draw(screen2, state, opts = {}) {
   if (state.searchLine) {
     screen2.put({ x: 0, y: top + 2, attr: { dim: true } }, state.searchLine);
   }
-  const lastBodyLine = screen2.height - 3 - blockHeight;
+  const lastBodyLine = screen2.height - 3;
   let y = state.bodyTop;
   if (state.emptyMessage && y <= lastBodyLine) {
     screen2.put({ x: 0, y, attr: { dim: true } }, state.emptyMessage);
@@ -48925,7 +48932,7 @@ function draw(screen2, state, opts = {}) {
     }
   }
   if (opts.block && blockHeight > 0) {
-    const top2 = blockTop(screen2.height, opts.block);
+    const top2 = state.bodyTop;
     for (const p of opts.block.puts)
       screen2.put({ x: p.x, y: top2 + p.y, attr: p.attr }, p.text);
   }
@@ -51710,62 +51717,75 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
   };
 }
 var TILE_H = SPRITE_ROWS;
+var CARD_W = 24;
+var CARD_H = TILE_H + 3;
+var CARD_GAP = 2;
 var ROW_GAP = 1;
-var TEXT_GAP = 1;
-var TEXT_MAX = 36;
-var TEXT_MIN = 8;
-var TILE_GAP = 2;
-var HEAD_ROWS = 2;
+var DONE_FADE = 0.55;
 function clip(text, width) {
   const chars = [...text];
   if (chars.length <= width)
     return text;
   return width <= 1 ? chars.slice(0, width).join("") : chars.slice(0, width - 1).join("") + "\u2026";
 }
+function rgb(hex) {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return [n >> 16 & 255, n >> 8 & 255, n & 255];
+}
+function fadeToTile(hex, amount) {
+  const [a, b] = [rgb(hex), rgb(TILE_BG)];
+  const mix = a.map((v, i) => Math.round(v + (b[i] - v) * amount));
+  return `#${mix.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
 function composeSubagentBlock(view, width, maxHeight, tick) {
   const empty = { height: 0, puts: [], pixels: [] };
-  if (maxHeight < HEAD_ROWS || width < 1)
+  if (maxHeight < 1 || width < 1)
     return empty;
-  if (view.availability === "corrupt") {
-    return { height: HEAD_ROWS, puts: [{ x: 0, y: 1, attr: { dim: true }, text: clip("Sub-agents: unknown \u2014 the dispatch register could not be read", width) }], pixels: [] };
-  }
+  const note = (text) => ({ height: 1, puts: [{ x: 0, y: 0, attr: { dim: true }, text: clip(text, width) }], pixels: [] });
+  if (view.availability === "corrupt")
+    return note("Sub-agents: unknown \u2014 the dispatch register could not be read");
   if (view.agents.length === 0)
-    return empty;
-  const textW = Math.min(TEXT_MAX, width - TILE_COLS - TEXT_GAP);
-  const fitsTile = textW >= TEXT_MIN;
-  const tileW = TILE_COLS + TEXT_GAP + textW;
-  const perRow = fitsTile ? Math.max(1, Math.floor((width + TILE_GAP) / (tileW + TILE_GAP))) : 0;
-  const tileRows = fitsTile ? Math.min(Math.ceil(view.agents.length / perRow), Math.floor((maxHeight - HEAD_ROWS + ROW_GAP) / (TILE_H + ROW_GAP))) : 0;
-  const shown = Math.min(view.agents.length, tileRows * perRow);
+    return note("(no sub-agents)");
+  const cardW = Math.min(CARD_W, width);
+  const perRow = Math.max(1, Math.floor((width + CARD_GAP) / (cardW + CARD_GAP)));
+  const rowsFit = Math.floor((maxHeight + ROW_GAP) / (CARD_H + ROW_GAP));
+  const cardRows = Math.max(0, Math.min(Math.ceil(view.agents.length / perRow), rowsFit));
+  if (cardRows === 0)
+    return note(`${view.agents.length} sub-agents, no room to show them`);
+  const shown = Math.min(view.agents.length, cardRows * perRow);
   const hidden = view.agents.length - shown;
   const puts = [];
   const pixels = [];
-  const header = `Sub-agents (${view.active} active)` + (hidden > 0 ? ` \xB7 ${hidden} more not shown` : "");
-  puts.push({ x: 0, y: 1, attr: { bold: true }, text: clip(header, width) });
   for (let i = 0; i < shown; i++) {
     const a = view.agents[i];
-    const x0 = i % perRow * (tileW + TILE_GAP);
-    const y0 = HEAD_ROWS + Math.floor(i / perRow) * (TILE_H + ROW_GAP);
-    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), a.status === "running")).forEach((line2, r) => line2.forEach((cell, c) => {
+    const done = a.status === "done";
+    const x0 = i % perRow * (cardW + CARD_GAP);
+    const y0 = Math.floor(i / perRow) * (CARD_H + ROW_GAP);
+    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done)).forEach((line2, r) => line2.forEach((cell, c) => {
       const px = { x: x0 + c, y: y0 + r, ch: cell.ch };
       if (cell.fg !== void 0)
-        px.fg = cell.fg;
+        px.fg = done ? fadeToTile(cell.fg, DONE_FADE) : cell.fg;
       if (cell.bg !== void 0)
-        px.bg = cell.bg;
+        px.bg = done ? fadeToTile(cell.bg, DONE_FADE) : cell.bg;
       pixels.push(px);
     }));
-    const tx = x0 + TILE_COLS + TEXT_GAP;
-    puts.push({ x: tx, y: y0, attr: { bold: true }, text: clip(a.type, textW) });
+    const ty = y0 + TILE_H;
+    puts.push({ x: x0, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, cardW) });
     const status = `${a.status} \xB7 ${a.contextPct === null ? "?" : `${a.contextPct}%`} ctx`;
-    const line = [...clip(`${status} \xB7 ${a.model ?? "model unknown"}`, textW)];
+    const line = [...clip(`${status} \xB7 ${a.model ?? "model unknown"}`, cardW)];
     const statusLen = Math.min(line.length, [...status].length);
-    puts.push({ x: tx, y: y0 + 1, attr: a.status === "running" ? { color: "green" } : { dim: true }, text: line.slice(0, statusLen).join("") });
+    puts.push({ x: x0, y: ty + 1, attr: done ? { dim: true } : { color: "green" }, text: line.slice(0, statusLen).join("") });
     if (line.length > statusLen)
-      puts.push({ x: tx + statusLen, y: y0 + 1, attr: { dim: true }, text: line.slice(statusLen).join("") });
+      puts.push({ x: x0 + statusLen, y: ty + 1, attr: { dim: true }, text: line.slice(statusLen).join("") });
     if (a.description)
-      puts.push({ x: tx, y: y0 + 2, attr: { dim: true }, text: clip(a.description, textW) });
+      puts.push({ x: x0, y: ty + 2, attr: { dim: true }, text: clip(a.description, cardW) });
   }
-  return { height: HEAD_ROWS + tileRows * TILE_H + Math.max(0, tileRows - 1) * ROW_GAP, puts, pixels };
+  const height = cardRows * CARD_H + (cardRows - 1) * ROW_GAP;
+  if (hidden > 0 && height + 1 <= maxHeight) {
+    puts.push({ x: 0, y: height, attr: { dim: true }, text: clip(`${hidden} more not shown`, width) });
+    return { height: height + 1, puts, pixels };
+  }
+  return { height, puts, pixels };
 }
 
 // packages/tui/dist/lock.js
@@ -51877,18 +51897,18 @@ var showBanner = process.env.STERLING_NO_BANNER !== "1";
 var screen = new termkit.default.ScreenBuffer({ dst: term });
 var subagents = createSubagentTracker(dirname7(dirname7(storePath)));
 var shownView = { availability: "absent", active: 0, agents: [] };
-var MIN_BODY_LINES = 8;
+var bodyTop = 0;
 var ANIMATION_MS = 333;
 function fullBodyLines() {
   return visibleBodyLines(term.height, bannerLines(term.width, showBanner).length);
 }
 function subagentBlock(tick) {
-  if (ctl.ui().tab !== TASKS_TAB)
+  if (ctl.ui().tab !== AGENTS_TAB)
     return { height: 0, puts: [], pixels: [] };
-  return composeSubagentBlock(shownView, term.width, fullBodyLines() - MIN_BODY_LINES, tick);
+  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2, tick);
 }
 function viewport() {
-  return { width: term.width, maxBodyLines: Math.max(0, fullBodyLines() - subagentBlock(0).height), showBanner };
+  return { width: term.width, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active } };
 }
 var painted;
 var pixelLayout = "";
@@ -51899,8 +51919,7 @@ function layoutKey(block) {
   return `${term.width}x${term.height}|` + block.pixels.map((p) => `${p.x},${p.y}`).join(";");
 }
 function screenPixels(block) {
-  const top = blockTop(term.height, block);
-  return block.pixels.map((p) => ({ ...p, y: p.y + top }));
+  return block.pixels.map((p) => ({ ...p, y: p.y + bodyTop }));
 }
 function animate() {
   const block = subagentBlock(Math.floor(Date.now() / ANIMATION_MS));
@@ -51911,6 +51930,8 @@ function animate() {
 function redraw() {
   const now = Date.now();
   shownView = subagents.view(now);
+  const state = ctl.state(viewport());
+  bodyTop = state.bodyTop;
   const block = subagentBlock(Math.floor(now / ANIMATION_MS));
   const key = layoutKey(block);
   const full = forceFull || key !== pixelLayout;
@@ -51919,7 +51940,7 @@ function redraw() {
   const pixels = screenPixels(block);
   if (full && painted)
     clearPixels(term, painted, pixels);
-  draw(screen, ctl.state(viewport()), { block });
+  draw(screen, state, { block });
   painted = paintPixels(term, pixels, full ? void 0 : painted, trueColor);
   const running = shownView.active > 0 && block.pixels.length > 0;
   if (running && !animation)

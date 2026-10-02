@@ -28,6 +28,9 @@ export interface DashboardOptions {
   disabledEffects?: Partial<Record<DisableableEffect, string | null>>;
 }
 
+/** The viewport a host passes: every field is required except the optional Agents tab. */
+export type ControllerViewport = Required<Omit<Viewport, 'agents'>> & Pick<Viewport, 'agents'>;
+
 export interface DashboardController {
   readonly stores: MountedStores;
   readonly store: SterlingStore;
@@ -36,9 +39,9 @@ export interface DashboardController {
   readonly configPath: string;
   ui(): UiState;
   roster(): AgentRosterSnapshot | undefined;
-  state(vp: Required<Viewport>): DashboardState;
+  state(vp: ControllerViewport): DashboardState;
   /** reduce one event and execute its effects; true when the event asked to quit */
-  handle(event: UiEvent, vp: Required<Viewport>): Promise<boolean>;
+  handle(event: UiEvent, vp: ControllerViewport): Promise<boolean>;
   /** execute effects (the impure seam); true when one of them is a quit */
   applyEffects(effects: Effect[]): Promise<boolean>;
   close(): void;
@@ -321,7 +324,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     configPath,
     ui: () => ui,
     roster: () => roster,
-    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster),
+    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents),
     async handle(event, vp) {
       const prevTab = ui.tab;
       const result = reduce(store, ui, event, vp, stores, roster, resolveProjectHeadSha);

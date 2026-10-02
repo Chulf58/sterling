@@ -8414,10 +8414,11 @@ function defaultResolveHeadSha() {
     return void 0;
   }
 }
-var TABS = ["Tasks", "Knowledge", "Queue", "System"];
+var TABS = ["Tasks", "Knowledge", "Queue", "Agents", "System"];
 var TASKS_TAB = TABS.indexOf("Tasks");
 var KNOWLEDGE_TAB = TABS.indexOf("Knowledge");
 var QUEUE_TAB = TABS.indexOf("Queue");
+var AGENTS_TAB = TABS.indexOf("Agents");
 var SYSTEM_TAB = TABS.indexOf("System");
 var initialUi = { tab: 0, cursor: 0, expanded: [], searchQuery: "", scroll: 0 };
 var EMPTY_ROSTER = {
@@ -8437,6 +8438,9 @@ function effortOptions(key) {
   return ["low", "medium", "high"];
 }
 var MODEL_VALUE_RE = /^claude-/;
+function visibleTabs(agents) {
+  return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== void 0);
+}
 function cardsFor(store, tab, expanded = []) {
   if (tab === 0)
     return todoCards(store, expanded);
@@ -8634,19 +8638,23 @@ function modeToggleRow(snap, ui, width, cursorIndex) {
   const shown = mode === null ? "UNKNOWN (config unreadable)" : mode === "hobby" || mode === "work" ? mode.toUpperCase() : `INVALID ('${mode}')`;
   return { id: "sys:project_mode", lines: [{ text: clip3(`${marker}Project mode: ${shown}`), kind: "title", selected }] };
 }
-function tabsFor(store, activeTab) {
+function tabsFor(store, activeTab, agents) {
   let taskCount = null;
   try {
     taskCount = store.count({ types: ["todo"], source: "user" });
   } catch {
     taskCount = null;
   }
-  return TABS.map((label, i) => ({
-    label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label,
-    active: i === activeTab
-  }));
+  return visibleTabs(agents).map((i) => {
+    const label = TABS[i];
+    return {
+      label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running})` : label,
+      active: i === activeTab,
+      index: i
+    };
+  });
 }
-function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster) {
+function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents) {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows = [];
   let screenRow = 0;
@@ -8685,19 +8693,19 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, max
     tabs,
     rows,
     emptyMessage: view.rows.length ? void 0 : "(no configured models)",
-    footer: `\u2190/\u2192 or 1-${TABS.length} tabs \xB7 \u2191/\u2193 rows \xB7 enter change model/effort \xB7 esc cancel \xB7 q quit`,
+    footer: `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 rows \xB7 enter change model/effort \xB7 esc cancel \xB7 q quit`,
     banner,
     projectName,
     bodyTop,
     scroll
   };
 }
-function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster) {
+function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents) {
   const banner = bannerLines(width, showBanner);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
-  const tabs = tabsFor(store, ui.tab);
+  const tabs = tabsFor(store, ui.tab, agents);
   if (ui.tab === SYSTEM_TAB)
-    return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster);
+    return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents);
   const nodes = nodesFor(store, ui, knowledge);
   const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
   let rows = [];
@@ -8803,7 +8811,7 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
   return {
     tabs,
     rows,
-    emptyMessage: nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
+    emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
     footer: (
       // Fix round (Opus review of 71c1f41): a Tasks-tab board_edit notice
       // (lost-update refusal, vanished item, failed HEAD resolve) must be
@@ -8811,7 +8819,7 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
       // state.footer unconditionally, so this is the one line available to
       // this scope's two files without touching render.ts. Mirrors the
       // System tab's own '⚠ ' convention (buildSystemTab's banner).
-      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : `\u2190/\u2192 or 1-${TABS.length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
+      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : ui.tab === AGENTS_TAB ? `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 q quit` : `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
     ),
     searchLine: searchActive ? `search: ${ui.searchQuery}` : void 0,
     queueCompleted,
@@ -8840,8 +8848,10 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
   const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects = [];
   const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
+  const reachable = visibleTabs(viewport.agents);
+  const stepTab = (dir) => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0];
   const scrollable = ui.tab !== QUEUE_TAB;
-  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster);
+  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster, viewport.agents);
   const revealAt = (cursor) => {
     if (!scrollable || !Number.isFinite(maxBodyLines))
       return { ...ui, cursor };
@@ -9044,10 +9054,10 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
           }
           return { ui, effects };
         case "LEFT":
-          return { ui: switchTab((ui.tab + TABS.length - 1) % TABS.length), effects };
+          return { ui: switchTab(stepTab(-1)), effects };
         case "RIGHT":
         case "TAB":
-          return { ui: switchTab((ui.tab + 1) % TABS.length), effects };
+          return { ui: switchTab(stepTab(1)), effects };
         case "UP":
           return { ui: moveCursor(-1), effects };
         case "DOWN":
@@ -9091,13 +9101,13 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
       }
       if (/^[1-9]$/.test(ch)) {
         const index = Number(ch) - 1;
-        if (index < TABS.length)
-          return { ui: switchTab(index), effects };
+        if (index < reachable.length)
+          return { ui: switchTab(reachable[index]), effects };
       }
       return { ui, effects };
     }
     case "tab":
-      if (event.index < 0 || event.index >= TABS.length)
+      if (!reachable.includes(event.index))
         return { ui, effects };
       return { ui: switchTab(event.index), effects };
     case "wheel": {
@@ -9108,13 +9118,13 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
       return { ui: { ...ui, scroll: st.scroll }, effects };
     }
     case "click": {
-      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster);
+      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster, viewport.agents);
       if (event.y === state.bodyTop - 1) {
         let x = 1;
         for (let i = 0; i < state.tabs.length; i++) {
           const width = state.tabs[i].label.length + 2;
           if (event.x >= x && event.x < x + width)
-            return { ui: switchTab(i), effects };
+            return { ui: switchTab(state.tabs[i].index), effects };
           x += width;
         }
         return { ui, effects };
@@ -9768,7 +9778,7 @@ function openDashboard(storePath, options = {}) {
     configPath: configPath2,
     ui: () => ui,
     roster: () => roster,
-    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster),
+    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents),
     async handle(event, vp) {
       const prevTab = ui.tab;
       const result = reduce(store, ui, event, vp, stores, roster, resolveProjectHeadSha);

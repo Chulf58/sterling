@@ -194,14 +194,19 @@ const AGENT = (agentId: string, avatar: number, status: 'running' | 'done' = 'ru
   agentId, avatar, type: 'implementor', description: 'Build the reader', model: 'claude-opus-5-5', status, elapsedMs: 65_000, contextPct: 42 as number | null,
 });
 
-test('block: no rows and a readable register draw nothing', () => {
-  assert.equal(composeSubagentBlock(view([]), 160, 30, 0).height, 0);
-  assert.equal(composeSubagentBlock(view([], 'absent'), 160, 30, 0).height, 0);
+test('block: no agents draws one dim line, a readable register is never blank; no room draws nothing', () => {
+  for (const availability of ['ok', 'absent'] as const) {
+    const b = composeSubagentBlock(view([], availability), 160, 30, 0);
+    assert.equal(b.height, 1);
+    assert.deepEqual(b.puts.map((p) => [p.text, p.attr.dim]), [['(no sub-agents)', true]]);
+    assert.equal(b.pixels.length, 0);
+  }
+  assert.equal(composeSubagentBlock(view([]), 160, 0, 0).height, 0);
 });
 
 test('block: a corrupt register is one dim line that says the state is unknown', () => {
   const b = composeSubagentBlock(view([], 'corrupt'), 160, 30, 0);
-  assert.equal(b.height, 2);
+  assert.equal(b.height, 1);
   assert.equal(b.pixels.length, 0);
   const text = b.puts.map((p) => p.text).join('\n');
   assert.match(text, /Sub-agents/);
@@ -209,38 +214,45 @@ test('block: a corrupt register is one dim line that says the state is unknown',
   assert.ok(b.puts.every((p) => p.attr.dim));
 });
 
-test('block: a 6x3 portrait on an 8x3 tinted tile per agent, then type, status, context, model and description; no frame, no avatar numbers', () => {
+test('block: the agents are cards side by side in ONE row, each an 8x3 tile with its three text lines below; no frame, no avatar numbers', () => {
   const b = composeSubagentBlock(view([AGENT('a1', 7), AGENT('a2', 31), AGENT('a3', 2, 'done')]), 160, 30, 0);
+  assert.equal(b.height, SPRITE_ROWS + 3, 'one card row: the tile and three text lines');
+  const type = b.puts.filter((p) => p.text === 'implementor');
+  assert.deepEqual(type.map((p) => [p.x, p.y]), [[0, 3], [26, 3], [52, 3]], 'three cards side by side, text on the row under the tile');
+  const statusRow = b.puts.filter((p) => p.y === 4).map((p) => p.text);
+  assert.ok(statusRow.includes('running · 42% ctx') && statusRow.includes(' · cla…') && statusRow.includes('done · 42% ctx'), JSON.stringify(statusRow));
+  assert.deepEqual(b.puts.filter((p) => p.text === 'Build the reader').map((p) => p.y), [5, 5, 5]);
   const text = b.puts.map((p) => p.text);
-  assert.ok(text.includes('Sub-agents (2 active)'));
-  assert.equal(b.height, 1 + 1 + SPRITE_ROWS, 'the three tiles share one tile row at 160 columns');
-  for (const want of ['implementor', 'Build the reader']) assert.ok(text.some((t) => t === want), `missing '${want}' in ${JSON.stringify(text)}`);
-  assert.ok(text.includes('running · 42% ctx') && text.includes(' · claude-opus-5-5'), 'status and context, then the model, on one line');
-  assert.ok(text.includes('done · 42% ctx'));
   assert.ok(!text.some((t) => /#\s?\d|\b(7|31)\b/.test(t)), 'no avatar number is printed');
   assert.ok(!text.some((t) => /[┌┐└┘│─]/.test(t)), 'no drawn frame');
   // every agent gets one 8x3 tile: 6x3 portrait cells plus a padding column each side, all on the tile colour
   assert.equal(b.pixels.length, 3 * TILE_COLS * SPRITE_ROWS);
   assert.ok(b.pixels.every((p) => p.bg !== undefined), 'a bg on every tile cell');
-  const first = b.pixels[0]!;
-  assert.deepEqual({ x: first.x, y: first.y, ch: first.ch, bg: first.bg }, { x: 0, y: 2, ch: ' ', bg: TILE_BG });
-  assert.ok(b.pixels.some((p) => p.ch !== ' ' && p.fg !== undefined && p.bg !== undefined), 'a quadrant cell carries both colours');
   assert.ok(b.pixels.every((p) => [...QUADRANTS].includes(p.ch)), 'composition only emits quadrant glyphs');
-  // the three text lines sit beside the tile, on its three rows
-  const type = b.puts.find((p) => p.text === 'implementor')!;
-  assert.equal(type.x, TILE_COLS + 1);
-  assert.equal(type.y, 2);
-  assert.equal(b.puts.find((p) => p.text === 'running · 42% ctx')!.y, 3);
-  assert.equal(b.puts.find((p) => p.text === 'Build the reader')!.y, 4);
-  // nothing is drawn past the width
+  const first = b.pixels[0]!;
+  assert.deepEqual({ x: first.x, y: first.y, ch: first.ch, bg: first.bg }, { x: 0, y: 0, ch: ' ', bg: TILE_BG });
+  assert.ok(b.pixels.some((p) => p.ch !== ' ' && p.fg !== undefined && p.bg !== undefined), 'a quadrant cell carries both colours');
+  assert.ok(b.pixels.every((p) => p.x < 160 && p.y < b.height));
   assert.ok(b.puts.every((p) => p.x + [...p.text].length <= 160));
 });
 
-test('block: the status line clips to the text width, keeping the status part first', () => {
-  const b = composeSubagentBlock(view([AGENT('a1', 3)]), TILE_COLS + 1 + 20, 30, 0);
-  const line = b.puts.filter((p) => p.y === 3);
-  assert.equal(line.map((p) => p.text).join(''), 'running · 42% ctx ·…');
-  assert.ok(b.puts.every((p) => p.x + [...p.text].length <= TILE_COLS + 1 + 20));
+test('block: a done card is dimmed, a running one is not; the same portrait is faded when done', () => {
+  const running = composeSubagentBlock(view([AGENT('a1', 5)]), 160, 30, 0);
+  const done = composeSubagentBlock(view([AGENT('a1', 5, 'done')]), 160, 30, 0);
+  assert.ok(running.puts.some((p) => p.attr.color === 'green'), 'a running status is green');
+  assert.ok(done.puts.every((p) => p.attr.dim), 'every text line of a done card is dim');
+  assert.ok(!running.puts.find((p) => p.text === 'implementor')!.attr.dim);
+  const coloured = (b: typeof running) => b.pixels.filter((p) => p.fg !== undefined);
+  assert.equal(coloured(done).length, coloured(running).length);
+  assert.notDeepEqual(coloured(done).map((p) => p.fg), coloured(running).map((p) => p.fg), 'the done portrait is faded');
+  assert.ok(done.pixels.every((p) => /^#[0-9a-f]{6}$/.test(p.bg ?? '')), 'faded colours stay valid hex');
+});
+
+test('block: the status line clips to the card width, keeping the status part first', () => {
+  const b = composeSubagentBlock(view([AGENT('a1', 3)]), 160, 30, 0);
+  const line = b.puts.filter((p) => p.y === 4);
+  assert.equal(line.map((p) => p.text).join(''), 'running · 42% ctx · cla…');
+  assert.ok(line.every((p) => p.x + [...p.text].length <= 24), 'nothing past the 24-column card');
 });
 
 test('block: only running portraits animate; a done portrait rests on frame 0', () => {
@@ -251,25 +263,32 @@ test('block: only running portraits animate; a done portrait rests on frame 0', 
   for (const t of [1, 2, 3, 5]) assert.deepEqual(done(t), done(0));
 });
 
-test('block: tile rows are separated by one blank row', () => {
-  const b = composeSubagentBlock(view([AGENT('a1', 1), AGENT('a2', 2)]), 60, 30, 0);
-  assert.equal(b.height, 2 + SPRITE_ROWS + 1 + SPRITE_ROWS);
-  const ys = new Set(b.pixels.map((p) => p.y));
-  assert.ok(!ys.has(2 + SPRITE_ROWS), 'the gap row holds no tile cell');
-  assert.ok(ys.has(2 + SPRITE_ROWS + 1));
+test('block: a narrow pane wraps cards to the next row, and what does not fit is counted', () => {
+  const agents = [AGENT('a1', 1), AGENT('a2', 2), AGENT('a3', 3)];
+  // 60 columns hold two 24-column cards; 13 rows hold two card rows
+  const wrapped = composeSubagentBlock(view(agents), 60, 13, 0);
+  assert.equal(wrapped.height, 2 * (SPRITE_ROWS + 3) + 1, 'two card rows with a blank row between');
+  assert.equal(wrapped.pixels.length, 3 * TILE_COLS * SPRITE_ROWS);
+  assert.deepEqual(wrapped.puts.filter((p) => p.text === 'implementor').map((p) => [p.x, p.y]), [[0, 3], [26, 3], [0, 10]]);
+  // one card row of room: two cards show and the rest is counted below them
+  const one = composeSubagentBlock(view(agents), 60, 7, 0);
+  assert.equal(one.pixels.length, 2 * TILE_COLS * SPRITE_ROWS);
+  assert.ok(one.puts.some((p) => p.text === '1 more not shown' && p.y === 6));
+  assert.ok(one.puts.every((p) => p.x + [...p.text].length <= 60));
+  // no room for a card row: a note, no portraits
+  const tight = composeSubagentBlock(view(agents), 60, 5, 0);
+  assert.equal(tight.pixels.length, 0);
+  assert.deepEqual(tight.puts.map((p) => p.text), ['3 sub-agents, no room to show them']);
+  assert.equal(composeSubagentBlock(view(agents), 60, 0, 0).height, 0);
 });
 
-test('block: a narrow pane wraps tiles, and what does not fit is counted in the header', () => {
-  const agents = [AGENT('a1', 1), AGENT('a2', 2), AGENT('a3', 3)];
-  const b = composeSubagentBlock(view(agents), 60, 6, 0);
-  assert.equal(b.pixels.length, SPRITE_ROWS * TILE_COLS, 'one tile per row at 60 columns, and 6 rows fit one tile row');
-  assert.ok(b.puts.some((p) => p.text === 'Sub-agents (3 active) · 2 more not shown'));
-  assert.ok(b.puts.every((p) => p.x + [...p.text].length <= 60));
-  // no room for a tile row: the header alone
-  const tight = composeSubagentBlock(view(agents), 60, 4, 0);
-  assert.equal(tight.height, 2);
-  assert.equal(tight.pixels.length, 0);
-  assert.equal(composeSubagentBlock(view(agents), 60, 1, 0).height, 0);
+test('animation condition: the timer runs only while the Agents tab shows a running agent', () => {
+  // main.ts starts the 3 Hz timer when `active > 0 && block.pixels.length > 0`, and composes an empty block
+  // off the Agents tab, so both halves are properties of what compose returns
+  const live = composeSubagentBlock(view([AGENT('a1', 1)]), 160, 30, 0);
+  assert.ok(view([AGENT('a1', 1)]).active > 0 && live.pixels.length > 0);
+  const allDone = view([AGENT('a1', 1, 'done')]);
+  assert.equal(allDone.active, 0, 'a done-only view has no running agent, so the timer stays off');
 });
 
 function transcriptLine(type: string, usage?: Record<string, number>, model = 'claude-opus-5-5'): string {
@@ -342,8 +361,8 @@ test('tracker: context % from the subagent transcript and the window table, "?" 
     assert.equal(v.agents[0]!.model, 'claude-opus-5-5', 'the transcript names the model that actually ran');
     assert.equal(v.agents[1]!.contextPct, null);
     const text = composeSubagentBlock(v, 160, 30, 0).puts.map((p) => p.text);
-    assert.ok(text.includes('running · 25% ctx') && text.includes(' · claude-opus-5-5'), JSON.stringify(text));
-    assert.ok(text.includes('running · ? ctx') && text.includes(' · model unknown'), JSON.stringify(text));
+    assert.ok(text.includes('running · 25% ctx') && text.includes(' · cla…'), JSON.stringify(text));
+    assert.ok(text.includes('running · ? ctx') && text.includes(' · model…'), JSON.stringify(text));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

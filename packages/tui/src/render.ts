@@ -23,14 +23,9 @@ export interface ScreenLike {
 }
 
 export interface DrawOptions {
-  /** the Sub-agents block, drawn in the rows just above the spacer and footer;
-   *  its portrait pixels are painted afterwards by paintPixels (truecolour) */
+  /** the Agents tab's cards, drawn from the top of the body; their portrait
+   *  pixels are painted afterwards by paintPixels (truecolour) */
   block?: SubagentBlock;
-}
-
-/** The screen row the Sub-agents block starts on. */
-export function blockTop(screenHeight: number, block: SubagentBlock): number {
-  return screenHeight - 2 - block.height;
 }
 
 export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOptions = {}): void {
@@ -68,7 +63,7 @@ export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOption
     // the spacer line (row top+2) doubles as the search bar while a query/input is live
     screen.put({ x: 0, y: top + 2, attr: { dim: true } }, state.searchLine);
   }
-  const lastBodyLine = screen.height - 3 - blockHeight; // reserve the blank spacer + footer, and the Sub-agents block
+  const lastBodyLine = screen.height - 3; // reserve the blank spacer + footer
   let y = state.bodyTop; // 0-based rows: header 0, tab bar 1, blank/search 2, body from bodyTop
   if (state.emptyMessage && y <= lastBodyLine) {
     screen.put({ x: 0, y, attr: { dim: true } }, state.emptyMessage);
@@ -121,7 +116,7 @@ export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOption
     }
   }
   if (opts.block && blockHeight > 0) {
-    const top = blockTop(screen.height, opts.block);
+    const top = state.bodyTop;
     for (const p of opts.block.puts) screen.put({ x: p.x, y: top + p.y, attr: p.attr }, p.text);
   }
   const footerY = blockHeight > 0 ? screen.height - 1 : Math.min(y + 1, screen.height - 1);
