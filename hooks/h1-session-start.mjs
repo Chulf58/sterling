@@ -7770,7 +7770,9 @@ var init_agent_fences = __esm({
   "scripts/lib/agent-fences.mjs"() {
     FENCE_KINDS = {
       "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
-      "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" }
+      "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
+      "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
+      "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" }
     };
     EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
   }
@@ -7785,7 +7787,7 @@ var init_checks = __esm({
 
 // scripts/lib/agent-distribution.mjs
 import { createHash as createHash3, randomUUID as randomUUID3 } from "node:crypto";
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, readdirSync as readdirSync2, existsSync as existsSync6, mkdirSync as mkdirSync5, statSync as statSync2, lstatSync as lstatSync2, unlinkSync as unlinkSync2, renameSync as renameSync3, linkSync } from "node:fs";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, readdirSync as readdirSync2, existsSync as existsSync7, mkdirSync as mkdirSync5, statSync as statSync2, lstatSync as lstatSync2, unlinkSync as unlinkSync2, renameSync as renameSync3, linkSync } from "node:fs";
 function sha256(text) {
   return createHash3("sha256").update(normalize(text), "utf8").digest("hex");
 }
@@ -7827,7 +7829,7 @@ function validateOpenCodeEntry(entry, where) {
   }
 }
 function loadRegistry(registryPath2) {
-  const registry = JSON.parse(readFileSync3(registryPath2, "utf8"));
+  const registry = JSON.parse(readFileSync4(registryPath2, "utf8"));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
     throw new Error(`agent registry ${registryPath2}: unsupported shape (expected {version: 1, agents: []})`);
   }
@@ -7875,9 +7877,9 @@ var init_agent_distribution = __esm({
 
 // scripts/hooks/h1-session-start.mjs
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { readFileSync as readFileSync8, existsSync as existsSync10, mkdirSync as mkdirSync10, readdirSync as readdirSync5, renameSync as renameSync6, statSync as statSync5, writeFileSync as writeFileSync7, rmSync as rmSync4 } from "node:fs";
-import { spawnSync as spawnSync4 } from "node:child_process";
-import { basename as basename2, join as join12 } from "node:path";
+import { readFileSync as readFileSync9, existsSync as existsSync11, mkdirSync as mkdirSync10, readdirSync as readdirSync5, renameSync as renameSync6, statSync as statSync5, writeFileSync as writeFileSync7, rmSync as rmSync5 } from "node:fs";
+import { spawnSync as spawnSync5 } from "node:child_process";
+import { basename as basename2, join as join13 } from "node:path";
 
 // scripts/hooks/lib/plugin-root-walk.mjs
 import { existsSync } from "node:fs";
@@ -8897,6 +8899,170 @@ function sessionBoundarySweep(root, opts = {}) {
   return { terminated, pruned, migrated, ...refused ? { refused } : {} };
 }
 
+// scripts/hooks/lib/rotation-restore.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { existsSync as existsSync6, readFileSync as readFileSync3, rmSync as rmSync2 } from "node:fs";
+import { join as join8 } from "node:path";
+var NOTE_PROSE_MAX = 2e3;
+var LIVE_DISPATCH_MAX = 20;
+var LIVE_TERRITORY_MAX = 40;
+var LIVE_TERRITORY_LINE_MAX = PATH_MAX * 4;
+var NOTE_FIELD_MAX = {
+  objective: NOTE_PROSE_MAX,
+  next_slice: NOTE_PROSE_MAX,
+  risks: NOTE_PROSE_MAX,
+  pointers: NOTE_PROSE_MAX,
+  branch: PATH_MAX,
+  head_sha: PATH_MAX,
+  session_id: PATH_MAX,
+  at: PATH_MAX
+};
+var LANE_HANDOFF_MAX = 1e3;
+function rotationNotePath(cwd) {
+  return join8(cwd, ".sterling", "transient", "rotation-note.json");
+}
+function readRotationNote(cwd) {
+  const notePath = rotationNotePath(cwd);
+  if (!existsSync6(notePath)) return null;
+  return JSON.parse(readFileSync3(notePath, "utf8"));
+}
+function consumeRotationNote(cwd) {
+  const note = readRotationNote(cwd);
+  if (note) rmSync2(rotationNotePath(cwd), { force: true });
+  return note;
+}
+function renderRotationRestore(note, { cwd, source, host = "claude", planLock: planLock2 = null, planLockMalformed: planLockMalformed2 = false }) {
+  if (host !== "claude" && host !== "opencode") throw new Error(`renderRotationRestore: unknown host '${host}'`);
+  const head = (() => {
+    try {
+      const r = spawnSync2("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", timeout: 5e3 });
+      return r.status === 0 ? (r.stdout ?? "").trim() : null;
+    } catch {
+      return null;
+    }
+  })();
+  const cautions = [];
+  if (note.head_sha && head && head !== note.head_sha) {
+    cautions.push(`HEAD has MOVED since the note (${sanitizeForContext(String(note.head_sha), PATH_MAX).slice(0, 8)} \u2192 ${head.slice(0, 8)}) \u2014 re-verify repository state before acting on it`);
+  }
+  const noteBaseBranch = sanitizeForContext(note.base_branch, PATH_MAX);
+  let commitsAheadUnverified = false;
+  if (typeof note.commits_ahead === "number") {
+    if (!note.base_branch) {
+      commitsAheadUnverified = true;
+    } else {
+      try {
+        const countR = spawnSync2("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd, encoding: "utf8", timeout: 5e3 });
+        const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
+        if (Number.isFinite(actual)) {
+          if (actual !== note.commits_ahead) {
+            cautions.push(`commits_ahead drift \u2014 note says ${note.commits_ahead}, actual is ${actual} (vs ${noteBaseBranch || "unknown base"})`);
+          }
+        } else {
+          commitsAheadUnverified = true;
+        }
+      } catch {
+        commitsAheadUnverified = true;
+      }
+    }
+  }
+  const ageMs = Date.now() - Date.parse(note.at ?? "");
+  if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1e3) {
+    cautions.push(`the note is ~${Math.round(ageMs / 36e5)}h old`);
+  }
+  const notePlanRaw = typeof note.plan_path === "string" && note.plan_path ? note.plan_path : null;
+  const livePlanRaw = typeof planLock2?.plan_path === "string" && planLock2.plan_path ? planLock2.plan_path : null;
+  const notePlan = notePlanRaw ? sanitizeForContext(notePlanRaw, PATH_MAX) : null;
+  const livePlan = livePlanRaw ? sanitizeForContext(livePlanRaw, PATH_MAX) : null;
+  if (notePlanRaw && planLockMalformed2) {
+    cautions.push(`the note names a plan (${notePlan}) but the live plan lock is MALFORMED and could not be compared against it \u2014 inspect it with \`plan-lock.mjs --show\``);
+  } else if (notePlanRaw && livePlanRaw && notePlanRaw !== livePlanRaw) {
+    cautions.push(`the note's plan_path DIFFERS from the current plan lock (note: ${notePlan}; lock now: ${livePlan}) \u2014 a new plan was approved after the note was written, and the PLAN LOCK section above is the authority`);
+  } else if (notePlanRaw && !livePlanRaw) {
+    cautions.push(`the note names a plan (${notePlan}) but no plan lock is live now \u2014 it was released, or .sterling/ was recreated`);
+  }
+  const planField = notePlanRaw ? [`- plan: ${notePlan}`] : [];
+  const noteSessionId = typeof note.session_id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(note.session_id) ? note.session_id : null;
+  const fields = planField.concat(
+    ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "session_id", "at"].map((k) => [k, k === "session_id" ? noteSessionId : note[k]]).filter(([, v]) => v).map(([k, v]) => `- ${k}: ${sanitizeForContext(String(v), NOTE_FIELD_MAX[k])}`)
+  ).concat(
+    typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${noteBaseBranch || "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
+  ).join("\n");
+  const liveDispatches = note.live_dispatches;
+  let liveLine = "";
+  if (Array.isArray(liveDispatches) && liveDispatches.length) {
+    const rendered = liveDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
+      const entries = Array.isArray(d?.territory) ? d.territory : [];
+      let territory = "no declared territory";
+      if (entries.length) {
+        const shown = entries.slice(0, LIVE_TERRITORY_MAX).map((t) => sanitizeForContext(String(t), PATH_MAX));
+        const dropped = entries.length - shown.length;
+        let joined = shown.join(", ");
+        if (joined.length > LIVE_TERRITORY_LINE_MAX) joined = `${joined.slice(0, LIVE_TERRITORY_LINE_MAX)}\u2026`;
+        territory = dropped > 0 ? `${joined}\u2026 (+${dropped} more)` : joined;
+      }
+      return `- ${sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent"} (${sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id"}) \u2014 ${territory}`;
+    }).join("\n");
+    const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
+    liveLine = `
+${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and cannot be resumed from this one (agent lookup is scoped to the current session); re-dispatch fresh if the work is still needed, and mind the territory below, which they may still be writing:
+${rendered}` + (omitted > 0 ? `
+\u2026 (+${omitted} more)` : "");
+  } else if (liveDispatches === null) {
+    liveLine = `
+${render(
+      disclosure(
+        "register_unavailable",
+        {},
+        "dispatch register unavailable \u2014 the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed, and check git status for files it may still be writing."
+      )
+    )}`;
+  }
+  const uncertainDispatches = Array.isArray(note.uncertain_dispatches) ? note.uncertain_dispatches : [];
+  let uncertainLine = "";
+  if (uncertainDispatches.length) {
+    const renderedUncertain = uncertainDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
+      const type = sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent";
+      const id = sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id";
+      const reason = sanitizeForContext(String(d?.reason ?? "unknown"), PATH_MAX) || "unknown";
+      return render(
+        disclosure("dispatch_status_unknown", {}, `${type}:${id} \u2014 ownership uncertain (${reason}); belongs to the previous session and cannot be resumed from this one \u2014 re-dispatch fresh if still needed`)
+      );
+    }).join("\n");
+    const omittedUncertain = uncertainDispatches.length - Math.min(uncertainDispatches.length, LIVE_DISPATCH_MAX);
+    uncertainLine = `
+${uncertainDispatches.length} dispatch(es) UNCERTAIN at rotation (lease expired, not confirmed dead \u2014 never counted as live):
+${renderedUncertain}` + (omittedUncertain > 0 ? `
+\u2026 (+${omittedUncertain} more)` : "");
+  }
+  const noteLanes = (Array.isArray(note.lanes) ? note.lanes : []).filter((l) => typeof l === "string").map((l) => sanitizeForContext(l.replace(/\s+/g, " "), LANE_HANDOFF_MAX)).filter(Boolean);
+  let lanesLine = "";
+  if (noteLanes.length) {
+    const noteSession = noteSessionId;
+    const renderedLanes = noteLanes.slice(0, LIVE_DISPATCH_MAX).map((l) => `- ${l}`).join("\n");
+    const omittedLanes = noteLanes.length - Math.min(noteLanes.length, LIVE_DISPATCH_MAX);
+    const wayBack = note.session_host === "opencode" ? noteSession ? `The old agents are reachable only by returning to the old session: \`opencode --session ${noteSession}\`.` : `The old agents are reachable only by returning to the old session; the note recorded no session id.` : noteSession ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.` : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`;
+    lanesLine = (host === "claude" ? `
+${noteLanes.length} lane hand-off(s) carried across the rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. ` : `
+${noteLanes.length} lane hand-off(s) carried across the rotation. Subagents of the previous session are not continued from this one: re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. `) + wayBack + `
+${renderedLanes}` + (omittedLanes > 0 ? `
+\u2026 (+${omittedLanes} more)` : "");
+  }
+  const body = `
+${fields}${liveLine}${uncertainLine}${lanesLine}
+Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. `;
+  const caution = cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "";
+  if (host === "opencode") {
+    return `
+
+ROTATION RESTORE (Sterling OpenCode plugin): a rotation note was prepared before this new session; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch OpenCode, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: exit and relaunch OpenCode now.` : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED OpenCode before this new session \u2014 a new session alone never reloads code, so relaunch now if that didn't happen yet.`);
+  }
+  const isClear = source === "clear";
+  return `
+
+ROTATION RESTORE (H1, source=${source}): a rotation note was prepared before this ${isClear ? "/clear" : "restart"}; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? isClear ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.` : `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 this restore is happening at session STARTUP, which already implies the exit-and-relaunch that reloads server/hook code.` : isClear ? `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.` : `If next_slice depends on a server/hook code change (migration, update, rebuild), this STARTUP already reloaded it.`);
+}
+
 // scripts/hooks/lib/undeclared-source.mjs
 init_dist();
 var SOURCE_EXTENSIONS = /* @__PURE__ */ new Set([
@@ -9047,7 +9213,7 @@ function renderUnavailable(reason) {
 
 // scripts/hooks/lib/undeclared-source-scan.mjs
 init_dist();
-import { spawnSync as spawnSync2 } from "node:child_process";
+import { spawnSync as spawnSync3 } from "node:child_process";
 var UNDECLARED_SOURCE_TIMEOUT_MS = 3e3;
 var UNDECLARED_SOURCE_OUTPUT_CAP = 5e6;
 function isPlainObject2(v) {
@@ -9105,14 +9271,14 @@ function gitSpawnFailureReason(result, label) {
   return null;
 }
 function scanFilePaths(cwd) {
-  const gitAll = spawnSync2("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+  const gitAll = spawnSync3("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
     cwd,
     timeout: UNDECLARED_SOURCE_TIMEOUT_MS,
     maxBuffer: UNDECLARED_SOURCE_OUTPUT_CAP
   });
   let reason = gitSpawnFailureReason(gitAll, "ls-files");
   if (reason) return { ok: false, reason };
-  const gitDeleted = spawnSync2("git", ["ls-files", "-z", "-d"], {
+  const gitDeleted = spawnSync3("git", ["ls-files", "-z", "-d"], {
     cwd,
     timeout: UNDECLARED_SOURCE_TIMEOUT_MS,
     maxBuffer: UNDECLARED_SOURCE_OUTPUT_CAP
@@ -9151,9 +9317,9 @@ init_agent_distribution();
 // scripts/hooks/lib/settlement.mjs
 init_dist2();
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, rmSync as rmSync2, statSync as statSync3, renameSync as renameSync4 } from "node:fs";
-import { spawnSync as spawnSync3 } from "node:child_process";
-import { join as join8, dirname as dirname7 } from "node:path";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, rmSync as rmSync3, statSync as statSync3, renameSync as renameSync4 } from "node:fs";
+import { spawnSync as spawnSync4 } from "node:child_process";
+import { join as join9, dirname as dirname7 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
 init_dist();
@@ -9161,7 +9327,7 @@ init_dist();
 // scripts/hooks/lib/settlement.mjs
 function hashFile(root, rel) {
   try {
-    return createHash4("sha256").update(readFileSync4(join8(root, rel))).digest("hex");
+    return createHash4("sha256").update(readFileSync5(join9(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -9169,7 +9335,7 @@ function hashFile(root, rel) {
 var GIT_SETTLED_REL = ".sterling/transient/git-settled.json";
 var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 function gitZ(root, args) {
-  const r = spawnSync3("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync4("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.error?.message || "").trim()}`);
   return r.stdout.split("\0").filter(Boolean);
 }
@@ -9184,7 +9350,7 @@ function changedSince(root, base2) {
 var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
 function readGitSettled(root) {
   try {
-    const s2 = JSON.parse(readFileSync4(join8(root, GIT_SETTLED_REL), "utf8"));
+    const s2 = JSON.parse(readFileSync5(join9(root, GIT_SETTLED_REL), "utf8"));
     return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
   } catch {
     return null;
@@ -9193,17 +9359,17 @@ function readGitSettled(root) {
 function gitTouches(root, now) {
   let head;
   try {
-    const r = spawnSync3("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+    const r = spawnSync4("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
     if (r.status === 0) head = r.stdout.trim();
-    else if (spawnSync3("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
+    else if (spawnSync4("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
     else return { ok: false, reason: "no_git" };
     const settled = readGitSettled(root);
     let base2 = settled?.sha;
     let mergeBase = null;
     if (base2 && base2 !== EMPTY_TREE) {
-      if (spawnSync3("git", ["cat-file", "-e", `${base2}^{commit}`], { cwd: root, timeout: 3e4 }).status !== 0) base2 = null;
-      else if (spawnSync3("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0) {
-        const mb = spawnSync3("git", ["merge-base", base2, head], { cwd: root, encoding: "utf8", timeout: 3e4 });
+      if (spawnSync4("git", ["cat-file", "-e", `${base2}^{commit}`], { cwd: root, timeout: 3e4 }).status !== 0) base2 = null;
+      else if (spawnSync4("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0) {
+        const mb = spawnSync4("git", ["merge-base", base2, head], { cwd: root, encoding: "utf8", timeout: 3e4 });
         mergeBase = mb.status === 0 ? mb.stdout.trim() || null : null;
         if (!mergeBase) base2 = null;
       }
@@ -9223,7 +9389,7 @@ function gitTouches(root, now) {
     const candidates = [...changed].map((path) => {
       let at = settled.at;
       try {
-        at = statSync3(join8(root, path)).mtime.toISOString();
+        at = statSync3(join9(root, path)).mtime.toISOString();
       } catch {
       }
       return { path, at: typeof at === "string" ? at : now };
@@ -9234,7 +9400,7 @@ function gitTouches(root, now) {
   }
 }
 function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
-  const p = join8(root, GIT_SETTLED_REL);
+  const p = join9(root, GIT_SETTLED_REL);
   mkdirSync6(dirname7(p), { recursive: true });
   if (ifAbsent) {
     try {
@@ -9250,7 +9416,7 @@ function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
     writeFileSync4(tmp, JSON.stringify(snapshot));
     renameSync4(tmp, p);
   } catch (e) {
-    rmSync2(tmp, { force: true });
+    rmSync3(tmp, { force: true });
     throw e;
   }
   return true;
@@ -9260,9 +9426,9 @@ function writeInitialGitSettled(root, snapshot) {
 }
 
 // scripts/lib/installed-copy.mjs
-import { existsSync as existsSync7, realpathSync as realpathSync3 } from "node:fs";
+import { existsSync as existsSync8, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { join as join9, resolve as resolve3, sep } from "node:path";
+import { join as join10, resolve as resolve3, sep } from "node:path";
 function canonical(p) {
   try {
     return realpathSync3(p);
@@ -9272,25 +9438,25 @@ function canonical(p) {
   }
 }
 function pluginCacheDir({ env = process.env, home = homedir2() } = {}) {
-  return join9(env.CLAUDE_CONFIG_DIR || join9(home, ".claude"), "plugins", "cache");
+  return join10(env.CLAUDE_CONFIG_DIR || join10(home, ".claude"), "plugins", "cache");
 }
 function isInstalledCopy(root, { env = process.env, home = homedir2() } = {}) {
   if (typeof root !== "string" || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  if (!existsSync7(join9(root, ".git"))) return true;
+  if (!existsSync8(join10(root, ".git"))) return true;
   const cache = canonical(pluginCacheDir({ env, home }));
   const real = canonical(root);
   return real.startsWith(cache + sep);
 }
 
 // scripts/lib/update.mjs
-import { closeSync as closeSync3, existsSync as existsSync8, mkdirSync as mkdirSync8, openSync as openSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, readSync as readSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync9, mkdirSync as mkdirSync8, openSync as openSync3, readFileSync as readFileSync7, readdirSync as readdirSync4, readSync as readSync2, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname8, join as join10 } from "node:path";
+import { dirname as dirname8, join as join11 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync3, readFileSync as readFileSync5, readdirSync as readdirSync3, mkdirSync as mkdirSync7, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync3, constants } from "node:fs";
+import { lstatSync as lstatSync3, readFileSync as readFileSync6, readdirSync as readdirSync3, mkdirSync as mkdirSync7, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync3, constants } from "node:fs";
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/handoff-projection.mjs
@@ -9304,21 +9470,21 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 
 // scripts/lib/update.mjs
 var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed-By-Agent", "review-ledger", "frozen-test"]);
-var UPDATE_MARKER_RELATIVE_PATH = join10(".sterling", "update-complete.json");
+var UPDATE_MARKER_RELATIVE_PATH = join11(".sterling", "update-complete.json");
 function machineStores(cwd) {
-  const stores = [join10(cwd, ".sterling", "sterling.db")];
-  const domains = join10(homedir3(), ".sterling", "domains");
-  if (existsSync8(domains)) {
+  const stores = [join11(cwd, ".sterling", "sterling.db")];
+  const domains = join11(homedir3(), ".sterling", "domains");
+  if (existsSync9(domains)) {
     for (const name of readdirSync4(domains).sort()) {
-      stores.push(join10(domains, name, "sterling.db"));
+      stores.push(join11(domains, name, "sterling.db"));
     }
   }
-  return stores.filter((store2) => existsSync8(store2));
+  return stores.filter((store2) => existsSync9(store2));
 }
 function walUserVersion(dbPath) {
   const walPath = `${dbPath}-wal`;
-  if (!existsSync8(walPath)) return null;
-  const wal = readFileSync6(walPath);
+  if (!existsSync9(walPath)) return null;
+  const wal = readFileSync7(walPath);
   if (wal.length < 32) return null;
   const magic = wal.readUInt32BE(0);
   if (magic !== 931071618 && magic !== 931071619) return null;
@@ -9350,8 +9516,8 @@ function probeSchemaVersion(dbPath) {
 }
 
 // scripts/hooks/lib/maintenance-worker.mjs
-import { closeSync as closeSync4, existsSync as existsSync9, mkdirSync as mkdirSync9, openSync as openSync4, readFileSync as readFileSync7, renameSync as renameSync5, rmSync as rmSync3, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync6, appendFileSync } from "node:fs";
-import { dirname as dirname9, isAbsolute as isAbsolute2, join as join11, resolve as resolve4, sep as sep2 } from "node:path";
+import { closeSync as closeSync4, existsSync as existsSync10, mkdirSync as mkdirSync9, openSync as openSync4, readFileSync as readFileSync8, renameSync as renameSync5, rmSync as rmSync4, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync6, appendFileSync } from "node:fs";
+import { dirname as dirname9, isAbsolute as isAbsolute2, join as join12, resolve as resolve4, sep as sep2 } from "node:path";
 var BATCH_MAX_WAIT_MS = 30 * 6e4;
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;
@@ -9370,20 +9536,20 @@ var WORKER_DISALLOWED_TOOLS = [
   "Bash"
 ];
 function workerPaths(root) {
-  const sterling = join11(root, ".sterling");
+  const sterling = join12(root, ".sterling");
   return {
-    lock: join11(sterling, "transient", "maintenance-worker.lock"),
-    takeover: join11(sterling, "transient", "maintenance-worker.lock.takeover"),
-    lastLaunch: join11(sterling, "transient", "maintenance-worker.last-launch"),
-    eligible: join11(sterling, "transient", "maintenance-worker.eligible.json"),
-    state: join11(sterling, "transient", "maintenance-worker.state.json"),
-    log: join11(sterling, "maintenance-worker.log"),
-    journal: join11(sterling, "maintenance-worker.jsonl")
+    lock: join12(sterling, "transient", "maintenance-worker.lock"),
+    takeover: join12(sterling, "transient", "maintenance-worker.lock.takeover"),
+    lastLaunch: join12(sterling, "transient", "maintenance-worker.last-launch"),
+    eligible: join12(sterling, "transient", "maintenance-worker.eligible.json"),
+    state: join12(sterling, "transient", "maintenance-worker.state.json"),
+    log: join12(sterling, "maintenance-worker.log"),
+    journal: join12(sterling, "maintenance-worker.jsonl")
   };
 }
 function readJson(path) {
   try {
-    return JSON.parse(readFileSync7(path, "utf8"));
+    return JSON.parse(readFileSync8(path, "utf8"));
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     return { unreadable: String(e?.message ?? e) };
@@ -9396,7 +9562,7 @@ function judgedVerdicts(root) {
   for (const path of [`${journal}.1`, journal]) {
     let text;
     try {
-      text = readFileSync7(path, "utf8");
+      text = readFileSync8(path, "utf8");
     } catch (e) {
       if (e?.code === "ENOENT") continue;
       throw e;
@@ -9468,7 +9634,7 @@ function ageText(iso, nowMs = Date.now()) {
 
 // scripts/hooks/h1-session-start.mjs
 async function deleteRegisterUnderLock(cwd) {
-  const transientDir = join12(cwd, ".sterling", "transient");
+  const transientDir = join13(cwd, ".sterling", "transient");
   try {
     mkdirSync10(transientDir, { recursive: true });
     await withRegisterLock(
@@ -9479,10 +9645,10 @@ async function deleteRegisterUnderLock(cwd) {
           process.stderr.write(`${sweep.refused}
 `);
         }
-        rmSync4(registerPath(cwd), { force: true });
+        rmSync5(registerPath(cwd), { force: true });
         const registerBasename = basename2(registerPath(cwd));
         for (const f of readdirSync5(transientDir)) {
-          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync4(join12(transientDir, f), { force: true });
+          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync5(join13(transientDir, f), { force: true });
         }
       },
       { retryMs: 1e3, timeoutMs: 1e4 }
@@ -9530,7 +9696,7 @@ function pluginVersion() {
   try {
     const root = pluginRoot2();
     if (!root) return null;
-    const v = JSON.parse(readFileSync8(join12(root, ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync9(join13(root, ".claude-plugin", "plugin.json"), "utf8")).version;
     return typeof v === "string" && v.length ? v : null;
   } catch {
   }
@@ -9540,13 +9706,13 @@ function shellQuote(value) {
   return `'${String(value).split("'").join(`'\\''`)}'`;
 }
 function pluginScript(root, name) {
-  const bundled = join12(root, "bin", name);
-  return existsSync10(bundled) ? bundled : join12(root, "scripts", name);
+  const bundled = join13(root, "bin", name);
+  return existsSync11(bundled) ? bundled : join13(root, "scripts", name);
 }
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
 function runPostUpdateSync(root, project) {
   const run = (name, args) => {
-    const r = spawnSync4(process.execPath, [pluginScript(root, name), ...args], { cwd: root, encoding: "utf8", timeout: POST_UPDATE_STEP_TIMEOUT_MS });
+    const r = spawnSync5(process.execPath, [pluginScript(root, name), ...args], { cwd: root, encoding: "utf8", timeout: POST_UPDATE_STEP_TIMEOUT_MS });
     const error = r.error ? r.error.message : r.signal ? `killed by ${r.signal}` : null;
     const out = `${r.stdout ?? ""}${r.stderr ?? ""}`.trim();
     return { status: error ? null : r.status, error, out, tail: out.split("\n").slice(-8).join(" | ") };
@@ -9587,11 +9753,11 @@ if (input.source === "startup" || input.source === "clear") {
   } catch {
   }
 }
-var sessionMarkerPath = join12(input.cwd, ".sterling", "transient", "session.json");
-var sessionMarkerTmp = join12(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
+var sessionMarkerPath = join13(input.cwd, ".sterling", "transient", "session.json");
+var sessionMarkerTmp = join13(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
 try {
-  if (existsSync10(join12(input.cwd, ".sterling", "config.json"))) {
-    mkdirSync10(join12(input.cwd, ".sterling", "transient"), { recursive: true });
+  if (existsSync11(join13(input.cwd, ".sterling", "config.json"))) {
+    mkdirSync10(join13(input.cwd, ".sterling", "transient"), { recursive: true });
     writeFileSync7(
       sessionMarkerTmp,
       JSON.stringify({ session_id: input.session_id ?? null, source: input.source ?? null, at: (/* @__PURE__ */ new Date()).toISOString() })
@@ -9600,8 +9766,8 @@ try {
   }
 } catch {
   try {
-    rmSync4(sessionMarkerPath, { recursive: true, force: true });
-    rmSync4(sessionMarkerTmp, { recursive: true, force: true });
+    rmSync5(sessionMarkerPath, { recursive: true, force: true });
+    rmSync5(sessionMarkerTmp, { recursive: true, force: true });
   } catch {
   }
 }
@@ -9626,7 +9792,7 @@ var storeVersionWarning = "";
 var storeVersionContext = "";
 var projectStoreBlocked = false;
 try {
-  const projectDb = join12(input.cwd, ".sterling", "sterling.db");
+  const projectDb = join13(input.cwd, ".sterling", "sterling.db");
   const behind = [];
   const other = [];
   for (const db of machineStores(input.cwd)) {
@@ -9668,19 +9834,19 @@ var postUpdateWarning = "";
 var postUpdateContext = "";
 try {
   const root = pluginRoot2();
-  if (root && !samePath2(input.cwd, root) && isInstalledCopy(root) && existsSync10(join12(input.cwd, ".sterling", "config.json"))) {
+  if (root && !samePath2(input.cwd, root) && isInstalledCopy(root) && existsSync11(join13(input.cwd, ".sterling", "config.json"))) {
     const current = pluginVersion();
-    const markerPath = join12(input.cwd, ".sterling", "synced-version");
+    const markerPath = join13(input.cwd, ".sterling", "synced-version");
     let previous = null;
     try {
-      previous = readFileSync8(markerPath, "utf8").trim() || null;
+      previous = readFileSync9(markerPath, "utf8").trim() || null;
     } catch {
     }
     if (!current) {
-      postUpdateWarning = `\u26A0 Sterling post-update sync SKIPPED \u2014 the installed plugin's version is unreadable (${join12(root, ".claude-plugin", "plugin.json")}). `;
+      postUpdateWarning = `\u26A0 Sterling post-update sync SKIPPED \u2014 the installed plugin's version is unreadable (${join13(root, ".claude-plugin", "plugin.json")}). `;
       postUpdateContext = `
 
-POST-UPDATE SYNC (H1): SKIPPED \u2014 ${join12(root, ".claude-plugin", "plugin.json")} carries no readable version, so this project's agents cannot be known current.`;
+POST-UPDATE SYNC (H1): SKIPPED \u2014 ${join13(root, ".claude-plugin", "plugin.json")} carries no readable version, so this project's agents cannot be known current.`;
     } else if (current !== previous) {
       const hop = `Sterling ${previous ?? "(never synced)"}\u2192${current}`;
       const result = runPostUpdateSync(root, input.cwd);
@@ -9789,31 +9955,31 @@ var currencyWarning = "";
 var currencyContext = "";
 try {
   const root = process.env.STERLING_CURRENCY_DISABLE === "1" ? null : pluginRoot2();
-  const gitDir = root ? join12(root, ".git") : null;
-  if (gitDir && existsSync10(gitDir) && statSync5(gitDir).isDirectory()) {
+  const gitDir = root ? join13(root, ".git") : null;
+  if (gitDir && existsSync11(gitDir) && statSync5(gitDir).isDirectory()) {
     let role = null;
     try {
-      role = JSON.parse(readFileSync8(join12(root, ".sterling", "config.json"), "utf8")).machine_role;
+      role = JSON.parse(readFileSync9(join13(root, ".sterling", "config.json"), "utf8")).machine_role;
     } catch {
     }
     if (role !== "authoring") {
       const git = (args, timeout = 5e3) => {
-        const r = spawnSync4("git", args, { cwd: root, encoding: "utf8", timeout });
+        const r = spawnSync5("git", args, { cwd: root, encoding: "utf8", timeout });
         return r.status === 0 ? (r.stdout ?? "").trim() : null;
       };
       const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
       const hasOrigin = (git(["remote"]) ?? "").split("\n").includes("origin");
       const defaultBranch = hasOrigin ? (git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]) ?? "").replace(/^origin\//, "") || "main" : null;
       if (hasOrigin && branch && branch === defaultBranch) {
-        const cachePath = join12(gitDir, "sterling-update-check.json");
+        const cachePath = join13(gitDir, "sterling-update-check.json");
         const ttl = Number(process.env.STERLING_CURRENCY_TTL_MS ?? 24 * 60 * 60 * 1e3);
         let fresh = false;
         try {
-          fresh = Date.now() - Date.parse(JSON.parse(readFileSync8(cachePath, "utf8")).checked_at) < ttl;
+          fresh = Date.now() - Date.parse(JSON.parse(readFileSync9(cachePath, "utf8")).checked_at) < ttl;
         } catch {
         }
         if (!fresh) {
-          spawnSync4("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+          spawnSync5("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
           try {
             writeFileSync7(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
           } catch {
@@ -9838,8 +10004,8 @@ function planLockSection(ctx) {
   const STALE_DAYS = 14;
   const DAY_MS = 24 * 60 * 60 * 1e3;
   const clean = sanitizeForContext;
-  const sterlingDir = join12(ctx.cwd, ".sterling");
-  const transientDir = join12(sterlingDir, "transient");
+  const sterlingDir = join13(ctx.cwd, ".sterling");
+  const transientDir = join13(sterlingDir, "transient");
   const blocks = [];
   const MARKERS = [
     {
@@ -9859,7 +10025,7 @@ function planLockSection(ctx) {
   for (const marker of MARKERS) {
     let raw = null;
     try {
-      raw = claimMarker(join12(transientDir, marker.file));
+      raw = claimMarker(join13(transientDir, marker.file));
     } catch {
       raw = null;
     }
@@ -9897,7 +10063,7 @@ function planLockSection(ctx) {
     }
     let branchNow = "unknown";
     try {
-      const r = spawnSync4("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
+      const r = spawnSync5("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
       const current = r.status === 0 ? (r.stdout ?? "").trim() : "";
       const approved = clean(lock.approved_branch, 120);
       if (current && approved) branchNow = current === approved ? "same" : `DIFFERENT (now ${current}, approved on ${approved})`;
@@ -9934,155 +10100,18 @@ function planLockSection(ctx) {
   blocks.push(...markerLines);
   return { context: blocks.length ? blocks.join("\n") + "\n\n" : "", lock: malformed ? null : lock, malformed };
 }
-var NOTE_PROSE_MAX = 2e3;
-var LIVE_DISPATCH_MAX = 20;
-var LIVE_TERRITORY_MAX = 40;
-var LIVE_TERRITORY_LINE_MAX = PATH_MAX * 4;
-var NOTE_FIELD_MAX = {
-  objective: NOTE_PROSE_MAX,
-  next_slice: NOTE_PROSE_MAX,
-  risks: NOTE_PROSE_MAX,
-  pointers: NOTE_PROSE_MAX,
-  branch: PATH_MAX,
-  head_sha: PATH_MAX,
-  session_id: PATH_MAX,
-  at: PATH_MAX
-};
-var LANE_HANDOFF_MAX = 1e3;
 var rotationContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {
-    const notePath = join12(input.cwd, ".sterling", "transient", "rotation-note.json");
-    if (existsSync10(notePath)) {
-      const note = JSON.parse(readFileSync8(notePath, "utf8"));
-      rmSync4(notePath, { force: true });
-      const head = (() => {
-        try {
-          const r = spawnSync4("git", ["rev-parse", "HEAD"], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
-          return r.status === 0 ? (r.stdout ?? "").trim() : null;
-        } catch {
-          return null;
-        }
-      })();
-      const cautions = [];
-      if (note.head_sha && head && head !== note.head_sha) {
-        cautions.push(`HEAD has MOVED since the note (${sanitizeForContext(String(note.head_sha), PATH_MAX).slice(0, 8)} \u2192 ${head.slice(0, 8)}) \u2014 re-verify repository state before acting on it`);
-      }
-      const noteBaseBranch = sanitizeForContext(note.base_branch, PATH_MAX);
-      let commitsAheadUnverified = false;
-      if (typeof note.commits_ahead === "number") {
-        if (!note.base_branch) {
-          commitsAheadUnverified = true;
-        } else {
-          try {
-            const countR = spawnSync4("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
-            const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
-            if (Number.isFinite(actual)) {
-              if (actual !== note.commits_ahead) {
-                cautions.push(`commits_ahead drift \u2014 note says ${note.commits_ahead}, actual is ${actual} (vs ${noteBaseBranch || "unknown base"})`);
-              }
-            } else {
-              commitsAheadUnverified = true;
-            }
-          } catch {
-            commitsAheadUnverified = true;
-          }
-        }
-      }
-      const ageMs = Date.now() - Date.parse(note.at ?? "");
-      if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1e3) {
-        cautions.push(`the note is ~${Math.round(ageMs / 36e5)}h old`);
-      }
-      const notePlanRaw = typeof note.plan_path === "string" && note.plan_path ? note.plan_path : null;
-      const livePlanRaw = typeof planLock?.plan_path === "string" && planLock.plan_path ? planLock.plan_path : null;
-      const notePlan = notePlanRaw ? sanitizeForContext(notePlanRaw, PATH_MAX) : null;
-      const livePlan = livePlanRaw ? sanitizeForContext(livePlanRaw, PATH_MAX) : null;
-      if (notePlanRaw && planLockMalformed) {
-        cautions.push(`the note names a plan (${notePlan}) but the live plan lock is MALFORMED and could not be compared against it \u2014 inspect it with \`plan-lock.mjs --show\``);
-      } else if (notePlanRaw && livePlanRaw && notePlanRaw !== livePlanRaw) {
-        cautions.push(`the note's plan_path DIFFERS from the current plan lock (note: ${notePlan}; lock now: ${livePlan}) \u2014 a new plan was approved after the note was written, and the PLAN LOCK section above is the authority`);
-      } else if (notePlanRaw && !livePlanRaw) {
-        cautions.push(`the note names a plan (${notePlan}) but no plan lock is live now \u2014 it was released, or .sterling/ was recreated`);
-      }
-      const planField = notePlanRaw ? [`- plan: ${notePlan}`] : [];
-      const noteSessionId = typeof note.session_id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(note.session_id) ? note.session_id : null;
-      const fields = planField.concat(
-        ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "session_id", "at"].map((k) => [k, k === "session_id" ? noteSessionId : note[k]]).filter(([, v]) => v).map(([k, v]) => `- ${k}: ${sanitizeForContext(String(v), NOTE_FIELD_MAX[k])}`)
-      ).concat(
-        typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${noteBaseBranch || "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
-      ).join("\n");
-      const liveDispatches = note.live_dispatches;
-      let liveLine = "";
-      if (Array.isArray(liveDispatches) && liveDispatches.length) {
-        const rendered = liveDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
-          const entries = Array.isArray(d?.territory) ? d.territory : [];
-          let territory = "no declared territory";
-          if (entries.length) {
-            const shown = entries.slice(0, LIVE_TERRITORY_MAX).map((t) => sanitizeForContext(String(t), PATH_MAX));
-            const dropped = entries.length - shown.length;
-            let joined = shown.join(", ");
-            if (joined.length > LIVE_TERRITORY_LINE_MAX) joined = `${joined.slice(0, LIVE_TERRITORY_LINE_MAX)}\u2026`;
-            territory = dropped > 0 ? `${joined}\u2026 (+${dropped} more)` : joined;
-          }
-          return `- ${sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent"} (${sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id"}) \u2014 ${territory}`;
-        }).join("\n");
-        const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
-        liveLine = `
-${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and cannot be resumed from this one (agent lookup is scoped to the current session); re-dispatch fresh if the work is still needed, and mind the territory below, which they may still be writing:
-${rendered}` + (omitted > 0 ? `
-\u2026 (+${omitted} more)` : "");
-      } else if (liveDispatches === null) {
-        liveLine = `
-${render(
-          disclosure(
-            "register_unavailable",
-            {},
-            "dispatch register unavailable \u2014 the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed, and check git status for files it may still be writing."
-          )
-        )}`;
-      }
-      const uncertainDispatches = Array.isArray(note.uncertain_dispatches) ? note.uncertain_dispatches : [];
-      let uncertainLine = "";
-      if (uncertainDispatches.length) {
-        const renderedUncertain = uncertainDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
-          const type = sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent";
-          const id = sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id";
-          const reason = sanitizeForContext(String(d?.reason ?? "unknown"), PATH_MAX) || "unknown";
-          return render(
-            disclosure("dispatch_status_unknown", {}, `${type}:${id} \u2014 ownership uncertain (${reason}); belongs to the previous session and cannot be resumed from this one \u2014 re-dispatch fresh if still needed`)
-          );
-        }).join("\n");
-        const omittedUncertain = uncertainDispatches.length - Math.min(uncertainDispatches.length, LIVE_DISPATCH_MAX);
-        uncertainLine = `
-${uncertainDispatches.length} dispatch(es) UNCERTAIN at rotation (lease expired, not confirmed dead \u2014 never counted as live):
-${renderedUncertain}` + (omittedUncertain > 0 ? `
-\u2026 (+${omittedUncertain} more)` : "");
-      }
-      const noteLanes = (Array.isArray(note.lanes) ? note.lanes : []).filter((l) => typeof l === "string").map((l) => sanitizeForContext(l.replace(/\s+/g, " "), LANE_HANDOFF_MAX)).filter(Boolean);
-      let lanesLine = "";
-      if (noteLanes.length) {
-        const noteSession = noteSessionId;
-        const renderedLanes = noteLanes.slice(0, LIVE_DISPATCH_MAX).map((l) => `- ${l}`).join("\n");
-        const omittedLanes = noteLanes.length - Math.min(noteLanes.length, LIVE_DISPATCH_MAX);
-        lanesLine = `
-${noteLanes.length} lane hand-off(s) carried across the rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. ` + (noteSession ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.` : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`) + `
-${renderedLanes}` + (omittedLanes > 0 ? `
-\u2026 (+${omittedLanes} more)` : "");
-      }
-      const isClear = input.source === "clear";
-      rotationContext = `
-
-ROTATION RESTORE (H1, source=${input.source}): a rotation note was prepared before this ${isClear ? "/clear" : "restart"}; this injection CONSUMES it (single-shot).` + (cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "") + `
-${fields}${liveLine}${uncertainLine}${lanesLine}
-Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. ` + (note.reason === "code-reload" ? isClear ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.` : `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 this restore is happening at session STARTUP, which already implies the exit-and-relaunch that reloads server/hook code.` : isClear ? `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.` : `If next_slice depends on a server/hook code change (migration, update, rebuild), this STARTUP already reloaded it.`);
-    }
+    const note = consumeRotationNote(input.cwd);
+    if (note) rotationContext = renderRotationRestore(note, { cwd: input.cwd, source: input.source, host: "claude", planLock, planLockMalformed });
   }
 } catch {
 }
 try {
   if (input.source === "compact" || input.source === "startup" || input.source === "clear") {
-    const conductorLedger = join12(input.cwd, ".sterling", "transient", "conductor-reads.json");
-    rmSync4(conductorLedger, { force: true });
+    const conductorLedger = join13(input.cwd, ".sterling", "transient", "conductor-reads.json");
+    rmSync5(conductorLedger, { force: true });
   }
 } catch {
 }
@@ -10094,16 +10123,16 @@ await deleteRegisterUnderLock(input.cwd);
 var residueContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {
-    const transient = join12(input.cwd, ".sterling", "transient");
-    const regPaths = [join12(transient, "touches.json"), join12(transient, "session-events.json"), join12(transient, "capture-nagged.json")];
+    const transient = join13(input.cwd, ".sterling", "transient");
+    const regPaths = [join13(transient, "touches.json"), join13(transient, "session-events.json"), join13(transient, "capture-nagged.json")];
     const [touchesPath, eventsPath] = regPaths;
-    if (regPaths.some((p) => existsSync10(p))) {
+    if (regPaths.some((p) => existsSync11(p))) {
       let touches = [];
       let events = [];
       let malformed = false;
       try {
-        if (existsSync10(touchesPath)) {
-          const raw = JSON.parse(readFileSync8(touchesPath, "utf8"));
+        if (existsSync11(touchesPath)) {
+          const raw = JSON.parse(readFileSync9(touchesPath, "utf8"));
           if (Array.isArray(raw)) touches = raw;
           else malformed = true;
         }
@@ -10111,8 +10140,8 @@ try {
         malformed = true;
       }
       try {
-        if (existsSync10(eventsPath)) {
-          const raw = JSON.parse(readFileSync8(eventsPath, "utf8"));
+        if (existsSync11(eventsPath)) {
+          const raw = JSON.parse(readFileSync9(eventsPath, "utf8"));
           if (Array.isArray(raw)) events = raw;
           else malformed = true;
         }
@@ -10159,7 +10188,7 @@ SESSION-BOUNDARY RESIDUE (H1): a previous session left unsettled transient regis
           }
         }
       }
-      for (const p of regPaths) rmSync4(p, { force: true });
+      for (const p of regPaths) rmSync5(p, { force: true });
     }
   }
 } catch {
@@ -10242,13 +10271,13 @@ if (reconcile.count > 0) {
 RECONCILE BACKLOG: ${inLane(reconcile.count)}, the oldest open since ${reconcile.oldest ?? "unknown"} (${age}). ` + (reconcile.owesProse === null ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items owe prose is unknown. ` : `Of these, ${inLane(reconcile.owesProse)} are judged 'owes prose' by the background worker (.sterling/maintenance-worker.jsonl) and wait on you to draft the article change. `) + `${worker}${lastRunNote}.`;
 }
 var registryContext = "";
-if (existsSync10(registryPath())) {
+if (existsSync11(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, "/");
   let registry;
   try {
     registry = new ProjectRegistry(registryPath());
     registry.touchLastSeen(cwdPosix, (/* @__PURE__ */ new Date()).toISOString());
-    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync10(p.repo_path));
+    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync11(p.repo_path));
     if (siblings.length) {
       registryContext = "\n\nSibling Sterling projects on this machine (shared project registry) \u2014 other initialized projects; knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n" + siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(", ") || "(no domains)"}`).join("\n");
     }
@@ -10266,7 +10295,7 @@ function markerWriterAlive(pid) {
   }
   if (process.platform !== "linux") return true;
   try {
-    const cmdline = readFileSync8(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
+    const cmdline = readFileSync9(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
     if (cmdline && !cmdline.includes("mcp-server")) return false;
   } catch (err) {
     if (err?.code === "ENOENT" || err?.code === "ESRCH") return false;
@@ -10276,12 +10305,12 @@ function markerWriterAlive(pid) {
 var staleWarning = "";
 try {
   const root = pluginRoot2();
-  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? existsSync10(join12(root, "mcp")) ? join12(root, "mcp") : join12(root, "packages", "mcp-server", "dist") : null);
-  const currentBuildId = serverDist && existsSync10(buildIdPath(serverDist)) ? readFileSync8(buildIdPath(serverDist), "utf8").trim() || null : null;
+  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? existsSync11(join13(root, "mcp")) ? join13(root, "mcp") : join13(root, "packages", "mcp-server", "dist") : null);
+  const currentBuildId = serverDist && existsSync11(buildIdPath(serverDist)) ? readFileSync9(buildIdPath(serverDist), "utf8").trim() || null : null;
   let marker = null;
-  const markerPath = runtimeMarkerPath(join12(input.cwd, ".sterling", "sterling.db"));
-  if (existsSync10(markerPath)) {
-    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync8(markerPath, "utf8")));
+  const markerPath = runtimeMarkerPath(join13(input.cwd, ".sterling", "sterling.db"));
+  if (existsSync11(markerPath)) {
+    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync9(markerPath, "utf8")));
     if (parsed.success) marker = parsed.data;
   }
   const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerWriterAlive(marker.pid) : null);
@@ -10293,7 +10322,7 @@ try {
 var machineWarning = "";
 var machineContext = "";
 try {
-  const agentsDir = join12(input.cwd, ".claude", "agents");
+  const agentsDir = join13(input.cwd, ".claude", "agents");
   const dead = [];
   const unknown = [];
   let dirEntries = null;
@@ -10309,7 +10338,7 @@ try {
   for (const f of (dirEntries ?? []).filter((n) => n.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync8(join12(agentsDir, f), "utf8");
+      content = readFileSync9(join13(agentsDir, f), "utf8");
     } catch (err) {
       unknown.push(`- ${f} \u2014 activation UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -10322,7 +10351,7 @@ try {
       }
       continue;
     }
-    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync10(p));
+    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync11(p));
     if (unresolved) dead.push({ agent: f, node: unresolved });
   }
   if (dead.length || unknown.length) {
@@ -10336,7 +10365,7 @@ MACHINE-CONTEXT DRIFT (H1): ` + (dead.length ? `${dead.length} inactive (${dead.
 var agentCurrencyWarning = "";
 var agentCurrencyContext = "";
 try {
-  const agentsDir = join12(input.cwd, ".claude", "agents");
+  const agentsDir = join13(input.cwd, ".claude", "agents");
   const installed = [];
   const unknown = [];
   let dirEntries = null;
@@ -10352,7 +10381,7 @@ try {
   for (const n of (dirEntries ?? []).filter((x) => x.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync8(join12(agentsDir, n), "utf8");
+      content = readFileSync9(join13(agentsDir, n), "utf8");
     } catch (err) {
       unknown.push(`- ${n} \u2014 currency UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -10371,11 +10400,11 @@ try {
   const unreadableBeforeClassification = unknown.length;
   if (installed.length || unknown.length) {
     const root = pluginRoot2();
-    const templatesDir = root ? join12(root, "agent-templates") : null;
+    const templatesDir = root ? join13(root, "agent-templates") : null;
     let templateFor = null;
     let cloneProblem = null;
     try {
-      templateFor = new Map(loadRegistry(join12(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
+      templateFor = new Map(loadRegistry(join13(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
     } catch (err) {
       cloneProblem = `the clone's agent templates at ${templatesDir ?? "(plugin root unresolved)"} could not be read: ${err?.message ?? err}`;
     }
@@ -10402,7 +10431,7 @@ try {
       }
       let templateContent = null;
       try {
-        templateContent = readFileSync8(join12(templatesDir, templateFile), "utf8");
+        templateContent = readFileSync9(join13(templatesDir, templateFile), "utf8");
       } catch (err) {
         unknown.push(`- ${file} \u2014 currency UNKNOWN: the clone template ${templateFile} could not be read (${err?.code ?? err?.message ?? err})`);
         continue;
@@ -10462,16 +10491,16 @@ ${versionLine}`);
 }
 var conductorActivationContext = "";
 try {
-  const settingsPath = join12(input.cwd, ".claude", "settings.json");
+  const settingsPath = join13(input.cwd, ".claude", "settings.json");
   let settingsAgent;
-  if (existsSync10(settingsPath)) {
+  if (existsSync11(settingsPath)) {
     try {
-      const parsed = JSON.parse(readFileSync8(settingsPath, "utf8"));
+      const parsed = JSON.parse(readFileSync9(settingsPath, "utf8"));
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) settingsAgent = parsed.agent;
     } catch {
     }
   }
-  const conductorFileMissing = !existsSync10(join12(input.cwd, ".claude", "agents", "conductor.md"));
+  const conductorFileMissing = !existsSync11(join13(input.cwd, ".claude", "agents", "conductor.md"));
   let reason = null;
   if (settingsAgent !== "conductor") {
     reason = settingsAgent === void 0 ? "settings key missing" : `settings key is ${JSON.stringify(settingsAgent)}`;
@@ -10481,7 +10510,7 @@ try {
   if (reason !== null) {
     const root = pluginRoot2();
     const clone = root ?? "<clone>";
-    const syncScript = root && existsSync10(join12(root, "bin", "sync-agents.mjs")) ? "bin/sync-agents.mjs" : "scripts/sync-agents.mjs";
+    const syncScript = root && existsSync11(join13(root, "bin", "sync-agents.mjs")) ? "bin/sync-agents.mjs" : "scripts/sync-agents.mjs";
     const shq = (value) => `'${String(value).split("'").join(`'\\''`)}'`;
     conductorActivationContext = `
 

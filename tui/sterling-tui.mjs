@@ -48273,9 +48273,11 @@ import { readFileSync as readFileSync2, writeFileSync as writeFileSync2, readdir
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
   "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
-  "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" }
+  "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
+  "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
+  "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" }
 };
-var FENCE_WORD_RE = /(?:sterling|portable)[\s_-]*only/i;
+var FENCE_WORD_RE = /(?:sterling|portable|claude|opencode)[\s_-]*only/i;
 var COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
 var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open: open2, close }) => [open2, close]));
 function classify(line) {
@@ -48299,11 +48301,13 @@ function malformedMarkers(text, label) {
   }
   return out;
 }
+var NO_COUNTERPART_MARKER = "<!-- no-opencode-counterpart -->";
 var splitLines = (text) => text.replace(/\r\n/g, "\n").split("\n");
 function validateFences(text, label) {
   const violations = malformedMarkers(text.replace(/\r\n/g, "\n"), label);
   let openFence = null;
-  splitLines(text).forEach((line, index) => {
+  const lines = splitLines(text);
+  lines.forEach((line, index) => {
     const at = `${label}:${index + 1}`;
     const marker = classify(line);
     if (!marker) return;
@@ -48318,6 +48322,13 @@ function validateFences(text, label) {
     } else if (openFence.kind !== marker.kind) {
       violations.push({ kind: "fence_mismatched", detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
     } else {
+      if (marker.kind === "claude-only") {
+        const first = lines[openFence.line];
+        const next = lines.slice(index + 1).find((l) => l.trim() !== "");
+        if (first !== NO_COUNTERPART_MARKER && next !== FENCE_KINDS["opencode-only"].open) {
+          violations.push({ kind: "fence_claude_only_unpaired", detail: `${label}:${openFence.line}: the claude-only block is not followed by an opencode-only block; add one, or put '${NO_COUNTERPART_MARKER}' as the first line inside the block if OpenCode has no counterpart` });
+        }
+      }
       openFence = null;
     }
   });
@@ -48326,7 +48337,7 @@ function validateFences(text, label) {
   }
   return violations;
 }
-function render(text, label, keepKind) {
+function render(text, label, keepKinds) {
   const violations = validateFences(text, label);
   if (violations.length) {
     throw new Error(`agent fences invalid in ${label} \u2014 refusing to render (P5):
@@ -48336,20 +48347,21 @@ function render(text, label, keepKind) {
   let inside = null;
   for (const line of splitLines(text)) {
     const marker = classify(line);
+    if (line === NO_COUNTERPART_MARKER) continue;
     if (marker) {
       inside = marker.role === "open" ? marker.kind : null;
       continue;
     }
-    if (inside && inside !== keepKind) continue;
+    if (inside && !keepKinds.includes(inside)) continue;
     out.push(line);
   }
   return out.join("\n");
 }
-function renderClaudeText(text, label) {
-  return render(text, label, "sterling-only");
-}
 function renderPortableText(text, label) {
-  return render(text, label, "portable-only");
+  return render(text, label, ["portable-only", "opencode-only"]);
+}
+function renderOpenCodeFullText(text, label) {
+  return render(text, label, ["sterling-only", "opencode-only"]);
 }
 
 // scripts/lib/agent-distribution.mjs
@@ -48528,7 +48540,7 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 
 // scripts/lib/opencode-install.mjs
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
-var ROSTER = ["conductor", "implementor", "researcher", "scout"];
+var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "librarian"];
 var FULL_HEADER_RE = /^<!-- sterling-full renderer=opencode-full\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
 var fwd = (p) => p.replace(/\\/g, "/");
 var normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
@@ -48546,11 +48558,19 @@ function git(projectDir, args2) {
   if (r.error) throw new Error(`git ${args2.join(" ")} could not run in ${fwd(projectDir)}: ${r.error.message}`);
   return r;
 }
-var CONDUCTOR_OPENCODE_NOTE = `
-## On OpenCode
-
-On OpenCode this roster is installed as sterling/implementor, sterling/researcher and sterling/scout; dispatch those names. In a work project the bare-named implementor, researcher and scout are the portable copies committed for colleagues without Sterling, so do not dispatch them.
-`;
+var CONDUCTOR_OPENCODE_DESCRIPTION = `Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Activated by default_agent "sterling/conductor" in the project's .opencode/opencode.json (written by /sterling:init and /sterling:update); never dispatched as a subagent.`;
+var FULL_PERMISSIONS = {
+  reviewer: { edit: "deny", webfetch: "deny", task: "deny" },
+  librarian: { edit: "deny", bash: "deny", webfetch: "deny", task: "deny" }
+};
+var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
+function storeWriteTools(pluginRoot = sterlingRootFrom()) {
+  const fm = normalize3(readFileSync5(join5(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+  const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
+  const tools = [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
+  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd(join5(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
+  return tools;
+}
 function opencodeModelRef(model) {
   if (typeof model !== "string" || !model) throw new TypeError(`opencodeModelRef: model must be a non-empty string, got ${JSON.stringify(model)}`);
   return `anthropic/${model}`;
@@ -48562,13 +48582,21 @@ function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.m
     if (dirname3(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
-function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, model } = {}) {
-  const claudeText = renderClaudeText(templateContent, label);
-  const out = renderOpenCodeAgent(claudeText, label, { permission: entry.opencode?.permission });
+function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, model, writeTools } = {}) {
+  const hostText = renderOpenCodeFullText(templateContent, label);
+  const permission = FULL_PERMISSIONS[entry.name] ?? entry.opencode?.permission;
+  const out = renderOpenCodeAgent(hostText, label, { permission, description: primary ? CONDUCTOR_OPENCODE_DESCRIPTION : void 0 });
   const header = parseOpenCodeHeader(out.content);
   let content = normalize3(out.content).replace(`${header.headerLine}
 `, "");
-  if (primary) content = content.replace(/^mode: subagent$/m, "mode: primary") + CONDUCTOR_OPENCODE_NOTE;
+  if (primary) content = content.replace(/^mode: subagent$/m, "mode: primary");
+  if (!STORE_WRITERS.has(entry.name)) {
+    const denies = (writeTools ?? storeWriteTools()).map((t) => `  ${t}: deny`);
+    const close = content.indexOf("\n---\n", 4);
+    const block = /^permission:$/m.test(content.slice(0, close)) ? denies : ["permission:", ...denies];
+    content = `${content.slice(0, close)}
+${block.join("\n")}${content.slice(close)}`;
+  }
   if (model) content = content.replace(/^(mode: \w+)$/m, `$1
 model: ${model}`);
   const fmEnd = content.indexOf("\n---\n", 4) + 5;
@@ -48582,6 +48610,7 @@ function frontmatterModel(content) {
 }
 function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   const registry = loadRegistry(join5(pluginRoot, "agent-templates", "registry.json"));
+  const writeTools = storeWriteTools(pluginRoot);
   const rows = [];
   for (const name of ROSTER) {
     const entry = registry.agents.find((a) => a.name === name);
@@ -48606,7 +48635,7 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       }
     }
     const model = models[name] ?? (disk === null ? void 0 : frontmatterModel(disk));
-    const agent = renderFullOpenCodeAgent(readFileSync5(join5(pluginRoot, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name === "conductor", model });
+    const agent = renderFullOpenCodeAgent(readFileSync5(join5(pluginRoot, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name === "conductor", model, writeTools });
     if (agent.name !== name) throw new Error(`opencode roster: '${entry.file}' renders as '${agent.name}', not '${name}' (P5)`);
     if (disk === agent.content) {
       rows.push({ item: rel, status: "matches" });

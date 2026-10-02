@@ -40,6 +40,7 @@ import { isInstalledCopy } from './lib/installed-copy.mjs';
 import { cloneLauncherTarget, marketplaceAutoUpdate, autoUpdateWarning, cloneCleanupLines } from './lib/consumer-cutover.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
 import { setupOpenCode } from './lib/opencode-install.mjs';
+import { probeClaude } from './lib/claude-probe.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -114,6 +115,22 @@ for (const rel of ['.sterling', '.sterling/runs', 'docs', 'docs/briefs', '.claud
     fail(`init REFUSED (destructive): '${rel}' exists as a file but the manifest requires a directory — refusing to replace it`, 2);
   }
 }
+
+// CLAUDE CODE PROBE (decision init-without-claude-code-probes-and-skips-claude-artifacts-
+// loudly): the launchers, .claude/agents, the conductor activation and the ~/.claude.json
+// Codex check are Claude-only, so on a machine without `claude` they are not written (one
+// loud line, below, names them). STERLING_CLAUDE_PROBE is the test-isolation seam, honored
+// at THIS call site: unset/'' -> the real probe; 'ok' -> force present; 'absent' -> force
+// absent. Any other value fails loud (P5), validated before any write.
+const claudeProbeOverride = process.env.STERLING_CLAUDE_PROBE;
+const claudeProbe = !claudeProbeOverride
+  ? probeClaude()
+  : claudeProbeOverride === 'ok'
+    ? { installed: true, version: 'forced' }
+    : claudeProbeOverride === 'absent'
+      ? { installed: false, reason: 'STERLING_CLAUDE_PROBE=absent' }
+      : fail(`STERLING_CLAUDE_PROBE must be 'ok' or 'absent' (got '${claudeProbeOverride}')`, 2);
+const claudeHost = claudeProbe.installed;
 
 // recorded config = the declaration source on re-runs (§12 ensure-manifest)
 const configPath = join(target, '.sterling', 'config.json');
@@ -232,6 +249,9 @@ if (!recorded) {
 // ---- §12 manifest, in order: per-item verify → create absent → skip matching → leave-and-report ----
 const items = []; // { item, status: created|matches|differs|exists|refused|refreshed|stale|skipped|failed, detail }
 const warns = [];
+if (!claudeHost) {
+  warns.push(`\n⚠ Claude Code not found (${claudeProbe.reason}) — skipped the Claude-only files: sterling-launch.sh, sterling.bat, tui.bat, .claude/agents/, .claude/settings.json and the codex user-scope check. Wrote the OpenCode side only; install Claude Code and re-run /sterling:init to add them.`);
+}
 
 // directories: a present directory is simply `exists` (a dir cannot be hand-edited)
 for (const [label, leaf] of [['.sterling/ (+runs/)', '.sterling/runs'], ['docs/briefs/', 'docs/briefs']]) {
@@ -600,34 +620,6 @@ if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
   }
 }
 
-// WSL/tmux launchers (§11, decision foreign_bb5e25cd): all projects are WSL (company
-// policy), so init generates the new-way launchers — a thin Windows .bat that
-// double-clicks into `wt -> wsl --cd <project> -> bash -lic ./sterling-launch.sh`,
-// plus the per-project tmux launcher sterling-launch.sh (claude left, TUI right).
-// node/claude are detected at RUNTIME inside the .sh; the .bat needs no exe paths.
-const toWindowsPath = (p) => {
-  // /mnt/c/Users/cuj/X -> C:\Users\cuj\X (WSL drvfs); else just backslash-ize
-  const m = /^\/mnt\/([a-z])(\/.*)?$/.exec(p);
-  return m ? `${m[1].toUpperCase()}:${(m[2] ?? '/').replace(/\//g, '\\')}` : p.replace(/\//g, '\\');
-};
-// tmux session names forbid '.'/':' and choke on spaces — bake a sanitized,
-// per-project name so multiple projects run at once but never the same one twice
-const sanitizeSession = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
-const winProjectDir = toWindowsPath(fwd(target));
-const sessionName = `sterling-${sanitizeSession(basename(target))}`;
-const splitPercent = Math.round(eff.splitRatio * 100);
-// the .sh is bash — ALWAYS LF (a CRLF shebang/line breaks bash); the .bat files
-// are ALWAYS CRLF (cmd.exe misparses LF-only batch files), regardless of eol config
-const lf = (s) => s.replace(/\r\n/g, '\n');
-const crlf = (s) => s.replace(/\r?\n/g, '\r\n');
-
-// (1) the tmux launcher — the actual split lives here; both .bat files call it
-// (an installed plugin copy gets NO --plugin-dir and resolves the TUI at run time;
-// the authoring clone keeps both — see scripts/lib/launcher-tmux.mjs)
-const expectedTmuxLauncher = assertNoDeadTerms('sterling-launch.sh', lf(
-  renderTmuxLauncher(pluginRoot, { session: sessionName, splitPercent })
-));
-const tmuxLauncherPath = join(target, 'sterling-launch.sh');
 // S6 consumer cutover (decision s6-consumer-cutover-init-on-installed-copy-fixes-
 // launchers): on an installed copy, a launcher that starts claude with --plugin-dir keeps
 // the project on its old clone (--plugin-dir overrides the installed plugin), so it is
@@ -635,50 +627,83 @@ const tmuxLauncherPath = join(target, 'sterling-launch.sh');
 // are collected for the manual deletion step printed at the end; nothing deletes them.
 const installedCopy = isInstalledCopy(pluginRoot);
 const oldClonePaths = [];
-const existingTmuxLauncher = existsSync(tmuxLauncherPath) ? readFileSync(tmuxLauncherPath, 'utf8') : null;
-const cloneLauncher = installedCopy && existingTmuxLauncher !== null ? cloneLauncherTarget(existingTmuxLauncher) : null;
-if (existingTmuxLauncher === null) {
-  writeFileSync(tmuxLauncherPath, expectedTmuxLauncher);
-  items.push({ item: 'sterling-launch.sh', status: 'created', detail: `tmux session ${sessionName}, ${splitPercent}% TUI pane` });
-} else if (normalize(existingTmuxLauncher) === normalize(expectedTmuxLauncher)) {
-  items.push({ item: 'sterling-launch.sh', status: 'matches', detail: 'generated content unchanged' });
-} else if (cloneLauncher) {
-  writeFileSync(tmuxLauncherPath, expectedTmuxLauncher);
-  if (cloneLauncher.clonePath) oldClonePaths.push(cloneLauncher.clonePath);
-  const from = cloneLauncher.clonePath ? `the clone ${cloneLauncher.clonePath}` : 'a clone (the old launcher does not record its path)';
-  items.push({ item: 'sterling-launch.sh', status: 'replaced', detail: `the old launcher started claude with --plugin-dir pointing at ${from}, which overrides the installed plugin; regenerated in the installed-copy shape` });
-} else {
-  items.push({ item: 'sterling-launch.sh', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
-}
 
-// (2) the double-click Windows entry: Windows Terminal -> WSL -> the tmux launcher
-const expectedLauncher = assertNoDeadTerms('sterling.bat', crlf(
-  readFileSync(join(pluginRoot, 'templates', 'launcher-win.bat'), 'utf8')
-    .replaceAll('{{WIN_PROJECT_DIR}}', winProjectDir)
-));
-const launcherPath = join(target, 'sterling.bat');
-if (!existsSync(launcherPath)) {
-  writeFileSync(launcherPath, expectedLauncher);
-  items.push({ item: 'sterling.bat', status: 'created', detail: `double-click -> wsl ${winProjectDir}` });
-} else if (normalize(readFileSync(launcherPath, 'utf8')) === normalize(expectedLauncher)) {
-  items.push({ item: 'sterling.bat', status: 'matches', detail: 'unchanged' });
-} else {
-  items.push({ item: 'sterling.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
-}
+// Claude-only (decision init-without-claude-code-probes-and-skips-claude-artifacts-loudly):
+// sterling-launch.sh starts `claude`, and the .bat files only call it.
+if (claudeHost) {
+  // WSL/tmux launchers (§11, decision foreign_bb5e25cd): all projects are WSL (company
+  // policy), so init generates the new-way launchers — a thin Windows .bat that
+  // double-clicks into `wt -> wsl --cd <project> -> bash -lic ./sterling-launch.sh`,
+  // plus the per-project tmux launcher sterling-launch.sh (claude left, TUI right).
+  // node/claude are detected at RUNTIME inside the .sh; the .bat needs no exe paths.
+  const toWindowsPath = (p) => {
+    // /mnt/c/Users/cuj/X -> C:\Users\cuj\X (WSL drvfs); else just backslash-ize
+    const m = /^\/mnt\/([a-z])(\/.*)?$/.exec(p);
+    return m ? `${m[1].toUpperCase()}:${(m[2] ?? '/').replace(/\//g, '\\')}` : p.replace(/\//g, '\\');
+  };
+  // tmux session names forbid '.'/':' and choke on spaces — bake a sanitized,
+  // per-project name so multiple projects run at once but never the same one twice
+  const sanitizeSession = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
+  const winProjectDir = toWindowsPath(fwd(target));
+  const sessionName = `sterling-${sanitizeSession(basename(target))}`;
+  const splitPercent = Math.round(eff.splitRatio * 100);
+  // the .sh is bash — ALWAYS LF (a CRLF shebang/line breaks bash); the .bat files
+  // are ALWAYS CRLF (cmd.exe misparses LF-only batch files), regardless of eol config
+  const lf = (s) => s.replace(/\r\n/g, '\n');
+  const crlf = (s) => s.replace(/\r?\n/g, '\r\n');
 
-// (3) the §13 dashboard re-opener: re-adds the TUI pane to the running session
-const expectedTuiLauncher = assertNoDeadTerms('tui.bat', crlf(
-  readFileSync(join(pluginRoot, 'templates', 'tui-win.bat'), 'utf8')
-    .replaceAll('{{WIN_PROJECT_DIR}}', winProjectDir)
-));
-const tuiLauncherPath = join(target, 'tui.bat');
-if (!existsSync(tuiLauncherPath)) {
-  writeFileSync(tuiLauncherPath, expectedTuiLauncher);
-  items.push({ item: 'tui.bat', status: 'created', detail: 'double-click -> ./sterling-launch.sh tui' });
-} else if (normalize(readFileSync(tuiLauncherPath, 'utf8')) === normalize(expectedTuiLauncher)) {
-  items.push({ item: 'tui.bat', status: 'matches', detail: 'unchanged' });
-} else {
-  items.push({ item: 'tui.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
+  // (1) the tmux launcher — the actual split lives here; both .bat files call it
+  // (an installed plugin copy gets NO --plugin-dir and resolves the TUI at run time;
+  // the authoring clone keeps both — see scripts/lib/launcher-tmux.mjs)
+  const expectedTmuxLauncher = assertNoDeadTerms('sterling-launch.sh', lf(
+    renderTmuxLauncher(pluginRoot, { session: sessionName, splitPercent })
+  ));
+  const tmuxLauncherPath = join(target, 'sterling-launch.sh');
+  const existingTmuxLauncher = existsSync(tmuxLauncherPath) ? readFileSync(tmuxLauncherPath, 'utf8') : null;
+  const cloneLauncher = installedCopy && existingTmuxLauncher !== null ? cloneLauncherTarget(existingTmuxLauncher) : null;
+  if (existingTmuxLauncher === null) {
+    writeFileSync(tmuxLauncherPath, expectedTmuxLauncher);
+    items.push({ item: 'sterling-launch.sh', status: 'created', detail: `tmux session ${sessionName}, ${splitPercent}% TUI pane` });
+  } else if (normalize(existingTmuxLauncher) === normalize(expectedTmuxLauncher)) {
+    items.push({ item: 'sterling-launch.sh', status: 'matches', detail: 'generated content unchanged' });
+  } else if (cloneLauncher) {
+    writeFileSync(tmuxLauncherPath, expectedTmuxLauncher);
+    if (cloneLauncher.clonePath) oldClonePaths.push(cloneLauncher.clonePath);
+    const from = cloneLauncher.clonePath ? `the clone ${cloneLauncher.clonePath}` : 'a clone (the old launcher does not record its path)';
+    items.push({ item: 'sterling-launch.sh', status: 'replaced', detail: `the old launcher started claude with --plugin-dir pointing at ${from}, which overrides the installed plugin; regenerated in the installed-copy shape` });
+  } else {
+    items.push({ item: 'sterling-launch.sh', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
+  }
+
+  // (2) the double-click Windows entry: Windows Terminal -> WSL -> the tmux launcher
+  const expectedLauncher = assertNoDeadTerms('sterling.bat', crlf(
+    readFileSync(join(pluginRoot, 'templates', 'launcher-win.bat'), 'utf8')
+      .replaceAll('{{WIN_PROJECT_DIR}}', winProjectDir)
+  ));
+  const launcherPath = join(target, 'sterling.bat');
+  if (!existsSync(launcherPath)) {
+    writeFileSync(launcherPath, expectedLauncher);
+    items.push({ item: 'sterling.bat', status: 'created', detail: `double-click -> wsl ${winProjectDir}` });
+  } else if (normalize(readFileSync(launcherPath, 'utf8')) === normalize(expectedLauncher)) {
+    items.push({ item: 'sterling.bat', status: 'matches', detail: 'unchanged' });
+  } else {
+    items.push({ item: 'sterling.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
+  }
+
+  // (3) the §13 dashboard re-opener: re-adds the TUI pane to the running session
+  const expectedTuiLauncher = assertNoDeadTerms('tui.bat', crlf(
+    readFileSync(join(pluginRoot, 'templates', 'tui-win.bat'), 'utf8')
+      .replaceAll('{{WIN_PROJECT_DIR}}', winProjectDir)
+  ));
+  const tuiLauncherPath = join(target, 'tui.bat');
+  if (!existsSync(tuiLauncherPath)) {
+    writeFileSync(tuiLauncherPath, expectedTuiLauncher);
+    items.push({ item: 'tui.bat', status: 'created', detail: 'double-click -> ./sterling-launch.sh tui' });
+  } else if (normalize(readFileSync(tuiLauncherPath, 'utf8')) === normalize(expectedTuiLauncher)) {
+    items.push({ item: 'tui.bat', status: 'matches', detail: 'unchanged' });
+  } else {
+    items.push({ item: 'tui.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
+  }
 }
 
 // (4) the native-Windows launcher (sterling-windows.bat) is RETIRED — decision
@@ -714,81 +739,87 @@ items.push({ item: UPDATE_LAUNCHER_NAME, ...updateLauncherRow });
 // same delivery precedent as the updater launcher above.
 items.push({ item: CONSUMER_CHECK_LAUNCHER_NAME, ...ensureConsumerCheckLauncher(target, pluginRoot) });
 
-// agent installation (§2.2) via the §13 sync semantics: installed | refreshed |
-// up_to_date | locally-modified left | refuse-on-local-modification
-// No machine vars are baked: the only template tokens are {{MODEL}}/{{EFFORT}}, resolved
-// from config below (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-
-// keeps-its-clone, design point C: nothing an installed agent says names a plugin path).
-const installedPluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
-const { report: agentReport } = syncAgents({
-  templatesDir: join(pluginRoot, 'agent-templates'),
-  registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
-  targetAgentsDir: join(target, '.claude', 'agents'),
-  pluginVersion: installedPluginVersion,
-  now: new Date().toISOString(),
-  // config.models is authoritative (98064d77): the config init just wrote/read
-  // resolves {{MODEL}}/{{EFFORT}} per agent. `recorded` on a re-run, else the
-  // freshly written `expectedConfig` — both are parsed SterlingConfig with .models.
-  config: recorded ?? expectedConfig,
-});
+// Claude-only (decision init-without-claude-code-probes-and-skips-claude-artifacts-loudly):
+// without Claude Code there is no .claude/ tree to sync agents into or activate a conductor in.
 const agentInstructions = [];
-for (const a of agentReport) {
-  const map = {
-    installed: { status: 'created', detail: 'installed with version/hash header' },
-    refreshed: { status: 'refreshed', detail: 'clean install, newer template — regenerated' },
-    header_repaired: { status: 'refreshed', detail: 'Sterling header repaired in place — content unchanged' },
-    machine_rebaked: { status: 'refreshed', detail: 'machine-specific paths re-baked for this host (node/hooks dir), template unchanged' },
-    up_to_date: { status: 'matches', detail: 'template hash + content hash match' },
-    config_drift: {
-      status: 'differs',
-      detail: a.status === 'config_drift'
-        ? `${[a.installed.model !== a.configured.model || a.installed.effort !== a.configured.effort ? 'model/effort' : null, a.tools ? 'tools' : null].filter(Boolean).join(' + ')} drift — ${describeConfigDrift(a)}; not rewritten — realize it with ${a.fix}`
-        : '',
-    },
-    locally_modified_up_to_date: { status: 'differs', detail: 'locally modified, template unchanged — left untouched' },
-    refused_local_modification: { status: 'refused', detail: 'locally modified AND template changed — overwrite refused (see /sterling:sync-agents guidance below)' },
-    foreign_file: { status: 'refused', detail: 'not Sterling-generated — never overwritten (see guidance below)' },
-    retired: { status: 'retired', detail: 'removed a clean Sterling-generated agent no longer in the registry' },
-    retired_unrecognized: { status: 'refused', detail: 'Sterling-marked retired agent has an unrecognized header — left untouched (see guidance below)' },
-    retired_but_modified: { status: 'refused', detail: 'retired Sterling agent was locally modified — left untouched (see guidance below)' },
-    retired_identity_mismatch: { status: 'refused', detail: 'retired Sterling agent identity is ambiguous — left untouched (see guidance below)' },
-    retired_read_failed: { status: 'refused', detail: 'retired Sterling agent could not be read — left untouched (see guidance below)' },
-    retired_delete_failed: { status: 'refused', detail: 'retired Sterling agent could not be deleted (see guidance below)' },
-    retired_scan_failed: { status: 'refused', detail: 'agent directory could not be scanned for retired Sterling agents (see guidance below)' },
-  }[a.status];
-  items.push({ item: `.claude/agents/${a.name}.md`, status: map.status, detail: map.detail });
-  if (a.instruction) agentInstructions.push(a.instruction);
-}
-const restartNeeded = agentChangesRequireRestart(agentReport);
+let restartNeeded = false;
+let conductorActivation = { activation: 'skipped', autoMemory: 'skipped' };
+if (claudeHost) {
+  // agent installation (§2.2) via the §13 sync semantics: installed | refreshed |
+  // up_to_date | locally-modified left | refuse-on-local-modification
+  // No machine vars are baked: the only template tokens are {{MODEL}}/{{EFFORT}}, resolved
+  // from config below (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-
+  // keeps-its-clone, design point C: nothing an installed agent says names a plugin path).
+  const installedPluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
+  const { report: agentReport } = syncAgents({
+    templatesDir: join(pluginRoot, 'agent-templates'),
+    registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
+    targetAgentsDir: join(target, '.claude', 'agents'),
+    pluginVersion: installedPluginVersion,
+    now: new Date().toISOString(),
+    // config.models is authoritative (98064d77): the config init just wrote/read
+    // resolves {{MODEL}}/{{EFFORT}} per agent. `recorded` on a re-run, else the
+    // freshly written `expectedConfig` — both are parsed SterlingConfig with .models.
+    config: recorded ?? expectedConfig,
+  });
+  for (const a of agentReport) {
+    const map = {
+      installed: { status: 'created', detail: 'installed with version/hash header' },
+      refreshed: { status: 'refreshed', detail: 'clean install, newer template — regenerated' },
+      header_repaired: { status: 'refreshed', detail: 'Sterling header repaired in place — content unchanged' },
+      machine_rebaked: { status: 'refreshed', detail: 'machine-specific paths re-baked for this host (node/hooks dir), template unchanged' },
+      up_to_date: { status: 'matches', detail: 'template hash + content hash match' },
+      config_drift: {
+        status: 'differs',
+        detail: a.status === 'config_drift'
+          ? `${[a.installed.model !== a.configured.model || a.installed.effort !== a.configured.effort ? 'model/effort' : null, a.tools ? 'tools' : null].filter(Boolean).join(' + ')} drift — ${describeConfigDrift(a)}; not rewritten — realize it with ${a.fix}`
+          : '',
+      },
+      locally_modified_up_to_date: { status: 'differs', detail: 'locally modified, template unchanged — left untouched' },
+      refused_local_modification: { status: 'refused', detail: 'locally modified AND template changed — overwrite refused (see /sterling:sync-agents guidance below)' },
+      foreign_file: { status: 'refused', detail: 'not Sterling-generated — never overwritten (see guidance below)' },
+      retired: { status: 'retired', detail: 'removed a clean Sterling-generated agent no longer in the registry' },
+      retired_unrecognized: { status: 'refused', detail: 'Sterling-marked retired agent has an unrecognized header — left untouched (see guidance below)' },
+      retired_but_modified: { status: 'refused', detail: 'retired Sterling agent was locally modified — left untouched (see guidance below)' },
+      retired_identity_mismatch: { status: 'refused', detail: 'retired Sterling agent identity is ambiguous — left untouched (see guidance below)' },
+      retired_read_failed: { status: 'refused', detail: 'retired Sterling agent could not be read — left untouched (see guidance below)' },
+      retired_delete_failed: { status: 'refused', detail: 'retired Sterling agent could not be deleted (see guidance below)' },
+      retired_scan_failed: { status: 'refused', detail: 'agent directory could not be scanned for retired Sterling agents (see guidance below)' },
+    }[a.status];
+    items.push({ item: `.claude/agents/${a.name}.md`, status: map.status, detail: map.detail });
+    if (a.instruction) agentInstructions.push(a.instruction);
+  }
+  restartNeeded = agentChangesRequireRestart(agentReport);
 
-// H1's post-update sync marker (.sterling/synced-version, keyed on plugin.json's
-// version): the agents were just synced at THIS version, so record it and the first
-// session after init does not sync them again. Written only when no agent was
-// refused — the same bar H1 sets before it writes the marker (sync-agents exit 2 is
-// not a sync), so a refusal keeps H1 retrying and surfacing it.
-const agentRefused = agentReport.some((a) => items.find((i) => i.item === `.claude/agents/${a.name}.md`)?.status === 'refused');
-if (!agentRefused) {
-  writeFileSync(join(target, '.sterling', 'synced-version'), `${installedPluginVersion}\n`);
-}
+  // H1's post-update sync marker (.sterling/synced-version, keyed on plugin.json's
+  // version): the agents were just synced at THIS version, so record it and the first
+  // session after init does not sync them again. Written only when no agent was
+  // refused — the same bar H1 sets before it writes the marker (sync-agents exit 2 is
+  // not a sync), so a refusal keeps H1 retrying and surfacing it.
+  const agentRefused = agentReport.some((a) => items.find((i) => i.item === `.claude/agents/${a.name}.md`)?.status === 'refused');
+  if (!agentRefused) {
+    writeFileSync(join(target, '.sterling', 'synced-version'), `${installedPluginVersion}\n`);
+  }
 
-// Route A (decision conductor-instructions-via-main-session-agent-route-a): init installs
-// the conductor like every other agent above, then activates it the same way
-// install-agents/sync-agents do — a settings-only write also needs a restart.
-const conductorActivation = ensureConductorActivation(target, agentReport);
-items.push({
-  item: '.claude/settings.json (conductor activation)',
-  status: { written: 'created', already: 'matches', refused: 'refused', skipped: 'skipped' }[conductorActivation.activation],
-  detail: conductorActivation.reason ?? (conductorActivation.activation === 'written' ? `wrote "agent": "conductor" to ${conductorActivation.path}` : 'already "agent": "conductor"'),
-});
-items.push({
-  item: '.claude/settings.json (auto-memory off)',
-  status: { written: 'created', already: 'matches', kept: 'notice', wrong_type: 'notice', skipped: 'skipped' }[conductorActivation.autoMemory],
-  detail: conductorActivation.autoMemoryNotice ?? {
-    written: `wrote "autoMemoryEnabled": false to ${conductorActivation.path}`,
-    already: 'already "autoMemoryEnabled": false',
-    skipped: 'settings.json is not a valid JSON object — not touched',
-  }[conductorActivation.autoMemory],
-});
+  // Route A (decision conductor-instructions-via-main-session-agent-route-a): init installs
+  // the conductor like every other agent above, then activates it the same way
+  // install-agents/sync-agents do — a settings-only write also needs a restart.
+  conductorActivation = ensureConductorActivation(target, agentReport);
+  items.push({
+    item: '.claude/settings.json (conductor activation)',
+    status: { written: 'created', already: 'matches', refused: 'refused', skipped: 'skipped' }[conductorActivation.activation],
+    detail: conductorActivation.reason ?? (conductorActivation.activation === 'written' ? `wrote "agent": "conductor" to ${conductorActivation.path}` : 'already "agent": "conductor"'),
+  });
+  items.push({
+    item: '.claude/settings.json (auto-memory off)',
+    status: { written: 'created', already: 'matches', kept: 'notice', wrong_type: 'notice', skipped: 'skipped' }[conductorActivation.autoMemory],
+    detail: conductorActivation.autoMemoryNotice ?? {
+      written: `wrote "autoMemoryEnabled": false to ${conductorActivation.path}`,
+      already: 'already "autoMemoryEnabled": false',
+      skipped: 'settings.json is not a valid JSON object — not touched',
+    }[conductorActivation.autoMemory],
+  });
+}
 
 // Sterling on OpenCode 2 (decision
 // sterling-on-opencode-installs-global-plugins-plus-untracked-project-config): global
@@ -932,13 +963,15 @@ const forcedCodexProbe = !codexProbeOverride
       : codexProbeOverride === 'not-logged-in'
         ? { ok: false, reason: 'not-logged-in' }
         : fail(`STERLING_CODEX_PROBE must be 'ok', 'absent', or 'not-logged-in' (got '${codexProbeOverride}')`, 2);
-const codexUserScope = userScopeCodexServer();
-if (codexUserScope.found) {
-  items.push({ item: 'codex MCP (user scope)', status: 'matches', detail: `a codex server is registered in ${fwd(codexUserScope.path)}` });
-} else {
-  const codexProbe = forcedCodexProbe ?? probeCodex();
-  warns.push(codexUserScopeLine(codexProbe, { nodeBinDir: fwd(dirname(process.execPath)), unreadable: codexUserScope.unreadable }));
-  items.push({ item: 'codex MCP (user scope)', status: 'skipped', detail: 'no codex server in the user-level Claude config — see the codex mcp line below for the command' });
+if (claudeHost) {
+  const codexUserScope = userScopeCodexServer();
+  if (codexUserScope.found) {
+    items.push({ item: 'codex MCP (user scope)', status: 'matches', detail: `a codex server is registered in ${fwd(codexUserScope.path)}` });
+  } else {
+    const codexProbe = forcedCodexProbe ?? probeCodex();
+    warns.push(codexUserScopeLine(codexProbe, { nodeBinDir: fwd(dirname(process.execPath)), unreadable: codexUserScope.unreadable }));
+    items.push({ item: 'codex MCP (user scope)', status: 'skipped', detail: 'no codex server in the user-level Claude config — see the codex mcp line below for the command' });
+  }
 }
 
 // PLUGIN AUTO-UPDATE (S6, decision s6-consumer-cutover-init-on-installed-copy-fixes-
@@ -947,7 +980,7 @@ if (codexUserScope.found) {
 // installed copy warns with the exact settings JSON. Same pattern as the codex check
 // above: init only READS the user-level file, and a missing or unparseable one is a
 // warning, never a crash.
-if (installedCopy) {
+if (claudeHost && installedCopy) {
   const autoUpdateLine = autoUpdateWarning(marketplaceAutoUpdate());
   if (autoUpdateLine) warns.push(autoUpdateLine);
 }

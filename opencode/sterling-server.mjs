@@ -7692,13 +7692,51 @@ CREATE TABLE IF NOT EXISTS activity_log (
   }
 });
 
+// scripts/lib/agent-fences.mjs
+var FENCE_KINDS, EXACT_MARKERS;
+var init_agent_fences = __esm({
+  "scripts/lib/agent-fences.mjs"() {
+    FENCE_KINDS = {
+      "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
+      "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
+      "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
+      "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" }
+    };
+    EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
+  }
+});
+
+// scripts/lib/checks.mjs
+var init_checks = __esm({
+  "scripts/lib/checks.mjs"() {
+    init_agent_fences();
+  }
+});
+
+// scripts/lib/agent-distribution.mjs
+var RESTART_INSTRUCTION;
+var init_agent_distribution = __esm({
+  "scripts/lib/agent-distribution.mjs"() {
+    init_dist();
+    init_checks();
+    init_agent_fences();
+    RESTART_INSTRUCTION = [
+      "================================================================",
+      "RESTART REQUIRED \u2014 project subagents load at session start.",
+      "Agents installed into .claude/agents/ are NOT visible to a",
+      "session that was already running. Restart Claude Code in this",
+      "project before dispatching any of the agents above.",
+      "================================================================"
+    ].join("\n");
+  }
+});
+
 // packages/opencode-plugin/src/server.mjs
 init_dist2();
 import { spawn } from "node:child_process";
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { appendFileSync as appendFileSync2, existsSync as existsSync7, mkdirSync as mkdirSync8, readFileSync as readFileSync8, renameSync as renameSync5, rmSync as rmSync4, writeFileSync as writeFileSync6 } from "node:fs";
-import { basename as basename2, delimiter, dirname as dirname8, isAbsolute as isAbsolute3, join as join8, resolve as resolve4 } from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { appendFileSync as appendFileSync2, existsSync as existsSync10, mkdirSync as mkdirSync10, readFileSync as readFileSync10, renameSync as renameSync6, rmSync as rmSync5, statSync as statSync5, writeFileSync as writeFileSync8 } from "node:fs";
+import { basename as basename2, delimiter, dirname as dirname9, isAbsolute as isAbsolute4, join as join11, resolve as resolve5 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 init_dist();
@@ -8876,15 +8914,15 @@ function openReconcileItems(store) {
   if (!total) return [];
   return store.query({ types: ["todo"], source: "system", cap: total }).filter((t) => t.system_reason === "reconcile_needed");
 }
-function gitState(root, spawnSync3 = nodeSpawnSync) {
-  const r = spawnSync3("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
+function gitState(root, spawnSync4 = nodeSpawnSync) {
+  const r = spawnSync4("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const [head, prefix = ""] = String(r.stdout ?? "").split("\n");
   return /^[0-9a-f]{40,64}$/.test(head) ? { head, prefix: prefix.trim() } : null;
 }
-function dirtyPaths(root, paths, spawnSync3 = nodeSpawnSync, prefix = "") {
+function dirtyPaths(root, paths, spawnSync4 = nodeSpawnSync, prefix = "") {
   if (!paths.length) return /* @__PURE__ */ new Set();
-  const r = spawnSync3("git", ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync4("git", ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const dirty = /* @__PURE__ */ new Set();
   const add = (p) => {
@@ -9108,12 +9146,390 @@ function ageText(iso, nowMs = Date.now()) {
   return hours > 0 ? `${hours}h` : `${mins}m`;
 }
 
+// scripts/hooks/lib/plan-lock.mjs
+import { closeSync as closeSync3, constants as FS, existsSync as existsSync5, fstatSync, mkdirSync as mkdirSync5, openSync as openSync3, readSync, renameSync as renameSync4, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { join as join6 } from "node:path";
+var PLAN_MAX_BYTES = 4 * 1024 * 1024;
+var LOCK_MAX_BYTES = 64 * 1024;
+var MARKER_MAX_BYTES = 64 * 1024;
+var PATH_MAX = 512;
+var LOCK_FILE = "plan-lock.json";
+var HEX64 = /^[0-9a-f]{64}$/i;
+function isAbsolutePlanPath(p) {
+  return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
+}
+function sanitizeForContext(value, max) {
+  if (typeof value !== "string") return "";
+  let out = "";
+  for (const ch of value) {
+    const code = ch.codePointAt(0);
+    if (code < 32 || code === 127 || code >= 128 && code <= 159) continue;
+    out += ch;
+  }
+  out = out.trim();
+  return out.length > max ? out.slice(0, max) : out;
+}
+function readBounded(path, maxBytes, noun) {
+  if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
+  let fd;
+  try {
+    fd = openSync3(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
+  } catch (e) {
+    return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { unreadable: "is not a regular file (a directory, FIFO, socket or device cannot hold it)", code: "ENOTFILE" };
+    if (st.size > maxBytes) return { unreadable: `is ${st.size} bytes, past the ${maxBytes}-byte bound`, code: "EFBIG" };
+    const buf = Buffer.allocUnsafe(st.size);
+    let read = 0;
+    while (read < st.size) {
+      const n = readSync(fd, buf, read, st.size - read, read);
+      if (n <= 0) break;
+      read += n;
+    }
+    if (read < st.size) return { unreadable: `shrank from ${st.size} to ${read} bytes during the read`, code: "EIO" };
+    const probe = Buffer.allocUnsafe(1);
+    let extra = 0;
+    try {
+      extra = readSync(fd, probe, 0, 1, st.size);
+    } catch {
+      extra = 0;
+    }
+    if (extra > 0) return { unreadable: `grew past its ${st.size}-byte size during the read`, code: "EFBIG" };
+    return { bytes: buf };
+  } catch (e) {
+    return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
+  } finally {
+    try {
+      closeSync3(fd);
+    } catch {
+    }
+  }
+}
+function readStoreFileBounded(path, maxBytes) {
+  const read = readBounded(path, maxBytes, "record");
+  if (read.unreadable) return read;
+  return { text: read.bytes.toString("utf8") };
+}
+function invalidReason(l) {
+  if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
+  if (!isAbsolutePlanPath(l.plan_path)) return "plan_path is not an absolute path string";
+  if (typeof l.approved_sha256 !== "string" || !HEX64.test(l.approved_sha256)) return "approved_sha256 is not a 64-character hex digest";
+  if (l.file_sha256_at_approval !== null && (typeof l.file_sha256_at_approval !== "string" || !HEX64.test(l.file_sha256_at_approval))) {
+    return "file_sha256_at_approval is neither null nor a 64-character hex digest";
+  }
+  if (typeof l.approved_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(l.approved_at) || !Number.isFinite(Date.parse(l.approved_at))) {
+    return "approved_at is not an ISO-8601 timestamp";
+  }
+  if (l.source !== "exit_plan_mode" && l.source !== "manual") return `source is ${JSON.stringify(l.source)}, not 'exit_plan_mode' or 'manual'`;
+  if (typeof l.title !== "string") return "title is not a string";
+  for (const key of ["approved_session_id", "approved_branch", "approved_head"]) {
+    if (l[key] !== null && typeof l[key] !== "string") return `${key} is neither null nor a string`;
+  }
+  if (l.text_file_mismatch !== void 0 && typeof l.text_file_mismatch !== "boolean") return "text_file_mismatch is neither absent nor a boolean";
+  if (l.observed_at !== void 0 && typeof l.observed_at !== "string") return "observed_at is neither absent nor a string";
+  if (l.observed_sha256 !== void 0 && l.observed_sha256 !== null && typeof l.observed_sha256 !== "string") return "observed_sha256 is neither absent, null, nor a string";
+  if (l.observed_status !== void 0 && !["present", "missing", "unreadable"].includes(l.observed_status)) {
+    return `observed_status is ${JSON.stringify(l.observed_status)}, not one of 'present' | 'missing' | 'unreadable'`;
+  }
+  return null;
+}
+function readLock(sterlingDir) {
+  const read = readStoreFileBounded(join6(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
+  const raw = read.text;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { malformed: `is not valid JSON (${e && e.message || e})`, raw };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { malformed: "is not a JSON object", raw };
+  const reason = invalidReason(parsed);
+  if (reason) return { malformed: reason, raw };
+  return { lock: parsed, raw };
+}
+
+// scripts/hooks/lib/rotation-restore.mjs
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { existsSync as existsSync6, readFileSync as readFileSync5, rmSync as rmSync3 } from "node:fs";
+import { join as join7 } from "node:path";
+
+// scripts/lib/review-errors.mjs
+var CODES = /* @__PURE__ */ new Set([
+  // §1.4 ledger verbs
+  "ledger_corrupt",
+  "ledger_absent",
+  "ledger_digest_mismatch",
+  "compatibility_lock_held",
+  "entry_not_found",
+  "entry_selector_ambiguous",
+  "entry_not_active",
+  "class_unknown",
+  "class_not_applicable",
+  "superseder_not_found",
+  "superseder_not_reviewer_class",
+  "superseder_not_newer",
+  "superseder_branch_mismatch",
+  "superseder_lifecycle_unacceptable",
+  "superseder_coverage_incomplete",
+  "superseder_commit_not_ancestor",
+  "superseder_commit_trailer_not_roster",
+  "superseder_commit_receipt_unbound",
+  "superseder_commit_blob_mismatch",
+  "covering_not_allowed",
+  "covering_receipt_invalid",
+  "no_live_territory_disproved",
+  "reconcile_no_match",
+  "reconcile_ambiguous",
+  "reconcile_nonce_split",
+  "reconcile_unresolved",
+  "record_external_duplicate",
+  "argument_invalid",
+  // commit operation
+  "nothing_staged",
+  "message_missing",
+  "no_spendable_receipt",
+  "receipt_bytes_mismatch",
+  "coverage_incomplete",
+  "reservation_conflict",
+  "commit_failed",
+  "finalize_failed",
+  "waiver_reason_missing",
+  // A13 additions
+  "target_sha_prior_receipt_unbound",
+  "commit_verify_failed",
+  "not_sterling_project",
+  "receipt_unscoped",
+  // §1.4 disclosures (never refuse)
+  "receipt_unattributable",
+  "receipt_foreign",
+  "receipt_identity_unknown",
+  "receipt_deferred",
+  "receipt_stale",
+  "receipt_age_unverifiable",
+  "receipt_no_overlap",
+  "multi_spend",
+  "bytes_waived",
+  "legacy_entries_present",
+  "receipt_not_spent_stale_bytes",
+  "register_unavailable",
+  "dispatch_status_unknown",
+  // A9 register/ledger additions
+  "register_entry_malformed",
+  "register_agent_id_duplicate",
+  "register_lock_held",
+  "receipt_not_active",
+  "receipt_foreign_session",
+  "receipt_foreign_branch",
+  // A9 --target-sha amend mode
+  "target_sha_unresolvable",
+  "target_sha_not_head",
+  "target_sha_tree_dirty",
+  "target_sha_published",
+  "target_sha_publication_unprovable",
+  // A11 additions
+  "territory_declaration_missing",
+  "territory_declaration_malformed",
+  "dispatch_overlap",
+  "dispatch_residue",
+  // ledger entry classification
+  "ledger_entry_malformed",
+  // A19 (security review): an env override of identity is disclosed, never silent
+  "session_identity_override",
+  // dispatch state machine (decision dispatch-state-machine-pre-slot-post-
+  // binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
+  "dispatch_state_collision",
+  "dispatch_post_late",
+  "dispatch_post_mismatch",
+  "dispatch_post_refused",
+  "dispatch_state_poisoned",
+  "dispatch_unattributable",
+  "dispatch_lock_held",
+  "dispatch_post_only"
+]);
+function assertCode(code) {
+  if (!CODES.has(code)) {
+    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
+  }
+}
+function disclosure(code, facts = {}, message = code) {
+  assertCode(code);
+  return { kind: "disclosure", code, facts, message };
+}
+function render(x) {
+  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
+  return `${label} [${x?.code}] ${x?.message ?? ""}`;
+}
+
+// scripts/hooks/lib/rotation-restore.mjs
+var NOTE_PROSE_MAX = 2e3;
+var LIVE_DISPATCH_MAX = 20;
+var LIVE_TERRITORY_MAX = 40;
+var LIVE_TERRITORY_LINE_MAX = PATH_MAX * 4;
+var NOTE_FIELD_MAX = {
+  objective: NOTE_PROSE_MAX,
+  next_slice: NOTE_PROSE_MAX,
+  risks: NOTE_PROSE_MAX,
+  pointers: NOTE_PROSE_MAX,
+  branch: PATH_MAX,
+  head_sha: PATH_MAX,
+  session_id: PATH_MAX,
+  at: PATH_MAX
+};
+var LANE_HANDOFF_MAX = 1e3;
+function rotationNotePath(cwd) {
+  return join7(cwd, ".sterling", "transient", "rotation-note.json");
+}
+function readRotationNote(cwd) {
+  const notePath = rotationNotePath(cwd);
+  if (!existsSync6(notePath)) return null;
+  return JSON.parse(readFileSync5(notePath, "utf8"));
+}
+function consumeRotationNote(cwd) {
+  const note = readRotationNote(cwd);
+  if (note) rmSync3(rotationNotePath(cwd), { force: true });
+  return note;
+}
+function renderRotationRestore(note, { cwd, source, host = "claude", planLock = null, planLockMalformed = false }) {
+  if (host !== "claude" && host !== "opencode") throw new Error(`renderRotationRestore: unknown host '${host}'`);
+  const head = (() => {
+    try {
+      const r = spawnSync3("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", timeout: 5e3 });
+      return r.status === 0 ? (r.stdout ?? "").trim() : null;
+    } catch {
+      return null;
+    }
+  })();
+  const cautions = [];
+  if (note.head_sha && head && head !== note.head_sha) {
+    cautions.push(`HEAD has MOVED since the note (${sanitizeForContext(String(note.head_sha), PATH_MAX).slice(0, 8)} \u2192 ${head.slice(0, 8)}) \u2014 re-verify repository state before acting on it`);
+  }
+  const noteBaseBranch = sanitizeForContext(note.base_branch, PATH_MAX);
+  let commitsAheadUnverified = false;
+  if (typeof note.commits_ahead === "number") {
+    if (!note.base_branch) {
+      commitsAheadUnverified = true;
+    } else {
+      try {
+        const countR = spawnSync3("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd, encoding: "utf8", timeout: 5e3 });
+        const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
+        if (Number.isFinite(actual)) {
+          if (actual !== note.commits_ahead) {
+            cautions.push(`commits_ahead drift \u2014 note says ${note.commits_ahead}, actual is ${actual} (vs ${noteBaseBranch || "unknown base"})`);
+          }
+        } else {
+          commitsAheadUnverified = true;
+        }
+      } catch {
+        commitsAheadUnverified = true;
+      }
+    }
+  }
+  const ageMs = Date.now() - Date.parse(note.at ?? "");
+  if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1e3) {
+    cautions.push(`the note is ~${Math.round(ageMs / 36e5)}h old`);
+  }
+  const notePlanRaw = typeof note.plan_path === "string" && note.plan_path ? note.plan_path : null;
+  const livePlanRaw = typeof planLock?.plan_path === "string" && planLock.plan_path ? planLock.plan_path : null;
+  const notePlan = notePlanRaw ? sanitizeForContext(notePlanRaw, PATH_MAX) : null;
+  const livePlan = livePlanRaw ? sanitizeForContext(livePlanRaw, PATH_MAX) : null;
+  if (notePlanRaw && planLockMalformed) {
+    cautions.push(`the note names a plan (${notePlan}) but the live plan lock is MALFORMED and could not be compared against it \u2014 inspect it with \`plan-lock.mjs --show\``);
+  } else if (notePlanRaw && livePlanRaw && notePlanRaw !== livePlanRaw) {
+    cautions.push(`the note's plan_path DIFFERS from the current plan lock (note: ${notePlan}; lock now: ${livePlan}) \u2014 a new plan was approved after the note was written, and the PLAN LOCK section above is the authority`);
+  } else if (notePlanRaw && !livePlanRaw) {
+    cautions.push(`the note names a plan (${notePlan}) but no plan lock is live now \u2014 it was released, or .sterling/ was recreated`);
+  }
+  const planField = notePlanRaw ? [`- plan: ${notePlan}`] : [];
+  const noteSessionId = typeof note.session_id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(note.session_id) ? note.session_id : null;
+  const fields = planField.concat(
+    ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "session_id", "at"].map((k) => [k, k === "session_id" ? noteSessionId : note[k]]).filter(([, v]) => v).map(([k, v]) => `- ${k}: ${sanitizeForContext(String(v), NOTE_FIELD_MAX[k])}`)
+  ).concat(
+    typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${noteBaseBranch || "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
+  ).join("\n");
+  const liveDispatches = note.live_dispatches;
+  let liveLine = "";
+  if (Array.isArray(liveDispatches) && liveDispatches.length) {
+    const rendered = liveDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
+      const entries = Array.isArray(d?.territory) ? d.territory : [];
+      let territory = "no declared territory";
+      if (entries.length) {
+        const shown = entries.slice(0, LIVE_TERRITORY_MAX).map((t) => sanitizeForContext(String(t), PATH_MAX));
+        const dropped = entries.length - shown.length;
+        let joined = shown.join(", ");
+        if (joined.length > LIVE_TERRITORY_LINE_MAX) joined = `${joined.slice(0, LIVE_TERRITORY_LINE_MAX)}\u2026`;
+        territory = dropped > 0 ? `${joined}\u2026 (+${dropped} more)` : joined;
+      }
+      return `- ${sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent"} (${sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id"}) \u2014 ${territory}`;
+    }).join("\n");
+    const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
+    liveLine = `
+${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and cannot be resumed from this one (agent lookup is scoped to the current session); re-dispatch fresh if the work is still needed, and mind the territory below, which they may still be writing:
+${rendered}` + (omitted > 0 ? `
+\u2026 (+${omitted} more)` : "");
+  } else if (liveDispatches === null) {
+    liveLine = `
+${render(
+      disclosure(
+        "register_unavailable",
+        {},
+        "dispatch register unavailable \u2014 the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed, and check git status for files it may still be writing."
+      )
+    )}`;
+  }
+  const uncertainDispatches = Array.isArray(note.uncertain_dispatches) ? note.uncertain_dispatches : [];
+  let uncertainLine = "";
+  if (uncertainDispatches.length) {
+    const renderedUncertain = uncertainDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
+      const type = sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent";
+      const id = sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id";
+      const reason = sanitizeForContext(String(d?.reason ?? "unknown"), PATH_MAX) || "unknown";
+      return render(
+        disclosure("dispatch_status_unknown", {}, `${type}:${id} \u2014 ownership uncertain (${reason}); belongs to the previous session and cannot be resumed from this one \u2014 re-dispatch fresh if still needed`)
+      );
+    }).join("\n");
+    const omittedUncertain = uncertainDispatches.length - Math.min(uncertainDispatches.length, LIVE_DISPATCH_MAX);
+    uncertainLine = `
+${uncertainDispatches.length} dispatch(es) UNCERTAIN at rotation (lease expired, not confirmed dead \u2014 never counted as live):
+${renderedUncertain}` + (omittedUncertain > 0 ? `
+\u2026 (+${omittedUncertain} more)` : "");
+  }
+  const noteLanes = (Array.isArray(note.lanes) ? note.lanes : []).filter((l) => typeof l === "string").map((l) => sanitizeForContext(l.replace(/\s+/g, " "), LANE_HANDOFF_MAX)).filter(Boolean);
+  let lanesLine = "";
+  if (noteLanes.length) {
+    const noteSession = noteSessionId;
+    const renderedLanes = noteLanes.slice(0, LIVE_DISPATCH_MAX).map((l) => `- ${l}`).join("\n");
+    const omittedLanes = noteLanes.length - Math.min(noteLanes.length, LIVE_DISPATCH_MAX);
+    const wayBack = note.session_host === "opencode" ? noteSession ? `The old agents are reachable only by returning to the old session: \`opencode --session ${noteSession}\`.` : `The old agents are reachable only by returning to the old session; the note recorded no session id.` : noteSession ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.` : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`;
+    lanesLine = (host === "claude" ? `
+${noteLanes.length} lane hand-off(s) carried across the rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. ` : `
+${noteLanes.length} lane hand-off(s) carried across the rotation. Subagents of the previous session are not continued from this one: re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. `) + wayBack + `
+${renderedLanes}` + (omittedLanes > 0 ? `
+\u2026 (+${omittedLanes} more)` : "");
+  }
+  const body = `
+${fields}${liveLine}${uncertainLine}${lanesLine}
+Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. `;
+  const caution = cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "";
+  if (host === "opencode") {
+    return `
+
+ROTATION RESTORE (Sterling OpenCode plugin): a rotation note was prepared before this new session; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch OpenCode, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: exit and relaunch OpenCode now.` : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED OpenCode before this new session \u2014 a new session alone never reloads code, so relaunch now if that didn't happen yet.`);
+  }
+  const isClear = source === "clear";
+  return `
+
+ROTATION RESTORE (H1, source=${source}): a rotation note was prepared before this ${isClear ? "/clear" : "restart"}; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? isClear ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.` : `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 this restore is happening at session STARTUP, which already implies the exit-and-relaunch that reloads server/hook code.` : isClear ? `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.` : `If next_slice depends on a server/hook code change (migration, update, rebuild), this STARTUP already reloaded it.`);
+}
+
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync4, rmSync as rmSync3, rmdirSync as rmdirSync2, renameSync as renameSync4, existsSync as existsSync5, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { join as join6, resolve as resolve3, dirname as dirname6, isAbsolute as isAbsolute2 } from "node:path";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync6, writeFileSync as writeFileSync5, rmSync as rmSync4, rmdirSync as rmdirSync2, renameSync as renameSync5, existsSync as existsSync7, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join8, resolve as resolve3, dirname as dirname6, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 function registerPath(root) {
-  return join6(root, ".sterling", "transient", "dispatch-register.json");
+  return join8(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -9135,10 +9551,10 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync5(p)) return { availability: "absent", arr: [] };
+  if (!existsSync7(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
-    raw = readFileSync5(p, "utf8");
+    raw = readFileSync6(p, "utf8");
   } catch {
     return { availability: "corrupt", arr: [] };
   }
@@ -9166,13 +9582,20 @@ function readRegister(root) {
 var MAX_PROMPT_BYTES = 512 * 1024;
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 
-// scripts/lib/update.mjs
-import { closeSync as closeSync4, existsSync as existsSync6, mkdirSync as mkdirSync7, openSync as openSync4, readFileSync as readFileSync7, readdirSync as readdirSync3, readSync, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname7, join as join7 } from "node:path";
+// scripts/lib/opencode-install.mjs
+import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync8, readdirSync as readdirSync3, statSync as statSync4, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname7, isAbsolute as isAbsolute3, join as join9, resolve as resolve4 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+init_agent_distribution();
+init_agent_fences();
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync2, readFileSync as readFileSync6, readdirSync as readdirSync2, mkdirSync as mkdirSync6, openSync as openSync3, writeSync, closeSync as closeSync3, unlinkSync, constants } from "node:fs";
+import { lstatSync as lstatSync2, readFileSync as readFileSync7, readdirSync as readdirSync2, mkdirSync as mkdirSync7, openSync as openSync4, writeSync, closeSync as closeSync4, unlinkSync as unlinkSync2, constants } from "node:fs";
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+// scripts/lib/opencode-agents.mjs
+init_agent_distribution();
+init_agent_fences();
 
 // scripts/lib/handoff-projection.mjs
 var HANDOFF_DOCS_DIR = "docs/sterling";
@@ -9183,13 +9606,30 @@ var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NO
 var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
 var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
 
+// scripts/lib/opencode-install.mjs
+var IMPORTS = [
+  "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
+  "import { homedir } from 'node:os';",
+  "import { dirname, join } from 'node:path';",
+  "import { pathToFileURL } from 'node:url';"
+].join("\n");
+function sterlingRootFrom(moduleUrl = import.meta.url) {
+  const start = dirname7(fileURLToPath2(moduleUrl));
+  for (let dir = start; ; dir = dirname7(dir)) {
+    if (existsSync8(join9(dir, "agent-templates", "registry.json"))) return dir;
+    if (dirname7(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
+  }
+}
+
 // scripts/lib/update.mjs
+import { closeSync as closeSync5, existsSync as existsSync9, mkdirSync as mkdirSync9, openSync as openSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, readSync as readSync2, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname8, join as join10 } from "node:path";
 var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed-By-Agent", "review-ledger", "frozen-test"]);
-var UPDATE_MARKER_RELATIVE_PATH = join7(".sterling", "update-complete.json");
+var UPDATE_MARKER_RELATIVE_PATH = join10(".sterling", "update-complete.json");
 function walUserVersion(dbPath) {
   const walPath = `${dbPath}-wal`;
-  if (!existsSync6(walPath)) return null;
-  const wal = readFileSync7(walPath);
+  if (!existsSync9(walPath)) return null;
+  const wal = readFileSync9(walPath);
   if (wal.length < 32) return null;
   const magic = wal.readUInt32BE(0);
   if (magic !== 931071618 && magic !== 931071619) return null;
@@ -9206,13 +9646,13 @@ function walUserVersion(dbPath) {
   return committed;
 }
 function probeSchemaVersion(dbPath) {
-  const fd = openSync4(dbPath, "r");
+  const fd = openSync5(dbPath, "r");
   const header = Buffer.alloc(100);
   let bytesRead;
   try {
-    bytesRead = readSync(fd, header, 0, header.length, 0);
+    bytesRead = readSync2(fd, header, 0, header.length, 0);
   } finally {
-    closeSync4(fd);
+    closeSync5(fd);
   }
   if (bytesRead < header.length || header.subarray(0, 16).toString("latin1") !== "SQLite format 3\0") {
     throw new Error(`'${dbPath}' is not a valid SQLite database file`);
@@ -9223,23 +9663,25 @@ function probeSchemaVersion(dbPath) {
 // packages/opencode-plugin/src/server.mjs
 var PLUGIN_ID = "sterling.server";
 var BUSY_TIMEOUT_MS = 1e3;
-var BUDGET_MS = { context: 4e3, delivery: 4e3, settle: 3e4, prompt: 4e3 };
+var BUDGET_MS = { context: 4e3, delivery: 4e3, settle: 3e4, prompt: 4e3, compaction: 4e3 };
 var NOTICES_REL = ".sterling/transient/opencode-notices.json";
 var LOG_REL = ".sterling/transient/opencode-plugin.log";
 var DELIVERY_TOOLS = /* @__PURE__ */ new Set(["read", "edit", "write"]);
 var PENDING_CAP = 200;
 var STATUS_TTL_MS = 1e4;
-var OPENCODE_HOST_TAIL = [
-  "## OpenCode host",
-  "",
-  "This session runs on OpenCode, not Claude Code. The layer above is written for Claude Code; read it with these substitutions:",
-  "",
-  "- **AskUserQuestion** is OpenCode's `question` tool. A ruling still exists only if it came through that form.",
-  "- **/plugin, --plugin-dir and the marketplace** do not apply. OpenCode loads Sterling from its plugin config; /sterling:* slash commands, .claude/agents and .claude/settings.json are Claude Code surfaces and are absent here.",
-  "- **There is no stop block.** When a turn ends, Sterling settles the files it changed. Capture and reconcile duties it finds arrive as a STERLING NOTICE in the next turn; act on them before new work.",
-  "- **The conductor role** (agent-templates/conductor.md) is yours in the main session. Dispatch subagents with the `subagent` tool.",
-  "- **The codex MCP tool** is available only if it is configured in OpenCode's MCP settings; otherwise skip the Codex lanes and say so."
-].join("\n");
+function opencodeHostTail(pluginRoot) {
+  const install = pluginRoot ? `- **Sterling is installed at \`${pluginRoot}\`.** Its scripts are \`${pluginRoot}/bin/*.mjs\` (run one with \`node "${pluginRoot}/bin/<name>.mjs"\`), its commands are \`${pluginRoot}/commands/*.md\`, its skills are \`${pluginRoot}/skills/*/SKILL.md\` and its agent templates are under \`${pluginRoot}/agent-templates/\`. Those files are written for Claude Code: where one says CLAUDE_PLUGIN_ROOT, use \`${pluginRoot}\`, and read the rest with the substitutions this layer makes.` : "- **Sterling's install root could not be resolved** (the error is above), so its scripts, commands and skills are unreachable this session. Tell the user before relying on any of them.";
+  return [
+    "## OpenCode host",
+    "",
+    "This session runs on OpenCode, not Claude Code. The layer above is Sterling's Claude Code layer with its Claude-only phrases rewritten for OpenCode. The other differences:",
+    "",
+    install,
+    "- **/plugin, --plugin-dir and the marketplace** do not apply. OpenCode loads Sterling through the plugin shim in its config dir. Slash commands, .claude/agents and .claude/settings.json are Claude Code surfaces and are absent here; to run a Sterling command this layer names, read its file under the commands directory and follow it.",
+    "- **There is no stop block.** When a turn ends, Sterling settles the files it changed. Capture and reconcile duties it finds arrive as a STERLING NOTICE in the next turn; act on them before new work.",
+    `- **The conductor role** (${pluginRoot ? `\`${pluginRoot}/agent-templates/conductor.md\`` : "agent-templates/conductor.md"}) is yours in the main session. Dispatch subagents with the \`subagent\` tool.`
+  ].join("\n");
+}
 function openProjectStore(dbPath) {
   const store = new SterlingStore(dbPath);
   const db = store["db"];
@@ -9250,37 +9692,136 @@ function openProjectStore(dbPath) {
   db.exec(`PRAGMA busy_timeout=${BUSY_TIMEOUT_MS}`);
   return store;
 }
-function defaultTemplatePath(moduleUrl = import.meta.url) {
-  let dir = dirname8(fileURLToPath2(moduleUrl));
-  for (let i = 0; i < 6; i++) {
-    const p = join8(dir, "templates", "target-claude-md.md");
-    if (existsSync7(p)) return p;
-    dir = dirname8(dir);
-  }
-  throw new Error(`templates/target-claude-md.md not found above ${dirname8(fileURLToPath2(moduleUrl))}`);
+function sterlingRoot(moduleUrl = import.meta.url) {
+  return sterlingRootFrom(moduleUrl);
 }
-function renderSterlingLayer(root, templatePath = defaultTemplatePath()) {
-  const projectName = loadConfig(root)?.project_name ?? basename2(root);
-  return `${readFileSync8(templatePath, "utf8").replaceAll("{{PROJECT_NAME}}", projectName).trimEnd()}
+function defaultTemplatePath(moduleUrl = import.meta.url) {
+  return join11(sterlingRoot(moduleUrl), "templates", "target-claude-md.md");
+}
+var LAYER_HOST_MAP = [
+  { id: "agents-import", phrase: "@AGENTS.md\n", to: () => "" },
+  {
+    id: "conductor-install",
+    phrase: 'installed to this project\'s `.claude/agents/conductor.md` by install-agents/sync-agents and activated as the main-session agent through `"agent": "conductor"` in `.claude/settings.json`',
+    to: () => "installed on OpenCode to this project's `.opencode/agents/sterling/conductor.md` by Sterling's init and update and made the default agent through `default_agent: \"sterling/conductor\"` in `.opencode/opencode.json` (on Claude Code: `.claude/agents/conductor.md`, activated in `.claude/settings.json`)"
+  },
+  {
+    id: "delivery-h19",
+    phrase: "H19 delivery helps here but does not excuse you:",
+    to: () => "Knowledge delivery (H19 on Claude Code; on OpenCode the Sterling plugin appends it to read, edit and write tool results, not yet to shell or patch) helps here but does not excuse you:"
+  },
+  {
+    id: "concept-designed-h10",
+    phrase: "so H10 holds the demand at session end",
+    to: () => "so the demand is held at session end (H10 does this on Claude Code; OpenCode does not mint it yet, so write the concept article before the turn ends)"
+  },
+  {
+    id: "wired-h7-h10",
+    lead: "- **Wired, not just asked:**",
+    to: () => "- **Wired, not just asked:** on Claude Code H7 and H10 do this. On OpenCode the Sterling plugin settles each finished turn: the owning article of a changed file gets a maintenance item (`reconcile_needed`) and a STERLING NOTICE in the next turn. The demand for an owning article of unowned territory (`article_missing`) and for the concept article of a registered `concept_designed` event (`concept_article_missing`) are not minted on OpenCode yet, so meet them yourself before the work is done."
+  },
+  { id: "ask-question-tool", phrase: "through the AskUserQuestion tool.**", to: () => "through OpenCode's `question` tool (AskUserQuestion on Claude Code).**" },
+  { id: "ask-question-form", phrase: "goes through the AskUserQuestion tool form", to: () => "goes through the `question` tool form" },
+  {
+    id: "de-ai-skill",
+    phrase: "Run `sterling:de-ai-writing` on prose deliverables before they ship.**",
+    to: (r) => `Run the de-ai-writing skill (\`${r}/skills/de-ai-writing/SKILL.md\`) on prose deliverables before they ship.**`
+  },
+  {
+    id: "de-ai-scanner",
+    phrase: "(the skill's scanner plus a read)",
+    to: (r) => `(its scanner, \`node "${r}/skills/de-ai-writing/scripts/check-ai-signs.mjs" <file>\`, plus a read)`
+  },
+  {
+    id: "review-territory-h22",
+    phrase: "Without it H22 falls back to prose-scraping the brief; H22 warns on a reviewer dispatch missing the line.",
+    to: () => "On Claude Code H22 reads the line, falls back to prose-scraping the brief without it and warns on a reviewer dispatch that lacks it. OpenCode has no H22; the line is still required, so a brief reads the same on both hosts."
+  },
+  {
+    id: "store-guard-h15",
+    phrase: "(Enforced: H15 \u2014 one rule:",
+    to: () => "(Enforced on Claude Code by H15, and on OpenCode by the edit deny on `.sterling/sterling.db*` in `.opencode/opencode.json`, which covers the edit and write tools but not the shell \u2014 one rule:"
+  },
+  {
+    id: "platform-mechanics",
+    phrase: "Claude Code's hook, frontmatter and transcript mechanics move between versions.",
+    to: () => "OpenCode's plugin hooks, agent files and config move between versions, as Claude Code's hooks, frontmatter and transcripts do."
+  },
+  {
+    id: "codex-availability",
+    phrase: "uses the `codex` MCP tool, with the lane",
+    to: () => "uses the `codex` MCP tool (on OpenCode only when a `codex` MCP server is configured for it; if the tool is absent, say so and skip the Codex lane), with the lane"
+  },
+  {
+    id: "codex-background",
+    phrase: "A call still running after 120s backgrounds itself and returns its result as a notification \u2014 normal, not a hang.",
+    to: () => "On Claude Code a call still running after 120s moves to the background and reports back as a notification. How OpenCode handles a long Codex call is unmeasured, so a slow call is not by itself a hang."
+  },
+  {
+    id: "ready-for-new-session",
+    lead: "- **Say `READY TO CLEAR` plainly when it is time.**",
+    to: (r) => `- **Say \`READY FOR NEW SESSION\` plainly when it is time.** At a clean boundary (the slice is committed, the rotation note is written by \`node "${r}/bin/rotation-note.mjs"\`, and nothing is in flight: no running lane, no uncommitted change, no pending capture), end the reply with the literal line \`READY FOR NEW SESSION\` in capitals, on its own line; the user then starts a new session with /new. If the session changed plugin or MCP-server code, write \`EXIT AND RELAUNCH\` instead, so OpenCode restarts on the new code. Never use a soft variant such as "fine to start over whenever you like". If something is still in flight, name it and do not print the line. User-stated 2026-09-26 for this line's Claude Code form, and user-ruled for OpenCode as this new-session wording: a hedged phrase buried in a summary gets missed, and the user is the one who starts the new session. On /new the Sterling plugin restores and consumes it in the new session's first turn.`
+  },
+  { id: "version-banner", phrase: "(the same value the session-start banner prints)", to: (r) => `(on OpenCode, read it from \`${r}/.claude-plugin/plugin.json\`)` },
+  {
+    id: "agent-currency",
+    phrase: ", and whether the session-start banner reported an AGENT CURRENCY warning",
+    to: () => ", and whether the session-start banner reported an AGENT CURRENCY warning (that banner is Claude Code only; on OpenCode say that no agent-currency check ran)"
+  },
+  {
+    id: "strict-mcp-config",
+    phrase: "- **A user-scope MCP server entry can be silently dropped under `--strict-mcp-config`.**",
+    to: () => "- **On Claude Code, a user-scope MCP server entry can be silently dropped under `--strict-mcp-config`.** (OpenCode reads its MCP servers from its own config and the project's `.opencode/opencode.json`.)"
+  }
+];
+var CLAUDE_ONLY_RESIDUE = ["${CLAUDE_PLUGIN_ROOT}", "READY TO CLEAR", "/clear"];
+function hostMapLayer(text, pluginRoot) {
+  let out = text;
+  for (const m of LAYER_HOST_MAP) {
+    if (m.lead) {
+      const lines = out.split("\n");
+      const i = lines.findIndex((l) => l.startsWith(m.lead));
+      if (i < 0) throw new Error(`Sterling layer host mapping '${m.id}': the bullet "${m.lead}" was not found in the template`);
+      lines[i] = m.to(pluginRoot);
+      out = lines.join("\n");
+    } else {
+      if (!out.includes(m.phrase)) throw new Error(`Sterling layer host mapping '${m.id}': "${m.phrase}" was not found in the template`);
+      out = out.replaceAll(m.phrase, () => m.to(pluginRoot));
+    }
+  }
+  out = out.replaceAll("${CLAUDE_PLUGIN_ROOT}", () => pluginRoot);
+  out = out.replace(/`?\/sterling:([a-z][a-z-]*)`?/g, (whole, name) => {
+    const file = join11(pluginRoot, "commands", `${name}.md`);
+    if (!existsSync10(file)) throw new Error(`Sterling layer host mapping: the template names /sterling:${name}, but ${file} does not exist`);
+    return `${whole} (on OpenCode: follow \`${file}\`)`;
+  });
+  const left = CLAUDE_ONLY_RESIDUE.filter((t) => out.includes(t));
+  if (left.length) throw new Error(`Sterling layer has unmapped Claude-only phrase(s) for OpenCode: ${left.join(", ")}`);
+  return out;
+}
+function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), templatePath = join11(pluginRoot, "templates", "target-claude-md.md")) {
+  const projectName = loadConfig(projectDir)?.project_name ?? basename2(projectDir);
+  const mapped = hostMapLayer(readFileSync10(templatePath, "utf8").replace(/\r\n/g, "\n"), pluginRoot);
+  return `${mapped.replaceAll("{{PROJECT_NAME}}", () => projectName).trimEnd()}
 
-${OPENCODE_HOST_TAIL}`;
+${opencodeHostTail(pluginRoot)}`;
 }
 var errText = (e) => String(e && e.message || e);
 function writeJsonAtomic(path, value) {
-  mkdirSync8(dirname8(path), { recursive: true });
+  mkdirSync10(dirname9(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomUUID4()}.tmp`;
   try {
-    writeFileSync6(tmp, JSON.stringify(value));
-    renameSync5(tmp, path);
+    writeFileSync8(tmp, JSON.stringify(value));
+    renameSync6(tmp, path);
   } catch (e) {
-    rmSync4(tmp, { force: true });
+    rmSync5(tmp, { force: true });
     throw e;
   }
 }
 function readNotices(root) {
-  const p = join8(root, NOTICES_REL);
-  if (!existsSync7(p)) return [];
-  const parsed = JSON.parse(readFileSync8(p, "utf8"));
+  const p = join11(root, NOTICES_REL);
+  if (!existsSync10(p)) return [];
+  const parsed = JSON.parse(readFileSync10(p, "utf8"));
   if (!Array.isArray(parsed)) throw new Error(`${NOTICES_REL} is not a JSON array`);
   return parsed;
 }
@@ -9288,7 +9829,7 @@ function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString())
   const notices = readNotices(root);
   if (notices.some((n) => n.text === text && !n.shown_at)) return;
   notices.push({ id: randomUUID4(), at: now, text });
-  writeJsonAtomic(join8(root, NOTICES_REL), notices);
+  writeJsonAtomic(join11(root, NOTICES_REL), notices);
 }
 function takeNotices(root, now) {
   const notices = readNotices(root);
@@ -9300,24 +9841,24 @@ function takeNotices(root, now) {
       changed = true;
     }
   }
-  if (changed) writeJsonAtomic(join8(root, NOTICES_REL), notices);
+  if (changed) writeJsonAtomic(join11(root, NOTICES_REL), notices);
   return notices;
 }
 function pruneShownNotices(root) {
   const notices = readNotices(root);
   const left = notices.filter((n) => !n.shown_at);
   if (left.length === notices.length) return;
-  if (left.length) writeJsonAtomic(join8(root, NOTICES_REL), left);
-  else rmSync4(join8(root, NOTICES_REL), { force: true });
+  if (left.length) writeJsonAtomic(join11(root, NOTICES_REL), left);
+  else rmSync5(join11(root, NOTICES_REL), { force: true });
 }
 function logLine(root, line) {
-  const p = join8(root, LOG_REL);
-  mkdirSync8(dirname8(p), { recursive: true });
+  const p = join11(root, LOG_REL);
+  mkdirSync10(dirname9(p), { recursive: true });
   appendFileSync2(p, `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
 }
 function claudeOnPathDefault() {
-  return (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync7(join8(d, "claude")));
+  return (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync10(join11(d, "claude")));
 }
 function liveDispatch(root) {
   const reg = readRegister(root);
@@ -9375,11 +9916,72 @@ function createSterlingServer(deps = {}) {
   const now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
   const claudeOnPath = deps.claudeOnPath ?? claudeOnPathDefault;
   const launchWorker2 = deps.launchWorker ?? maybeLaunchMaintenanceWorker;
+  const renderRestore = deps.renderRestore ?? renderRotationRestore;
   const pending = /* @__PURE__ */ new Map();
   const statusCache = /* @__PURE__ */ new Map();
+  const restored = /* @__PURE__ */ new Map();
+  const malformedNoted = /* @__PURE__ */ new Set();
+  let session = null;
   let directory = process.cwd();
   let chain = Promise.resolve();
   const rootOf = () => projectRoot(directory);
+  async function rotationRestore(root, sessionID) {
+    if (restored.has(sessionID)) return restored.get(sessionID);
+    let note;
+    try {
+      note = readRotationNote(root);
+    } catch (e) {
+      const notePath = rotationNotePath(root);
+      let key = notePath;
+      try {
+        key = `${notePath}@${statSync5(notePath).mtimeMs}`;
+      } catch {
+      }
+      if (!malformedNoted.has(key)) {
+        malformedNoted.add(key);
+        logLine(root, `rotation note malformed: ${errText(e)}`);
+        addNotice(root, `Sterling: the rotation note is malformed (${errText(e)}); delete ${notePath}. See ${LOG_REL}.`, now());
+      }
+      return "";
+    }
+    if (!note) return "";
+    try {
+      if (typeof sessionID !== "string" || !sessionID || sessionID === note.session_id) return "";
+      if (!session || typeof session.get !== "function") throw new Error("ctx.session.get is unavailable, so the session cannot be checked for a parent");
+      const info = await session.get({ sessionID });
+      if (info?.parentID) return "";
+      const created = info?.time?.created;
+      const noteAt = Date.parse(note.at ?? "");
+      if (Number.isFinite(created) && Number.isFinite(noteAt) && created <= noteAt) {
+        logLine(root, `rotation restore skipped for ${sessionID}: created before the note (time.created=${JSON.stringify(created)}, note.at=${JSON.stringify(note.at)} = ${noteAt} ms)`);
+        return "";
+      }
+    } catch (e) {
+      logLine(root, `rotation restore skipped for ${sessionID}: ${errText(e)}`);
+      addNotice(root, `Sterling: a rotation note is waiting but could not be checked against this session (${errText(e)}); it was left in place. See ${LOG_REL}.`, now());
+      return "";
+    }
+    const consumed = consumeRotationNote(root);
+    if (!consumed) return "";
+    let planLock = null;
+    let planLockMalformed = false;
+    try {
+      const read = readLock(join11(root, ".sterling"));
+      planLock = read.lock ?? null;
+      planLockMalformed = Boolean(read.malformed);
+    } catch (e) {
+      planLockMalformed = true;
+      logLine(root, `rotation restore: plan lock unreadable: ${errText(e)}`);
+    }
+    try {
+      const text = renderRestore(consumed, { cwd: root, host: "opencode", planLock, planLockMalformed }).replace(/^\n+/, "");
+      restored.set(sessionID, text);
+      return text;
+    } catch (e) {
+      logLine(root, `rotation restore: render failed after the note was consumed: ${errText(e)}`);
+      return "";
+    }
+  }
   async function fenced(name, root, fn) {
     const started = Date.now();
     let timer;
@@ -9407,7 +10009,7 @@ function createSterlingServer(deps = {}) {
   function statusLine(root) {
     const hit = statusCache.get(root);
     if (hit && Date.now() - hit.at < STATUS_TTL_MS) return hit.text;
-    const dbPath = join8(root, ".sterling", "sterling.db");
+    const dbPath = join11(root, ".sterling", "sterling.db");
     let schema;
     try {
       const found = probeSchemaVersion(dbPath);
@@ -9433,17 +10035,21 @@ function createSterlingServer(deps = {}) {
   async function onContext(input) {
     const root = rootOf();
     if (!root) return;
-    await fenced("context", root, () => {
+    await fenced("context", root, async () => {
+      const restore = await rotationRestore(root, input.sessionID);
+      let pluginRoot = null;
       let layer;
       try {
-        layer = renderSterlingLayer(root, deps.templatePath ?? defaultTemplatePath());
+        pluginRoot = deps.sterlingRoot ?? sterlingRoot();
+        layer = renderSterlingLayer(root, pluginRoot);
       } catch (e) {
         logLine(root, `context: layer render failed: ${errText(e)}`);
         layer = `STERLING LAYER UNAVAILABLE: ${errText(e)}
 
-${OPENCODE_HOST_TAIL}`;
+${opencodeHostTail(pluginRoot)}`;
       }
       const blocks = [layer, statusLine(root)];
+      if (restore) blocks.push(restore);
       const notices = takeNotices(root, now());
       if (notices.length) blocks.push(`STERLING NOTICES (from the end of the last turn):
 ${notices.map((n) => `- ${n.text}`).join("\n")}`);
@@ -9457,9 +10063,9 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
     await fenced("delivery", root, () => {
       const raw = input.input?.path;
       if (typeof raw !== "string" || !raw) return;
-      const rel = repoRel(isAbsolute3(raw) ? raw : resolve4(directory, raw), root);
+      const rel = repoRel(isAbsolute4(raw) ? raw : resolve5(directory, raw), root);
       if (!rel || rel === ".git" || rel.startsWith(".git/") || rel.startsWith(".sterling/")) return;
-      const store = openStore(join8(root, ".sterling", "sterling.db"));
+      const store = openStore(join11(root, ".sterling", "sterling.db"));
       try {
         const delivery = buildDelivery(store, root, rel, input.sessionID);
         if (!delivery) return;
@@ -9468,6 +10074,15 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
       } finally {
         store.close();
       }
+    });
+  }
+  async function onCompaction(input) {
+    const root = rootOf();
+    if (!root) return;
+    await fenced("compaction", root, () => {
+      const dir = deliverySessionDir(root, input?.sessionID);
+      if (!dir) throw new Error(`compaction input has no usable sessionID (${typeof input?.sessionID}); delivery receipts were not reset`);
+      rmSync5(dir, { recursive: true, force: true });
     });
   }
   async function onAfter(input) {
@@ -9496,7 +10111,7 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
     const dispatch = liveDispatch(root);
     let store;
     try {
-      store = openStore(join8(root, ".sterling", "sterling.db"));
+      store = openStore(join11(root, ".sterling", "sterling.db"));
       const minted = mintSettlementReconcile(store, root, git.candidates.map((c) => c.path), at);
       if (!dispatch.live) writeGitSettled(root, git.next);
       if (minted.length) {
@@ -9518,7 +10133,7 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
     if (!claudeOnPath()) return;
     let workerStore;
     try {
-      workerStore = openStore(join8(root, ".sterling", "sterling.db"));
+      workerStore = openStore(join11(root, ".sterling", "sterling.db"));
       launchWorker2({ root, config: loadConfig(root), store: workerStore, trigger: "stop", spawn });
     } catch (e) {
       logLine(root, `maintenance worker launch failed: ${errText(e)}`);
@@ -9532,7 +10147,7 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
     if (!root) return;
     await fenced("prompt", root, () => {
       if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
-      const store = openStore(join8(root, ".sterling", "sterling.db"));
+      const store = openStore(join11(root, ".sterling", "sterling.db"));
       let selection;
       try {
         selection = store.takeSelection();
@@ -9552,7 +10167,7 @@ TUI selection (one-shot): the user has selected ${selection.type} '${selection.r
     statusCache.delete(root);
     await fenced("settle", root, () => settle(root));
   }
-  const handlers = { context: onContext, prompt: onPrompt, before: onBefore, after: onAfter, event: onEvent };
+  const handlers = { context: onContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };
   return {
     id: PLUGIN_ID,
     handlers,
@@ -9564,8 +10179,10 @@ TUI selection (one-shot): the user has selected ${selection.type} '${selection.r
     },
     async setup(ctx) {
       directory = ctx?.location?.directory ?? process.cwd();
+      session = ctx.session;
       await ctx.session.hook("context", onContext);
       await ctx.session.hook("prompt", onPrompt);
+      await ctx.session.hook("compaction", onCompaction);
       await ctx.tool.hook("execute.before", onBefore);
       await ctx.tool.hook("execute.after", onAfter);
       const abort = new AbortController();
@@ -9598,13 +10215,15 @@ export {
   BUSY_TIMEOUT_MS,
   LOG_REL,
   NOTICES_REL,
-  OPENCODE_HOST_TAIL,
   PLUGIN_ID,
   addNotice,
   createSterlingServer,
   server_default as default,
   defaultTemplatePath,
+  hostMapLayer,
   liveDispatch,
   openProjectStore,
-  renderSterlingLayer
+  opencodeHostTail,
+  renderSterlingLayer,
+  sterlingRoot
 };

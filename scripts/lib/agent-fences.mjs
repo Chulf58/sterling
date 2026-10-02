@@ -9,19 +9,33 @@
 // A rewritten line is therefore a sterling-only original plus a portable-only
 // replacement. A marker is a whole line, exactly as written below; fences are
 // balanced and never nested. Anything else is refused loudly (P5), never guessed.
+// A second axis is the HOST: a claude-only block reaches only the Claude render,
+// an opencode-only block only the OpenCode renders (the Sterling-full render of
+// scripts/lib/opencode-install.mjs and the portable render), so a host-specific
+// instruction is a claude-only original plus an opencode-only replacement and the
+// Claude render stays byte-identical to the unfenced template.
+// A claude-only block must be paired: the next non-blank line after its close
+// marker opens an opencode-only block, so a host-specific instruction cannot be
+// left with no OpenCode text by accident (the OpenCode render would silently go
+// without it). A claude-only block that really has no OpenCode counterpart says so
+// with the whole-line marker `<!-- no-opencode-counterpart -->` as the first line
+// inside the block; the marker is dropped from every render, so the Claude render
+// stays identical to the same template without it.
 // Dependency-free on purpose: agent-distribution.mjs and opencode-agents.mjs
 // both import it.
 
 export const FENCE_KINDS = {
   'sterling-only': { open: '<!-- sterling-only -->', close: '<!-- /sterling-only -->' },
   'portable-only': { open: '<!-- portable-only -->', close: '<!-- /portable-only -->' },
+  'claude-only': { open: '<!-- claude-only -->', close: '<!-- /claude-only -->' },
+  'opencode-only': { open: '<!-- opencode-only -->', close: '<!-- /opencode-only -->' },
 };
 
 // Any HTML comment that NAMES a fence (any case, any separator, on one line or
 // spread over several) is meant as a marker. Only the four byte-exact marker
 // lines are markers; every other spelling is malformed and refused, never read
 // as prose — prose would leak its block into the portable render (Sol review).
-const FENCE_WORD_RE = /(?:sterling|portable)[\s_-]*only/i;
+const FENCE_WORD_RE = /(?:sterling|portable|claude|opencode)[\s_-]*only/i;
 const COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
 const EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
 
@@ -49,12 +63,15 @@ function malformedMarkers(text, label) {
   return out;
 }
 
+export const NO_COUNTERPART_MARKER = '<!-- no-opencode-counterpart -->';
+
 const splitLines = (text) => text.replace(/\r\n/g, '\n').split('\n');
 
 export function validateFences(text, label) {
   const violations = malformedMarkers(text.replace(/\r\n/g, '\n'), label);
   let openFence = null;
-  splitLines(text).forEach((line, index) => {
+  const lines = splitLines(text);
+  lines.forEach((line, index) => {
     const at = `${label}:${index + 1}`;
     const marker = classify(line);
     if (!marker) return;
@@ -69,6 +86,13 @@ export function validateFences(text, label) {
     } else if (openFence.kind !== marker.kind) {
       violations.push({ kind: 'fence_mismatched', detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
     } else {
+      if (marker.kind === 'claude-only') {
+        const first = lines[openFence.line]; // openFence.line is 1-based, so this is the line after the open marker
+        const next = lines.slice(index + 1).find((l) => l.trim() !== '');
+        if (first !== NO_COUNTERPART_MARKER && next !== FENCE_KINDS['opencode-only'].open) {
+          violations.push({ kind: 'fence_claude_only_unpaired', detail: `${label}:${openFence.line}: the claude-only block is not followed by an opencode-only block; add one, or put '${NO_COUNTERPART_MARKER}' as the first line inside the block if OpenCode has no counterpart` });
+        }
+      }
       openFence = null;
     }
   });
@@ -78,10 +102,10 @@ export function validateFences(text, label) {
   return violations;
 }
 
-// keepKind: the fence whose CONTENT survives (markers dropped); the other kind's
-// blocks are dropped whole. Line endings are normalized to LF, like every other
-// render in agent-distribution.
-function render(text, label, keepKind) {
+// keepKinds: the fences whose CONTENT survives (markers dropped); every other
+// kind's blocks are dropped whole. Line endings are normalized to LF, like every
+// other render in agent-distribution.
+function render(text, label, keepKinds) {
   const violations = validateFences(text, label);
   if (violations.length) {
     throw new Error(`agent fences invalid in ${label} — refusing to render (P5):\n  ${violations.map((v) => `[${v.kind}] ${v.detail}`).join('\n  ')}`);
@@ -90,22 +114,28 @@ function render(text, label, keepKind) {
   let inside = null;
   for (const line of splitLines(text)) {
     const marker = classify(line);
+    if (line === NO_COUNTERPART_MARKER) continue;
     if (marker) {
       inside = marker.role === 'open' ? marker.kind : null;
       continue;
     }
-    if (inside && inside !== keepKind) continue;
+    if (inside && !keepKinds.includes(inside)) continue;
     out.push(line);
   }
   return out.join('\n');
 }
 
 export function renderClaudeText(text, label) {
-  return render(text, label, 'sterling-only');
+  return render(text, label, ['sterling-only', 'claude-only']);
 }
 
 export function renderPortableText(text, label) {
-  return render(text, label, 'portable-only');
+  return render(text, label, ['portable-only', 'opencode-only']);
+}
+
+/** The Sterling-full OpenCode render: Sterling lines kept, as on Claude, with the OpenCode host's text. */
+export function renderOpenCodeFullText(text, label) {
+  return render(text, label, ['sterling-only', 'opencode-only']);
 }
 
 // What a reader with no Sterling installed cannot act on (decision 161e2972's

@@ -77,6 +77,21 @@ test('fences: unbalanced, nested, mismatched and malformed markers fail loudly',
   }
 });
 
+test('fences: a claude-only block must be followed by an opencode-only block, unless it carries the no-opencode-counterpart marker', () => {
+  const paired = 'a\n<!-- claude-only -->\nc\n<!-- /claude-only -->\n\n<!-- opencode-only -->\no\n<!-- /opencode-only -->\nz\n';
+  assert.deepEqual(validateFences(paired, 'f.md'), []);
+  const unpaired = 'a\n<!-- claude-only -->\nc\n<!-- /claude-only -->\nz\n';
+  assert.deepEqual(validateFences(unpaired, 'f.md').map((v) => v.kind), ['fence_claude_only_unpaired']);
+  assert.match(validateFences(unpaired, 'f.md')[0].detail, /f\.md:2:.*no-opencode-counterpart/);
+  assert.throws(() => renderClaudeText(unpaired, 'f.md'), /fence_claude_only_unpaired/);
+  const wrongNeighbor = 'a\n<!-- claude-only -->\nc\n<!-- /claude-only -->\n<!-- sterling-only -->\ns\n<!-- /sterling-only -->\n';
+  assert.deepEqual(validateFences(wrongNeighbor, 'f.md').map((v) => v.kind), ['fence_claude_only_unpaired']);
+  const optedOut = 'a\n<!-- claude-only -->\n<!-- no-opencode-counterpart -->\nc\n<!-- /claude-only -->\nz\n';
+  assert.deepEqual(validateFences(optedOut, 'f.md'), []);
+  assert.equal(renderClaudeText(optedOut, 'f.md'), 'a\nc\nz\n', 'the marker is dropped from the Claude render');
+  assert.equal(renderPortableText(optedOut, 'f.md'), 'a\nz\n');
+});
+
 test('fences: lintAgentFences reports violations as check entries and passes every shipped template', () => {
   assert.deepEqual(lintAgentFences('<!-- sterling-only -->\n', 'x.md').map((v) => v.kind), ['fence_unclosed']);
   for (const file of readdirSync(templatesDir).filter((f) => f.endsWith('.md'))) {

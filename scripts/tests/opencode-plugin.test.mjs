@@ -6,7 +6,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -74,14 +74,23 @@ function makeProject({ withGit = true } = {}) {
 }
 
 /** A stub of the OpenCode 2 plugin context: records hook registrations and feeds events. */
-function stubCtx(directory) {
+function stubCtx(directory, sessions = {}) {
   const hooks = { session: {}, tool: {} };
   const queue = [];
   let wake = null;
   return {
     hooks,
     location: { directory },
-    session: { hook: async (name, fn) => void (hooks.session[name] = fn) },
+    session: {
+      hook: async (name, fn) => void (hooks.session[name] = fn),
+      // OpenCode 2.0.21: session.get({ sessionID }) -> SessionInfo { id, parentID?, time: { created } }.
+      get: async ({ sessionID }) => {
+        const s = sessions[sessionID];
+        if (s instanceof Error) throw s;
+        if (!s) throw new Error(`no session ${sessionID}`);
+        return { id: sessionID, ...s };
+      },
+    },
     tool: { hook: async (name, fn) => void (hooks.tool[name] = fn) },
     event: {
       subscribe: ({ signal } = {}) => ({
@@ -100,9 +109,9 @@ function stubCtx(directory) {
   };
 }
 
-async function setupPlugin(dir, deps = {}) {
+async function setupPlugin(dir, deps = {}, sessions = {}) {
   const plugin = server.createSterlingServer({ claudeOnPath: () => false, ...deps });
-  const ctx = stubCtx(dir);
+  const ctx = stubCtx(dir, sessions);
   const cleanup = await plugin.setup(ctx);
   return { plugin, ctx, cleanup };
 }
@@ -144,6 +153,7 @@ test('session context injects the Sterling layer, the OpenCode host tail, a stat
     assert.doesNotMatch(text, /\{\{PROJECT_NAME\}\}/);
     assert.match(text, /OpenCode host/);
     assert.match(text, /`question` tool/);
+    assert.ok(text.includes(`Sterling is installed at \`${server.sterlingRoot()}\``), 'the layer names the resolved Sterling root');
     assert.match(text, /no stop block/i);
     assert.match(text, /conductor/);
     assert.match(text, /STERLING STATUS: board 1 open, maintenance queue 0, store schema v\d+ \(current\)/);
@@ -155,10 +165,77 @@ test('session context injects the Sterling layer, the OpenCode host tail, a stat
   }
 });
 
-test('the host tail maps every Claude-only name the layer uses', () => {
-  const tail = server.OPENCODE_HOST_TAIL;
-  for (const term of ['AskUserQuestion', '`question` tool', '/plugin', '--plugin-dir', '.claude/agents', 'codex', 'stop block', 'conductor', 'next turn']) {
+test('the host tail names the Sterling root and the Claude Code surfaces OpenCode lacks', () => {
+  const tail = server.opencodeHostTail('/opt/sterling-x');
+  for (const term of ['`/opt/sterling-x`', '/opt/sterling-x/bin/', '/opt/sterling-x/commands/', '/opt/sterling-x/skills/', 'CLAUDE_PLUGIN_ROOT', '/plugin', '--plugin-dir', '.claude/agents', 'stop block', 'conductor', '`subagent` tool', 'next turn']) {
     assert.ok(tail.includes(term), `host tail names ${term}`);
+  }
+  assert.ok(!tail.includes('${CLAUDE_PLUGIN_ROOT}'), 'the tail names the variable without the shell form, so the layer greps clean');
+  assert.match(server.opencodeHostTail(null), /could not be resolved/, 'an unresolved root is said out loud');
+});
+
+test('the Sterling root comes from one function: the plugin root above the module, which holds the template and bin/', () => {
+  const root = server.sterlingRoot();
+  assert.equal(root, repo.replace(/\/$/, ''));
+  assert.equal(server.defaultTemplatePath(), join(root, 'templates', 'target-claude-md.md'));
+  assert.ok(existsSync(join(root, 'bin', 'concept-designed.mjs')));
+  // The committed bundle sits one level below the root and resolves the same root.
+  assert.equal(server.sterlingRoot(pathToFileURL(join(repo, 'opencode', 'sterling-server.mjs')).href), root);
+  assert.throws(() => server.sterlingRoot(pathToFileURL(join(tmpdir(), 'nowhere', 'x.mjs')).href), /no Sterling plugin root/);
+});
+
+test('the injected layer is fully host-mapped: no unmapped Claude-only phrase, every named Sterling file exists', () => {
+  const p = makeProject({ withGit: false });
+  try {
+    const root = server.sterlingRoot();
+    const layer = server.renderSterlingLayer(p.dir, root);
+    for (const claudeOnly of ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', '@AGENTS.md', 'sterling:de-ai-writing', 'H22 warns', 'H10 holds the demand', 'H19 delivery helps', '(Enforced: H15', 'session-start banner prints', 'backgrounds itself and returns', "Claude Code's hook, frontmatter and transcript mechanics move"]) {
+      assert.ok(!layer.includes(claudeOnly), `layer still carries the Claude-only phrase ${claudeOnly}`);
+    }
+    assert.match(layer, /^- \*\*Say `READY FOR NEW SESSION` plainly when it is time\.\*\*.*\/new/m, 'the clear line is the ruled new-session line');
+    assert.match(layer, /`question` tool \(AskUserQuestion on Claude Code\)/);
+    assert.match(layer, /\.opencode\/agents\/sterling\/conductor\.md/);
+    assert.match(layer, /default_agent/);
+    assert.match(layer, /reconcile_needed.*STERLING NOTICE/s, 'H7 is mapped to settlement notices');
+    assert.match(layer, /article_missing.*concept_article_missing.*not minted on OpenCode yet/s, 'the missing H10 demands are disclosed');
+    assert.match(layer, /codex.*MCP server is configured/s);
+    // Every /sterling:<command> named in the layer carries its OpenCode equivalent.
+    for (const m of layer.matchAll(/\/sterling:([a-z][a-z-]*)/g)) {
+      const after = layer.slice(m.index, m.index + 200);
+      assert.ok(after.includes(`${root}/commands/${m[1]}.md`), `/sterling:${m[1]} is mapped to its command file`);
+    }
+    // Every Sterling path the layer names resolves on disk.
+    const named = [...layer.matchAll(new RegExp(`${root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/[\\w./-]*[\\w]`, 'g'))].map((m) => m[0]);
+    for (const want of ['bin/concept-designed.mjs', 'bin/rotation-note.mjs', 'skills/de-ai-writing/SKILL.md', 'skills/de-ai-writing/scripts/check-ai-signs.mjs', '.claude-plugin/plugin.json']) {
+      assert.ok(named.includes(`${root}/${want}`), `layer names ${want} under the root`);
+    }
+    for (const path of named) assert.ok(existsSync(path), `${path} named in the layer exists`);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('template drift is loud: a mapped phrase that vanished, or a new unmapped Claude-only phrase, fails the render', () => {
+  const p = makeProject({ withGit: false });
+  const fake = mkdtempSync(join(tmpdir(), 'sterling-oc-fake-root-'));
+  try {
+    const root = server.sterlingRoot();
+    const real = readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8');
+    mkdirSync(join(fake, 'templates'));
+    mkdirSync(join(fake, 'commands'));
+    for (const c of ['task', 'drain']) writeFileSync(join(fake, 'commands', `${c}.md`), 'x');
+    const tpl = join(fake, 'templates', 'target-claude-md.md');
+    writeFileSync(tpl, real.replace('so H10 holds the demand at session end', 'so the demand is held'));
+    assert.throws(() => server.renderSterlingLayer(p.dir, fake), /host mapping 'concept-designed-h10'.*not found/);
+    writeFileSync(tpl, `${real}\n- run \`node "\${CLAUDE_PLUGIN_ROOT}/bin/new-thing.mjs"\`\n`);
+    assert.ok(server.renderSterlingLayer(p.dir, fake).includes(`\`node "${fake}/bin/new-thing.mjs"\``), 'any plugin-root reference becomes the resolved root');
+    writeFileSync(tpl, `${real}\n- then print READY TO CLEAR and run /clear\n`);
+    assert.throws(() => server.renderSterlingLayer(p.dir, fake), /unmapped Claude-only phrase.*READY TO CLEAR.*\/clear/);
+    writeFileSync(tpl, `${real}\n- drained by \`/sterling:nosuch\`\n`);
+    assert.throws(() => server.renderSterlingLayer(p.dir, fake), /\/sterling:nosuch.*commands\/nosuch\.md/);
+  } finally {
+    p.cleanup();
+    rmSync(fake, { recursive: true, force: true });
   }
 });
 
@@ -198,6 +275,164 @@ test('an internal error in a tool hook is swallowed, logged and surfaced as a no
     assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /delivery.*boom in delivery/);
     const notices = JSON.parse(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8'));
     assert.ok(notices.some((n) => /boom in delivery/.test(n.text)), 'the failure becomes a notice the next context shows');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+const NOTE_AT = '2026-10-02T10:00:00.000Z';
+const writeNote = (dir, extra = {}) => {
+  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'transient', 'rotation-note.json'), JSON.stringify({ next_slice: 'ROTATION-SLICE-42', session_id: 'ses_old', session_host: 'opencode', lanes: ['lane x'], at: NOTE_AT, ...extra }));
+};
+const noteExists = (dir) => existsSync(join(dir, '.sterling', 'transient', 'rotation-note.json'));
+const after = Date.parse(NOTE_AT) + 60_000;
+const contextFor = async (ctx, sessionID) => {
+  const ci = { ...contextInput(), sessionID };
+  await ctx.hooks.session.context(ci);
+  return systemText(ci);
+};
+
+test('rotation restore: the first new root session gets the note once and consumes it; it stays for that session; the next new session does not get it', async () => {
+  const p = makeProject();
+  try {
+    writeNote(p.dir);
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_new: { time: { created: after } }, ses_next: { time: { created: after + 1 } } });
+    const first = await contextFor(ctx, 'ses_new');
+    assert.match(first, /ROTATION RESTORE \(Sterling OpenCode plugin\)/);
+    assert.match(first, /ROTATION-SLICE-42/);
+    assert.match(first, /`opencode --session ses_old`/);
+    assert.equal(noteExists(p.dir), false, 'consumed');
+    assert.equal((first.match(/ROTATION RESTORE/g) ?? []).length, 1);
+    assert.match(await contextFor(ctx, 'ses_new'), /ROTATION-SLICE-42/, 'the restore stays in that session\'s later turns');
+    assert.doesNotMatch(await contextFor(ctx, 'ses_next'), /ROTATION RESTORE/, 'a second new session does not get it');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('rotation restore: the note stays in place for the old session, a child session, a session older than the note, and when the session cannot be read', async () => {
+  const p = makeProject();
+  try {
+    writeNote(p.dir);
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, {
+      ses_old: { time: { created: after } },
+      ses_child: { parentID: 'ses_new', time: { created: after } },
+      ses_early: { time: { created: Date.parse(NOTE_AT) - 1 } },
+      ses_broken: new Error('server said no'),
+      ses_notime: {},
+    });
+    for (const sid of ['ses_old', 'ses_child', 'ses_early']) {
+      assert.doesNotMatch(await contextFor(ctx, sid), /ROTATION RESTORE/, sid);
+      assert.equal(noteExists(p.dir), true, `${sid} leaves the note`);
+    }
+    const broken = await contextFor(ctx, 'ses_broken');
+    assert.doesNotMatch(broken, /ROTATION RESTORE/);
+    assert.match(broken, /Sterling layer\)/, 'a failed session lookup costs only the restore');
+    assert.equal(noteExists(p.dir), true);
+    assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /server said no/);
+    assert.match(await contextFor(ctx, 'ses_notime'), /ROTATION RESTORE/, 'an unreadable created time does not block a root session with a different id');
+    assert.equal(noteExists(p.dir), false);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('rotation restore: a malformed note gets its own notice naming the cause and the remedy, shown once per note file, and the layer survives', async () => {
+  const p = makeProject();
+  try {
+    mkdirSync(join(p.dir, '.sterling', 'transient'), { recursive: true });
+    const notePath = join(p.dir, '.sterling', 'transient', 'rotation-note.json');
+    writeFileSync(notePath, '{ not json');
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_new: { time: { created: after } } });
+    const first = await contextFor(ctx, 'ses_new');
+    assert.match(first, /Sterling layer\)/, 'a malformed note costs only the restore');
+    const noticeTexts = () => JSON.parse(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8')).map((n) => n.text);
+    const malformed = noticeTexts().filter((t) => /malformed/.test(t));
+    assert.equal(malformed.length, 1);
+    assert.ok(malformed[0].includes(`delete ${notePath}`), malformed[0]);
+    assert.ok(!noticeTexts().some((t) => /could not be checked/.test(t)), 'not the session-check notice');
+    assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /rotation note malformed/);
+    for (let i = 0; i < 3; i++) await contextFor(ctx, 'ses_new');
+    assert.equal(noticeTexts().filter((t) => /malformed/.test(t)).length, 1, 'later requests do not repeat it');
+    assert.equal(existsSync(notePath), true, 'the note is left in place');
+    // a rewritten malformed note is a new note file and is announced again
+    const later = new Date(Date.now() + 5000);
+    writeFileSync(notePath, '[');
+    utimesSync(notePath, later, later);
+    await contextFor(ctx, 'ses_new');
+    assert.equal(JSON.parse(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8')).filter((n) => /malformed/.test(n.text)).length, 2);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('rotation restore: a root session skipped for its creation time logs the raw time.created and note.at', async () => {
+  const p = makeProject();
+  try {
+    writeNote(p.dir);
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_early: { time: { created: 1759399000 } } });
+    await contextFor(ctx, 'ses_early');
+    const log = readFileSync(join(p.dir, server.LOG_REL), 'utf8');
+    assert.match(log, /rotation restore skipped for ses_early: created before the note \(time\.created=1759399000, note\.at="2026-10-02T10:00:00\.000Z"/);
+    assert.equal(noteExists(p.dir), true);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('rotation restore: a render failure after the note was consumed is logged and costs only the restore', async () => {
+  const p = makeProject();
+  try {
+    writeNote(p.dir);
+    const { ctx, cleanup } = await setupPlugin(p.dir, { renderRestore: () => { throw new Error('render boom'); } }, { ses_new: { time: { created: after } } });
+    const text = await contextFor(ctx, 'ses_new');
+    assert.doesNotMatch(text, /ROTATION RESTORE/);
+    assert.match(text, /Sterling layer\)/, 'the layer survives the render failure');
+    assert.equal(noteExists(p.dir), false, 'consumed by design');
+    assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /render failed after the note was consumed: render boom/);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('the layer says the new session restores the note', () => {
+  const p = makeProject({ withGit: false });
+  try {
+    const layer = server.renderSterlingLayer(p.dir, server.sterlingRoot());
+    assert.match(layer, /the Sterling plugin restores and consumes it in the new session's first turn/);
+    assert.doesNotMatch(layer, /does not restore the rotation note/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('compaction resets that session\'s delivery receipts, so delivery fires again after context loss; other sessions keep theirs', async () => {
+  const p = makeProject();
+  try {
+    const { ctx, cleanup } = await setupPlugin(p.dir);
+    assert.equal(typeof ctx.hooks.session.compaction, 'function', 'the compaction hook is registered');
+    const deliver = async (sessionID, id) => {
+      const call = { tool: 'read', sessionID, id, input: { path: 'src/a.mjs' } };
+      await ctx.hooks.tool['execute.before'](call);
+      const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'read' }] } };
+      await ctx.hooks.tool['execute.after'](after);
+      return after.result.content.length === 2;
+    };
+    assert.equal(await deliver('ses_1', 'k1'), true);
+    assert.equal(await deliver('ses_2', 'k2'), true);
+    assert.equal(await deliver('ses_1', 'k3'), false, 'delivered once per session');
+    const compaction = { sessionID: 'ses_1', agent: 'build', system: [], messages: [], tools: {}, options: {} };
+    await ctx.hooks.session.compaction(compaction);
+    assert.equal(compaction.result, undefined, 'the hook never supplies a compaction result');
+    assert.equal(await deliver('ses_1', 'k4'), true, 'after compaction the article is delivered again');
+    assert.equal(await deliver('ses_2', 'k5'), false, 'another session keeps its receipts');
     await cleanup?.();
   } finally {
     p.cleanup();
@@ -464,4 +699,5 @@ test('live: OpenCode 2.0.21 shows the model the injected layer and an edit deliv
   assert.equal(r.status, 0, `live smoke failed:\n${r.stdout}\n${r.stderr}`);
   assert.match(r.stdout, /LAYER-SEEN: yes/);
   assert.match(r.stdout, /DELIVERY-SEEN: yes/);
+  assert.match(r.stdout, /BIN-CALLED-BY-ROOT: yes/, 'the model ran a bin script by the root the layer names');
 });

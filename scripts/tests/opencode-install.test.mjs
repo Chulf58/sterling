@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   setupOpenCode, formatOpenCodeRows, opencodeConfigDir, mcpLauncherPath, STERLING_AGENTS_SUBDIR, CONDUCTOR_AGENT,
-  swapFullAgentModel, opencodeModelRef, sterlingRootFrom,
+  swapFullAgentModel, opencodeModelRef, sterlingRootFrom, storeWriteTools,
 } from '../lib/opencode-install.mjs';
 import { renderPortableText } from '../lib/agent-fences.mjs';
 
@@ -81,7 +81,10 @@ test('global install writes both shims and the MCP launcher, idempotently, honou
   const shim = readFileSync(join(plugins, 'sterling.js'), 'utf8');
   assert.ok(shim.includes(JSON.stringify(repoRoot.replace(/\\/g, '/'))), 'authoring clone: the clone path is baked');
   const second = setupOpenCode({ projectDir: dir, pluginRoot: repoRoot, env, home, installed: false, probe: OC2 });
-  assert.deepEqual([...new Set(second.rows.map((r) => r.status))], ['matches']);
+  // The codex row skips here (no Codex in the temp HOME); opencode-codex-mcp.test.mjs covers it.
+  const codex = second.rows.filter((r) => r.item.endsWith('mcp.servers.codex'));
+  assert.deepEqual(codex.map((r) => r.status), ['skipped']);
+  assert.deepEqual([...new Set(second.rows.filter((r) => !codex.includes(r)).map((r) => r.status))], ['matches']);
 });
 
 test('installed copy: no versioned cache path is written; the shims resolve the newest at run time', () => {
@@ -231,11 +234,12 @@ test('Sterling-full roster: conductor primary, Sterling lines kept, permissions 
   const home = tmp('oc-home-');
   const dir = project('work');
   const r = run(dir, home);
-  for (const n of ['conductor', 'implementor', 'researcher', 'scout']) assert.equal(statusOf(r, `${STERLING_AGENTS_SUBDIR}/${n}.md`), 'created', n);
+  for (const n of ['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'librarian']) assert.equal(statusOf(r, `${STERLING_AGENTS_SUBDIR}/${n}.md`), 'created', n);
   const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
   assert.match(read('conductor'), /^---\ndescription: .+\nmode: primary\n---\n<!-- sterling-full /);
   assert.match(read('conductor'), /dispatch those names/);
-  assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\n---\n/);
+  // The implementor's only permissions are the store-write denies its Claude disallowedTools carry.
+  assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\npermission:\n( {2}sterling_\w+: deny\n)+---\n/);
   assert.match(read('researcher'), /\npermission:\n {2}edit: deny\n/);
   assert.match(read('scout'), /\n {2}bash: deny\n/);
   // Sterling-only lines survive: the full body is longer than the portable render of the same template.
@@ -411,4 +415,19 @@ test('installed-copy shims pick the highest installed version at run time', () =
   const none = spawnSync(process.execPath, [mcpLauncherPath({ home }), '--store', 's.db'], { encoding: 'utf8', env });
   assert.notEqual(none.status, 0);
   assert.match(none.stderr, /no installed Sterling plugin under .*claude plugin install sterling@sterling/);
+});
+
+test('storeWriteTools throws, naming the template, when disallowedTools has no mcp__sterling__* entry', () => {
+  const root = tmp('oc-roster-');
+  try {
+    mkdirSync(join(root, 'agent-templates'));
+    writeFileSync(join(root, 'agent-templates', 'implementor.md'), '---\nname: implementor\ndisallowedTools: Agent, WebFetch\n---\nbody\n');
+    assert.throws(() => storeWriteTools(root), /no mcp__sterling__\* entries in .*implementor\.md disallowedTools/);
+    writeFileSync(join(root, 'agent-templates', 'implementor.md'), '---\nname: implementor\n---\nbody\n');
+    assert.throws(() => storeWriteTools(root), /no mcp__sterling__\* entries/, 'a template with no disallowedTools line at all');
+    writeFileSync(join(root, 'agent-templates', 'implementor.md'), '---\nname: implementor\ndisallowedTools: Agent, mcp__sterling__knowledge_create, mcp__sterling__board_add\n---\nbody\n');
+    assert.deepEqual(storeWriteTools(root), ['sterling_knowledge_create', 'sterling_board_add']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

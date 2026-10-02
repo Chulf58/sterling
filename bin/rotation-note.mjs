@@ -5535,8 +5535,14 @@ function readLanes(argv = process.argv.slice(2)) {
 }
 var lanes = readLanes();
 var SESSION_ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/;
-var envSessionId = (process.env.CLAUDE_CODE_SESSION_ID ?? "").trim();
+var claudeSessionEnv = (process.env.CLAUDE_CODE_SESSION_ID ?? "").trim();
+var opencodeSessionEnv = (process.env.OPENCODE_SESSION_ID ?? "").trim();
+var opencodeShell = process.env.OPENCODE === "1" && SESSION_ID_SHAPE.test(opencodeSessionEnv);
+var host = opencodeShell || !claudeSessionEnv && (opencodeSessionEnv || process.env.OPENCODE === "1") ? "opencode" : "claude";
+var envSessionId = host === "opencode" ? opencodeSessionEnv : claudeSessionEnv;
 var sessionId = SESSION_ID_SHAPE.test(envSessionId) ? envSessionId : null;
+var sessionHost = host === "opencode" && sessionId ? "opencode" : null;
+var boundary = host === "opencode" ? "the new session" : "the /clear";
 var git = (args) => {
   try {
     const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 5e3 });
@@ -5597,6 +5603,7 @@ var note = {
   next_slice: nextSlice,
   lanes,
   session_id: sessionId,
+  ...sessionHost ? { session_host: sessionHost } : {},
   objective: (arg2("objective") ?? "").trim() || null,
   risks: (arg2("risks") ?? "").trim() || null,
   pointers: (arg2("pointers") ?? "").trim() || null,
@@ -5622,12 +5629,19 @@ process.stdout.write(
 next_slice: ${note.next_slice}
 lanes: ${lanes.length}
 ` + (sessionId ? `session_id: ${sessionId}
-` : "session_id: unavailable (CLAUDE_CODE_SESSION_ID unset or not id-shaped) \u2014 the restore cannot name the session to resume\n") + (note.branch ? `anchored: ${note.branch} @ ${note.head_sha?.slice(0, 8) ?? "?"}
+` : `session_id: unavailable (${host === "opencode" ? "OPENCODE_SESSION_ID" : "CLAUDE_CODE_SESSION_ID"} unset or not id-shaped) \u2014 the restore cannot name the session to resume
+`) + (note.branch ? `anchored: ${note.branch} @ ${note.head_sha?.slice(0, 8) ?? "?"}
 ` : "anchored: no git (drift disclosure unavailable)\n") + (note.commits_ahead !== null ? `commits_ahead: ${note.commits_ahead} (vs ${note.base_branch})
 ` : "commits_ahead: unavailable (no origin/HEAD, main, or master to diff against \u2014 pass --into to a future version if this recurs)\n") + // Silent when the set is a confirmed zero (P1 — nothing to check).
-  (liveDispatches === null ? "live_dispatches: UNKNOWN \u2014 the dispatch register exists but could not be read; any subagent from this session cannot be resumed after the /clear \u2014 re-dispatch fresh if still needed\n" : liveDispatches.length ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? "agent"}:${d.agent_id ?? "?"}`).join(", ")}) \u2014 still running across the /clear but cannot be resumed from the new session: re-dispatch fresh if still needed (pass a --lane hand-off for each worth continuing)
+  (liveDispatches === null ? `live_dispatches: UNKNOWN \u2014 the dispatch register exists but could not be read; any subagent from this session cannot be resumed after ${boundary} \u2014 re-dispatch fresh if still needed
+` : liveDispatches.length ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? "agent"}:${d.agent_id ?? "?"}`).join(", ")}) \u2014 still running across ${boundary} but cannot be resumed from the new session: re-dispatch fresh if still needed (pass a --lane hand-off for each worth continuing)
 ` : "") + (uncertainDispatches && uncertainDispatches.length ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? "agent"}:${d.agent_id ?? "?"}`).join(", ")}) \u2014 lease expired, not confirmed dead; cannot be resumed from the new session either: re-dispatch fresh if still needed
-` : "") + (note.reason === "code-reload" ? `CODE RELOAD REQUIRED (--reason=code-reload) \u2014 /clear alone will NOT load it (MCP servers survive it). The sequence is:
+` : "") + (host === "opencode" ? note.reason === "code-reload" ? `CODE RELOAD REQUIRED (--reason=code-reload) \u2014 a new session alone will NOT load it (OpenCode loads plugins and MCP servers at startup). The sequence is:
+  1. exit and relaunch OpenCode now
+  2. THEN start a new session (/new) \u2014 the Sterling OpenCode plugin restores and consumes this note in that session's first turn
+` : `Tell the user READY FOR NEW SESSION \u2014 on /new, the Sterling OpenCode plugin restores and consumes this note in the new session's first turn, single-shot.
+If plugin or MCP-server CODE changed since this session started (migration, update, rebuild), a new session alone will not reload it \u2014 EXIT AND RELAUNCH OpenCode first, THEN /new.
+` : note.reason === "code-reload" ? `CODE RELOAD REQUIRED (--reason=code-reload) \u2014 /clear alone will NOT load it (MCP servers survive it). The sequence is:
   1. exit and relaunch the Claude Code CLI now \u2014 H1 restores and consumes this note automatically at that very startup
   2. THEN /clear \u2014 H1 restores and consumes this note automatically if step 1 hasn't already delivered it (single-shot: whichever of startup/clear happens first wins, and the other becomes a no-op)
 ` : `Tell the user READY TO CLEAR \u2014 on /clear, H1 restores and consumes this note automatically. The very next session STARTUP (e.g. after a relaunch) restores it the same way, single-shot \u2014 whichever comes first.

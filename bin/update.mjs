@@ -9257,7 +9257,9 @@ var init_agent_fences = __esm({
   "scripts/lib/agent-fences.mjs"() {
     FENCE_KINDS = {
       "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
-      "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" }
+      "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
+      "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
+      "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" }
     };
     EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open: open2, close }) => [open2, close]));
   }

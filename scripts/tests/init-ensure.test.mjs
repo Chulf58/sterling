@@ -109,6 +109,7 @@ function init(dir, args = [], extraEnv = {}) {
       STERLING_REGISTRY_DB: join(dir, 'registry.db'),
       STERLING_PLUGIN_ROOT_MATCH: pluginRootMatch,
       STERLING_CODEX_PROBE: 'absent',
+      STERLING_CLAUDE_PROBE: 'ok',
       CLAUDE_CONFIG_DIR: claudeConfigDir,
       ...extraEnv,
     },
