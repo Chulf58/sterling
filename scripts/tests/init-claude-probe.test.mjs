@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { probeClaude } from '../lib/claude-probe.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const FRESH_FLAGS = ['--project-name', 'claude-probe', '--stack-tags', 'node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups', '--mode', 'work'];
+const FRESH_FLAGS = ['--project-name', 'claude-probe', '--stack-tags', 'node', '--domain-description', 'node=test domain node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups', '--mode', 'work'];
 const CLAUDE_FILES = ['sterling-launch.sh', 'sterling.bat', 'tui.bat', '.claude'];
 const SKIP_LINE = /^.*Claude Code not found.*$/gm;
 
@@ -29,10 +29,12 @@ after(() => {
 
 // A spawn of init fully isolated from the machine: scratch HOME, registry, plugin-root
 // match and Claude config dir (the same containment init-ensure.test.mjs applies).
+const homes = new Map(); // one scratch HOME per target dir, so a re-run sees the domain stores the first run created
 function init(dir, extraEnv = {}) {
+  if (!homes.has(dir)) homes.set(dir, tmp('sterling-cp-home-'));
   const env = {
     ...process.env,
-    HOME: tmp('sterling-cp-home-'),
+    HOME: homes.get(dir),
     STERLING_REGISTRY_DB: join(dir, 'registry.db'),
     STERLING_PLUGIN_ROOT_MATCH: tmp('sterling-cp-root-'),
     CLAUDE_CONFIG_DIR: tmp('sterling-cp-cfg-'),
