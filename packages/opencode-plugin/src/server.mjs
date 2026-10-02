@@ -16,7 +16,7 @@
 //      the store and appended to the next prompt, as H2 does on Claude Code;
 //   5. the compaction hook: the session's delivery receipts are removed, so
 //      delivery fires again after compaction drops context.
-// The store guard (edit deny on .sterling/sterling.db) is not here: the
+// The store guard (edit and shell deny on .sterling/sterling.db) is not here: the
 // installer writes it into .opencode/opencode.json (scripts/lib/opencode-install.mjs).
 // Every handler is fenced: a throw is logged to .sterling/transient and turned
 // into a notice, never raised into OpenCode. Outside a Sterling project (no

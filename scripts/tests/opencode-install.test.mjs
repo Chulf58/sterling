@@ -149,6 +149,33 @@ test('project config: a fresh file gets the measured guard shape and the conduct
   assert.equal(got.default_agent, CONDUCTOR_AGENT);
 });
 
+test('project config: the store guard also denies shell commands that name sterling.db (finding opencode-2-0-21-tool-shapes-execpath-and-shell-store-guard-october-2026)', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const cfg = join(dir, '.opencode', 'opencode.json');
+  assert.deepEqual(Object.entries(JSON.parse(readFileSync(cfg, 'utf8')).permission.shell), [['*', 'allow'], ['*sterling.db*', 'deny']]);
+  assert.equal(statusOf(run(dir, home), 'opencode.json'), 'matches', 'idempotent');
+});
+
+test('project config: the shell deny is merged into an existing shell block without clobbering the user\'s keys, idempotently', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  mkdirSync(join(dir, '.opencode'));
+  const cfg = join(dir, '.opencode', 'opencode.json');
+  writeFileSync(cfg, JSON.stringify({ permission: { shell: { '*': 'ask', 'git push*': 'deny', '*sterling.db*': 'allow' } } }));
+  assert.equal(statusOf(run(dir, home), 'opencode.json'), 'refreshed');
+  const got = JSON.parse(readFileSync(cfg, 'utf8'));
+  assert.deepEqual(Object.entries(got.permission.shell), [['*', 'ask'], ['git push*', 'deny'], ['*sterling.db*', 'deny']], "the user's rules stay, Sterling's deny is last so it wins");
+  assert.ok(got.permission.edit['.sterling/sterling.db*'] === 'deny', 'the edit deny is still written');
+  assert.equal(statusOf(run(dir, home), 'opencode.json'), 'matches');
+  writeFileSync(cfg, JSON.stringify({ permission: { shell: 'ask' } }));
+  run(dir, home);
+  assert.deepEqual(Object.entries(JSON.parse(readFileSync(cfg, 'utf8')).permission.shell), [['*', 'ask'], ['*sterling.db*', 'deny']], 'a string value becomes the "*" rule');
+  writeFileSync(cfg, JSON.stringify({ permission: { shell: ['x'] } }));
+  assert.equal(statusOf(run(dir, home), 'opencode.json'), 'refused');
+});
+
 test('project config: invalid JSON or a tracked opencode.json is refused and not touched', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');

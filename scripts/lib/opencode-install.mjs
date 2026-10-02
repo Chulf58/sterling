@@ -25,7 +25,7 @@
 //    node_modules (finding 789147ca), and the TUI shim loads the newest copy there.
 //    Also once per machine: a `codex` entry under mcp.servers in <config dir>/opencode.json,
 //    written only for a Codex whose `mcp-server --help` prints mcp-server help.
-// 2. PER PROJECT: <project>/.opencode/opencode.json gets the store-guard edit-deny rules
+// 2. PER PROJECT: <project>/.opencode/opencode.json gets the store-guard edit and shell deny rules
 //    and default_agent, merged into whatever else the file holds. It gets no `sterling`
 //    MCP entry: the server plugin adds that itself (decision
 //    sterling-opencode-plugin-injects-its-own-mcp-entry), and an entry an earlier init
@@ -65,6 +65,7 @@ export const ROSTER = ['conductor', 'implementor', 'researcher', 'scout', 'revie
 /** The npm package `opencode plugin add` installs (decision sterling-on-opencode-distributes-as-npm-package-via-opencode-plugin-add). */
 export const STERLING_NPM_PACKAGE = '@chulf58/sterling';
 export const STORE_GUARD_PATTERNS =['**/.sterling/sterling.db*', '.sterling/sterling.db*'];
+export const SHELL_STORE_GUARD_PATTERN = '*sterling.db*';
 const PACKAGE_MARKER = 'sterling-generated';
 const EXCLUDE_BEGIN = '# >>> sterling opencode (managed by Sterling init/update; per-user files, never committed)';
 const EXCLUDE_END = '# <<< sterling opencode';
@@ -615,7 +616,15 @@ export function ensureProjectConfig({ projectDir, home = homedir(), tracked, con
   if (typeof edit !== 'object' || Array.isArray(edit)) return [refusal(rel, `${rel}: "permission.edit" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
   const guarded = { '*': 'allow', ...Object.fromEntries(Object.entries(edit).filter(([k]) => !STORE_GUARD_PATTERNS.includes(k))) };
   for (const p of STORE_GUARD_PATTERNS) guarded[p] = 'deny';
-  config.permission = { ...permission, edit: guarded };
+  // The edit deny does not cover the shell tool: `printf >> .sterling/sterling.db`
+  // got through until this shell rule was added (finding
+  // opencode-2-0-21-tool-shapes-execpath-and-shell-store-guard-october-2026). Same merge as edit.
+  let shell = permission.shell ?? { '*': 'allow' };
+  if (typeof shell === 'string') shell = { '*': shell };
+  if (typeof shell !== 'object' || shell === null || Array.isArray(shell)) return [refusal(rel, `${rel}: "permission.shell" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
+  const shellGuarded = { '*': 'allow', ...Object.fromEntries(Object.entries(shell).filter(([k]) => k !== SHELL_STORE_GUARD_PATTERN)) };
+  shellGuarded[SHELL_STORE_GUARD_PATTERN] = 'deny';
+  config.permission = { ...permission, edit: guarded, shell: shellGuarded };
   if (!conductorOk) {
     if (config.default_agent === undefined) notes.push(`default_agent not set: the ${CONDUCTOR_AGENT} agent file was refused`);
   } else if (config.default_agent === undefined) config.default_agent = CONDUCTOR_AGENT;
@@ -624,7 +633,7 @@ export function ensureProjectConfig({ projectDir, home = homedir(), tracked, con
   if (after === before) return [{ item: rel, status: 'matches', detail: notes.join('; ') || undefined }, ...extraRows];
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, after);
-  return [{ item: rel, status: before === null ? 'created' : 'refreshed', detail: notes.join('; ') || 'store-guard edit deny, default_agent' }, ...extraRows];
+  return [{ item: rel, status: before === null ? 'created' : 'refreshed', detail: notes.join('; ') || 'store-guard edit and shell deny, default_agent' }, ...extraRows];
 }
 
 function excludeLines(wholeDir) {
