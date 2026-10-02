@@ -84,7 +84,9 @@ function loadExclusiveResourceNames(cwd) {
 //      declaration was present but malformed);
 //   3. for a resume, which has no brief, the same agent's most recent prior
 //      round in this session ('resume-inherited');
-//   4. otherwise nothing ('unattributable').
+//   4. otherwise nothing ('unattributable'), until the Post that binds the
+//      lane fills the row from its brief's REVIEW-TERRITORY (postTerritory);
+//      a later resume then inherits those files through 3.
 // The claimed_files/claimed_glob_prefixes write-side negation guard stays
 // deleted (research_finding h22-dispatch-register-consumer-map-which-parts-
 // have-a-reader-september-2026).
@@ -123,6 +125,19 @@ function regularFileEntries(files, cwd) {
     if (st?.isFile()) out.push(f);
   }
   return out;
+}
+
+// The territory a binding Post fills into a row its Start left unattributable
+// (recordDispatchPost's fillUnattributableRowLocked): the bound brief's valid
+// REVIEW-TERRITORY only, normalised and kind-recorded exactly as at Start.
+// Free prose is not a fallback here (decision h22-dispatch-files-from-review-
+// territory-and-resume-inherits-prior-round, option A).
+function postTerritory(prompt, cwd) {
+  const territory = parseReviewTerritory(prompt);
+  if (!territory.present) return { ok: false, reason: 'the bound brief declares no REVIEW-TERRITORY' };
+  if (!territory.valid) return { ok: false, reason: `the bound brief's REVIEW-TERRITORY is malformed (${territory.reason})` };
+  const files = normalizeRegisterPaths(territory.files, cwd);
+  return { ok: true, files, file_entries: regularFileEntries(files, cwd) };
 }
 
 // SubagentStop dispatch-state fallback lookup key: when the primary agent_id
@@ -287,7 +302,7 @@ try {
       warnNonBlocking(`H22: unexpected ${event} tool_name '${input.tool_name}' on the Task|Agent matcher — allowing, nothing tracked`);
     } else {
       const recorder = event === 'PreToolUse' ? recordDispatchPre : event === 'PostToolUse' ? recordDispatchPost : recordDispatchFailure;
-      const result = await recorder(input.cwd, input);
+      const result = await recorder(input.cwd, input, event === 'PostToolUse' ? { territoryFor: (prompt) => postTerritory(prompt, input.cwd) } : undefined);
       if (result.disclosures?.length) lines.push(...result.disclosures);
     }
     if (lines.length) process.stderr.write(lines.join('\n') + '\n');
