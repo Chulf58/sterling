@@ -190,3 +190,23 @@ test('transform callbacks re-run on reload and give the same registrations', asy
   assert.deepEqual([...a.skills.values()], [...b.skills.values()]);
   assert.deepEqual(a.mcp.get('sterling'), b.mcp.get('sterling'));
 });
+
+test('dashboard.md: the OpenCode render names the TUI plugin and no tmux or launcher; the Claude render is the unfenced text', async (t) => {
+  const { renderClaudeText } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'agent-fences.mjs')).href);
+  const source = readFileSync(join(repo, 'commands', 'dashboard.md'), 'utf8');
+  assert.match(source, /^<!-- claude-only -->$/m, 'the Claude Code text is fenced');
+  const claude = renderClaudeText(source, 'commands/dashboard.md');
+  const unfenced = source.replace(/<!-- opencode-only -->\n[\s\S]*?<!-- \/opencode-only -->\n/, '').replace(/^<!-- \/?claude-only -->\n/gm, '');
+  assert.equal(claude, unfenced, 'byte-identical to the source without the fences');
+  assert.doesNotMatch(claude, /<!--|OpenCode|<leader>k/, 'no marker or OpenCode text reaches the Claude render');
+  assert.match(claude, /`\.\/sterling-launch\.sh tui`/);
+
+  const project = tempProject(t);
+  const ctx = stubCtx(project);
+  await cfg.createConfigHandler({ sterlingRoot: repo, now: () => NOW })(ctx);
+  await ctx.run().commands.get('sterling:dashboard').execute({ sessionID: 's', prompt: { text: '' }, delivery: 'steer' });
+  const oc = ctx.prompts[0].text;
+  assert.doesNotMatch(oc, /tmux|launcher|sterling-launch|\.bat\b|split pane|<!--/i);
+  assert.match(oc, /`<leader>k` \(ctrl\+x then k by default\)/);
+  assert.match(oc, /`\/sterling`/);
+});
