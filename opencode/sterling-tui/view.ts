@@ -59,7 +59,11 @@ function clip(text: string, width: number): string {
 
 /** `label (id8)`: the label clips, the id8 never does (names clip, ids never do). */
 function handle(label: string, id: string, width: number): string {
-  const suffix = ` (${id.slice(0, 8)})`;
+  return tagged(label, id.slice(0, 8), width);
+}
+
+function tagged(label: string, tag: string, width: number): string {
+  const suffix = ` (${tag})`;
   return clip(label, width - suffix.length) + suffix;
 }
 
@@ -70,6 +74,108 @@ export function sidebarLines(s: SidebarSummary, width = SIDEBAR_WIDTH): string[]
   for (const t of s.top) lines.push(handle(`  ${t.label}`, t.id, width));
   lines.push(clip(`Queue ${s.queue}${s.queueCapped ? '+' : ''} waiting`, width));
   for (const n of s.notices) lines.push(clip(`! ${n}`, width));
+  return lines;
+}
+
+export interface ModelRefLike {
+  id: string;
+  providerID: string;
+}
+
+export interface TokenUsageLike {
+  input: number;
+  output: number;
+  reasoning: number;
+  cache: { read: number; write: number };
+}
+
+/** The slice of OpenCode 2's SessionInfo the sub-agent rows read. */
+export interface SubagentSession {
+  id: string;
+  parentID?: string;
+  title?: string;
+  model?: ModelRefLike;
+}
+
+/** What readSubagents needs from OpenCode's data layer, as plain callbacks. */
+export interface SubagentSource {
+  sessions: readonly SubagentSession[];
+  /** the root session whose descendants are the sub-agents */
+  rootID: string;
+  isRunning(id: string): boolean;
+  /** the session's latest assistant turn, when it has one */
+  lastTurn(id: string): { tokens?: TokenUsageLike; model?: ModelRefLike } | undefined;
+  /** the model's context window in tokens */
+  contextLimit(model: ModelRefLike): number | undefined;
+}
+
+export interface SubagentRow {
+  id: string;
+  title: string;
+  status: 'active' | 'idle';
+  /** '42%' of the model's context window, or '?' when either side is unknown */
+  context: string;
+  model: string;
+}
+
+/** The distinguishing end of an OpenCode session id: ids are time-ordered, so
+ *  the leading characters repeat across sessions created close together. */
+function shortId(id: string): string {
+  return id.slice(-8);
+}
+
+/** Every session under `rootID` by parentID, nested sub-agents included.
+ *  Verified live: a child's SessionInfo carries parentID (finding 8f10e0be), so
+ *  this needs no per-session request. `seen` also stops a parent cycle. */
+function descendants(sessions: readonly SubagentSession[], rootID: string): SubagentSession[] {
+  const out: SubagentSession[] = [];
+  const seen = new Set<string>([rootID]);
+  let frontier = [rootID];
+  while (frontier.length) {
+    const next: string[] = [];
+    for (const s of sessions) {
+      if (s.parentID && frontier.includes(s.parentID) && !seen.has(s.id)) {
+        seen.add(s.id);
+        out.push(s);
+        next.push(s.id);
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
+
+/** Sub-agent rows for the session tree under `rootID`, running ones first. */
+export function readSubagents(src: SubagentSource): SubagentRow[] {
+  const rows = descendants(src.sessions, src.rootID).map((s) => {
+    const turn = src.lastTurn(s.id);
+    const model = turn?.model ?? s.model;
+    const t = turn?.tokens;
+    const limit = model ? src.contextLimit(model) : undefined;
+    const used = t ? t.input + t.output + t.reasoning + t.cache.read + t.cache.write : undefined;
+    const title = s.title?.trim();
+    return {
+      id: s.id,
+      title: title ? title : shortId(s.id),
+      status: src.isRunning(s.id) ? ('active' as const) : ('idle' as const),
+      context: used !== undefined && limit && limit > 0 ? `${Math.round((used / limit) * 100)}%` : '?',
+      model: model?.id ?? '-',
+    };
+  });
+  // Array.prototype.sort is stable, so each group keeps the session list's order
+  return rows.sort((a, b) => Number(b.status === 'active') - Number(a.status === 'active'));
+}
+
+/** The sub-agent block: a heading with the active count, then per row
+ *  `title (id8)` and a dim `status · N% ctx · model` line. */
+export function subagentLines(rows: readonly SubagentRow[], width = SIDEBAR_WIDTH): string[] {
+  const active = rows.filter((r) => r.status === 'active').length;
+  const lines = [`Sub-agents (${active} active)`];
+  if (rows.length === 0) return [...lines, 'no sub-agents'];
+  for (const r of rows) {
+    lines.push(tagged(r.title, shortId(r.id), width));
+    lines.push(clip(`  ${r.status} · ${r.context} ctx · ${r.model}`, width));
+  }
   return lines;
 }
 

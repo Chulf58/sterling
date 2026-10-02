@@ -9815,7 +9815,10 @@ function clip(text, width) {
   return text.length <= width ? text : text.slice(0, Math.max(0, width - 1)) + "\u2026";
 }
 function handle(label, id, width) {
-  const suffix = ` (${id.slice(0, 8)})`;
+  return tagged(label, id.slice(0, 8), width);
+}
+function tagged(label, tag, width) {
+  const suffix = ` (${tag})`;
   return clip(label, width - suffix.length) + suffix;
 }
 function sidebarLines(s2, width = SIDEBAR_WIDTH) {
@@ -9825,6 +9828,54 @@ function sidebarLines(s2, width = SIDEBAR_WIDTH) {
   for (const t of s2.top) lines.push(handle(`  ${t.label}`, t.id, width));
   lines.push(clip(`Queue ${s2.queue}${s2.queueCapped ? "+" : ""} waiting`, width));
   for (const n of s2.notices) lines.push(clip(`! ${n}`, width));
+  return lines;
+}
+function shortId(id) {
+  return id.slice(-8);
+}
+function descendants(sessions, rootID) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set([rootID]);
+  let frontier = [rootID];
+  while (frontier.length) {
+    const next = [];
+    for (const s2 of sessions) {
+      if (s2.parentID && frontier.includes(s2.parentID) && !seen.has(s2.id)) {
+        seen.add(s2.id);
+        out.push(s2);
+        next.push(s2.id);
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
+function readSubagents(src) {
+  const rows = descendants(src.sessions, src.rootID).map((s2) => {
+    const turn = src.lastTurn(s2.id);
+    const model = turn?.model ?? s2.model;
+    const t = turn?.tokens;
+    const limit = model ? src.contextLimit(model) : void 0;
+    const used = t ? t.input + t.output + t.reasoning + t.cache.read + t.cache.write : void 0;
+    const title = s2.title?.trim();
+    return {
+      id: s2.id,
+      title: title ? title : shortId(s2.id),
+      status: src.isRunning(s2.id) ? "active" : "idle",
+      context: used !== void 0 && limit && limit > 0 ? `${Math.round(used / limit * 100)}%` : "?",
+      model: model?.id ?? "-"
+    };
+  });
+  return rows.sort((a, b) => Number(b.status === "active") - Number(a.status === "active"));
+}
+function subagentLines(rows, width = SIDEBAR_WIDTH) {
+  const active = rows.filter((r) => r.status === "active").length;
+  const lines = [`Sub-agents (${active} active)`];
+  if (rows.length === 0) return [...lines, "no sub-agents"];
+  for (const r of rows) {
+    lines.push(tagged(r.title, shortId(r.id), width));
+    lines.push(clip(`  ${r.status} \xB7 ${r.context} ctx \xB7 ${r.model}`, width));
+  }
   return lines;
 }
 function keyToUiEvent(key) {
@@ -9871,8 +9922,11 @@ function findStorePath(start, env) {
 
 // opencode/sterling-tui/tui.tsx
 var ROUTE = "sterling";
+var SUBAGENT_EVENTS = ["session.created", "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.step.ended"];
 var COMMAND = "sterling.open";
 var [tick, setTick] = createSignal(0);
+var [syncFailure, setSyncFailure] = createSignal();
+var synced = /* @__PURE__ */ new Set();
 var dashboard;
 var projectDir = process.cwd();
 function controller() {
@@ -9884,6 +9938,37 @@ function controller() {
 function clip2(text, width) {
   return text.length <= width ? text : text.slice(0, Math.max(0, width - 1)) + "\u2026";
 }
+function subagentBlock(api, sessionID, width) {
+  tick();
+  const block = guarded("sub-agents", () => {
+    const d = api.data;
+    const rows = readSubagents({
+      sessions: d.session.list(),
+      rootID: d.session.root(sessionID),
+      isRunning: (id) => d.session.status(id) === "running",
+      lastTurn: (id) => {
+        if (!synced.has(id)) {
+          synced.add(id);
+          d.session.message.sync(id).then(
+            () => setSyncFailure(void 0),
+            (err) => {
+              synced.delete(id);
+              setSyncFailure(`messages unavailable \u2014 ${err?.message ?? String(err)}`);
+            }
+          );
+        }
+        const turn = d.session.message.list(id).findLast((m) => m.type === "assistant" && m.tokens);
+        return turn && { tokens: turn.tokens, model: turn.model };
+      },
+      contextLimit: (m) => d.location.model.list().find((x) => x.providerID === m.providerID && x.modelID === m.id)?.limit.context
+    });
+    return subagentLines(rows, width);
+  });
+  const lines = block.ok ? block.value : [clip2(`! ${block.error}`, width)];
+  const failure = syncFailure();
+  return failure ? [...lines, clip2(`! ${failure}`, width)] : lines;
+}
+var subagentLineDim = (line) => line.startsWith("  ") || line === "no sub-agents";
 function Commands(props) {
   props.api.keymap.layer(() => ({
     mode: "global",
@@ -9905,10 +9990,11 @@ function Sidebar(props) {
   return <box flexDirection="column" paddingTop={1}>
       <text>{lines().title}</text>
       <For each={lines().body}>{(l) => <text>{l}</text>}</For>
+      <For each={subagentBlock(props.api, props.sessionID, SIDEBAR_WIDTH)}>{(l) => <text fg={subagentLineDim(l) ? muted() : void 0}>{l}</text>}</For>
       <text fg={muted()}>{hint()}</text>
     </box>;
 }
-function paint(st, maxBodyLines) {
+function paint(st, maxBodyLines, extra = []) {
   const lines = [{ text: st.searchLine ?? "", dim: true }];
   if (st.emptyMessage) lines.push({ text: st.emptyMessage, dim: true });
   const body = [];
@@ -9927,9 +10013,9 @@ function paint(st, maxBodyLines) {
     lines.push(...pending, { text: qc.header, dim: true }, ...qc.lines.map((text) => ({ text, dim: true })));
     if (st.queueActivity) lines.push({ text: st.queueActivity.header, dim: true }, ...st.queueActivity.lines.map((text) => ({ text, dim: true })));
   } else {
-    lines.push(...body.slice(0, maxBodyLines));
+    lines.push(...body.slice(0, Math.max(3, maxBodyLines - extra.length)));
   }
-  lines.push({ text: "" }, { text: st.footer, dim: true });
+  lines.push(...extra, { text: "" }, { text: st.footer, dim: true });
   return { header: st.projectName, tabs: st.tabs, lines };
 }
 function FullView(props) {
@@ -9945,7 +10031,11 @@ function FullView(props) {
     const c = controller();
     if (!c.ok) return { ok: false, error: c.error };
     const st = guarded("dashboard", () => c.value.state(viewport()));
-    return st.ok ? { ok: true, ...paint(st.value, viewport().maxBodyLines) } : { ok: false, error: st.error };
+    if (!st.ok) return { ok: false, error: st.error };
+    const sid = props.sessionID();
+    const onTasks = st.value.tabs.findIndex((t) => t.active) === TASKS_TAB;
+    const extra = sid && onTasks ? [{ text: "" }, ...subagentBlock(props.api, sid, viewport().width).map((text) => ({ text, dim: subagentLineDim(text) }))] : [];
+    return { ok: true, ...paint(st.value, viewport().maxBodyLines, extra) };
   };
   useKeyboard((key) => {
     if (props.api.keymap.mode.current() !== "base") return;
@@ -10006,8 +10096,12 @@ var tui_default = {
     };
     const disposers = [
       api.ui.slot({ append: "app", render: () => <Commands api={api} open={open2} /> }),
-      api.ui.slot({ append: "sidebar.content", render: () => <Sidebar api={api} /> }),
-      api.ui.router.register({ name: ROUTE, render: () => <FullView api={api} close={() => api.ui.router.navigate(back)} /> })
+      api.ui.slot({ append: "sidebar.content", render: (input) => <Sidebar api={api} sessionID={input.sessionID} /> }),
+      api.ui.router.register({
+        name: ROUTE,
+        render: () => <FullView api={api} sessionID={() => back.type === "session" ? back.sessionID : void 0} close={() => api.ui.router.navigate(back)} />
+      }),
+      ...SUBAGENT_EVENTS.map((type) => api.data.on(type, () => setTick((n) => n + 1)))
     ];
     const timer = setInterval(() => setTick((n) => n + 1), 1e3);
     return () => {

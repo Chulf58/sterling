@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { SterlingStore } from '@sterling/store';
 import { initialUi } from '@sterling/tui/dist/state.js';
 import * as view from '../view.ts';
-import { SIDEBAR_WIDTH, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, sidebarLines, type SidebarSummary } from '../view.ts';
+import { SIDEBAR_WIDTH, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, readSubagents, sidebarLines, subagentLines, type SidebarSummary, type SubagentSource } from '../view.ts';
 
 const ID = '0123abcd-0000-4000-8000-000000000000';
 
@@ -109,4 +109,75 @@ test('findStorePath: STERLING_STORE wins; otherwise the nearest .sterling/sterli
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- running sub-agents (board running-subagents-in-sterling-s-opencode-2-panel) ----
+
+const ROOT = 'ses_root0000000000000000';
+const kid = (n: number) => `ses_00000000000000${n}abcdef`;
+const tokens = (input: number, output = 0) => ({ input, output, reasoning: 0, cache: { read: 0, write: 0 } });
+
+function source(over: Partial<SubagentSource> = {}): SubagentSource {
+  return {
+    sessions: [
+      { id: ROOT, title: 'main work' },
+      { id: kid(1), parentID: ROOT, title: 'explore the repo' },
+      { id: kid(2), parentID: ROOT, title: 'review the diff' },
+      { id: 'ses_other', title: 'unrelated root' },
+      { id: 'ses_otherkid', parentID: 'ses_other', title: 'belongs elsewhere' },
+    ],
+    rootID: ROOT,
+    isRunning: (id) => id === kid(2),
+    lastTurn: (id) => (id === kid(2) ? { tokens: tokens(40_000, 10_000), model: { id: 'big-pickle', providerID: 'opencode' } } : undefined),
+    contextLimit: () => 200_000,
+    ...over,
+  };
+}
+
+test('subagents: only descendants of the root, active first, with status, context % and model', () => {
+  const rows = readSubagents(source());
+  assert.deepEqual(rows.map((r) => r.id), [kid(2), kid(1)], "the running child sorts first; another root's children are excluded");
+  assert.equal(rows[0].status, 'active');
+  assert.equal(rows[0].context, '25%');
+  assert.equal(rows[0].model, 'big-pickle');
+  assert.equal(rows[1].status, 'idle');
+  assert.equal(rows[1].context, '?', 'no turn yet: unknown');
+  assert.equal(rows[1].model, '-');
+});
+
+test('subagents: nested children count, and a parent cycle cannot loop', () => {
+  const nested = readSubagents(source({ sessions: [{ id: ROOT }, { id: kid(1), parentID: ROOT }, { id: kid(3), parentID: kid(1), title: 'grandchild' }] }));
+  assert.deepEqual(nested.map((r) => r.id).sort(), [kid(1), kid(3)].sort());
+  const cyclic = readSubagents(source({ sessions: [{ id: ROOT }, { id: kid(1), parentID: kid(2) }, { id: kid(2), parentID: kid(1) }] }));
+  assert.deepEqual(cyclic, [], 'a cycle detached from the root is not reachable');
+});
+
+test('subagents: context % is unknown without a limit, and counts every token class', () => {
+  const noLimit = readSubagents(source({ contextLimit: () => undefined }));
+  assert.equal(noLimit[0].context, '?');
+  const all = readSubagents(source({ lastTurn: () => ({ tokens: { input: 1000, output: 1000, reasoning: 1000, cache: { read: 500, write: 500 } }, model: { id: 'm', providerID: 'p' } }), contextLimit: () => 8000 }));
+  assert.equal(all[0].context, '50%');
+  const zero = readSubagents(source({ contextLimit: () => 0 }));
+  assert.equal(zero[0].context, '?', 'a zero limit is no limit');
+});
+
+test('subagents: the session model is used when no turn has a model yet; a blank title falls back to the id', () => {
+  const rows = readSubagents(source({ sessions: [{ id: ROOT }, { id: kid(1), parentID: ROOT, title: '  ', model: { id: 'gpt-x', providerID: 'p' } }], lastTurn: () => undefined }));
+  assert.equal(rows[0].title, kid(1).slice(-8));
+  assert.equal(rows[0].model, 'gpt-x');
+});
+
+test('subagent lines: heading counts the active ones, titles clip but ids never, all within the width', () => {
+  const long = 'A very long sub-agent title that cannot possibly fit in the sidebar column';
+  const rows = readSubagents(source({ sessions: [{ id: ROOT }, { id: kid(2), parentID: ROOT, title: long }] }));
+  const lines = subagentLines(rows, SIDEBAR_WIDTH);
+  assert.equal(lines[0], 'Sub-agents (1 active)');
+  const row = lines.find((l) => l.includes(`(${kid(2).slice(-8)})`));
+  assert.ok(row && /…/.test(row), lines.join('\n'));
+  assert.ok(lines.some((l) => /active · 25% ctx · big-pickle/.test(l)), lines.join('\n'));
+  assert.ok(lines.every((l) => l.length <= SIDEBAR_WIDTH), lines.join('\n'));
+});
+
+test('subagent lines: none says so in one line', () => {
+  assert.deepEqual(subagentLines([], SIDEBAR_WIDTH), ['Sub-agents (0 active)', 'no sub-agents']);
 });

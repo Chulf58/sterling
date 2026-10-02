@@ -16,10 +16,12 @@
 import { createSignal, For, Show } from 'solid-js';
 import { useKeyboard, useTerminalDimensions } from '@opentui/solid';
 import { openDashboard, type DashboardController } from '@sterling/tui/dist/controller.js';
-import type { DashboardState } from '@sterling/tui/dist/state.js';
-import { SIDEBAR_WIDTH, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, sidebarLines, type Guarded, type KeyLike } from './view.ts';
+import { TASKS_TAB, type DashboardState } from '@sterling/tui/dist/state.js';
+import { SIDEBAR_WIDTH, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, readSubagents, sidebarLines, subagentLines, type Guarded, type KeyLike, type ModelRefLike, type SubagentSession, type TokenUsageLike } from './view.ts';
 
 const ROUTE = 'sterling';
+/** OpenCode events that change a sub-agent row: a child appears, starts or ends a run, finishes a step. */
+const SUBAGENT_EVENTS = ['session.created', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.step.ended'];
 const COMMAND = 'sterling.open';
 
 type Route = { type: string; [k: string]: unknown };
@@ -37,11 +39,28 @@ interface Api {
   ui: {
     dialog: { clear(): void };
     router: { register(page: { name: string; render: () => unknown }): () => void; navigate(to: Route): void; current(): Route };
-    slot(claim: { append: string; render: (input: unknown) => unknown }): () => void;
+    slot(claim: { append: string; render: (input: { sessionID: string }) => unknown }): () => void;
+  };
+  /** OpenCode 2's reactive data layer (context.d.ts Data), the slice the sub-agent rows read. */
+  data: {
+    on(type: string, handler: () => void): () => void;
+    session: {
+      list(): SubagentSession[];
+      root(sessionID: string): string;
+      status(sessionID: string): 'idle' | 'running';
+      message: {
+        list(sessionID: string): { type: string; model?: ModelRefLike; tokens?: TokenUsageLike }[];
+        sync(sessionID: string): Promise<void>;
+      };
+    };
+    location: { model: { list(): { providerID: string; modelID: string; limit: { context: number } }[] } };
   };
 }
 
 const [tick, setTick] = createSignal(0);
+const [syncFailure, setSyncFailure] = createSignal<string | undefined>();
+/** sub-agent sessions whose messages were requested; a failed request is retried on the next read */
+const synced = new Set<string>();
 let dashboard: Guarded<DashboardController> | undefined;
 /** The project directory setup() resolved: api.location.directory, else process.cwd(). */
 let projectDir = process.cwd();
@@ -61,6 +80,43 @@ function clip(text: string, width: number): string {
   return text.length <= width ? text : text.slice(0, Math.max(0, width - 1)) + '…';
 }
 
+/** The sub-agent block for the session tree under `sessionID`. Message history
+ *  is not loaded until asked for, so each new child's is requested once; the
+ *  rows then follow OpenCode's own events. A failed request is shown. */
+function subagentBlock(api: Api, sessionID: string, width: number): string[] {
+  tick();
+  const block = guarded('sub-agents', () => {
+    const d = api.data;
+    const rows = readSubagents({
+      sessions: d.session.list(),
+      rootID: d.session.root(sessionID),
+      isRunning: (id) => d.session.status(id) === 'running',
+      lastTurn: (id) => {
+        if (!synced.has(id)) {
+          synced.add(id);
+          d.session.message.sync(id).then(
+            () => setSyncFailure(undefined),
+            (err: unknown) => {
+              synced.delete(id);
+              setSyncFailure(`messages unavailable — ${(err as Error)?.message ?? String(err)}`);
+            },
+          );
+        }
+        const turn = d.session.message.list(id).findLast((m) => m.type === 'assistant' && m.tokens);
+        return turn && { tokens: turn.tokens, model: turn.model };
+      },
+      contextLimit: (m) => d.location.model.list().find((x) => x.providerID === m.providerID && x.modelID === m.id)?.limit.context,
+    });
+    return subagentLines(rows, width);
+  });
+  const lines = block.ok ? block.value : [clip(`! ${block.error}`, width)];
+  const failure = syncFailure();
+  return failure ? [...lines, clip(`! ${failure}`, width)] : lines;
+}
+
+/** A sub-agent block line is dim unless it is the heading or a `title (id)` row. */
+const subagentLineDim = (line: string) => line.startsWith('  ') || line === 'no sub-agents';
+
 function Commands(props: { api: Api; open: () => void }) {
   props.api.keymap.layer(() => ({
     mode: 'global',
@@ -69,7 +125,7 @@ function Commands(props: { api: Api; open: () => void }) {
   return null;
 }
 
-function Sidebar(props: { api: Api }) {
+function Sidebar(props: { api: Api; sessionID: string }) {
   const muted = () => props.api.theme?.text?.muted;
   const lines = () => {
     tick();
@@ -84,6 +140,7 @@ function Sidebar(props: { api: Api }) {
     <box flexDirection="column" paddingTop={1}>
       <text>{lines().title}</text>
       <For each={lines().body}>{(l) => <text>{l}</text>}</For>
+      <For each={subagentBlock(props.api, props.sessionID, SIDEBAR_WIDTH)}>{(l) => <text fg={subagentLineDim(l) ? muted() : undefined}>{l}</text>}</For>
       <text fg={muted()}>{hint()}</text>
     </box>
   );
@@ -98,7 +155,7 @@ interface Painted {
 /** Flatten a DashboardState into display lines the way render.ts paints it:
  *  header, tab bar, search/spacer, the scrolled body window, the queue tab's
  *  completed and activity sections, the footer. */
-function paint(st: DashboardState, maxBodyLines: number): { header: string; tabs: { label: string; active: boolean }[]; lines: Painted[] } {
+function paint(st: DashboardState, maxBodyLines: number, extra: Painted[] = []): { header: string; tabs: { label: string; active: boolean }[]; lines: Painted[] } {
   const lines: Painted[] = [{ text: st.searchLine ?? '', dim: true }];
   if (st.emptyMessage) lines.push({ text: st.emptyMessage, dim: true });
   const body: Painted[] = [];
@@ -117,13 +174,13 @@ function paint(st: DashboardState, maxBodyLines: number): { header: string; tabs
     lines.push(...pending, { text: qc.header, dim: true }, ...qc.lines.map((text) => ({ text, dim: true })));
     if (st.queueActivity) lines.push({ text: st.queueActivity.header, dim: true }, ...st.queueActivity.lines.map((text) => ({ text, dim: true })));
   } else {
-    lines.push(...body.slice(0, maxBodyLines));
+    lines.push(...body.slice(0, Math.max(3, maxBodyLines - extra.length)));
   }
-  lines.push({ text: '' }, { text: st.footer, dim: true });
+  lines.push(...extra, { text: '' }, { text: st.footer, dim: true });
   return { header: st.projectName, tabs: st.tabs, lines };
 }
 
-function FullView(props: { api: Api; close: () => void }) {
+function FullView(props: { api: Api; sessionID: () => string | undefined; close: () => void }) {
   const dims = useTerminalDimensions();
   const [version, setVersion] = createSignal(0);
   const [failure, setFailure] = createSignal<string | undefined>();
@@ -137,7 +194,12 @@ function FullView(props: { api: Api; close: () => void }) {
     const c = controller();
     if (!c.ok) return { ok: false as const, error: c.error };
     const st = guarded('dashboard', () => c.value.state(viewport()));
-    return st.ok ? { ok: true as const, ...paint(st.value, viewport().maxBodyLines) } : { ok: false as const, error: st.error };
+    if (!st.ok) return { ok: false as const, error: st.error };
+    // sub-agents belong to a session, and sit under the Tasks tab's board rows
+    const sid = props.sessionID();
+    const onTasks = st.value.tabs.findIndex((t) => t.active) === TASKS_TAB;
+    const extra: Painted[] = sid && onTasks ? [{ text: '' }, ...subagentBlock(props.api, sid, viewport().width).map((text) => ({ text, dim: subagentLineDim(text) }))] : [];
+    return { ok: true as const, ...paint(st.value, viewport().maxBodyLines, extra) };
   };
 
   useKeyboard((key: KeyLike & { eventType?: string; defaultPrevented?: boolean; preventDefault?: () => void }) => {
@@ -206,8 +268,12 @@ export default {
     };
     const disposers = [
       api.ui.slot({ append: 'app', render: () => <Commands api={api} open={open} /> }),
-      api.ui.slot({ append: 'sidebar.content', render: () => <Sidebar api={api} /> }),
-      api.ui.router.register({ name: ROUTE, render: () => <FullView api={api} close={() => api.ui.router.navigate(back)} /> }),
+      api.ui.slot({ append: 'sidebar.content', render: (input) => <Sidebar api={api} sessionID={input.sessionID} /> }),
+      api.ui.router.register({
+        name: ROUTE,
+        render: () => <FullView api={api} sessionID={() => (back.type === 'session' ? (back.sessionID as string) : undefined)} close={() => api.ui.router.navigate(back)} />,
+      }),
+      ...SUBAGENT_EVENTS.map((type) => api.data.on(type, () => setTick((n) => n + 1))),
     ];
     // a live view over the durable store, like the terminal TUI's 1 Hz redraw
     const timer = setInterval(() => setTick((n) => n + 1), 1000);

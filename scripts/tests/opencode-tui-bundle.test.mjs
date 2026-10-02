@@ -44,6 +44,7 @@ function fakeApi(directory) {
   const calls = { slots: 0, routes: 0 };
   const api = {
     location: { directory },
+    data: { on: () => () => {} },
     keymap: { layer() {}, shortcuts: () => [], mode: { current: () => 'base' } },
     ui: {
       dialog: { clear() {} },
