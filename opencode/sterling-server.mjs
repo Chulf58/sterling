@@ -4985,10 +4985,11 @@ var init_config = __esm({
       // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
       // with opt-out, disposal skips the snapshot LOUDLY (check_skipped).
       backup_opt_out: external_exports.boolean().default(false),
-      // §3.3: the project's stack_tags, declared at init, ARE the domain mount
-      // manifest — the SAME list that filters retrieval (§3.4) mounts the shared
-      // domain stores, so the mounted set and the filter align by construction. Each
-      // tag mounts a store at ~/.sterling/domains/<tag>/sterling.db (lazily created).
+      // §3.3: the project's stack_tags, declared at init, are the domain mount
+      // manifest and nothing else; they do not filter retrieval (a query's own
+      // stack_tags option is a separate, caller-supplied filter). Each tag mounts an
+      // EXISTING store at ~/.sterling/domains/<tag>/sterling.db; a new domain store
+      // is made only by createDomain in @sterling/store, which requires a description.
       stack_tags: external_exports.array(external_exports.string()).default([]),
       // §3.3 (spec line 94 — path configurable per domain): per-tag store-path
       // override; default is the per-user root above. tag → absolute db path (POSIX).
@@ -5435,21 +5436,20 @@ var init_dist = __esm({
   }
 });
 
+// packages/store/dist/shares.js
+var init_shares = __esm({
+  "packages/store/dist/shares.js"() {
+    "use strict";
+  }
+});
+
 // packages/store/dist/mounted.js
 var init_mounted = __esm({
   "packages/store/dist/mounted.js"() {
     "use strict";
     init_dist2();
     init_dist();
-  }
-});
-
-// packages/store/dist/registry.js
-import { DatabaseSync } from "node:sqlite";
-var init_registry2 = __esm({
-  "packages/store/dist/registry.js"() {
-    "use strict";
-    init_dist();
+    init_shares();
   }
 });
 
@@ -5741,6 +5741,23 @@ var init_axis = __esm({
   }
 });
 
+// packages/store/dist/domain-fit.js
+var init_domain_fit = __esm({
+  "packages/store/dist/domain-fit.js"() {
+    "use strict";
+    init_axis();
+  }
+});
+
+// packages/store/dist/registry.js
+import { DatabaseSync } from "node:sqlite";
+var init_registry2 = __esm({
+  "packages/store/dist/registry.js"() {
+    "use strict";
+    init_dist();
+  }
+});
+
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { mkdirSync, existsSync, realpathSync, statSync } from "node:fs";
@@ -5950,6 +5967,8 @@ var init_dist2 = __esm({
     init_zod();
     init_dist();
     init_mounted();
+    init_shares();
+    init_domain_fit();
     init_registry2();
     init_axis();
     init_axis();
@@ -6058,6 +6077,15 @@ CREATE TABLE IF NOT EXISTS activity_log (
   type TEXT NOT NULL,
   record_id TEXT NOT NULL,
   title TEXT NOT NULL
+);
+-- Store-level key/value metadata (board 675daf9d, decision
+-- projects-mount-domains-and-sibling-projects): a domain store's description is
+-- its 'description' key. Additive: CREATE IF NOT EXISTS on every v2 open, so no
+-- user_version bump; a pre-v2 store opens read-only before this DDL runs.
+CREATE TABLE IF NOT EXISTS store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 `;
     SUPPORTED_SCHEMA_VERSION = 2;
@@ -7714,6 +7742,28 @@ CREATE TABLE IF NOT EXISTS activity_log (
         this.assertWritable("writeSelection");
         this.tx(() => {
           this.db.prepare("INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at").run(type, recordId, at);
+        });
+      }
+      /**
+       * Store-level metadata read (store_meta). undefined when the key was never
+       * set. A pre-v2 store has no store_meta table (it opens read-only before the
+       * DDL runs), so this refuses there with the migration error rather than
+       * answering "unset" for a question the store cannot answer.
+       */
+      getMeta(key) {
+        this.assertV2Surface("getMeta");
+        const row = this.db.prepare("SELECT value FROM store_meta WHERE key = ?").get(key);
+        return row?.value;
+      }
+      /** Store-level metadata write (store_meta): upsert, one row per key, stamped updated_at. */
+      setMeta(key, value) {
+        this.assertWritable("setMeta");
+        if (typeof key !== "string" || key.length === 0)
+          throw new Error("setMeta: key must be a non-empty string");
+        if (typeof value !== "string")
+          throw new Error(`setMeta: value for key '${key}' must be a string`);
+        this.tx(() => {
+          this.db.prepare("INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(key, value, (/* @__PURE__ */ new Date()).toISOString());
         });
       }
       takeSelection() {
