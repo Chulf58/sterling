@@ -1,5 +1,5 @@
-// The deliberate wording edits made to agent-templates/conductor.md after the commits
-// that two tests pin its Claude render to:
+// The deliberate edits made to agent-templates/conductor.md and agent-templates/implementor.md
+// after the commits that the tests pin their Claude renders to. Conductor first:
 //   - scripts/tests/opencode-host-render.test.mjs (baseline 9c7533f, before the host fences)
 //   - scripts/tests/portable-agents.test.mjs (baseline 0e5a9fe, before the host fences)
 // Both tests prove that the host fences and the render change nothing in the Claude-facing
@@ -8,9 +8,13 @@
 // regression, so it is listed here, never absorbed by moving a baseline or loosening an
 // assertion.
 //
-// The next deliberate conductor.md wording edit that reaches the Claude render adds an
-// entry here: [before, after] with the commit sha and a one-line reason. Each `before`
-// must occur exactly once in the baseline, so a stale entry fails loudly.
+// The same holds for implementor.md, which scripts/tests/portable-agents.test.mjs pins to
+// 201a0bc (IMPLEMENTOR_WORDING_EDITS below).
+//
+// The next deliberate edit to either template that reaches the Claude render adds an
+// entry to that template's list: [before, after] with the commit sha and a one-line
+// reason. Each `before` must occur exactly once in the baseline, so a stale entry fails
+// loudly.
 import assert from 'node:assert/strict';
 
 export const CONDUCTOR_WORDING_EDITS = [
@@ -37,15 +41,28 @@ export const CONDUCTOR_WORDING_EDITS = [
   },
 ];
 
+export const IMPLEMENTOR_WORDING_EDITS = [
+  {
+    commit: '7f34f5b',
+    date: '2026-10-03',
+    reason: 'new MCP tool domain_describe (Domains D2) is denied to the implementor under both prefixes; store writes stay the conductor\'s',
+    before: ', mcp__sterling__capture_pending, mcp__plugin_sterling_sterling__capture_pending\n',
+    after: ', mcp__sterling__capture_pending, mcp__plugin_sterling_sterling__capture_pending, mcp__sterling__domain_describe, mcp__plugin_sterling_sterling__domain_describe\n',
+  },
+];
+
 const occurrences = (text, needle) => text.split(needle).length - 1;
 
-// Applies every listed edit to a baseline conductor.md. Throws if an entry's `before`
-// does not occur exactly once, so an entry that no longer matches its baseline fails.
-export function applyConductorWordingEdits(baselineText) {
+// Applies a list of edits to a baseline template. Throws if an entry's `before` does not
+// occur exactly once, so an entry that no longer matches its baseline fails.
+function applyWordingEdits(edits, baselineText) {
   let text = baselineText;
-  for (const { commit, before, after } of CONDUCTOR_WORDING_EDITS) {
+  for (const { commit, before, after } of edits) {
     assert.equal(occurrences(text, before), 1, `wording edit ${commit}: its "before" text must occur exactly once in the baseline`);
     text = text.replace(before, () => after);
   }
   return text;
 }
+
+export const applyConductorWordingEdits = (baselineText) => applyWordingEdits(CONDUCTOR_WORDING_EDITS, baselineText);
+export const applyImplementorWordingEdits = (baselineText) => applyWordingEdits(IMPLEMENTOR_WORDING_EDITS, baselineText);
