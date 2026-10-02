@@ -43,6 +43,9 @@ if (!process.env[MARKER]) {
   // background maintenance worker (a detached headless claude); the launcher
   // honors this flag (scripts/hooks/lib/maintenance-worker.mjs).
   process.env.STERLING_MAINTENANCE_WORKER_DISABLE = '1';
+  // A real init/sync-agents spawned by a test must never install Sterling's OpenCode
+  // shims into the user's actual ~/.config/opencode (scripts/lib/opencode-install.mjs).
+  process.env.STERLING_OPENCODE_SETUP_DISABLE = '1';
   process.on('exit', () => {
     rmSync(root, { recursive: true, force: true });
   });

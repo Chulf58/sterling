@@ -15,6 +15,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { parseConfig } from '@sterling/schemas';
 import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
+import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { isSterlingClone, readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 
@@ -80,6 +81,20 @@ for (const r of report) {
   }
 }
 if (report.length === 0) console.log('no agents registered — nothing to sync');
+
+// Sterling on OpenCode 2 (decision
+// sterling-on-opencode-installs-global-plugins-plus-untracked-project-config): global
+// shims, this project's untracked .opencode/opencode.json and the Sterling-full roster.
+// Before the portable copies, so a hobby→work switch narrows the exclude block first.
+// Lines start "OpenCode", which /sterling:update's agent-status parser does not count.
+const opencodeSetup = setupOpenCode({ projectDir: targetDir, pluginRoot });
+for (const line of formatOpenCodeRows(opencodeSetup)) console.log(line);
+for (const r of opencodeSetup.rows ?? []) {
+  if (r.refused) {
+    refused += 1;
+    console.error('\n' + r.instruction + '\n');
+  }
+}
 
 // Portable OpenCode copies (decision
 // init-prepares-opencode-portable-agents-and-target-handoff-projections): the same
