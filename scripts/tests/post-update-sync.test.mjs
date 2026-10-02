@@ -470,3 +470,68 @@ test('OpenCode sync: a failed session lookup is logged and noticed once for that
     delete process.env.FIXTURE_LOG;
   }
 });
+
+// An installed copy laid out where OpenCode's npm cache keeps `opencode plugin add`'s package.
+function makeNpmCopy(home, version) {
+  const plugin = join(home, '.cache', 'opencode', 'npm', '@chulf58', 'sterling@latest', 'node_modules', '@chulf58', 'sterling');
+  mkdirSync(join(plugin, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(plugin, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version }));
+  writeFileSync(join(plugin, 'package.json'), JSON.stringify({ name: '@chulf58/sterling', version }));
+  mkdirSync(join(plugin, 'scripts'), { recursive: true });
+  writeFileSync(join(plugin, 'scripts', 'sync-agents.mjs'), `process.exit(0);\n`);
+  writeFileSync(join(plugin, 'scripts', 'stamp-contract.mjs'), `process.exit(0);\n`);
+  mkdirSync(join(plugin, 'opencode', 'sterling-tui'), { recursive: true });
+  writeFileSync(join(plugin, 'opencode', 'sterling-tui', 'package.json'), JSON.stringify({ name: 'sterling-tui', type: 'module' }));
+  writeFileSync(join(plugin, 'opencode', 'sterling-tui', 'sterling-tui.bundle.tsx'), `export default { id: "dash-${version}" };\n`);
+  return plugin;
+}
+
+test('OpenCode sync, npm copy: the sync re-materializes the dashboard and its rows are in the notice', async () => {
+  const home = tmp('sterling-pus-home-');
+  const plugin = makeNpmCopy(home, '2.0.0');
+  const project = makeProject({ marker: '1.0.0', store: false });
+  const syncOnce = ocSync(plugin, sessionStub({ ses_root: {} }), { env: {}, home });
+  await syncOnce(project, 'ses_root');
+  await syncOnce.idle();
+  assert.equal(markerOf(project), '2.0.0\n');
+  const dest = join(home, '.sterling', 'opencode', 'tui', '2.0.0');
+  assert.equal(readFileSync(join(dest, 'sterling-tui.bundle.tsx'), 'utf8'), 'export default { id: "dash-2.0.0" };\n');
+  const texts = noticeTexts(project);
+  assert.equal(texts.length, 1);
+  assert.match(texts[0], /^POST-UPDATE SYNC \(OpenCode plugin\): Sterling 1\.0\.0→2\.0\.0 — agents synced, none changed\./);
+  assert.ok(texts[0].includes(`OpenCode created: ${dest.replace(/\\/g, '/')}/`), texts[0]);
+});
+
+test('OpenCode sync, npm copy: a refused dashboard copy is a REFUSED row in the notice, and the sync still lands', async () => {
+  const home = tmp('sterling-pus-home-');
+  const plugin = makeNpmCopy(home, '2.0.0');
+  const dest = join(home, '.sterling', 'opencode', 'tui', '2.0.0');
+  mkdirSync(dest, { recursive: true });
+  writeFileSync(join(dest, 'mine.txt'), 'not Sterling\n');
+  const project = makeProject({ marker: '1.0.0', store: false });
+  const syncOnce = ocSync(plugin, sessionStub({ ses_root: {} }), { env: {}, home });
+  await syncOnce(project, 'ses_root');
+  await syncOnce.idle();
+  assert.equal(markerOf(project), '2.0.0\n');
+  assert.equal(readFileSync(join(dest, 'mine.txt'), 'utf8'), 'not Sterling\n');
+  const texts = noticeTexts(project);
+  assert.equal(texts.length, 1);
+  assert.match(texts[0], /OpenCode refused: .*\/tui\/2\.0\.0\/ — .*Sterling did not write it/);
+});
+
+test('OpenCode sync, a copy outside the npm cache: no dashboard is materialized', async () => {
+  const home = tmp('sterling-pus-home-');
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  process.env.FIXTURE_LOG = join(tmp('sterling-pus-log-'), 'calls.log');
+  try {
+    const syncOnce = ocSync(plugin, sessionStub({ ses_root: {} }), { env: {}, home });
+    await syncOnce(project, 'ses_root');
+    await syncOnce.idle();
+    assert.equal(markerOf(project), `${VERSION}\n`);
+    assert.equal(existsSync(join(home, '.sterling')), false);
+    assert.doesNotMatch(noticeTexts(project)[0], /OpenCode (created|matches|refreshed|refused)/);
+  } finally {
+    delete process.env.FIXTURE_LOG;
+  }
+});
