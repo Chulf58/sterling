@@ -515,3 +515,23 @@ test('an unreadable maintenance queue is a degraded line in the context, not onl
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('the root session context states the pending Sterling issue reports, with the flush command under the plugin root', async () => {
+  const dir = makeProject();
+  const pluginDir = mkdtempSync(join(tmpdir(), 'sterling-oc-plugin-root-'));
+  try {
+    const h = handler(dir, { pluginRoot: pluginDir, sessions: { ses_root: {} } });
+    const i = input('ses_root');
+    await h.onContext(i);
+    assert.doesNotMatch(textOf(i), /Sterling issue reports:/, 'nothing queued, no line');
+    const entry = JSON.stringify({ fingerprint: 'sterling-fp-000000000001', title: 't', body: 'b', labels: ['sterling-report'] });
+    writeFileSync(join(dir, '.sterling', 'pending-issue-reports.jsonl'), `${entry}\n${entry}\n`);
+    const j = input('ses_root');
+    await h.onContext(j);
+    assert.match(textOf(j), /Sterling issue reports: 2 queued in \.sterling\/pending-issue-reports\.jsonl, not yet filed on GitHub\./);
+    assert.ok(textOf(j).includes(`node "${join(pluginDir, 'bin', 'report-issue.mjs')}" --flush`), 'the command names the resolved Sterling root');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(pluginDir, { recursive: true, force: true });
+  }
+});

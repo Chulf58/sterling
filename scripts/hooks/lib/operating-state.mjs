@@ -1,10 +1,13 @@
 // The host-neutral operating-state lines H1 states at SessionStart: the project
-// config read with its three states, MACHINE ROLE, TDD posture and Project mode.
+// config read with its three states, MACHINE ROLE, TDD posture, Project mode and
+// the pending Sterling issue-report count.
 // Extracted from h1-session-start.mjs so the OpenCode context hook
 // (packages/opencode-plugin/src/context.mjs) renders the SAME text from the SAME
 // code (board cbee2b3d, audit f2ba68c2 row 2). Each line function returns the
 // bare line, or '' when the line is not stated; the caller adds its own
 // separator. Builtins and ./common.mjs only: hooks bundle this module.
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { loadConfig } from './common.mjs';
 
 /**
@@ -112,5 +115,36 @@ export function projectModeLine({ config, configUnreadable }) {
   return (
     `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) — config.mode must be 'hobby' or 'work'; ` +
     'init, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).'
+  );
+}
+
+/**
+ * PENDING ISSUE REPORTS (decision
+ * projects-file-sterling-issues-as-scrubbed-github-issues-automatically): when
+ * report-issue.mjs cannot reach GitHub (gh missing, not logged in, or a failed
+ * call) it queues the report in .sterling/pending-issue-reports.jsonl. This line
+ * states the count from that local file only; it makes no network call. Each
+ * non-blank line is one queued report (report-issue.mjs validates the entries when
+ * it flushes, so a malformed line still counts here as one report waiting). No file
+ * or no report means no line. A file that exists but cannot be read is a loud
+ * UNKNOWN line, never silence. `pluginRoot` is the resolved Sterling root, or null
+ * when it could not be resolved; the flush command is then named plugin-relative.
+ */
+export const PENDING_ISSUE_REPORTS = 'pending-issue-reports.jsonl';
+
+export function pendingIssueReportsLine({ cwd, pluginRoot }) {
+  const path = join(cwd, '.sterling', PENDING_ISSUE_REPORTS);
+  if (!existsSync(path)) return '';
+  let count;
+  try {
+    count = readFileSync(path, 'utf8').split('\n').filter((l) => l.trim()).length;
+  } catch (e) {
+    return `Sterling issue reports: UNKNOWN — .sterling/${PENDING_ISSUE_REPORTS} could not be read (${(e && e.message) || e}), so the number of queued reports is not known.`;
+  }
+  if (count === 0) return '';
+  const flush = pluginRoot ? `\`node "${join(pluginRoot, 'bin', 'report-issue.mjs')}" --flush\`` : "Sterling's bin/report-issue.mjs --flush";
+  return (
+    `Sterling issue reports: ${count} queued in .sterling/${PENDING_ISSUE_REPORTS}, not yet filed on GitHub. ` +
+    `Send them with ${flush} once gh is installed and logged in; the next report sends them too.`
   );
 }
