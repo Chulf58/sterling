@@ -12420,7 +12420,7 @@ function createConfigHandler(deps = {}) {
 
 // packages/opencode-plugin/src/context.mjs
 init_dist2();
-import { join as join23 } from "node:path";
+import { join as join24 } from "node:path";
 
 // scripts/lib/update.mjs
 import { closeSync as closeSync3, existsSync as existsSync12, mkdirSync as mkdirSync9, openSync as openSync3, readFileSync as readFileSync11, readdirSync as readdirSync6, readSync, writeFileSync as writeFileSync5 } from "node:fs";
@@ -13879,6 +13879,82 @@ function createDispatchHandlers({ rootOf, fenced, now = () => Date.now() }) {
   return { onBefore, onAfter, noteExecutionEnd };
 }
 
+// packages/opencode-plugin/src/worker.mjs
+import { spawn as spawn2 } from "node:child_process";
+import { existsSync as existsSync16 } from "node:fs";
+import { delimiter, join as join23 } from "node:path";
+function inWorkerChild(env = process.env) {
+  return env?.[WORKER_ENV_FLAG] === "1";
+}
+var onPath = (name) => (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync16(join23(d, name)));
+function claudeOnPathDefault() {
+  return onPath("claude");
+}
+function nodeOnPathDefault() {
+  return onPath("node") || process.platform === "win32" && onPath("node.exe");
+}
+var isNodeBinary = (execPath) => /^node(\.exe)?$/i.test(String(execPath ?? "").split(/[\\/]/).pop());
+function opencodeBinDefault(execPath = process.execPath) {
+  return !isNodeBinary(execPath) && /opencode/i.test(String(execPath ?? "").split(/[\\/]/).pop()) ? execPath : null;
+}
+var NO_RUNNER_TEXT = "Sterling: the maintenance worker did not run. No maintenance runner exists on this machine: the worker runs `claude -p` or `opencode run`, and neither `claude` nor an OpenCode binary was found (this plugin is not running inside an OpenCode binary). The maintenance queue drains only by hand (/sterling:drain) until one is installed.";
+function createWorkerLaunch({
+  openStore,
+  claudeOnPath = claudeOnPathDefault,
+  opencodeBin = null,
+  launchWorker: launchWorker2 = maybeLaunchMaintenanceWorker,
+  nodeOnPath = nodeOnPathDefault,
+  execPath = process.execPath,
+  spawnImpl = spawn2
+}) {
+  const skipReported = /* @__PURE__ */ new Set();
+  function skipOnce(root, at, logText, noticeText) {
+    if (skipReported.has(root)) return;
+    skipReported.add(root);
+    logLine(root, logText);
+    addNotice(root, noticeText, at);
+  }
+  const findOpencode = opencodeBin ?? (() => opencodeBinDefault(execPath));
+  return function launchWorkerFor(root, at) {
+    const ocBin = claudeOnPath() ? null : findOpencode();
+    const runnerHost = ocBin ? { host: "opencode", opencodeBin: ocBin } : {};
+    if (!ocBin && !claudeOnPath()) {
+      skipOnce(root, at, "maintenance worker skipped: no maintenance runner on this machine (`claude` is not on PATH and no OpenCode binary was found)", NO_RUNNER_TEXT);
+      return;
+    }
+    const config = loadConfig(root);
+    if (ocBin && opencodeModelOf(config) === null) {
+      skipOnce(root, at, `maintenance worker skipped: ${OPENCODE_MODEL_UNSET}`, `Sterling: the maintenance worker did not run. ${OPENCODE_MODEL_UNSET}.`);
+      return;
+    }
+    const nodeCmd = isNodeBinary(execPath) ? execPath : nodeOnPath() ? "node" : null;
+    if (!nodeCmd) {
+      skipOnce(
+        root,
+        at,
+        `maintenance worker skipped: the plugin runs in ${execPath}, not node, and no node is on PATH to run the worker`,
+        `Sterling: the maintenance worker did not run. This plugin runs inside ${execPath}, which is not node, and no \`node\` is on PATH to run the worker's runner script. Install Node.js on PATH, or drain the maintenance queue by hand (/sterling:drain).`
+      );
+      return;
+    }
+    const spawnNode = (cmd, args, opts) => spawnImpl(cmd === process.execPath ? nodeCmd : cmd, args, opts);
+    let workerStore;
+    try {
+      workerStore = openStore(join23(root, ".sterling", "sterling.db"));
+      const result = launchWorker2({ root, config, store: workerStore, trigger: "stop", spawn: spawnNode, ...runnerHost });
+      if (result?.reason === "error") {
+        logLine(root, `maintenance worker launch failed: ${result.detail ?? "no detail"}`);
+        addNotice(root, `Sterling: the maintenance worker could not be launched (${result.detail ?? "no detail"}).`, at);
+      }
+    } catch (e) {
+      logLine(root, `maintenance worker launch failed: ${errText(e)}`);
+      addNotice(root, `Sterling: the maintenance worker could not be launched (${errText(e)}).`, at);
+    } finally {
+      workerStore?.close();
+    }
+  };
+}
+
 // packages/opencode-plugin/src/context.mjs
 var STATUS_TTL_MS = 1e4;
 var UNDECLARED_TTL_MS = 5 * 6e4;
@@ -13891,7 +13967,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   function statusLine(root) {
     const hit = statusCache.get(root);
     if (hit && Date.now() - hit.at < STATUS_TTL_MS) return hit.text;
-    const dbPath = join23(root, ".sterling", "sterling.db");
+    const dbPath = join24(root, ".sterling", "sterling.db");
     let schema;
     try {
       const found = probeSchemaVersion(dbPath);
@@ -13919,7 +13995,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     if (cached) return cached;
     const brief = briefOf(input.messages);
     try {
-      const store = openStore(join23(root, ".sterling", "sterling.db"));
+      const store = openStore(join24(root, ".sterling", "sterling.db"));
       try {
         const out = stageChild({ store, root, sessionID: input.sessionID, agent: input.agent, brief, disclosure: brief ? "" : notStagedLine("brief-unavailable") });
         if (out.staged) remember(stagedCache, input.sessionID, out.text);
@@ -13946,7 +14022,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       let state = null;
       let error = null;
       try {
-        const store = openStore(join23(root, ".sterling", "sterling.db"));
+        const store = openStore(join24(root, ".sterling", "sterling.db"));
         try {
           state = readMaintenanceState(store, root);
         } finally {
@@ -13988,7 +14064,7 @@ ${opencodeHostTail(pluginRoot)}`;
         logLine(root, `context: child staging skipped for ${input.sessionID}, session lookup failed: ${kind.why}`);
         blocks.push(notStagedLine("session-lookup-failed"));
       } else if (kind.kind === "root") {
-        if (sweepStale && env[WORKER_ENV_FLAG] !== "1" && !swept.has(root)) {
+        if (sweepStale && !inWorkerChild(env) && !swept.has(root)) {
           swept.add(root);
           let line;
           try {
@@ -14008,7 +14084,7 @@ ${opencodeHostTail(pluginRoot)}`;
         if (staged) blocks.push(staged);
       }
       if (restore) blocks.push(restore);
-      const notices = takeNotices(root, now());
+      const notices = inWorkerChild(env) ? [] : takeNotices(root, now());
       if (notices.length) blocks.push(`STERLING NOTICES (from the end of the last turn):
 ${notices.map((n) => `- ${n.text}`).join("\n")}`);
       input.system.push({ type: "text", text: blocks.join("\n\n") });
@@ -14018,17 +14094,17 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
 }
 
 // packages/opencode-plugin/src/pr-loop.mjs
-import { join as join26 } from "node:path";
+import { join as join27 } from "node:path";
 
 // scripts/lib/work-pr.mjs
-import { existsSync as existsSync16, mkdirSync as mkdirSync13, readFileSync as readFileSync14, renameSync as renameSync6, writeFileSync as writeFileSync9 } from "node:fs";
-import { delimiter, dirname as dirname11, join as join24 } from "node:path";
+import { existsSync as existsSync17, mkdirSync as mkdirSync13, readFileSync as readFileSync14, renameSync as renameSync6, writeFileSync as writeFileSync9 } from "node:fs";
+import { delimiter as delimiter2, dirname as dirname11, join as join25 } from "node:path";
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
-var prLoopPath = (root) => join24(root, PR_LOOP_REL);
+var prLoopPath = (root) => join25(root, PR_LOOP_REL);
 function readPrLoop(root) {
   const file = prLoopPath(root);
-  if (!existsSync16(file)) return null;
+  if (!existsSync17(file)) return null;
   let s2;
   try {
     s2 = JSON.parse(readFileSync14(file, "utf8"));
@@ -14047,15 +14123,15 @@ function readPrLoop(root) {
 }
 
 // scripts/hooks/lib/pr-loop-duty.mjs
-import { existsSync as existsSync17 } from "node:fs";
-import { join as join25 } from "node:path";
+import { existsSync as existsSync18 } from "node:fs";
+import { join as join26 } from "node:path";
 var errMessage = (e) => String(e && e.message || e);
 function evaluatePrLoop(root) {
   let mode;
   try {
     mode = readProjectMode(root);
   } catch (e) {
-    if (existsSync17(join25(root, PR_LOOP_REL))) {
+    if (existsSync18(join26(root, PR_LOOP_REL))) {
       return {
         state: null,
         degraded: `\u2022 PR review loop: the project mode is unreadable (${errMessage(e)}) \u2014 ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
@@ -14093,18 +14169,18 @@ function createPrLoopNotice({ now, pluginRoot } = {}) {
       return;
     }
     announced.add(state.armed_at);
-    addNotice(root, prLoopOwedText(state, prLoopNext(state, join26(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"))), at);
+    addNotice(root, prLoopOwedText(state, prLoopNext(state, join27(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"))), at);
   };
 }
 
 // packages/opencode-plugin/src/restore.mjs
 import { statSync as statSync6 } from "node:fs";
-import { join as join28 } from "node:path";
+import { join as join29 } from "node:path";
 
 // scripts/hooks/lib/rotation-restore.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { existsSync as existsSync18, readFileSync as readFileSync15, rmSync as rmSync7 } from "node:fs";
-import { join as join27 } from "node:path";
+import { existsSync as existsSync19, readFileSync as readFileSync15, rmSync as rmSync7 } from "node:fs";
+import { join as join28 } from "node:path";
 var NOTE_PROSE_MAX = 2e3;
 var LIVE_DISPATCH_MAX = 20;
 var LIVE_TERRITORY_MAX = 40;
@@ -14121,11 +14197,11 @@ var NOTE_FIELD_MAX = {
 };
 var LANE_HANDOFF_MAX = 1e3;
 function rotationNotePath(cwd) {
-  return join27(cwd, ".sterling", "transient", "rotation-note.json");
+  return join28(cwd, ".sterling", "transient", "rotation-note.json");
 }
 function readRotationNote(cwd) {
   const notePath = rotationNotePath(cwd);
-  if (!existsSync18(notePath)) return null;
+  if (!existsSync19(notePath)) return null;
   return JSON.parse(readFileSync15(notePath, "utf8"));
 }
 function consumeRotationNote(cwd) {
@@ -14266,10 +14342,11 @@ ROTATION RESTORE (H1, source=${source}): a rotation note was prepared before thi
 }
 
 // packages/opencode-plugin/src/restore.mjs
-function createRotationRestore({ getSession, now, renderRestore = renderRotationRestore }) {
+function createRotationRestore({ getSession, now, renderRestore = renderRotationRestore, env = process.env }) {
   const restored = /* @__PURE__ */ new Map();
   const malformedNoted = /* @__PURE__ */ new Set();
   return async function rotationRestore(root, sessionID) {
+    if (inWorkerChild(env)) return "";
     if (restored.has(sessionID)) return restored.get(sessionID);
     let note;
     try {
@@ -14311,7 +14388,7 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
     let planLock = null;
     let planLockMalformed = false;
     try {
-      const read = readLock(join28(root, ".sterling"));
+      const read = readLock(join29(root, ".sterling"));
       planLock = read.lock ?? null;
       planLockMalformed = Boolean(read.malformed);
     } catch (e) {
@@ -14330,18 +14407,18 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { existsSync as existsSync19, mkdirSync as mkdirSync14, readFileSync as readFileSync16, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname12, join as join29 } from "node:path";
-var SESSION_EVENTS_REL = join29(".sterling", "transient", "session-events.json");
+import { existsSync as existsSync20, mkdirSync as mkdirSync14, readFileSync as readFileSync16, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname12, join as join30 } from "node:path";
+var SESSION_EVENTS_REL = join30(".sterling", "transient", "session-events.json");
 function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
   const event = { kind: "research_tool", detail: String(detail ?? ""), at };
   if (typeof agentId === "string" && agentId !== "") event.agent_id = agentId;
   return event;
 }
 function appendSessionEvent(projectDir, event) {
-  const eventsPath = join29(projectDir, SESSION_EVENTS_REL);
+  const eventsPath = join30(projectDir, SESSION_EVENTS_REL);
   mkdirSync14(dirname12(eventsPath), { recursive: true });
-  const events = existsSync19(eventsPath) ? JSON.parse(readFileSync16(eventsPath, "utf8")) : [];
+  const events = existsSync20(eventsPath) ? JSON.parse(readFileSync16(eventsPath, "utf8")) : [];
   events.push(event);
   writeFileSync10(eventsPath, JSON.stringify(events));
 }
@@ -14372,14 +14449,15 @@ function createResearchRecorder({ rootOf, fenced, now }) {
 }
 
 // packages/opencode-plugin/src/selection.mjs
-import { join as join30 } from "node:path";
-function createPromptHandler({ openStore, rootOf, fenced }) {
+import { join as join31 } from "node:path";
+function createPromptHandler({ openStore, rootOf, fenced, env = process.env }) {
   return async function onPrompt(input) {
+    if (inWorkerChild(env)) return;
     const root = rootOf();
     if (!root) return;
     await fenced("prompt", root, () => {
       if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
-      const store = openStore(join30(root, ".sterling", "sterling.db"));
+      const store = openStore(join31(root, ".sterling", "sterling.db"));
       let selection;
       try {
         selection = store.takeSelection();
@@ -14398,8 +14476,8 @@ TUI selection (one-shot): the user has selected ${selection.type} '${selection.r
 init_dist();
 import { spawnSync as spawnSync6 } from "node:child_process";
 import { randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync20, mkdirSync as mkdirSync16, readFileSync as readFileSync18, renameSync as renameSync8, rmSync as rmSync9, writeFileSync as writeFileSync12 } from "node:fs";
-import { dirname as dirname14, join as join32 } from "node:path";
+import { existsSync as existsSync21, mkdirSync as mkdirSync16, readFileSync as readFileSync18, renameSync as renameSync8, rmSync as rmSync9, writeFileSync as writeFileSync12 } from "node:fs";
+import { dirname as dirname14, join as join33 } from "node:path";
 
 // scripts/hooks/lib/session-duties.mjs
 init_dist();
@@ -14504,10 +14582,10 @@ init_dist2();
 import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
 import { readFileSync as readFileSync17, writeFileSync as writeFileSync11, mkdirSync as mkdirSync15, rmSync as rmSync8, statSync as statSync7, renameSync as renameSync7 } from "node:fs";
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { join as join31, dirname as dirname13 } from "node:path";
+import { join as join32, dirname as dirname13 } from "node:path";
 function hashFile(root, rel) {
   try {
-    return createHash3("sha256").update(readFileSync17(join31(root, rel))).digest("hex");
+    return createHash3("sha256").update(readFileSync17(join32(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -14521,7 +14599,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync17(join31(root, ".sterling", "config.json"), "utf8");
+    const raw = readFileSync17(join32(root, ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -14588,7 +14666,7 @@ function changedSince(root, base2) {
 var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
 function readGitSettled(root) {
   try {
-    const s2 = JSON.parse(readFileSync17(join31(root, GIT_SETTLED_REL), "utf8"));
+    const s2 = JSON.parse(readFileSync17(join32(root, GIT_SETTLED_REL), "utf8"));
     return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
   } catch {
     return null;
@@ -14627,7 +14705,7 @@ function gitTouches(root, now) {
     const candidates = [...changed].map((path) => {
       let at = settled.at;
       try {
-        at = statSync7(join31(root, path)).mtime.toISOString();
+        at = statSync7(join32(root, path)).mtime.toISOString();
       } catch {
       }
       return { path, at: typeof at === "string" ? at : now };
@@ -14638,7 +14716,7 @@ function gitTouches(root, now) {
   }
 }
 function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
-  const p = join31(root, GIT_SETTLED_REL);
+  const p = join32(root, GIT_SETTLED_REL);
   mkdirSync15(dirname13(p), { recursive: true });
   if (ifAbsent) {
     try {
@@ -14669,15 +14747,15 @@ var EVENTS_REL = ".sterling/transient/session-events.json";
 var WEIGHED_KINDS = /* @__PURE__ */ new Set(["concept_designed", "research_tool", "agent_dispatch"]);
 var eventKey = (e) => `${e.kind}|${e.detail ?? ""}|${e.at ?? ""}`;
 function readDutyState(root) {
-  const p = join32(root, DUTIES_REL);
-  if (!existsSync20(p)) return { owed: [], weighed: [] };
+  const p = join33(root, DUTIES_REL);
+  if (!existsSync21(p)) return { owed: [], weighed: [] };
   const parsed = JSON.parse(readFileSync18(p, "utf8"));
   if (!parsed || !Array.isArray(parsed.owed) || !Array.isArray(parsed.weighed)) throw new Error(`${DUTIES_REL} is not a {owed, weighed} object`);
   return parsed;
 }
 function readSessionEvents(root) {
-  const p = join32(root, EVENTS_REL);
-  if (!existsSync20(p)) return { events: [] };
+  const p = join33(root, EVENTS_REL);
+  if (!existsSync21(p)) return { events: [] };
   try {
     const parsed = JSON.parse(readFileSync18(p, "utf8"));
     if (!Array.isArray(parsed)) return { events: [], error: "it is not a JSON array" };
@@ -14696,7 +14774,7 @@ function newSince(root, base2, paths) {
 function articleDemand(store, root, config, paths, base2, degraded) {
   const exempt = demandExemption(config, loadGeneratedProjections(root));
   const { isUnowned } = ownershipJoin(store, root);
-  let unowned = paths.filter((p) => existsSync20(join32(root, p)) && !exempt(p) && isUnowned(p));
+  let unowned = paths.filter((p) => existsSync21(join33(root, p)) && !exempt(p) && isUnowned(p));
   if (unowned.length) {
     const ignored = gitIgnored(unowned, root);
     if (ignored === null) degraded.push("git check-ignore failed, so ignored files may be named");
@@ -14756,7 +14834,7 @@ function settleDuties(store, root, git, at) {
   if (queued.length) notices.push(`Sterling settlement: duties the previous turn left unpaid are now queued as maintenance items: ${queued.join(", ")}. Pay them, or drain them with /sterling:drain.`);
   const owed = [];
   const windowStart = isValidAt(git.settled.at) ? git.settled.at : at;
-  const changed = git.candidates.filter((c) => existsSync20(join32(root, c.path)));
+  const changed = git.candidates.filter((c) => existsSync21(join33(root, c.path)));
   const generated = loadGeneratedProjections(root);
   const touched = changed.filter((c) => !IMAGE_BINARY_EXT.test(c.path) && !generated.has(c.path) && !dischargedByCutoff(c.at, cutoffs.capture));
   if (touched.length && !capturedSince(store, windowStart)) {
@@ -14784,7 +14862,7 @@ ${owed.map((d) => `- ${describe(d)}`).join("\n")}`);
   if (degraded.length) notices.push(`Sterling settlement: the article demand was checked with a degraded probe: ${degraded.join("; ")}.`);
   const present = new Set(events.map(eventKey));
   const nextWeighed = [.../* @__PURE__ */ new Set([...state.weighed.filter((k) => present.has(k)), ...fresh.map(eventKey)])];
-  writeJsonAtomic2(join32(root, DUTIES_REL), { owed, weighed: nextWeighed });
+  writeJsonAtomic2(join33(root, DUTIES_REL), { owed, weighed: nextWeighed });
   return { notices };
 }
 function writeJsonAtomic2(path, value) {
@@ -14829,7 +14907,7 @@ function createSettle({ openStore, now, launchWorkerFor }) {
     const dispatch = liveDispatch(root);
     let store;
     try {
-      store = openStore(join32(root, ".sterling", "sterling.db"));
+      store = openStore(join33(root, ".sterling", "sterling.db"));
       const minted = mintSettlementReconcile(store, root, git.candidates.map((c) => c.path), at);
       const duties = settleDuties(store, root, git, at);
       if (!dispatch.live) writeGitSettled(root, git.next);
@@ -14926,7 +15004,7 @@ function createSessionSync(deps = {}) {
     }
   }
   async function syncOnce(root, sessionID) {
-    if (started) return;
+    if (started || inWorkerChild(env)) return;
     const pluginRoot = deps.sterlingRoot ?? sterlingRoot();
     let applies;
     try {
@@ -14946,79 +15024,6 @@ function createSessionSync(deps = {}) {
   }
   syncOnce.idle = () => running ?? Promise.resolve();
   return syncOnce;
-}
-
-// packages/opencode-plugin/src/worker.mjs
-import { spawn as spawn2 } from "node:child_process";
-import { existsSync as existsSync21 } from "node:fs";
-import { delimiter as delimiter2, join as join33 } from "node:path";
-var onPath = (name) => (process.env.PATH ?? "").split(delimiter2).some((d) => d && existsSync21(join33(d, name)));
-function claudeOnPathDefault() {
-  return onPath("claude");
-}
-function nodeOnPathDefault() {
-  return onPath("node") || process.platform === "win32" && onPath("node.exe");
-}
-var isNodeBinary = (execPath) => /^node(\.exe)?$/i.test(String(execPath ?? "").split(/[\\/]/).pop());
-function opencodeBinDefault(execPath = process.execPath) {
-  return !isNodeBinary(execPath) && /opencode/i.test(String(execPath ?? "").split(/[\\/]/).pop()) ? execPath : null;
-}
-var NO_RUNNER_TEXT = "Sterling: the maintenance worker did not run. No maintenance runner exists on this machine: the worker runs `claude -p` or `opencode run`, and neither `claude` nor an OpenCode binary was found (this plugin is not running inside an OpenCode binary). The maintenance queue drains only by hand (/sterling:drain) until one is installed.";
-function createWorkerLaunch({
-  openStore,
-  claudeOnPath = claudeOnPathDefault,
-  opencodeBin = null,
-  launchWorker: launchWorker2 = maybeLaunchMaintenanceWorker,
-  nodeOnPath = nodeOnPathDefault,
-  execPath = process.execPath,
-  spawnImpl = spawn2
-}) {
-  const skipReported = /* @__PURE__ */ new Set();
-  function skipOnce(root, at, logText, noticeText) {
-    if (skipReported.has(root)) return;
-    skipReported.add(root);
-    logLine(root, logText);
-    addNotice(root, noticeText, at);
-  }
-  const findOpencode = opencodeBin ?? (() => opencodeBinDefault(execPath));
-  return function launchWorkerFor(root, at) {
-    const ocBin = claudeOnPath() ? null : findOpencode();
-    const runnerHost = ocBin ? { host: "opencode", opencodeBin: ocBin } : {};
-    if (!ocBin && !claudeOnPath()) {
-      skipOnce(root, at, "maintenance worker skipped: no maintenance runner on this machine (`claude` is not on PATH and no OpenCode binary was found)", NO_RUNNER_TEXT);
-      return;
-    }
-    const config = loadConfig(root);
-    if (ocBin && opencodeModelOf(config) === null) {
-      skipOnce(root, at, `maintenance worker skipped: ${OPENCODE_MODEL_UNSET}`, `Sterling: the maintenance worker did not run. ${OPENCODE_MODEL_UNSET}.`);
-      return;
-    }
-    const nodeCmd = isNodeBinary(execPath) ? execPath : nodeOnPath() ? "node" : null;
-    if (!nodeCmd) {
-      skipOnce(
-        root,
-        at,
-        `maintenance worker skipped: the plugin runs in ${execPath}, not node, and no node is on PATH to run the worker`,
-        `Sterling: the maintenance worker did not run. This plugin runs inside ${execPath}, which is not node, and no \`node\` is on PATH to run the worker's runner script. Install Node.js on PATH, or drain the maintenance queue by hand (/sterling:drain).`
-      );
-      return;
-    }
-    const spawnNode = (cmd, args, opts) => spawnImpl(cmd === process.execPath ? nodeCmd : cmd, args, opts);
-    let workerStore;
-    try {
-      workerStore = openStore(join33(root, ".sterling", "sterling.db"));
-      const result = launchWorker2({ root, config, store: workerStore, trigger: "stop", spawn: spawnNode, ...runnerHost });
-      if (result?.reason === "error") {
-        logLine(root, `maintenance worker launch failed: ${result.detail ?? "no detail"}`);
-        addNotice(root, `Sterling: the maintenance worker could not be launched (${result.detail ?? "no detail"}).`, at);
-      }
-    } catch (e) {
-      logLine(root, `maintenance worker launch failed: ${errText(e)}`);
-      addNotice(root, `Sterling: the maintenance worker could not be launched (${errText(e)}).`, at);
-    } finally {
-      workerStore?.close();
-    }
-  };
 }
 
 // packages/opencode-plugin/src/server.mjs
@@ -15057,7 +15062,7 @@ function createSterlingServer(deps = {}) {
       clearTimeout(timer);
     }
   }
-  const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore });
+  const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env: deps.env ?? process.env });
   const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, env: deps.env ?? process.env, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
   const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
   const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
@@ -15079,12 +15084,12 @@ function createSterlingServer(deps = {}) {
   const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker });
   const settle = createSettle({ openStore, now, launchWorkerFor });
   const prLoopNotice = createPrLoopNotice({ now, pluginRoot: deps.sterlingRoot });
-  const onPrompt = createPromptHandler({ openStore, rootOf, fenced });
+  const onPrompt = createPromptHandler({ openStore, rootOf, fenced, env: deps.env ?? process.env });
   const onCompaction = createCompactionHandler({ rootOf, fenced });
   const configure = deps.configure ?? createConfigHandler(deps);
   async function onEvent(ev) {
     if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
-    if ((deps.env ?? process.env)[WORKER_ENV_FLAG] === "1") return;
+    if (inWorkerChild(deps.env ?? process.env)) return;
     const root = rootOf();
     if (!root) return;
     const sessionID = ev.data?.sessionID;
