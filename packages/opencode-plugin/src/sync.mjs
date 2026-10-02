@@ -1,13 +1,95 @@
-// Post-update sync: runs once per plugin process, at the first context request
-// that reaches the context handler. A no-op until a lane gives it duties; the
-// root-session check belongs with the first real duty, because a no-op must not
-// add a session lookup to every context request.
+// Post-update sync on OpenCode: the first ROOT session of the plugin process runs
+// the shared post-update sync (scripts/lib/post-update-sync.mjs, shared with H1)
+// for this project, under the newest-copy-wins rule (decision
+// dual-host-post-update-sync-newest-copy-wins). The result reaches the model as a
+// notice: synced, refused-older or failed; equal versions say nothing. The sync
+// runs in the background, so the context request that starts it never waits for
+// it, and its notice shows on the next request.
+//
+// A root session has no parentID key in ctx.session.get's result (finding
+// opencode-2-0-21-session-get-shape-and-rotation-restore-live-october-2026). The
+// verdict is cached per session id, and once the sync has started nothing is
+// looked up again. On a clone the sync does not apply, and no session is looked up.
+import { postUpdateApplies, postUpdateSync, runStepAsync } from '../../../scripts/lib/post-update-sync.mjs';
+import { sterlingRoot } from './layer.mjs';
+import { LOG_REL, errText, logLine } from './log.mjs';
+import { addNotice } from './notices.mjs';
 
-/** Returns `syncOnce(root, sessionID)`; only the first call does anything. */
+/**
+ * Returns `syncOnce(root, sessionID)` and `syncOnce.idle()` (resolves when a started
+ * sync has finished; tests). deps: getSession() returns ctx.session (null before
+ * setup); now(); sterlingRoot overrides the resolved Sterling root; nodeBin is the
+ * node used to run the steps (default 'node' on PATH, as the installer's MCP
+ * launcher assumes: the plugin runs inside the compiled OpenCode binary,
+ * @opencode/cli's bin/opencode.exe, so process.execPath is not known to be node).
+ */
 export function createSessionSync(deps = {}) {
-  let ran = false;
-  return async function syncOnce(root, sessionID) {
-    if (ran) return;
-    ran = true;
-  };
+  const getSession = deps.getSession ?? (() => null);
+  const now = deps.now ?? (() => new Date().toISOString());
+  const nodeBin = deps.nodeBin ?? 'node';
+  const verdicts = new Map();
+  let started = false;
+  let running = null;
+
+  function report(root, text) {
+    try {
+      addNotice(root, text, now());
+    } catch (e) {
+      // The notice file is unwritable: stderr is the last place left.
+      process.stderr.write(`[sterling] ${text} (notice not recorded: ${errText(e)})\n`);
+    }
+  }
+
+  async function run(root, pluginRoot) {
+    try {
+      const result = await postUpdateSync({ root: pluginRoot, project: root, host: 'opencode', runStep: (r, name, args) => runStepAsync(r, name, args, { nodeBin }) });
+      if (!result) return;
+      logLine(root, `post-update sync: ${result.outcome}`);
+      report(root, result.context.replace(/^\n+/, ''));
+    } catch (e) {
+      try {
+        logLine(root, `post-update sync failed: ${errText(e)}`);
+      } finally {
+        report(root, `Sterling: post-update sync FAILED (${errText(e)}); no marker was written, so it retries the next time OpenCode starts. See ${LOG_REL}.`);
+      }
+    }
+  }
+
+  async function isRootSession(root, sessionID) {
+    try {
+      if (typeof sessionID !== 'string' || !sessionID) throw new Error('the context request carries no session id');
+      const session = getSession();
+      if (!session || typeof session.get !== 'function') throw new Error('ctx.session.get is unavailable');
+      const info = await session.get({ sessionID });
+      return !info?.parentID;
+    } catch (e) {
+      logLine(root, `post-update sync: session check failed for ${sessionID}: ${errText(e)}`);
+      report(root, `Sterling: the post-update sync could not check whether session ${sessionID} is a root session (${errText(e)}); it waits for the next session. See ${LOG_REL}.`);
+      return false;
+    }
+  }
+
+  async function syncOnce(root, sessionID) {
+    if (started) return;
+    const pluginRoot = deps.sterlingRoot ?? sterlingRoot();
+    let applies;
+    try {
+      applies = postUpdateApplies(pluginRoot, root);
+    } catch (e) {
+      // Latched first, so a predicate that throws is reported once (by the fence), not per request.
+      started = true;
+      throw e;
+    }
+    if (!applies) {
+      started = true;
+      return;
+    }
+    if (!verdicts.has(sessionID)) verdicts.set(sessionID, isRootSession(root, sessionID));
+    if (!(await verdicts.get(sessionID)) || started) return;
+    started = true;
+    running = run(root, pluginRoot);
+  }
+
+  syncOnce.idle = () => running ?? Promise.resolve();
+  return syncOnce;
 }
