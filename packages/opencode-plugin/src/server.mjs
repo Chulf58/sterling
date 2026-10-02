@@ -19,7 +19,8 @@
 //   3. session.execution.succeeded of a ROOT session: settlement (mint
 //      reconcile duties, then advance the settled snapshot), the maintenance
 //      worker, and a notice the model sees at the next turn. A child session's
-//      event settles nothing; it ends a background subagent's dispatch;
+//      execution end (succeeded, failed or interrupted) settles nothing; it
+//      ends a background subagent's dispatch;
 //   4. the prompt hook: a record selected in the dashboard is taken once from
 //      the store and appended to the next prompt, as H2 does on Claude Code;
 //   5. the compaction hook: the session's delivery receipts are removed, so
@@ -44,7 +45,7 @@ import { createCompactionHandler } from './compaction.mjs';
 import { createConfigHandler } from './config.mjs';
 import { createContextHandler } from './context.mjs';
 import { createDeliveryHandlers } from './delivery.mjs';
-import { createDispatchHandlers, rootSessionGate } from './dispatch.mjs';
+import { createDispatchHandlers, rootSessionGate, sweepStaleDispatches } from './dispatch.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { NOTICES_REL, addNotice } from './notices.mjs';
 import { createPrLoopNotice } from './pr-loop.mjs';
@@ -63,6 +64,9 @@ export { defaultTemplatePath, hostBlockPairs, opencodeHostTail, renderSterlingLa
 
 export const PLUGIN_ID = 'sterling.server';
 
+// The events that end a session's execution. Each ends a background child's dispatch; only succeeded settles.
+const EXECUTION_END_EVENTS = new Set(['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted']);
+
 // Per-handler budgets. The store calls are synchronous and cannot be cut off
 // mid-call; the budget bounds the awaited part and logs any overrun.
 export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 10000, research: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000 };
@@ -79,6 +83,7 @@ export function createSterlingServer(deps = {}) {
   let session = null;
   let directory = process.cwd();
   let chain = Promise.resolve();
+  // Each session's parentID, shared by the context handler and the settlement gate (bounded, bounded.mjs).
   const parents = new Map();
 
   const rootOf = () => projectRoot(directory);
@@ -110,7 +115,7 @@ export function createSterlingServer(deps = {}) {
   }
 
   const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore });
-  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
+  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
   const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
   const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
   const dispatch = createDispatchHandlers({ rootOf, fenced });
@@ -139,24 +144,34 @@ export function createSterlingServer(deps = {}) {
   const configure = deps.configure ?? createConfigHandler(deps);
 
   async function onEvent(ev) {
-    if (ev?.type !== 'session.execution.succeeded') return;
+    if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
     // Inside the maintenance worker's own `opencode run` child (the runner sets
     // the flag), this globally installed plugin must not settle or launch a
     // worker: it would race the parent's settlement on the same store.
     if ((deps.env ?? process.env)[WORKER_ENV_FLAG] === '1') return;
     const root = rootOf();
     if (!root) return;
-    // Settle only on the root session (dispatch.mjs rootSessionGate): a child's
+    const sessionID = ev.data?.sessionID;
+    // Noted before the gate reads the register, so a background child that ends
+    // before its subagent call binds it is ended at that bind (dispatch.mjs).
+    dispatch.noteExecutionEnd(sessionID);
+    // Any execution end of a child ends its background dispatch; only a root
+    // session's successful end settles (dispatch.mjs rootSessionGate): a child's
     // execution end is not the end of the user's turn.
+    const succeeded = ev.type === 'session.execution.succeeded';
     let gate = { settle: false };
-    await fenced('settle', root, async () => {
-      gate = await rootSessionGate(root, { session, sessionID: ev.data?.sessionID, parents });
+    await fenced(succeeded ? 'settle' : 'dispatch', root, async () => {
+      gate = await rootSessionGate(root, { session, sessionID, parents });
+      if (!gate.why) return;
+      if (!succeeded) {
+        logLine(root, `dispatch end skipped on ${ev.type}: could not check whether session ${sessionID} is a child (${gate.why})`);
+        return;
+      }
+      // Inside the fence: a torn notices file must not reject onEvent and end the subscription loop.
+      logLine(root, `settle skipped: could not check whether session ${sessionID} is a child (${gate.why})`);
+      addNotice(root, `Sterling settlement skipped: could not check whether session ${sessionID} is a child session (${gate.why}); only a root session settles, and the next root settlement covers this range.`, now());
     });
-    if (gate.why) {
-      logLine(root, `settle skipped: could not check whether session ${ev.data?.sessionID} is a child (${gate.why})`);
-      addNotice(root, `Sterling settlement skipped: could not check whether session ${ev.data?.sessionID} is a child session (${gate.why}); only a root session settles, and the next root settlement covers this range.`, now());
-    }
-    if (!gate.settle) return;
+    if (!gate.settle || !succeeded) return;
     resetStatus(root);
     await fenced('settle', root, () => settle(root));
     await fenced('settle', root, () => prLoopNotice(root));

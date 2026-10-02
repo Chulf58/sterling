@@ -47,17 +47,23 @@ export function readProjectConfig(cwd) {
  * never sees the line; it exists because the committed CLAUDE.md's "this machine
  * authors" prose travels with every clone and misleads a session opened inside one.
  */
-export function machineRoleLine({ atClone, installedCopy, config }) {
+// Where the Sterling layer lives, per host: CLAUDE.md on Claude Code, the
+// injected layer on OpenCode (as axis-compose's HOST_TEXT varies its wording).
+const MACHINE_ROLE_LAYER = { claude: "Sterling layer in CLAUDE.md's", opencode: "Sterling layer's" };
+
+export function machineRoleLine({ atClone, installedCopy, config, host = 'claude' }) {
+  if (!Object.hasOwn(MACHINE_ROLE_LAYER, host)) throw new Error(`machineRoleLine: unknown host '${host}'`);
+  const layer = MACHINE_ROLE_LAYER[host];
   if (installedCopy) {
     return 'MACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.';
   }
   if (!atClone) return '';
   const role = config?.machine_role;
   if (role === 'authoring') {
-    return 'MACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) — Sterling work lands and merges here; the Sterling layer in CLAUDE.md\'s authoring contract applies.';
+    return `MACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) — Sterling work lands and merges here; the ${layer} authoring contract applies.`;
   }
   if (role === 'consumer') {
-    return 'MACHINE ROLE: CONSUMER — this clone consumes via /sterling:update. The Sterling layer in CLAUDE.md\'s "this machine authors" language does NOT apply on this machine: never commit here, never hand-reconcile drift; a dirty generated file is discarded (git checkout -- <path>); currency comes only from /sterling:update.';
+    return `MACHINE ROLE: CONSUMER — this clone consumes via /sterling:update. The ${layer} "this machine authors" language does NOT apply on this machine: never commit here, never hand-reconcile drift; a dirty generated file is discarded (git checkout -- <path>); currency comes only from /sterling:update.`;
   }
   return 'MACHINE ROLE: UNDECLARED — treat as CONSUMER (the safe posture) until declared. The authoring machine declares machine_role:"authoring" in .sterling/config.json once; a successful /sterling:update stamps "consumer" automatically.';
 }

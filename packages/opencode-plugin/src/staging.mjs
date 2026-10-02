@@ -10,6 +10,7 @@
 // Hazards render whole: H19's read-only-lane pointer mode reads .claude/agents,
 // a Claude Code surface that does not exist here.
 import { EXEMPT_AGENT_TYPES, RETURN_CONTRACT, composeContext, dispatchChrome, stageBrief } from '../../../scripts/hooks/lib/stage-brief.mjs';
+import { agentRole } from './agent-name.mjs';
 
 // A brief is a prompt, not a document: bound what is scanned.
 const BRIEF_SCAN_CAP = 20_000;
@@ -31,13 +32,14 @@ export function briefOf(messages) {
 /**
  * The context a child session gets for `brief`: the staged territory records
  * with the plan, TDD and return-contract chrome around them, or the chrome alone
- * when nothing governs the brief. `agent` is the child's OpenCode agent name (the
- * roster's implementor gets the TDD and plan lines). `disclosure` is a not-staged
+ * when nothing governs the brief. `agent` is the child's OpenCode agent name,
+ * compared as its role (agent-name.mjs: sterling/implementor gets the TDD and plan lines). `disclosure` is a not-staged
  * line folded in beside the contract. `staged` is true when records were
  * delivered, so the caller keeps that text for the child's later requests: the
  * guard ledger is marked here, once, and would not deliver them again.
  */
-export function stageChild({ store, root, sessionID, agent, brief, disclosure = '' }) {
+export function stageChild({ store, root, sessionID, agent: agentName, brief, disclosure = '' }) {
+  const agent = agentRole(agentName);
   const chrome = dispatchChrome(root, agent);
   if (brief) {
     const built = stageBrief({

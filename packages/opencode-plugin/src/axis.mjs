@@ -31,6 +31,7 @@ import { repoRel } from '../../../scripts/hooks/lib/common.mjs';
 import { recordAdvisoryFire } from '../../../scripts/hooks/lib/advisory-counter.mjs';
 import { codexModelPin, composeMechanismAxis, composeOutputAxis, outputAxisReadGated } from '../../../scripts/hooks/lib/axis-compose.mjs';
 import { dispatchOverlapNotice } from '../../../scripts/hooks/lib/dispatch-overlap.mjs';
+import { agentRole } from './agent-name.mjs';
 import { isListingCommand } from '../../../scripts/hooks/lib/listing-command.mjs';
 import { guardPath, markDiscoveryDelivered, markSubstanceDelivered, outgoingProposalText, readGuard, writeGuard } from '../../../scripts/hooks/lib/delivery.mjs';
 import { appendToResult } from './delivery.mjs';
@@ -111,7 +112,7 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced }) {
     }
     const overlap =
       surface === 'dispatch'
-        ? dispatchOverlapNotice({ tool_input: { subagent_type: args.agent, prompt: args.prompt }, cwd: root, session_id: input.sessionID })
+        ? dispatchOverlapNotice({ tool_input: { subagent_type: agentRole(args.agent), prompt: args.prompt }, cwd: root, session_id: input.sessionID })
         : null;
     let built = null;
     await fenced('axis', root, () => {

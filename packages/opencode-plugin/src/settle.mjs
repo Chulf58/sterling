@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
 import { gitIgnored, loadConfig } from '../../../scripts/hooks/lib/common.mjs';
+import { agentRole } from './agent-name.mjs';
 import {
   IMAGE_BINARY_EXT,
   articleMissingText,
@@ -178,7 +179,7 @@ export function settleDuties(store, root, git, at) {
   for (const family of unmetConceptFamilies(store, families, earliestSessionAt)) owed.push({ duty: 'concept', family, since: families.get(family), window_start: earliestSessionAt });
   const researchAgents = new Set(config.session_events.research_agents);
   // OpenCode names the installed roles sterling/<role>; the role is what research_agents lists.
-  const isResearchAgent = (d) => researchAgents.has(d) || researchAgents.has(String(d ?? '').replace(/^sterling\//, ''));
+  const isResearchAgent = (d) => researchAgents.has(d) || researchAgents.has(agentRole(String(d ?? '')));
   const research = fresh.filter((e) => (e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && isResearchAgent(e.detail))) && !dischargedByCutoff(e.at, cutoffs.research));
   if (research.length) {
     const ats = research.map((e) => e.at).filter(isValidAt).sort();
@@ -208,9 +209,11 @@ function writeJsonAtomic(path, value) {
 
 /**
  * A live dispatch means paths are still being changed under it, so the snapshot
- * must not advance past them. Two sources: the Claude Code register (any row
- * without `ended`; H10 settles those paths itself) and the dispatch state, where
- * an OpenCode subagent is bound to its child session until it ends (dispatch.mjs).
+ * must not advance past them. Two sources: the dispatch register (any row
+ * without `ended`: a Claude Code round, which H10 settles itself, or an OpenCode
+ * subagent's round, registered when its call binds the child) and the dispatch
+ * state, where an OpenCode subagent is bound to its child session until it ends
+ * (dispatch.mjs).
  * A pending record (no binding yet) does not count: its call has not returned, so
  * the root execution has not ended either, and an orphan left by a denied call
  * must not hold the snapshot forever. Anything that cannot be read counts as
@@ -220,7 +223,7 @@ export function liveDispatch(root) {
   const reg = readRegister(root);
   if (reg.availability !== 'absent' && reg.availability !== 'ok') return { live: true, why: `the dispatch register is ${reg.availability}` };
   const rows = reg.availability === 'ok' ? reg.entries.filter((e) => !e.ended) : [];
-  if (rows.length) return { live: true, why: `${rows.length} Claude dispatch(es) still registered (${rows.map((r) => r.agent_id).join(', ')})` };
+  if (rows.length) return { live: true, why: `${rows.length} dispatch(es) still registered (${rows.map((r) => r.agent_id).join(', ')})` };
   const state = readDispatchState(root);
   if (state.availability !== 'absent' && state.availability !== 'ok') return { live: true, why: `the dispatch state is ${state.availability}${state.reason ? ` (${state.reason})` : ''}` };
   if (state.poisoned.length) return { live: true, why: `the dispatch state holds ${state.poisoned.length} unreadable record(s) (${state.poisoned.map((p) => p.file).join(', ')})` };
@@ -262,7 +265,7 @@ export function createSettle({ openStore, now, launchWorkerFor }) {
       }
       for (const text of duties.notices) addNotice(root, text, at);
       if (git.base_lost) addNotice(root, `Sterling settlement: the settled commit ${git.settled.sha} is no longer reachable from HEAD ${git.next.sha}; duties for the commits between them were not derived. Reconcile them by hand from git log.`, at);
-      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; the first settlement after the dispatch ends advances it.`, at);
+      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; the first settlement after the dispatch ends advances it. If no subagent is still running (OpenCode exited or crashed mid-dispatch), restart OpenCode: its first root request sweeps the dispatch records a dead process left live.`, at);
     } catch (e) {
       logLine(root, `settle failed: ${errText(e)}`);
       addNotice(root, `Sterling settlement failed (${errText(e)}); the settled snapshot was not advanced, so the next turn retries the same range.`, at);

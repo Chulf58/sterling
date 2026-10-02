@@ -9,7 +9,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -296,6 +296,9 @@ test('when the session lookup fails the child is not guessed at: no staging, the
     const i = input('ses_child', [userMsg('Fix src/a.mjs')]);
     await h.onContext(i);
     assert.doesNotMatch(textOf(i), /a-article/);
+    assert.match(textOf(i), /YOUR KNOWLEDGE WAS NOT STAGED/);
+    assert.match(textOf(i), /\[session-lookup-failed\]/);
+    assert.match(readFileSync(join(dir, '.sterling', 'transient', 'opencode-plugin.log'), 'utf8'), /session lookup failed: lookup boom/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -351,12 +354,13 @@ test('a child session carries the return contract, and an implementor child the 
   try {
     const h = handler(dir, { sessions: { ses_child: { parentID: 'ses_root' } } });
     const i = input('ses_child', [userMsg('Summarize nothing in particular.')]);
-    i.agent = 'implementor';
+    i.agent = 'sterling/implementor';
     await h.onContext(i);
     assert.match(textOf(i), /STERLING DEFAULT RETURN CONTRACT/);
     assert.match(textOf(i), /TDD posture: tests-first OFF/);
+    assert.equal((textOf(i).match(/TDD posture:/g) ?? []).length, 2, 'the sterling/implementor child gets its own TDD line beside the conductor-level one');
     const r = input('ses_child', [userMsg('Summarize nothing in particular.')]);
-    r.agent = 'researcher';
+    r.agent = 'sterling/researcher';
     const h2 = handler(dir, { sessions: { ses_child: { parentID: 'ses_root' } } });
     await h2.onContext(r);
     assert.match(textOf(r), /STERLING DEFAULT RETURN CONTRACT/);
@@ -422,6 +426,91 @@ test('a shallow queue with no reconcile items adds no queue or backlog line', as
     const i = input('ses_root');
     await h.onContext(i);
     assert.doesNotMatch(textOf(i), /MAINTENANCE QUEUE|RECONCILE BACKLOG/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- review-fix round: fail-closed lookups, root-only scan, bounded caches --
+
+test('a session lookup that resolves to null, {} or another session is not read as root: no staging guess, a loud line', async () => {
+  const dir = makeProject();
+  try {
+    for (const info of [null, {}, { id: 'ses_someone_else' }]) {
+      const h = handler(dir, { getSession: () => ({ get: async () => info }) });
+      const i = input('ses_child', [userMsg('Fix src/a.mjs')]);
+      await h.onContext(i);
+      assert.doesNotMatch(textOf(i), /a-article/, JSON.stringify(info));
+      assert.match(textOf(i), /\[session-lookup-failed\]/, JSON.stringify(info));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the undeclared-source scan runs for root sessions only, once per process (not per session)', async () => {
+  const dir = makeProject({ project_name: 'fixture-proj', toolchains: [{ adapter: 'node', path_globs: ['lib/**/*.mjs'], test_globs: ['tests/**'], run_commands: { test: 'node --test' } }] });
+  try {
+    const h = handler(dir, { sessions: { ses_root: {}, ses_other: {}, ses_child: { parentID: 'ses_root' } } });
+    const child = input('ses_child', [userMsg('Summarize nothing in particular.')]);
+    await h.onContext(child);
+    assert.doesNotMatch(textOf(child), /UNDECLARED SOURCE/i, 'a child session never gets the scan');
+    const i = input('ses_root');
+    await h.onContext(i);
+    assert.match(textOf(i), /UNDECLARED SOURCE/i);
+    // Cover src/ now: a per-session scan would see it; the per-process cache still holds the first answer.
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'fixture-proj', toolchains: [{ adapter: 'node', path_globs: ['**/*.mjs'], test_globs: ['tests/**'], run_commands: { test: 'node --test' } }] }));
+    const other = input('ses_other');
+    await h.onContext(other);
+    assert.match(textOf(other), /UNDECLARED SOURCE/i, 'a second root session in the same process reuses the cached scan');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the per-session caches are bounded: the oldest entry goes first', async () => {
+  const { remember } = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'bounded.mjs')).href);
+  const m = new Map();
+  for (let n = 0; n < 5; n++) remember(m, `k${n}`, n, 3);
+  assert.deepEqual([...m.keys()], ['k2', 'k3', 'k4']);
+  remember(m, 'k2', 'again', 3);
+  assert.deepEqual([...m.keys()], ['k3', 'k4', 'k2'], 'a rewrite refreshes the entry');
+});
+
+test('MACHINE ROLE on OpenCode names the Sterling layer, not CLAUDE.md; the Claude text is unchanged', async () => {
+  const dir = makeProject({ project_name: 'fixture-proj', machine_role: 'consumer' });
+  try {
+    const h = handler(dir, { pluginRoot: dir, sessions: { ses_root: {} } });
+    const i = input('ses_root');
+    await h.onContext(i);
+    const roleLine = textOf(i).split('\n').find((l) => l.startsWith('MACHINE ROLE:'));
+    assert.match(roleLine, /^MACHINE ROLE: CONSUMER — .*The Sterling layer's "this machine authors" language/);
+    assert.doesNotMatch(roleLine, /CLAUDE\.md/);
+    assert.match(lib.machineRoleLine({ atClone: true, installedCopy: false, config: { machine_role: 'consumer' } }), /The Sterling layer in CLAUDE\.md's "this machine authors"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable maintenance queue is a degraded line in the context, not only a log line', async () => {
+  const dir = makeProject();
+  try {
+    const session = { get: async ({ sessionID }) => ({ id: sessionID }) };
+    const h = contextMod.createContextHandler({
+      openStore: () => {
+        throw new Error('store locked');
+      },
+      now: () => NOW,
+      rootOf: () => dir,
+      fenced: async (_name, _root, fn) => fn(),
+      rotationRestore: async () => '',
+      sessionSync: async () => {},
+      pluginRoot: join(dir, 'no-such-plugin-root'),
+      getSession: () => session,
+    });
+    const i = input('ses_root');
+    await h.onContext(i);
+    assert.match(textOf(i), /MAINTENANCE QUEUE UNREADABLE \(store locked\)/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

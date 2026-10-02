@@ -381,3 +381,138 @@ test('settlement does not advance while an OpenCode subagent is live in the disp
     p.cleanup();
   }
 });
+
+// --- review-fix round: background dispatch ends, agent names, register rounds -
+
+const registerRows = (dir) => {
+  const p = join(dir, '.sterling', 'transient', 'dispatch-register.json');
+  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : [];
+};
+const bgCall = (id, child, prompt = 'edit src/a.mjs', agent = 'sterling/implementor') => ({
+  before: { tool: 'subagent', sessionID: 'ses_root', agent: 'build', messageID: 'm', id, input: { agent, description: 'bg', prompt, background: true } },
+  result: { content: 'started', metadata: { sessionID: child, status: 'running' } },
+});
+
+test('a background child dispatch also ends when its execution fails or is interrupted', async () => {
+  const p = makeProject({ records: [] });
+  try {
+    const { ctx, plugin, cleanup } = await setup(p.dir, { ses_root: {}, ses_f: { parentID: 'ses_root' }, ses_i: { parentID: 'ses_root' } });
+    for (const [id, child] of [['call_f', 'ses_f'], ['call_i', 'ses_i']]) {
+      const { before, result } = bgCall(id, child);
+      await ctx.hooks.tool['execute.before'](before);
+      await ctx.hooks.tool['execute.after']({ ...before, status: 'completed', result });
+    }
+    await plugin.handlers.event({ type: 'session.execution.failed', data: { sessionID: 'ses_f' } });
+    await plugin.handlers.event({ type: 'session.execution.interrupted', data: { sessionID: 'ses_i' } });
+    assert.deepEqual(stateRecords(p.dir).filter((r) => !r.terminal).map((r) => r.tool_use_id), [], 'both background dispatches ended');
+    assert.ok(registerRows(p.dir).every((r) => r.ended), 'their register rounds ended');
+    assert.equal(server.liveDispatch(p.dir).live, false);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('a background child that ends before its subagent call returns is ended when the call binds it', async () => {
+  const p = makeProject({ records: [] });
+  try {
+    const { ctx, plugin, cleanup } = await setup(p.dir, { ses_root: {}, ses_fast: { parentID: 'ses_root' } });
+    const { before, result } = bgCall('call_fast', 'ses_fast');
+    await ctx.hooks.tool['execute.before'](before);
+    await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_fast' } });
+    await ctx.hooks.tool['execute.after']({ ...before, status: 'completed', result });
+    assert.deepEqual(stateRecords(p.dir).filter((r) => !r.terminal).map((r) => r.tool_use_id), [], 'the late bind ends the dispatch');
+    assert.ok(registerRows(p.dir).every((r) => r.ended), 'and its register round');
+    assert.equal(server.liveDispatch(p.dir).live, false, 'nothing holds settlement');
+
+    // A resumed child (same session id, a new call) ended earlier is NOT ended by that old end.
+    const again = bgCall('call_fast_2', 'ses_fast');
+    await ctx.hooks.tool['execute.before'](again.before);
+    await ctx.hooks.tool['execute.after']({ ...again.before, status: 'completed', result: again.result });
+    assert.ok(stateRecords(p.dir).some((r) => r.tool_use_id === 'call_fast_2' && !r.terminal), 'an end from before this call does not end it');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('the first root context of a process sweeps dispatch records a dead process left live, and the hold notice names the remedy', async () => {
+  const p = makeProject({ records: [] });
+  try {
+    const first = await setup(p.dir, { ses_root: {}, ses_dead: { parentID: 'ses_root' } });
+    await first.plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+    const { before, result } = bgCall('call_dead', 'ses_dead');
+    await first.ctx.hooks.tool['execute.before'](before);
+    await first.ctx.hooks.tool['execute.after']({ ...before, status: 'completed', result });
+    writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 5;\n');
+    git(p.dir, ['commit', '-qam', 'change']);
+    await first.plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+    assert.match(noticeTexts(p.dir).join('\n'), /not advanced because[^\n]*restart OpenCode/, 'the hold notice names the manual remedy');
+    await first.cleanup?.();
+
+    // A new process: its child context does not sweep, its first root context does.
+    const second = await setup(p.dir, { ses_root2: {}, ses_kid: { parentID: 'ses_root2' } });
+    await second.ctx.hooks.session.context({ sessionID: 'ses_kid', agent: 'sterling/scout', system: [], messages: [], tools: {} });
+    assert.ok(stateRecords(p.dir).some((r) => r.tool_use_id === 'call_dead' && !r.terminal), 'a child context does not sweep');
+    await second.ctx.hooks.session.context({ sessionID: 'ses_root2', agent: 'build', system: [], messages: [], tools: {} });
+    assert.ok(stateRecords(p.dir).every((r) => r.terminal), 'the stale record is terminal after the sweep');
+    assert.equal(existsSync(join(p.dir, '.sterling', 'transient', 'dispatch-register.json')), false, 'the register is cleared, as H1 clears it');
+    assert.equal(server.liveDispatch(p.dir).live, false);
+    await second.cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('a live background implementor registers a round from its brief, and a second implementor brief on the same file gets DISPATCH OVERLAP', async () => {
+  const p = makeProject({ records: [] });
+  try {
+    const { ctx, cleanup } = await setup(p.dir, { ses_root: {}, ses_impl: { parentID: 'ses_root' } });
+    const { before, result } = bgCall('call_impl', 'ses_impl', 'Implement the change in src/a.mjs and add tests.');
+    await ctx.hooks.tool['execute.before'](before);
+    await ctx.hooks.tool['execute.after']({ ...before, status: 'completed', result });
+    const row = registerRows(p.dir).find((r) => r.agent_id === 'ses_impl');
+    assert.deepEqual(row?.files, ['src/a.mjs']);
+    assert.equal(row?.agent_type, 'implementor', 'the register holds the role, not the sterling/ name');
+    assert.equal(row?.session_id, 'ses_root');
+    assert.ok(!row.ended);
+
+    const { after } = await call(ctx, { tool: 'subagent', input: { agent: 'sterling/implementor', description: 'second', prompt: 'Refactor src/a.mjs.' }, metadata: { sessionID: 'ses_impl2', status: 'completed' } });
+    assert.match(appended(after), /DISPATCH OVERLAP \(advisory\)[^\n]*src\/a\.mjs ← implementor:ses_impl/);
+
+    const scout = await call(ctx, { tool: 'subagent', input: { agent: 'sterling/scout', description: 'look', prompt: 'Map who calls src/a.mjs.' }, metadata: { sessionID: 'ses_sc', status: 'completed' } });
+    assert.doesNotMatch(appended(scout.after), /DISPATCH OVERLAP/, 'a sterling/scout brief is read-only once its name is normalised');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('the root-session gate fails closed when session.get resolves to null or a different session', async () => {
+  const { rootSessionGate } = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'dispatch.mjs')).href);
+  const p = makeProject({ records: [] });
+  try {
+    for (const info of [null, {}, { id: 'ses_other' }]) {
+      const gate = await rootSessionGate(p.dir, { session: { get: async () => info }, sessionID: 'ses_x', parents: new Map() });
+      assert.equal(gate.settle, false, JSON.stringify(info));
+      assert.match(gate.why ?? '', /ses_x/, 'the why names the session it could not confirm');
+    }
+    assert.deepEqual(await rootSessionGate(p.dir, { session: { get: async () => ({ id: 'ses_x' }) }, sessionID: 'ses_x', parents: new Map() }), { settle: true });
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('a torn notices file cannot reject the event handler, so the subscription loop survives', async () => {
+  const p = makeProject({ records: [] });
+  try {
+    const { plugin, cleanup } = await setup(p.dir, { ses_root: {} });
+    mkdirSync(join(p.dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(p.dir, server.NOTICES_REL), '[{"torn"');
+    await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_unknown' } });
+    assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /settle skipped: could not check whether session ses_unknown is a child/);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});

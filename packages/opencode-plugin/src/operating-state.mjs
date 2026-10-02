@@ -23,7 +23,7 @@ import { samePath } from '../../../scripts/lib/post-update-sync.mjs';
 export function operatingStateLines(root, pluginRoot) {
   const { config, configUnreadable } = readProjectConfig(root);
   const atClone = Boolean(pluginRoot && samePath(root, pluginRoot));
-  const lines = [machineRoleLine({ atClone, installedCopy: false, config }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable })].filter(Boolean);
+  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable })].filter(Boolean);
   return { lines, config };
 }
 
