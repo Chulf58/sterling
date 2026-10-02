@@ -268,6 +268,7 @@ function runInit(target, claudeConfigDir) {
       STERLING_REGISTRY_DB: join(target, 'registry.db'),
       STERLING_PLUGIN_ROOT_MATCH: tmp('sterling-cut-prm-'),
       STERLING_CODEX_PROBE: 'absent',
+      STERLING_CLAUDE_PROBE: 'ok',
       CLAUDE_CONFIG_DIR: claudeConfigDir,
     },
   });
