@@ -8083,7 +8083,43 @@ function statusBracket(record) {
   return `${status}\xB7${scope}${record?.superseded_by ? `, superseded_by: ${record.superseded_by}` : ""}`;
 }
 function statusAnnotation(record) {
-  return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
+  return (record?.status === "active" ? "" : ` [${statusBracket(record)}]`) + supersededAnnotation(record);
+}
+function supersededAnnotation(record) {
+  if (typeof record?.supersession_unknown === "string") {
+    return ` [supersession UNKNOWN (the lookup failed: ${clip(record.supersession_unknown, 120)}): read it before relying on this]`;
+  }
+  const inbound = Array.isArray(record?.inbound_supersedes) ? record.inbound_supersedes : [];
+  if (!inbound.length) return "";
+  const names = inbound.map(
+    (s2) => `${clip(s2.slug || s2.title || s2.id, 80)} (${String(s2.id).slice(0, 8)}${s2.status && s2.status !== "active" ? `, ${s2.status}` : ""})`
+  );
+  return ` [SUPERSEDED, whole or in part, by ${names.join("; ")}: read it before relying on this]`;
+}
+function authorityInDoubt(record) {
+  return typeof record?.supersession_unknown === "string" || Array.isArray(record?.inbound_supersedes) && record.inbound_supersedes.length > 0;
+}
+function authorityMarker(record) {
+  if (authorityInDoubt(record)) return "";
+  return record?.authority ? `[${record.authority}] ` : "";
+}
+function withInboundSupersedes(store, record) {
+  let inbound;
+  try {
+    inbound = store.inboundSupersedes(record.id);
+  } catch (e) {
+    return { ...record, supersession_unknown: String(e?.message ?? e) };
+  }
+  if (!inbound.length) return record;
+  return {
+    ...record,
+    inbound_supersedes: inbound.map((s2) => ({
+      id: s2.id,
+      ...s2.slug ? { slug: s2.slug } : {},
+      ...s2.title ? { title: s2.title } : {},
+      status: s2.status
+    }))
+  };
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
@@ -8261,8 +8297,7 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
     `\u25B8 DECISIONS ${matchLabel} (${fullTotal}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
   for (const d of shown) {
-    const authorityMarker = d.authority ? `[${d.authority}] ` : "";
-    lines.push(`  \u2192 ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`);
+    lines.push(`  \u2192 ${authorityMarker(d)}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
@@ -9513,7 +9548,7 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
   });
   if (!fresh.length) return null;
   const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
-  const decisions = fresh.filter((x) => x.record.type === "decision");
+  const decisions = fresh.filter((x) => x.record.type === "decision").map((x) => ({ ...x, record: withInboundSupersedes(store, x.record) }));
   const articles = fresh.filter((x) => x.record.type === "feature_article");
   const priorAnswers = fresh.filter(
     (x) => x.record.type === "research_finding" || x.record.type === "disconfirmed_hypothesis" || x.record.type === "open_question"
@@ -9542,7 +9577,7 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
       `\u25B8 DECISIONS for this subject (${records.length}) \u2014 one may already settle the question you just put; the user's pick must not silently contradict it. One line each, knowledge_get the id for the full ruling:`,
       ...shown.map((d) => {
         const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
-        return `${pointerHead(d, d.slug || d.title || d.statement)} \u2014 ${d.authority ? `[${d.authority}] ` : ""}${clip2(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` + (rejected ? ` \u2014 rejected: ${clip2(rejected, DECISION_REJECTED_CLIP)}` : "");
+        return `${pointerHead(d, d.slug || d.title || d.statement)} \u2014 ${authorityMarker(d)}${clip2(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` + (rejected ? ` \u2014 rejected: ${clip2(rejected, DECISION_REJECTED_CLIP)}` : "");
       }),
       ...records.length > shown.length ? [`  \u2026 ${records.length - shown.length} more NOT shown (cap ${MAX_DECISIONS}) \u2014 ${remedy} for the full set`] : []
     ].join("\n");

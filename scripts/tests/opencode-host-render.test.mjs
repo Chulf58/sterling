@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { validateFences, renderClaudeText, renderPortableText, renderOpenCodeFullText } from '../lib/agent-fences.mjs';
 import { loadRegistry } from '../lib/agent-distribution.mjs';
+import { applyConductorWordingEdits } from './conductor-wording-edits.mjs';
 import { ROSTER, STERLING_AGENTS_SUBDIR, renderFullOpenCodeAgent, setupOpenCode } from '../lib/opencode-install.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -75,7 +76,8 @@ test('the Claude-rendered conductor is byte-identical to its render before the h
   assert.equal(r.status, 0, `git show ${PRE_HOST_FENCE_COMMIT}: ${r.stderr}`);
   const now = read('agent-templates/conductor.md');
   assert.match(now, /^<!-- opencode-only -->$/m, 'the template carries host fences');
-  assert.equal(renderClaudeText(now, 'conductor.md'), renderClaudeText(r.stdout, 'conductor.md'));
+  // The baseline plus the deliberate wording edits listed in conductor-wording-edits.mjs.
+  assert.equal(renderClaudeText(now, 'conductor.md'), renderClaudeText(applyConductorWordingEdits(r.stdout), 'conductor.md'));
 });
 
 test('the OpenCode conductor names no Claude-only mechanism and carries the OpenCode mapping', () => {

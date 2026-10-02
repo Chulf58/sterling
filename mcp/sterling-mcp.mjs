@@ -28268,8 +28268,40 @@ var SterlingTools = class _SterlingTools {
     if (!Array.isArray(entries) || entries.length === 0) {
       throw new Error(`knowledge_append: 'entries' must be a non-empty array \u2014 nothing to append`);
     }
-    if (field === "links") {
+    const selector = /^([A-Za-z_]\w*)\[([A-Za-z_]\w*)=(.+)\]\.([A-Za-z_]\w*)$/.exec(field);
+    const base2 = selector ? selector[1] : field;
+    if (base2 === "links") {
       throw new Error(`knowledge_append: 'links' is not appendable here \u2014 use knowledge_link, which also maintains the record_links index`);
+    }
+    if (selector) {
+      const [, , key, value, sub] = selector;
+      this.refuseServerOwnedFields({ [base2]: entries }, "knowledge_append");
+      this.refuseUnknownFields(old.type, { [base2]: entries }, "knowledge_append");
+      const arr = old[base2];
+      if (!Array.isArray(arr)) {
+        throw new Error(`knowledge_append: '${base2}' on ${old.type} is ${arr === void 0 ? "absent" : typeof arr}, not an array \u2014 the [${key}=\u2026] selector addresses array elements; nothing was written`);
+      }
+      const hits = arr.filter((el2) => elementOwnsScalar(el2, key) && String(el2[key]) === value);
+      if (hits.length !== 1) {
+        throw new Error(`knowledge_append: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base2} \u2014 exactly one is required, nothing was written. ` + (hits.length === 0 ? `Confirm the ${key} value against the live array.` : `Select on a key whose value is unique in the array.`));
+      }
+      const el = hits[0];
+      const cur = el[sub];
+      if (!Array.isArray(cur)) {
+        throw new Error(`knowledge_append: '${sub}' on the selected ${base2} element is ${cur === void 0 ? "absent" : typeof cur}, not an array \u2014 append only extends array fields; nothing was written`);
+      }
+      const nextArr = arr.map((e) => e === el ? { ...el, [sub]: [...cur, ...entries] } : e);
+      const { record: record3, claims_check: claims_check2 } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base2]: nextArr }, resolves, void 0, "knowledge_append"));
+      return {
+        record: record3,
+        warnings: [
+          ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base2]: nextArr }), record3),
+          ...this.articleOversizeWarnings(record3),
+          ...this.citedIdWarnings(JSON.stringify(entries)),
+          ...this.openReconcileLaneWarnings(this.supersedeChain(old))
+        ],
+        ...claims_check2 ? { claims_check: claims_check2 } : {}
+      };
     }
     this.refuseServerOwnedFields({ [field]: entries }, "knowledge_append");
     this.refuseUnknownFields(old.type, { [field]: entries }, "knowledge_append");
@@ -33130,7 +33162,7 @@ function createSterlingServer(storePath2) {
     })
   }, ({ id, body, resolves, expected_version, projection }) => json(tools.writeProjected(tools.knowledgeUpdateResult(id, body, resolves, expected_version), projection)));
   server2.registerTool("knowledge_append", {
-    description: `Append entries to an array field (history, files, current_ac, live_test_refs, \u2026) without retransmitting it; same versioned write path as knowledge_update. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review items keyed to this record's chain, plus an article_missing item when an appended files[] entry's path is one of that item's file_keys (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.`,
+    description: `Append entries to an array field (history, files, current_ac, live_test_refs, \u2026) without retransmitting it; same versioned write path as knowledge_update. \`field\` may be an array-element selector 'arr[key=value].sub' to append inside ONE element's array (e.g. field "live_test_refs[ac_id=AC4].test_paths", entries ["tests/x.test.mjs"]); the selector must match exactly one element and sub must already be an array on it. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review items keyed to this record's chain, plus an article_missing item when an appended files[] entry's path is one of that item's file_keys (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.`,
     inputSchema: strict({
       id: external_exports.string(),
       field: external_exports.string(),

@@ -111,9 +111,18 @@ try {
     }
 
     if (stamped !== newest) {
+      // On a non-authoring clone (consumer, or role undeclared) "Regenerate and
+      // commit" is the harmful remedy — a smaller store shrinks a shared file.
+      // Name the safe route instead; the check never flips the setting itself
+      // (decision a446753c: one fact, one setting).
+      const remedy =
+        config?.machine_role === 'authoring'
+          ? `Regenerate and commit: ${proj.regenerate}`
+          : `This clone's machine role is ${config?.machine_role ?? 'undeclared'}, not authoring: do NOT regenerate here, a smaller store would shrink the shared file.\n` +
+            `  If this store did not produce the committed projection, set "store_authority": "secondary" in .sterling/config.json; the check then reports the drift without failing.\n` +
+            `  Only on the authoring clone: ${proj.regenerate}, then commit.`;
       console.error(
-        `projection freshness FAILED: ${proj.file} is stale — header as-of ${stamped}, store newest ${proj.label} record ${newest}.\n` +
-          `  Regenerate and commit: ${proj.regenerate}`
+        `projection freshness FAILED: ${proj.file} is stale — header as-of ${stamped}, store newest ${proj.label} record ${newest}.\n  ${remedy}`
       );
       failed = true;
       continue;

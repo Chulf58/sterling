@@ -271,6 +271,8 @@ export const BIN_ENTRIES = {
   'no-capture': 'scripts/no-capture.mjs',
   'plan-lock': 'scripts/plan-lock.mjs',
   'pr-review-wait': 'scripts/pr-review-wait.mjs',
+  // files a scrubbed Sterling defect report as a GitHub issue from a consumer project
+  'report-issue': 'scripts/report-issue.mjs',
   'rotation-note': 'scripts/rotation-note.mjs',
   'stamp-contract': 'scripts/stamp-contract.mjs',
   'sync-agents': 'scripts/sync-agents.mjs',

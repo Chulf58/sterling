@@ -192,3 +192,42 @@ test("store_authority 'secondary': a projection this store did not produce is re
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// A primary store on a non-authoring clone that fails the freshness check gets
+// the safe route in its remedy: "Regenerate and commit" is harmful there (a
+// smaller store shrinks a shared file). The check does not treat such a clone as
+// secondary on its own — the user sets store_authority by hand (decision
+// a446753c: one fact, one setting).
+test('freshness FAIL on a non-authoring clone names the store_authority route and warns against regenerating; authoring text unchanged', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-proj-role-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  try {
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    store.create(articleRec('record-schemas-registry', 'g'));
+    store.close();
+    writeFileSync(join(dir, 'architecture.md'), '# Architecture\n(store state as of 2099-01-01T00:00:00.000Z)\n');
+    const runWith = (config) => {
+      writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(config));
+      return spawnSync(process.execPath, [join(root, 'scripts', 'check-projection-fresh.mjs'), dir], {
+        encoding: 'utf8', cwd: dir, timeout: 60_000,
+      });
+    };
+
+    for (const [label, config] of [['consumer', { machine_role: 'consumer' }], ['undeclared', {}]]) {
+      const r = runWith(config);
+      assert.equal(r.status, 1, `${label}: exit code stays 1`);
+      assert.match(r.stderr, /projection freshness FAILED: architecture\.md is stale/, label);
+      assert.match(r.stderr, /store_authority/, `${label}: names the setting`);
+      assert.match(r.stderr, /"secondary"/, `${label}: names the safe value`);
+      assert.match(r.stderr, /\.sterling\/config\.json/, `${label}: names the file`);
+      assert.match(r.stderr, /do NOT regenerate/i, `${label}: warns against regenerating`);
+    }
+
+    const authoring = runWith({ machine_role: 'authoring' });
+    assert.equal(authoring.status, 1);
+    assert.match(authoring.stderr, /Regenerate and commit: node scripts\/architecture-projection\.mjs/);
+    assert.doesNotMatch(authoring.stderr, /store_authority/, 'authoring remedy text is unchanged');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
