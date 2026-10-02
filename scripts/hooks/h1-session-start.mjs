@@ -9,7 +9,7 @@ import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync,
 import { spawnSync } from 'node:child_process';
 import { basename, join } from 'node:path';
 import { pluginRoot as sharedPluginRoot, walkUpPluginRoot as sharedWalkUpPluginRoot } from './lib/plugin-root-walk.mjs';
-import { readStdin, allow, exitAfterWrite, openStore, loadConfig } from './lib/common.mjs';
+import { readStdin, allow, exitAfterWrite, openStore } from './lib/common.mjs';
 // Plan-lock primitives — ONE implementation, shared with h31-plan-lock.mjs,
 // h19-dispatch-staging.mjs and scripts/plan-lock.mjs. Aliased on import so the
 // PLAN LOCK section's names read locally while the definitions stay shared.
@@ -27,6 +27,7 @@ import { withRegisterLock, readRegister, registerPath, sessionBoundarySweep } fr
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { consumeRotationNote, renderRotationRestore } from './lib/rotation-restore.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
+import { machineRoleLine, projectModeLine, readProjectConfig, tddPostureLine } from './lib/operating-state.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
 import { ProjectRegistry, registryPath, SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
@@ -412,148 +413,35 @@ if (!store) {
 // and falls back to the schema default rather than throwing. Contrast the gates
 // (H3/H5/H14/H15), which fail CLOSED on exactly this input — a hook that cannot
 // evaluate must deny only where denying is its job (anti_pattern foreign_e13f0fb5).
-let config = null;
-let configUnreadable = false;
-try {
-  config = loadConfig(input.cwd);
-} catch {
-  config = null;
-  configUnreadable = true;
-}
-// A config that PARSES but is not an object (`[]`, `true`, `false`, `0`, `""`,
-// `"x"`, `5`) is unusable in exactly the way a throw is: every `config?.x?.y`
-// read below optional-chains to undefined, which the posture line would
-// otherwise render as the documented default. That is the same false-posture
-// defect the UNKNOWN branch closes, reached through a JSON-LEGAL corruption
-// instead of a malformed one, so it takes the same branch (review 2026-09-06).
-//
-// `null` IS DELIBERATELY EXCLUDED: loadConfig returns null for an ABSENT file,
-// which must keep rendering the documented default; a file whose content is
-// literally `null` parses to that same value and is therefore indistinguishable
-// from absent, so it shares that outcome as an accepted limitation (pinned as
-// such in h1-tdd-posture-line.test.mjs).
-//
-// THE COMPARISON MUST STAY A NULL TEST, NOT A TRUTHINESS TEST. Rewriting it as
-// `if (config && ...)` swallows `false`, `0` and `""` — three JSON-legal
-// non-object configs that would silently return to a confident ON — and the
-// four truthy non-object arms (`[]`, `true`, `"x"`, `5`) plus the null-trap arm all
-// stay GREEN under that rewrite, which is why those three falsy shapes are
-// pinned explicitly. Measured, not assumed: the truthiness rewrite reddens
-// exactly those three arms and nothing else. `!=` vs `!==` here is NOT the
-// hazard — they differ only for `undefined`, which loadConfig never returns, so
-// that swap is behaviourally inert and correctly leaves the suite green.
-//
-// It does NOT change any other consumer: `config` stays null-or-as-parsed and
-// roleContext / the queue threshold / the concurrency ceiling all keep
-// degrading to their own defaults as before.
-if (config !== null && (typeof config !== 'object' || Array.isArray(config))) {
-  configUnreadable = true;
-}
-
-// MACHINE ROLE (todo cabbc10f, decision foreign_a9b98b7d): stated ONLY when this
-// session's project IS a Sterling clone itself — comparing the normalized
-// input.cwd to pluginRoot(). Every OTHER Sterling project (a consumer of the
-// plugin, not a clone of it) never sees this line; it exists because the
-// committed CLAUDE.md's "this machine authors" prose travels with every
-// clone and misleads a session opened inside one. Guarded exactly like the
-// config read above — H1 is soft, so a malformed config costs this line, never
-// the conventions injection.
+// The three-state read (absent / unreadable / non-object) and the MACHINE ROLE,
+// TDD posture and Project mode lines below live in lib/operating-state.mjs, shared
+// with the OpenCode context hook; the rationale for each travels with its function.
+const { config, configUnreadable } = readProjectConfig(input.cwd);
+// `config` stays null-or-as-parsed, so the queue threshold and the concurrency
+// ceiling keep degrading to their own defaults. Each line below is guarded like
+// every other H1 read: a malformed config or unresolved plugin root costs only
+// that line (fail-open).
 let roleContext = '';
 try {
   const root = pluginRoot();
-  if (root && !samePath(input.cwd, root) && isInstalledCopy(root)) {
-    // An installed copy (no .git — decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
-    // design D) is never a project's cwd, so the line is stated in EVERY project: it is the
-    // only place a session learns that /plugin, not /sterling:update, moves this machine.
-    roleContext =
-      '\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.';
-  } else if (root && samePath(input.cwd, root)) {
-    const role = config?.machine_role;
-    if (role === 'authoring') {
-      roleContext =
-        '\n\nMACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) — Sterling work lands and merges here; the Sterling layer in CLAUDE.md\'s authoring contract applies.';
-    } else if (role === 'consumer') {
-      roleContext =
-        '\n\nMACHINE ROLE: CONSUMER — this clone consumes via /sterling:update. The Sterling layer in CLAUDE.md\'s "this machine authors" language does NOT apply on this machine: never commit here, never hand-reconcile drift; a dirty generated file is discarded (git checkout -- <path>); currency comes only from /sterling:update.';
-    } else {
-      roleContext =
-        '\n\nMACHINE ROLE: UNDECLARED — treat as CONSUMER (the safe posture) until declared. The authoring machine declares machine_role:"authoring" in .sterling/config.json once; a successful /sterling:update stamps "consumer" automatically.';
-    }
-  }
+  const installedCopy = Boolean(root && !samePath(input.cwd, root) && isInstalledCopy(root));
+  const atClone = Boolean(root && samePath(input.cwd, root));
+  const line = machineRoleLine({ atClone, installedCopy, config });
+  if (line) roleContext = `\n\n${line}`;
 } catch {
   // fail-open — a malformed config or unresolved plugin root costs only this line
 }
 
-// TDD POSTURE (decision foreign_752caf98
-// tdd-and-mutation-toggles-in-system-tab, board 7e7279c4 slice 3C): mechanizes
-// the "check what this machine is set to" instruction CLAUDE.md states in
-// prose by reading the LIVE per-project toggle at every SessionStart, rather
-// than leaving the conductor to consult a value it cannot see. loadConfig
-// (above) returns the raw parsed .sterling/config.json with NO zod defaults
-// applied (unlike the MCP server's parseConfig) — a project whose config
-// predates this toggle, or config === null on a malformed read, leaves
-// config?.tdd?.enabled undefined here. Undefined is treated as the
-// DOCUMENTED SCHEMA DEFAULT (the field defaults true, decision foreign_752caf98)
-// rather than invented: only an explicit `false` reads as OFF. Positioned
-// immediately after roleContext in the output concatenation below. Guarded
-// like every other H1 read — H1 is soft, so a malformed config costs only
-// this one line, never the conventions injection.
-//
-// AN UNREADABLE CONFIG REPORTS UNKNOWN, NEVER THE DEFAULT (external review
-// 2026-09-06, Codex thread 01a075e9, which caught this where two roster
-// reviewers did not). ABSENT and UNREADABLE are different facts and this line
-// must not collapse them: an absent key genuinely IS the schema default, but a
-// config that could not be PARSED tells us nothing about the toggle, and
-// rendering that as "ON" asserts a posture the hook never read. That is
-// the worst failure available here — worse than printing nothing — because
-// this line exists precisely to stop the conductor assuming a posture, and in
-// a project where the toggle is OFF (this clone, today) a corrupt config
-// would confidently state the exact opposite of the truth. loadConfig returns
-// null for an ABSENT file and THROWS on a malformed one, which is what makes
-// the two distinguishable at all.
 let tddPostureContext = '';
 try {
-  if (configUnreadable) {
-    tddPostureContext =
-      '\n\nTDD posture: UNKNOWN — the project config could not be read, so ' +
-      'config.tdd.enabled could not be determined. ' +
-      'This is NOT the default posture: repair the config, or state your posture explicitly.';
-  } else {
-    const tddOn = config?.tdd?.enabled !== false;
-    tddPostureContext =
-      `\n\nTDD posture: tests-first ${tddOn ? 'ON' : 'OFF'} ` +
-      `(config.tdd.enabled — TUI System tab; explicit asks still work)`;
-  }
+  tddPostureContext = `\n\n${tddPostureLine({ config, configUnreadable })}`;
 } catch {
   // fail-open — a malformed config costs only this line
 }
 
-// PROJECT MODE (decision project-mode-hobby-work-toggle-decides-flow, slice S1):
-// informational only — states this project's config.mode next to the role and
-// TDD lines so the session knows which flow applies. Same three states as the
-// TDD line above: an absent key IS the schema default (hobby); an unreadable
-// config is UNKNOWN, never the default; and a value outside hobby/work reads
-// INVALID, never as either flow (the surfaces that act on the mode refuse it).
 let modeContext = '';
 try {
-  if (configUnreadable) {
-    modeContext =
-      '\n\nProject mode: UNKNOWN — the project config could not be read, so config.mode could not be determined. ' +
-      'This is NOT the hobby default: repair the config.';
-  } else {
-    const mode = config?.mode;
-    if (mode === undefined || mode === 'hobby' || mode === 'work') {
-      modeContext =
-        `\n\nProject mode: ${mode === 'work' ? 'WORK' : 'HOBBY'} (config.mode — TUI System tab) — ` +
-        (mode === 'work'
-          ? 'the OpenCode agents and handoff files are written and maintained.'
-          : 'the OpenCode agents and handoff files are not written or maintained in hobby mode; existing ones may remain from an earlier work period.');
-    } else {
-      modeContext =
-        `\n\nProject mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) — config.mode must be 'hobby' or 'work'; ` +
-        'init, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).';
-    }
-  }
+  modeContext = `\n\n${projectModeLine({ config, configUnreadable })}`;
 } catch {
   // fail-open — a malformed config costs only this line
 }
