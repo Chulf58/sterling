@@ -74,14 +74,23 @@ function makeProject({ withGit = true } = {}) {
 }
 
 /** A stub of the OpenCode 2 plugin context: records hook registrations and feeds events. */
-function stubCtx(directory) {
+function stubCtx(directory, sessions = {}) {
   const hooks = { session: {}, tool: {} };
   const queue = [];
   let wake = null;
   return {
     hooks,
     location: { directory },
-    session: { hook: async (name, fn) => void (hooks.session[name] = fn) },
+    session: {
+      hook: async (name, fn) => void (hooks.session[name] = fn),
+      // OpenCode 2.0.21: session.get({ sessionID }) -> SessionInfo { id, parentID?, time: { created } }.
+      get: async ({ sessionID }) => {
+        const s = sessions[sessionID];
+        if (s instanceof Error) throw s;
+        if (!s) throw new Error(`no session ${sessionID}`);
+        return { id: sessionID, ...s };
+      },
+    },
     tool: { hook: async (name, fn) => void (hooks.tool[name] = fn) },
     event: {
       subscribe: ({ signal } = {}) => ({
@@ -100,9 +109,9 @@ function stubCtx(directory) {
   };
 }
 
-async function setupPlugin(dir, deps = {}) {
+async function setupPlugin(dir, deps = {}, sessions = {}) {
   const plugin = server.createSterlingServer({ claudeOnPath: () => false, ...deps });
-  const ctx = stubCtx(dir);
+  const ctx = stubCtx(dir, sessions);
   const cleanup = await plugin.setup(ctx);
   return { plugin, ctx, cleanup };
 }
@@ -267,6 +276,77 @@ test('an internal error in a tool hook is swallowed, logged and surfaced as a no
     const notices = JSON.parse(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8'));
     assert.ok(notices.some((n) => /boom in delivery/.test(n.text)), 'the failure becomes a notice the next context shows');
     await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+const NOTE_AT = '2026-10-02T10:00:00.000Z';
+const writeNote = (dir, extra = {}) => {
+  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'transient', 'rotation-note.json'), JSON.stringify({ next_slice: 'ROTATION-SLICE-42', session_id: 'ses_old', session_host: 'opencode', lanes: ['lane x'], at: NOTE_AT, ...extra }));
+};
+const noteExists = (dir) => existsSync(join(dir, '.sterling', 'transient', 'rotation-note.json'));
+const after = Date.parse(NOTE_AT) + 60_000;
+const contextFor = async (ctx, sessionID) => {
+  const ci = { ...contextInput(), sessionID };
+  await ctx.hooks.session.context(ci);
+  return systemText(ci);
+};
+
+test('rotation restore: the first new root session gets the note once and consumes it; it stays for that session; the next new session does not get it', async () => {
+  const p = makeProject();
+  try {
+    writeNote(p.dir);
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_new: { time: { created: after } }, ses_next: { time: { created: after + 1 } } });
+    const first = await contextFor(ctx, 'ses_new');
+    assert.match(first, /ROTATION RESTORE \(Sterling OpenCode plugin\)/);
+    assert.match(first, /ROTATION-SLICE-42/);
+    assert.match(first, /`opencode --session ses_old`/);
+    assert.equal(noteExists(p.dir), false, 'consumed');
+    assert.equal((first.match(/ROTATION RESTORE/g) ?? []).length, 1);
+    assert.match(await contextFor(ctx, 'ses_new'), /ROTATION-SLICE-42/, 'the restore stays in that session\'s later turns');
+    assert.doesNotMatch(await contextFor(ctx, 'ses_next'), /ROTATION RESTORE/, 'a second new session does not get it');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('rotation restore: the note stays in place for the old session, a child session, a session older than the note, and when the session cannot be read', async () => {
+  const p = makeProject();
+  try {
+    writeNote(p.dir);
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, {
+      ses_old: { time: { created: after } },
+      ses_child: { parentID: 'ses_new', time: { created: after } },
+      ses_early: { time: { created: Date.parse(NOTE_AT) - 1 } },
+      ses_broken: new Error('server said no'),
+      ses_notime: {},
+    });
+    for (const sid of ['ses_old', 'ses_child', 'ses_early']) {
+      assert.doesNotMatch(await contextFor(ctx, sid), /ROTATION RESTORE/, sid);
+      assert.equal(noteExists(p.dir), true, `${sid} leaves the note`);
+    }
+    const broken = await contextFor(ctx, 'ses_broken');
+    assert.doesNotMatch(broken, /ROTATION RESTORE/);
+    assert.match(broken, /Sterling layer\)/, 'a failed session lookup costs only the restore');
+    assert.equal(noteExists(p.dir), true);
+    assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /server said no/);
+    assert.match(await contextFor(ctx, 'ses_notime'), /ROTATION RESTORE/, 'an unreadable created time does not block a root session with a different id');
+    assert.equal(noteExists(p.dir), false);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('the layer says the new session restores the note', () => {
+  const p = makeProject({ withGit: false });
+  try {
+    const layer = server.renderSterlingLayer(p.dir, server.sterlingRoot());
+    assert.match(layer, /the Sterling plugin restores and consumes it in the new session's first turn/);
+    assert.doesNotMatch(layer, /does not restore the rotation note/);
   } finally {
     p.cleanup();
   }

@@ -4,7 +4,9 @@
 //   1. session context: the Sterling layer (templates/target-claude-md.md, the
 //      file init renders into CLAUDE.md) with its Claude-only phrases mapped
 //      to OpenCode, an OpenCode host tail naming the resolved Sterling root, a
-//      status line and pending notices;
+//      status line, pending notices, and the rotation restore in the first new
+//      root session after a rotation note (scripts/hooks/lib/rotation-restore.mjs,
+//      shared with H1);
 //   2. execute.before/after on read, edit and write: H19-style knowledge
 //      delivery appended to the tool result;
 //   3. session.execution.succeeded: settlement (mint reconcile duties, then
@@ -51,6 +53,8 @@ import {
 } from '../../../scripts/hooks/lib/delivery.mjs';
 import { gitTouches, mintSettlementReconcile, writeGitSettled, writeInitialGitSettled } from '../../../scripts/hooks/lib/settlement.mjs';
 import { maybeLaunchMaintenanceWorker } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
+import { readLock as readPlanLock } from '../../../scripts/hooks/lib/plan-lock.mjs';
+import { consumeRotationNote, readRotationNote, renderRotationRestore } from '../../../scripts/hooks/lib/rotation-restore.mjs';
 import { readRegister } from '../../../scripts/lib/dispatch-register.mjs';
 import { sterlingRootFrom } from '../../../scripts/lib/opencode-install.mjs';
 import { probeSchemaVersion } from '../../../scripts/lib/update.mjs';
@@ -193,7 +197,7 @@ const LAYER_HOST_MAP = [
     id: 'ready-for-new-session',
     lead: '- **Say `READY TO CLEAR` plainly when it is time.**',
     to: (r) =>
-      `- **Say \`READY FOR NEW SESSION\` plainly when it is time.** At a clean boundary (the slice is committed, the rotation note is written by \`node "${r}/bin/rotation-note.mjs"\`, and nothing is in flight: no running lane, no uncommitted change, no pending capture), end the reply with the literal line \`READY FOR NEW SESSION\` in capitals, on its own line; the user then starts a new session with /new. If the session changed plugin or MCP-server code, write \`EXIT AND RELAUNCH\` instead, so OpenCode restarts on the new code. Never use a soft variant such as "fine to start over whenever you like". If something is still in flight, name it and do not print the line. User-stated 2026-09-26 for this line's Claude Code form, and user-ruled for OpenCode as this new-session wording: a hedged phrase buried in a summary gets missed, and the user is the one who starts the new session. OpenCode does not restore the rotation note into the new session yet, so put its path (\`.sterling/transient/rotation-note.json\`) under the line for the user to hand over.`,
+      `- **Say \`READY FOR NEW SESSION\` plainly when it is time.** At a clean boundary (the slice is committed, the rotation note is written by \`node "${r}/bin/rotation-note.mjs"\`, and nothing is in flight: no running lane, no uncommitted change, no pending capture), end the reply with the literal line \`READY FOR NEW SESSION\` in capitals, on its own line; the user then starts a new session with /new. If the session changed plugin or MCP-server code, write \`EXIT AND RELAUNCH\` instead, so OpenCode restarts on the new code. Never use a soft variant such as "fine to start over whenever you like". If something is still in flight, name it and do not print the line. User-stated 2026-09-26 for this line's Claude Code form, and user-ruled for OpenCode as this new-session wording: a hedged phrase buried in a summary gets missed, and the user is the one who starts the new session. On /new the Sterling plugin restores and consumes it in the new session's first turn.`,
   },
   { id: 'version-banner', phrase: '(the same value the session-start banner prints)', to: (r) => `(on OpenCode, read it from \`${r}/.claude-plugin/plugin.json\`)` },
   {
@@ -377,10 +381,59 @@ export function createSterlingServer(deps = {}) {
   const launchWorker = deps.launchWorker ?? maybeLaunchMaintenanceWorker;
   const pending = new Map();
   const statusCache = new Map();
+  // Restore text per session that consumed a rotation note: OpenCode builds the
+  // system prompt per request, so the restore is re-sent on that session's
+  // later turns. Process-lifetime only; a relaunched OpenCode does not re-send it.
+  const restored = new Map();
+  let session = null;
   let directory = process.cwd();
   let chain = Promise.resolve();
 
   const rootOf = () => projectRoot(directory);
+
+  /**
+   * The rotation restore for this request, or ''. The note is consumed only by
+   * a ROOT session (no parentID) whose id differs from the note's session_id
+   * and, when the session's created time is readable, that was created after
+   * the note was written; otherwise the note stays for the session the user
+   * opens next (decision on the P5 design hazard, conductor-ruled 2026-10-02).
+   * A failed session lookup leaves the note, logs and notices; it never costs
+   * the layer.
+   */
+  async function rotationRestore(root, sessionID) {
+    if (restored.has(sessionID)) return restored.get(sessionID);
+    let note;
+    try {
+      note = readRotationNote(root);
+      if (!note) return '';
+      if (typeof sessionID !== 'string' || !sessionID || sessionID === note.session_id) return '';
+      if (!session || typeof session.get !== 'function') throw new Error('ctx.session.get is unavailable, so the session cannot be checked for a parent');
+      const info = await session.get({ sessionID });
+      if (info?.parentID) return '';
+      const created = info?.time?.created;
+      const noteAt = Date.parse(note.at ?? '');
+      if (Number.isFinite(created) && Number.isFinite(noteAt) && created <= noteAt) return '';
+    } catch (e) {
+      logLine(root, `rotation restore skipped for ${sessionID}: ${errText(e)}`);
+      addNotice(root, `Sterling: a rotation note is waiting but could not be checked against this session (${errText(e)}); it was left in place. See ${LOG_REL}.`, now());
+      return '';
+    }
+    const consumed = consumeRotationNote(root);
+    if (!consumed) return '';
+    let planLock = null;
+    let planLockMalformed = false;
+    try {
+      const read = readPlanLock(join(root, '.sterling'));
+      planLock = read.lock ?? null;
+      planLockMalformed = Boolean(read.malformed);
+    } catch (e) {
+      planLockMalformed = true;
+      logLine(root, `rotation restore: plan lock unreadable: ${errText(e)}`);
+    }
+    const text = renderRotationRestore(consumed, { cwd: root, host: 'opencode', planLock, planLockMalformed }).replace(/^\n+/, '');
+    restored.set(sessionID, text);
+    return text;
+  }
 
   /** Run fn inside the handler fence: budgeted, and a throw is logged and becomes a notice. */
   async function fenced(name, root, fn) {
@@ -438,7 +491,8 @@ export function createSterlingServer(deps = {}) {
   async function onContext(input) {
     const root = rootOf();
     if (!root) return;
-    await fenced('context', root, () => {
+    await fenced('context', root, async () => {
+      const restore = await rotationRestore(root, input.sessionID);
       let pluginRoot = null;
       let layer;
       try {
@@ -449,6 +503,7 @@ export function createSterlingServer(deps = {}) {
         layer = `STERLING LAYER UNAVAILABLE: ${errText(e)}\n\n${opencodeHostTail(pluginRoot)}`;
       }
       const blocks = [layer, statusLine(root)];
+      if (restore) blocks.push(restore);
       const notices = takeNotices(root, now());
       if (notices.length) blocks.push(`STERLING NOTICES (from the end of the last turn):\n${notices.map((n) => `- ${n.text}`).join('\n')}`);
       input.system.push({ type: 'text', text: blocks.join('\n\n') });
@@ -590,6 +645,7 @@ export function createSterlingServer(deps = {}) {
     },
     async setup(ctx) {
       directory = ctx?.location?.directory ?? process.cwd();
+      session = ctx.session;
       await ctx.session.hook('context', onContext);
       await ctx.session.hook('prompt', onPrompt);
       await ctx.session.hook('compaction', onCompaction);
