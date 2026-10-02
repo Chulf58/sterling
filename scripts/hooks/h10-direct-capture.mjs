@@ -43,23 +43,37 @@ import { pluginRoot } from './lib/plugin-root-walk.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy, fileEntriesOf } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
-import { isForeignTree } from './lib/working-tree.mjs';
 import { publishNotice } from './lib/delivery.mjs';
 import { readProjectMode } from '../lib/handoff-projection.mjs';
 import { readPrLoop, PR_LOOP_REL } from '../lib/work-pr.mjs';
 import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
+import {
+  IMAGE_BINARY_EXT,
+  articleMissingText,
+  capturedSince,
+  captureOwedText,
+  conceptArticleMissingText,
+  conceptFamiliesFrom,
+  demandExemption,
+  dischargedByCutoff,
+  hasOpenSystemTodo,
+  isValidAt,
+  noCaptureCutoffs,
+  ownershipJoin,
+  researchCapturedSince,
+  researchOwedText,
+  systemTodo,
+  unmetConceptFamilies,
+} from './lib/session-duties.mjs';
 
-/**
- * ARTICLE_MISSING TEXT (shared by the §6 mint and the live-recompute heal —
+/*
+ * ARTICLE_MISSING TEXT, articleMissingText in lib/session-duties.mjs (shared by the §6 mint and the live-recompute heal —
  * Dome Farmer #45: the heal used to rewrite file_keys via a `...survivor`
  * spread that carried the OLD text forward, so the item's stated count went
  * stale the moment a carried, untouched file dropped out of the healed set.
  * Both call sites now derive the count from the same file_keys list they
  * write, so the two can never disagree.
  */
-function articleMissingText(fileKeys, { newlyCreated = 0 } = {}) {
-  return `article missing: ${fileKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newlyCreated ? ` (${newlyCreated} newly created)` : ''} — create the owning article(s) (§6 H10 / §12 accretion)`;
-}
 
 /**
  * DEAD-DISPATCH RESIDUE (SPEC A, boards 03ed9d35/31565253; shared lib
@@ -1354,8 +1368,7 @@ try {
   // scripts/no-capture.mjs, scripts/concept-designed.mjs, scripts/test-repair.mjs,
   // and the MCP tool surface's own appender (packages/mcp-server/src/tools.ts,
   // whose injectable `now` defaults to the same call).
-  const ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-  const isValidAt = (a) => typeof a === 'string' && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
+  // ISO_AT and isValidAt live in lib/session-duties.mjs, shared with OpenCode.
 
   // Classify session events.
   const debugEvents = sessionEvents.filter((e) => e.kind === 'debug_scope');
@@ -1370,17 +1383,7 @@ try {
   // favour of the family's earliest VALID `at` (ignoring it can only move the
   // window LATER — the strict direction), and a family with no valid `at` at all
   // carries a null anchor and is demanded unconditionally below.
-  const conceptEvents = sessionEvents.filter((e) => e.kind === 'concept_designed' && e.detail);
-  const conceptFamilies = new Map(); // family -> earliest VALID at, or null when the family has none
-  for (const e of conceptEvents) {
-    const at = isValidAt(e.at) ? e.at : null;
-    if (!conceptFamilies.has(e.detail)) {
-      conceptFamilies.set(e.detail, at);
-      continue;
-    }
-    const prior = conceptFamilies.get(e.detail);
-    if (at !== null && (prior === null || at < prior)) conceptFamilies.set(e.detail, at);
-  }
+  const conceptFamilies = conceptFamiliesFrom(sessionEvents); // family -> earliest VALID at, or null when the family has none
 
   // No-capture declaration (board 7bbec3bd): scripts/no-capture.mjs and the
   // no_capture MCP tool append a no_capture event the moment the conductor
@@ -1417,30 +1420,14 @@ try {
   // corruption, and the same fail-closed rule that governs an uncomparable `at`
   // governs an unreadable scope — never widen a discharge on data you cannot
   // read.
-  const NO_CAPTURE_LANES = ['research', 'capture', 'all'];
-  const laneOf = (e) => {
-    if (e.lane === undefined || e.lane === null) return 'capture';
-    return NO_CAPTURE_LANES.includes(e.lane) ? e.lane : null;
-  };
+  // The lane rule is noCaptureLaneOf in lib/session-duties.mjs.
   //
   // The CUTOFF itself must be a canonical stamp before it can discharge anything
   // (2026-08-22): a declaration carrying 'n/a' sorts ABOVE every ISO stamp
   // ('n' > '2') and, taken as the cutoff, discharged every event in the session.
   // With no VALID declaration covering a lane its cutoff is null and nothing on
   // that lane is discharged.
-  const noCaptureEvents = sessionEvents.filter((e) => e.kind === 'no_capture');
-  const cutoffForLane = (lane) =>
-    noCaptureEvents
-      .filter((e) => {
-        const declared = laneOf(e);
-        return declared === lane || declared === 'all';
-      })
-      .map((e) => e.at)
-      .filter(isValidAt)
-      .sort()
-      .at(-1) ?? null;
-  const captureLaneCutoff = cutoffForLane('capture');
-  const researchLaneCutoff = cutoffForLane('research');
+  const { capture: captureLaneCutoff, research: researchLaneCutoff } = noCaptureCutoffs(sessionEvents);
   // The discharge test, applied per touch and per event AGAINST ITS OWN LANE'S
   // cutoff: covered only when its OWN `at` is a canonical stamp at or before
   // that cutoff. A missing or malformed `at` is therefore NOT covered — it
@@ -1449,7 +1436,7 @@ try {
   // such a record OUT, i.e. silently treated the duty it carried as discharged).
   // ONE comparison, two bound helpers: lane scoping changes WHICH cutoff a duty
   // is measured against, never HOW the stamps are compared.
-  const dischargedByCutoff = (at, cutoff) => cutoff !== null && isValidAt(at) && at <= cutoff;
+  // dischargedByCutoff lives in lib/session-duties.mjs.
   const dischargedOnCaptureLane = (at) => dischargedByCutoff(at, captureLaneCutoff);
   const dischargedOnResearchLane = (at) => dischargedByCutoff(at, researchLaneCutoff);
 
@@ -1558,7 +1545,7 @@ try {
   // The one place this regex reaches the article lane is the `imageBinaryOnly`
   // exemption on the no-duty terminal release, which fires only when EVERY
   // touched path is an image — see the block there.
-  const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
+  // IMAGE_BINARY_EXT lives in lib/session-duties.mjs.
   // A file a LIVE dispatch owns leaves the capture trigger set too (decision
   // ec9eacaa) — dropped here rather than at activePaths so it cannot backdate
   // `earliest` either, which would anchor the captured-set window to work whose
@@ -1823,16 +1810,7 @@ try {
   // rather than a bigger guess; total 0 skips the second call entirely. Store
   // failures still propagate exactly as before — the duty gate's own catch owns
   // the fail-loud direction, and the cap was never what made it safe.
-  const ownersSeen = new Map();
-  const ownerRows = (p) => {
-    if (ownersSeen.has(p)) return ownersSeen.get(p);
-    const filter = { types: ['feature_article', 'reference_material'], file_keys: [p] };
-    const total = store.count(filter);
-    const rows = total === 0 ? [] : store.query({ ...filter, cap: total });
-    ownersSeen.set(p, rows);
-    return rows;
-  };
-  const isUnowned = (p) => !ownerRows(p).some((r) => !isForeignTree(r, input.cwd));
+  const { ownerRows, isUnowned } = ownershipJoin(store, input.cwd);
   // What the join actually SAW for one demanded path — so a false demand is
   // diagnosable from the deny text alone instead of by re-running the query by
   // hand. "none" is the ordinary case; a row listed here was matched and then
@@ -1894,8 +1872,7 @@ try {
   // config.generated_projections is regenerated from the store and can never
   // own an article, so it is exempt the same way (board 3d3c9d81). The carried
   // keys of an open item are pruned by the same predicate (prunable, below).
-  const ignoreGlobs = config.article_demand.ignore_globs;
-  const exemptFromDemand = (p) => generatedProjections.has(p) || ignoreGlobs.some((g) => matchesGlob(p, g));
+  const exemptFromDemand = demandExemption(config, generatedProjections);
   let unowned = paths.filter((p) => !exemptFromDemand(p)).filter(isUnowned);
   // A gitignored path is never governed territory (board 1de3653b) — it cannot
   // be owned, so demanding an article for it is a false demand. A failed ignore
@@ -2329,9 +2306,7 @@ try {
   // hypotheses IS a durable capture — the session's knowledge landed in the
   // store even though it landed as a question rather than an answer, so nagging
   // for capture after one is a false demand.
-  const captured = store
-    .query({ types: ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'open_question'], cap: 1000 })
-    .some((r) => r.created_at >= earliest || r.updated_at >= earliest);
+  const captured = capturedSince(store, earliest);
 
   // Research duty satisfaction: research_finding|decision|anti_pattern since earliest
   // ACTIVE research event (no_capture-discharged events excluded — item 353416a9).
@@ -2344,9 +2319,7 @@ try {
     // store, satisfying the duty with knowledge written months ago.
     const rts = activeResearchEvents.map((e) => e.at).filter(isValidAt).sort();
     earliestResearch = rts.length ? rts[0] : now;
-    researchSatisfied = store
-      .query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
-      .some((r) => r.created_at >= earliestResearch || r.updated_at >= earliestResearch);
+    researchSatisfied = researchCapturedSince(store, earliestResearch);
   }
 
   // Concept duty satisfaction (decision foreign_7208729b): per FAMILY, a feature_article
@@ -2370,7 +2343,7 @@ try {
   // the since-the-event path above: an article created/updated within
   // CONCEPT_PRE_EVENT_WINDOW_MS BEFORE the family's own event `at` also
   // satisfies.
-  const CONCEPT_PRE_EVENT_WINDOW_MS = 15 * 60_000;
+  // The window is CONCEPT_PRE_EVENT_WINDOW_MS in lib/session-duties.mjs.
   let unmetFamilies = [];
   if (hasConceptDuty) {
     // FIX L2 (upgrade-polish review, 2026-08-21): a non-canonical `at` sorts
@@ -2380,29 +2353,8 @@ try {
     // isValidAt guard above.
     const sessionAts = sessionEvents.map((e) => e.at).filter(isValidAt).sort();
     const earliestSessionAt = sessionAts.length ? sessionAts[0] : now;
-    const articles = store.query({ types: ['feature_article'], cap: 1000 });
-    unmetFamilies = [...conceptFamilies.entries()]
-      .filter(([family, since]) => {
-        // No valid `at` anywhere in the family's events: the window is
-        // unresolvable, so the duty stays demanded rather than being measured
-        // against an invented anchor (fail-closed).
-        if (since === null) return true;
-        const windowStart = since < earliestSessionAt ? since : earliestSessionAt;
-        const sinceMs = Date.parse(since);
-        const preStart = Number.isFinite(sinceMs) ? sinceMs - CONCEPT_PRE_EVENT_WINDOW_MS : null;
-        return !articles.some((a) => {
-          if (a.concept_family !== family) return false;
-          if (a.created_at >= windowStart || a.updated_at >= windowStart) return true;
-          if (preStart === null) return false;
-          const created = Date.parse(a.created_at);
-          const updated = Date.parse(a.updated_at);
-          return (
-            (Number.isFinite(created) && created >= preStart && created <= sinceMs) ||
-            (Number.isFinite(updated) && updated >= preStart && updated <= sinceMs)
-          );
-        });
-      })
-      .map(([family]) => family);
+    // A family with no valid `at` anywhere is demanded unconditionally (fail-closed).
+    unmetFamilies = unmetConceptFamilies(store, conceptFamilies, earliestSessionAt);
   }
   const conceptSatisfied = unmetFamilies.length === 0;
 
@@ -2721,26 +2673,8 @@ try {
   } else if (hasCaptureDuty && !captured) {
     // Undeclared capture debt keeps the broader "any capture_owed open" gate,
     // unchanged.
-    const open = store
-      .query({ types: ['todo'], cap: 1000 })
-      .some((t) => t.source === 'system' && t.system_reason === 'capture_owed');
-    if (!open) {
-      store.enqueueSystemTodo({
-        id: randomUUID(),
-        type: 'todo',
-        created_at: now,
-        updated_at: now,
-        author: 'system',
-        status: 'active',
-        superseded_by: null,
-        links: [],
-        scope: 'project',
-        stack_tags: [],
-        text: `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture${clipped}`,
-        source: 'system',
-        system_reason: 'capture_owed',
-        file_keys: owedKeys,
-      });
+    if (!hasOpenSystemTodo(store, 'capture_owed')) {
+      store.enqueueSystemTodo(systemTodo(now, { text: captureOwedText(activePaths.length, clipped), system_reason: 'capture_owed', file_keys: owedKeys }));
     }
   }
   if (articleDemand) {
@@ -2817,22 +2751,7 @@ try {
     // that is undrainable debt H1 counts forever (the same reasoning the live
     // recompute above gives for REMOVING an item it heals to empty).
     if (demandKeys.length) {
-      store.enqueueSystemTodo({
-        id: randomUUID(),
-        type: 'todo',
-        created_at: now,
-        updated_at: now,
-        author: 'system',
-        status: 'active',
-        superseded_by: null,
-        links: [],
-        scope: 'project',
-        stack_tags: [],
-        text: articleMissingText(demandKeys, { newlyCreated: newUnowned.length }),
-        source: 'system',
-        system_reason: 'article_missing',
-        file_keys: demandKeys,
-      });
+      store.enqueueSystemTodo(systemTodo(now, { text: articleMissingText(demandKeys, { newlyCreated: newUnowned.length }), system_reason: 'article_missing', file_keys: demandKeys }));
     }
   }
   if (!conceptSatisfied) {
@@ -2841,46 +2760,15 @@ try {
     // dedupes it — the text is deterministic per family, so the old
     // text.includes() pre-check duplicated exactly what the choke does; removed.
     for (const family of unmetFamilies) {
-      store.enqueueSystemTodo({
-        id: randomUUID(),
-        type: 'todo',
-        created_at: now,
-        updated_at: now,
-        author: 'system',
-        status: 'active',
-        superseded_by: null,
-        links: [],
-        scope: 'project',
-        stack_tags: [],
-        text: `concept article missing: design settled for concept family '${family}' and the session ended without its concept article — create/update the feature_article with concept_family '${family}'`,
-        source: 'system',
-        system_reason: 'concept_article_missing',
-      });
+      store.enqueueSystemTodo(systemTodo(now, { text: conceptArticleMissingText(family), system_reason: 'concept_article_missing' }));
     }
   }
   if (hasResearchDuty && !researchSatisfied) {
     // "any research_owed open" gates more than the choke's exact-key match
     // (its text carries session-specific query details) — kept deliberately.
-    const open = store
-      .query({ types: ['todo'], cap: 1000 })
-      .some((t) => t.source === 'system' && t.system_reason === 'research_owed');
-    if (!open) {
+    if (!hasOpenSystemTodo(store, 'research_owed')) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join('; ');
-      store.enqueueSystemTodo({
-        id: randomUUID(),
-        type: 'todo',
-        created_at: now,
-        updated_at: now,
-        author: 'system',
-        status: 'active',
-        superseded_by: null,
-        links: [],
-        scope: 'project',
-        stack_tags: [],
-        text: `research owed: session research not captured (queries/agents: ${queryTexts})`,
-        source: 'system',
-        system_reason: 'research_owed',
-      });
+      store.enqueueSystemTodo(systemTodo(now, { text: researchOwedText(queryTexts), system_reason: 'research_owed' }));
     }
   }
   // R2 (board c198866d round-3 fixer, BLOCKING): the final terminal release —

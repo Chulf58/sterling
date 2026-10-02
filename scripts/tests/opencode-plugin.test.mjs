@@ -463,9 +463,9 @@ test('edit, write and read deliver the owning knowledge onto the tool result onc
     await ctx.hooks.tool['execute.after'](after3);
     assert.match(String(after3.result.content), /^written[\s\S]*alpha-feature/, 'a string result is appended to');
 
-    const shell = { tool: 'shell', sessionID: 'ses_3', id: 'c4', input: { command: 'cat src/a.mjs' } };
-    await ctx.hooks.tool['execute.before'](shell);
-    const after4 = { ...shell, status: 'completed', result: { content: [{ type: 'text', text: 'x' }] } };
+    const glob = { tool: 'glob', sessionID: 'ses_3', id: 'c4', input: { path: 'src/a.mjs' } };
+    await ctx.hooks.tool['execute.before'](glob);
+    const after4 = { ...glob, status: 'completed', result: { content: [{ type: 'text', text: 'x' }] } };
     await ctx.hooks.tool['execute.after'](after4);
     assert.equal(after4.result.content.length, 1, 'other tools get no delivery');
     await cleanup?.();
@@ -736,6 +736,262 @@ test('config and session-sync defaults are no-ops: they touch nothing and leave 
 
 // Opt-in live smoke against the scratch OpenCode 2.0.21 install. Set
 // STERLING_OC_LIVE=1 and STERLING_OC_DIR to the dir holding env.sh and node_modules/@opencode/cli.
+// --- Parity P6: H10's other duties as next-turn notices, shell and patch delivery, a loud worker skip.
+
+// The fixture's records are stamped NOW; this clock runs strictly after it, so a
+// record a test writes, and every settlement window, are later than the fixture.
+let tick = 0;
+const isoNow = () => new Date(Math.max(Date.now(), Date.parse(NOW) + 60_000) + tick++).toISOString();
+const systemItems = (dir, reason) => {
+  const s = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  try {
+    return s.query({ types: ['todo'], cap: 100 }).filter((t) => t.source === 'system' && t.system_reason === reason);
+  } finally {
+    s.close();
+  }
+};
+const noticeTexts = (dir) => (existsSync(join(dir, server.NOTICES_REL)) ? JSON.parse(readFileSync(join(dir, server.NOTICES_REL), 'utf8')).map((n) => n.text) : []);
+const writeEvents = (dir, events) => {
+  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'transient', 'session-events.json'), JSON.stringify(events));
+};
+const withStoreAt = (dir, fn) => {
+  const s = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  try {
+    return fn(s);
+  } finally {
+    s.close();
+  }
+};
+const liveEnvelope = (type) => ({ ...envelope(type), created_at: isoNow(), updated_at: isoNow() });
+const addFinding = (dir) =>
+  withStoreAt(dir, (s) => s.create({ ...liveEnvelope('research_finding'), question: 'q?', answer: 'a', source_urls: [], source_date: '2026-09-01', capture_date: '2026-09-02' }));
+
+test('settlement nags unpaid capture and article duties as a next-turn notice, then queues them when the next settlement finds them still unpaid', async () => {
+  const p = makeProject();
+  try {
+    const { plugin, ctx, cleanup } = await setupPlugin(p.dir, { now: isoNow });
+    await plugin.handlers.event(succeeded);
+    for (const n of ['n1', 'n2']) writeFileSync(join(p.dir, 'src', `${n}.mjs`), `export const ${n} = 1;\n`);
+    await plugin.handlers.event(succeeded);
+    const nag = noticeTexts(p.dir).join('\n');
+    assert.match(nag, /capture owed/i, 'the capture duty is raised');
+    assert.match(nag, /2 changed file\(s\) nothing owns.*src\/n1\.mjs/s, 'the article duty names the new unowned files');
+    assert.deepEqual(systemItems(p.dir, 'capture_owed'), [], 'nothing is queued on the nag');
+    assert.deepEqual(systemItems(p.dir, 'article_missing'), []);
+
+    const ci = contextInput();
+    await ctx.hooks.session.context(ci);
+    assert.match(systemText(ci), /capture owed/i, 'the next context shows the nag');
+
+    await plugin.handlers.event(succeeded);
+    const owed = systemItems(p.dir, 'capture_owed');
+    assert.equal(owed.length, 1);
+    assert.equal(owed[0].text, 'capture owed: direct-mode session touched 2 file(s) and ended without capture', 'the text is the H10 text');
+    const missing = systemItems(p.dir, 'article_missing');
+    assert.equal(missing.length, 1);
+    assert.deepEqual([...missing[0].file_keys].sort(), ['src/n1.mjs', 'src/n2.mjs']);
+    assert.match(missing[0].text, /^article missing: 2 file\(s\) nothing owns .*\(2 newly created\)/);
+    assert.ok(noticeTexts(p.dir).some((t) => /queued/i.test(t) && /capture_owed/.test(t) && /article_missing/.test(t)), 'the queueing is announced');
+
+    await plugin.handlers.event(succeeded);
+    assert.equal(systemItems(p.dir, 'capture_owed').length, 1, 'a duty is queued once');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('a capture written during the turn pays the capture duty, and a no_capture declaration after the nag discharges it', async () => {
+  const p = makeProject();
+  try {
+    const { plugin, cleanup } = await setupPlugin(p.dir, { now: isoNow });
+    await plugin.handlers.event(succeeded);
+    writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 5;\n');
+    addFinding(p.dir);
+    await plugin.handlers.event(succeeded);
+    assert.ok(!noticeTexts(p.dir).some((t) => /capture owed/i.test(t)), 'no nag: the turn wrote a record');
+
+    writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 6;\n');
+    await plugin.handlers.event(succeeded);
+    assert.ok(noticeTexts(p.dir).some((t) => /capture owed/i.test(t)), 'the next uncaptured change nags');
+    writeEvents(p.dir, [{ kind: 'no_capture', lane: 'capture', detail: 'nothing durable', at: isoNow() }]);
+    await plugin.handlers.event(succeeded);
+    assert.deepEqual(systemItems(p.dir, 'capture_owed'), [], 'a later no_capture declaration discharges it');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('concept and research duties come from the session-event register; each event is weighed once', async () => {
+  const p = makeProject();
+  try {
+    const { plugin, cleanup } = await setupPlugin(p.dir, { now: isoNow });
+    await plugin.handlers.event(succeeded);
+    writeEvents(p.dir, [
+      { kind: 'concept_designed', detail: 'fam-x', at: isoNow() },
+      { kind: 'research_tool', detail: 'https://example.com/doc', at: isoNow() },
+    ]);
+    await plugin.handlers.event(succeeded);
+    const nag = noticeTexts(p.dir).join('\n');
+    assert.match(nag, /concept_family 'fam-x'/);
+    assert.match(nag, /research.*https:\/\/example\.com\/doc/s);
+
+    addFinding(p.dir);
+    await plugin.handlers.event(succeeded);
+    const concept = systemItems(p.dir, 'concept_article_missing');
+    assert.equal(concept.length, 1);
+    assert.equal(concept[0].text, "concept article missing: design settled for concept family 'fam-x' and the session ended without its concept article — create/update the feature_article with concept_family 'fam-x'");
+    assert.deepEqual(systemItems(p.dir, 'research_owed'), [], 'the finding written after the nag pays the research duty');
+
+    await plugin.handlers.event(succeeded);
+    assert.ok(!noticeTexts(p.dir).some((t) => /fam-x/.test(t) && /owed|nag|duties/i.test(t) && !/queued/i.test(t)), 'a weighed event is not raised again');
+    assert.equal(systemItems(p.dir, 'concept_article_missing').length, 1);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('a malformed session-event register is a loud notice, and the file duties still settle', async () => {
+  const p = makeProject();
+  try {
+    const { plugin, cleanup } = await setupPlugin(p.dir, { now: isoNow });
+    await plugin.handlers.event(succeeded);
+    mkdirSync(join(p.dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(p.dir, '.sterling', 'transient', 'session-events.json'), '{not json');
+    writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 7;\n');
+    await plugin.handlers.event(succeeded);
+    const texts = noticeTexts(p.dir);
+    assert.ok(texts.some((t) => /session-events\.json/.test(t) && /concept and research duties/.test(t)));
+    assert.ok(texts.some((t) => /capture owed/i.test(t)));
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('shell delivery: paths a command names get H19 pointers on the result, once per session', async () => {
+  const p = makeProject();
+  try {
+    const { ctx, cleanup } = await setupPlugin(p.dir);
+    const call = { tool: 'shell', sessionID: 'ses_1', id: 's1', input: { command: 'cat src/a.mjs | head -3' } };
+    await ctx.hooks.tool['execute.before'](call);
+    const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'out' }] } };
+    await ctx.hooks.tool['execute.after'](after);
+    assert.equal(after.result.content.length, 2);
+    assert.match(after.result.content[1].text, /STERLING KNOWLEDGE POINTERS \(H19\)/);
+    assert.match(after.result.content[1].text, /src\/a\.mjs — article 'alpha-feature title \[alpha-feature\]'/);
+
+    const again = { tool: 'shell', sessionID: 'ses_1', id: 's2', input: { command: `wc -l ${join(p.dir, 'src', 'a.mjs')}` } };
+    await ctx.hooks.tool['execute.before'](again);
+    const after2 = { ...again, status: 'completed', result: { content: [{ type: 'text', text: 'out' }] } };
+    await ctx.hooks.tool['execute.after'](after2);
+    assert.equal(after2.result.content.length, 1, 'a path pointed at once this session is not repeated');
+
+    const none = { tool: 'shell', sessionID: 'ses_1', id: 's3', input: { command: 'echo hello' } };
+    await ctx.hooks.tool['execute.before'](none);
+    const after3 = { ...none, status: 'completed', result: { content: [{ type: 'text', text: 'hello' }] } };
+    await ctx.hooks.tool['execute.after'](after3);
+    assert.equal(after3.result.content.length, 1, 'a command naming no governed path gets nothing');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('patch delivery: every file a patch adds, updates, deletes or moves to gets the edit delivery', async () => {
+  const p = makeProject();
+  try {
+    const { ctx, cleanup } = await setupPlugin(p.dir);
+    const patchText = ['*** Begin Patch', '*** Update File: src/a.mjs', '@@', '-export const a = 1;', '+export const a = 2;', '*** Add File: src/new.mjs', '+export const n = 1;', '*** End Patch'].join('\n');
+    const call = { tool: 'patch', sessionID: 'ses_1', id: 'p1', input: { patchText } };
+    await ctx.hooks.tool['execute.before'](call);
+    const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'patched' }] } };
+    await ctx.hooks.tool['execute.after'](after);
+    assert.equal(after.result.content.length, 2);
+    const text = after.result.content[1].text;
+    assert.match(text, /STERLING KNOWLEDGE DELIVERY/);
+    assert.match(text, /alpha-feature/);
+    assert.match(text, /src\/new\.mjs/, 'the added file gets the unowned-territory notice');
+
+    const failed = { tool: 'patch', sessionID: 'ses_2', id: 'p2', input: { patchText } };
+    await ctx.hooks.tool['execute.before'](failed);
+    const afterFail = { ...failed, status: 'error', result: { content: [{ type: 'text', text: 'bad' }] } };
+    await ctx.hooks.tool['execute.after'](afterFail);
+    assert.equal(afterFail.result.content.length, 1, 'a failed patch delivers nothing');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('with no claude on PATH the worker skip is loud: one notice per process and a log line', async () => {
+  const p = makeProject();
+  try {
+    const { plugin, ctx, cleanup } = await setupPlugin(p.dir, { claudeOnPath: () => false });
+    await plugin.handlers.event(succeeded);
+    writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 8;\n');
+    await plugin.handlers.event(succeeded);
+    const skip = noticeTexts(p.dir).filter((t) => /maintenance worker/i.test(t));
+    assert.equal(skip.length, 1);
+    assert.match(skip[0], /no maintenance runner/i);
+    assert.match(skip[0], /Parity P8/);
+    const log = readFileSync(join(p.dir, server.LOG_REL), 'utf8');
+    assert.match(log, /no maintenance runner/i);
+    await ctx.hooks.session.context(contextInput());
+    await plugin.handlers.event(succeeded);
+    await plugin.handlers.event(succeeded);
+    assert.equal(noticeTexts(p.dir).filter((t) => /maintenance worker/i.test(t)).length, 0, 'the notice is not raised again in this process');
+    assert.equal(readFileSync(join(p.dir, server.LOG_REL), 'utf8').match(/no maintenance runner/gi).length, 1, 'nor logged again');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('inside a non-node host the worker runner is spawned with node from PATH; no node is a loud skip; a failed launch is a notice', async () => {
+  const worker = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'worker.mjs')).href);
+  assert.equal(worker.isNodeBinary('/usr/bin/node'), true);
+  assert.equal(worker.isNodeBinary('C:\\Program Files\\nodejs\\node.exe'), true);
+  assert.equal(worker.isNodeBinary('/home/u/.opencode/bin/opencode'), false);
+  const p = makeProject();
+  try {
+    const openStore = (dbPath) => new SterlingStore(dbPath);
+    const spawned = [];
+    const spawnImpl = (cmd, args) => {
+      spawned.push({ cmd, args });
+      return { on() {}, unref() {}, pid: 1 };
+    };
+    // The lib spawns its runner as process.execPath (scripts/hooks/lib/maintenance-worker.mjs).
+    const launchWorker = (o) => {
+      o.spawn(process.execPath, ['runner.mjs'], {});
+      return { launched: true, reason: 'launched' };
+    };
+    const inOpencode = worker.createWorkerLaunch({ openStore, claudeOnPath: () => true, launchWorker, execPath: '/x/opencode', nodeOnPath: () => true, spawnImpl });
+    inOpencode(p.dir, isoNow());
+    assert.deepEqual(spawned, [{ cmd: 'node', args: ['runner.mjs'] }], 'the runner runs on node, not the host binary');
+
+    const onNode = worker.createWorkerLaunch({ openStore, claudeOnPath: () => true, launchWorker, execPath: '/usr/bin/node', nodeOnPath: () => false, spawnImpl });
+    onNode(p.dir, isoNow());
+    assert.equal(spawned[1].cmd, '/usr/bin/node', 'a node host keeps its own binary');
+
+    const noNode = worker.createWorkerLaunch({ openStore, claudeOnPath: () => true, launchWorker, execPath: '/x/opencode', nodeOnPath: () => false, spawnImpl });
+    noNode(p.dir, isoNow());
+    noNode(p.dir, isoNow());
+    assert.equal(spawned.length, 2, 'nothing is spawned without node');
+    assert.equal(noticeTexts(p.dir).filter((t) => /not node, and no `node` is on PATH/.test(t)).length, 1, 'one notice per process');
+    assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /\/x\/opencode, not node/);
+
+    const failing = worker.createWorkerLaunch({ openStore, claudeOnPath: () => true, launchWorker: () => ({ launched: false, reason: 'error', detail: 'spawn: EACCES' }), execPath: '/usr/bin/node', spawnImpl });
+    failing(p.dir, isoNow());
+    assert.ok(noticeTexts(p.dir).some((t) => /could not be launched \(spawn: EACCES\)/.test(t)), 'a launch the lib reports as failed is a notice');
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('live: OpenCode 2.0.21 shows the model the injected layer and an edit delivery', { skip: process.env.STERLING_OC_LIVE !== '1' }, async () => {
   const ocDir = process.env.STERLING_OC_DIR;
   assert.ok(ocDir && existsSync(join(ocDir, 'node_modules', '@opencode', 'cli')), 'STERLING_OC_DIR must point at the OpenCode 2.0.21 scratch install');
