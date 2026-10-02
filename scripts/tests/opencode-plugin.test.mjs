@@ -75,7 +75,7 @@ function makeProject({ withGit = true } = {}) {
 
 /** A stub of the OpenCode 2 plugin context: records hook registrations and feeds events. */
 function stubCtx(directory, sessions = {}) {
-  const hooks = { session: {}, tool: {} };
+  const hooks = { session: {}, tool: {}, transforms: { command: [], skill: [], mcp: [] } };
   const queue = [];
   let wake = null;
   return {
@@ -92,6 +92,10 @@ function stubCtx(directory, sessions = {}) {
       },
     },
     tool: { hook: async (name, fn) => void (hooks.tool[name] = fn) },
+    // Registration surfaces (config.mjs): each transform callback is kept; tests run them when they need to.
+    command: { transform: async (cb) => (hooks.transforms.command.push(cb), { dispose: async () => {} }) },
+    skill: { transform: async (cb) => (hooks.transforms.skill.push(cb), { dispose: async () => {} }) },
+    mcp: { transform: async (cb) => (hooks.transforms.mcp.push(cb), { dispose: async () => {} }) },
     event: {
       subscribe: ({ signal } = {}) => ({
         async *[Symbol.asyncIterator]() {
@@ -710,13 +714,10 @@ test('config and session-sync seams are wired: configure runs once at setup, syn
   }
 });
 
-test('config and session-sync defaults are no-ops: they touch nothing and leave the context unchanged', async () => {
+test('the default config registers through the three transforms and the session-sync default is a no-op; neither changes the context', async () => {
   const p = makeProject();
   try {
-    const { createConfigHandler } = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'config.mjs')).href);
     const { createSessionSync } = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'sync.mjs')).href);
-    const untouchable = new Proxy({}, { get: (_, k) => { throw new Error(`the no-op configure touched ctx.${String(k)}`); } });
-    assert.equal(await createConfigHandler()(untouchable), undefined);
     const syncOnce = createSessionSync();
     assert.equal(await syncOnce(p.dir, 'ses_1'), undefined);
     assert.equal(await syncOnce(p.dir, 'ses_2'), undefined);
@@ -725,6 +726,8 @@ test('config and session-sync defaults are no-ops: they touch nothing and leave 
     const a = await contextFor(plain.ctx, 'ses_1');
     const b = await contextFor(noop.ctx, 'ses_1');
     assert.equal(a, b, 'the default seams add nothing to the context');
+    const t = plain.ctx.hooks.transforms;
+    assert.deepEqual([t.command.length, t.skill.length, t.mcp.length], [1, 1, 1], 'the default configure registered commands, skills and the MCP entry once each');
     assert.equal(existsSync(join(p.dir, server.NOTICES_REL)), false, 'no notice was raised');
     assert.equal(existsSync(join(p.dir, server.LOG_REL)), false, 'nothing was logged');
     await plain.cleanup?.();
