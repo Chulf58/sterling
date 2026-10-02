@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { parseConfig, RECORD_TYPES } from '@sterling/schemas';
-import { SterlingStore } from '@sterling/store';
+import { SterlingStore, createDomain } from '@sterling/store';
 import { createSterlingServer } from '../server.js';
 import { SterlingTools } from '../tools.js';
 
@@ -1082,5 +1082,65 @@ test('knowledge_create is typed per-type (decision foreign_7c7f6db1, probe resea
     );
   } finally {
     await cleanup();
+  }
+});
+
+test('MCP boot with a configured domain whose store is MISSING still starts, warns once on stderr, and the tools work on the remaining stores (board 675daf9d (c) ruling)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mcp-missing-domain-'));
+  const presentDb = join(dir, 'domains', 'present', 'sterling.db');
+  const ghostDb = join(dir, 'domains', 'ghost', 'sterling.db');
+  createDomain('present', 'present domain', presentDb);
+  writeFileSync(
+    join(dir, 'config.json'),
+    JSON.stringify({ stack_tags: ['present', 'ghost'], domain_paths: { present: presentDb, ghost: ghostDb } })
+  );
+  const written: string[] = [];
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    written.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  let booted: ReturnType<typeof createSterlingServer>;
+  try {
+    booted = createSterlingServer(join(dir, 'sterling.db'));
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+  const { server, store } = booted;
+  const client = new Client({ name: 'test-client', version: '0.0.1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const ghostLines = written.filter((l) => l.includes("'ghost'"));
+    assert.equal(ghostLines.length, 1, `exactly one stderr line for the missing domain: ${JSON.stringify(written)}`);
+    assert.ok(ghostLines[0].includes(ghostDb) && /createDomain/.test(ghostLines[0]) && /init/.test(ghostLines[0]), ghostLines[0]);
+    assert.ok(!written.some((l) => l.includes("'present'")), 'no warning for the domain that exists');
+    assert.equal(existsSync(ghostDb), false, 'boot never creates the missing domain');
+    assert.deepEqual(store.domainNames(), ['present']);
+    assert.deepEqual(store.missingDomains.map((m) => m.name), ['ghost']);
+
+    const fields = {
+      type: 'reference_material',
+      title: 'present ref',
+      kind: 'doc',
+      location: 'https://example.com/x',
+      summary: 'bootcheckterm',
+      source_date: '2026-06-16',
+      capture_date: '2026-06-16',
+      basis: 'platform',
+    };
+    const inDomain = payload(
+      await client.callTool({ name: 'knowledge_create', arguments: { type: 'reference_material', fields: { ...fields, scope: 'domain:present' }, projection: 'full' } })
+    ) as { record: { id: string } };
+    assert.ok(store.querySource('present', {}).some((r) => r.id === inDomain.record.id), 'a domain write lands in the existing domain');
+    const q = payload(await client.callTool({ name: 'knowledge_query', arguments: { rank_terms: ['bootcheckterm'] } })) as { records: { id: string }[] };
+    assert.ok(q.records.some((r) => r.id === inDomain.record.id), 'knowledge_query reads the remaining domain');
+    const refused = await client.callTool({ name: 'knowledge_create', arguments: { type: 'reference_material', fields: { ...fields, scope: 'domain:ghost' } } });
+    assert.equal(refused.isError, true, 'a write to the missing domain is refused, not silently created');
+  } finally {
+    await client.close();
+    await server.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

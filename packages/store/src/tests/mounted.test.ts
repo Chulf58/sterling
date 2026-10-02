@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { MountedStores, SterlingStore, createDomain } from '../index.js';
+import { MountedStores, SterlingStore, createDomain, missingDomainWarning } from '../index.js';
 import type { QueryOptions } from '../index.js';
 
 const NOW = '2026-06-16T12:00:00.000Z';
@@ -314,6 +314,39 @@ test('MountedStores: the default mount mode REFUSES a missing domain, naming cre
     assert.equal(existsSync(freshDb), false, 'no domain db is created by a refused mount');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('MountedStores skipMissing records each skipped domain in missingDomains, and the warning names the domain, path and fix', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-missing-list-'));
+  const presentDb = join(dir, 'domains', 'present', 'sterling.db');
+  const ghostDb = join(dir, 'domains', 'ghost', 'sterling.db');
+  createDomain('present', 'present domain', presentDb);
+  const stores = new MountedStores(
+    join(dir, '.sterling', 'sterling.db'),
+    [{ name: 'present', dbPath: presentDb }, { name: 'ghost', dbPath: ghostDb }],
+    { skipMissing: true }
+  );
+  try {
+    assert.deepEqual(stores.domainNames(), ['present']);
+    assert.deepEqual(stores.missingDomains, [{ name: 'ghost', dbPath: ghostDb }]);
+    const line = missingDomainWarning(stores.missingDomains[0]);
+    assert.ok(line.includes("'ghost'") && line.includes(ghostDb), line);
+    assert.match(line, /createDomain/);
+    assert.match(line, /init/);
+    assert.ok(!line.includes('\n'), 'one line');
+  } finally {
+    stores.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('MountedStores: with every domain present, missingDomains is empty', () => {
+  const { stores, cleanup } = harness(['genesys']);
+  try {
+    assert.deepEqual(stores.missingDomains, []);
+  } finally {
+    cleanup();
   }
 });
 

@@ -24,7 +24,7 @@ import {
   type Freshness,
 } from '@sterling/schemas';
 
-export { MountedStores, type DomainMount, resolveDomainMounts, createDomain, DomainNotCreatedError, DOMAIN_DESCRIPTION_KEY } from './mounted.js';
+export { MountedStores, type DomainMount, resolveDomainMounts, createDomain, DomainNotCreatedError, DOMAIN_DESCRIPTION_KEY, missingDomainWarning } from './mounted.js';
 export { allocateShares, DEFAULT_PROJECT_SHARE } from './shares.js';
 export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
 export * from './axis.js';

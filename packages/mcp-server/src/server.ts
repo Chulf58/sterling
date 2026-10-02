@@ -7,7 +7,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { z } from 'zod';
 import { parseConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor } from '@sterling/schemas';
-import { MountedStores, resolveDomainMounts } from '@sterling/store';
+import { MountedStores, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { SterlingTools, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
@@ -178,9 +178,13 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   // Read before opening the store: config.stack_tags is the §3.3 mount manifest.
   const configPath = join(dirname(storePath), 'config.json');
   const config = parseConfig(existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {});
-  // §3.3: mount one shared domain store per stack tag (resolveDomainMounts) — the
-  // mounted set equals the §3.4 filter set by construction.
-  const store = new MountedStores(storePath, resolveDomainMounts(config));
+  // §3.3: mount one shared domain store per stack tag (resolveDomainMounts). The
+  // stack tags are only the mount manifest; they do not filter retrieval. Boot
+  // never fails on a configured domain whose store is missing (board 675daf9d
+  // (c) ruling): it is skipped and announced on stderr, one line per domain, and
+  // stays on store.missingDomains. Creating it is an explicit createDomain call.
+  const store = new MountedStores(storePath, resolveDomainMounts(config), { skipMissing: true });
+  for (const m of store.missingDomains) process.stderr.write(missingDomainWarning(m) + '\n');
   // store lives at <project>/.sterling/sterling.db (§2.3) — project root is two up;
   // §3.2.5 repo-located doc mtime checks resolve against it
   const tools = new SterlingTools({ store, config, repoRoot: dirname(dirname(storePath)) });

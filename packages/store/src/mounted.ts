@@ -68,6 +68,17 @@ export class DomainNotCreatedError extends Error {
   }
 }
 
+/** The one-line warning for a configured domain that was skipped because its
+ *  store does not exist. Shared by every caller that mounts with skipMissing
+ *  and announces the skip, so the wording cannot drift between them. */
+export function missingDomainWarning(m: DomainMount): string {
+  return (
+    `sterling: domain '${m.name}' is configured but has no store at '${m.dbPath}'; it is NOT mounted, ` +
+    `so its knowledge is not read and writes to scope domain:${m.name} are refused. ` +
+    `Create it with createDomain (a description is required), or run init to set it up.`
+  );
+}
+
 /**
  * Create a NEW domain store at dbPath and record its description (store_meta key
  * 'description'). The one way a domain store comes into being. Fails loud, with
@@ -130,6 +141,11 @@ export class MountedStores {
   readonly project: SterlingStore;
   private readonly domains = new Map<string, SterlingStore>();
 
+  /** Configured domains skipped under skipMissing because their store does not
+   *  exist, in manifest order. Kept so a caller (boot, a tool response, H1) can
+   *  disclose the skip instead of the domain silently vanishing. */
+  readonly missingDomains: DomainMount[] = [];
+
   /** The project store is opened, and created when absent. A domain store is
    *  only ever OPENED here, never created: a mount whose db file does not exist
    *  throws DomainNotCreatedError naming createDomain (board 675daf9d (c)), with
@@ -142,7 +158,10 @@ export class MountedStores {
     try {
       for (const m of mounts) {
         if (!existsSync(m.dbPath)) {
-          if (options?.skipMissing) continue;
+          if (options?.skipMissing) {
+            this.missingDomains.push({ name: m.name, dbPath: m.dbPath });
+            continue;
+          }
           throw new DomainNotCreatedError(m.name, m.dbPath);
         }
         this.domains.set(m.name, new SterlingStore(m.dbPath));
