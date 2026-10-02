@@ -19,6 +19,8 @@ import {
   hasRecordCentralityHit,
   recordCentralityHits,
   classifyClaimPath,
+  fitDomains,
+  MountedStores,
   type QueryOptions,
   type ToolStore,
 } from '@sterling/store';
@@ -549,6 +551,10 @@ export interface KnowledgeQueryResult {
    * capped-window disclosure, never a replacement for it.
    */
   above_threshold?: number;
+  /** Configured domains not mounted because their store is missing, so this
+   *  read did not search them. Present only when non-empty. Each record also
+   *  carries `source`: 'project' or 'domain:<name>', the store that holds it. */
+  missing_domains?: string[];
 }
 
 /** knowledge_preflight's disclosed result (H20/H19 relevance slice 4b; scope
@@ -580,12 +586,17 @@ export interface KnowledgePreflightResult {
    *  was truncated to it — omitted, never `false`, when the window is
    *  already complete. */
   capped?: true;
+  /** Configured domains not mounted because their store is missing, so this
+   *  check did not search them. Present only when non-empty. */
+  missing_domains?: string[];
   matches: {
     id: string;
     type: string;
     title: string;
     matched_on: string[];
     central: string[];
+    /** The store holding the match: 'project' or 'domain:<name>'. */
+    source: string;
     /** board c6e3561f disclosure-carry: records elsewhere holding a
      *  rel:'supersedes' edge onto this match — same shape knowledge_get and
      *  knowledge_query-full surface, OMITTED when there are none. */
@@ -638,6 +649,55 @@ export interface ToolDeps {
   newId?: () => string;
   /** project root for §3.2.5 repo-located doc mtime checks; absent → check inert */
   repoRoot?: string;
+  /** The mounted-domain surface (Domains D2). Absent: derived from a
+   *  MountedStores `store`, or none at all for a plain single store. */
+  domains?: DomainSurface;
+}
+
+/**
+ * The mounted domains as the tool layer sees them (Domains D2, decision
+ * projects-mount-domains-and-sibling-projects): their names, their
+ * descriptions, and the configured domains skipped because no store exists.
+ * Kept beside ToolStore rather than inside it because only the domain-facing
+ * tools need it and a plain SterlingStore has no domains to report.
+ */
+export interface DomainSurface {
+  /** Mounted domain names, in manifest order. */
+  names(): string[];
+  /** A mounted domain's description, or undefined when its store has none. */
+  description(name: string): string | undefined;
+  /** Store a mounted domain's description (the store trims it). */
+  setDescription(name: string, description: string): void;
+  /** Configured domains that are NOT mounted because their store is missing. */
+  missing(): string[];
+}
+
+/** The DomainSurface over a MountedStores: every read and the one write go
+ *  through the stores' own surface (setDomainDescription), so the store
+ *  package stays the one write path. */
+export function mountedDomainSurface(stores: MountedStores): DomainSurface {
+  return {
+    names: () => stores.domainNames(),
+    description: (name) => stores.domainDescription(name),
+    setDescription: (name, description) => stores.setDomainDescription(name, description),
+    missing: () => stores.missingDomains.map((m) => m.name),
+  };
+}
+
+/** Types that never leave the project store (§3.3): knowledge_promote refuses
+ *  them and the promotion_review mint never proposes them. */
+const UNPROMOTABLE_TYPES = ['feature_article', 'todo', 'attestation'];
+
+/** The repo paths a record declares: `file_keys`, or a feature_article's
+ *  `files[].path`. A record with any of these is about this repo, so it stays
+ *  project-scoped (decision projects-mount-domains-and-sibling-projects). A
+ *  reference_material's doc `location` is deliberately not counted: the ruling
+ *  names file_keys, and domain-scoped doc references already exist. */
+function declaredRepoPaths(type: string, record: Record<string, unknown>): string[] {
+  if (type === 'feature_article') {
+    return ((record.files as { path?: unknown }[] | undefined) ?? []).map((f) => f?.path).filter((p): p is string => typeof p === 'string');
+  }
+  return Array.isArray(record.file_keys) ? (record.file_keys as unknown[]).filter((p): p is string => typeof p === 'string') : [];
 }
 
 const DAY_MS = 86_400_000;
@@ -1578,6 +1638,7 @@ export class SterlingTools {
   private now: () => string;
   private newId: () => string;
   private repoRoot?: string;
+  private domains?: DomainSurface;
 
   constructor(deps: ToolDeps) {
     this.store = deps.store;
@@ -1585,6 +1646,57 @@ export class SterlingTools {
     this.now = deps.now ?? (() => new Date().toISOString());
     this.newId = deps.newId ?? randomUUID;
     this.repoRoot = deps.repoRoot;
+    this.domains = deps.domains ?? (deps.store instanceof MountedStores ? mountedDomainSurface(deps.store) : undefined);
+  }
+
+  /** Every mounted domain with its description (null when its store has none),
+   *  in manifest order. */
+  private mountedDomainList(): { name: string; description: string | null }[] {
+    return (this.domains?.names() ?? []).map((name) => ({ name, description: this.domains!.description(name) ?? null }));
+  }
+
+  /** `{ missing_domains }` when a configured domain was skipped for having no
+   *  store, else nothing: a read over fewer stores than configured says so. */
+  private missingDomainsDisclosure(): { missing_domains?: string[] } {
+    const missing = this.domains?.missing() ?? [];
+    return missing.length ? { missing_domains: missing } : {};
+  }
+
+  /** The store a read record came from: 'project' or 'domain:<name>', from the
+   *  mount that physically holds it (scopeOfHolder), never the body's label. */
+  private sourceOf(id: string): string {
+    return this.store.scopeOfHolder(id);
+  }
+
+  /**
+   * domain_describe (Domains D2): read a mounted domain's description, or set it
+   * when `description` is given. The description is the store_meta row that
+   * says which knowledge belongs in the domain; knowledge_create lists it and
+   * the promotion_review mint matches records against it. An unmounted domain
+   * and a blank description are refused with nothing written.
+   */
+  domainDescribe(args: { domain: string; description?: string }):
+    | { domain: string; description: string | null }
+    | { domain: string; description: string; previous_description: string | null; updated: true } {
+    const { domain, description } = args;
+    const mounted = this.domains?.names() ?? [];
+    if (!mounted.includes(domain)) {
+      const missing = this.domains?.missing() ?? [];
+      const why = missing.includes(domain)
+        ? `it is configured but has no store, so it is not mounted (create it with a description first)`
+        : `mounted domains: ${mounted.length ? mounted.join(', ') : '(none)'}`;
+      throw new Error(`domain_describe: domain '${domain}' is not mounted; ${why}. Nothing was written.`);
+    }
+    if (description === undefined) return { domain, description: this.domains!.description(domain) ?? null };
+    if (typeof description !== 'string' || description.trim().length === 0) {
+      throw new Error(
+        `domain_describe: the description for '${domain}' is blank. A description says which knowledge belongs in this domain; omit it to read the current one. Nothing was written.`
+      );
+    }
+    const previous = this.domains!.description(domain) ?? null;
+    const next = description.trim();
+    this.domains!.setDescription(domain, next);
+    return { domain, description: next, previous_description: previous, updated: true };
   }
 
   /**
@@ -3619,6 +3731,22 @@ export class SterlingTools {
       if (err instanceof ZodError) throw this.renderValidationFailure(err, type, 'knowledge_create');
       throw err;
     }
+    // ONE WRITE RULE (decision projects-mount-domains-and-sibling-projects): a
+    // record about a subject goes to scope domain:<subject>, a record about this
+    // repo stays project. Repo paths mean nothing in a shared domain store, so a
+    // domain-scoped record that declares any is refused before any write.
+    const scopeValue = typeof parsed.scope === 'string' ? parsed.scope : '';
+    if (scopeValue.startsWith('domain:')) {
+      const paths = declaredRepoPaths(type, parsed);
+      if (paths.length) {
+        const field = type === 'feature_article' ? 'files' : 'file_keys';
+        throw new Error(
+          `knowledge_create: scope '${scopeValue}' is a shared domain store, and this ${type} declares repo paths in ${field} ` +
+            `(${paths.slice(0, 5).join(', ')}${paths.length > 5 ? ', …' : ''}). A record about this repo's files stays scope 'project'; ` +
+            `a record about the domain's subject goes to '${scopeValue}' without repo paths. Drop the ${field} or create it project-scoped. Nothing was written.`
+        );
+      }
+    }
     // THE CLAIM CHECK, on the parsed candidate (paths already normalized) and
     // before ANY write, so a refused create leaves nothing behind — including
     // the create knowledge_extract and knowledge_split perform inside their own
@@ -3806,7 +3934,9 @@ export class SterlingTools {
       };
     }
     const record = this.store.create(candidate);
-    this.surfacePromotionCandidate(record, type);
+    const promotionWarning = this.surfacePromotionCandidate(record, type);
+    if (promotionWarning) citationWarnings.push(promotionWarning);
+    const mountedDomains = this.mountedDomainList();
     // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): only for the three ruling
     // types — other types' create responses stay byte-identical. Computed
     // AFTER the store write (AC6: disclosure never blocks or gates), on the
@@ -3820,29 +3950,48 @@ export class SterlingTools {
       check_skipped: skipped,
       warnings: citationWarnings,
       ...(sameSubject ? { same_subject: sameSubject } : {}),
+      ...(mountedDomains.length ? { mounted_domains: mountedDomains } : {}),
       ...claimsCheck,
     };
   }
 
   /**
-   * §3.3 project-store-then-promote: reference/research records are
-   * domain-candidates by default. One born project-scoped, when the project has
-   * a domain mounted to promote into, surfaces a single promotion_review
-   * maintenance item — the human decides at the queue drain, never an automatic
-   * move. No domain mounted → nowhere to promote → nothing surfaced (so a
-   * domain-less project sees no promotion noise). A record the conductor already
-   * scoped to a domain at creation is not a candidate.
+   * The promotion backstop (decision projects-mount-domains-and-sibling-projects,
+   * PROPOSALS ruling, amended head): a record born project-scoped, of any
+   * promotable durable type, that declares no repo paths and whose text fits
+   * the description of at least one mounted NON-sterling domain surfaces one
+   * promotion_review item naming the suggested domain(s), the description and
+   * the matched terms. Exactly one fit is drainable by the agent; several fits
+   * go to the user. The 'sterling' domain is excluded because it is mounted by
+   * every project and would otherwise claim every record about Sterling work.
+   * No mounted domain with a description, or no fit, surfaces nothing. Returns
+   * the receipt warning for knowledge_create, or undefined when nothing was
+   * surfaced.
    */
-  private surfacePromotionCandidate(record: DurableRecord, type: string): void {
-    if (type !== 'reference_material' && type !== 'research_finding') return;
-    if (record.scope !== 'project' || this.config.stack_tags.length === 0) return;
-    const label = (record as { title?: string; question?: string }).title ?? (record as { question?: string }).question ?? type;
+  private surfacePromotionCandidate(record: DurableRecord, type: string): string | undefined {
+    if (UNPROMOTABLE_TYPES.includes(type)) return undefined;
+    if (record.scope !== 'project') return undefined;
+    const body = record as unknown as Record<string, unknown>;
+    if (declaredRepoPaths(type, body).length) return undefined;
+    const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
+    if (!registered) return undefined;
+    const candidates = this.mountedDomainList().filter((d) => d.name !== 'sterling' && d.description);
+    if (!candidates.length) return undefined;
+    const fits = fitDomains(registered.fts(body), candidates, { exclude: ['sterling'] });
+    if (!fits.length) return undefined;
+    const descriptionOf = new Map(candidates.map((d) => [d.name, d.description as string]));
+    const named = fits.map((f) => `domain:${f.name} ("${descriptionOf.get(f.name)}"; matched: ${f.matched.join(', ')})`).join('; ');
+    const verdict = fits.length === 1 ? 'exactly one fit: drainable' : 'several fit: ask the user';
+    const label = SterlingTools.mintHeadlineOf(type, body) || type;
     this.maintenanceEnqueue({
       reason: 'promotion_review',
-      text: `review '${label}' for promotion to a domain store — project-scoped ${type}, a domain-candidate by default (§3.3)`,
-      file_keys: (record as { file_keys?: string[] }).file_keys,
+      text: `review '${label}' for promotion: project-scoped ${type} with no file_keys fits ${named}. ${verdict}`,
       feature_link: record.id,
     });
+    return (
+      `promotion candidate: this project-scoped ${type} fits ${named}, so a promotion_review item was queued (${verdict}). ` +
+      `A record about that subject belongs in scope domain:${fits[0].name} at creation; one about this repo stays project.`
+    );
   }
 
   private findAntiPatternOverlap(
@@ -5422,6 +5571,7 @@ export class SterlingTools {
         provenance: 'unavailable:count_projection',
         records: [],
         ...(byType ? { by_type: byType } : {}),
+        ...this.missingDomainsDisclosure(),
       };
     }
     const records = this.knowledgeQuery(filter);
@@ -5456,7 +5606,8 @@ export class SterlingTools {
     const projectRecord = (r: (typeof records)[number]): Record<string, unknown> => {
       const base = projection === 'digest' ? digestRecord(r as unknown as Record<string, unknown>) : this.projectForQuery(r);
       const drift = annotations.get(r.id);
-      return drift ? { ...base, baseline_drift: drift } : base;
+      const labelled = { ...base, source: this.sourceOf(r.id) };
+      return drift ? { ...labelled, baseline_drift: drift } : labelled;
     };
     return {
       matched_filter: matchedFilter,
@@ -5474,6 +5625,7 @@ export class SterlingTools {
       provenance,
       records: records.map(projectRecord),
       ...(aboveThreshold !== undefined ? { above_threshold: aboveThreshold } : {}),
+      ...this.missingDomainsDisclosure(),
     };
   }
 
@@ -5531,7 +5683,7 @@ export class SterlingTools {
   knowledgePreflight(text: string): KnowledgePreflightResult {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) {
-      return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matched_total: 0, matches: [] };
+      return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matched_total: 0, matches: [], ...this.missingDomainsDisclosure() };
     }
     // B2G widening (findings f6ada94d and
     // preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
@@ -5595,6 +5747,7 @@ export class SterlingTools {
         title: SterlingTools.axisRecordTitle(record),
         matched_on: hits,
         central: centralHits,
+        source: this.sourceOf(record.id),
         ...(inbound.length ? { inbound_supersedes: inbound } : {}),
       };
     });
@@ -5607,6 +5760,7 @@ export class SterlingTools {
       ...(capped ? { capped: true as const } : {}),
       matches,
       answerability: matchedTotal ? 'verify_targets' : 'ungoverned',
+      ...this.missingDomainsDisclosure(),
     };
   }
 
@@ -8916,6 +9070,9 @@ export class SterlingTools {
     dropped_file_keys: number;
     dropped_stack_tags: string[];
     kept_stack_tags: string[];
+    /** The target domain's description (null when its store has none), so the
+     *  receipt shows what the record was promoted into. */
+    domain_description: string | null;
     warnings: string[];
   } {
     // Through the SHARED LADDER (decision foreign_2debab53), not a raw store.get: a
@@ -8949,8 +9106,7 @@ export class SterlingTools {
           `nothing was written.`
       );
     }
-    const UNPROMOTABLE = ['feature_article', 'todo', 'attestation'];
-    if (UNPROMOTABLE.includes(original.type)) {
+    if (UNPROMOTABLE_TYPES.includes(original.type)) {
       throw new Error(
         `knowledge_promote: ${original.type} never promotes — feature_article is always project (§3.3); todo is a project surface; an attestation's artifact_key names a project-local artifact that means nothing in a shared domain store (review finding, 2026-08-21)`
       );
@@ -9029,6 +9185,12 @@ export class SterlingTools {
       );
     }
     warnings.push(...this.suspiciousLocalLabelWarnings(content as Record<string, unknown>));
+    // The create above already proved the domain is mounted, so this read
+    // cannot hit an unmounted name.
+    const domainDescription = this.domains?.names().includes(domain) ? (this.domains.description(domain) ?? null) : null;
+    if (domainDescription === null) {
+      warnings.push(`domain:${domain} has no description, so nothing records which knowledge belongs in it; set one with domain_describe`);
+    }
 
     return {
       promoted,
@@ -9037,6 +9199,7 @@ export class SterlingTools {
       dropped_file_keys: originalFileKeys.length,
       dropped_stack_tags: droppedStackTags,
       kept_stack_tags: keptStackTags,
+      domain_description: domainDescription,
       warnings,
     };
   }

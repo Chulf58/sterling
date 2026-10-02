@@ -52,6 +52,8 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { SterlingTools } from '../tools.js';
 import { harnessMounted as harnessMountedShared } from './test-helpers/mounted-harness.js';
+import { seedRecordRaw } from './test-helpers/raw-seed.js';
+import type { DurableRecord } from '@sterling/schemas';
 
 const NOW = '2026-09-06T12:00:00.000Z';
 
@@ -89,8 +91,8 @@ const mkReferenceScoped = (tools: SterlingTools, title: string, scope: string): 
     scope,
   }).record as unknown as Loose;
 
-const mkArticleScoped = (tools: SterlingTools, slug: string, paths: string[], scope: string): Loose =>
-  tools.knowledgeCreate('feature_article', {
+const mkArticleScoped = (tools: SterlingTools, slug: string, paths: string[], scope: string, store?: { create(input: unknown): DurableRecord }) => {
+  const fields = {
     slug,
     title: slug,
     what_it_does: 'does',
@@ -103,7 +105,13 @@ const mkArticleScoped = (tools: SterlingTools, slug: string, paths: string[], sc
     history: [{ date: NOW, event: 'seed' }],
     live_test_refs: [],
     scope,
-  }).record as unknown as Loose;
+  };
+  // knowledge_create refuses a domain-scoped article that owns files (Domains D2), so a
+  // non-project row is seeded straight through the store (test-helpers/raw-seed.ts).
+  if (scope === 'project') return tools.knowledgeCreate('feature_article', fields).record as unknown as Loose;
+  if (!store) throw new Error('mkArticleScoped: a non-project scope needs the store to seed through');
+  return seedRecordRaw(store, 'feature_article', fields, NOW) as unknown as Loose;
+};
 
 function decisionFields(): Loose {
   return { title: `probe-${randomUUID().slice(0, 8)}`, statement: 's', alternatives_rejected: [], rationale: 'r' };
@@ -181,7 +189,7 @@ test('LANE knowledge_update: a resolves claim against a DOMAIN-held target is re
 test('LANE knowledge_append: a resolves claim against a DOMAIN-held target is refused by name; the write WITHOUT resolves succeeds; maintenance_remove then closes it; no split write', () => {
   const { tools, store, cleanup } = harnessMounted(['node']);
   try {
-    const target = mkArticleScoped(tools, 'thing-append', ['src/thing.ts'], 'domain:node');
+    const target = mkArticleScoped(tools, 'thing-append', ['src/thing.ts'], 'domain:node', store);
     const { record: item } = tools.maintenanceEnqueue({
       reason: 'refresh_reference',
       text: "refresh 'thing-append'",
@@ -278,7 +286,7 @@ test('LANE knowledge_edit: a resolves claim against a DOMAIN-held target is refu
 test('LANE knowledge_array_remove: a resolves claim against a DOMAIN-held target is refused by name; the write WITHOUT resolves succeeds; maintenance_remove then closes it; no split write', () => {
   const { tools, store, cleanup } = harnessMounted(['node']);
   try {
-    const target = mkArticleScoped(tools, 'thing-arr', ['src/keep.ts', 'src/drop.ts'], 'domain:node');
+    const target = mkArticleScoped(tools, 'thing-arr', ['src/keep.ts', 'src/drop.ts'], 'domain:node', store);
     const { record: item } = tools.maintenanceEnqueue({
       reason: 'refresh_reference',
       text: "refresh 'thing-arr'",
@@ -410,9 +418,9 @@ test('PRECEDENCE: resolves naming an id with NO open maintenance item at all is 
 // `doesNotMatch` assertion goes red.
 
 test('PRECEDENCE: resolves naming an item whose system_reason FORBIDS this lane is refused for THAT reason — even against a domain-held target, never as if it were a mount problem', () => {
-  const { tools, cleanup } = harnessMounted(['node']);
+  const { tools, store, cleanup } = harnessMounted(['node']);
   try {
-    const target = mkArticleScoped(tools, 'thing-wrong-lane', ['src/thing.ts'], 'domain:node');
+    const target = mkArticleScoped(tools, 'thing-wrong-lane', ['src/thing.ts'], 'domain:node', store);
     const { record: item } = tools.maintenanceEnqueue({
       reason: 'capture_owed',
       text: "capture owed for 'thing-wrong-lane'",

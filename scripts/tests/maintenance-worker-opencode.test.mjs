@@ -122,6 +122,8 @@ test('[gate] an OpenCode run with knowledge_get on the article and a read of its
     assert.equal(config.model, 'anthropic/claude-sonnet-5-5');
     assert.deepEqual(config.mcp.sterling, { type: 'local', command: ['node', join(fx.plugin, 'mcp', 'sterling-mcp.mjs'), '--store', join(fx.project, '.sterling', 'sterling.db')], enabled: true });
     for (const k of ['shell', 'edit', 'write', 'patch', 'subagent', ...OPENCODE_DENIED_MCP]) assert.equal(config.permission[k], 'deny', k);
+    // Domains D2: domain_describe writes a domain's description, so the worker is denied it.
+    assert.equal(config.permission.sterling_domain_describe, 'deny', 'sterling_domain_describe');
     for (const k of ['sterling_maintenance_remove', 'sterling_knowledge_get', 'sterling_knowledge_line_ref_fix', 'read', 'grep', 'execute']) assert.equal(config.permission[k], undefined, `${k} stays allowed`);
 
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');

@@ -5500,10 +5500,11 @@ var init_config = __esm({
       // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
       // with opt-out, disposal skips the snapshot LOUDLY (check_skipped).
       backup_opt_out: external_exports.boolean().default(false),
-      // §3.3: the project's stack_tags, declared at init, ARE the domain mount
-      // manifest — the SAME list that filters retrieval (§3.4) mounts the shared
-      // domain stores, so the mounted set and the filter align by construction. Each
-      // tag mounts a store at ~/.sterling/domains/<tag>/sterling.db (lazily created).
+      // §3.3: the project's stack_tags, declared at init, are the domain mount
+      // manifest and nothing else; they do not filter retrieval (a query's own
+      // stack_tags option is a separate, caller-supplied filter). Each tag mounts an
+      // EXISTING store at ~/.sterling/domains/<tag>/sterling.db; a new domain store
+      // is made only by createDomain in @sterling/store, which requires a description.
       stack_tags: external_exports.array(external_exports.string()).default([]),
       // §3.3 (spec line 94 — path configurable per domain): per-tag store-path
       // override; default is the per-user root above. tag → absolute db path (POSIX).
@@ -6036,8 +6037,53 @@ var init_dist = __esm({
   }
 });
 
+// packages/store/dist/shares.js
+function allocateShares(perSourceCounts, cap, projectShare = DEFAULT_PROJECT_SHARE) {
+  if (!Array.isArray(perSourceCounts) || perSourceCounts.length === 0) {
+    throw new Error("allocateShares: perSourceCounts must contain at least the project count (index 0)");
+  }
+  if (!Number.isInteger(cap) || cap < 1)
+    throw new Error(`allocateShares: cap must be a positive integer, got ${cap}`);
+  for (const c of perSourceCounts) {
+    if (!Number.isInteger(c) || c < 0)
+      throw new Error(`allocateShares: every count must be a non-negative integer, got ${c}`);
+  }
+  if (typeof projectShare !== "number" || !(projectShare >= 0 && projectShare <= 1)) {
+    throw new Error(`allocateShares: projectShare must be between 0 and 1, got ${projectShare}`);
+  }
+  const domainCount = perSourceCounts.length - 1;
+  const projectQuota = domainCount === 0 ? cap : Math.min(cap, Math.ceil(projectShare * cap - 1e-9));
+  const quotas = [projectQuota];
+  const rest = cap - projectQuota;
+  for (let i = 0; i < domainCount; i++) {
+    quotas.push(Math.floor(rest / domainCount) + (i < rest % domainCount ? 1 : 0));
+  }
+  const alloc = perSourceCounts.map((count, i) => Math.min(count, quotas[i]));
+  let left = cap - alloc.reduce((a, b) => a + b, 0);
+  while (left > 0) {
+    let gave = false;
+    for (let i = 0; i < alloc.length && left > 0; i++) {
+      if (alloc[i] < perSourceCounts[i]) {
+        alloc[i]++;
+        left--;
+        gave = true;
+      }
+    }
+    if (!gave)
+      break;
+  }
+  return alloc;
+}
+var DEFAULT_PROJECT_SHARE;
+var init_shares = __esm({
+  "packages/store/dist/shares.js"() {
+    "use strict";
+    DEFAULT_PROJECT_SHARE = 0.6;
+  }
+});
+
 // packages/store/dist/mounted.js
-import { mkdirSync as mkdirSync2, existsSync as existsSync5 } from "node:fs";
+import { mkdirSync as mkdirSync2, existsSync as existsSync5, rmSync } from "node:fs";
 import { dirname as dirname2, join as join9 } from "node:path";
 import { homedir as homedir3 } from "node:os";
 function resolveDomainMounts(config) {
@@ -6050,12 +6096,47 @@ function open(dbPath) {
   mkdirSync2(dirname2(dbPath), { recursive: true });
   return new SterlingStore(dbPath);
 }
-var MountedStores;
+function missingDomainWarning(m) {
+  return `sterling: domain '${m.name}' is configured but has no store at '${m.dbPath}'; it is NOT mounted, so its knowledge is not read and writes to scope domain:${m.name} are refused. Create it with createDomain (a description is required), or run init to set it up.`;
+}
+function createDomain(name, description, dbPath) {
+  if (typeof name !== "string" || name.trim().length === 0)
+    throw new Error("createDomain: a domain name is required");
+  if (typeof description !== "string" || description.trim().length === 0) {
+    throw new Error(`createDomain: domain '${name}' needs a description saying which knowledge belongs in it; none was given, so nothing was created`);
+  }
+  if (existsSync5(dbPath)) {
+    throw new Error(`createDomain: a store for domain '${name}' already exists at '${dbPath}'; set its description on that store instead of re-creating it`);
+  }
+  const store = open(dbPath);
+  try {
+    store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
+  } catch (e) {
+    store.close();
+    for (const suffix of ["", "-wal", "-shm", "-journal"])
+      rmSync(dbPath + suffix, { force: true });
+    throw e;
+  }
+  store.close();
+}
+var DOMAIN_DESCRIPTION_KEY, DomainNotCreatedError, MountedStores;
 var init_mounted = __esm({
   "packages/store/dist/mounted.js"() {
     "use strict";
     init_dist2();
     init_dist();
+    init_shares();
+    DOMAIN_DESCRIPTION_KEY = "description";
+    DomainNotCreatedError = class extends Error {
+      domain;
+      db_path;
+      constructor(domain, dbPath) {
+        super(`domain '${domain}' has no store at '${dbPath}'. Domain stores are not created on first mount: create it with createDomain('${domain}', <description>, <dbPath>), where the description says which knowledge belongs in this domain. To mount only the domains that already exist, pass { skipMissing: true }.`);
+        this.name = "DomainNotCreatedError";
+        this.domain = domain;
+        this.db_path = dbPath;
+      }
+    };
     MountedStores = class {
       /** The project store — also the home of the board/maintenance queue and
        *  other project-local transient state (the run/handoff protocol this
@@ -6091,19 +6172,58 @@ var init_mounted = __esm({
        */
       project;
       domains = /* @__PURE__ */ new Map();
-      /** Opening a store creates its file + schema (§2.3 lazy creation): a domain
-       *  store comes into being the first time a project's manifest mounts it.
-       *  When options.skipMissing is true, domain mounts whose db file does NOT
-       *  already exist on disk are SKIPPED — never created. Existing siblings that
-       *  DO exist are still mounted. The default (no options / skipMissing false)
-       *  always lazily creates missing stores (§2.3 backward-compatible default). */
+      /** Configured domains skipped under skipMissing because their store does not
+       *  exist, in manifest order. Kept so a caller (boot, a tool response, H1) can
+       *  disclose the skip instead of the domain silently vanishing. */
+      missingDomains = [];
+      /** The project store is opened, and created when absent. A domain store is
+       *  only ever OPENED here, never created: a mount whose db file does not exist
+       *  throws DomainNotCreatedError naming createDomain (board 675daf9d (c)), with
+       *  every handle opened so far closed and no file written for the missing
+       *  domain. When options.skipMissing is true such a mount is skipped instead,
+       *  and the existing siblings are still mounted. An existing domain store opens
+       *  as it is, whether or not it has a description. */
       constructor(projectDbPath, mounts = [], options) {
         this.project = open(projectDbPath);
-        for (const m of mounts) {
-          if (options?.skipMissing && !existsSync5(m.dbPath))
-            continue;
-          this.domains.set(m.name, open(m.dbPath));
+        try {
+          for (const m of mounts) {
+            if (!existsSync5(m.dbPath)) {
+              if (options?.skipMissing) {
+                this.missingDomains.push({ name: m.name, dbPath: m.dbPath });
+                continue;
+              }
+              throw new DomainNotCreatedError(m.name, m.dbPath);
+            }
+            this.domains.set(m.name, new SterlingStore(m.dbPath));
+          }
+        } catch (e) {
+          this.close();
+          throw e;
         }
+      }
+      /** A mounted domain's description (store_meta 'description'), or undefined
+       *  when that existing store has none. An unmounted name is refused. */
+      domainDescription(name) {
+        const store = this.domains.get(name);
+        if (!store)
+          throw new Error(`domainDescription: domain '${name}' is not mounted`);
+        return store.getMeta(DOMAIN_DESCRIPTION_KEY);
+      }
+      /** Set a mounted domain's description (store_meta 'description'), trimmed,
+       *  on that domain's own store. The write path for an existing domain;
+       *  createDomain sets it for a new one. An unmounted name and a blank
+       *  description are refused with nothing written, and so is a call inside a
+       *  transaction open on another mount (the same affinity rule as every write
+       *  through this class). */
+      setDomainDescription(name, description) {
+        const store = this.domains.get(name);
+        if (!store)
+          throw new Error(`setDomainDescription: domain '${name}' is not mounted`);
+        if (typeof description !== "string" || description.trim().length === 0) {
+          throw new Error(`setDomainDescription: the description for domain '${name}' is blank; nothing was written`);
+        }
+        this.assertMountAffinity("setDomainDescription", store, `domain '${name}'`);
+        store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
       }
       /** Scope-routed write (§3.3): project → the project store; domain:<name> → that
        *  domain store. Routing is MECHANICAL here; the tool layer owns the policy
@@ -6146,14 +6266,18 @@ var init_mounted = __esm({
         }
         throw new Error(`unroutable scope '${scope}'`);
       }
-      /** Cross-store retrieval (§3.4): every mounted store runs the full
-       *  filter→join→rank→cap; results concatenate PROJECT-FIRST then domains (each
-       *  internally bm25-ranked — §3.3 project-store-first bias) and the overall cap
-       *  re-applies. A unified cross-store bm25 re-rank is a later refinement. */
+      /** Cross-store retrieval (§3.4) with read shares (board 675daf9d (b)): every
+       *  mounted store runs the full filter→join→rank→cap on its own, allocateShares
+       *  decides how many of each store's results make the cap (the project up to
+       *  ceil(0.6 x cap) when a domain has matches, the rest split across domains,
+       *  unused share spilling over), and each store's top-N is concatenated project
+       *  first, then domains in manifest order. Scores are never compared across
+       *  databases. When only the project matches it fills the cap, as before. */
       query(opts2 = {}) {
         const cap = opts2.cap ?? DEFAULT_QUERY_CAP;
-        const merged = this.all().flatMap((s2) => s2.query(opts2));
-        return merged.slice(0, cap);
+        const perStore = this.all().map((s2) => s2.query({ ...opts2, cap }));
+        const shares = allocateShares(perStore.map((r) => r.length), cap);
+        return perStore.flatMap((records, i) => records.slice(0, shares[i]));
       }
       /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
        *  query(), summed project-first across every mounted store (countBySource is
@@ -6561,79 +6685,6 @@ var init_mounted = __esm({
   }
 });
 
-// packages/store/dist/registry.js
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync as mkdirSync3 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { dirname as dirname3, join as join10 } from "node:path";
-function registryPath() {
-  return process.env.STERLING_REGISTRY_DB ?? join10(homedir4(), ".sterling", "registry.db");
-}
-var REGISTRY_DDL, ProjectRegistry;
-var init_registry2 = __esm({
-  "packages/store/dist/registry.js"() {
-    "use strict";
-    init_dist();
-    REGISTRY_DDL = `
-CREATE TABLE IF NOT EXISTS projects (
-  repo_path TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  stack_tags TEXT NOT NULL,
-  toolchains TEXT NOT NULL,
-  sterling_version TEXT,
-  first_init_at TEXT NOT NULL,
-  last_init_at TEXT NOT NULL,
-  last_seen_at TEXT
-);`;
-    ProjectRegistry = class {
-      db;
-      constructor(path = registryPath()) {
-        mkdirSync3(dirname3(path), { recursive: true });
-        this.db = new DatabaseSync(path);
-        this.db.exec("PRAGMA busy_timeout=5000");
-        this.db.exec("PRAGMA journal_mode=WAL");
-        this.db.exec(REGISTRY_DDL);
-      }
-      /** Upsert by repo_path (init event, P4): create on first init
-       *  (first_init_at = last_init_at = at), refresh the mutable fields + last_init_at
-       *  on re-init while preserving first_init_at. */
-      register(input) {
-        this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
-         ON CONFLICT(repo_path) DO UPDATE SET
-           name = excluded.name,
-           stack_tags = excluded.stack_tags,
-           toolchains = excluded.toolchains,
-           sterling_version = excluded.sterling_version,
-           last_init_at = excluded.last_init_at`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at);
-      }
-      /** Session-activity touch (H1 SessionStart): update last_seen_at for an
-       *  EXISTING row only — never create (registration is init's job). Returns
-       *  whether a row was updated. */
-      touchLastSeen(repoPath2, at) {
-        return this.db.prepare("UPDATE projects SET last_seen_at = ? WHERE repo_path = ?").run(at, repoPath2).changes > 0;
-      }
-      /** All registered projects, name-ordered. Stale-at-read (existence of
-       *  repo_path) is the caller's lazy check — the registry stores no liveness. */
-      list() {
-        return this.db.prepare("SELECT * FROM projects ORDER BY name").all().map((r) => projectRegistrationSchema.parse({
-          ...r,
-          stack_tags: JSON.parse(r.stack_tags),
-          toolchains: JSON.parse(r.toolchains)
-        }));
-      }
-      /** Human-gated removal (the /sterling:projects prune of a missing project) —
-       *  never automatic. Returns whether a row was removed. */
-      remove(repoPath2) {
-        return this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2).changes > 0;
-      }
-      close() {
-        this.db.close();
-      }
-    };
-  }
-});
-
 // packages/store/dist/axis.js
 function extractAxisTerms(text, maxTerms) {
   return rankedAxisTerms(text).slice(0, Math.max(0, maxTerms));
@@ -6929,6 +6980,136 @@ var init_axis = __esm({
   }
 });
 
+// packages/store/dist/domain-fit.js
+function termsMatch(a, b) {
+  return a === b || a.startsWith(b) || b.startsWith(a);
+}
+function subjectTerms(text) {
+  return extractAxisTermsUncapped(text).filter((t) => t.length >= AXIS_MIN_TERM_LEN && !GENERIC_DEV_TERMS.has(t));
+}
+function fitDomains(recordText, domains, opts2 = {}) {
+  if (typeof recordText !== "string")
+    throw new TypeError("fitDomains: recordText must be a string");
+  if (!Array.isArray(domains))
+    throw new TypeError("fitDomains: domains must be an array");
+  const minTerms = opts2.minTerms ?? DOMAIN_FIT_MIN_TERMS;
+  if (!Number.isInteger(minTerms) || minTerms < 1) {
+    throw new RangeError(`fitDomains: minTerms must be a positive integer, got ${String(minTerms)}`);
+  }
+  if (opts2.exclude !== void 0 && (!Array.isArray(opts2.exclude) || opts2.exclude.some((n) => typeof n !== "string"))) {
+    throw new TypeError("fitDomains: exclude must be an array of strings");
+  }
+  const excluded = new Set((opts2.exclude ?? []).map((n) => n.toLowerCase()));
+  const seen = /* @__PURE__ */ new Set();
+  for (const d of domains) {
+    if (d === null || typeof d !== "object" || typeof d.name !== "string" || d.name.trim() === "") {
+      throw new TypeError("fitDomains: every domain needs a non-empty string name");
+    }
+    if (d.description != null && typeof d.description !== "string") {
+      throw new TypeError(`fitDomains: description of domain '${d.name}' must be a string`);
+    }
+    const key = d.name.toLowerCase();
+    if (seen.has(key))
+      throw new Error(`fitDomains: duplicate domain name '${d.name}'`);
+    seen.add(key);
+  }
+  const recordTerms = subjectTerms(recordText);
+  const fits = [];
+  for (const d of domains) {
+    if (excluded.has(d.name.toLowerCase()) || !d.description)
+      continue;
+    const descTerms = subjectTerms(d.description);
+    if (!descTerms.length)
+      continue;
+    const matched = descTerms.filter((dt) => recordTerms.some((rt) => termsMatch(dt, rt)));
+    if (matched.length < Math.min(minTerms, descTerms.length))
+      continue;
+    fits.push({ name: d.name, score: matched.length / descTerms.length, matched });
+  }
+  return fits.sort((a, b) => b.score - a.score || b.matched.length - a.matched.length || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+var DOMAIN_FIT_MIN_TERMS;
+var init_domain_fit = __esm({
+  "packages/store/dist/domain-fit.js"() {
+    "use strict";
+    init_axis();
+    DOMAIN_FIT_MIN_TERMS = 2;
+  }
+});
+
+// packages/store/dist/registry.js
+import { DatabaseSync } from "node:sqlite";
+import { mkdirSync as mkdirSync3 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { dirname as dirname3, join as join10 } from "node:path";
+function registryPath() {
+  return process.env.STERLING_REGISTRY_DB ?? join10(homedir4(), ".sterling", "registry.db");
+}
+var REGISTRY_DDL, ProjectRegistry;
+var init_registry2 = __esm({
+  "packages/store/dist/registry.js"() {
+    "use strict";
+    init_dist();
+    REGISTRY_DDL = `
+CREATE TABLE IF NOT EXISTS projects (
+  repo_path TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  stack_tags TEXT NOT NULL,
+  toolchains TEXT NOT NULL,
+  sterling_version TEXT,
+  first_init_at TEXT NOT NULL,
+  last_init_at TEXT NOT NULL,
+  last_seen_at TEXT
+);`;
+    ProjectRegistry = class {
+      db;
+      constructor(path = registryPath()) {
+        mkdirSync3(dirname3(path), { recursive: true });
+        this.db = new DatabaseSync(path);
+        this.db.exec("PRAGMA busy_timeout=5000");
+        this.db.exec("PRAGMA journal_mode=WAL");
+        this.db.exec(REGISTRY_DDL);
+      }
+      /** Upsert by repo_path (init event, P4): create on first init
+       *  (first_init_at = last_init_at = at), refresh the mutable fields + last_init_at
+       *  on re-init while preserving first_init_at. */
+      register(input) {
+        this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+         ON CONFLICT(repo_path) DO UPDATE SET
+           name = excluded.name,
+           stack_tags = excluded.stack_tags,
+           toolchains = excluded.toolchains,
+           sterling_version = excluded.sterling_version,
+           last_init_at = excluded.last_init_at`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at);
+      }
+      /** Session-activity touch (H1 SessionStart): update last_seen_at for an
+       *  EXISTING row only — never create (registration is init's job). Returns
+       *  whether a row was updated. */
+      touchLastSeen(repoPath2, at) {
+        return this.db.prepare("UPDATE projects SET last_seen_at = ? WHERE repo_path = ?").run(at, repoPath2).changes > 0;
+      }
+      /** All registered projects, name-ordered. Stale-at-read (existence of
+       *  repo_path) is the caller's lazy check — the registry stores no liveness. */
+      list() {
+        return this.db.prepare("SELECT * FROM projects ORDER BY name").all().map((r) => projectRegistrationSchema.parse({
+          ...r,
+          stack_tags: JSON.parse(r.stack_tags),
+          toolchains: JSON.parse(r.toolchains)
+        }));
+      }
+      /** Human-gated removal (the /sterling:projects prune of a missing project) —
+       *  never automatic. Returns whether a row was removed. */
+      remove(repoPath2) {
+        return this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2).changes > 0;
+      }
+      close() {
+        this.db.close();
+      }
+    };
+  }
+});
+
 // packages/store/dist/index.js
 var dist_exports2 = {};
 __export(dist_exports2, {
@@ -6939,7 +7120,11 @@ __export(dist_exports2, {
   AXIS_MIN_TERM_LEN: () => AXIS_MIN_TERM_LEN,
   AXIS_RECORD_TOP_K: () => AXIS_RECORD_TOP_K,
   DECLARED_CAPTURE_OWED_PREFIX: () => DECLARED_CAPTURE_OWED_PREFIX,
+  DEFAULT_PROJECT_SHARE: () => DEFAULT_PROJECT_SHARE,
   DEFAULT_QUERY_CAP: () => DEFAULT_QUERY_CAP,
+  DOMAIN_DESCRIPTION_KEY: () => DOMAIN_DESCRIPTION_KEY,
+  DOMAIN_FIT_MIN_TERMS: () => DOMAIN_FIT_MIN_TERMS,
+  DomainNotCreatedError: () => DomainNotCreatedError,
   GENERIC_DEV_TERMS: () => GENERIC_DEV_TERMS,
   JournalDemotionRefusedError: () => JournalDemotionRefusedError,
   MAX_RANK_TERMS: () => MAX_RANK_TERMS,
@@ -6949,6 +7134,7 @@ __export(dist_exports2, {
   SchemaMigrationRequiredError: () => SchemaMigrationRequiredError,
   SterlingStore: () => SterlingStore,
   UnsupportedSchemaVersionError: () => UnsupportedSchemaVersionError,
+  allocateShares: () => allocateShares,
   assertNoFieldLoss: () => assertNoFieldLoss,
   axisHits: () => axisHits,
   axisNarrowText: () => axisNarrowText,
@@ -6956,15 +7142,18 @@ __export(dist_exports2, {
   buildReconcileText: () => buildReconcileText,
   catalogStatus: () => catalogStatus,
   classifyClaimPath: () => classifyClaimPath,
+  createDomain: () => createDomain,
   declaredCaptureTarget: () => declaredCaptureTarget,
   decodeLiveRecordRow: () => decodeLiveRecordRow,
   droppedKeyPaths: () => droppedKeyPaths,
   extractAxisTerms: () => extractAxisTerms,
   extractAxisTermsUncapped: () => extractAxisTermsUncapped,
+  fitDomains: () => fitDomains,
   hasDiscriminatingHit: () => hasDiscriminatingHit,
   hasFullNarrowCentralityCoverage: () => hasFullNarrowCentralityCoverage,
   hasRecordCentralityHit: () => hasRecordCentralityHit,
   journalDemotionRequired: () => journalDemotionRequired,
+  missingDomainWarning: () => missingDomainWarning,
   rankTermDedupeKey: () => rankTermDedupeKey,
   rankTerms: () => rankTerms,
   recordCentralityHits: () => recordCentralityHits,
@@ -7199,6 +7388,8 @@ var init_dist2 = __esm({
     init_zod();
     init_dist();
     init_mounted();
+    init_shares();
+    init_domain_fit();
     init_registry2();
     init_axis();
     init_axis();
@@ -7307,6 +7498,15 @@ CREATE TABLE IF NOT EXISTS activity_log (
   type TEXT NOT NULL,
   record_id TEXT NOT NULL,
   title TEXT NOT NULL
+);
+-- Store-level key/value metadata (board 675daf9d, decision
+-- projects-mount-domains-and-sibling-projects): a domain store's description is
+-- its 'description' key. Additive: CREATE IF NOT EXISTS on every v2 open, so no
+-- user_version bump; a pre-v2 store opens read-only before this DDL runs.
+CREATE TABLE IF NOT EXISTS store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 `;
     SUPPORTED_SCHEMA_VERSION = 2;
@@ -8964,6 +9164,28 @@ CREATE TABLE IF NOT EXISTS activity_log (
         this.assertWritable("writeSelection");
         this.tx(() => {
           this.db.prepare("INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at").run(type, recordId, at);
+        });
+      }
+      /**
+       * Store-level metadata read (store_meta). undefined when the key was never
+       * set. A pre-v2 store has no store_meta table (it opens read-only before the
+       * DDL runs), so this refuses there with the migration error rather than
+       * answering "unset" for a question the store cannot answer.
+       */
+      getMeta(key) {
+        this.assertV2Surface("getMeta");
+        const row = this.db.prepare("SELECT value FROM store_meta WHERE key = ?").get(key);
+        return row?.value;
+      }
+      /** Store-level metadata write (store_meta): upsert, one row per key, stamped updated_at. */
+      setMeta(key, value) {
+        this.assertWritable("setMeta");
+        if (typeof key !== "string" || key.length === 0)
+          throw new Error("setMeta: key must be a non-empty string");
+        if (typeof value !== "string")
+          throw new Error(`setMeta: value for key '${key}' must be a string`);
+        this.tx(() => {
+          this.db.prepare("INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(key, value, (/* @__PURE__ */ new Date()).toISOString());
         });
       }
       takeSelection() {

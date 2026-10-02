@@ -22341,10 +22341,11 @@ var configSchema = external_exports.object({
   // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
   // with opt-out, disposal skips the snapshot LOUDLY (check_skipped).
   backup_opt_out: external_exports.boolean().default(false),
-  // §3.3: the project's stack_tags, declared at init, ARE the domain mount
-  // manifest — the SAME list that filters retrieval (§3.4) mounts the shared
-  // domain stores, so the mounted set and the filter align by construction. Each
-  // tag mounts a store at ~/.sterling/domains/<tag>/sterling.db (lazily created).
+  // §3.3: the project's stack_tags, declared at init, are the domain mount
+  // manifest and nothing else; they do not filter retrieval (a query's own
+  // stack_tags option is a separate, caller-supplied filter). Each tag mounts an
+  // EXISTING store at ~/.sterling/domains/<tag>/sterling.db; a new domain store
+  // is made only by createDomain in @sterling/store, which requires a description.
   stack_tags: external_exports.array(external_exports.string()).default([]),
   // §3.3 (spec line 94 — path configurable per domain): per-tag store-path
   // override; default is the per-user root above. tag → absolute db path (POSIX).
@@ -22817,9 +22818,50 @@ import { dirname as dirname3, basename, join as join3, resolve as resolvePath } 
 import { randomUUID } from "node:crypto";
 
 // packages/store/dist/mounted.js
-import { mkdirSync, existsSync } from "node:fs";
+import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { dirname as dirname2, join as join2 } from "node:path";
 import { homedir } from "node:os";
+
+// packages/store/dist/shares.js
+var DEFAULT_PROJECT_SHARE = 0.6;
+function allocateShares(perSourceCounts, cap, projectShare = DEFAULT_PROJECT_SHARE) {
+  if (!Array.isArray(perSourceCounts) || perSourceCounts.length === 0) {
+    throw new Error("allocateShares: perSourceCounts must contain at least the project count (index 0)");
+  }
+  if (!Number.isInteger(cap) || cap < 1)
+    throw new Error(`allocateShares: cap must be a positive integer, got ${cap}`);
+  for (const c of perSourceCounts) {
+    if (!Number.isInteger(c) || c < 0)
+      throw new Error(`allocateShares: every count must be a non-negative integer, got ${c}`);
+  }
+  if (typeof projectShare !== "number" || !(projectShare >= 0 && projectShare <= 1)) {
+    throw new Error(`allocateShares: projectShare must be between 0 and 1, got ${projectShare}`);
+  }
+  const domainCount = perSourceCounts.length - 1;
+  const projectQuota = domainCount === 0 ? cap : Math.min(cap, Math.ceil(projectShare * cap - 1e-9));
+  const quotas = [projectQuota];
+  const rest = cap - projectQuota;
+  for (let i = 0; i < domainCount; i++) {
+    quotas.push(Math.floor(rest / domainCount) + (i < rest % domainCount ? 1 : 0));
+  }
+  const alloc = perSourceCounts.map((count, i) => Math.min(count, quotas[i]));
+  let left = cap - alloc.reduce((a, b) => a + b, 0);
+  while (left > 0) {
+    let gave = false;
+    for (let i = 0; i < alloc.length && left > 0; i++) {
+      if (alloc[i] < perSourceCounts[i]) {
+        alloc[i]++;
+        left--;
+        gave = true;
+      }
+    }
+    if (!gave)
+      break;
+  }
+  return alloc;
+}
+
+// packages/store/dist/mounted.js
 function resolveDomainMounts(config2) {
   return config2.stack_tags.map((name) => ({
     name,
@@ -22829,6 +22871,20 @@ function resolveDomainMounts(config2) {
 function open(dbPath) {
   mkdirSync(dirname2(dbPath), { recursive: true });
   return new SterlingStore(dbPath);
+}
+var DOMAIN_DESCRIPTION_KEY = "description";
+var DomainNotCreatedError = class extends Error {
+  domain;
+  db_path;
+  constructor(domain, dbPath) {
+    super(`domain '${domain}' has no store at '${dbPath}'. Domain stores are not created on first mount: create it with createDomain('${domain}', <description>, <dbPath>), where the description says which knowledge belongs in this domain. To mount only the domains that already exist, pass { skipMissing: true }.`);
+    this.name = "DomainNotCreatedError";
+    this.domain = domain;
+    this.db_path = dbPath;
+  }
+};
+function missingDomainWarning(m) {
+  return `sterling: domain '${m.name}' is configured but has no store at '${m.dbPath}'; it is NOT mounted, so its knowledge is not read and writes to scope domain:${m.name} are refused. Create it with createDomain (a description is required), or run init to set it up.`;
 }
 var MountedStores = class {
   /** The project store — also the home of the board/maintenance queue and
@@ -22865,19 +22921,58 @@ var MountedStores = class {
    */
   project;
   domains = /* @__PURE__ */ new Map();
-  /** Opening a store creates its file + schema (§2.3 lazy creation): a domain
-   *  store comes into being the first time a project's manifest mounts it.
-   *  When options.skipMissing is true, domain mounts whose db file does NOT
-   *  already exist on disk are SKIPPED — never created. Existing siblings that
-   *  DO exist are still mounted. The default (no options / skipMissing false)
-   *  always lazily creates missing stores (§2.3 backward-compatible default). */
+  /** Configured domains skipped under skipMissing because their store does not
+   *  exist, in manifest order. Kept so a caller (boot, a tool response, H1) can
+   *  disclose the skip instead of the domain silently vanishing. */
+  missingDomains = [];
+  /** The project store is opened, and created when absent. A domain store is
+   *  only ever OPENED here, never created: a mount whose db file does not exist
+   *  throws DomainNotCreatedError naming createDomain (board 675daf9d (c)), with
+   *  every handle opened so far closed and no file written for the missing
+   *  domain. When options.skipMissing is true such a mount is skipped instead,
+   *  and the existing siblings are still mounted. An existing domain store opens
+   *  as it is, whether or not it has a description. */
   constructor(projectDbPath, mounts = [], options) {
     this.project = open(projectDbPath);
-    for (const m of mounts) {
-      if (options?.skipMissing && !existsSync(m.dbPath))
-        continue;
-      this.domains.set(m.name, open(m.dbPath));
+    try {
+      for (const m of mounts) {
+        if (!existsSync(m.dbPath)) {
+          if (options?.skipMissing) {
+            this.missingDomains.push({ name: m.name, dbPath: m.dbPath });
+            continue;
+          }
+          throw new DomainNotCreatedError(m.name, m.dbPath);
+        }
+        this.domains.set(m.name, new SterlingStore(m.dbPath));
+      }
+    } catch (e) {
+      this.close();
+      throw e;
     }
+  }
+  /** A mounted domain's description (store_meta 'description'), or undefined
+   *  when that existing store has none. An unmounted name is refused. */
+  domainDescription(name) {
+    const store = this.domains.get(name);
+    if (!store)
+      throw new Error(`domainDescription: domain '${name}' is not mounted`);
+    return store.getMeta(DOMAIN_DESCRIPTION_KEY);
+  }
+  /** Set a mounted domain's description (store_meta 'description'), trimmed,
+   *  on that domain's own store. The write path for an existing domain;
+   *  createDomain sets it for a new one. An unmounted name and a blank
+   *  description are refused with nothing written, and so is a call inside a
+   *  transaction open on another mount (the same affinity rule as every write
+   *  through this class). */
+  setDomainDescription(name, description) {
+    const store = this.domains.get(name);
+    if (!store)
+      throw new Error(`setDomainDescription: domain '${name}' is not mounted`);
+    if (typeof description !== "string" || description.trim().length === 0) {
+      throw new Error(`setDomainDescription: the description for domain '${name}' is blank; nothing was written`);
+    }
+    this.assertMountAffinity("setDomainDescription", store, `domain '${name}'`);
+    store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
   }
   /** Scope-routed write (§3.3): project → the project store; domain:<name> → that
    *  domain store. Routing is MECHANICAL here; the tool layer owns the policy
@@ -22920,14 +23015,18 @@ var MountedStores = class {
     }
     throw new Error(`unroutable scope '${scope}'`);
   }
-  /** Cross-store retrieval (§3.4): every mounted store runs the full
-   *  filter→join→rank→cap; results concatenate PROJECT-FIRST then domains (each
-   *  internally bm25-ranked — §3.3 project-store-first bias) and the overall cap
-   *  re-applies. A unified cross-store bm25 re-rank is a later refinement. */
+  /** Cross-store retrieval (§3.4) with read shares (board 675daf9d (b)): every
+   *  mounted store runs the full filter→join→rank→cap on its own, allocateShares
+   *  decides how many of each store's results make the cap (the project up to
+   *  ceil(0.6 x cap) when a domain has matches, the rest split across domains,
+   *  unused share spilling over), and each store's top-N is concatenated project
+   *  first, then domains in manifest order. Scores are never compared across
+   *  databases. When only the project matches it fills the cap, as before. */
   query(opts = {}) {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-    const merged = this.all().flatMap((s2) => s2.query(opts));
-    return merged.slice(0, cap);
+    const perStore = this.all().map((s2) => s2.query({ ...opts, cap }));
+    const shares = allocateShares(perStore.map((r) => r.length), cap);
+    return perStore.flatMap((records, i) => records.slice(0, shares[i]));
   }
   /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
    *  query(), summed project-first across every mounted store (countBySource is
@@ -23333,9 +23432,6 @@ var MountedStores = class {
   }
 };
 
-// packages/store/dist/registry.js
-import { DatabaseSync } from "node:sqlite";
-
 // packages/store/dist/axis.js
 var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
   // function words
@@ -23483,6 +23579,9 @@ function rankedAxisTerms(text) {
   }
   return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).map(([term]) => term);
 }
+function extractAxisTermsUncapped(text) {
+  return rankedAxisTerms(text);
+}
 function axisNarrowText(record2) {
   if (!record2 || typeof record2 !== "object")
     return "";
@@ -23617,6 +23716,59 @@ function hasRecordCentralityHit(record2, outgoingText, opts = {}) {
   return covered.length >= Math.min(minTerms, central.length);
 }
 
+// packages/store/dist/domain-fit.js
+var DOMAIN_FIT_MIN_TERMS = 2;
+function termsMatch(a, b) {
+  return a === b || a.startsWith(b) || b.startsWith(a);
+}
+function subjectTerms(text) {
+  return extractAxisTermsUncapped(text).filter((t) => t.length >= AXIS_MIN_TERM_LEN && !GENERIC_DEV_TERMS.has(t));
+}
+function fitDomains(recordText, domains, opts = {}) {
+  if (typeof recordText !== "string")
+    throw new TypeError("fitDomains: recordText must be a string");
+  if (!Array.isArray(domains))
+    throw new TypeError("fitDomains: domains must be an array");
+  const minTerms = opts.minTerms ?? DOMAIN_FIT_MIN_TERMS;
+  if (!Number.isInteger(minTerms) || minTerms < 1) {
+    throw new RangeError(`fitDomains: minTerms must be a positive integer, got ${String(minTerms)}`);
+  }
+  if (opts.exclude !== void 0 && (!Array.isArray(opts.exclude) || opts.exclude.some((n) => typeof n !== "string"))) {
+    throw new TypeError("fitDomains: exclude must be an array of strings");
+  }
+  const excluded = new Set((opts.exclude ?? []).map((n) => n.toLowerCase()));
+  const seen = /* @__PURE__ */ new Set();
+  for (const d of domains) {
+    if (d === null || typeof d !== "object" || typeof d.name !== "string" || d.name.trim() === "") {
+      throw new TypeError("fitDomains: every domain needs a non-empty string name");
+    }
+    if (d.description != null && typeof d.description !== "string") {
+      throw new TypeError(`fitDomains: description of domain '${d.name}' must be a string`);
+    }
+    const key = d.name.toLowerCase();
+    if (seen.has(key))
+      throw new Error(`fitDomains: duplicate domain name '${d.name}'`);
+    seen.add(key);
+  }
+  const recordTerms = subjectTerms(recordText);
+  const fits = [];
+  for (const d of domains) {
+    if (excluded.has(d.name.toLowerCase()) || !d.description)
+      continue;
+    const descTerms = subjectTerms(d.description);
+    if (!descTerms.length)
+      continue;
+    const matched = descTerms.filter((dt) => recordTerms.some((rt) => termsMatch(dt, rt)));
+    if (matched.length < Math.min(minTerms, descTerms.length))
+      continue;
+    fits.push({ name: d.name, score: matched.length / descTerms.length, matched });
+  }
+  return fits.sort((a, b) => b.score - a.score || b.matched.length - a.matched.length || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+// packages/store/dist/registry.js
+import { DatabaseSync } from "node:sqlite";
+
 // packages/store/dist/index.js
 function classifyClaimPath(repoRoot, path) {
   try {
@@ -23741,6 +23893,15 @@ CREATE TABLE IF NOT EXISTS activity_log (
   type TEXT NOT NULL,
   record_id TEXT NOT NULL,
   title TEXT NOT NULL
+);
+-- Store-level key/value metadata (board 675daf9d, decision
+-- projects-mount-domains-and-sibling-projects): a domain store's description is
+-- its 'description' key. Additive: CREATE IF NOT EXISTS on every v2 open, so no
+-- user_version bump; a pre-v2 store opens read-only before this DDL runs.
+CREATE TABLE IF NOT EXISTS store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 `;
 var SUPPORTED_SCHEMA_VERSION = 2;
@@ -25588,6 +25749,28 @@ var SterlingStore = class _SterlingStore {
       this.db.prepare("INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at").run(type, recordId, at);
     });
   }
+  /**
+   * Store-level metadata read (store_meta). undefined when the key was never
+   * set. A pre-v2 store has no store_meta table (it opens read-only before the
+   * DDL runs), so this refuses there with the migration error rather than
+   * answering "unset" for a question the store cannot answer.
+   */
+  getMeta(key) {
+    this.assertV2Surface("getMeta");
+    const row = this.db.prepare("SELECT value FROM store_meta WHERE key = ?").get(key);
+    return row?.value;
+  }
+  /** Store-level metadata write (store_meta): upsert, one row per key, stamped updated_at. */
+  setMeta(key, value) {
+    this.assertWritable("setMeta");
+    if (typeof key !== "string" || key.length === 0)
+      throw new Error("setMeta: key must be a non-empty string");
+    if (typeof value !== "string")
+      throw new Error(`setMeta: value for key '${key}' must be a string`);
+    this.tx(() => {
+      this.db.prepare("INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(key, value, (/* @__PURE__ */ new Date()).toISOString());
+    });
+  }
   takeSelection() {
     let row;
     this.tx(() => {
@@ -26087,6 +26270,21 @@ function textRowRecord(record2) {
   }
   return out;
 }
+function mountedDomainSurface(stores) {
+  return {
+    names: () => stores.domainNames(),
+    description: (name) => stores.domainDescription(name),
+    setDescription: (name, description) => stores.setDomainDescription(name, description),
+    missing: () => stores.missingDomains.map((m) => m.name)
+  };
+}
+var UNPROMOTABLE_TYPES = ["feature_article", "todo", "attestation"];
+function declaredRepoPaths(type, record2) {
+  if (type === "feature_article") {
+    return (record2.files ?? []).map((f) => f?.path).filter((p) => typeof p === "string");
+  }
+  return Array.isArray(record2.file_keys) ? record2.file_keys.filter((p) => typeof p === "string") : [];
+}
 var DAY_MS = 864e5;
 var DEFAULT_BOARD_CAP = 50;
 var BOARD_SCAN_CAP = 1e3;
@@ -26360,12 +26558,55 @@ var SterlingTools = class _SterlingTools {
   now;
   newId;
   repoRoot;
+  domains;
   constructor(deps) {
     this.store = deps.store;
     this.config = deps.config ?? parseConfig({});
     this.now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
     this.newId = deps.newId ?? randomUUID2;
     this.repoRoot = deps.repoRoot;
+    this.domains = deps.domains ?? (deps.store instanceof MountedStores ? mountedDomainSurface(deps.store) : void 0);
+  }
+  /** Every mounted domain with its description (null when its store has none),
+   *  in manifest order. */
+  mountedDomainList() {
+    return (this.domains?.names() ?? []).map((name) => ({ name, description: this.domains.description(name) ?? null }));
+  }
+  /** `{ missing_domains }` when a configured domain was skipped for having no
+   *  store, else nothing: a read over fewer stores than configured says so. */
+  missingDomainsDisclosure() {
+    const missing = this.domains?.missing() ?? [];
+    return missing.length ? { missing_domains: missing } : {};
+  }
+  /** The store a read record came from: 'project' or 'domain:<name>', from the
+   *  mount that physically holds it (scopeOfHolder), never the body's label. */
+  sourceOf(id) {
+    return this.store.scopeOfHolder(id);
+  }
+  /**
+   * domain_describe (Domains D2): read a mounted domain's description, or set it
+   * when `description` is given. The description is the store_meta row that
+   * says which knowledge belongs in the domain; knowledge_create lists it and
+   * the promotion_review mint matches records against it. An unmounted domain
+   * and a blank description are refused with nothing written.
+   */
+  domainDescribe(args2) {
+    const { domain, description } = args2;
+    const mounted = this.domains?.names() ?? [];
+    if (!mounted.includes(domain)) {
+      const missing = this.domains?.missing() ?? [];
+      const why = missing.includes(domain) ? `it is configured but has no store, so it is not mounted (create it with a description first)` : `mounted domains: ${mounted.length ? mounted.join(", ") : "(none)"}`;
+      throw new Error(`domain_describe: domain '${domain}' is not mounted; ${why}. Nothing was written.`);
+    }
+    if (description === void 0)
+      return { domain, description: this.domains.description(domain) ?? null };
+    if (typeof description !== "string" || description.trim().length === 0) {
+      throw new Error(`domain_describe: the description for '${domain}' is blank. A description says which knowledge belongs in this domain; omit it to read the current one. Nothing was written.`);
+    }
+    const previous = this.domains.description(domain) ?? null;
+    const next = description.trim();
+    this.domains.setDescription(domain, next);
+    return { domain, description: next, previous_description: previous, updated: true };
   }
   /**
    * §16.1.9: unbuilt checks emit check_skipped where they would have run — never
@@ -27933,6 +28174,14 @@ var SterlingTools = class _SterlingTools {
         throw this.renderValidationFailure(err, type, "knowledge_create");
       throw err;
     }
+    const scopeValue = typeof parsed.scope === "string" ? parsed.scope : "";
+    if (scopeValue.startsWith("domain:")) {
+      const paths = declaredRepoPaths(type, parsed);
+      if (paths.length) {
+        const field = type === "feature_article" ? "files" : "file_keys";
+        throw new Error(`knowledge_create: scope '${scopeValue}' is a shared domain store, and this ${type} declares repo paths in ${field} (${paths.slice(0, 5).join(", ")}${paths.length > 5 ? ", \u2026" : ""}). A record about this repo's files stays scope 'project'; a record about the domain's subject goes to '${scopeValue}' without repo paths. Drop the ${field} or create it project-scoped. Nothing was written.`);
+      }
+    }
     const claimsCheck = opts?.internalMint === true ? {} : this.assertClaimedPaths("knowledge_create", parsed);
     if (type === "feature_article" || type === "reference_material") {
       candidate.file_baselines = this.computeBaselines(candidate);
@@ -27994,37 +28243,60 @@ var SterlingTools = class _SterlingTools {
       };
     }
     const record2 = this.store.create(candidate);
-    this.surfacePromotionCandidate(record2, type);
+    const promotionWarning = this.surfacePromotionCandidate(record2, type);
+    if (promotionWarning)
+      citationWarnings.push(promotionWarning);
+    const mountedDomains = this.mountedDomainList();
     const sameSubject = _SterlingTools.SAME_SUBJECT_TYPES.includes(type) ? this.sameSubjectDigest(registered ? registered.fts(parsed) : "", /* @__PURE__ */ new Set([record2.id])) : void 0;
     return {
       record: record2,
       check_skipped: skipped,
       warnings: citationWarnings,
       ...sameSubject ? { same_subject: sameSubject } : {},
+      ...mountedDomains.length ? { mounted_domains: mountedDomains } : {},
       ...claimsCheck
     };
   }
   /**
-   * §3.3 project-store-then-promote: reference/research records are
-   * domain-candidates by default. One born project-scoped, when the project has
-   * a domain mounted to promote into, surfaces a single promotion_review
-   * maintenance item — the human decides at the queue drain, never an automatic
-   * move. No domain mounted → nowhere to promote → nothing surfaced (so a
-   * domain-less project sees no promotion noise). A record the conductor already
-   * scoped to a domain at creation is not a candidate.
+   * The promotion backstop (decision projects-mount-domains-and-sibling-projects,
+   * PROPOSALS ruling, amended head): a record born project-scoped, of any
+   * promotable durable type, that declares no repo paths and whose text fits
+   * the description of at least one mounted NON-sterling domain surfaces one
+   * promotion_review item naming the suggested domain(s), the description and
+   * the matched terms. Exactly one fit is drainable by the agent; several fits
+   * go to the user. The 'sterling' domain is excluded because it is mounted by
+   * every project and would otherwise claim every record about Sterling work.
+   * No mounted domain with a description, or no fit, surfaces nothing. Returns
+   * the receipt warning for knowledge_create, or undefined when nothing was
+   * surfaced.
    */
   surfacePromotionCandidate(record2, type) {
-    if (type !== "reference_material" && type !== "research_finding")
-      return;
-    if (record2.scope !== "project" || this.config.stack_tags.length === 0)
-      return;
-    const label = record2.title ?? record2.question ?? type;
+    if (UNPROMOTABLE_TYPES.includes(type))
+      return void 0;
+    if (record2.scope !== "project")
+      return void 0;
+    const body = record2;
+    if (declaredRepoPaths(type, body).length)
+      return void 0;
+    const registered = RECORD_TYPES[type];
+    if (!registered)
+      return void 0;
+    const candidates = this.mountedDomainList().filter((d) => d.name !== "sterling" && d.description);
+    if (!candidates.length)
+      return void 0;
+    const fits = fitDomains(registered.fts(body), candidates, { exclude: ["sterling"] });
+    if (!fits.length)
+      return void 0;
+    const descriptionOf = new Map(candidates.map((d) => [d.name, d.description]));
+    const named = fits.map((f) => `domain:${f.name} ("${descriptionOf.get(f.name)}"; matched: ${f.matched.join(", ")})`).join("; ");
+    const verdict = fits.length === 1 ? "exactly one fit: drainable" : "several fit: ask the user";
+    const label = _SterlingTools.mintHeadlineOf(type, body) || type;
     this.maintenanceEnqueue({
       reason: "promotion_review",
-      text: `review '${label}' for promotion to a domain store \u2014 project-scoped ${type}, a domain-candidate by default (\xA73.3)`,
-      file_keys: record2.file_keys,
+      text: `review '${label}' for promotion: project-scoped ${type} with no file_keys fits ${named}. ${verdict}`,
       feature_link: record2.id
     });
+    return `promotion candidate: this project-scoped ${type} fits ${named}, so a promotion_review item was queued (${verdict}). A record about that subject belongs in scope domain:${fits[0].name} at creation; one about this repo stays project.`;
   }
   findAntiPatternOverlap(candidate) {
     const existing = this.store.query({ types: ["anti_pattern"], cap: 1e3 });
@@ -29012,7 +29284,8 @@ var SterlingTools = class _SterlingTools {
         // said out loud rather than left to read as "nothing is stale here".
         provenance: "unavailable:count_projection",
         records: [],
-        ...byType ? { by_type: byType } : {}
+        ...byType ? { by_type: byType } : {},
+        ...this.missingDomainsDisclosure()
       };
     }
     const records = this.knowledgeQuery(filter);
@@ -29027,7 +29300,8 @@ var SterlingTools = class _SterlingTools {
     const projectRecord = (r) => {
       const base2 = projection === "digest" ? digestRecord(r) : this.projectForQuery(r);
       const drift = annotations.get(r.id);
-      return drift ? { ...base2, baseline_drift: drift } : base2;
+      const labelled = { ...base2, source: this.sourceOf(r.id) };
+      return drift ? { ...labelled, baseline_drift: drift } : labelled;
     };
     return {
       matched_filter: matchedFilter,
@@ -29040,7 +29314,8 @@ var SterlingTools = class _SterlingTools {
       answerability,
       provenance,
       records: records.map(projectRecord),
-      ...aboveThreshold !== void 0 ? { above_threshold: aboveThreshold } : {}
+      ...aboveThreshold !== void 0 ? { above_threshold: aboveThreshold } : {},
+      ...this.missingDomainsDisclosure()
     };
   }
   /**
@@ -29097,7 +29372,7 @@ var SterlingTools = class _SterlingTools {
   knowledgePreflight(text) {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) {
-      return { answerability: "insufficient", reason: "too_little_vocabulary", terms, matched_total: 0, matches: [] };
+      return { answerability: "insufficient", reason: "too_little_vocabulary", terms, matched_total: 0, matches: [], ...this.missingDomainsDisclosure() };
     }
     const allMatches = this.axisCandidateMatches(text, terms, _SterlingTools.PREFLIGHT_MIN_HITS, false);
     const withCentrality = allMatches.map(({ record: record2, hits }) => ({
@@ -29121,6 +29396,7 @@ var SterlingTools = class _SterlingTools {
         title: _SterlingTools.axisRecordTitle(record2),
         matched_on: hits,
         central: centralHits,
+        source: this.sourceOf(record2.id),
         ...inbound.length ? { inbound_supersedes: inbound } : {}
       };
     });
@@ -29129,7 +29405,8 @@ var SterlingTools = class _SterlingTools {
       matched_total: matchedTotal,
       ...capped ? { capped: true } : {},
       matches,
-      answerability: matchedTotal ? "verify_targets" : "ungoverned"
+      answerability: matchedTotal ? "verify_targets" : "ungoverned",
+      ...this.missingDomainsDisclosure()
     };
   }
   /** PULL floor (knowledgePreflight only): one matched term suffices once
@@ -31172,8 +31449,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     if (!this.store.projectStoreHolds(originalId)) {
       throw new Error(`knowledge_promote: record '${originalId}' is labelled scope='project' but the PROJECT store does not hold it \u2014 it physically lives in a domain mount, and its body's scope says nothing about that. Only project-scoped records the project store actually holds promote (\xA73.3); nothing was written.`);
     }
-    const UNPROMOTABLE = ["feature_article", "todo", "attestation"];
-    if (UNPROMOTABLE.includes(original.type)) {
+    if (UNPROMOTABLE_TYPES.includes(original.type)) {
       throw new Error(`knowledge_promote: ${original.type} never promotes \u2014 feature_article is always project (\xA73.3); todo is a project surface; an attestation's artifact_key names a project-local artifact that means nothing in a shared domain store (review finding, 2026-08-21)`);
     }
     const ts = this.now();
@@ -31216,6 +31492,10 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       warnings.push(`promoted record carries no stack_tags \u2014 unreachable by tag-filtered queries; consider tagging it in the domain store`);
     }
     warnings.push(...this.suspiciousLocalLabelWarnings(content));
+    const domainDescription = this.domains?.names().includes(domain) ? this.domains.description(domain) ?? null : null;
+    if (domainDescription === null) {
+      warnings.push(`domain:${domain} has no description, so nothing records which knowledge belongs in it; set one with domain_describe`);
+    }
     return {
       promoted,
       retired: originalId,
@@ -31223,6 +31503,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       dropped_file_keys: originalFileKeys.length,
       dropped_stack_tags: droppedStackTags,
       kept_stack_tags: keptStackTags,
+      domain_description: domainDescription,
       warnings
     };
   }
@@ -33058,12 +33339,19 @@ var strict = (shape) => external_exports.object(shape).strict();
 function createSterlingServer(storePath2) {
   const configPath = join5(dirname5(storePath2), "config.json");
   const config2 = parseConfig(existsSync4(configPath) ? JSON.parse(readFileSync2(configPath, "utf8")) : {});
-  const store = new MountedStores(storePath2, resolveDomainMounts(config2));
-  const tools = new SterlingTools({ store, config: config2, repoRoot: dirname5(dirname5(storePath2)) });
+  const store = new MountedStores(storePath2, resolveDomainMounts(config2), { skipMissing: true });
+  for (const m of store.missingDomains)
+    process.stderr.write(missingDomainWarning(m) + "\n");
+  const tools = new SterlingTools({ store, config: config2, repoRoot: dirname5(dirname5(storePath2)), domains: mountedDomainSurface(store) });
+  const bootDomains = store.domainNames().map((name) => {
+    const description = store.domainDescription(name);
+    return description ? `${name} ("${description}")` : `${name} (no description)`;
+  });
+  const createDomainsNote = bootDomains.length ? ` Mounted domains: ${bootDomains.join("; ")}. A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.` : "";
   const server2 = new McpServer({ name: "sterling", version: "0.1.0" });
   const json = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
   server2.registerTool("knowledge_create", {
-    description: 'Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type\'s allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.',
+    description: "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." + createDomainsNote,
     inputSchema: strict({ type: external_exports.string(), fields: knowledgeCreateFieldsSchema, projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ type, fields, projection }) => {
     const { type: fieldsType, ...restFields } = fields;
@@ -33076,7 +33364,7 @@ function createSterlingServer(storePath2) {
     return json(tools.writeProjected(tools.knowledgeCreate(type, restFields), projection));
   });
   server2.registerTool("knowledge_query", {
-    description: `Retrieve knowledge: filter (types, stack_tags) \u2192 file_keys join \u2192 rank (rank_terms: single keywords, never prose) \u2192 cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW \u2014 raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: "full" (default), "digest" (one headline line per record \u2014 scan wide, then knowledge_get the few you need), or "count". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (score = -bm25, higher is more relevant, unbounded).`,
+    description: `Retrieve knowledge: filter (types, stack_tags) \u2192 file_keys join \u2192 rank (rank_terms: single keywords, never prose) \u2192 cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW \u2014 raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: "full" (default), "digest" (one headline line per record \u2014 scan wide, then knowledge_get the few you need), or "count". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (score = -bm25, higher is more relevant, unbounded). Each record carries \`source\` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched.`,
     inputSchema: strict({
       types: external_exports.array(external_exports.string()).optional(),
       stack_tags: external_exports.array(external_exports.string()).optional(),
@@ -33204,7 +33492,7 @@ function createSterlingServer(storePath2) {
     })
   }, ({ id, selector, expected_version, resolves, projection }) => json(tools.writeProjected(tools.knowledgeArrayRemove(id, selector, expected_version, resolves), projection)));
   server2.registerTool("knowledge_promote", {
-    description: 'Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article and todo never promote; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The echo (`promoted`) defaults to a digest; projection:"full" returns the whole record.',
+    description: 'Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article and todo never promote; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The receipt carries domain_description, the target domain\'s description. The echo (`promoted`) defaults to a digest; projection:"full" returns the whole record.',
     inputSchema: strict({ id: external_exports.string(), domain: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection)));
   server2.registerTool("board_add", {
@@ -33285,12 +33573,16 @@ function createSterlingServer(storePath2) {
       expected_digest: external_exports.string().optional()
     })
   }, ({ path, value, expected_digest }) => json(tools.configSet({ path, value, expected_digest })));
+  server2.registerTool("domain_describe", {
+    description: "Read or set a mounted domain's description: the one line that says which knowledge belongs in that shared domain store. knowledge_create lists it, and the promotion_review mint matches project records against it. Promotion proposals go only to project records with no file_keys (an article's files count; a reference_material's location does not). Omit `description` to read it ({domain, description}, null when unset); pass it to set it ({domain, description, previous_description, updated:true}). An unmounted domain and a blank description are refused with nothing written.",
+    inputSchema: strict({ domain: external_exports.string(), description: external_exports.string().optional() })
+  }, ({ domain, description }) => json(tools.domainDescribe({ domain, description })));
   server2.registerTool("knowledge_link", {
     description: "Add a typed link: cites | informed_by | fulfills | falsified_by (supersedes is refused \u2014 use knowledge_supersede / knowledge_retire). falsified_by points FROM the record whose claim was disproven TO the record carrying the evidence; the falsified record stays live. When a successor claim exists, supersede instead.",
     inputSchema: strict({ from: external_exports.string(), rel: external_exports.string(), to: external_exports.string() })
   }, ({ from, rel, to }) => json(tools.knowledgeLink(from, rel, to)));
   server2.registerTool("knowledge_preflight", {
-    description: 'Pre-write conflict check: does the store already govern this subject? Run it before dispatching, designing, asking the user, or drafting a new record. Pass `text` (one subject) or `texts` (an agenda, one verdict per entry, in order). Matches anti_pattern, decision, feature_article, research_finding, disconfirmed_hypothesis and open_question records. Verdicts: "verify_targets" \u2014 the store governs this; open the named matches before proceeding (a match is a pointer, not the source); "ungoverned" \u2014 nothing governs it; "insufficient" \u2014 too little vocabulary to judge; the verdict and matched_total are decided from the centrality-passing candidate set only, not the capped `matches` window. Returns {terms, matched_total, capped (present/true only when `matches` was truncated), matches:[{id,type,title,matched_on,central}], answerability} or {verdicts:[\u2026]}. `matches` is capped at 20, sorted centrality-first (a central match always outranks a merely-hitting one), then by raw hit count. `matches` may include records with `central:[]` (non-central) \u2014 record-centrality is no longer required to LIST a candidate, only to decide the verdict and matched_total. matched_total counts centrality-passing, qualifying records among the candidates evaluated (each record type\'s own query is itself capped at 40), not a true/exact/full count.',
+    description: 'Pre-write conflict check: does the store already govern this subject? Run it before dispatching, designing, asking the user, or drafting a new record. Pass `text` (one subject) or `texts` (an agenda, one verdict per entry, in order). Matches anti_pattern, decision, feature_article, research_finding, disconfirmed_hypothesis and open_question records. Verdicts: "verify_targets" \u2014 the store governs this; open the named matches before proceeding (a match is a pointer, not the source); "ungoverned" \u2014 nothing governs it; "insufficient" \u2014 too little vocabulary to judge; the verdict and matched_total are decided from the centrality-passing candidate set only, not the capped `matches` window. Returns {terms, matched_total, capped (present/true only when `matches` was truncated), matches:[{id,type,title,matched_on,central,source}], answerability, missing_domains (only when a configured domain has no store)} or {verdicts:[\u2026]}. `matches` is capped at 20, sorted centrality-first (a central match always outranks a merely-hitting one), then by raw hit count. `matches` may include records with `central:[]` (non-central) \u2014 record-centrality is no longer required to LIST a candidate, only to decide the verdict and matched_total. matched_total counts centrality-passing, qualifying records among the candidates evaluated (each record type\'s own query is itself capped at 40), not a true/exact/full count.',
     inputSchema: strict({ text: external_exports.string().optional(), texts: external_exports.array(external_exports.string()).optional() })
   }, ({ text, texts }) => {
     if (text === void 0 === (texts === void 0)) {
