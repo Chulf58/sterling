@@ -5882,9 +5882,6 @@ function registerStartLocked(root, entry) {
   writeRawArrayAtomic(root, list);
   return toWrite;
 }
-function registerStart(root, entry) {
-  return withRegisterLock(root, () => registerStartLocked(root, entry));
-}
 function registerEndLocked(root, agentId, event, { sessionId } = {}) {
   const { availability, arr } = readRawArray(root);
   if (availability === "corrupt") {
@@ -6362,7 +6359,40 @@ function recordDispatchPre(root, stdin) {
     };
   }));
 }
-function recordDispatchPost(root, stdin) {
+function fillUnattributableRowLocked(root, { sessionId, agentId, agentType, toolUseId, prompt }, territoryFor) {
+  if (typeof territoryFor !== "function") return [];
+  const leave = (facts, why, ended = false) => [render(disclosure("dispatch_unattributable", { tool_use_id: toolUseId, agent_id: agentId, ...facts }, `Post for tool_use_id '${toolUseId}' bound agentId '${agentId}' but did not fill its register row: ${why}; the row keeps files [], so ${ended ? "a resume will inherit no files" : "H10 will not defer this lane's files"}`))];
+  const { availability, arr } = readRawArray(root);
+  if (availability === "absent") return [];
+  if (availability === "corrupt") return leave({ reason: "register-corrupt" }, `the register at ${registerPath(root)} is unreadable`);
+  const idx = [];
+  arr.forEach((e, i) => {
+    if (e && e.session_id === sessionId && e.agent_id === agentId) idx.push(i);
+  });
+  if (idx.length === 0) return [];
+  if (idx.length > 1) return leave({ reason: "ambiguous", rows: idx.length }, `the lane has ${idx.length} register rows in this session, so which one this brief belongs to is not known`, idx.every((i) => arr[i].ended));
+  const row = arr[idx[0]];
+  if (row.tool_use_id === toolUseId) return [];
+  if (row.files_source !== "unattributable" || !Array.isArray(row.files) || row.files.length > 0 || row.tool_use_id !== null && row.tool_use_id !== void 0) {
+    return leave({ reason: "row-not-unattributable", files_source: row.files_source ?? null, row_tool_use_id: row.tool_use_id ?? null }, `its row is not an empty unattributable one (files_source '${row.files_source}', ${Array.isArray(row.files) ? row.files.length : "no"} files, tool_use_id ${JSON.stringify(row.tool_use_id ?? null)})`, Boolean(row.ended));
+  }
+  if (typeof agentType !== "string" || row.agent_type !== agentType) {
+    return leave({ reason: "agent-type-mismatch", row_agent_type: row.agent_type ?? null, dispatched_type: agentType ?? null }, `the row's agent type '${row.agent_type}' differs from the dispatched '${agentType}'`, Boolean(row.ended));
+  }
+  const territory = territoryFor(prompt);
+  if (!territory?.ok) return leave({ reason: "no-review-territory" }, territory?.reason ?? "the brief yielded no territory", Boolean(row.ended));
+  arr[idx[0]] = {
+    ...row,
+    files: territory.files.slice(),
+    file_entries: territory.file_entries.slice(),
+    files_source: "review-territory",
+    tool_use_id: toolUseId,
+    filled_at_post: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  writeRawArrayAtomic(root, arr);
+  return [];
+}
+function recordDispatchPost(root, stdin, opts = {}) {
   return withRegisterLock(root, () => catchContainmentRefusal(() => {
     const toolUseId = stdin?.tool_use_id;
     const tr = stdin?.tool_response;
@@ -6395,6 +6425,11 @@ function recordDispatchPost(root, stdin) {
         disclosures: [render(disclosure("dispatch_state_poisoned", { tool_use_id: toolUseId, reason: existing.reason, file: existing.file }, `Post for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}: ${existing.file ?? "(unnamed)"}) \u2014 not bound`))]
       };
     }
+    const fillRow = () => fillUnattributableRowLocked(
+      root,
+      { sessionId: stringField(stdin?.session_id), agentId, agentType: stringField(stdin?.tool_input?.subagent_type), toolUseId, prompt: inputPrompt },
+      opts.territoryFor
+    );
     const sessionId = stringField(stdin?.session_id);
     if (typeof sessionId !== "string" || sessionId === "") {
       return {
@@ -6453,7 +6488,8 @@ function recordDispatchPost(root, stdin) {
               { tool_use_id: toolUseId, agent_id: agentId },
               `Post for tool_use_id '${toolUseId}' created a NEW dispatch-state record (origin 'post-only') \u2014 no Pre had been recorded for it; stronger evidence is never refused for weaker evidence's absence`
             )
-          )
+          ),
+          ...fillRow()
         ],
         record
       };
@@ -6463,7 +6499,10 @@ function recordDispatchPost(root, stdin) {
       return {
         ok: true,
         action: "late-post-noop",
-        disclosures: [render(disclosure("dispatch_post_late", { tool_use_id: toolUseId, agent_id: agentId }, `Post for tool_use_id '${toolUseId}' arrived after this record went terminal (${r.terminal.reason}) \u2014 no-op`))]
+        disclosures: [
+          render(disclosure("dispatch_post_late", { tool_use_id: toolUseId, agent_id: agentId }, `Post for tool_use_id '${toolUseId}' arrived after this record went terminal (${r.terminal.reason}) \u2014 the record is not bound`)),
+          ...fillRow()
+        ]
       };
     }
     if (r.session_id !== null && sessionId !== null && r.session_id !== sessionId) {
@@ -6480,7 +6519,7 @@ function recordDispatchPost(root, stdin) {
     if (!r.started) {
       const updated2 = { ...r, post_binding: { agent_id: agentId, at } };
       writeLiveRecord(root, key, updated2);
-      return { ok: true, action: "post-bound", disclosures: [], record: updated2 };
+      return { ok: true, action: "post-bound", disclosures: fillRow(), record: updated2 };
     }
     if (r.started.agent_id === agentId) {
       const updated2 = { ...r, post_binding: { agent_id: agentId, at, confirmed_derived: true } };
@@ -6633,12 +6672,20 @@ async function resolveAndRegisterStart(root, startStdin, entryBuilder) {
       throw e;
     }
   }
-  async function finalizeUnattributable(resolution) {
+  async function finalizeUnattributable(fallback) {
     try {
-      const entry = await registerStart(root, entryBuilder(resolution));
-      return { resolution, entry };
+      return await withRegisterLock(root, () => {
+        const again = attemptDetermine(root, { session_id, agent_id, agent_type, consumer });
+        const resolution = again.verdict === "resolved" && again.value.source !== "unattributable" ? again.value : fallback;
+        try {
+          return { resolution, entry: registerStartLocked(root, entryBuilder(resolution)) };
+        } catch (e) {
+          if (e?.kind === "refusal") return { resolution, entry: null, refusal: e };
+          throw e;
+        }
+      });
     } catch (e) {
-      if (e?.kind === "refusal") return { resolution, entry: null, refusal: e };
+      if (e?.kind === "refusal") return { resolution: fallback, entry: null, refusal: e };
       throw e;
     }
   }
@@ -6754,6 +6801,13 @@ function regularFileEntries(files, cwd) {
   }
   return out;
 }
+function postTerritory(prompt, cwd) {
+  const territory = parseReviewTerritory(prompt);
+  if (!territory.present) return { ok: false, reason: "the bound brief declares no REVIEW-TERRITORY" };
+  if (!territory.valid) return { ok: false, reason: `the bound brief's REVIEW-TERRITORY is malformed (${territory.reason})` };
+  const files = normalizeRegisterPaths(territory.files, cwd);
+  return { ok: true, files, file_entries: regularFileEntries(files, cwd) };
+}
 function sidecarForChildTranscript(childPath) {
   if (!childPath.endsWith(".jsonl")) return { ok: false };
   const sidecarPath = `${childPath.slice(0, -".jsonl".length)}.meta.json`;
@@ -6860,7 +6914,7 @@ try {
       warnNonBlocking(`H22: unexpected ${event} tool_name '${input.tool_name}' on the Task|Agent matcher \u2014 allowing, nothing tracked`);
     } else {
       const recorder = event === "PreToolUse" ? recordDispatchPre : event === "PostToolUse" ? recordDispatchPost : recordDispatchFailure;
-      const result = await recorder(input.cwd, input);
+      const result = await recorder(input.cwd, input, event === "PostToolUse" ? { territoryFor: (prompt) => postTerritory(prompt, input.cwd) } : void 0);
       if (result.disclosures?.length) lines.push(...result.disclosures);
     }
     if (lines.length) process.stderr.write(lines.join("\n") + "\n");

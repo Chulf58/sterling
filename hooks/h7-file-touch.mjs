@@ -7739,7 +7739,9 @@ try {
     touchesPath,
     () => {
       const touches = existsSync3(touchesPath) ? parseTouchesContent(readFileSync3(touchesPath, "utf8")) : [];
-      touches.push({ path: rel, at: now });
+      const touch = { path: rel, at: now };
+      if (typeof input.agent_id === "string" && input.agent_id !== "") touch.agent_id = input.agent_id;
+      touches.push(touch);
       writeFileSync2(touchesPath, JSON.stringify(touches));
     },
     { onTimeout: () => store.recordCheckSkipped("h7-touches-lock", "lock_timeout", void 0, now) }
