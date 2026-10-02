@@ -191,6 +191,24 @@ test('transform callbacks re-run on reload and give the same registrations', asy
   assert.deepEqual(a.mcp.get('sterling'), b.mcp.get('sterling'));
 });
 
+// Claude Code reads commands and skills raw, fences and all, so its model sees every
+// opencode-only block. Each one opens with an explicit "On OpenCode," so that model
+// cannot take the block as its own instruction (coordinator ruling, 2026-10-02).
+test('every opencode-only block in a raw-read command or skill opens with "On OpenCode,"', () => {
+  const files = [...commandFiles().map((n) => join('commands', `${n}.md`)), ...skillDirs().map((d) => join('skills', d, 'SKILL.md'))];
+  let blocks = 0;
+  for (const rel of files) {
+    const lines = readFileSync(join(repo, rel), 'utf8').replace(/\r\n/g, '\n').split('\n');
+    lines.forEach((line, i) => {
+      if (line !== '<!-- opencode-only -->') return;
+      blocks++;
+      const first = lines.slice(i + 1).find((l) => l.trim() !== '');
+      assert.ok(first?.startsWith('On OpenCode,'), `${rel}:${i + 2}: an opencode-only block opens with "On OpenCode,", got ${JSON.stringify(first)}`);
+    });
+  }
+  assert.ok(blocks >= 1, 'the check saw at least one block (dashboard.md has one)');
+});
+
 test('dashboard.md: the OpenCode render names the TUI plugin and no tmux or launcher; the Claude render is the unfenced text', async (t) => {
   const { renderClaudeText } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'agent-fences.mjs')).href);
   const source = readFileSync(join(repo, 'commands', 'dashboard.md'), 'utf8');

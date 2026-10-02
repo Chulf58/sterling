@@ -12,7 +12,7 @@ If `sterling-launch.sh` does not exist, re-run `/sterling:init` first — the en
 Report only whether the pane opened (or the regeneration outcome). The TUI itself is the output.
 <!-- /claude-only -->
 <!-- opencode-only -->
-On OpenCode the dashboard is the Sterling TUI plugin, already running inside OpenCode, so there is nothing to start. Its summary is a panel in the session sidebar. Open the full view with `<leader>k` (ctrl+x then k by default), with `/sterling`, or with "Open Sterling dashboard" in the command palette; Escape leaves it.
+On OpenCode, the dashboard is the Sterling TUI plugin, already running inside OpenCode, so there is nothing to start. Its summary is a panel in the session sidebar. Open the full view with `<leader>k` (ctrl+x then k by default), with `/sterling`, or with "Open Sterling dashboard" in the command palette; Escape leaves it.
 
 If the sidebar shows no Sterling panel, the TUI plugin is not loaded: tell the user to run `/sterling:update` (or init) in Claude Code, which installs the OpenCode plugins, and to restart OpenCode.
 
