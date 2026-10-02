@@ -17,6 +17,8 @@
 //    <CLAUDE_CONFIG_DIR or ~/.claude>/plugins/cache/*/sterling/<version>/ directory, so
 //    no versioned cache path is ever written to disk. A file of the same name that
 //    Sterling did not write, or one edited since, is refused, never overwritten.
+//    Also once per machine: a `codex` entry under mcp.servers in <config dir>/opencode.json,
+//    written only for a Codex whose `mcp-server --help` prints mcp-server help.
 // 2. PER PROJECT: <project>/.opencode/opencode.json gets the `sterling` local MCP entry,
 //    the store-guard edit-deny rules and default_agent, merged into whatever else the
 //    file holds. What Sterling writes under .opencode/ is kept out of git through a
@@ -296,6 +298,106 @@ export function installGlobal({ pluginRoot, installed, env = process.env, home =
   return rows;
 }
 
+// ---------- codex MCP (user scope) -------------------------------------------
+// Board item parity-p4-codex-mcp-lanes-on-opencode-2-decision-7f83f57e-au. The entry
+// shape is the one measured on 2.0.21 (finding
+// codex-mcp-server-runs-under-opencode-2-0-21-servers-shape-october-2026): it lives
+// under mcp.servers, because a legacy mcp.<name> entry carrying a timeout was dropped
+// silently. A Codex qualifies only when `mcp-server --help` prints that subcommand's
+// own help: 0.154+ exits 0 with the generic help (anti_pattern codex-mcp-probe-by-exit-status).
+
+/** The pinned side install (finding codex-mcp-bridge-needs-codex-0-153-4-pinned-side-install), under home. */
+export const PINNED_CODEX_REL = '.local/codex-mcp-0.153.4/bin/codex';
+const PINNED_CODEX_INSTALL = 'npm i -g --prefix ~/.local/codex-mcp-0.153.4 @openai/codex@0.153.4';
+const CODEX_PROBE_TIMEOUT_MS = 10_000;
+
+const isFile = (p) => existsSync(p) && statSync(p).isFile();
+
+/**
+ * Codex binaries to try, best first: the one Claude Code's user-scope codex server
+ * runs (<CLAUDE_CONFIG_DIR or home>/.claude.json, as init reads it), the pinned side
+ * install, then every `codex` on PATH.
+ */
+function codexCandidates({ env, home }) {
+  const out = [];
+  const notes = [];
+  const claudeJson = join(env.CLAUDE_CONFIG_DIR || home, '.claude.json');
+  if (isFile(claudeJson)) {
+    let command;
+    try {
+      command = JSON.parse(readFileSync(claudeJson, 'utf8'))?.mcpServers?.codex?.command;
+    } catch (err) {
+      // Reported in the row; the other candidates still run.
+      notes.push(`${fwd(claudeJson)} not read (${err.message})`);
+    }
+    if (typeof command === 'string' && isAbsolute(command)) out.push(command);
+  }
+  out.push(join(home, PINNED_CODEX_REL));
+  for (const dir of (env.PATH ?? '').split(':').filter(Boolean)) out.push(join(dir, 'codex'));
+  return { candidates: [...new Set(out)].filter(isFile), notes };
+}
+
+/** The first candidate whose `mcp-server --help` prints mcp-server help, or { tried } when none does. */
+export function resolveCodexMcp({ env = process.env, home = homedir(), nodeBinDir, spawnFn = spawnSync }) {
+  const { candidates, notes } = codexCandidates({ env, home });
+  const tried = [...notes];
+  for (const command of candidates) {
+    const r = spawnFn(command, ['mcp-server', '--help'], { encoding: 'utf8', timeout: CODEX_PROBE_TIMEOUT_MS, env: { ...env, PATH: codexPath(nodeBinDir) } });
+    const help = `${r.stdout ?? ''}\n${r.stderr ?? ''}`;
+    if (!r.error && r.status === 0 && /\bcodex\s+mcp-server\b/i.test(help)) return { command };
+    tried.push(`${fwd(command)} (${r.error ? r.error.message : r.status !== 0 ? `exit ${r.status}` : 'generic help, no mcp-server subcommand'})`);
+  }
+  return { tried };
+}
+
+const codexPath = (nodeBinDir) => `${fwd(nodeBinDir)}:/usr/local/bin:/usr/bin:/bin`;
+
+/** The measured entry: PATH carries the node bin dir because codex is a `#!/usr/bin/env node` script. */
+export function codexServerEntry(command, nodeBinDir) {
+  return {
+    type: 'local',
+    command: [fwd(command), 'mcp-server'],
+    environment: { PATH: codexPath(nodeBinDir) },
+    timeout: { startup: 30000, execution: 900000 },
+  };
+}
+
+/** Merge mcp.servers.codex into <opencode config dir>/opencode.json; every other key is kept. */
+export function ensureCodexServer({ env = process.env, home = homedir(), nodeBinDir = dirname(process.execPath), spawnFn = spawnSync }) {
+  const path = join(opencodeConfigDir({ env, home }), 'opencode.json');
+  const label = `${fwd(path)} mcp.servers.codex`;
+  const found = resolveCodexMcp({ env, home, nodeBinDir, spawnFn });
+  if (!found.command) {
+    const tried = found.tried.length ? `tried ${found.tried.join('; ')}` : 'no Codex binary found';
+    return { item: label, status: 'skipped', detail: `codex MCP for OpenCode SKIPPED: no Codex whose \`mcp-server --help\` prints mcp-server help (${tried}). Install the pinned Codex (${PINNED_CODEX_INSTALL}), then run /sterling:update` };
+  }
+  let config = {};
+  let before = null;
+  if (existsSync(path)) {
+    before = normalize(readFileSync(path, 'utf8'));
+    try {
+      config = JSON.parse(before);
+    } catch (err) {
+      return refusal(label, `${fwd(path)} is not valid JSON (${err.message})`, `fix or remove ${fwd(path)}, then rerun /sterling:update`);
+    }
+    if (config === null || typeof config !== 'object' || Array.isArray(config)) return refusal(label, `${fwd(path)} is not a JSON object`, `fix or remove ${fwd(path)}, then rerun /sterling:update`);
+  }
+  const mcp = config.mcp ?? {};
+  if (typeof mcp !== 'object' || Array.isArray(mcp)) return refusal(label, `${fwd(path)}: "mcp" is not an object`, `fix ${fwd(path)}, then rerun /sterling:update`);
+  const servers = mcp.servers ?? {};
+  if (typeof servers !== 'object' || Array.isArray(servers)) return refusal(label, `${fwd(path)}: "mcp.servers" is not an object`, `fix ${fwd(path)}, then rerun /sterling:update`);
+  const want = codexServerEntry(found.command, nodeBinDir);
+  const legacy = mcp.codex !== undefined ? '; a legacy mcp.codex entry is also present, which 2.0.21 drops silently when it carries a timeout' : '';
+  if (servers.codex !== undefined) {
+    if (JSON.stringify(servers.codex) === JSON.stringify(want)) return { item: label, status: 'matches', detail: `${fwd(found.command)}${legacy}` };
+    return { item: label, status: 'skipped', detail: `kept: mcp.servers.codex is already set and differs from Sterling's (yours); Sterling's would be ${JSON.stringify(want)}${legacy}` };
+  }
+  config.mcp = { ...mcp, servers: { ...servers, codex: want } };
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+  return { item: label, status: before === null ? 'created' : 'refreshed', detail: `${fwd(found.command)}${legacy}` };
+}
+
 // ---------- per project -----------------------------------------------------
 
 function git(projectDir, args) {
@@ -403,9 +505,12 @@ const FULL_PERMISSIONS = {
 const STORE_WRITERS = new Set(['conductor', 'librarian']);
 
 /**
- * The store-write tools as OpenCode names them (<mcp server>_<tool>, the server
- * entry being `sterling`), read from the implementor template's disallowedTools,
- * which is the one list of what a non-writing agent may not call.
+ * The store-write tools as OpenCode's permission keys name them (<mcp server>_<tool>,
+ * the server entry being `sterling`), read from the implementor template's
+ * disallowedTools, which is the one list of what a non-writing agent may not call.
+ * Measured live on 2.0.21 (2026-10-02, stub `sterling` MCP server): the key
+ * `sterling_knowledge_create: deny` removes exactly that tool from the agent, while
+ * the dotted name the code tool shows (`sterling.knowledge_create`) does not bite.
  */
 export function storeWriteTools(pluginRoot = sterlingRootFrom()) {
   const fm = normalize(readFileSync(join(pluginRoot, 'agent-templates', 'implementor.md'), 'utf8')).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? '';
@@ -535,6 +640,7 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   if (oc.major < 2) return { skipped: `OpenCode ${oc.version} found, but Sterling on OpenCode needs 2.x — SKIPPED; upgrade OpenCode (opencode upgrade), then run /sterling:update` };
   const isInstalled = installed ?? isInstalledCopy(pluginRoot, { env, home });
   const rows = installGlobal({ pluginRoot, installed: isInstalled, env, home });
+  rows.push(ensureCodexServer({ env, home }));
   const ls = git(projectDir, ['ls-files', '--', '.opencode']);
   const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
   let mode;

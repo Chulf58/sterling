@@ -81,7 +81,10 @@ test('global install writes both shims and the MCP launcher, idempotently, honou
   const shim = readFileSync(join(plugins, 'sterling.js'), 'utf8');
   assert.ok(shim.includes(JSON.stringify(repoRoot.replace(/\\/g, '/'))), 'authoring clone: the clone path is baked');
   const second = setupOpenCode({ projectDir: dir, pluginRoot: repoRoot, env, home, installed: false, probe: OC2 });
-  assert.deepEqual([...new Set(second.rows.map((r) => r.status))], ['matches']);
+  // The codex row skips here (no Codex in the temp HOME); opencode-codex-mcp.test.mjs covers it.
+  const codex = second.rows.filter((r) => r.item.endsWith('mcp.servers.codex'));
+  assert.deepEqual(codex.map((r) => r.status), ['skipped']);
+  assert.deepEqual([...new Set(second.rows.filter((r) => !codex.includes(r)).map((r) => r.status))], ['matches']);
 });
 
 test('installed copy: no versioned cache path is written; the shims resolve the newest at run time', () => {
