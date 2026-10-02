@@ -24,14 +24,16 @@
 // same three relevance floors, a centrality check) rather than path-matched, so
 // deriveExpected mirrors it only when the caller supplies `outputAxisProbes`
 // ({rel, tool, tool_response, agent_id?}[]) — a cheap silence-only arm was
-// rejected because H23 is silent for at least eight different reasons (an
-// unsupported tool, an agent-scoped call, no tool_response, an excluded path,
-// owned-path suppression, no term match, dedup, the pointer cap) and a
-// verdict that cannot tell them apart is exactly the multiply-caused silence
-// anti_pattern foreign_1b141d1f warns about; `expected_reason` ('unsupported_tool' |
-// 'agent_id_present' | 'no_tool_response' | 'path_excluded' |
-// 'owned_suppressed' | 'below_axis_floor') names which of the six
-// STORE-DERIVABLE silence causes applies (dedup and the pointer cap stay
+// rejected because H23 is silent for at least seven different reasons (an
+// unsupported tool, no tool_response, an excluded path, owned-path
+// suppression, no term match, dedup, the pointer cap) and a verdict that
+// cannot tell them apart is exactly the multiply-caused silence anti_pattern
+// foreign_1b141d1f warns about; `expected_reason` ('unsupported_tool' |
+// 'no_tool_response' | 'path_excluded' | 'owned_suppressed' |
+// 'below_axis_floor') names which of the five STORE-DERIVABLE silence causes
+// applies. A probe's optional `agent_id` silences nothing: live H23 delivers
+// for the conductor and a child alike and uses agent_id only to key its guard
+// file (board cbabb551) (dedup and the pointer cap stay
 // h23-output-axis.mjs's own frozen suite's concern, never re-derived here —
 // board f1e056bd item 3 closed the other two, which this mirror omitted
 // entirely until now). The content a real Read/Bash call
@@ -259,17 +261,8 @@ function deriveOutputAxisExpected(store, probe, index, root) {
   // non-empty expected set against a hook that is correctly silent).
   if (tool !== 'Read' && tool !== 'Bash' && tool !== 'PowerShell') return silent('unsupported_tool');
 
-  // AGENT-SCOPED SILENCE: this mirror treats a probe carrying `agent_id` as
-  // silent before even looking at tool_response. The live hook no longer
-  // scopes on agent_id: H23 delivers directly for conductor and child
-  // contexts alike and uses agent_id only to key its guard file (guardPath), so
-  // this arm is a known divergence kept as the oracle's own convention. Also board
-  // f1e056bd item 3 — a probe with `agent_id` set would otherwise have
-  // derived a non-empty expected set against this hook's deliberate silence.
-  if (probe?.agent_id) return silent('agent_id_present');
-
   // NOTHING TO MATCH AGAINST (the rawResponse undefined/null allow in h23-output-axis.mjs), checked next in
-  // the HOOK's own order — after the tool-type and agent-scope gates above,
+  // the HOOK's own order — after the tool-type gate above,
   // before the store is even opened, and therefore before the read-seam gates
   // below. An absent/null tool_response
   // is a first-class silent allow, and it is NOT 'below_axis_floor': "there was
@@ -334,9 +327,9 @@ function deriveOutputAxisExpected(store, probe, index, root) {
     ...base,
     expected: { owners: [], hazards, rationale: [] },
     expected_ids,
-    // Present ONLY when silent — the LAST of the six derivable silence
-    // reasons ('unsupported_tool' | 'agent_id_present' | 'no_tool_response' |
-    // 'path_excluded' | 'owned_suppressed' | 'below_axis_floor'); dedup and
+    // Present ONLY when silent — the LAST of the five derivable silence
+    // reasons ('unsupported_tool' | 'no_tool_response' | 'path_excluded' |
+    // 'owned_suppressed' | 'below_axis_floor'); dedup and
     // the pointer cap stay out of scope here, per the module header and
     // h23-output-axis.mjs's own frozen suite.
     ...(expected_ids.length === 0 ? { expected_reason: 'below_axis_floor' } : {}),
