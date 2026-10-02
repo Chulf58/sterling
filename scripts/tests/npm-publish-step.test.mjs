@@ -94,6 +94,7 @@ test('no npm login refuses loudly, names npm login, and never publishes', () => 
   assert.equal(result.status, 'refused');
   assert.match(out, /npm login/);
   assert.match(out, /THE MERGE STANDS/);
+  assert.equal(result.reason, 'npm whoami failed (no login, npm missing, or network)', 'the headline names every cause, not only a missing login');
   assert.deepEqual(calls.map((c) => c.args[0]), ['whoami']);
 });
 

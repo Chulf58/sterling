@@ -72,7 +72,7 @@ export function publishAfterMerge({ target, baseSha, headSha, pushed, npm = defa
 
   const who = npm(['whoami'], { cwd: target });
   if (who.status !== 0) {
-    return refuse('npm has no login on this machine.', `Run \`npm login\` once, then: ${byHand}\n${output(who)}`);
+    return refuse('npm whoami failed (no login, npm missing, or network)', `If npm has no login, run \`npm login\` once; then: ${byHand}\n${output(who)}`);
   }
   const view = npm(['view', spec, 'version'], { cwd: target });
   if (view.status === 0 && view.stdout.trim() === version) {
