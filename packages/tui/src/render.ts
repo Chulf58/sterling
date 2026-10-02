@@ -2,6 +2,7 @@
 // derived; owns NOTHING testable. Mouse + key events are translated to the
 // state layer's UiEvent vocabulary and fed to reduce().
 import type { DashboardState, UiEvent } from './state.js';
+import type { BlockPixel, SubagentBlock } from './subagents.js';
 import { bannerPaletteIndex } from './banner.js';
 
 // minimal structural types for the slice of terminal-kit we use
@@ -21,7 +22,19 @@ export interface ScreenLike {
   draw(options: { delta: boolean }): void;
 }
 
-export function draw(screen: ScreenLike, state: DashboardState): void {
+export interface DrawOptions {
+  /** the Sub-agents block, drawn in the rows just above the spacer and footer;
+   *  its portrait pixels are painted afterwards by paintPixels (truecolour) */
+  block?: SubagentBlock;
+}
+
+/** The screen row the Sub-agents block starts on. */
+export function blockTop(screenHeight: number, block: SubagentBlock): number {
+  return screenHeight - 2 - block.height;
+}
+
+export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOptions = {}): void {
+  const blockHeight = opts.block?.height ?? 0;
   // The frame is composed off-screen into a ScreenBuffer and delta-drawn:
   // only cells that changed since the previous frame reach the terminal, so
   // an unchanged dashboard writes nothing — no flicker. put() coordinates
@@ -55,7 +68,7 @@ export function draw(screen: ScreenLike, state: DashboardState): void {
     // the spacer line (row top+2) doubles as the search bar while a query/input is live
     screen.put({ x: 0, y: top + 2, attr: { dim: true } }, state.searchLine);
   }
-  const lastBodyLine = screen.height - 3; // reserve the blank spacer + footer
+  const lastBodyLine = screen.height - 3 - blockHeight; // reserve the blank spacer + footer, and the Sub-agents block
   let y = state.bodyTop; // 0-based rows: header 0, tab bar 1, blank/search 2, body from bodyTop
   if (state.emptyMessage && y <= lastBodyLine) {
     screen.put({ x: 0, y, attr: { dim: true } }, state.emptyMessage);
@@ -107,8 +120,80 @@ export function draw(screen: ScreenLike, state: DashboardState): void {
       }
     }
   }
-  screen.put({ x: 0, y: Math.min(y + 1, screen.height - 1), attr: { dim: true } }, state.footer);
+  if (opts.block && blockHeight > 0) {
+    const top = blockTop(screen.height, opts.block);
+    for (const p of opts.block.puts) screen.put({ x: p.x, y: top + p.y, attr: p.attr }, p.text);
+  }
+  const footerY = blockHeight > 0 ? screen.height - 1 : Math.min(y + 1, screen.height - 1);
+  screen.put({ x: 0, y: footerY, attr: { dim: true } }, state.footer);
   screen.draw({ delta: true });
+}
+
+/** The slice of terminal-kit's Terminal that paints a truecolour cell. */
+export interface PixelTerm {
+  moveTo(x: number, y: number): unknown;
+  colorRgbHex(hex: string): unknown;
+  bgColorRgbHex(hex: string): unknown;
+  styleReset(): unknown;
+  noFormat(str: string): unknown;
+}
+
+/** Blank the cells of a previous paint that the next one no longer covers.
+ *  Run it BEFORE the buffer's delta draw: those cells are blank in the buffer
+ *  on both frames, so the delta draw would leave the old pixels on screen,
+ *  while a cell that now holds text differs from the buffer's last frame and
+ *  is rewritten by the delta draw. (A full, non-delta draw is no substitute:
+ *  terminal-kit repaints every line again on the delta draw after it, which
+ *  wipes portraits the animation only patches.) */
+export function clearPixels(term: PixelTerm, prev: ReadonlyMap<string, string>, next: readonly BlockPixel[]): void {
+  const keep = new Set(next.map((p) => `${p.x},${p.y}`));
+  let wrote = false;
+  for (const key of prev.keys()) {
+    if (keep.has(key)) continue;
+    const [x, y] = key.split(',').map(Number) as [number, number];
+    if (!wrote) term.styleReset();
+    term.moveTo(x + 1, y + 1);
+    term.noFormat(' ');
+    wrote = true;
+  }
+}
+
+function sgr24(hex: string, background: boolean): string {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return `\x1b[${background ? 48 : 38};2;${(n >> 16) & 255};${(n >> 8) & 255};${n & 255}m`;
+}
+
+/** Paint portrait pixels (0-based screen coordinates) straight to the
+ *  terminal with 24-bit colour: the ScreenBuffer is 256-palette only. Those
+ *  cells hold blank spaces in the buffer, so its delta draw leaves them alone.
+ *  With `prev` (the map this function returned last time) only changed cells
+ *  are written; without it every pixel is. A pixel with no colour is written
+ *  with the default background, so transparency shows the host's own.
+ *  trueColor writes the 24-bit SGR itself; otherwise terminal-kit's
+ *  colorRgbHex picks the nearest colour its terminal detection allows. */
+export function paintPixels(term: PixelTerm, pixels: readonly BlockPixel[], prev?: ReadonlyMap<string, string>, trueColor = false): Map<string, string> {
+  const next = new Map<string, string>();
+  let wrote = false;
+  for (const p of pixels) {
+    const key = `${p.x},${p.y}`;
+    const sig = `${p.ch}|${p.fg ?? ''}|${p.bg ?? ''}`;
+    next.set(key, sig);
+    if (prev?.get(key) === sig) continue;
+    term.styleReset();
+    term.moveTo(p.x + 1, p.y + 1);
+    if (p.fg !== undefined) {
+      if (trueColor) term.noFormat(sgr24(p.fg, false));
+      else term.colorRgbHex(p.fg);
+    }
+    if (p.bg !== undefined) {
+      if (trueColor) term.noFormat(sgr24(p.bg, true));
+      else term.bgColorRgbHex(p.bg);
+    }
+    term.noFormat(p.ch);
+    wrote = true;
+  }
+  if (wrote) term.styleReset();
+  return next;
 }
 
 /** Translate terminal-kit key names to state-layer events. Printable keys
