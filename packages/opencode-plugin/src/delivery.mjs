@@ -206,7 +206,7 @@ function buildPatchDelivery(store, root, rels, sessionID) {
   };
 }
 
-function appendToResult(result, text) {
+export function appendToResult(result, text) {
   if (Array.isArray(result?.content)) result.content.push({ type: 'text', text });
   else if (typeof result?.content === 'string') result.content = `${result.content}\n\n${text}`;
   else throw new Error(`unrecognized tool result content shape (${typeof result?.content})`);

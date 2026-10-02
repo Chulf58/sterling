@@ -113,7 +113,8 @@ function stubCtx(directory, sessions = {}) {
   };
 }
 
-async function setupPlugin(dir, deps = {}, sessions = {}) {
+// The default knows ses_1 as a root session (no parentID): only a root session settles (dispatch.mjs rootSessionGate).
+async function setupPlugin(dir, deps = {}, sessions = { ses_1: {} }) {
   const plugin = server.createSterlingServer({ claudeOnPath: () => false, ...deps });
   const ctx = stubCtx(dir, sessions);
   const cleanup = await plugin.setup(ctx);

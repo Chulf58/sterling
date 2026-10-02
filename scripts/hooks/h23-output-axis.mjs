@@ -59,71 +59,14 @@
 // theirs — this hook's own contract requires exit 0 even there), a missing
 // tool_response, an unrecognised tool name, and any internal failure.
 import { readStdin, allow, openStore, repoRel, exitAfterWrite, warnNonBlocking } from './lib/common.mjs';
-import { isForeignTree } from './lib/working-tree.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { isListingCommand } from './lib/listing-command.mjs';
-import { MAX_RANK_TERMS } from '@sterling/store';
-import {
-  guardPath,
-  readGuard,
-  writeGuard,
-  extractAxisTerms,
-  axisHits,
-  AXIS_MIN_HITS,
-  hasDiscriminatingHit,
-  AXIS_MIN_DISCRIMINATING_HITS,
-  hasRecordCentralityHit,
-  joinPointerBlock,
-} from './lib/delivery.mjs';
+import { guardPath, readGuard, writeGuard } from './lib/delivery.mjs';
+import { composeOutputAxis, outputAxisReadGated } from './lib/axis-compose.mjs';
 
-// Clip and cap, named per the brief (foreign_b266d6b7): matching runs over the first
-// 16,000 chars of the stringified tool_response only, and at most
-// OUTPUT_AXIS_POINTER_CAP pointer lines render per block regardless of how many
-// records matched.
-export const OUTPUT_AXIS_CLIP = 16_000;
-/** ONE pointer line + the suppressed-count tail (was 3 + tail), per USER RULING
- *  h23-kept-raised-threshold-one-pointer-payload (284fc4b0, 2026-08-31). H23 is
- *  KEPT — the drop-premise broke on the pre-check, because one of its real saves
- *  is structurally output-only (no path event for H19, no dispatch/ask event for
- *  H20 at that moment) — but it is measured as the largest single advisory
- *  consumer on this repo (57 of 103 all-time fires) at a ~6% follow rate, so the
- *  volume comes down where it is cheapest. The remainder is still DISCLOSED, never
- *  silently dropped: capping to one line must not turn "3 more matched" into
- *  "that is all there is" (the same cap-and-disclose rule renderHazards keeps). */
-export const OUTPUT_AXIS_POINTER_CAP = 1;
-
-// THE OTHER HALF OF RULING 284fc4b0 — THE RAISED MATCH THRESHOLD — IS NOT BUILT
-// HERE, and deliberately so: the mechanism the ruling names cannot express it.
-// Measured 2026-08-31, before implementing, and reported rather than shipped:
-//
-//   (1) min_score thresholds `-bm25(records_fts)`, which is IDF-WEIGHTED and so
-//       corpus-relative in MAGNITUDE, not just in ordering. A floor tuned on this
-//       repo's store (records passing the three axis floors: 49 -> 18 for
-//       CLAUDE.md at a floor of 12, with pure-noise prose silenced by 6) reduces
-//       to "never fires" on a young or homogeneous store: probed at corpus sizes
-//       1, 4 and 20 where every record matched, EVERY record scored below 0.05,
-//       so ANY positive floor silenced all of them. Shipping a constant would
-//       have implemented DROP — the option this very ruling rejected on the
-//       evidence — on every consumer project, silently.
-//   (2) The two portable floors already exported for H20's deny path do not
-//       substitute. STRICT_MIN_HITS (>=3 distinct hits) barely cuts (49->44,
-//       29->24, and the noise samples not at all); hasFullNarrowCentralityCoverage
-//       over-cuts (4 of 5 real samples to zero).
-//   (3) The reframing both measurements force: H23's noise is NOT weak matches.
-//       On a repo whose own text IS the store's subject matter, the records it
-//       surfaces score high on every axis measure available — this is intrinsic
-//       high recall, not a mis-set threshold.
-//
-// Left to the conductor + an outside-family consult, per the ruling's own
-// fallback clause (FOLD into H19/H20 if noise persists).
-
-/** Title-only clip: this channel renders NO guidance/rationale/statement
- *  prose inline, ever — a pointer line names the record, it never restates
- *  it (pointer-not-substance, same rule as H19's Bash pointers). */
-function clipTitle(text, cap = 140) {
-  const t = String(text ?? '').replace(/\s+/g, ' ').trim();
-  return t.length <= cap ? t : `${t.slice(0, cap)}…`;
-}
+// The clip and pointer cap, with the measurements behind them, live in
+// lib/axis-compose.mjs; they are re-exported here under their old names.
+export { OUTPUT_AXIS_CLIP, OUTPUT_AXIS_POINTER_CAP } from './lib/axis-compose.mjs';
 
 try {
   const input = readStdin();
@@ -140,82 +83,23 @@ try {
   const store = openStore(input.cwd);
   if (!store) allow(); // not a Sterling project — no ceremony (P1)
 
-  // READ SEAM OWNERSHIP GATE: silent on territory an owning feature_article or
-  // repo-located reference_material already covers — H19 delivers substance
-  // (or, for a reference doc, its own pointer) there. Mirrors
-  // h19-knowledge-delivery's owner query EXACTLY (same types, same
-  // working_tree filter, review finding 2) so the two channels agree on what
-  // 'governed' means — a divergent predicate here would silently disagree
-  // with H19 about the same path. Unresolvable/outside-repo paths fall through
-  // to the match (no jurisdiction to gate on).
-  //
-  // PATH EXCLUSIONS mirror h19-knowledge-delivery.mjs:41-42 (review finding
-  // 1): reading the store's own tree or its delivery queue is the highest
-  // false-positive input this hook could face, and it is self-referential —
-  // matching on .sterling/transient/delivery/pending.json's own content would
-  // let this hook feed itself.
-  if (toolName === 'Read') {
-    const rel = repoRel(input.tool_input?.file_path, input.cwd);
-    if (rel === '.git' || rel?.startsWith('.git/')) allow();
-    if (rel?.startsWith('.sterling/')) allow();
-    if (rel) {
-      const owners = store
-        .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
-        .filter((r) => !isForeignTree(r, input.cwd));
-      if (owners.length) allow();
-    }
-  }
+  // READ SEAM OWNERSHIP GATE — lib/axis-compose.mjs outputAxisReadGated, which
+  // carries the rationale (H19 owns governed territory; .git and .sterling are excluded).
+  if (toolName === 'Read' && outputAxisReadGated(store, repoRel(input.tool_input?.file_path, input.cwd), input.cwd)) allow();
 
   // Stringify an object-shaped tool_response (e.g. a structured Bash result)
   // before matching; a string tool_response is matched as-is.
   const content = typeof rawResponse === 'string' ? rawResponse : JSON.stringify(rawResponse);
-  const clipped = content.slice(0, OUTPUT_AXIS_CLIP);
 
-  const terms = extractAxisTerms(clipped, MAX_RANK_TERMS);
-  if (terms.length < AXIS_MIN_HITS) allow(); // too little vocabulary to match on
-
-  // STAGE 1 — narrow in the store. anti_pattern ONLY (ruling 5564361d v2):
-  // decisions reach the model through H20 and explicit store lookups.
-  const candidates = store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 });
-  if (!candidates.length) allow();
-
-  // STAGE 2 — the same three floors H20 proved: enough distinct hits, at
-  // least one discriminating (not universal dev vocabulary), and the hits
-  // must be central to the RECORD's own narrow fields, not a passing mention.
-  const scored = candidates
-    .map((r) => ({ record: r, hits: axisHits(r, terms) }))
-    .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, clipped))
-    .sort((a, b) => b.hits.length - a.hits.length);
-  if (!scored.length) allow();
-
-  // OWN DEDUP NAMESPACE — guard.output_axis, never guard.records/pointer_files.
+  // THE COMPOSITION IS SHARED (lib/axis-compose.mjs, also called by the OpenCode
+  // plugin): the three floors, the guard.output_axis dedup and the pointer block.
   const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
-  const guard = readGuard(gPath);
-  const seen = new Set(guard.output_axis ?? []);
-  const fresh = scored.filter((x) => !seen.has(x.record.id));
-  if (!fresh.length) allow(); // already pointed at this session, on this axis
-
-  // Every candidate is an anti_pattern, so the remainder counts hazards only.
-  const shown = fresh.slice(0, OUTPUT_AXIS_POINTER_CAP);
-  const remainder = fresh.length - shown.length;
-
-  // PER-RECORD LINES, keyed by id (fixer F1): the drain rebuilds this block from
-  // the recipe, replaying a still-live record's line verbatim and REPLACING a
-  // superseded/missing one with its stub, so the payload is assembled from the
-  // same {header, lines, tail} decomposition the recipe carries. `header` and the
-  // '(+N more matched)' tail interpolate no record field, so they replay verbatim.
-  const header =
-    'ADVISORY (not an error) — STERLING OUTPUT-AXIS DELIVERY (H23): the tool output you just consumed matches a recorded hazard. ' +
-    'Pointer only, never a block: follow the read below before assuming the answer, never treat this line as the ruling itself.';
-  const pointerLines = shown.map((x) => {
-    const r = x.record;
-    return { id: r.id, hazard: true, line: `  → HAZARD anti_pattern '${clipTitle(r.title)}' · knowledge_get ${r.id}` };
-  });
-  const tail = remainder > 0 ? `  (+${remainder} more matched)` : '';
+  const composed = composeOutputAxis(store, { content, guardFor: () => readGuard(gPath) });
+  if (!composed) allow();
+  const { text: payload, guard, seen, shown } = composed;
 
   // Direct on this PostToolUse for both conductor and child contexts.
   recordAdvisoryFire(input.cwd, 'h23', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
-  const payload = joinPointerBlock({ header, lines: pointerLines, tail });
   exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }), 0, {
     onWritten: () => {
       guard.output_axis = [...seen, ...shown.map((x) => x.record.id)];
