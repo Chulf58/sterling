@@ -27,8 +27,10 @@
 //   context.mjs (the context handler)         delivery.mjs (tool delivery)
 //   settle.mjs (settlement)                   worker.mjs (maintenance worker)
 //   selection.mjs (prompt hook)               compaction.mjs (receipt reset)
+//   config.mjs (registration), sync.mjs (post-update sync)
 //   notices.mjs, log.mjs, store.mjs (shared plumbing)
 import { createCompactionHandler } from './compaction.mjs';
+import { createConfigHandler } from './config.mjs';
 import { createContextHandler } from './context.mjs';
 import { createDeliveryHandlers } from './delivery.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
@@ -37,6 +39,7 @@ import { createRotationRestore } from './restore.mjs';
 import { createPromptHandler } from './selection.mjs';
 import { createSettle, liveDispatch } from './settle.mjs';
 import { BUSY_TIMEOUT_MS, openProjectStore } from './store.mjs';
+import { createSessionSync } from './sync.mjs';
 import { createWorkerLaunch } from './worker.mjs';
 import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
 
@@ -47,11 +50,12 @@ export const PLUGIN_ID = 'sterling.server';
 
 // Per-handler budgets. The store calls are synchronous and cannot be cut off
 // mid-call; the budget bounds the awaited part and logs any overrun.
-export const BUDGET_MS = { context: 4000, delivery: 4000, settle: 30000, prompt: 4000, compaction: 4000 };
+export const BUDGET_MS = { context: 4000, delivery: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000 };
 
 /**
  * The plugin factory. `deps` exists for tests: openStore(dbPath), now(),
- * claudeOnPath(), launchWorker(opts), sterlingRoot (a path), renderRestore(note, opts).
+ * claudeOnPath(), launchWorker(opts), sterlingRoot (a path), renderRestore(note, opts),
+ * configure(ctx) and syncSession(root, sessionID) (replace the config.mjs and sync.mjs handlers).
  */
 export function createSterlingServer(deps = {}) {
   const openStore = deps.openStore ?? openProjectStore;
@@ -89,12 +93,13 @@ export function createSterlingServer(deps = {}) {
   }
 
   const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore });
-  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, pluginRoot: deps.sterlingRoot });
+  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync: deps.syncSession ?? createSessionSync(deps), pluginRoot: deps.sterlingRoot });
   const { onBefore, onAfter } = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
   const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker });
   const settle = createSettle({ openStore, now, launchWorkerFor });
   const onPrompt = createPromptHandler({ openStore, rootOf, fenced });
   const onCompaction = createCompactionHandler({ rootOf, fenced });
+  const configure = deps.configure ?? createConfigHandler(deps);
 
   async function onEvent(ev) {
     if (ev?.type !== 'session.execution.succeeded') return;
@@ -118,6 +123,8 @@ export function createSterlingServer(deps = {}) {
     async setup(ctx) {
       directory = ctx?.location?.directory ?? process.cwd();
       session = ctx.session;
+      const root = rootOf();
+      if (root) await fenced('config', root, () => configure(ctx));
       await ctx.session.hook('context', onContext);
       await ctx.session.hook('prompt', onPrompt);
       await ctx.session.hook('compaction', onCompaction);

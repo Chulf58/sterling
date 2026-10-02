@@ -690,6 +690,50 @@ test('prompt hook: no selection leaves the prompt untouched; a store failure bec
   }
 });
 
+test('config and session-sync seams are wired: configure runs once at setup, syncSession on every context request', async () => {
+  const p = makeProject();
+  try {
+    const configured = [];
+    const synced = [];
+    const { ctx, cleanup } = await setupPlugin(p.dir, {
+      configure: async (c) => void configured.push(c),
+      syncSession: async (root, sessionID) => void synced.push([root, sessionID]),
+    });
+    assert.deepEqual(configured, [ctx], 'configure received the plugin context once, at setup');
+    await contextFor(ctx, 'ses_a');
+    await contextFor(ctx, 'ses_b');
+    assert.deepEqual(synced.map(([, sid]) => sid), ['ses_a', 'ses_b'], 'the context handler calls syncSession with the session id');
+    assert.equal(synced[0][0], p.dir.replace(/\\/g, '/'), 'syncSession receives the project root');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('config and session-sync defaults are no-ops: they touch nothing and leave the context unchanged', async () => {
+  const p = makeProject();
+  try {
+    const { createConfigHandler } = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'config.mjs')).href);
+    const { createSessionSync } = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'sync.mjs')).href);
+    const untouchable = new Proxy({}, { get: (_, k) => { throw new Error(`the no-op configure touched ctx.${String(k)}`); } });
+    assert.equal(await createConfigHandler()(untouchable), undefined);
+    const syncOnce = createSessionSync();
+    assert.equal(await syncOnce(p.dir, 'ses_1'), undefined);
+    assert.equal(await syncOnce(p.dir, 'ses_2'), undefined);
+    const plain = await setupPlugin(p.dir);
+    const noop = await setupPlugin(p.dir, { configure: async () => {}, syncSession: async () => {} });
+    const a = await contextFor(plain.ctx, 'ses_1');
+    const b = await contextFor(noop.ctx, 'ses_1');
+    assert.equal(a, b, 'the default seams add nothing to the context');
+    assert.equal(existsSync(join(p.dir, server.NOTICES_REL)), false, 'no notice was raised');
+    assert.equal(existsSync(join(p.dir, server.LOG_REL)), false, 'nothing was logged');
+    await plain.cleanup?.();
+    await noop.cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
 // Opt-in live smoke against the scratch OpenCode 2.0.21 install. Set
 // STERLING_OC_LIVE=1 and STERLING_OC_DIR to the dir holding env.sh and node_modules/@opencode/cli.
 test('live: OpenCode 2.0.21 shows the model the injected layer and an edit delivery', { skip: process.env.STERLING_OC_LIVE !== '1' }, async () => {

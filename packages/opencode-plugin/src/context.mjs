@@ -10,11 +10,11 @@ import { takeNotices } from './notices.mjs';
 const STATUS_TTL_MS = 10_000;
 
 /**
- * `rotationRestore(root, sessionID)` is restore.mjs's gate; `pluginRoot` is the
+ * `rotationRestore(root, sessionID)` is restore.mjs's gate; `sessionSync(root, sessionID)` is sync.mjs's once-per-process step; `pluginRoot` is the
  * test override for the resolved Sterling root. Returns the handler and
  * `resetStatus(root)`, which drops the cached status line.
  */
-export function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, pluginRoot: pluginRootOverride }) {
+export function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride }) {
   const statusCache = new Map();
 
   function statusLine(root) {
@@ -48,6 +48,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     const root = rootOf();
     if (!root) return;
     await fenced('context', root, async () => {
+      await sessionSync(root, input.sessionID);
       const restore = await rotationRestore(root, input.sessionID);
       let pluginRoot = null;
       let layer;
