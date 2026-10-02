@@ -41,12 +41,17 @@ function defaultResolveHeadSha(): string | undefined {
   }
 }
 
-export const TABS = ['Tasks', 'Knowledge', 'Queue', 'System'] as const;
+export const TABS = ['Tasks', 'Knowledge', 'Queue', 'Agents', 'System'] as const;
 /** the board (user-source todos) — the tab boardEdit's 'e' key operates on */
 export const TASKS_TAB = TABS.indexOf('Tasks');
 /** the knowledge explorer (formerly 'Articles'): a category→source→record tree */
 export const KNOWLEDGE_TAB = TABS.indexOf('Knowledge');
 export const QUEUE_TAB = TABS.indexOf('Queue');
+/** the live Sub-agents cards (Claude Code's terminal dashboard only): the host paints the
+ *  cards, this layer owns the tab, its count label and its navigation. A host that does not
+ *  paint them (the OpenCode full view, which lists sub-agents under every tab) leaves
+ *  Viewport.agents unset, and the tab is neither shown nor reachable. */
+export const AGENTS_TAB = TABS.indexOf('Agents');
 /** the System tab (run r-f9a7): the agent roster with drift + catalog status,
  *  and the inline model/effort swap selector — the TUI's first write surface */
 export const SYSTEM_TAB = TABS.indexOf('System');
@@ -269,7 +274,19 @@ export interface Row {
 }
 
 /** Pane geometry threaded in from the renderer side; Infinity = unbounded. */
+/** Enables the Agents tab; `running` is the live agent count shown in its label. */
+export interface AgentsTab {
+  running: number;
+}
+
+/** The tab indices a host can reach: every tab, minus Agents unless the host enabled it. */
+export function visibleTabs(agents?: AgentsTab): number[] {
+  return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== undefined);
+}
+
 export interface Viewport {
+  /** set by a host that paints the Agents tab's cards */
+  agents?: AgentsTab;
   /** columns available — wraps expanded bodies, clips collapsed titles */
   width?: number;
   /** body lines visible — the click hit-test bound (visibleBodyLines) */
@@ -280,7 +297,8 @@ export interface Viewport {
 }
 
 export interface DashboardState {
-  tabs: { label: string; active: boolean }[];
+  /** `index` is the tab's TABS index: the tab bar can skip a tab, so a position is not an index */
+  tabs: { label: string; active: boolean; index: number }[];
   rows: Row[];
   emptyMessage?: string;
   footer: string;
@@ -837,7 +855,7 @@ function modeToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cu
  * widths from the bare TABS constant would drift the moment a count appears —
  * which is why this returns labels rather than just a number.
  */
-function tabsFor(store: SterlingStore, activeTab: number): { label: string; active: boolean }[] {
+function tabsFor(store: SterlingStore, activeTab: number, agents?: AgentsTab): { label: string; active: boolean; index: number }[] {
   let taskCount: number | null = null;
   try {
     taskCount = store.count({ types: ['todo'], source: 'user' });
@@ -850,10 +868,14 @@ function tabsFor(store: SterlingStore, activeTab: number): { label: string; acti
     // store in the same buildDashboardState call and would throw first.
     taskCount = null;
   }
-  return TABS.map((label, i) => ({
-    label: label === 'Tasks' && taskCount !== null ? `${label} (${taskCount})` : label,
-    active: i === activeTab,
-  }));
+  return visibleTabs(agents).map((i) => {
+    const label: string = TABS[i]!;
+    return {
+      label: label === 'Tasks' && taskCount !== null ? `${label} (${taskCount})` : label === 'Agents' && agents ? `${label} (${agents.running})` : label,
+      active: i === activeTab,
+      index: i,
+    };
+  });
 }
 
 function systemDashboardState(
@@ -862,9 +884,10 @@ function systemDashboardState(
   banner: string[],
   projectName: string,
   bodyTop: number,
-  tabs: { label: string; active: boolean }[],
+  tabs: { label: string; active: boolean; index: number }[],
   maxBodyLines: number,
-  roster?: AgentRosterSnapshot
+  roster?: AgentRosterSnapshot,
+  agents?: AgentsTab
 ): DashboardState {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows: Row[] = [];
@@ -917,7 +940,7 @@ function systemDashboardState(
     tabs,
     rows,
     emptyMessage: view.rows.length ? undefined : '(no configured models)',
-    footer: `←/→ or 1-${TABS.length} tabs · ↑/↓ rows · enter change model/effort · esc cancel · q quit`,
+    footer: `←/→ or 1-${visibleTabs(agents).length} tabs · ↑/↓ rows · enter change model/effort · esc cancel · q quit`,
     banner,
     projectName,
     bodyTop,
@@ -925,14 +948,14 @@ function systemDashboardState(
   };
 }
 
-export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot): DashboardState {
+export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab): DashboardState {
   const banner = bannerLines(width, showBanner);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
   // Computed ONCE here and threaded into every projection, so the Tasks count
   // and the widths the hit-test measures can never come from two places.
-  const tabs = tabsFor(store, ui.tab);
+  const tabs = tabsFor(store, ui.tab, agents);
   // System tab (run r-f9a7): its own projection, not a card/knowledge list.
-  if (ui.tab === SYSTEM_TAB) return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster);
+  if (ui.tab === SYSTEM_TAB) return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents);
   const nodes = nodesFor(store, ui, knowledge);
   const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
   let rows: Row[] = [];
@@ -1053,7 +1076,9 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
     tabs,
     rows,
     emptyMessage:
-      nodes.length === 0
+      ui.tab === AGENTS_TAB
+        ? undefined
+        : nodes.length === 0
         ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery
           ? '(no matches)'
           : ui.tab === QUEUE_TAB
@@ -1069,7 +1094,9 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
       // System tab's own '⚠ ' convention (buildSystemTab's banner).
       ui.tab === TASKS_TAB && ui.notice
         ? `⚠ ${ui.notice}`
-        : `←/→ or 1-${TABS.length} tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit` +
+        : ui.tab === AGENTS_TAB
+          ? `←/→ or 1-${visibleTabs(agents).length} tabs · q quit`
+          : `←/→ or 1-${visibleTabs(agents).length} tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit` +
           (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears' : '') +
           (ui.tab === TASKS_TAB ? (ui.boardEdit ? ' · enter save · esc cancel' : ' · e edit') : ''),
     searchLine: searchActive ? `search: ${ui.searchQuery}` : undefined,
@@ -1120,10 +1147,14 @@ export function reduce(
   // (and any in-progress sparring-partner model edit, same discard-on-switch rule)
   const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: undefined, notice: undefined, sparringModelEdit: undefined, boardEdit: undefined });
 
+  // the tabs this host can reach, in bar order: a digit picks the n-th, left/right step through them
+  const reachable = visibleTabs(viewport.agents);
+  const stepTab = (dir: number): number => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0]!;
+
   // the queue tab has a fixed layout; only the card tabs scroll
   const scrollable = ui.tab !== QUEUE_TAB;
   const buildSelf = (uiNext: UiState): DashboardState =>
-    buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster);
+    buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster, viewport.agents);
 
   // move the selection by `delta` and keep it inside the scroll window so the
   // viewport follows the cursor. An unbounded viewport or a non-scrolling tab
@@ -1412,10 +1443,10 @@ export function reduce(
           }
           return { ui, effects };
         case 'LEFT':
-          return { ui: switchTab((ui.tab + TABS.length - 1) % TABS.length), effects };
+          return { ui: switchTab(stepTab(-1)), effects };
         case 'RIGHT':
         case 'TAB':
-          return { ui: switchTab((ui.tab + 1) % TABS.length), effects };
+          return { ui: switchTab(stepTab(1)), effects };
         case 'UP':
           return { ui: moveCursor(-1), effects };
         case 'DOWN':
@@ -1482,12 +1513,12 @@ export function reduce(
       }
       if (/^[1-9]$/.test(ch)) {
         const index = Number(ch) - 1;
-        if (index < TABS.length) return { ui: switchTab(index), effects };
+        if (index < reachable.length) return { ui: switchTab(reachable[index]!), effects };
       }
       return { ui, effects };
     }
     case 'tab':
-      if (event.index < 0 || event.index >= TABS.length) return { ui, effects };
+      if (!reachable.includes(event.index)) return { ui, effects };
       return { ui: switchTab(event.index), effects };
     case 'wheel': {
       // wheel scrolls the viewport by lines (so you can read a tall expanded
@@ -1501,7 +1532,7 @@ export function reduce(
       // build the same geometry the renderer drew with — wrapped heights, the
       // queue tab's pending truncation, AND the banner-driven bodyTop must all
       // match the screen, so the tab-bar row and body hit-test track the banner
-      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster);
+      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster, viewport.agents);
       // tab bar sits one line above the body block (its own header row is just
       // above the body); terminal line = bodyTop - 1. Pick the tab by x extent.
       if (event.y === state.bodyTop - 1) {
@@ -1513,7 +1544,7 @@ export function reduce(
         // would drift again with each digit the count gains.
         for (let i = 0; i < state.tabs.length; i++) {
           const width = state.tabs[i].label.length + 2; // ' label '
-          if (event.x >= x && event.x < x + width) return { ui: switchTab(i), effects };
+          if (event.x >= x && event.x < x + width) return { ui: switchTab(state.tabs[i].index), effects };
           x += width;
         }
         return { ui, effects };

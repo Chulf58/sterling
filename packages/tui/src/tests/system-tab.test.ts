@@ -83,7 +83,7 @@ import * as viewmodel from '../viewmodel.js';
 /** The System tab index used to DRIVE the entry points without passing a raw
  *  `undefined` tab (mirrors KNOW_TAB=2 in state.test.ts). The exported
  *  state.SYSTEM_TAB is asserted to equal this by the registry test below. */
-const SYS_TAB = 3;
+const SYS_TAB = 4;
 
 const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over });
 
@@ -92,14 +92,16 @@ const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over })
  *  assertion rather than on undefined arithmetic. */
 interface TabCell {
   label?: string;
+  index?: number;
 }
 /** The x of tab i's label, DERIVED from the labels the renderer produced: cells
  *  start at terminal x=1 and each cell is `label.length + 2` wide. Tab labels
  *  are dynamic (the Tasks label carries its open-task count), so the tab row's
  *  absolute coordinates are not a constant this oracle may hardcode. */
-function tabLabelX(s: DashboardState, i: number): number {
+function tabLabelX(s: DashboardState, tabIndex: number): number {
   const cells = s.tabs as unknown as TabCell[];
-  assert.ok(i < cells.length, `tab ${i} is present in the rendered tab row`);
+  const i = cells.findIndex((c) => c.index === tabIndex);
+  assert.ok(i >= 0, `tab ${tabIndex} is present in the rendered tab row`);
   let x = 1;
   for (let j = 0; j < i; j++) {
     assert.equal(typeof cells[j].label, 'string', `tab cell ${j} exposes its rendered label`);
@@ -304,17 +306,18 @@ const key = (name: string) => ({ kind: 'key', name });
 // TABS registry — the last tab; hotkey + hit-test scale by TABS.length
 // ===========================================================================
 
-test('phase4 registry: TABS gains "System" as the fourth entry; state.SYSTEM_TAB === 3', () => {
+test('phase4 registry: TABS ends with "System" after the Agents tab; state.SYSTEM_TAB === 4', () => {
   assert.strictEqual(typeof STc.SYSTEM_TAB, 'number', 'state.SYSTEM_TAB must be an exported number');
-  assert.equal(STc.SYSTEM_TAB, SYS_TAB, 'the System tab is index 3 (appended fourth)');
-  assert.equal(TABS.length, 4, 'TABS has four entries');
-  assert.equal(TABS[3], 'System', 'TABS[3] is the "System" label');
+  assert.equal(STc.SYSTEM_TAB, SYS_TAB, 'the System tab is index 4 (last, after Agents)');
+  assert.equal(TABS.length, 5, 'TABS has five entries');
+  assert.equal(TABS[3], 'Agents', 'TABS[3] is the "Agents" label');
+  assert.equal(TABS[4], 'System', 'TABS[4] is the "System" label');
 });
 
-test('phase4 registry: the digit-4 hotkey scales via TABS.length and selects the System tab', () => {
+test('phase4 registry: on a host without the Agents tab the digit-4 hotkey selects the System tab', () => {
   const { store, cleanup } = storeFixture();
   try {
-    // '4' selects index 3, the last of four tabs. Hotkeys scale by count.
+    // '4' selects the fourth tab this host reaches (Agents is not painted by default), which is System.
     const r = SR.reduce(store, st(), { kind: 'char', ch: '4' });
     assert.equal(r.ui.tab, SYS_TAB, "the '4' hotkey switches to the fourth (System) tab");
   } finally {

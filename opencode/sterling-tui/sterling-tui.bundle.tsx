@@ -8,7 +8,7 @@ var __export = (target, all) => {
 };
 
 // opencode/sterling-tui/tui.tsx
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, Index, Show, untrack } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 
 // packages/tui/dist/controller.js
@@ -8414,10 +8414,11 @@ function defaultResolveHeadSha() {
     return void 0;
   }
 }
-var TABS = ["Tasks", "Knowledge", "Queue", "System"];
+var TABS = ["Tasks", "Knowledge", "Queue", "Agents", "System"];
 var TASKS_TAB = TABS.indexOf("Tasks");
 var KNOWLEDGE_TAB = TABS.indexOf("Knowledge");
 var QUEUE_TAB = TABS.indexOf("Queue");
+var AGENTS_TAB = TABS.indexOf("Agents");
 var SYSTEM_TAB = TABS.indexOf("System");
 var initialUi = { tab: 0, cursor: 0, expanded: [], searchQuery: "", scroll: 0 };
 var EMPTY_ROSTER = {
@@ -8437,6 +8438,9 @@ function effortOptions(key) {
   return ["low", "medium", "high"];
 }
 var MODEL_VALUE_RE = /^claude-/;
+function visibleTabs(agents) {
+  return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== void 0);
+}
 function cardsFor(store, tab, expanded = []) {
   if (tab === 0)
     return todoCards(store, expanded);
@@ -8634,19 +8638,23 @@ function modeToggleRow(snap, ui, width, cursorIndex) {
   const shown = mode === null ? "UNKNOWN (config unreadable)" : mode === "hobby" || mode === "work" ? mode.toUpperCase() : `INVALID ('${mode}')`;
   return { id: "sys:project_mode", lines: [{ text: clip3(`${marker}Project mode: ${shown}`), kind: "title", selected }] };
 }
-function tabsFor(store, activeTab) {
+function tabsFor(store, activeTab, agents) {
   let taskCount = null;
   try {
     taskCount = store.count({ types: ["todo"], source: "user" });
   } catch {
     taskCount = null;
   }
-  return TABS.map((label, i) => ({
-    label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label,
-    active: i === activeTab
-  }));
+  return visibleTabs(agents).map((i) => {
+    const label = TABS[i];
+    return {
+      label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running})` : label,
+      active: i === activeTab,
+      index: i
+    };
+  });
 }
-function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster) {
+function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents) {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows = [];
   let screenRow = 0;
@@ -8685,19 +8693,19 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, max
     tabs,
     rows,
     emptyMessage: view.rows.length ? void 0 : "(no configured models)",
-    footer: `\u2190/\u2192 or 1-${TABS.length} tabs \xB7 \u2191/\u2193 rows \xB7 enter change model/effort \xB7 esc cancel \xB7 q quit`,
+    footer: `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 rows \xB7 enter change model/effort \xB7 esc cancel \xB7 q quit`,
     banner,
     projectName,
     bodyTop,
     scroll
   };
 }
-function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster) {
+function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents) {
   const banner = bannerLines(width, showBanner);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
-  const tabs = tabsFor(store, ui.tab);
+  const tabs = tabsFor(store, ui.tab, agents);
   if (ui.tab === SYSTEM_TAB)
-    return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster);
+    return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents);
   const nodes = nodesFor(store, ui, knowledge);
   const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
   let rows = [];
@@ -8803,7 +8811,7 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
   return {
     tabs,
     rows,
-    emptyMessage: nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
+    emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
     footer: (
       // Fix round (Opus review of 71c1f41): a Tasks-tab board_edit notice
       // (lost-update refusal, vanished item, failed HEAD resolve) must be
@@ -8811,7 +8819,7 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
       // state.footer unconditionally, so this is the one line available to
       // this scope's two files without touching render.ts. Mirrors the
       // System tab's own '⚠ ' convention (buildSystemTab's banner).
-      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : `\u2190/\u2192 or 1-${TABS.length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
+      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : ui.tab === AGENTS_TAB ? `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 q quit` : `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
     ),
     searchLine: searchActive ? `search: ${ui.searchQuery}` : void 0,
     queueCompleted,
@@ -8840,8 +8848,10 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
   const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects = [];
   const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
+  const reachable = visibleTabs(viewport.agents);
+  const stepTab = (dir) => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0];
   const scrollable = ui.tab !== QUEUE_TAB;
-  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster);
+  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster, viewport.agents);
   const revealAt = (cursor) => {
     if (!scrollable || !Number.isFinite(maxBodyLines))
       return { ...ui, cursor };
@@ -9044,10 +9054,10 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
           }
           return { ui, effects };
         case "LEFT":
-          return { ui: switchTab((ui.tab + TABS.length - 1) % TABS.length), effects };
+          return { ui: switchTab(stepTab(-1)), effects };
         case "RIGHT":
         case "TAB":
-          return { ui: switchTab((ui.tab + 1) % TABS.length), effects };
+          return { ui: switchTab(stepTab(1)), effects };
         case "UP":
           return { ui: moveCursor(-1), effects };
         case "DOWN":
@@ -9091,13 +9101,13 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
       }
       if (/^[1-9]$/.test(ch)) {
         const index = Number(ch) - 1;
-        if (index < TABS.length)
-          return { ui: switchTab(index), effects };
+        if (index < reachable.length)
+          return { ui: switchTab(reachable[index]), effects };
       }
       return { ui, effects };
     }
     case "tab":
-      if (event.index < 0 || event.index >= TABS.length)
+      if (!reachable.includes(event.index))
         return { ui, effects };
       return { ui: switchTab(event.index), effects };
     case "wheel": {
@@ -9108,13 +9118,13 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
       return { ui: { ...ui, scroll: st.scroll }, effects };
     }
     case "click": {
-      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster);
+      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster, viewport.agents);
       if (event.y === state.bodyTop - 1) {
         let x = 1;
         for (let i = 0; i < state.tabs.length; i++) {
           const width = state.tabs[i].label.length + 2;
           if (event.x >= x && event.x < x + width)
-            return { ui: switchTab(i), effects };
+            return { ui: switchTab(state.tabs[i].index), effects };
           x += width;
         }
         return { ui, effects };
@@ -9768,7 +9778,7 @@ function openDashboard(storePath, options = {}) {
     configPath: configPath2,
     ui: () => ui,
     roster: () => roster,
-    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster),
+    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents),
     async handle(event, vp) {
       const prevTab = ui.tab;
       const result = reduce(store, ui, event, vp, stores, roster, resolveProjectHeadSha);
@@ -9785,6 +9795,2331 @@ function openDashboard(storePath, options = {}) {
 // opencode/sterling-tui/view.ts
 import { existsSync as existsSync6 } from "node:fs";
 import { dirname as dirname5, join as join7 } from "node:path";
+
+// packages/tui/dist/avatars/assign.js
+function assign(liveIds, current, rng, { poolSize = 48, freed = [] } = {}) {
+  const live = new Set(liveIds);
+  const next = /* @__PURE__ */ new Map();
+  for (const id of liveIds) {
+    const idx = current.get(id);
+    if (idx !== void 0)
+      next.set(id, idx);
+  }
+  const held = () => new Set(next.values());
+  let order = freed.filter((i) => i >= 0 && i < poolSize);
+  const heldNow = held();
+  for (const [id, idx] of current) {
+    if (live.has(id) || heldNow.has(idx))
+      continue;
+    order = order.filter((i) => i !== idx);
+    order.push(idx);
+  }
+  for (const id of liveIds) {
+    if (next.has(id))
+      continue;
+    const taken = held();
+    const open2 = [];
+    for (let i = 0; i < poolSize; i++)
+      if (!taken.has(i))
+        open2.push(i);
+    let pick;
+    if (open2.length > 0)
+      pick = open2[Math.floor(rng() * open2.length)];
+    else if (order.length > 0)
+      pick = order[0];
+    else
+      pick = Math.floor(rng() * poolSize);
+    next.set(id, pick);
+  }
+  return { current: next, freed: order };
+}
+
+// packages/tui/dist/avatars/pool.json
+var pool_default = {
+  palette: {
+    A: "#1d1e1c",
+    B: "#8a4fa8",
+    D: "#f0d6bd",
+    E: "#e9c8b0",
+    F: "#f0c040",
+    G: "#a08c52",
+    H: "#bfa96a",
+    I: "#e0731f",
+    J: "#2b2830",
+    K: "#1c1a20",
+    L: "#efc9a6",
+    M: "#e2b792",
+    N: "#8eaac8",
+    O: "#a9c3de",
+    P: "#25252b",
+    Q: "#7a4a2a",
+    R: "#5f391f",
+    S: "#2a3150",
+    T: "#3a4363",
+    U: "#f4f1ea",
+    V: "#7a45a8",
+    W: "#d9732a",
+    X: "#b45a1a",
+    Y: "#e88aa0",
+    Z: "#e8c547",
+    a: "#a8472a",
+    b: "#85361f",
+    c: "#1b8f84",
+    d: "#2ec4b6",
+    e: "#b0801e",
+    f: "#9e7322",
+    g: "#f7e4d4",
+    h: "#ecd3bf",
+    i: "#cfd2d6",
+    j: "#2e8b57",
+    k: "#e8d9a0",
+    l: "#2f5fa8",
+    n: "#e8dcc0",
+    p: "#a0764a",
+    q: "#b8322e",
+    s: "#4a3326",
+    t: "#6e5fa2",
+    u: "#8b7bbd",
+    v: "#baae96",
+    w: "#c8b9a3",
+    x: "#96261f",
+    y: "#36251b",
+    z: "#86603a",
+    "0": "#3f7d4a",
+    "2": "#c9ced6",
+    "3": "#9aa1ad",
+    "4": "#cdbd80"
+  },
+  avatars: [
+    {
+      parts: {
+        style: "cap",
+        hair: 8,
+        hat: 3,
+        skin: 0,
+        clothes: 3,
+        acc: "earrings",
+        extra: "none"
+      },
+      frames: [
+        [
+          "..BBBBBBBB..",
+          "..DDDDDDDD..",
+          "..DDADDADD..",
+          ".FDDDDDDDDF.",
+          "....DDDD....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "..BBBBBBBB..",
+          "..DDDDDDDD..",
+          "..DDDDDDDD..",
+          ".FDDDEEDDDF.",
+          "....DDDD....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "....BBBBBBB.",
+          "..DDDDDDDD..",
+          "..DDADDADD..",
+          ".FDDDDDDDDF.",
+          "....DDDD....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "....BBBBBB..",
+          "...DDDDDDDD.",
+          "...DDADDADD.",
+          "..DDDDEEDDDD",
+          ".....DDDH...",
+          "GGHHDDIIHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bob",
+        hair: 5,
+        hat: 2,
+        skin: 2,
+        clothes: 2,
+        acc: "none",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "..JJJJJJJJ..",
+          ".JJLLLLLLJJ.",
+          ".JKLALLALKJ.",
+          ".JKLLLLLLKJ.",
+          "....LLLL....",
+          "NNOOOOPLOONN"
+        ],
+        [
+          "..JJJJJJJJ..",
+          ".JJLLLLLLJJ.",
+          ".JKLLLLLLKJ.",
+          ".JKLMLLMLKJ.",
+          "....LLLL....",
+          "NNOOOOPLOONN"
+        ],
+        [
+          "...JJJJJJJKJ",
+          "..JJLLLLLLJJ",
+          ".JKLALLALKJ.",
+          ".JKLLLLLLKJ.",
+          "....LLLL....",
+          "NNOOOOPLOONN"
+        ],
+        [
+          "...JJJJJJJKJ",
+          "..JJLLLLLLJJ",
+          "..JJLALLALJJ",
+          "..JKLLLLLLKJ",
+          ".....OLLO...",
+          "NNOOOOPLOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "long",
+        hair: 3,
+        hat: 2,
+        skin: 0,
+        clothes: 5,
+        acc: "none",
+        extra: "beard"
+      },
+      frames: [
+        [
+          "..QQQQQQQQ..",
+          ".QQDDDDDDQQ.",
+          ".QQDADDADQQ.",
+          ".QQQDDDDQQQ.",
+          ".QQTDDDDTQQS",
+          "..TTUUVDTTSS"
+        ],
+        [
+          "..QQQQQQQQ..",
+          ".QQDDDDDDQQ.",
+          ".QQDDDDDDQQ.",
+          ".QQQDEEDQQQ.",
+          ".QQTDDDDTQQS",
+          "..TTUUVDTTSS"
+        ],
+        [
+          "...QQQQQQQQ.",
+          "..QQDDDDDDQQ",
+          ".QQDADDADQQ.",
+          ".QQQDDDDQQQ.",
+          ".QQTDDDDTQQS",
+          "..TTUUVDTTSS"
+        ],
+        [
+          "...QQQQQQQQ.",
+          "..QQDDDDDDQQ",
+          "..QQDADDADQQ",
+          "..QQDDEEDDQQ",
+          "..QQ.UDDETQQ",
+          ".TTTUUVDTTSS"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bob",
+        hair: 7,
+        hat: 3,
+        skin: 2,
+        clothes: 2,
+        acc: "pencil",
+        extra: "beard"
+      },
+      frames: [
+        [
+          "..WWWWWWWW..",
+          ".WWLLLLLLWY.",
+          ".WWLALLALWZ.",
+          ".WWWLLLLWWZ.",
+          "....LLLL....",
+          "NNOOOOPLOONN"
+        ],
+        [
+          "..WWWWWWWW..",
+          ".WWLLLLLLWY.",
+          ".WWLLLLLLWZ.",
+          ".WWWLMMLWWZ.",
+          "....LLLL....",
+          "NNOOOOPLOONN"
+        ],
+        [
+          "...WWWWWWWXX",
+          "..WWLLLLLLYX",
+          ".WWLALLALWZ.",
+          ".WWWLLLLWWZ.",
+          "....LLLL....",
+          "NNOOOOPLOONN"
+        ],
+        [
+          "...WWWWWWWXX",
+          "..WWLLLLLLXY",
+          "..WWLALLALWZ",
+          "..WWLLMMLLWW",
+          ".....OLLO...",
+          "NNOOOOPLOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "spikes",
+        hair: 6,
+        hat: 2,
+        skin: 2,
+        clothes: 5,
+        acc: "pencil",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "..aaaaaabb..",
+          "..aLLLLLLbY.",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
+          "....LLLL....",
+          ".TTTUUVLTTT."
+        ],
+        [
+          "..aaaaaabb..",
+          "..aLLLLLLbY.",
+          "..LLLLLLLLZ.",
+          "..LLMLLMLL..",
+          "....LLLL....",
+          ".TTTUUVLTTT."
+        ],
+        [
+          "....aaaaaa..",
+          "...LLLLLLaY.",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
+          "....LLLL....",
+          ".TTTUUVLTTT."
+        ],
+        [
+          "...aaaaaaabb",
+          "...aLLLLLLbY",
+          "...LLALLALLL",
+          "...LLLLLLLL.",
+          ".....ULLMT..",
+          ".TTTUUVLTTT."
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "spikes",
+        hair: 3,
+        hat: 4,
+        skin: 2,
+        clothes: 2,
+        acc: "feather",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "..QQQQQQRR..",
+          "..QLLLLLLR..",
+          "..LLALLALL..",
+          "..LLLLLLLL..",
+          "....LLLL....",
+          "NNOOOOPLOONN"
+        ],
+        [
+          "..QQQQQQRR..",
+          "..QLLLLLLR..",
+          "..LLLLLLLL..",
+          "..LLMLLMLL..",
+          "....LLLL....",
+          "NNOOOOPLOONN"
+        ],
+        [
+          "....QQQQQQR.",
+          "...LLLLLLQ..",
+          "..LLALLALL..",
+          "..LLLLLLLL..",
+          "....LLLL....",
+          "NNOOOOPLOONN"
+        ],
+        [
+          "...QQQQQQQR.",
+          "...QLLLLLLR.",
+          "...LLALLALL.",
+          "...LLLLLLLL.",
+          ".....OLLO...",
+          "NNOOOOPLOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bald",
+        hair: 8,
+        hat: 3,
+        skin: 0,
+        clothes: 3,
+        acc: "feather",
+        extra: "none"
+      },
+      frames: [
+        [
+          ".cccDDDD....",
+          "..DDDDDDDD..",
+          "..DDADDADD..",
+          "..DDDDDDDD..",
+          "....DDDD....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          ".cccDDDD....",
+          "..DDDDDDDD..",
+          "..DDDDDDDD..",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "..ccdDDDD...",
+          "..cDDDDDDDD.",
+          "..DDADDADD..",
+          "..DDDDDDDD..",
+          "....DDDD....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "..ccdDDDD...",
+          "..cDDDDDDDD.",
+          "...DDADDADD.",
+          "...DDDEEDDD.",
+          ".....DDDH...",
+          "GGHHDDIIHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "sidepart",
+        hair: 0,
+        hat: 0,
+        skin: 1,
+        clothes: 1,
+        acc: "feather",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "ccdeeeeeff..",
+          "..eeeggggf..",
+          "..fgAeeAgf..",
+          "..ggeeeegg..",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "ccdeeeeeff..",
+          "..eeeggggf..",
+          "..fggggggf..",
+          "..ggeeeegg..",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          ".ccceeeeeef.",
+          "..ceeeggggf.",
+          "..fgAeeAgf..",
+          "..ggeeeegg..",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          ".ccceeeeeef.",
+          "..ceeeggggf.",
+          "....gAggAg..",
+          "...gggeeggg.",
+          ".....UggU...",
+          "iiUUUUjgUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "curly",
+        hair: 1,
+        hat: 2,
+        skin: 0,
+        clothes: 5,
+        acc: "earrings",
+        extra: "beard"
+      },
+      frames: [
+        [
+          "..kkkkkkkk..",
+          ".kkDDDDDDkk.",
+          ".kDDADDADDk.",
+          ".kkkDDDDkkk.",
+          "....DDDD....",
+          ".TTTUUVDTTT."
+        ],
+        [
+          "..kkkkkkkk..",
+          ".kkDDDDDDkk.",
+          ".kDDDDDDDDk.",
+          ".kkkDEEDkkk.",
+          "....DDDD....",
+          ".TTTUUVDTTT."
+        ],
+        [
+          "...kkkkkkkk.",
+          ".kkkDDDDDkk.",
+          ".kDDADDADDk.",
+          ".kkkDDDDkkk.",
+          "....DDDD....",
+          ".TTTUUVDTTT."
+        ],
+        [
+          "...kkkkkkkk.",
+          "..kkDDDDDDkk",
+          "..kkDADDADkk",
+          "..FkDDEEDDkF",
+          ".....UDDET..",
+          ".TTTUUVDTTT."
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "beanie",
+        hair: 6,
+        hat: 2,
+        skin: 0,
+        clothes: 2,
+        acc: "feather",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "..llllllll..",
+          "..DDDDDDDD..",
+          "..DADDDDAD..",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "..llllllll..",
+          "..DDDDDDDD..",
+          "..DDDDDDDD..",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "....lllllll.",
+          "..DDDDDDDD..",
+          "..DADDDDAD..",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "....llllll..",
+          "...DDDDDDDD.",
+          "...DADDDDAD.",
+          "...DDDEEDDD.",
+          ".....ODDO...",
+          "NNOOOOPDOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bun",
+        hair: 6,
+        hat: 2,
+        skin: 1,
+        clothes: 3,
+        acc: "pencil",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "..aaaaaabb..",
+          "..aggggggbY.",
+          "..ggAggAggZ.",
+          "..gggggggg..",
+          "....gggg....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "..aaaaaabb..",
+          "..aggggggbY.",
+          "..ggggggggZ.",
+          "..gghgghgg..",
+          "....gggg....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "....aaaaaa..",
+          "...ggggggaY.",
+          "..ggAggAggZ.",
+          "..gggggggg..",
+          "....gggg....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "...aaaaaaabb",
+          "...aggggggbY",
+          "...ggAggAggg",
+          "...gggggggg.",
+          ".....gggH...",
+          "GGHHg.IIHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "hat",
+        hair: 2,
+        hat: 4,
+        skin: 1,
+        clothes: 1,
+        acc: "earrings",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "...gnnnng...",
+          "..gggggggg..",
+          "..ggAppAgg..",
+          ".FggppppggF.",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "...gnnnng...",
+          "..gggggggg..",
+          "..gggggggg..",
+          ".FggppppggF.",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "....nnnnnn..",
+          "..gggggggg..",
+          "..ggAppAgg..",
+          ".FggppppggF.",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "....nnnnnn..",
+          "...gggggggg.",
+          "...ggAggAgg.",
+          "..ggggppgggg",
+          ".....UggU...",
+          "iiUUUUjgUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "cap",
+        hair: 4,
+        hat: 1,
+        skin: 0,
+        clothes: 3,
+        acc: "earrings",
+        extra: "beard"
+      },
+      frames: [
+        [
+          "..qqqqqqqq..",
+          "..DDDDDDDD..",
+          "..DDADDADD..",
+          ".FssDDDDssF.",
+          "....DDDD....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "..qqqqqqqq..",
+          "..DDDDDDDD..",
+          "..DDDDDDDD..",
+          ".FssDEEDssF.",
+          "....DDDD....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "....qqqqqqq.",
+          "..DDDDDDDD..",
+          "..DDADDADD..",
+          ".FssDDDDssF.",
+          "....DDDD....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "....qqqqqq..",
+          "...DDDDDDDD.",
+          "...DDADDADD.",
+          "..D.DDEEDD.D",
+          ".....DDDH...",
+          "GGHHDDIIHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "long",
+        hair: 0,
+        hat: 2,
+        skin: 0,
+        clothes: 2,
+        acc: "pencil",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "..eeeeeeee..",
+          ".eeDDDDDDeY.",
+          ".efDADDADfZ.",
+          ".efDDDDDDfZ.",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "..eeeeeeee..",
+          ".eeDDDDDDeY.",
+          ".efDDDDDDfZ.",
+          ".efDEDDEDfZ.",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "...eeeeeeeff",
+          "..eeDDDDDDYf",
+          ".efDADDADfZ.",
+          ".efDDDDDDfZ.",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "...eeeeeeeff",
+          "..eeDDDDDDfY",
+          "..eeDADDADeZ",
+          "..efDDDDDDee",
+          "..ee.ODDO.ee",
+          "NNOOOOPDOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "beanie",
+        hair: 1,
+        hat: 3,
+        skin: 1,
+        clothes: 1,
+        acc: "earrings",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "..BBBBBBBB..",
+          "..gggggggg..",
+          "..gAggggAg..",
+          ".FggghhgggF.",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "..BBBBBBBB..",
+          "..gggggggg..",
+          "..gggggggg..",
+          ".FggghhgggF.",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "....BBBBBBB.",
+          "..gggggggg..",
+          "..gAggggAg..",
+          ".FggghhgggF.",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "....BBBBBB..",
+          "...gggggggg.",
+          "...gAggggAg.",
+          "..gggghhgggg",
+          ".....UggU...",
+          "iiUUUUjgUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bald",
+        hair: 1,
+        hat: 2,
+        skin: 2,
+        clothes: 4,
+        acc: "earrings",
+        extra: "none"
+      },
+      frames: [
+        [
+          "....LLLL....",
+          "..LLLLLLLL..",
+          "..LLALLALL..",
+          ".FLLLLLLLLF.",
+          "....LLLL....",
+          "ttuuuLLuuutt"
+        ],
+        [
+          "....LLLL....",
+          "..LLLLLLLL..",
+          "..LLLLLLLL..",
+          ".FLLLMMLLLF.",
+          "....LLLL....",
+          "ttuuuLLuuutt"
+        ],
+        [
+          ".....LLLL...",
+          "...LLLLLLLL.",
+          "..LLALLALL..",
+          ".FLLLLLLLLF.",
+          "....LLLL....",
+          "ttuuuLLuuutt"
+        ],
+        [
+          ".....LLLL...",
+          "...LLLLLLLL.",
+          "...LLALLALL.",
+          "..LLLLMMLLLL",
+          ".....ULLu...",
+          "ttuuUULuuutt"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "hat",
+        hair: 4,
+        hat: 2,
+        skin: 2,
+        clothes: 0,
+        acc: "none",
+        extra: "none"
+      },
+      frames: [
+        [
+          "....llll....",
+          "..LLLLLLLL..",
+          "..LLALLALL..",
+          "..LLLLLLLL..",
+          "....LLLL....",
+          "vvwwwwxLwwvv"
+        ],
+        [
+          "....llll....",
+          "..LLLLLLLL..",
+          "..LLLLLLLL..",
+          "..LLLMMLLL..",
+          "....LLLL....",
+          "vvwwwwxLwwvv"
+        ],
+        [
+          "....llllll..",
+          "..LLLLLLLL..",
+          "..LLALLALL..",
+          "..LLLLLLLL..",
+          "....LLLL....",
+          "vvwwwwxLwwvv"
+        ],
+        [
+          "....llllll..",
+          "...LLLLLLLL.",
+          "...LLALLALL.",
+          "...LLLMMLLL.",
+          ".....wLLw...",
+          "vvwwwwxLwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "tuft",
+        hair: 5,
+        hat: 0,
+        skin: 1,
+        clothes: 3,
+        acc: "feather",
+        extra: "beard"
+      },
+      frames: [
+        [
+          "..JJJJJJKK..",
+          "..JggggggK..",
+          "..JgAggAgJ..",
+          "..JJggggJJ..",
+          "....gggg....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "..JJJJJJKK..",
+          "..JggggggK..",
+          "..JggggggJ..",
+          "..JJghhgJJ..",
+          "....gggg....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "....JJJJKK..",
+          "...ggggggK..",
+          "..JgAggAgJ..",
+          "..JJggggJJ..",
+          "....gggg....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "....JJJJKK..",
+          "...KggggggK.",
+          "...KgAggAgK.",
+          "....gghhgg..",
+          ".....gggH...",
+          "GGHHg.IIHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bob",
+        hair: 4,
+        hat: 1,
+        skin: 0,
+        clothes: 2,
+        acc: "feather",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "ccssssssss..",
+          "sssDDDDDDss.",
+          ".syDADDADys.",
+          ".syDDDDDDys.",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "ccssssssss..",
+          "sssDDDDDDss.",
+          ".syDDDDDDys.",
+          ".syDEDDEDys.",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "ccdssssssss.",
+          "..ssDDDDDDss",
+          ".syDADDADys.",
+          ".syDDDDDDys.",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          ".cdssssssss.",
+          "..ssDDDDDDss",
+          "..ssDADDADss",
+          "..syDDDDDDys",
+          ".....ODDO...",
+          "NNOOOOPDOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "beanie",
+        hair: 8,
+        hat: 2,
+        skin: 2,
+        clothes: 5,
+        acc: "none",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "..llllllll..",
+          "..LLLLLLLL..",
+          "..LALLLLAL..",
+          "..LLLMMLLL..",
+          "....LLLL....",
+          ".TTTUUVLTTT."
+        ],
+        [
+          "..llllllll..",
+          "..LLLLLLLL..",
+          "..LLLLLLLL..",
+          "..LLLMMLLL..",
+          "....LLLL....",
+          ".TTTUUVLTTT."
+        ],
+        [
+          "....lllllll.",
+          "..LLLLLLLL..",
+          "..LALLLLAL..",
+          "..LLLMMLLL..",
+          "....LLLL....",
+          ".TTTUUVLTTT."
+        ],
+        [
+          "....llllll..",
+          "...LLLLLLLL.",
+          "...LALLLLAL.",
+          "...LLLMMLLL.",
+          ".....ULLMT..",
+          ".TTTUUVLTTT."
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bun",
+        hair: 0,
+        hat: 1,
+        skin: 1,
+        clothes: 4,
+        acc: "feather",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "..eeeeeeff..",
+          "..eggggggf..",
+          "..gAggggAg..",
+          "..ggghhggg..",
+          "....gggg....",
+          "ttuuugguuutt"
+        ],
+        [
+          "..eeeeeeff..",
+          "..eggggggf..",
+          "..gggggggg..",
+          "..ggghhggg..",
+          "....gggg....",
+          "ttuuugguuutt"
+        ],
+        [
+          "....eeeeeef.",
+          "...gggggge..",
+          "..gAggggAg..",
+          "..ggghhggg..",
+          "....gggg....",
+          "ttuuugguuutt"
+        ],
+        [
+          "...eeeeeeef.",
+          "...eggggggf.",
+          "...gAggggAg.",
+          "...ggghhggg.",
+          ".....Uggu...",
+          "ttuuUUguuutt"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "hat",
+        hair: 5,
+        hat: 4,
+        skin: 0,
+        clothes: 3,
+        acc: "pencil",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "...DnnnnD...",
+          "..DDDDDDDDY.",
+          "..DADDDDADZ.",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "...DnnnnD...",
+          "..DDDDDDDDY.",
+          "..DDDDDDDDZ.",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "....nnnnnn..",
+          "..DDDDDDDDY.",
+          "..DADDDDADZ.",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "....nnnnnn..",
+          "...DDDDDDDDD",
+          "...DADDDDADD",
+          "...DDDEEDDD.",
+          ".....DDDH...",
+          "GGHHDDIIHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "long",
+        hair: 2,
+        hat: 2,
+        skin: 2,
+        clothes: 2,
+        acc: "earrings",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "..pppppppp..",
+          ".ppLLLLLLpp.",
+          ".FzLAppALzF.",
+          ".FzLppppLzF.",
+          ".N..LLLL..N.",
+          "NNOOOOPLOONN"
+        ],
+        [
+          "..pppppppp..",
+          ".ppLLLLLLpp.",
+          ".FzLLLLLLzF.",
+          ".FzLppppLzF.",
+          ".N..LLLL..N.",
+          "NNOOOOPLOONN"
+        ],
+        [
+          "...pppppppp.",
+          "..ppLLLLLLpp",
+          ".FzLAppALzF.",
+          ".FzLppppLzF.",
+          ".N..LLLL..N.",
+          "NNOOOOPLOONN"
+        ],
+        [
+          "...pppppppp.",
+          "..ppLLLLLLpp",
+          "..ppLALLALpp",
+          "..FpLLppLLpF",
+          "..pp.OLLO.pp",
+          "NNOOOOPLOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bun",
+        hair: 2,
+        hat: 3,
+        skin: 0,
+        clothes: 2,
+        acc: "none",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "..ppppppzz..",
+          "..pDDDDDDz..",
+          "..DADDDDAD..",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "..ppppppzz..",
+          "..pDDDDDDz..",
+          "..DDDDDDDD..",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "....ppppppz.",
+          "...DDDDDDp..",
+          "..DADDDDAD..",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "...pppppppz.",
+          "...pDDDDDDz.",
+          "...DADDDDAD.",
+          "...DDDEEDDD.",
+          ".....ODDO...",
+          "NNOOOOPDOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "beanie",
+        hair: 4,
+        hat: 0,
+        skin: 2,
+        clothes: 3,
+        acc: "pencil",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "..00000000..",
+          "..LLLLLLLLY.",
+          "..LLAssALLZ.",
+          "..LLssssLL..",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "..00000000..",
+          "..LLLLLLLLY.",
+          "..LLLLLLLLZ.",
+          "..LLssssLL..",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "....000000..",
+          "..LLLLLLLLY.",
+          "..LLAssALLZ.",
+          "..LLssssLL..",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "....00000000",
+          "...LLLLLLLLL",
+          "...LLALLALLL",
+          "...LLLssLLL.",
+          ".....LLLH...",
+          "GGHHLLILHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "tuft",
+        hair: 2,
+        hat: 2,
+        skin: 0,
+        clothes: 0,
+        acc: "none",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "..ppppppzz..",
+          "..pDDDDDDz..",
+          "..DADDDDAD..",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "vvwwwwxDwwvv"
+        ],
+        [
+          "..ppppppzz..",
+          "..pDDDDDDz..",
+          "..zDDDDDDz..",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "vvwwwwxDwwvv"
+        ],
+        [
+          "....ppppzz..",
+          "...DDDDDDz..",
+          "..DADDDDAD..",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "vvwwwwxDwwvv"
+        ],
+        [
+          "...pppppzz..",
+          "...pDDDDDDz.",
+          "....ADDDDA..",
+          "...DDDEEDDD.",
+          ".....wDDw...",
+          "vvwwwwxDwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "cap",
+        hair: 6,
+        hat: 2,
+        skin: 2,
+        clothes: 0,
+        acc: "pencil",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "..llllllll..",
+          "..LLLLLLLLY.",
+          "..LLAaaALLZ.",
+          "..LLaaaaLL..",
+          "....LLLL....",
+          "vvwwwwxLwwvv"
+        ],
+        [
+          "..llllllll..",
+          "..LLLLLLLLY.",
+          "..LLLLLLLLZ.",
+          "..LLaaaaLL..",
+          "....LLLL....",
+          "vvwwwwxLwwvv"
+        ],
+        [
+          "....llllll..",
+          "..LLLLLLLLY.",
+          "..LLAaaALLZ.",
+          "..LLaaaaLL..",
+          "....LLLL....",
+          "vvwwwwxLwwvv"
+        ],
+        [
+          "....llllllll",
+          "...LLLLLLLLL",
+          "...LLALLALLL",
+          "...LLLaaLLL.",
+          ".....wLLw...",
+          "vvwwwwxLwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "ponytail",
+        hair: 2,
+        hat: 3,
+        skin: 2,
+        clothes: 3,
+        acc: "none",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "..pppppppp..",
+          "..pLLLLLLpp.",
+          "..zLALLALLp.",
+          "..LLLLLLLLp.",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "..pppppppp..",
+          "..pLLLLLLpp.",
+          "..zLLLLLLLp.",
+          "..LLMLLMLLp.",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "...pppppppp.",
+          "...pLLLLLLpp",
+          "..zLALLALLp.",
+          "..LLLLLLLLp.",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "...pppppppp.",
+          "...pLLLLLLpp",
+          "....LALLALLp",
+          "...LLLLLLLLp",
+          ".....LLLH...",
+          "GGHHLLILHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "tuft",
+        hair: 8,
+        hat: 3,
+        skin: 2,
+        clothes: 3,
+        acc: "pencil",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "..2222223...",
+          "..32LLLL33Y.",
+          "..3LA22AL3Z.",
+          "..LL2222LL..",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "..2222223...",
+          "..32LLLL33Y.",
+          "..3LLLLLL3Z.",
+          "..LL2222LL..",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "...22222L3..",
+          "..22LLLLL3Y.",
+          "..3LA22AL3Z.",
+          "..LL2222LL..",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "...22222L3..",
+          "...2LLLLLLYY",
+          "...LLALLAL33",
+          "...LLL22LL3.",
+          ".....LLLH...",
+          "GGHHLLILHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "sidepart",
+        hair: 1,
+        hat: 2,
+        skin: 1,
+        clothes: 1,
+        acc: "earrings",
+        extra: "none"
+      },
+      frames: [
+        [
+          "...kkkkk44..",
+          "..kkkgggg4..",
+          "..4gAggAg4..",
+          ".FggggggggF.",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "...kkkkk44..",
+          "..kkkgggg4..",
+          "..4gggggg4..",
+          ".FggghhgggF.",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "....kkkkkk4.",
+          "...kkkgggg4.",
+          "..4gAggAg4..",
+          ".FggggggggF.",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "....kkkkkk4.",
+          "...kkkgggg4.",
+          "...ggAggAg4.",
+          "..gggghhgg44",
+          ".....UggU...",
+          "iiUUUUjgUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bald",
+        hair: 8,
+        hat: 4,
+        skin: 0,
+        clothes: 0,
+        acc: "earrings",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "....DDDD....",
+          "..DDDDDDDD..",
+          "..DDA22ADD..",
+          ".FDD2222DDF.",
+          "....DDDD....",
+          "vvwwwwxDwwvv"
+        ],
+        [
+          "....DDDD....",
+          "..DDDDDDDD..",
+          "..DDDDDDDD..",
+          ".FDD2222DDF.",
+          "....DDDD....",
+          "vvwwwwxDwwvv"
+        ],
+        [
+          ".....DDDD...",
+          "...DDDDDDDD.",
+          "..DDA22ADD..",
+          ".FDD2222DDF.",
+          "....DDDD....",
+          "vvwwwwxDwwvv"
+        ],
+        [
+          ".....DDDD...",
+          "...DDDDDDDD.",
+          "...DDADDADD.",
+          "..DDDD22DDDD",
+          ".....wDDw...",
+          "vvwwwwxDwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "sidepart",
+        hair: 6,
+        hat: 3,
+        skin: 0,
+        clothes: 0,
+        acc: "earrings",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "...aaaaabb..",
+          "..aaaDDDDb..",
+          "..DADDDDAD..",
+          ".FDDDEEDDDF.",
+          "....DDDD....",
+          "vvwwwwxDwwvv"
+        ],
+        [
+          "...aaaaabb..",
+          "..aaaDDDDb..",
+          "..bDDDDDDb..",
+          ".FDDDEEDDDF.",
+          "....DDDD....",
+          "vvwwwwxDwwvv"
+        ],
+        [
+          "....aaaaaab.",
+          "...aaaDDDDb.",
+          "..DADDDDAD..",
+          ".FDDDEEDDDF.",
+          "....DDDD....",
+          "vvwwwwxDwwvv"
+        ],
+        [
+          "....aaaaaab.",
+          "...aaaDDDDb.",
+          "....ADDDDAbb",
+          "..DDDDEEDDDD",
+          ".....wDDw...",
+          "vvwwwwxDwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bald",
+        hair: 0,
+        hat: 2,
+        skin: 1,
+        clothes: 1,
+        acc: "feather",
+        extra: "smile"
+      },
+      frames: [
+        [
+          ".cccgggg....",
+          "..gggggggg..",
+          "..ggAggAgg..",
+          "..gggggggg..",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          ".cccgggg....",
+          "..gggggggg..",
+          "..gggggggg..",
+          "..gghgghgg..",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "..ccdgggg...",
+          "..cgggggggg.",
+          "..ggAggAgg..",
+          "..gggggggg..",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "..ccdgggg...",
+          "..cgggggggg.",
+          "...ggAggAgg.",
+          "...gggggggg.",
+          ".....UggU...",
+          "iiUUUUjgUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "ponytail",
+        hair: 1,
+        hat: 0,
+        skin: 1,
+        clothes: 3,
+        acc: "none",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "..kkkkkkkk..",
+          "..kggggggkk.",
+          "..gAggggAgk.",
+          "..ggghhgggk.",
+          "....gggg....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "..kkkkkkkk..",
+          "..kggggggkk.",
+          "..4gggggggk.",
+          "..ggghhgggk.",
+          "....gggg....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "...kkkkkkkk.",
+          "...kggggggkk",
+          "..gAggggAgk.",
+          "..ggghhgggk.",
+          "....gggg....",
+          "GGHHIIIIHHGG"
+        ],
+        [
+          "...kkkkkkkk.",
+          "...kggggggkk",
+          "...gAggggAgk",
+          "...ggghhgggk",
+          ".....gggH...",
+          "GGHHg.IIHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "tuft",
+        hair: 7,
+        hat: 2,
+        skin: 0,
+        clothes: 2,
+        acc: "none",
+        extra: "none"
+      },
+      frames: [
+        [
+          "..WWWWWWXX..",
+          "..WDDDDDDX..",
+          "..XDADDADX..",
+          "..DDDDDDDD..",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "..WWWWWWXX..",
+          "..WDDDDDDX..",
+          "..XDDDDDDX..",
+          "..DDDEEDDD..",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "...DWWWWXX..",
+          "...DDDDDDX..",
+          "..XDADDADX..",
+          "..DDDDDDDD..",
+          "....DDDD....",
+          "NNOOOOPDOONN"
+        ],
+        [
+          "...WWWWWXX..",
+          "...WDDDDDDX.",
+          "....DADDAD..",
+          "...DDDEEDDD.",
+          ".....ODDO...",
+          "NNOOOOPDOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "cap",
+        hair: 5,
+        hat: 0,
+        skin: 1,
+        clothes: 4,
+        acc: "pencil",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "..00000000..",
+          "..ggggggggY.",
+          "..gAggggAgZ.",
+          "..ggghhggg..",
+          "....gggg....",
+          "ttuuugguuutt"
+        ],
+        [
+          "..00000000..",
+          "..ggggggggY.",
+          "..ggggggggZ.",
+          "..ggghhggg..",
+          "....gggg....",
+          "ttuuugguuutt"
+        ],
+        [
+          "....000000..",
+          "..ggggggggY.",
+          "..gAggggAgZ.",
+          "..ggghhggg..",
+          "....gggg....",
+          "ttuuugguuutt"
+        ],
+        [
+          "....00000000",
+          "...ggggggggg",
+          "...gAggggAgg",
+          "...ggghhggg.",
+          ".....Uggu...",
+          "ttuuUUguuutt"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "ponytail",
+        hair: 2,
+        hat: 0,
+        skin: 0,
+        clothes: 5,
+        acc: "pencil",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "..pppppppp..",
+          "..pDDDDDDpY.",
+          "..DADDDDADZ.",
+          "..DDDEEDDDZ.",
+          "....DDDD....",
+          ".TTTUUVDTTT."
+        ],
+        [
+          "..pppppppp..",
+          "..pDDDDDDpY.",
+          "..zDDDDDDDZ.",
+          "..DDDEEDDDZ.",
+          "....DDDD....",
+          ".TTTUUVDTTT."
+        ],
+        [
+          "...pppppppp.",
+          "...pDDDDDDpp",
+          "..DADDDDADZ.",
+          "..DDDEEDDDZ.",
+          "....DDDD....",
+          ".TTTUUVDTTT."
+        ],
+        [
+          "...pppppppp.",
+          "...pDDDDDDpp",
+          "....ADDDDADp",
+          "...DDDEEDDDp",
+          ".....UDDET..",
+          ".TTTUUVDTTT."
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "sidepart",
+        hair: 7,
+        hat: 3,
+        skin: 2,
+        clothes: 3,
+        acc: "earrings",
+        extra: "none"
+      },
+      frames: [
+        [
+          "...WWWWWXX..",
+          "..WWWLLLLX..",
+          "..XLALLALX..",
+          ".FLLLLLLLLF.",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "...WWWWWXX..",
+          "..WWWLLLLX..",
+          "..XLLLLLLX..",
+          ".FLLLMMLLLF.",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "....WWWWWWX.",
+          "...WWWLLLLX.",
+          "..XLALLALX..",
+          ".FLLLLLLLLF.",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "....WWWWWWX.",
+          "...WWWLLLLX.",
+          "....LALLALXX",
+          "..LLLLMMLLLL",
+          ".....LLLH...",
+          "GGHHLLILHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "curly",
+        hair: 0,
+        hat: 2,
+        skin: 2,
+        clothes: 5,
+        acc: "earrings",
+        extra: "wide"
+      },
+      frames: [
+        [
+          "..eeeeeeee..",
+          ".eeLLLLLLee.",
+          ".FLALLLLALF.",
+          ".FLLLMMLLLF.",
+          "....LLLL....",
+          ".TTTUUVLTTT."
+        ],
+        [
+          "..eeeeeeee..",
+          ".eeLLLLLLee.",
+          ".FLLLLLLLLF.",
+          ".FLLLMMLLLF.",
+          "....LLLL....",
+          ".TTTUUVLTTT."
+        ],
+        [
+          "..eeeeeeeee.",
+          ".eeLLLLLLee.",
+          ".FLALLLLALF.",
+          ".FLLLMMLLLF.",
+          "....LLLL....",
+          ".TTTUUVLTTT."
+        ],
+        [
+          "...eeeeeeee.",
+          "..eeLLLLLLee",
+          "..eLALLLLALe",
+          "..eLLLMMLLLe",
+          ".....ULLMT..",
+          ".TTTUUVLTTT."
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "ponytail",
+        hair: 7,
+        hat: 4,
+        skin: 1,
+        clothes: 2,
+        acc: "feather",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "ddWWWWWWWW..",
+          "..WggggggWW.",
+          "..XgAggAggW.",
+          "..ggggggggW.",
+          "....gggg....",
+          "NNOOOOPgOONN"
+        ],
+        [
+          "ddWWWWWWWW..",
+          "..WggggggWW.",
+          "..XgggggggW.",
+          "..gghgghggW.",
+          "....gggg....",
+          "NNOOOOPgOONN"
+        ],
+        [
+          "ccdWWWWWWWW.",
+          "..WWggggggWW",
+          "..XgAggAggW.",
+          "..ggggggggW.",
+          "....gggg....",
+          "NNOOOOPgOONN"
+        ],
+        [
+          ".cdWWWWWWWW.",
+          "..WWggggggWW",
+          "....gAggAggW",
+          "...ggggggggW",
+          ".....OggO...",
+          "NNOOOOPgOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bun",
+        hair: 0,
+        hat: 2,
+        skin: 2,
+        clothes: 0,
+        acc: "none",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "..eeeeeeff..",
+          "..eLLLLLLf..",
+          "..LLAeeALL..",
+          "..LLeeeeLL..",
+          "....LLLL....",
+          "vvwwwwxLwwvv"
+        ],
+        [
+          "..eeeeeeff..",
+          "..eLLLLLLf..",
+          "..LLLLLLLL..",
+          "..LLeeeeLL..",
+          "....LLLL....",
+          "vvwwwwxLwwvv"
+        ],
+        [
+          "....eeeeeef.",
+          "...LLLLLLe..",
+          "..LLAeeALL..",
+          "..LLeeeeLL..",
+          "....LLLL....",
+          "vvwwwwxLwwvv"
+        ],
+        [
+          "...eeeeeeef.",
+          "...eLLLLLLf.",
+          "...LLALLALL.",
+          "...LLLeeLLL.",
+          ".....wLLw...",
+          "vvwwwwxLwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "curly",
+        hair: 4,
+        hat: 1,
+        skin: 1,
+        clothes: 2,
+        acc: "none",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "..ssssssss..",
+          ".ssggggggss.",
+          ".sggAggAggs.",
+          "..gggggggg..",
+          "....gggg....",
+          "NNOOOOPgOONN"
+        ],
+        [
+          "..ssssssss..",
+          ".ssggggggss.",
+          ".sggggggggs.",
+          "..gghgghgg..",
+          "....gggg....",
+          "NNOOOOPgOONN"
+        ],
+        [
+          "..sssssssss.",
+          ".ssggggggss.",
+          ".sggAggAggs.",
+          "..gggggggg..",
+          "....gggg....",
+          "NNOOOOPgOONN"
+        ],
+        [
+          "...ssssssss.",
+          "..ssggggggss",
+          "...ggAggAgg.",
+          "...gggggggg.",
+          ".....OggO...",
+          "NNOOOOPgOONN"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "long",
+        hair: 3,
+        hat: 4,
+        skin: 1,
+        clothes: 0,
+        acc: "feather",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "ccQQQQQQQQ..",
+          "QQQggggggQQ.",
+          ".QRgAQQAgRQ.",
+          ".QRgQQQQgRQ.",
+          "....gggg....",
+          "vvwwwwxgwwvv"
+        ],
+        [
+          "ccQQQQQQQQ..",
+          "QQQggggggQQ.",
+          ".QRggggggRQ.",
+          ".QRgQQQQgRQ.",
+          "....gggg....",
+          "vvwwwwxgwwvv"
+        ],
+        [
+          "ccdQQQQQQQQ.",
+          "..QQggggggQQ",
+          ".QRgAQQAgRQ.",
+          ".QRgQQQQgRQ.",
+          "....gggg....",
+          "vvwwwwxgwwvv"
+        ],
+        [
+          ".cdQQQQQQQQ.",
+          "..QQggggggQQ",
+          "..QQgAggAgQQ",
+          "..QRggQQggRQ",
+          "..QQ.wggw.QQ",
+          "vvwwwwxgwwvv"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "curly",
+        hair: 5,
+        hat: 2,
+        skin: 2,
+        clothes: 3,
+        acc: "feather",
+        extra: "beard"
+      },
+      frames: [
+        [
+          "..JJJJJJJJ..",
+          ".JJLLLLLLJJ.",
+          ".JLLALLALLJ.",
+          "..JJLLLLJJ..",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "..JJJJJJJJ..",
+          ".JJLLLLLLJJ.",
+          ".JLLLLLLLLJ.",
+          "..JJLMMLJJ..",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "..JJJJJJJJJ.",
+          ".JJLLLLLLJJ.",
+          ".JLLALLALLJ.",
+          "..JJLLLLJJ..",
+          "....LLLL....",
+          "GGHHLIILHHGG"
+        ],
+        [
+          "...JJJJJJJJ.",
+          "..JJLLLLLLJJ",
+          "..JLLALLALLJ",
+          "..JJLLMMLLJJ",
+          ".....LLLH...",
+          "GGHHLLILHHGG"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "bob",
+        hair: 1,
+        hat: 1,
+        skin: 1,
+        clothes: 1,
+        acc: "pencil",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "..kkkkkkkk..",
+          ".kkggggggkY.",
+          ".k4gAggAg4k.",
+          ".k4gggggg4k.",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "..kkkkkkkk..",
+          ".kkggggggkY.",
+          ".k4gggggg4k.",
+          ".k4ghgghg4k.",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "...kkkkkkk4.",
+          "..kkgggggg44",
+          ".k4gAggAg4k.",
+          ".k4gggggg4k.",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "...kkkkkkk4.",
+          "..kkgggggg44",
+          "..kkgAggAgkZ",
+          "..k4ggggggkk",
+          ".....UggU...",
+          "iiUUUUjgUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "spikes",
+        hair: 3,
+        hat: 0,
+        skin: 0,
+        clothes: 4,
+        acc: "pencil",
+        extra: "moustache"
+      },
+      frames: [
+        [
+          "..QQQQQQRR..",
+          "..QDDDDDDRY.",
+          "..DDAQQADDZ.",
+          "..DDQQQQDD..",
+          "....DDDD....",
+          "ttuuuDDuuutt"
+        ],
+        [
+          "..QQQQQQRR..",
+          "..QDDDDDDRY.",
+          "..DDDDDDDDZ.",
+          "..DDQQQQDD..",
+          "....DDDD....",
+          "ttuuuDDuuutt"
+        ],
+        [
+          "....QQQQQQ..",
+          "...DDDDDDQY.",
+          "..DDAQQADDZ.",
+          "..DDQQQQDD..",
+          "....DDDD....",
+          "ttuuuDDuuutt"
+        ],
+        [
+          "...QQQQQQQRR",
+          "...QDDDDDDRY",
+          "...DDADDADDD",
+          "...DDDQQDDD.",
+          ".....UDDu...",
+          "ttuuUUDuuutt"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "hat",
+        hair: 3,
+        hat: 0,
+        skin: 1,
+        clothes: 1,
+        acc: "none",
+        extra: "none"
+      },
+      frames: [
+        [
+          "....0000....",
+          "..gggggggg..",
+          "..ggAggAgg..",
+          "..gggggggg..",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "....0000....",
+          "..gggggggg..",
+          "..gggggggg..",
+          "..ggghhggg..",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "....000000..",
+          "..gggggggg..",
+          "..ggAggAgg..",
+          "..gggggggg..",
+          "....gggg....",
+          "iiUUUUjgUUii"
+        ],
+        [
+          "....000000..",
+          "...gggggggg.",
+          "...ggAggAgg.",
+          "...ggghhggg.",
+          ".....UggU...",
+          "iiUUUUjgUUii"
+        ]
+      ]
+    },
+    {
+      parts: {
+        style: "spikes",
+        hair: 7,
+        hat: 3,
+        skin: 1,
+        clothes: 0,
+        acc: "feather",
+        extra: "smile"
+      },
+      frames: [
+        [
+          "..WWWWWWXX..",
+          "..WggggggX..",
+          "..ggAggAgg..",
+          "..gggggggg..",
+          "....gggg....",
+          "vvwwwwxgwwvv"
+        ],
+        [
+          "..WWWWWWXX..",
+          "..WggggggX..",
+          "..gggggggg..",
+          "..gghgghgg..",
+          "....gggg....",
+          "vvwwwwxgwwvv"
+        ],
+        [
+          "....WWWWWWX.",
+          "...ggggggW..",
+          "..ggAggAgg..",
+          "..gggggggg..",
+          "....gggg....",
+          "vvwwwwxgwwvv"
+        ],
+        [
+          "...WWWWWWWX.",
+          "...WggggggX.",
+          "...ggAggAgg.",
+          "...gggggggg.",
+          ".....wggw...",
+          "vvwwwwxgwwvv"
+        ]
+      ]
+    }
+  ]
+};
+
+// packages/tui/dist/avatars/sprite.js
+var POOL_SIZE = pool_default.avatars.length;
+var SPRITE_ROWS = 3;
+var SPRITE_COLS = 6;
+var TILE_PAD = 1;
+var TILE_COLS = SPRITE_COLS + 2 * TILE_PAD;
+var TILE_BG = "#2a2e37";
+var FRAME_COUNT = 4;
+var QUADRANTS = " \u2598\u259D\u2580\u2596\u258C\u259E\u259B\u2597\u259A\u2590\u259C\u2584\u2599\u259F\u2588";
+var palette = pool_default.palette;
+function colourAt(rows, r, c) {
+  const ch = rows[r]?.[c];
+  return ch === void 0 || ch === "." ? void 0 : palette[ch];
+}
+function quadrantCell(px) {
+  const keys = [];
+  for (const c of px)
+    if (!keys.includes(c))
+      keys.push(c);
+  if (keys.length > 2)
+    throw new Error(`a 2x2 block holds ${keys.length} colours, at most 2 fit one cell`);
+  if (keys.length === 1)
+    return keys[0] === void 0 ? { ch: " " } : { ch: "\u2588", fg: keys[0] };
+  const count = (k) => px.filter((c) => c === k).length;
+  let bg;
+  let fg;
+  if (keys[0] === void 0 || keys[1] === void 0) {
+    bg = void 0;
+    fg = keys[0] === void 0 ? keys[1] : keys[0];
+  } else {
+    [bg, fg] = count(keys[1]) > count(keys[0]) ? [keys[1], keys[0]] : [keys[0], keys[1]];
+  }
+  const mask = px.reduce((m, c, i) => c === fg ? m | 1 << i : m, 0);
+  return bg === void 0 ? { ch: QUADRANTS[mask], fg } : { ch: QUADRANTS[mask], fg, bg };
+}
+function cells(avatarIndex, frame2) {
+  const av = pool_default.avatars[(avatarIndex % POOL_SIZE + POOL_SIZE) % POOL_SIZE];
+  const rows = av.frames[(frame2 % FRAME_COUNT + FRAME_COUNT) % FRAME_COUNT];
+  const out = [];
+  for (let r = 0; r < SPRITE_ROWS; r++) {
+    const line = [];
+    for (let c = 0; c < SPRITE_COLS; c++) {
+      line.push(quadrantCell([colourAt(rows, r * 2, c * 2), colourAt(rows, r * 2, c * 2 + 1), colourAt(rows, r * 2 + 1, c * 2), colourAt(rows, r * 2 + 1, c * 2 + 1)]));
+    }
+    out.push(line);
+  }
+  return out;
+}
+function tileCells(avatarIndex, frame2) {
+  return cells(avatarIndex, frame2).map((row) => {
+    const pad = { ch: " ", bg: TILE_BG };
+    return [pad, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), pad];
+  });
+}
+var SEQUENCE = [0, 0, 1, 0, 2, 0, 3, 0];
+function phaseFor(avatarIndex) {
+  return (avatarIndex * 3 % SEQUENCE.length + SEQUENCE.length) % SEQUENCE.length;
+}
+function frameAt(tick2, phase, running) {
+  if (!running)
+    return 0;
+  const n = SEQUENCE.length;
+  return SEQUENCE[((Math.trunc(tick2) + Math.trunc(phase)) % n + n) % n];
+}
+
+// opencode/sterling-tui/view.ts
 var SIDEBAR_WIDTH = 34;
 var TOP_TASKS = 5;
 var QUEUE_CAP = 1e3;
@@ -9815,7 +12150,10 @@ function clip(text, width) {
   return text.length <= width ? text : text.slice(0, Math.max(0, width - 1)) + "\u2026";
 }
 function handle(label, id, width) {
-  const suffix = ` (${id.slice(0, 8)})`;
+  return tagged(label, id.slice(0, 8), width);
+}
+function tagged(label, tag, width) {
+  const suffix = ` (${tag})`;
   return clip(label, width - suffix.length) + suffix;
 }
 function sidebarLines(s2, width = SIDEBAR_WIDTH) {
@@ -9825,6 +12163,89 @@ function sidebarLines(s2, width = SIDEBAR_WIDTH) {
   for (const t of s2.top) lines.push(handle(`  ${t.label}`, t.id, width));
   lines.push(clip(`Queue ${s2.queue}${s2.queueCapped ? "+" : ""} waiting`, width));
   for (const n of s2.notices) lines.push(clip(`! ${n}`, width));
+  return lines;
+}
+function shortId(id) {
+  return id.slice(-8);
+}
+function descendants(sessions, rootID) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set([rootID]);
+  let frontier = [rootID];
+  while (frontier.length) {
+    const next = [];
+    for (const s2 of sessions) {
+      if (s2.parentID && frontier.includes(s2.parentID) && !seen.has(s2.id)) {
+        seen.add(s2.id);
+        out.push(s2);
+        next.push(s2.id);
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
+function readSubagents(src) {
+  const rows = descendants(src.sessions, src.rootID).map((s2) => {
+    const turn = src.lastTurn(s2.id);
+    const model = turn?.model ?? s2.model;
+    const t = turn?.tokens;
+    const limit = model ? src.contextLimit(model) : void 0;
+    const used = t ? t.input + t.output + t.reasoning + t.cache.read + t.cache.write : void 0;
+    const title = s2.title?.trim();
+    return {
+      id: s2.id,
+      title: title ? title : shortId(s2.id),
+      status: src.isRunning(s2.id) ? "active" : "idle",
+      context: used !== void 0 && limit && limit > 0 ? `${Math.round(used / limit * 100)}%` : "?",
+      model: model?.id ?? "-"
+    };
+  });
+  return rows.sort((a, b) => Number(b.status === "active") - Number(a.status === "active"));
+}
+var PORTRAIT_WIDTH = TILE_COLS;
+var SIDE_TEXT_MIN = 16;
+var GAP = 1;
+function bodyLinesFor(terminalHeight, extraLines) {
+  return Math.max(3, terminalHeight - 8 - extraLines);
+}
+var emptyAvatars = () => ({ current: /* @__PURE__ */ new Map(), freed: [] });
+function stepAvatars(prev, familyIds, rng) {
+  return assign(familyIds, prev.current, rng, { poolSize: POOL_SIZE, freed: prev.freed });
+}
+function portraitLines(avatar, frame2) {
+  return tileCells(avatar, frame2).map((row) => {
+    const line = [];
+    for (const c of row) {
+      const last = line[line.length - 1];
+      if (last && last.fg === c.fg && last.bg === c.bg) last.text += c.ch;
+      else line.push({ text: c.ch, fg: c.fg, bg: c.bg });
+    }
+    return line;
+  });
+}
+function rowText(r, width) {
+  return [
+    [{ text: clip(r.title, width) }],
+    [{ text: clip(`${r.status} \xB7 ${r.context} ctx \xB7 ${r.model}`, width), dim: true }],
+    [{ text: clip(r.description ?? "", width), dim: true }]
+  ];
+}
+function subagentRowLines(r, avatar, tick2, width) {
+  const portrait = portraitLines(avatar, frameAt(tick2, phaseFor(avatar), r.status === "active"));
+  const sideWidth = width - PORTRAIT_WIDTH - GAP;
+  if (sideWidth < SIDE_TEXT_MIN) return [...portrait, ...rowText(r, width)];
+  const text = rowText(r, sideWidth);
+  return portrait.map((line, i) => [...line, { text: " ".repeat(GAP) }, ...text[i]]);
+}
+function subagentSpanLines(rows, avatars, tick2, width = SIDEBAR_WIDTH) {
+  const active = rows.filter((r) => r.status === "active").length;
+  const lines = [[{ text: `Sub-agents (${active} active)` }]];
+  if (rows.length === 0) return [...lines, [{ text: "no sub-agents", dim: true }]];
+  rows.forEach((r, i) => {
+    if (i > 0) lines.push([]);
+    lines.push(...subagentRowLines(r, avatars.get(r.id) ?? 0, tick2, width));
+  });
   return lines;
 }
 function keyToUiEvent(key) {
@@ -9871,8 +12292,14 @@ function findStorePath(start, env) {
 
 // opencode/sterling-tui/tui.tsx
 var ROUTE = "sterling";
+var FRAME_MS = 333;
+var SUBAGENT_EVENTS = ["session.created", "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.step.ended"];
 var COMMAND = "sterling.open";
 var [tick, setTick] = createSignal(0);
+var [frame, setFrame] = createSignal(0);
+var anyRunning = false;
+var [syncFailure, setSyncFailure] = createSignal();
+var synced = /* @__PURE__ */ new Set();
 var dashboard;
 var projectDir = process.cwd();
 function controller() {
@@ -9884,6 +12311,57 @@ function controller() {
 function clip2(text, width) {
   return text.length <= width ? text : text.slice(0, Math.max(0, width - 1)) + "\u2026";
 }
+var avatarStates = /* @__PURE__ */ new Map();
+var blockCache = /* @__PURE__ */ new Map();
+function subagentData(api, sessionID) {
+  const at = tick();
+  const hit = blockCache.get(sessionID);
+  if (hit && hit.at === at) return hit.value;
+  const value = guarded("sub-agents", () => {
+    const d = api.data;
+    const rootID = d.session.root(sessionID);
+    const rows = readSubagents({
+      sessions: d.session.list(),
+      rootID,
+      isRunning: (id) => d.session.status(id) === "running",
+      lastTurn: (id) => {
+        if (!synced.has(id)) {
+          synced.add(id);
+          d.session.message.sync(id).then(
+            () => setSyncFailure(void 0),
+            (err) => {
+              synced.delete(id);
+              setSyncFailure(`messages unavailable \u2014 ${err?.message ?? String(err)}`);
+            }
+          );
+        }
+        const turn = d.session.message.list(id).findLast((m) => m.type === "assistant" && m.tokens);
+        return turn && { tokens: turn.tokens, model: turn.model };
+      },
+      contextLimit: (m) => d.location.model.list().find((x) => x.providerID === m.providerID && x.modelID === m.id)?.limit.context
+    });
+    const avatars = stepAvatars(avatarStates.get(rootID) ?? emptyAvatars(), rows.map((r) => r.id), Math.random);
+    avatarStates.set(rootID, avatars);
+    return { rows, avatars };
+  });
+  blockCache.set(sessionID, { at, value });
+  return value;
+}
+function subagentBlock(api, sessionID, width) {
+  const frameNow = frame();
+  const block = subagentData(api, sessionID);
+  anyRunning = block.ok && block.value.rows.some((r) => r.status === "active");
+  const lines = block.ok ? subagentSpanLines(block.value.rows, block.value.avatars.current, frameNow, width) : [[{ text: clip2(`! ${block.error}`, width) }]];
+  const failure = syncFailure();
+  return failure ? [...lines, [{ text: clip2(`! ${failure}`, width) }]] : lines;
+}
+function StyledLine(props) {
+  return <text>
+      <Index each={props.spans.length ? props.spans : [{ text: " " }]}>
+        {(sp) => <span style={{ fg: sp().dim ? props.palette.muted : sp().fg ?? props.palette.text, bg: sp().bg ?? props.palette.surface }}>{sp().text}</span>}
+      </Index>
+    </text>;
+}
 function Commands(props) {
   props.api.keymap.layer(() => ({
     mode: "global",
@@ -9893,6 +12371,7 @@ function Commands(props) {
 }
 function Sidebar(props) {
   const muted = () => props.api.theme?.text?.muted;
+  const palette2 = () => ({ text: props.api.theme?.text?.base, muted: muted(), surface: props.api.theme?.background?.raised?.base });
   const lines = () => {
     tick();
     const c = controller();
@@ -9905,9 +12384,11 @@ function Sidebar(props) {
   return <box flexDirection="column" paddingTop={1}>
       <text>{lines().title}</text>
       <For each={lines().body}>{(l) => <text>{l}</text>}</For>
+      <Index each={subagentBlock(props.api, props.sessionID, SIDEBAR_WIDTH)}>{(l) => <StyledLine spans={l()} palette={palette2()} />}</Index>
       <text fg={muted()}>{hint()}</text>
     </box>;
 }
+var footerLines = (st) => [{ text: "" }, { text: st.footer, dim: true }];
 function paint(st, maxBodyLines) {
   const lines = [{ text: st.searchLine ?? "", dim: true }];
   if (st.emptyMessage) lines.push({ text: st.emptyMessage, dim: true });
@@ -9929,8 +12410,7 @@ function paint(st, maxBodyLines) {
   } else {
     lines.push(...body.slice(0, maxBodyLines));
   }
-  lines.push({ text: "" }, { text: st.footer, dim: true });
-  return { header: st.projectName, tabs: st.tabs, lines };
+  return { header: st.projectName, tabs: st.tabs, lines, footer: footerLines(st) };
 }
 function FullView(props) {
   const dims = useTerminalDimensions();
@@ -9938,14 +12418,32 @@ function FullView(props) {
   const [failure, setFailure] = createSignal();
   const muted = () => props.api.theme?.text?.muted;
   const highlight = () => props.api.theme?.background?.raised?.high;
-  const viewport = () => ({ width: Math.max(20, dims().width - 2), maxBodyLines: Math.max(3, dims().height - 8), showBanner: false });
+  const palette2 = () => ({ text: props.api.theme?.text?.base, muted: muted(), surface: props.api.theme?.background?.base });
+  const width = () => Math.max(20, dims().width - 2);
+  const subagentSession = () => {
+    const c = controller();
+    const sid = props.sessionID();
+    return sid && c.ok && c.value.ui().tab === TASKS_TAB ? sid : void 0;
+  };
+  const extraHeight = () => {
+    const sid = subagentSession();
+    return sid ? 1 + untrack(() => subagentBlock(props.api, sid, width()).length) : 0;
+  };
+  const viewport = () => ({ width: width(), maxBodyLines: bodyLinesFor(dims().height, extraHeight()), showBanner: false });
+  const extra = () => {
+    tick();
+    version();
+    const sid = subagentSession();
+    return sid ? subagentBlock(props.api, sid, width()) : [];
+  };
   const view = () => {
     tick();
     version();
     const c = controller();
     if (!c.ok) return { ok: false, error: c.error };
     const st = guarded("dashboard", () => c.value.state(viewport()));
-    return st.ok ? { ok: true, ...paint(st.value, viewport().maxBodyLines) } : { ok: false, error: st.error };
+    if (!st.ok) return { ok: false, error: st.error };
+    return { ok: true, ...paint(st.value, viewport().maxBodyLines) };
   };
   useKeyboard((key) => {
     if (props.api.keymap.mode.current() !== "base") return;
@@ -9982,6 +12480,13 @@ function FullView(props) {
         <For each={view().lines}>
           {(l) => <text fg={l.dim ? muted() : void 0} bg={l.selected ? highlight() : void 0}>{l.text || " "}</text>}
         </For>
+        <Show when={extra().length}>
+          <text> </text>
+          <Index each={extra()}>{(l) => <StyledLine spans={l()} palette={palette2()} />}</Index>
+        </Show>
+        <For each={view().footer}>
+          {(l) => <text fg={l.dim ? muted() : void 0}>{l.text || " "}</text>}
+        </For>
       </Show>
       <Show when={failure()}>
         <text>{failure()}</text>
@@ -10006,12 +12511,20 @@ var tui_default = {
     };
     const disposers = [
       api.ui.slot({ append: "app", render: () => <Commands api={api} open={open2} /> }),
-      api.ui.slot({ append: "sidebar.content", render: () => <Sidebar api={api} /> }),
-      api.ui.router.register({ name: ROUTE, render: () => <FullView api={api} close={() => api.ui.router.navigate(back)} /> })
+      api.ui.slot({ append: "sidebar.content", render: (input) => <Sidebar api={api} sessionID={input.sessionID} /> }),
+      api.ui.router.register({
+        name: ROUTE,
+        render: () => <FullView api={api} sessionID={() => back.type === "session" ? back.sessionID : void 0} close={() => api.ui.router.navigate(back)} />
+      }),
+      ...SUBAGENT_EVENTS.map((type) => api.data.on(type, () => setTick((n) => n + 1)))
     ];
     const timer = setInterval(() => setTick((n) => n + 1), 1e3);
+    const animation = setInterval(() => {
+      if (anyRunning) setFrame((n) => n + 1);
+    }, FRAME_MS);
     return () => {
       clearInterval(timer);
+      clearInterval(animation);
       for (const dispose of disposers) dispose();
       if (dashboard?.ok) dashboard.value.close();
       dashboard = void 0;

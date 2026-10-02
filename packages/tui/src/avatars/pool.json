@@ -1,0 +1,2218 @@
+{
+ "palette": {
+  "A": "#1d1e1c",
+  "B": "#8a4fa8",
+  "D": "#f0d6bd",
+  "E": "#e9c8b0",
+  "F": "#f0c040",
+  "G": "#a08c52",
+  "H": "#bfa96a",
+  "I": "#e0731f",
+  "J": "#2b2830",
+  "K": "#1c1a20",
+  "L": "#efc9a6",
+  "M": "#e2b792",
+  "N": "#8eaac8",
+  "O": "#a9c3de",
+  "P": "#25252b",
+  "Q": "#7a4a2a",
+  "R": "#5f391f",
+  "S": "#2a3150",
+  "T": "#3a4363",
+  "U": "#f4f1ea",
+  "V": "#7a45a8",
+  "W": "#d9732a",
+  "X": "#b45a1a",
+  "Y": "#e88aa0",
+  "Z": "#e8c547",
+  "a": "#a8472a",
+  "b": "#85361f",
+  "c": "#1b8f84",
+  "d": "#2ec4b6",
+  "e": "#b0801e",
+  "f": "#9e7322",
+  "g": "#f7e4d4",
+  "h": "#ecd3bf",
+  "i": "#cfd2d6",
+  "j": "#2e8b57",
+  "k": "#e8d9a0",
+  "l": "#2f5fa8",
+  "n": "#e8dcc0",
+  "p": "#a0764a",
+  "q": "#b8322e",
+  "s": "#4a3326",
+  "t": "#6e5fa2",
+  "u": "#8b7bbd",
+  "v": "#baae96",
+  "w": "#c8b9a3",
+  "x": "#96261f",
+  "y": "#36251b",
+  "z": "#86603a",
+  "0": "#3f7d4a",
+  "2": "#c9ced6",
+  "3": "#9aa1ad",
+  "4": "#cdbd80"
+ },
+ "avatars": [
+  {
+   "parts": {
+    "style": "cap",
+    "hair": 8,
+    "hat": 3,
+    "skin": 0,
+    "clothes": 3,
+    "acc": "earrings",
+    "extra": "none"
+   },
+   "frames": [
+    [
+     "..BBBBBBBB..",
+     "..DDDDDDDD..",
+     "..DDADDADD..",
+     ".FDDDDDDDDF.",
+     "....DDDD....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "..BBBBBBBB..",
+     "..DDDDDDDD..",
+     "..DDDDDDDD..",
+     ".FDDDEEDDDF.",
+     "....DDDD....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "....BBBBBBB.",
+     "..DDDDDDDD..",
+     "..DDADDADD..",
+     ".FDDDDDDDDF.",
+     "....DDDD....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "....BBBBBB..",
+     "...DDDDDDDD.",
+     "...DDADDADD.",
+     "..DDDDEEDDDD",
+     ".....DDDH...",
+     "GGHHDDIIHHGG"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "bob",
+    "hair": 5,
+    "hat": 2,
+    "skin": 2,
+    "clothes": 2,
+    "acc": "none",
+    "extra": "smile"
+   },
+   "frames": [
+    [
+     "..JJJJJJJJ..",
+     ".JJLLLLLLJJ.",
+     ".JKLALLALKJ.",
+     ".JKLLLLLLKJ.",
+     "....LLLL....",
+     "NNOOOOPLOONN"
+    ],
+    [
+     "..JJJJJJJJ..",
+     ".JJLLLLLLJJ.",
+     ".JKLLLLLLKJ.",
+     ".JKLMLLMLKJ.",
+     "....LLLL....",
+     "NNOOOOPLOONN"
+    ],
+    [
+     "...JJJJJJJKJ",
+     "..JJLLLLLLJJ",
+     ".JKLALLALKJ.",
+     ".JKLLLLLLKJ.",
+     "....LLLL....",
+     "NNOOOOPLOONN"
+    ],
+    [
+     "...JJJJJJJKJ",
+     "..JJLLLLLLJJ",
+     "..JJLALLALJJ",
+     "..JKLLLLLLKJ",
+     ".....OLLO...",
+     "NNOOOOPLOONN"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "long",
+    "hair": 3,
+    "hat": 2,
+    "skin": 0,
+    "clothes": 5,
+    "acc": "none",
+    "extra": "beard"
+   },
+   "frames": [
+    [
+     "..QQQQQQQQ..",
+     ".QQDDDDDDQQ.",
+     ".QQDADDADQQ.",
+     ".QQQDDDDQQQ.",
+     ".QQTDDDDTQQS",
+     "..TTUUVDTTSS"
+    ],
+    [
+     "..QQQQQQQQ..",
+     ".QQDDDDDDQQ.",
+     ".QQDDDDDDQQ.",
+     ".QQQDEEDQQQ.",
+     ".QQTDDDDTQQS",
+     "..TTUUVDTTSS"
+    ],
+    [
+     "...QQQQQQQQ.",
+     "..QQDDDDDDQQ",
+     ".QQDADDADQQ.",
+     ".QQQDDDDQQQ.",
+     ".QQTDDDDTQQS",
+     "..TTUUVDTTSS"
+    ],
+    [
+     "...QQQQQQQQ.",
+     "..QQDDDDDDQQ",
+     "..QQDADDADQQ",
+     "..QQDDEEDDQQ",
+     "..QQ.UDDETQQ",
+     ".TTTUUVDTTSS"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "bob",
+    "hair": 7,
+    "hat": 3,
+    "skin": 2,
+    "clothes": 2,
+    "acc": "pencil",
+    "extra": "beard"
+   },
+   "frames": [
+    [
+     "..WWWWWWWW..",
+     ".WWLLLLLLWY.",
+     ".WWLALLALWZ.",
+     ".WWWLLLLWWZ.",
+     "....LLLL....",
+     "NNOOOOPLOONN"
+    ],
+    [
+     "..WWWWWWWW..",
+     ".WWLLLLLLWY.",
+     ".WWLLLLLLWZ.",
+     ".WWWLMMLWWZ.",
+     "....LLLL....",
+     "NNOOOOPLOONN"
+    ],
+    [
+     "...WWWWWWWXX",
+     "..WWLLLLLLYX",
+     ".WWLALLALWZ.",
+     ".WWWLLLLWWZ.",
+     "....LLLL....",
+     "NNOOOOPLOONN"
+    ],
+    [
+     "...WWWWWWWXX",
+     "..WWLLLLLLXY",
+     "..WWLALLALWZ",
+     "..WWLLMMLLWW",
+     ".....OLLO...",
+     "NNOOOOPLOONN"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "spikes",
+    "hair": 6,
+    "hat": 2,
+    "skin": 2,
+    "clothes": 5,
+    "acc": "pencil",
+    "extra": "smile"
+   },
+   "frames": [
+    [
+     "..aaaaaabb..",
+     "..aLLLLLLbY.",
+     "..LLALLALLZ.",
+     "..LLLLLLLL..",
+     "....LLLL....",
+     ".TTTUUVLTTT."
+    ],
+    [
+     "..aaaaaabb..",
+     "..aLLLLLLbY.",
+     "..LLLLLLLLZ.",
+     "..LLMLLMLL..",
+     "....LLLL....",
+     ".TTTUUVLTTT."
+    ],
+    [
+     "....aaaaaa..",
+     "...LLLLLLaY.",
+     "..LLALLALLZ.",
+     "..LLLLLLLL..",
+     "....LLLL....",
+     ".TTTUUVLTTT."
+    ],
+    [
+     "...aaaaaaabb",
+     "...aLLLLLLbY",
+     "...LLALLALLL",
+     "...LLLLLLLL.",
+     ".....ULLMT..",
+     ".TTTUUVLTTT."
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "spikes",
+    "hair": 3,
+    "hat": 4,
+    "skin": 2,
+    "clothes": 2,
+    "acc": "feather",
+    "extra": "smile"
+   },
+   "frames": [
+    [
+     "..QQQQQQRR..",
+     "..QLLLLLLR..",
+     "..LLALLALL..",
+     "..LLLLLLLL..",
+     "....LLLL....",
+     "NNOOOOPLOONN"
+    ],
+    [
+     "..QQQQQQRR..",
+     "..QLLLLLLR..",
+     "..LLLLLLLL..",
+     "..LLMLLMLL..",
+     "....LLLL....",
+     "NNOOOOPLOONN"
+    ],
+    [
+     "....QQQQQQR.",
+     "...LLLLLLQ..",
+     "..LLALLALL..",
+     "..LLLLLLLL..",
+     "....LLLL....",
+     "NNOOOOPLOONN"
+    ],
+    [
+     "...QQQQQQQR.",
+     "...QLLLLLLR.",
+     "...LLALLALL.",
+     "...LLLLLLLL.",
+     ".....OLLO...",
+     "NNOOOOPLOONN"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "bald",
+    "hair": 8,
+    "hat": 3,
+    "skin": 0,
+    "clothes": 3,
+    "acc": "feather",
+    "extra": "none"
+   },
+   "frames": [
+    [
+     ".cccDDDD....",
+     "..DDDDDDDD..",
+     "..DDADDADD..",
+     "..DDDDDDDD..",
+     "....DDDD....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     ".cccDDDD....",
+     "..DDDDDDDD..",
+     "..DDDDDDDD..",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "..ccdDDDD...",
+     "..cDDDDDDDD.",
+     "..DDADDADD..",
+     "..DDDDDDDD..",
+     "....DDDD....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "..ccdDDDD...",
+     "..cDDDDDDDD.",
+     "...DDADDADD.",
+     "...DDDEEDDD.",
+     ".....DDDH...",
+     "GGHHDDIIHHGG"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "sidepart",
+    "hair": 0,
+    "hat": 0,
+    "skin": 1,
+    "clothes": 1,
+    "acc": "feather",
+    "extra": "moustache"
+   },
+   "frames": [
+    [
+     "ccdeeeeeff..",
+     "..eeeggggf..",
+     "..fgAeeAgf..",
+     "..ggeeeegg..",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "ccdeeeeeff..",
+     "..eeeggggf..",
+     "..fggggggf..",
+     "..ggeeeegg..",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     ".ccceeeeeef.",
+     "..ceeeggggf.",
+     "..fgAeeAgf..",
+     "..ggeeeegg..",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     ".ccceeeeeef.",
+     "..ceeeggggf.",
+     "....gAggAg..",
+     "...gggeeggg.",
+     ".....UggU...",
+     "iiUUUUjgUUii"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "curly",
+    "hair": 1,
+    "hat": 2,
+    "skin": 0,
+    "clothes": 5,
+    "acc": "earrings",
+    "extra": "beard"
+   },
+   "frames": [
+    [
+     "..kkkkkkkk..",
+     ".kkDDDDDDkk.",
+     ".kDDADDADDk.",
+     ".kkkDDDDkkk.",
+     "....DDDD....",
+     ".TTTUUVDTTT."
+    ],
+    [
+     "..kkkkkkkk..",
+     ".kkDDDDDDkk.",
+     ".kDDDDDDDDk.",
+     ".kkkDEEDkkk.",
+     "....DDDD....",
+     ".TTTUUVDTTT."
+    ],
+    [
+     "...kkkkkkkk.",
+     ".kkkDDDDDkk.",
+     ".kDDADDADDk.",
+     ".kkkDDDDkkk.",
+     "....DDDD....",
+     ".TTTUUVDTTT."
+    ],
+    [
+     "...kkkkkkkk.",
+     "..kkDDDDDDkk",
+     "..kkDADDADkk",
+     "..FkDDEEDDkF",
+     ".....UDDET..",
+     ".TTTUUVDTTT."
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "beanie",
+    "hair": 6,
+    "hat": 2,
+    "skin": 0,
+    "clothes": 2,
+    "acc": "feather",
+    "extra": "wide"
+   },
+   "frames": [
+    [
+     "..llllllll..",
+     "..DDDDDDDD..",
+     "..DADDDDAD..",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "..llllllll..",
+     "..DDDDDDDD..",
+     "..DDDDDDDD..",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "....lllllll.",
+     "..DDDDDDDD..",
+     "..DADDDDAD..",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "....llllll..",
+     "...DDDDDDDD.",
+     "...DADDDDAD.",
+     "...DDDEEDDD.",
+     ".....ODDO...",
+     "NNOOOOPDOONN"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "bun",
+    "hair": 6,
+    "hat": 2,
+    "skin": 1,
+    "clothes": 3,
+    "acc": "pencil",
+    "extra": "smile"
+   },
+   "frames": [
+    [
+     "..aaaaaabb..",
+     "..aggggggbY.",
+     "..ggAggAggZ.",
+     "..gggggggg..",
+     "....gggg....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "..aaaaaabb..",
+     "..aggggggbY.",
+     "..ggggggggZ.",
+     "..gghgghgg..",
+     "....gggg....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "....aaaaaa..",
+     "...ggggggaY.",
+     "..ggAggAggZ.",
+     "..gggggggg..",
+     "....gggg....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "...aaaaaaabb",
+     "...aggggggbY",
+     "...ggAggAggg",
+     "...gggggggg.",
+     ".....gggH...",
+     "GGHHg.IIHHGG"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "hat",
+    "hair": 2,
+    "hat": 4,
+    "skin": 1,
+    "clothes": 1,
+    "acc": "earrings",
+    "extra": "moustache"
+   },
+   "frames": [
+    [
+     "...gnnnng...",
+     "..gggggggg..",
+     "..ggAppAgg..",
+     ".FggppppggF.",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "...gnnnng...",
+     "..gggggggg..",
+     "..gggggggg..",
+     ".FggppppggF.",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "....nnnnnn..",
+     "..gggggggg..",
+     "..ggAppAgg..",
+     ".FggppppggF.",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "....nnnnnn..",
+     "...gggggggg.",
+     "...ggAggAgg.",
+     "..ggggppgggg",
+     ".....UggU...",
+     "iiUUUUjgUUii"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "cap",
+    "hair": 4,
+    "hat": 1,
+    "skin": 0,
+    "clothes": 3,
+    "acc": "earrings",
+    "extra": "beard"
+   },
+   "frames": [
+    [
+     "..qqqqqqqq..",
+     "..DDDDDDDD..",
+     "..DDADDADD..",
+     ".FssDDDDssF.",
+     "....DDDD....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "..qqqqqqqq..",
+     "..DDDDDDDD..",
+     "..DDDDDDDD..",
+     ".FssDEEDssF.",
+     "....DDDD....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "....qqqqqqq.",
+     "..DDDDDDDD..",
+     "..DDADDADD..",
+     ".FssDDDDssF.",
+     "....DDDD....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "....qqqqqq..",
+     "...DDDDDDDD.",
+     "...DDADDADD.",
+     "..D.DDEEDD.D",
+     ".....DDDH...",
+     "GGHHDDIIHHGG"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "long",
+    "hair": 0,
+    "hat": 2,
+    "skin": 0,
+    "clothes": 2,
+    "acc": "pencil",
+    "extra": "smile"
+   },
+   "frames": [
+    [
+     "..eeeeeeee..",
+     ".eeDDDDDDeY.",
+     ".efDADDADfZ.",
+     ".efDDDDDDfZ.",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "..eeeeeeee..",
+     ".eeDDDDDDeY.",
+     ".efDDDDDDfZ.",
+     ".efDEDDEDfZ.",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "...eeeeeeeff",
+     "..eeDDDDDDYf",
+     ".efDADDADfZ.",
+     ".efDDDDDDfZ.",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "...eeeeeeeff",
+     "..eeDDDDDDfY",
+     "..eeDADDADeZ",
+     "..efDDDDDDee",
+     "..ee.ODDO.ee",
+     "NNOOOOPDOONN"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "beanie",
+    "hair": 1,
+    "hat": 3,
+    "skin": 1,
+    "clothes": 1,
+    "acc": "earrings",
+    "extra": "wide"
+   },
+   "frames": [
+    [
+     "..BBBBBBBB..",
+     "..gggggggg..",
+     "..gAggggAg..",
+     ".FggghhgggF.",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "..BBBBBBBB..",
+     "..gggggggg..",
+     "..gggggggg..",
+     ".FggghhgggF.",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "....BBBBBBB.",
+     "..gggggggg..",
+     "..gAggggAg..",
+     ".FggghhgggF.",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "....BBBBBB..",
+     "...gggggggg.",
+     "...gAggggAg.",
+     "..gggghhgggg",
+     ".....UggU...",
+     "iiUUUUjgUUii"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "bald",
+    "hair": 1,
+    "hat": 2,
+    "skin": 2,
+    "clothes": 4,
+    "acc": "earrings",
+    "extra": "none"
+   },
+   "frames": [
+    [
+     "....LLLL....",
+     "..LLLLLLLL..",
+     "..LLALLALL..",
+     ".FLLLLLLLLF.",
+     "....LLLL....",
+     "ttuuuLLuuutt"
+    ],
+    [
+     "....LLLL....",
+     "..LLLLLLLL..",
+     "..LLLLLLLL..",
+     ".FLLLMMLLLF.",
+     "....LLLL....",
+     "ttuuuLLuuutt"
+    ],
+    [
+     ".....LLLL...",
+     "...LLLLLLLL.",
+     "..LLALLALL..",
+     ".FLLLLLLLLF.",
+     "....LLLL....",
+     "ttuuuLLuuutt"
+    ],
+    [
+     ".....LLLL...",
+     "...LLLLLLLL.",
+     "...LLALLALL.",
+     "..LLLLMMLLLL",
+     ".....ULLu...",
+     "ttuuUULuuutt"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "hat",
+    "hair": 4,
+    "hat": 2,
+    "skin": 2,
+    "clothes": 0,
+    "acc": "none",
+    "extra": "none"
+   },
+   "frames": [
+    [
+     "....llll....",
+     "..LLLLLLLL..",
+     "..LLALLALL..",
+     "..LLLLLLLL..",
+     "....LLLL....",
+     "vvwwwwxLwwvv"
+    ],
+    [
+     "....llll....",
+     "..LLLLLLLL..",
+     "..LLLLLLLL..",
+     "..LLLMMLLL..",
+     "....LLLL....",
+     "vvwwwwxLwwvv"
+    ],
+    [
+     "....llllll..",
+     "..LLLLLLLL..",
+     "..LLALLALL..",
+     "..LLLLLLLL..",
+     "....LLLL....",
+     "vvwwwwxLwwvv"
+    ],
+    [
+     "....llllll..",
+     "...LLLLLLLL.",
+     "...LLALLALL.",
+     "...LLLMMLLL.",
+     ".....wLLw...",
+     "vvwwwwxLwwvv"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "tuft",
+    "hair": 5,
+    "hat": 0,
+    "skin": 1,
+    "clothes": 3,
+    "acc": "feather",
+    "extra": "beard"
+   },
+   "frames": [
+    [
+     "..JJJJJJKK..",
+     "..JggggggK..",
+     "..JgAggAgJ..",
+     "..JJggggJJ..",
+     "....gggg....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "..JJJJJJKK..",
+     "..JggggggK..",
+     "..JggggggJ..",
+     "..JJghhgJJ..",
+     "....gggg....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "....JJJJKK..",
+     "...ggggggK..",
+     "..JgAggAgJ..",
+     "..JJggggJJ..",
+     "....gggg....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "....JJJJKK..",
+     "...KggggggK.",
+     "...KgAggAgK.",
+     "....gghhgg..",
+     ".....gggH...",
+     "GGHHg.IIHHGG"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "bob",
+    "hair": 4,
+    "hat": 1,
+    "skin": 0,
+    "clothes": 2,
+    "acc": "feather",
+    "extra": "smile"
+   },
+   "frames": [
+    [
+     "ccssssssss..",
+     "sssDDDDDDss.",
+     ".syDADDADys.",
+     ".syDDDDDDys.",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "ccssssssss..",
+     "sssDDDDDDss.",
+     ".syDDDDDDys.",
+     ".syDEDDEDys.",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "ccdssssssss.",
+     "..ssDDDDDDss",
+     ".syDADDADys.",
+     ".syDDDDDDys.",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     ".cdssssssss.",
+     "..ssDDDDDDss",
+     "..ssDADDADss",
+     "..syDDDDDDys",
+     ".....ODDO...",
+     "NNOOOOPDOONN"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "beanie",
+    "hair": 8,
+    "hat": 2,
+    "skin": 2,
+    "clothes": 5,
+    "acc": "none",
+    "extra": "wide"
+   },
+   "frames": [
+    [
+     "..llllllll..",
+     "..LLLLLLLL..",
+     "..LALLLLAL..",
+     "..LLLMMLLL..",
+     "....LLLL....",
+     ".TTTUUVLTTT."
+    ],
+    [
+     "..llllllll..",
+     "..LLLLLLLL..",
+     "..LLLLLLLL..",
+     "..LLLMMLLL..",
+     "....LLLL....",
+     ".TTTUUVLTTT."
+    ],
+    [
+     "....lllllll.",
+     "..LLLLLLLL..",
+     "..LALLLLAL..",
+     "..LLLMMLLL..",
+     "....LLLL....",
+     ".TTTUUVLTTT."
+    ],
+    [
+     "....llllll..",
+     "...LLLLLLLL.",
+     "...LALLLLAL.",
+     "...LLLMMLLL.",
+     ".....ULLMT..",
+     ".TTTUUVLTTT."
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "bun",
+    "hair": 0,
+    "hat": 1,
+    "skin": 1,
+    "clothes": 4,
+    "acc": "feather",
+    "extra": "wide"
+   },
+   "frames": [
+    [
+     "..eeeeeeff..",
+     "..eggggggf..",
+     "..gAggggAg..",
+     "..ggghhggg..",
+     "....gggg....",
+     "ttuuugguuutt"
+    ],
+    [
+     "..eeeeeeff..",
+     "..eggggggf..",
+     "..gggggggg..",
+     "..ggghhggg..",
+     "....gggg....",
+     "ttuuugguuutt"
+    ],
+    [
+     "....eeeeeef.",
+     "...gggggge..",
+     "..gAggggAg..",
+     "..ggghhggg..",
+     "....gggg....",
+     "ttuuugguuutt"
+    ],
+    [
+     "...eeeeeeef.",
+     "...eggggggf.",
+     "...gAggggAg.",
+     "...ggghhggg.",
+     ".....Uggu...",
+     "ttuuUUguuutt"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "hat",
+    "hair": 5,
+    "hat": 4,
+    "skin": 0,
+    "clothes": 3,
+    "acc": "pencil",
+    "extra": "wide"
+   },
+   "frames": [
+    [
+     "...DnnnnD...",
+     "..DDDDDDDDY.",
+     "..DADDDDADZ.",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "...DnnnnD...",
+     "..DDDDDDDDY.",
+     "..DDDDDDDDZ.",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "....nnnnnn..",
+     "..DDDDDDDDY.",
+     "..DADDDDADZ.",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "....nnnnnn..",
+     "...DDDDDDDDD",
+     "...DADDDDADD",
+     "...DDDEEDDD.",
+     ".....DDDH...",
+     "GGHHDDIIHHGG"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "long",
+    "hair": 2,
+    "hat": 2,
+    "skin": 2,
+    "clothes": 2,
+    "acc": "earrings",
+    "extra": "moustache"
+   },
+   "frames": [
+    [
+     "..pppppppp..",
+     ".ppLLLLLLpp.",
+     ".FzLAppALzF.",
+     ".FzLppppLzF.",
+     ".N..LLLL..N.",
+     "NNOOOOPLOONN"
+    ],
+    [
+     "..pppppppp..",
+     ".ppLLLLLLpp.",
+     ".FzLLLLLLzF.",
+     ".FzLppppLzF.",
+     ".N..LLLL..N.",
+     "NNOOOOPLOONN"
+    ],
+    [
+     "...pppppppp.",
+     "..ppLLLLLLpp",
+     ".FzLAppALzF.",
+     ".FzLppppLzF.",
+     ".N..LLLL..N.",
+     "NNOOOOPLOONN"
+    ],
+    [
+     "...pppppppp.",
+     "..ppLLLLLLpp",
+     "..ppLALLALpp",
+     "..FpLLppLLpF",
+     "..pp.OLLO.pp",
+     "NNOOOOPLOONN"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "bun",
+    "hair": 2,
+    "hat": 3,
+    "skin": 0,
+    "clothes": 2,
+    "acc": "none",
+    "extra": "wide"
+   },
+   "frames": [
+    [
+     "..ppppppzz..",
+     "..pDDDDDDz..",
+     "..DADDDDAD..",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "..ppppppzz..",
+     "..pDDDDDDz..",
+     "..DDDDDDDD..",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "....ppppppz.",
+     "...DDDDDDp..",
+     "..DADDDDAD..",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "...pppppppz.",
+     "...pDDDDDDz.",
+     "...DADDDDAD.",
+     "...DDDEEDDD.",
+     ".....ODDO...",
+     "NNOOOOPDOONN"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "beanie",
+    "hair": 4,
+    "hat": 0,
+    "skin": 2,
+    "clothes": 3,
+    "acc": "pencil",
+    "extra": "moustache"
+   },
+   "frames": [
+    [
+     "..00000000..",
+     "..LLLLLLLLY.",
+     "..LLAssALLZ.",
+     "..LLssssLL..",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "..00000000..",
+     "..LLLLLLLLY.",
+     "..LLLLLLLLZ.",
+     "..LLssssLL..",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "....000000..",
+     "..LLLLLLLLY.",
+     "..LLAssALLZ.",
+     "..LLssssLL..",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "....00000000",
+     "...LLLLLLLLL",
+     "...LLALLALLL",
+     "...LLLssLLL.",
+     ".....LLLH...",
+     "GGHHLLILHHGG"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "tuft",
+    "hair": 2,
+    "hat": 2,
+    "skin": 0,
+    "clothes": 0,
+    "acc": "none",
+    "extra": "wide"
+   },
+   "frames": [
+    [
+     "..ppppppzz..",
+     "..pDDDDDDz..",
+     "..DADDDDAD..",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "vvwwwwxDwwvv"
+    ],
+    [
+     "..ppppppzz..",
+     "..pDDDDDDz..",
+     "..zDDDDDDz..",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "vvwwwwxDwwvv"
+    ],
+    [
+     "....ppppzz..",
+     "...DDDDDDz..",
+     "..DADDDDAD..",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "vvwwwwxDwwvv"
+    ],
+    [
+     "...pppppzz..",
+     "...pDDDDDDz.",
+     "....ADDDDA..",
+     "...DDDEEDDD.",
+     ".....wDDw...",
+     "vvwwwwxDwwvv"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "cap",
+    "hair": 6,
+    "hat": 2,
+    "skin": 2,
+    "clothes": 0,
+    "acc": "pencil",
+    "extra": "moustache"
+   },
+   "frames": [
+    [
+     "..llllllll..",
+     "..LLLLLLLLY.",
+     "..LLAaaALLZ.",
+     "..LLaaaaLL..",
+     "....LLLL....",
+     "vvwwwwxLwwvv"
+    ],
+    [
+     "..llllllll..",
+     "..LLLLLLLLY.",
+     "..LLLLLLLLZ.",
+     "..LLaaaaLL..",
+     "....LLLL....",
+     "vvwwwwxLwwvv"
+    ],
+    [
+     "....llllll..",
+     "..LLLLLLLLY.",
+     "..LLAaaALLZ.",
+     "..LLaaaaLL..",
+     "....LLLL....",
+     "vvwwwwxLwwvv"
+    ],
+    [
+     "....llllllll",
+     "...LLLLLLLLL",
+     "...LLALLALLL",
+     "...LLLaaLLL.",
+     ".....wLLw...",
+     "vvwwwwxLwwvv"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "ponytail",
+    "hair": 2,
+    "hat": 3,
+    "skin": 2,
+    "clothes": 3,
+    "acc": "none",
+    "extra": "smile"
+   },
+   "frames": [
+    [
+     "..pppppppp..",
+     "..pLLLLLLpp.",
+     "..zLALLALLp.",
+     "..LLLLLLLLp.",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "..pppppppp..",
+     "..pLLLLLLpp.",
+     "..zLLLLLLLp.",
+     "..LLMLLMLLp.",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "...pppppppp.",
+     "...pLLLLLLpp",
+     "..zLALLALLp.",
+     "..LLLLLLLLp.",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "...pppppppp.",
+     "...pLLLLLLpp",
+     "....LALLALLp",
+     "...LLLLLLLLp",
+     ".....LLLH...",
+     "GGHHLLILHHGG"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "tuft",
+    "hair": 8,
+    "hat": 3,
+    "skin": 2,
+    "clothes": 3,
+    "acc": "pencil",
+    "extra": "moustache"
+   },
+   "frames": [
+    [
+     "..2222223...",
+     "..32LLLL33Y.",
+     "..3LA22AL3Z.",
+     "..LL2222LL..",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "..2222223...",
+     "..32LLLL33Y.",
+     "..3LLLLLL3Z.",
+     "..LL2222LL..",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "...22222L3..",
+     "..22LLLLL3Y.",
+     "..3LA22AL3Z.",
+     "..LL2222LL..",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "...22222L3..",
+     "...2LLLLLLYY",
+     "...LLALLAL33",
+     "...LLL22LL3.",
+     ".....LLLH...",
+     "GGHHLLILHHGG"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "sidepart",
+    "hair": 1,
+    "hat": 2,
+    "skin": 1,
+    "clothes": 1,
+    "acc": "earrings",
+    "extra": "none"
+   },
+   "frames": [
+    [
+     "...kkkkk44..",
+     "..kkkgggg4..",
+     "..4gAggAg4..",
+     ".FggggggggF.",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "...kkkkk44..",
+     "..kkkgggg4..",
+     "..4gggggg4..",
+     ".FggghhgggF.",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "....kkkkkk4.",
+     "...kkkgggg4.",
+     "..4gAggAg4..",
+     ".FggggggggF.",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "....kkkkkk4.",
+     "...kkkgggg4.",
+     "...ggAggAg4.",
+     "..gggghhgg44",
+     ".....UggU...",
+     "iiUUUUjgUUii"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "bald",
+    "hair": 8,
+    "hat": 4,
+    "skin": 0,
+    "clothes": 0,
+    "acc": "earrings",
+    "extra": "moustache"
+   },
+   "frames": [
+    [
+     "....DDDD....",
+     "..DDDDDDDD..",
+     "..DDA22ADD..",
+     ".FDD2222DDF.",
+     "....DDDD....",
+     "vvwwwwxDwwvv"
+    ],
+    [
+     "....DDDD....",
+     "..DDDDDDDD..",
+     "..DDDDDDDD..",
+     ".FDD2222DDF.",
+     "....DDDD....",
+     "vvwwwwxDwwvv"
+    ],
+    [
+     ".....DDDD...",
+     "...DDDDDDDD.",
+     "..DDA22ADD..",
+     ".FDD2222DDF.",
+     "....DDDD....",
+     "vvwwwwxDwwvv"
+    ],
+    [
+     ".....DDDD...",
+     "...DDDDDDDD.",
+     "...DDADDADD.",
+     "..DDDD22DDDD",
+     ".....wDDw...",
+     "vvwwwwxDwwvv"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "sidepart",
+    "hair": 6,
+    "hat": 3,
+    "skin": 0,
+    "clothes": 0,
+    "acc": "earrings",
+    "extra": "wide"
+   },
+   "frames": [
+    [
+     "...aaaaabb..",
+     "..aaaDDDDb..",
+     "..DADDDDAD..",
+     ".FDDDEEDDDF.",
+     "....DDDD....",
+     "vvwwwwxDwwvv"
+    ],
+    [
+     "...aaaaabb..",
+     "..aaaDDDDb..",
+     "..bDDDDDDb..",
+     ".FDDDEEDDDF.",
+     "....DDDD....",
+     "vvwwwwxDwwvv"
+    ],
+    [
+     "....aaaaaab.",
+     "...aaaDDDDb.",
+     "..DADDDDAD..",
+     ".FDDDEEDDDF.",
+     "....DDDD....",
+     "vvwwwwxDwwvv"
+    ],
+    [
+     "....aaaaaab.",
+     "...aaaDDDDb.",
+     "....ADDDDAbb",
+     "..DDDDEEDDDD",
+     ".....wDDw...",
+     "vvwwwwxDwwvv"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "bald",
+    "hair": 0,
+    "hat": 2,
+    "skin": 1,
+    "clothes": 1,
+    "acc": "feather",
+    "extra": "smile"
+   },
+   "frames": [
+    [
+     ".cccgggg....",
+     "..gggggggg..",
+     "..ggAggAgg..",
+     "..gggggggg..",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     ".cccgggg....",
+     "..gggggggg..",
+     "..gggggggg..",
+     "..gghgghgg..",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "..ccdgggg...",
+     "..cgggggggg.",
+     "..ggAggAgg..",
+     "..gggggggg..",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "..ccdgggg...",
+     "..cgggggggg.",
+     "...ggAggAgg.",
+     "...gggggggg.",
+     ".....UggU...",
+     "iiUUUUjgUUii"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "ponytail",
+    "hair": 1,
+    "hat": 0,
+    "skin": 1,
+    "clothes": 3,
+    "acc": "none",
+    "extra": "wide"
+   },
+   "frames": [
+    [
+     "..kkkkkkkk..",
+     "..kggggggkk.",
+     "..gAggggAgk.",
+     "..ggghhgggk.",
+     "....gggg....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "..kkkkkkkk..",
+     "..kggggggkk.",
+     "..4gggggggk.",
+     "..ggghhgggk.",
+     "....gggg....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "...kkkkkkkk.",
+     "...kggggggkk",
+     "..gAggggAgk.",
+     "..ggghhgggk.",
+     "....gggg....",
+     "GGHHIIIIHHGG"
+    ],
+    [
+     "...kkkkkkkk.",
+     "...kggggggkk",
+     "...gAggggAgk",
+     "...ggghhgggk",
+     ".....gggH...",
+     "GGHHg.IIHHGG"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "tuft",
+    "hair": 7,
+    "hat": 2,
+    "skin": 0,
+    "clothes": 2,
+    "acc": "none",
+    "extra": "none"
+   },
+   "frames": [
+    [
+     "..WWWWWWXX..",
+     "..WDDDDDDX..",
+     "..XDADDADX..",
+     "..DDDDDDDD..",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "..WWWWWWXX..",
+     "..WDDDDDDX..",
+     "..XDDDDDDX..",
+     "..DDDEEDDD..",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "...DWWWWXX..",
+     "...DDDDDDX..",
+     "..XDADDADX..",
+     "..DDDDDDDD..",
+     "....DDDD....",
+     "NNOOOOPDOONN"
+    ],
+    [
+     "...WWWWWXX..",
+     "...WDDDDDDX.",
+     "....DADDAD..",
+     "...DDDEEDDD.",
+     ".....ODDO...",
+     "NNOOOOPDOONN"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "cap",
+    "hair": 5,
+    "hat": 0,
+    "skin": 1,
+    "clothes": 4,
+    "acc": "pencil",
+    "extra": "wide"
+   },
+   "frames": [
+    [
+     "..00000000..",
+     "..ggggggggY.",
+     "..gAggggAgZ.",
+     "..ggghhggg..",
+     "....gggg....",
+     "ttuuugguuutt"
+    ],
+    [
+     "..00000000..",
+     "..ggggggggY.",
+     "..ggggggggZ.",
+     "..ggghhggg..",
+     "....gggg....",
+     "ttuuugguuutt"
+    ],
+    [
+     "....000000..",
+     "..ggggggggY.",
+     "..gAggggAgZ.",
+     "..ggghhggg..",
+     "....gggg....",
+     "ttuuugguuutt"
+    ],
+    [
+     "....00000000",
+     "...ggggggggg",
+     "...gAggggAgg",
+     "...ggghhggg.",
+     ".....Uggu...",
+     "ttuuUUguuutt"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "ponytail",
+    "hair": 2,
+    "hat": 0,
+    "skin": 0,
+    "clothes": 5,
+    "acc": "pencil",
+    "extra": "wide"
+   },
+   "frames": [
+    [
+     "..pppppppp..",
+     "..pDDDDDDpY.",
+     "..DADDDDADZ.",
+     "..DDDEEDDDZ.",
+     "....DDDD....",
+     ".TTTUUVDTTT."
+    ],
+    [
+     "..pppppppp..",
+     "..pDDDDDDpY.",
+     "..zDDDDDDDZ.",
+     "..DDDEEDDDZ.",
+     "....DDDD....",
+     ".TTTUUVDTTT."
+    ],
+    [
+     "...pppppppp.",
+     "...pDDDDDDpp",
+     "..DADDDDADZ.",
+     "..DDDEEDDDZ.",
+     "....DDDD....",
+     ".TTTUUVDTTT."
+    ],
+    [
+     "...pppppppp.",
+     "...pDDDDDDpp",
+     "....ADDDDADp",
+     "...DDDEEDDDp",
+     ".....UDDET..",
+     ".TTTUUVDTTT."
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "sidepart",
+    "hair": 7,
+    "hat": 3,
+    "skin": 2,
+    "clothes": 3,
+    "acc": "earrings",
+    "extra": "none"
+   },
+   "frames": [
+    [
+     "...WWWWWXX..",
+     "..WWWLLLLX..",
+     "..XLALLALX..",
+     ".FLLLLLLLLF.",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "...WWWWWXX..",
+     "..WWWLLLLX..",
+     "..XLLLLLLX..",
+     ".FLLLMMLLLF.",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "....WWWWWWX.",
+     "...WWWLLLLX.",
+     "..XLALLALX..",
+     ".FLLLLLLLLF.",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "....WWWWWWX.",
+     "...WWWLLLLX.",
+     "....LALLALXX",
+     "..LLLLMMLLLL",
+     ".....LLLH...",
+     "GGHHLLILHHGG"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "curly",
+    "hair": 0,
+    "hat": 2,
+    "skin": 2,
+    "clothes": 5,
+    "acc": "earrings",
+    "extra": "wide"
+   },
+   "frames": [
+    [
+     "..eeeeeeee..",
+     ".eeLLLLLLee.",
+     ".FLALLLLALF.",
+     ".FLLLMMLLLF.",
+     "....LLLL....",
+     ".TTTUUVLTTT."
+    ],
+    [
+     "..eeeeeeee..",
+     ".eeLLLLLLee.",
+     ".FLLLLLLLLF.",
+     ".FLLLMMLLLF.",
+     "....LLLL....",
+     ".TTTUUVLTTT."
+    ],
+    [
+     "..eeeeeeeee.",
+     ".eeLLLLLLee.",
+     ".FLALLLLALF.",
+     ".FLLLMMLLLF.",
+     "....LLLL....",
+     ".TTTUUVLTTT."
+    ],
+    [
+     "...eeeeeeee.",
+     "..eeLLLLLLee",
+     "..eLALLLLALe",
+     "..eLLLMMLLLe",
+     ".....ULLMT..",
+     ".TTTUUVLTTT."
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "ponytail",
+    "hair": 7,
+    "hat": 4,
+    "skin": 1,
+    "clothes": 2,
+    "acc": "feather",
+    "extra": "smile"
+   },
+   "frames": [
+    [
+     "ddWWWWWWWW..",
+     "..WggggggWW.",
+     "..XgAggAggW.",
+     "..ggggggggW.",
+     "....gggg....",
+     "NNOOOOPgOONN"
+    ],
+    [
+     "ddWWWWWWWW..",
+     "..WggggggWW.",
+     "..XgggggggW.",
+     "..gghgghggW.",
+     "....gggg....",
+     "NNOOOOPgOONN"
+    ],
+    [
+     "ccdWWWWWWWW.",
+     "..WWggggggWW",
+     "..XgAggAggW.",
+     "..ggggggggW.",
+     "....gggg....",
+     "NNOOOOPgOONN"
+    ],
+    [
+     ".cdWWWWWWWW.",
+     "..WWggggggWW",
+     "....gAggAggW",
+     "...ggggggggW",
+     ".....OggO...",
+     "NNOOOOPgOONN"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "bun",
+    "hair": 0,
+    "hat": 2,
+    "skin": 2,
+    "clothes": 0,
+    "acc": "none",
+    "extra": "moustache"
+   },
+   "frames": [
+    [
+     "..eeeeeeff..",
+     "..eLLLLLLf..",
+     "..LLAeeALL..",
+     "..LLeeeeLL..",
+     "....LLLL....",
+     "vvwwwwxLwwvv"
+    ],
+    [
+     "..eeeeeeff..",
+     "..eLLLLLLf..",
+     "..LLLLLLLL..",
+     "..LLeeeeLL..",
+     "....LLLL....",
+     "vvwwwwxLwwvv"
+    ],
+    [
+     "....eeeeeef.",
+     "...LLLLLLe..",
+     "..LLAeeALL..",
+     "..LLeeeeLL..",
+     "....LLLL....",
+     "vvwwwwxLwwvv"
+    ],
+    [
+     "...eeeeeeef.",
+     "...eLLLLLLf.",
+     "...LLALLALL.",
+     "...LLLeeLLL.",
+     ".....wLLw...",
+     "vvwwwwxLwwvv"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "curly",
+    "hair": 4,
+    "hat": 1,
+    "skin": 1,
+    "clothes": 2,
+    "acc": "none",
+    "extra": "smile"
+   },
+   "frames": [
+    [
+     "..ssssssss..",
+     ".ssggggggss.",
+     ".sggAggAggs.",
+     "..gggggggg..",
+     "....gggg....",
+     "NNOOOOPgOONN"
+    ],
+    [
+     "..ssssssss..",
+     ".ssggggggss.",
+     ".sggggggggs.",
+     "..gghgghgg..",
+     "....gggg....",
+     "NNOOOOPgOONN"
+    ],
+    [
+     "..sssssssss.",
+     ".ssggggggss.",
+     ".sggAggAggs.",
+     "..gggggggg..",
+     "....gggg....",
+     "NNOOOOPgOONN"
+    ],
+    [
+     "...ssssssss.",
+     "..ssggggggss",
+     "...ggAggAgg.",
+     "...gggggggg.",
+     ".....OggO...",
+     "NNOOOOPgOONN"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "long",
+    "hair": 3,
+    "hat": 4,
+    "skin": 1,
+    "clothes": 0,
+    "acc": "feather",
+    "extra": "moustache"
+   },
+   "frames": [
+    [
+     "ccQQQQQQQQ..",
+     "QQQggggggQQ.",
+     ".QRgAQQAgRQ.",
+     ".QRgQQQQgRQ.",
+     "....gggg....",
+     "vvwwwwxgwwvv"
+    ],
+    [
+     "ccQQQQQQQQ..",
+     "QQQggggggQQ.",
+     ".QRggggggRQ.",
+     ".QRgQQQQgRQ.",
+     "....gggg....",
+     "vvwwwwxgwwvv"
+    ],
+    [
+     "ccdQQQQQQQQ.",
+     "..QQggggggQQ",
+     ".QRgAQQAgRQ.",
+     ".QRgQQQQgRQ.",
+     "....gggg....",
+     "vvwwwwxgwwvv"
+    ],
+    [
+     ".cdQQQQQQQQ.",
+     "..QQggggggQQ",
+     "..QQgAggAgQQ",
+     "..QRggQQggRQ",
+     "..QQ.wggw.QQ",
+     "vvwwwwxgwwvv"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "curly",
+    "hair": 5,
+    "hat": 2,
+    "skin": 2,
+    "clothes": 3,
+    "acc": "feather",
+    "extra": "beard"
+   },
+   "frames": [
+    [
+     "..JJJJJJJJ..",
+     ".JJLLLLLLJJ.",
+     ".JLLALLALLJ.",
+     "..JJLLLLJJ..",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "..JJJJJJJJ..",
+     ".JJLLLLLLJJ.",
+     ".JLLLLLLLLJ.",
+     "..JJLMMLJJ..",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "..JJJJJJJJJ.",
+     ".JJLLLLLLJJ.",
+     ".JLLALLALLJ.",
+     "..JJLLLLJJ..",
+     "....LLLL....",
+     "GGHHLIILHHGG"
+    ],
+    [
+     "...JJJJJJJJ.",
+     "..JJLLLLLLJJ",
+     "..JLLALLALLJ",
+     "..JJLLMMLLJJ",
+     ".....LLLH...",
+     "GGHHLLILHHGG"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "bob",
+    "hair": 1,
+    "hat": 1,
+    "skin": 1,
+    "clothes": 1,
+    "acc": "pencil",
+    "extra": "smile"
+   },
+   "frames": [
+    [
+     "..kkkkkkkk..",
+     ".kkggggggkY.",
+     ".k4gAggAg4k.",
+     ".k4gggggg4k.",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "..kkkkkkkk..",
+     ".kkggggggkY.",
+     ".k4gggggg4k.",
+     ".k4ghgghg4k.",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "...kkkkkkk4.",
+     "..kkgggggg44",
+     ".k4gAggAg4k.",
+     ".k4gggggg4k.",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "...kkkkkkk4.",
+     "..kkgggggg44",
+     "..kkgAggAgkZ",
+     "..k4ggggggkk",
+     ".....UggU...",
+     "iiUUUUjgUUii"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "spikes",
+    "hair": 3,
+    "hat": 0,
+    "skin": 0,
+    "clothes": 4,
+    "acc": "pencil",
+    "extra": "moustache"
+   },
+   "frames": [
+    [
+     "..QQQQQQRR..",
+     "..QDDDDDDRY.",
+     "..DDAQQADDZ.",
+     "..DDQQQQDD..",
+     "....DDDD....",
+     "ttuuuDDuuutt"
+    ],
+    [
+     "..QQQQQQRR..",
+     "..QDDDDDDRY.",
+     "..DDDDDDDDZ.",
+     "..DDQQQQDD..",
+     "....DDDD....",
+     "ttuuuDDuuutt"
+    ],
+    [
+     "....QQQQQQ..",
+     "...DDDDDDQY.",
+     "..DDAQQADDZ.",
+     "..DDQQQQDD..",
+     "....DDDD....",
+     "ttuuuDDuuutt"
+    ],
+    [
+     "...QQQQQQQRR",
+     "...QDDDDDDRY",
+     "...DDADDADDD",
+     "...DDDQQDDD.",
+     ".....UDDu...",
+     "ttuuUUDuuutt"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "hat",
+    "hair": 3,
+    "hat": 0,
+    "skin": 1,
+    "clothes": 1,
+    "acc": "none",
+    "extra": "none"
+   },
+   "frames": [
+    [
+     "....0000....",
+     "..gggggggg..",
+     "..ggAggAgg..",
+     "..gggggggg..",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "....0000....",
+     "..gggggggg..",
+     "..gggggggg..",
+     "..ggghhggg..",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "....000000..",
+     "..gggggggg..",
+     "..ggAggAgg..",
+     "..gggggggg..",
+     "....gggg....",
+     "iiUUUUjgUUii"
+    ],
+    [
+     "....000000..",
+     "...gggggggg.",
+     "...ggAggAgg.",
+     "...ggghhggg.",
+     ".....UggU...",
+     "iiUUUUjgUUii"
+    ]
+   ]
+  },
+  {
+   "parts": {
+    "style": "spikes",
+    "hair": 7,
+    "hat": 3,
+    "skin": 1,
+    "clothes": 0,
+    "acc": "feather",
+    "extra": "smile"
+   },
+   "frames": [
+    [
+     "..WWWWWWXX..",
+     "..WggggggX..",
+     "..ggAggAgg..",
+     "..gggggggg..",
+     "....gggg....",
+     "vvwwwwxgwwvv"
+    ],
+    [
+     "..WWWWWWXX..",
+     "..WggggggX..",
+     "..gggggggg..",
+     "..gghgghgg..",
+     "....gggg....",
+     "vvwwwwxgwwvv"
+    ],
+    [
+     "....WWWWWWX.",
+     "...ggggggW..",
+     "..ggAggAgg..",
+     "..gggggggg..",
+     "....gggg....",
+     "vvwwwwxgwwvv"
+    ],
+    [
+     "...WWWWWWWX.",
+     "...WggggggX.",
+     "...ggAggAgg.",
+     "...gggggggg.",
+     ".....wggw...",
+     "vvwwwwxgwwvv"
+    ]
+   ]
+  }
+ ]
+}

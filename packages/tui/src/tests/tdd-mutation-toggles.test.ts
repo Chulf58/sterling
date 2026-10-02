@@ -55,7 +55,7 @@ import * as viewmodel from '../viewmodel.js';
 // a clean AssertionError, never a TypeError.
 // ===========================================================================
 
-const SYS_TAB = 3;
+const SYS_TAB = 4;
 
 const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over });
 

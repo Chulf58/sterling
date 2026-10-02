@@ -33,7 +33,7 @@ function stubHostPackages(root) {
   const nm = join(root, 'node_modules');
   mkdirSync(join(nm, 'solid-js'), { recursive: true });
   writeFileSync(join(nm, 'solid-js', 'package.json'), JSON.stringify({ name: 'solid-js', type: 'module', exports: { '.': './index.js' } }));
-  writeFileSync(join(nm, 'solid-js', 'index.js'), 'export const createSignal = (v) => [() => v, () => {}];\nexport const For = () => null;\nexport const Show = () => null;\n');
+  writeFileSync(join(nm, 'solid-js', 'index.js'), 'export const createSignal = (v) => [() => v, () => {}];\nexport const For = () => null;\nexport const Show = () => null;\nexport const Index = () => null;\nexport const untrack = (fn) => fn();\n');
   mkdirSync(join(nm, '@opentui', 'solid'), { recursive: true });
   writeFileSync(join(nm, '@opentui', 'solid', 'package.json'), JSON.stringify({ name: '@opentui/solid', type: 'module', exports: { '.': './index.js', './jsx-runtime': './jsx-runtime.js' } }));
   writeFileSync(join(nm, '@opentui', 'solid', 'index.js'), 'export const useKeyboard = () => {};\nexport const useTerminalDimensions = () => () => ({ width: 80, height: 24 });\n');
@@ -44,6 +44,7 @@ function fakeApi(directory) {
   const calls = { slots: 0, routes: 0 };
   const api = {
     location: { directory },
+    data: { on: () => () => {} },
     keymap: { layer() {}, shortcuts: () => [], mode: { current: () => 'base' } },
     ui: {
       dialog: { clear() {} },

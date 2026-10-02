@@ -27,7 +27,7 @@ import * as stateMod from '../state.js';
 //   • applyModeToggle(e, onError?, path?) writes config.mode and nothing else.
 // ===========================================================================
 
-const SYS_TAB = 3;
+const SYS_TAB = 4;
 const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over });
 
 interface SystemRow { id: string; lines: { text: string; selected?: boolean }[] }

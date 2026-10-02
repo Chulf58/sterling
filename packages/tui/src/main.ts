@@ -4,9 +4,10 @@
 // the bundle test uses it to prove runtime resolution works.
 import { dirname, join } from 'node:path';
 import { openDashboard } from './controller.js';
-import { visibleBodyLines } from './state.js';
+import { visibleBodyLines, AGENTS_TAB } from './state.js';
 import { bannerLines } from './banner.js';
-import { draw, keyToEvent, mouseToEvent } from './render.js';
+import { clearPixels, draw, keyToEvent, mouseToEvent, paintPixels } from './render.js';
+import { composeSubagentBlock, createSubagentTracker, type BlockPixel, type SubagentBlock, type SubagentView } from './subagents.js';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
 
 const smoke = process.env.STERLING_TUI_SMOKE === '1';
@@ -53,17 +54,82 @@ const showBanner = process.env.STERLING_NO_BANNER !== '1';
 // frame against the previous one and writes only the changed cells.
 let screen = new termkit.default.ScreenBuffer({ dst: term });
 
+// Agents tab: live subagents from H22's dispatch register, one card each with
+// an animated portrait. The tracker holds the portrait assignment for
+// the TUI's lifetime and reads the register at most once a second.
+const subagents = createSubagentTracker(dirname(dirname(storePath)));
+// the view the last redraw drew; the hit-test and the animation reuse it, so
+// they always agree with what is on screen
+let shownView: SubagentView = { availability: 'absent', active: 0, agents: [] };
+// the screen row the body starts on, taken from the last drawn state: the cards start there
+let bodyTop = 0;
+const ANIMATION_MS = 333; // about 3 Hz, only while a subagent is running
+
+function fullBodyLines(): number {
+  return visibleBodyLines(term.height, bannerLines(term.width, showBanner).length);
+}
+
+function subagentBlock(tick: number): SubagentBlock {
+  if (ctl.ui().tab !== AGENTS_TAB) return { height: 0, puts: [], pixels: [] };
+  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2, tick);
+}
+
 // One viewport snapshot for both the draw and the click hit-test (the sync
 // constraint: reduce must see the same width/visibleBodyLines the renderer drew
 // with). bodyTop follows the banner height, so it is threaded as showBanner.
+// The Agents tab is enabled here, and its label carries the running count.
 function viewport() {
-  const bannerHeight = bannerLines(term.width, showBanner).length;
-  return { width: term.width, maxBodyLines: visibleBodyLines(term.height, bannerHeight), showBanner };
+  return { width: term.width, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active } };
+}
+
+// Portrait pixels are painted outside the ScreenBuffer (truecolour): when
+// their positions change, the old ones are blanked and all are repainted.
+let painted: Map<string, string> | undefined;
+let pixelLayout = '';
+let forceFull = true;
+let animation: ReturnType<typeof setInterval> | undefined;
+// terminal-kit takes its colour support from TERM_PROGRAM first and maps tmux
+// to 16 colours, yet tmux itself accepts 24-bit SGR and converts it for the
+// outer terminal; so inside tmux (the dashboard's home) the pixels carry RGB.
+const trueColor =
+  /^(truecolor|24bits?)$/.test(process.env.COLORTERM ?? '') || process.env.TERM_PROGRAM === 'tmux' || term.support?.trueColor === true;
+
+function layoutKey(block: SubagentBlock): string {
+  return `${term.width}x${term.height}|` + block.pixels.map((p) => `${p.x},${p.y}`).join(';');
+}
+
+function screenPixels(block: SubagentBlock): BlockPixel[] {
+  return block.pixels.map((p) => ({ ...p, y: p.y + bodyTop }));
+}
+
+function animate(): void {
+  const block = subagentBlock(Math.floor(Date.now() / ANIMATION_MS));
+  // the layout moved since the last redraw: that redraw's successor repaints it
+  if (layoutKey(block) !== pixelLayout) return;
+  painted = paintPixels(term, screenPixels(block), painted, trueColor);
 }
 
 function redraw(): void {
+  const now = Date.now();
+  shownView = subagents.view(now);
+  const state = ctl.state(viewport());
+  bodyTop = state.bodyTop;
+  const block = subagentBlock(Math.floor(now / ANIMATION_MS));
+  const key = layoutKey(block);
+  const full = forceFull || key !== pixelLayout;
+  pixelLayout = key;
+  forceFull = false;
+  const pixels = screenPixels(block);
+  if (full && painted) clearPixels(term, painted, pixels);
   // the roster is the cached activation snapshot — the 1 Hz redraw never re-reads it
-  draw(screen, ctl.state(viewport()));
+  draw(screen, state, { block });
+  painted = paintPixels(term, pixels, full ? undefined : painted, trueColor);
+  const running = shownView.active > 0 && block.pixels.length > 0;
+  if (running && !animation) animation = setInterval(animate, ANIMATION_MS);
+  else if (!running && animation) {
+    clearInterval(animation);
+    animation = undefined;
+  }
 }
 
 async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
@@ -117,6 +183,7 @@ term.on('mouse', (name: string, data: { x: number; y: number }) => void handle(m
 term.on('resize', () => {
   // fresh buffer at the new size; its empty delta state forces a full repaint
   screen = new termkit.default.ScreenBuffer({ dst: term });
+  forceFull = true;
   redraw();
 });
 setInterval(redraw, 1000); // live view over the durable store
