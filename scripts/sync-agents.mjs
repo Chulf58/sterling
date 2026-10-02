@@ -18,6 +18,7 @@ import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.m
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { isSterlingClone, readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
+import { probeClaudeWithOverride } from './lib/claude-probe.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -41,6 +42,19 @@ try {
   process.exit(2);
 }
 
+// Claude Code probe (decision init-without-claude-code-probes-and-skips-claude-artifacts-loudly):
+// .claude/agents/ and .claude/settings.json are Claude-only, so on a machine without
+// `claude` (the npm copy's post-update sync on an OpenCode-only machine) they are not
+// written; one loud line names them. Checked before any write.
+let claudeProbe;
+try {
+  claudeProbe = probeClaudeWithOverride();
+} catch (err) {
+  console.log(`refused_claude_probe: ${err.message}; nothing synced`);
+  process.exit(2);
+}
+const claudeHost = claudeProbe.installed;
+
 // config.models is the authoritative model/effort source (98064d77): read the
 // target project's config when present, else the shipped default config, so a
 // refresh resolves {{MODEL}}/{{EFFORT}} to pinned ids (never a leftover token).
@@ -49,7 +63,7 @@ const config = parseConfig(
   JSON.parse(readFileSync(existsSync(configPath) ? configPath : join(pluginRoot, 'templates', 'default-config.json'), 'utf8'))
 );
 
-const { report, restartInstruction } = syncAgents({
+const { report, restartInstruction } = !claudeHost ? { report: [], restartInstruction: '' } : syncAgents({
   templatesDir: join(pluginRoot, 'agent-templates'),
   registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
   targetAgentsDir: join(targetDir, '.claude', 'agents'),
@@ -80,7 +94,9 @@ for (const r of report) {
     );
   }
 }
-if (report.length === 0) console.log('no agents registered — nothing to sync');
+if (!claudeHost) {
+  console.log(`⚠ Claude Code not found (${claudeProbe.reason}) — skipped the Claude-only files: .claude/agents/ and .claude/settings.json. Synced the OpenCode side only; install Claude Code and re-run /sterling:init to add them.`);
+} else if (report.length === 0) console.log('no agents registered — nothing to sync');
 
 // Sterling on OpenCode 2 (decision
 // sterling-on-opencode-installs-global-plugins-plus-untracked-project-config): global
@@ -144,17 +160,20 @@ if (agentChangesRequireRestart(report)) console.log('\n' + restartInstruction);
 
 // Route A (decision conductor-instructions-via-main-session-agent-route-a): so
 // /sterling:update's sync-agents fan-out also activates the conductor on every sibling.
-const activationResult = ensureConductorActivation(targetDir, report);
-console.log(`conductor activation: ${activationResult.activation}${activationResult.reason ? ` (${activationResult.reason})` : ''}`);
-console.log(`auto-memory off: ${activationResult.autoMemory}${activationResult.autoMemoryNotice ? ` (${activationResult.autoMemoryNotice})` : ''}`);
-if (activationResult.activation === 'written') {
-  console.log(`EXIT AND RELAUNCH: conductor activation newly written in ${activationResult.path}`);
-} else if (activationResult.autoMemory === 'written') {
-  console.log(`EXIT AND RELAUNCH: "autoMemoryEnabled": false newly written in ${activationResult.path}`);
+// Without Claude Code there is no .claude/settings.json to activate (said above).
+if (claudeHost) {
+  const activationResult = ensureConductorActivation(targetDir, report);
+  console.log(`conductor activation: ${activationResult.activation}${activationResult.reason ? ` (${activationResult.reason})` : ''}`);
+  console.log(`auto-memory off: ${activationResult.autoMemory}${activationResult.autoMemoryNotice ? ` (${activationResult.autoMemoryNotice})` : ''}`);
+  if (activationResult.activation === 'written') {
+    console.log(`EXIT AND RELAUNCH: conductor activation newly written in ${activationResult.path}`);
+  } else if (activationResult.autoMemory === 'written') {
+    console.log(`EXIT AND RELAUNCH: "autoMemoryEnabled": false newly written in ${activationResult.path}`);
+  }
+  // A refused activation means the conductor is installed but NOT the main-session
+  // agent — /sterling:update must not stamp this complete (Sol review HIGH finding).
+  if (activationResult.activation === 'refused') refused += 1;
 }
-// A refused activation means the conductor is installed but NOT the main-session
-// agent — /sterling:update must not stamp this complete (Sol review HIGH finding).
-if (activationResult.activation === 'refused') refused += 1;
 // An explicit non-false autoMemoryEnabled is a NOTICE (printed above), never a refusal:
 // counting it would fail every /sterling:update on the machine for one project's choice.
 process.exit(refused > 0 ? 2 : 0);

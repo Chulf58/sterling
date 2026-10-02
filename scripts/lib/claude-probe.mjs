@@ -11,3 +11,16 @@ export function probeClaude({ env = process.env } = {}) {
   if (r.status !== 0 || !m) return { installed: false, reason: `claude --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
   return { installed: true, version: m[0], major: Number(m[1]) };
 }
+
+/**
+ * probeClaude behind the STERLING_CLAUDE_PROBE test seam: unset or '' runs the real probe,
+ * 'ok' forces present, 'absent' forces absent. Any other value throws (P5), so a caller
+ * checks it before writing anything.
+ */
+export function probeClaudeWithOverride({ env = process.env } = {}) {
+  const override = env.STERLING_CLAUDE_PROBE;
+  if (!override) return probeClaude({ env });
+  if (override === 'ok') return { installed: true, version: 'forced' };
+  if (override === 'absent') return { installed: false, reason: 'STERLING_CLAUDE_PROBE=absent' };
+  throw new Error(`STERLING_CLAUDE_PROBE must be 'ok' or 'absent' (got '${override}')`);
+}
