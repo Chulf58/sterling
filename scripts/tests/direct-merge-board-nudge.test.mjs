@@ -342,6 +342,8 @@ test('4 [never-a-gate]: with an intersecting user todo present, the exit code an
 
     assert.ok(Object.prototype.hasOwnProperty.call(baselineJson, 'pushed'), "baseline stdout JSON must carry a 'pushed' key");
     assert.ok(Object.prototype.hasOwnProperty.call(nudgeJson, 'pushed'), "nudge-present stdout JSON must carry a 'pushed' key");
+    assert.equal(baselineJson.opencode_release, 'skipped', 'a hobby merge reports the OpenCode release step as opencode_release (here skipped: not the Sterling package)');
+    assert.equal('npm_publish' in baselineJson, false, 'the npm publish step is gone');
 
     const baselineKeys = Object.keys(baselineJson).sort();
     const nudgeKeys = Object.keys(nudgeJson).sort();

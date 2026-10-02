@@ -478,7 +478,7 @@ test('installed-copy shims pick the highest installed version at run time, acros
   rmSync(join(home, '.cache'), { recursive: true });
   const none = runMcp();
   assert.notEqual(none.status, 0);
-  assert.match(none.stderr, /no installed Sterling found under .*plugins.cache .*opencode.npm .*opencode plugin add @chulf58\/sterling/);
+  assert.match(none.stderr, /no installed Sterling found under .*plugins.cache .*opencode.npm .*opencode plugin add "github:Chulf58\/sterling#semver:>=0\.18\.0"/);
   assert.doesNotMatch(none.stderr, /claude plugin install/, 'the OpenCode shims name the OpenCode remedy');
 });
 
@@ -710,8 +710,8 @@ test('dual-host machine, Claude runs init: the npm copy in the cache retires the
   assert.equal(statusOf(again, 'sterling-tui/tui.tsx'), 'matches');
 });
 
-test('dual-host machine: the global opencode.json naming @chulf58/sterling in plugins suppresses the server shim before the cache holds a copy', () => {
-  for (const entry of ['@chulf58/sterling', '@chulf58/sterling@latest', { package: '@chulf58/sterling' }]) {
+test('dual-host machine: the global opencode.json naming Sterling (the Git spec or the package name) in plugins suppresses the server shim before the cache holds a copy', () => {
+  for (const entry of ['github:Chulf58/sterling#semver:>=0.18.0', 'Chulf58/sterling#opencode-release', 'git+https://github.com/Chulf58/sterling.git#semver:>=0.18.0', 'git+ssh://git@github.com/chulf58/sterling.git', { package: 'github:Chulf58/sterling#semver:>=0.18.0' }, '@chulf58/sterling', '@chulf58/sterling@latest', { package: '@chulf58/sterling' }]) {
     const home = tmp('oc-home-');
     const cfgDir = opencodeConfigDir({ env: {}, home });
     mkdirSync(cfgDir, { recursive: true });
@@ -724,8 +724,8 @@ test('dual-host machine: the global opencode.json naming @chulf58/sterling in pl
   const home = tmp('oc-home-');
   const cfgDir = opencodeConfigDir({ env: {}, home });
   mkdirSync(cfgDir, { recursive: true });
-  writeFileSync(join(cfgDir, 'opencode.json'), JSON.stringify({ plugins: ['@chulf58/sterling-other'] }));
-  assert.equal(statusOf(run(project('hobby'), home, { installed: true }), '/sterling.js'), 'created', 'a different package name does not count');
+  writeFileSync(join(cfgDir, 'opencode.json'), JSON.stringify({ plugins: ['@chulf58/sterling-other', 'github:Chulf58/sterling-other#semver:>=1.0.0', 'github:someone/sterling'] }));
+  assert.equal(statusOf(run(project('hobby'), home, { installed: true }), '/sterling.js'), 'created', 'a different package name or repo does not count');
 });
 
 test('dual-host machine: an unreadable global opencode.json is said out loud and does not suppress the server shim', () => {

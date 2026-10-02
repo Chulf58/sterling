@@ -14,7 +14,7 @@ Report only whether the pane opened (or the regeneration outcome). The TUI itsel
 <!-- opencode-only -->
 On OpenCode, the dashboard is the Sterling TUI plugin, already running inside OpenCode, so there is nothing to start. Its summary is a panel in the session sidebar. Open the full view with `<leader>k` (ctrl+x then k by default), with `/sterling`, or with "Open Sterling dashboard" in the command palette; Escape leaves it.
 
-If the sidebar shows no Sterling panel, the TUI plugin is not loaded. The fix depends on where this Sterling came from (its root is named in the Sterling layer). A copy from `opencode plugin add`, under OpenCode's npm cache: tell the user to run `opencode plugin update @chulf58/sterling` and then `/sterling:init` here, which installs the OpenCode plugins. A copy from the Claude Code plugin cache or a clone: tell the user to run `/sterling:update` (or init) in Claude Code, which installs them. Either way, restart OpenCode afterwards.
+If the sidebar shows no Sterling panel, the TUI plugin is not loaded. The fix depends on where this Sterling came from (its root is named in the Sterling layer). A copy from `opencode plugin add`, under OpenCode's npm cache: tell the user to run `opencode plugin update "github:Chulf58/sterling#semver:>=0.18.0"` and then `/sterling:init` here, which installs the OpenCode plugins. A copy from the Claude Code plugin cache or a clone: tell the user to run `/sterling:update` (or init) in Claude Code, which installs them. Either way, restart OpenCode afterwards.
 
 Report only how to open it. The TUI itself is the output.
 <!-- /opencode-only -->

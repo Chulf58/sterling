@@ -227,9 +227,10 @@ test('dashboard.md: the OpenCode render names the TUI plugin and no tmux or laun
   assert.doesNotMatch(oc, /tmux|launcher|sterling-launch|\.bat\b|split pane|<!--/i);
   assert.match(oc, /`<leader>k` \(ctrl\+x then k by default\)/);
   assert.match(oc, /`\/sterling`/);
-  // The fix for a missing panel depends on the host that installed the copy (decision 66d04413):
-  // the npm copy updates through opencode plugin update, a Claude Code copy through Claude Code.
-  assert.match(oc, /`opencode plugin add`[^.]*`opencode plugin update @chulf58\/sterling`/);
+  // The fix for a missing panel depends on the host that installed the copy (decision
+  // sterling-on-opencode-installs-from-a-git-release-branch-v2):
+  // the OpenCode copy updates through opencode plugin update, a Claude Code copy through Claude Code.
+  assert.match(oc, /`opencode plugin add`[^.]*`opencode plugin update "github:Chulf58\/sterling#semver:>=0\.18\.0"`/);
   assert.match(oc, /Claude Code plugin cache or a clone[^.]*`\/sterling:update`[^.]*in Claude Code/);
   assert.doesNotMatch(oc, /not loaded: tell the user to run `\/sterling:update`/, 'the route is not Claude Code for every copy');
 });

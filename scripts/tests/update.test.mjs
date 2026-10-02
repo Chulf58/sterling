@@ -2163,7 +2163,7 @@ test('installed copy (no .git at the plugin root): /sterling:update refuses befo
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {}, pluginRoot });
     assert.equal(report.exit, 2);
     assert.deepEqual(calls, [], 'nothing runs on an installed copy');
-    assert.match(lines.join('\n'), /Sterling is installed as a plugin — update it with `claude plugin update sterling@<marketplace>` \(Claude Code\) or `opencode plugin update @chulf58\/sterling` \(OpenCode\)/, 'a copy under neither install root names both hosts');
+    assert.match(lines.join('\n'), /Sterling is installed as a plugin — update it with `claude plugin update sterling@<marketplace>` \(Claude Code\) or `opencode plugin update "github:Chulf58\/sterling#semver:>=0\.18\.0"` \(OpenCode\)/, 'a copy under neither install root names both hosts');
     assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -2182,7 +2182,7 @@ test('installed copy under OpenCode\'s npm cache: the refusal names `opencode pl
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {}, pluginRoot, env: {}, home });
     assert.equal(report.exit, 2);
     assert.deepEqual(calls, [], 'nothing runs on an installed copy, even one carrying a .git');
-    assert.match(report.refusal, /installed as an OpenCode plugin — update it with `opencode plugin update @chulf58\/sterling`/);
+    assert.match(report.refusal, /installed as an OpenCode plugin — update it with `opencode plugin update "github:Chulf58\/sterling#semver:>=0\.18\.0"`/);
     assert.doesNotMatch(report.refusal, /\/plugin \(|claude plugin update/);
     assert.match(lines.join('\n'), /opencode plugin update/);
   } finally {

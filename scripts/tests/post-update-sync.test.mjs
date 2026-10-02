@@ -412,7 +412,7 @@ test('OpenCode sync: an older copy leaves the refusal notice naming the update r
   assert.match(texts[0], /^POST-UPDATE SYNC REFUSED \(OpenCode plugin\): this Sterling copy is 9\.9\.9-fixture, older than this project's sync marker 10\.0\.0/);
   // The old expectation pinned "run /sterling:update in OpenCode", which cannot update an
   // installed copy: the npm copy's route is `opencode plugin update` (decision 66d04413).
-  assert.match(texts[0], /update it with `opencode plugin update @chulf58\/sterling`/);
+  assert.match(texts[0], /update it with `opencode plugin update "github:Chulf58\/sterling#semver:>=0\.18\.0"`/);
   assert.doesNotMatch(texts[0], /\/sterling:update/);
 });
 
@@ -431,8 +431,8 @@ test('older copy: the refusal names the installing host\'s update route, whichev
   const npmCopy = place(join('.cache', 'opencode', 'npm', '@chulf58', 'sterling@latest', '1759500000000', 'node_modules', '@chulf58', 'sterling'));
   const refusal = async (root, host) => (await postUpdateSync({ root, project: makeProject({ marker: '10.0.0', store: false }), host, env: {}, home })).context;
   assert.match(await refusal(claudeCopy, 'opencode'), /update this host's Sterling: update it through \/plugin \(Installed tab → Update\)\./);
-  assert.match(await refusal(npmCopy, 'claude'), /update this host's Sterling: update it with `opencode plugin update @chulf58\/sterling`\./);
-  assert.match(await refusal(npmCopy, 'opencode'), /`opencode plugin update @chulf58\/sterling`/);
+  assert.match(await refusal(npmCopy, 'claude'), /update this host's Sterling: update it with `opencode plugin update "github:Chulf58\/sterling#semver:>=0\.18\.0"`\./);
+  assert.match(await refusal(npmCopy, 'opencode'), /`opencode plugin update "github:Chulf58\/sterling#semver:>=0\.18\.0"`/);
 });
 
 test('OpenCode sync: equal versions add no notice and touch nothing', async () => {

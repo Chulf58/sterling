@@ -53,7 +53,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isInstalledCopy } from './installed-copy.mjs';
-import { RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, installHostOf, readCopyVersion, compareSterlingVersions, scanInstalledSterling } from './sterling-roots.mjs';
+import { RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, installHostOf, readCopyVersion, compareSterlingVersions, scanInstalledSterling, sterlingInstallRemedy } from './sterling-roots.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
 import { sha256, loadRegistry } from './agent-distribution.mjs';
 import { renderOpenCodeFullText } from './agent-fences.mjs';
@@ -65,7 +65,7 @@ export const STERLING_AGENTS_SUBDIR = '.opencode/agents/sterling';
 export const PROJECT_CONFIG_REL = '.opencode/opencode.json';
 export const CONDUCTOR_AGENT = 'sterling/conductor';
 export const ROSTER = ['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'librarian'];
-/** The npm package `opencode plugin add` installs (decision sterling-on-opencode-distributes-as-npm-package-via-opencode-plugin-add). */
+/** The package name of the copy `opencode plugin add` installs from STERLING_GIT_SPEC (decision sterling-on-opencode-installs-from-a-git-release-branch-v2). */
 export const STERLING_NPM_PACKAGE = '@chulf58/sterling';
 export const STORE_GUARD_PATTERNS =['**/.sterling/sterling.db*', '.sterling/sterling.db*'];
 export const SHELL_STORE_GUARD_PATTERN = '*sterling.db*';
@@ -368,7 +368,7 @@ export function materializeTui({ pluginRoot, env = process.env, home = homedir()
   const base = materializedTuiRoot({ home });
   const src = join(pluginRoot, 'opencode', 'sterling-tui');
   const v = readCopyVersion(pluginRoot, 'opencode');
-  if (!v.version) return [refusal(`${fwd(base)}/`, `the version of ${fwd(pluginRoot)} cannot be read: ${v.reason}`, 'reinstall Sterling (opencode plugin add @chulf58/sterling), then rerun /sterling:update')];
+  if (!v.version) return [refusal(`${fwd(base)}/`, `the version of ${fwd(pluginRoot)} cannot be read: ${v.reason}`, `reinstall Sterling (${sterlingInstallRemedy('opencode')}), then rerun /sterling:update`)];
   const missing = TUI_MATERIALIZED_FILES.filter((f) => !existsSync(join(src, f)));
   if (missing.length) return [refusal(`${fwd(base)}/`, `${fwd(src)} lacks ${missing.join(', ')}, so there is no dashboard to copy`, 'update Sterling, then rerun /sterling:update')];
   const rows = [];
@@ -438,7 +438,12 @@ function ensureTuiShim(tuiDir, shim) {
   ];
 }
 
-const namesNpmPackage = (s) => typeof s === 'string' && (s === STERLING_NPM_PACKAGE || s.startsWith(`${STERLING_NPM_PACKAGE}@`));
+// A `plugins` entry is the spec as typed (finding e18e1c71): the Git spec in any of the
+// forms npm-package-arg reads as Chulf58/sterling on GitHub, with any #committish or
+// #semver range, or the package name as a registry spec.
+const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|ssh|git):\/\/(?:git@)?github\.com[/:]|(?:https?|git):\/\/github\.com\/|git@github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+const namesNpmPackage = (s) =>
+  typeof s === 'string' && (s === STERLING_NPM_PACKAGE || s.startsWith(`${STERLING_NPM_PACKAGE}@`) || STERLING_GIT_REPO.test(s.split('#')[0]));
 
 /**
  * The `opencode plugin add` copy as this MACHINE has it, whichever host runs init:

@@ -20,7 +20,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { isInstalledCopy } from './installed-copy.mjs';
-import { compareSterlingVersions, installHostOf, parseSterlingVersion } from './sterling-roots.mjs';
+import { compareSterlingVersions, installHostOf, parseSterlingVersion, sterlingUpdateRemedy } from './sterling-roots.mjs';
 
 // Each step is bounded well inside H1's hooks.json timeout (180s): two steps at
 // 60s leave room for the rest of SessionStart.
@@ -47,10 +47,11 @@ const HOST_TEXT = {
 
 // How to update an installed copy, by the host that INSTALLED it (installHostOf), not the
 // host asking: on a dual-host machine OpenCode can run a Claude-cache copy and H1 an npm
-// copy. The npm copy updates through `opencode plugin update` (decision 66d04413).
+// copy. The OpenCode copy updates through `opencode plugin update` (decision
+// sterling-on-opencode-installs-from-a-git-release-branch-v2).
 const UPDATE_ROUTE = {
   'claude-code': 'update it through /plugin (Installed tab → Update)',
-  opencode: 'update it with `opencode plugin update @chulf58/sterling`',
+  opencode: `update it with ${sterlingUpdateRemedy('opencode')}`,
 };
 // A copy under neither install root (installed, so not a git clone, but somewhere the
 // resolver does not scan) takes the asking host's own install route.
