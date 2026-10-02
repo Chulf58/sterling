@@ -13769,11 +13769,13 @@ async function sweepStaleDispatches(root) {
   try {
     mkdirSync12(transientDir, { recursive: true });
     let refused = "";
+    let terminated = 0;
     await withRegisterLock(
       root,
       () => {
         const sweep = sessionBoundarySweep(root, { now: Date.now() });
         if (sweep.refused) refused = sweep.refused;
+        terminated = sweep.terminated ?? 0;
         rmSync6(registerPath(root), { force: true });
         const registerBasename = basename3(registerPath(root));
         for (const f of readdirSync7(transientDir)) {
@@ -13782,7 +13784,14 @@ async function sweepStaleDispatches(root) {
       },
       { retryMs: 100, timeoutMs: 2e3 }
     );
-    return refused ? `STERLING DISPATCH SWEEP: ${refused}` : "";
+    const lines = [];
+    if (terminated) {
+      lines.push(
+        `DEAD-DISPATCH RESIDUE (OpenCode process start): ${terminated} dispatch record(s) a previous OpenCode process left live were ended (session-boundary) and the dispatch register was cleared. Those subagents belonged to that process and cannot be resumed from this one: check git status for files they may have left half-written, and re-dispatch if the work is still needed.`
+      );
+    }
+    if (refused) lines.push(`STERLING DISPATCH SWEEP: ${refused}`);
+    return lines.join("\n\n");
   } catch (e) {
     if (e?.code !== "register_lock_held") throw e;
     return `STERLING DISPATCH SWEEP SKIPPED: ${render(e)}. Dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
@@ -13873,7 +13882,7 @@ function createDispatchHandlers({ rootOf, fenced, now = () => Date.now() }) {
 // packages/opencode-plugin/src/context.mjs
 var STATUS_TTL_MS = 1e4;
 var UNDECLARED_TTL_MS = 5 * 6e4;
-function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = /* @__PURE__ */ new Map(), sweepStale }) {
+function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = /* @__PURE__ */ new Map(), sweepStale, env = process.env }) {
   const statusCache = /* @__PURE__ */ new Map();
   const undeclaredCache = /* @__PURE__ */ new Map();
   const maintenanceCache = /* @__PURE__ */ new Map();
@@ -13979,7 +13988,7 @@ ${opencodeHostTail(pluginRoot)}`;
         logLine(root, `context: child staging skipped for ${input.sessionID}, session lookup failed: ${kind.why}`);
         blocks.push(notStagedLine("session-lookup-failed"));
       } else if (kind.kind === "root") {
-        if (sweepStale && !swept.has(root)) {
+        if (sweepStale && env[WORKER_ENV_FLAG] !== "1" && !swept.has(root)) {
           swept.add(root);
           let line;
           try {
@@ -15049,7 +15058,7 @@ function createSterlingServer(deps = {}) {
     }
   }
   const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore });
-  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
+  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, env: deps.env ?? process.env, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
   const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
   const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
   const dispatch = createDispatchHandlers({ rootOf, fenced });
