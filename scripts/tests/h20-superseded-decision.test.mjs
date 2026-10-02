@@ -1,6 +1,6 @@
 // REGRESSION: H20 delivered a superseded decision as "[standing]" (Dome Farmer
 // issue 2026-10-02, FRICTION near-miss; board 7e4850cf sub-item (c)). Measured
-// in Dome Farmer's store: decision bac7bcdb was created with a
+// in Dome Farmer's store: decision foreign_bac7bcdb was created with a
 // links[{rel:'supersedes', target_id: 64a315d9}] entry. That writes the
 // record_relations edge but does NOT retire the target (create admits a
 // supersedes link as a partial override; only supersede/retireInFavorOf retire),
