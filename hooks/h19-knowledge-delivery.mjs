@@ -7929,6 +7929,19 @@ function authorityMarker(record) {
   if (Array.isArray(record?.inbound_supersedes) && record.inbound_supersedes.length) return "";
   return record?.authority ? `[${record.authority}] ` : "";
 }
+function withInboundSupersedes(store, record) {
+  const inbound = store.inboundSupersedes(record.id);
+  if (!inbound.length) return record;
+  return {
+    ...record,
+    inbound_supersedes: inbound.map((s2) => ({
+      id: s2.id,
+      ...s2.slug ? { slug: s2.slug } : {},
+      ...s2.title ? { title: s2.title } : {},
+      status: s2.status
+    }))
+  };
+}
 function clip(text, cap) {
   const s2 = String(text ?? "");
   let out = "";
@@ -8621,7 +8634,7 @@ function main(input2) {
     const migrationNotice = claimLegacyInjectionRungNotice(input2.cwd, rawRung);
     const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, input2.cwd));
     const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
-    const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
+    const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 }).map((r) => withInboundSupersedes(store, r));
     const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
     const guard = readGuard(gPath);
     const hazardMode = hazardLaneMode(input2, input2.cwd);
