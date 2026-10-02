@@ -18,11 +18,14 @@
 //     [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
 //     [--backup-path <p> | --backup-opt-out] [--mode hobby|work]
 //     [--domain-description <domain>=<text>]...   (repeatable; one per NEW domain store)
+//     [--update-ensure]   (set only by /sterling:update's re-bake step)
 //   (stack tags ARE the domain mount manifest — §3.3; no separate domains flag)
 //   (init creates each declared domain's store that does not exist yet, with a
 //   description: --domain-description <domain>=<text>, split at the first '='. The
 //   forced 'sterling' domain ships a default. A domain with no description refuses
-//   before any write. An existing store is never touched.)
+//   before any write. An existing store is never touched. On the update ensure
+//   pass (--update-ensure) a recorded domain with no store and no description is
+//   skipped with a loud line instead, so it cannot fail the whole re-bake.)
 //   (declaration flags are required only when no recorded config exists)
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, unlinkSync, renameSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -250,7 +253,25 @@ for (const name of domainDescriptions.keys()) {
     fail(`init REFUSED: ${DOMAIN_DESCRIPTION_FLAG} names '${name}', which is not a declared domain (declared: ${domainMounts.map((m) => m.name).join(', ')})`, 2);
   }
 }
-const undescribed = domainsToCreate.filter((d) => !d.description);
+let undescribed = domainsToCreate.filter((d) => !d.description);
+// THE UPDATE ENSURE PASS (/sterling:update re-bakes with --update-ensure, tolerate
+// mode) never refuses on a recorded domain whose store is gone: nothing can be
+// asked there, and a refusal would skip every other ensure item. The domain is
+// not created and not mounted, and one stderr line per domain says so and names
+// the remedy. An interactive init still refuses below.
+const skippedDomains = [];
+if (hasFlag('--update-ensure') && recorded) {
+  for (const d of undescribed) {
+    if (!recorded.stack_tags.includes(d.name)) continue;
+    skippedDomains.push(d);
+    process.stderr.write(
+      `init: domain '${d.name}' is recorded but has no store at '${d.dbPath}' and no description; SKIPPED on the update ensure pass ` +
+        `(not created, not mounted). Run /sterling:init with ${DOMAIN_DESCRIPTION_FLAG} ${d.name}=<description> to create it.\n`
+    );
+  }
+  undescribed = undescribed.filter((d) => !skippedDomains.includes(d));
+  domainsToCreate.splice(0, domainsToCreate.length, ...domainsToCreate.filter((d) => !skippedDomains.includes(d)));
+}
 if (undescribed.length) {
   fail(
     `init REFUSED: ${undescribed.length === 1 ? 'domain' : 'domains'} ${undescribed.map((d) => `'${d.name}'`).join(', ')} ` +
@@ -317,6 +338,9 @@ for (const [label, leaf] of [['.sterling/ (+runs/)', '.sterling/runs'], ['docs/b
 for (const d of domainsToCreate) {
   createDomain(d.name, d.description, d.dbPath);
   items.push({ item: `domain '${d.name}'`, status: 'created', detail: `${d.dbPath} — ${d.description}` });
+}
+for (const d of skippedDomains) {
+  items.push({ item: `domain '${d.name}'`, status: 'skipped', detail: `${d.dbPath} — no store and no description; not created on the update ensure pass` });
 }
 for (const m of domainsExisting) {
   items.push({ item: `domain '${m.name}'`, status: 'exists', detail: `${m.dbPath} — already has a store; its description is untouched${domainDescriptions.has(m.name) ? ` (the --domain-description given for it was NOT applied)` : ''}` });

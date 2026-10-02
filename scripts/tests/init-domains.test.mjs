@@ -160,3 +160,20 @@ test('a re-run whose recorded domain store is gone refuses and names the flag', 
   assert.notEqual(again.code, 0, again.out);
   assert.match(again.out, /--domain-description python=/);
 });
+
+test('the /sterling:update ensure pass skips a recorded domain whose store is gone, loudly, instead of refusing the whole init', () => {
+  // Task-end review 2026-10-03: a refusal there failed every later ensure item of
+  // the update's re-bake. An interactive re-run still refuses (test above).
+  const dir = tmp('sterling-dom-proj-');
+  const home = tmp('sterling-dom-home-');
+  const first = init(dir, home, [...BASE_FLAGS, '--stack-tags', 'python', '--domain-description', 'python=P']);
+  assert.equal(first.code, 0, first.out);
+  rmSync(join(home, '.sterling', 'domains', 'python'), { recursive: true, force: true });
+  rmSync(join(dir, '.claude', 'agents', 'scout.md'), { force: true });
+  const again = init(dir, home, ['--update-ensure']);
+  assert.equal(again.code, 0, again.out);
+  assert.match(again.out, /domain 'python' is recorded but has no store at .*python.* SKIPPED/);
+  assert.match(again.out, /--domain-description python=/, 'the line names the remedy');
+  assert.equal(existsSync(domainDb(home, 'python')), false, 'no store is created without a description');
+  assert.ok(existsSync(join(dir, '.claude', 'agents', 'scout.md')), 'the rest of the ensure pass still ran');
+});
