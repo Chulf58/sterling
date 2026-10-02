@@ -148,8 +148,22 @@ test('OpenCode without a usable session id: no session_host, and the unavailable
   assert.match(got.stdout, /READY FOR NEW SESSION/);
 });
 
-test('both set (Claude Code launched from an OpenCode shell): Claude Code wins and the note is the Claude form', () => {
+test('both ids set without OPENCODE=1: Claude Code wins and the note is the Claude form', () => {
+  const got = run({ CLAUDE_CODE_SESSION_ID: 'cc-session-1', OPENCODE_SESSION_ID: 'ses_x' });
+  assert.equal(got.stdout, GOLDEN['claude-session'].stdout);
+  assert.deepEqual(got.note, GOLDEN['claude-session'].note);
+});
+
+test('both ids set with OPENCODE=1 (OpenCode shell under a parent Claude Code): the OpenCode id wins, the note is the OpenCode form', () => {
   const got = run({ CLAUDE_CODE_SESSION_ID: 'cc-session-1', OPENCODE_SESSION_ID: 'ses_x', OPENCODE: '1' });
+  assert.equal(got.note.session_id, 'ses_x');
+  assert.equal(got.note.session_host, 'opencode');
+  assert.match(got.stdout, /^session_id: ses_x$/m);
+  assert.match(got.stdout, /READY FOR NEW SESSION/);
+});
+
+test('OPENCODE=1 with an unusable OPENCODE_SESSION_ID does not displace a valid Claude Code id', () => {
+  const got = run({ CLAUDE_CODE_SESSION_ID: 'cc-session-1', OPENCODE_SESSION_ID: 'bad id;', OPENCODE: '1' });
   assert.equal(got.stdout, GOLDEN['claude-session'].stdout);
   assert.deepEqual(got.note, GOLDEN['claude-session'].note);
 });

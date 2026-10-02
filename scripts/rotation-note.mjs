@@ -115,14 +115,19 @@ const lanes = readLanes();
 // it inside a runnable command. Absent or malformed -> null, never guessed.
 // ON OPENCODE (decision sterling-is-fully-standalone-on-opencode-2-full-parity-
 // with-claude-code): OpenCode 2.0.21's shell tool sets OPENCODE_SESSION_ID (and
-// OPENCODE=1) for every command, so it is the fallback source, read only when
-// CLAUDE_CODE_SESSION_ID is unset; the way back is then `opencode --session <id>`,
+// OPENCODE=1) for every command; the way back is then `opencode --session <id>`,
 // and the note records session_host 'opencode' so the restore names that command.
-// A Claude Code note is unchanged and carries no session_host.
+// PRECEDENCE when both ids are set: with OPENCODE=1 and a valid OPENCODE_SESSION_ID
+// the OpenCode id wins, because OpenCode's shell tool sets it per command, whereas
+// CLAUDE_CODE_SESSION_ID can be inherited from a parent Claude Code that launched
+// OpenCode. In every other case the order is unchanged: Claude Code's id first,
+// OpenCode's only when CLAUDE_CODE_SESSION_ID is unset. A Claude Code note is
+// unchanged and carries no session_host.
 const SESSION_ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/;
 const claudeSessionEnv = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim();
 const opencodeSessionEnv = (process.env.OPENCODE_SESSION_ID ?? '').trim();
-const host = !claudeSessionEnv && (opencodeSessionEnv || process.env.OPENCODE === '1') ? 'opencode' : 'claude';
+const opencodeShell = process.env.OPENCODE === '1' && SESSION_ID_SHAPE.test(opencodeSessionEnv);
+const host = opencodeShell || (!claudeSessionEnv && (opencodeSessionEnv || process.env.OPENCODE === '1')) ? 'opencode' : 'claude';
 const envSessionId = host === 'opencode' ? opencodeSessionEnv : claudeSessionEnv;
 const sessionId = SESSION_ID_SHAPE.test(envSessionId) ? envSessionId : null;
 const sessionHost = host === 'opencode' && sessionId ? 'opencode' : null;

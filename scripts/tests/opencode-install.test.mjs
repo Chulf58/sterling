@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   setupOpenCode, formatOpenCodeRows, opencodeConfigDir, mcpLauncherPath, STERLING_AGENTS_SUBDIR, CONDUCTOR_AGENT,
-  swapFullAgentModel, opencodeModelRef, sterlingRootFrom,
+  swapFullAgentModel, opencodeModelRef, sterlingRootFrom, storeWriteTools,
 } from '../lib/opencode-install.mjs';
 import { renderPortableText } from '../lib/agent-fences.mjs';
 
@@ -415,4 +415,19 @@ test('installed-copy shims pick the highest installed version at run time', () =
   const none = spawnSync(process.execPath, [mcpLauncherPath({ home }), '--store', 's.db'], { encoding: 'utf8', env });
   assert.notEqual(none.status, 0);
   assert.match(none.stderr, /no installed Sterling plugin under .*claude plugin install sterling@sterling/);
+});
+
+test('storeWriteTools throws, naming the template, when disallowedTools has no mcp__sterling__* entry', () => {
+  const root = tmp('oc-roster-');
+  try {
+    mkdirSync(join(root, 'agent-templates'));
+    writeFileSync(join(root, 'agent-templates', 'implementor.md'), '---\nname: implementor\ndisallowedTools: Agent, WebFetch\n---\nbody\n');
+    assert.throws(() => storeWriteTools(root), /no mcp__sterling__\* entries in .*implementor\.md disallowedTools/);
+    writeFileSync(join(root, 'agent-templates', 'implementor.md'), '---\nname: implementor\n---\nbody\n');
+    assert.throws(() => storeWriteTools(root), /no mcp__sterling__\* entries/, 'a template with no disallowedTools line at all');
+    writeFileSync(join(root, 'agent-templates', 'implementor.md'), '---\nname: implementor\ndisallowedTools: Agent, mcp__sterling__knowledge_create, mcp__sterling__board_add\n---\nbody\n');
+    assert.deepEqual(storeWriteTools(root), ['sterling_knowledge_create', 'sterling_board_add']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

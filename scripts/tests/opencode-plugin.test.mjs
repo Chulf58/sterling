@@ -6,7 +6,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -335,6 +335,67 @@ test('rotation restore: the note stays in place for the old session, a child ses
     assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /server said no/);
     assert.match(await contextFor(ctx, 'ses_notime'), /ROTATION RESTORE/, 'an unreadable created time does not block a root session with a different id');
     assert.equal(noteExists(p.dir), false);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('rotation restore: a malformed note gets its own notice naming the cause and the remedy, shown once per note file, and the layer survives', async () => {
+  const p = makeProject();
+  try {
+    mkdirSync(join(p.dir, '.sterling', 'transient'), { recursive: true });
+    const notePath = join(p.dir, '.sterling', 'transient', 'rotation-note.json');
+    writeFileSync(notePath, '{ not json');
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_new: { time: { created: after } } });
+    const first = await contextFor(ctx, 'ses_new');
+    assert.match(first, /Sterling layer\)/, 'a malformed note costs only the restore');
+    const noticeTexts = () => JSON.parse(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8')).map((n) => n.text);
+    const malformed = noticeTexts().filter((t) => /malformed/.test(t));
+    assert.equal(malformed.length, 1);
+    assert.ok(malformed[0].includes(`delete ${notePath}`), malformed[0]);
+    assert.ok(!noticeTexts().some((t) => /could not be checked/.test(t)), 'not the session-check notice');
+    assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /rotation note malformed/);
+    for (let i = 0; i < 3; i++) await contextFor(ctx, 'ses_new');
+    assert.equal(noticeTexts().filter((t) => /malformed/.test(t)).length, 1, 'later requests do not repeat it');
+    assert.equal(existsSync(notePath), true, 'the note is left in place');
+    // a rewritten malformed note is a new note file and is announced again
+    const later = new Date(Date.now() + 5000);
+    writeFileSync(notePath, '[');
+    utimesSync(notePath, later, later);
+    await contextFor(ctx, 'ses_new');
+    assert.equal(JSON.parse(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8')).filter((n) => /malformed/.test(n.text)).length, 2);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('rotation restore: a root session skipped for its creation time logs the raw time.created and note.at', async () => {
+  const p = makeProject();
+  try {
+    writeNote(p.dir);
+    const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_early: { time: { created: 1759399000 } } });
+    await contextFor(ctx, 'ses_early');
+    const log = readFileSync(join(p.dir, server.LOG_REL), 'utf8');
+    assert.match(log, /rotation restore skipped for ses_early: created before the note \(time\.created=1759399000, note\.at="2026-10-02T10:00:00\.000Z"/);
+    assert.equal(noteExists(p.dir), true);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('rotation restore: a render failure after the note was consumed is logged and costs only the restore', async () => {
+  const p = makeProject();
+  try {
+    writeNote(p.dir);
+    const { ctx, cleanup } = await setupPlugin(p.dir, { renderRestore: () => { throw new Error('render boom'); } }, { ses_new: { time: { created: after } } });
+    const text = await contextFor(ctx, 'ses_new');
+    assert.doesNotMatch(text, /ROTATION RESTORE/);
+    assert.match(text, /Sterling layer\)/, 'the layer survives the render failure');
+    assert.equal(noteExists(p.dir), false, 'consumed by design');
+    assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /render failed after the note was consumed: render boom/);
     await cleanup?.();
   } finally {
     p.cleanup();

@@ -14,6 +14,13 @@
 // scripts/lib/opencode-install.mjs and the portable render), so a host-specific
 // instruction is a claude-only original plus an opencode-only replacement and the
 // Claude render stays byte-identical to the unfenced template.
+// A claude-only block must be paired: the next non-blank line after its close
+// marker opens an opencode-only block, so a host-specific instruction cannot be
+// left with no OpenCode text by accident (the OpenCode render would silently go
+// without it). A claude-only block that really has no OpenCode counterpart says so
+// with the whole-line marker `<!-- no-opencode-counterpart -->` as the first line
+// inside the block; the marker is dropped from every render, so the Claude render
+// stays identical to the same template without it.
 // Dependency-free on purpose: agent-distribution.mjs and opencode-agents.mjs
 // both import it.
 
@@ -56,12 +63,15 @@ function malformedMarkers(text, label) {
   return out;
 }
 
+export const NO_COUNTERPART_MARKER = '<!-- no-opencode-counterpart -->';
+
 const splitLines = (text) => text.replace(/\r\n/g, '\n').split('\n');
 
 export function validateFences(text, label) {
   const violations = malformedMarkers(text.replace(/\r\n/g, '\n'), label);
   let openFence = null;
-  splitLines(text).forEach((line, index) => {
+  const lines = splitLines(text);
+  lines.forEach((line, index) => {
     const at = `${label}:${index + 1}`;
     const marker = classify(line);
     if (!marker) return;
@@ -76,6 +86,13 @@ export function validateFences(text, label) {
     } else if (openFence.kind !== marker.kind) {
       violations.push({ kind: 'fence_mismatched', detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
     } else {
+      if (marker.kind === 'claude-only') {
+        const first = lines[openFence.line]; // openFence.line is 1-based, so this is the line after the open marker
+        const next = lines.slice(index + 1).find((l) => l.trim() !== '');
+        if (first !== NO_COUNTERPART_MARKER && next !== FENCE_KINDS['opencode-only'].open) {
+          violations.push({ kind: 'fence_claude_only_unpaired', detail: `${label}:${openFence.line}: the claude-only block is not followed by an opencode-only block; add one, or put '${NO_COUNTERPART_MARKER}' as the first line inside the block if OpenCode has no counterpart` });
+        }
+      }
       openFence = null;
     }
   });
@@ -97,6 +114,7 @@ function render(text, label, keepKinds) {
   let inside = null;
   for (const line of splitLines(text)) {
     const marker = classify(line);
+    if (line === NO_COUNTERPART_MARKER) continue;
     if (marker) {
       inside = marker.role === 'open' ? marker.kind : null;
       continue;
