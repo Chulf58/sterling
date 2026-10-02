@@ -58,10 +58,19 @@ echo "== layer probe"
 ask "Do not use any tools. Your instructions contain a heading of the form 'CLAUDE.md — <name> (Sterling layer)' and may contain a section titled 'OpenCode host'. Reply exactly: NAME=<name> HOST=<yes or no>" layer | tee "$WORK/layer.txt"
 echo "== edit probe"
 ask "Use the edit tool once to change 'a = 1' to 'a = 2' in src/a.mjs. The first read or edit tool result for that file will include a STERLING KNOWLEDGE DELIVERY block naming a codeword of the form WORD-digits. Reply with that codeword only." edit | tee "$WORK/edit.txt"
+echo "== bin probe"
+# The prompt gives no path: the model has to take the Sterling root from the injected layer.
+STERLING_ROOT=$(dirname "$(dirname "$(readlink -f "$BUNDLE")")")
+ask "Your instructions say where Sterling is installed. Use the shell tool once to run Sterling's bin script check-agents-visible.mjs from that install with node and no arguments. Reply with the first line it printed." bin | tee "$WORK/bin.txt"
 
 if grep -q 'quartz-heron-41' "$WORK/layer.txt" && grep -q 'HOST=yes' "$WORK/layer.txt"; then echo "LAYER-SEEN: yes"; else echo "LAYER-SEEN: no"; fi
 if grep -q 'MANGO-88' "$WORK/edit.txt"; then echo "DELIVERY-SEEN: yes"; else echo "DELIVERY-SEEN: no"; fi
 if grep -q 'MANGO-88' "$WORK/edit.out"; then echo "DELIVERY-IN-TOOL-RESULT: yes"; else echo "DELIVERY-IN-TOOL-RESULT: no"; fi
+# The model may run the full path or cd into the root first; either way the root
+# reaches the shell call only from the layer, and the usage line only from the run.
+# The command is JSON-escaped (the layer quotes the path), so match up to the input's closing brace.
+grep -o '"input":{"command":"[^}]*' "$WORK/bin.out" | grep 'check-agents-visible' | head -3 || true
+if grep -o '"input":{"command":"[^}]*' "$WORK/bin.out" | grep 'check-agents-visible' | grep -qF "$STERLING_ROOT" && grep -q 'usage: check-agents-visible.mjs' "$WORK/bin.out"; then echo "BIN-CALLED-BY-ROOT: yes"; else echo "BIN-CALLED-BY-ROOT: no"; fi
 echo "plugin log:"; cat "$PROJ/.sterling/transient/opencode-plugin.log" 2>/dev/null || echo "(none)"
 echo "settled snapshot: $([ -f "$PROJ/.sterling/transient/git-settled.json" ] && echo present || echo absent)"
 echo "serve log tail:"; tail -15 "$WORK/serve.out"

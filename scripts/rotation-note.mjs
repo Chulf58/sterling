@@ -113,9 +113,21 @@ const lanes = readLanes();
 // a wrong id sends the user to `claude --resume` the wrong session. A value that
 // is not id-shaped (^[A-Za-z0-9_-]{1,128}$) is refused to null, because H1 prints
 // it inside a runnable command. Absent or malformed -> null, never guessed.
+// ON OPENCODE (decision sterling-is-fully-standalone-on-opencode-2-full-parity-
+// with-claude-code): OpenCode 2.0.21's shell tool sets OPENCODE_SESSION_ID (and
+// OPENCODE=1) for every command, so it is the fallback source, read only when
+// CLAUDE_CODE_SESSION_ID is unset; the way back is then `opencode --session <id>`,
+// and the note records session_host 'opencode' so the restore names that command.
+// A Claude Code note is unchanged and carries no session_host.
 const SESSION_ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/;
-const envSessionId = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim();
+const claudeSessionEnv = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim();
+const opencodeSessionEnv = (process.env.OPENCODE_SESSION_ID ?? '').trim();
+const host = !claudeSessionEnv && (opencodeSessionEnv || process.env.OPENCODE === '1') ? 'opencode' : 'claude';
+const envSessionId = host === 'opencode' ? opencodeSessionEnv : claudeSessionEnv;
 const sessionId = SESSION_ID_SHAPE.test(envSessionId) ? envSessionId : null;
+const sessionHost = host === 'opencode' && sessionId ? 'opencode' : null;
+// The boundary the user crosses: Claude Code's /clear, or a new OpenCode session.
+const boundary = host === 'opencode' ? 'the new session' : 'the /clear';
 
 const git = (args) => {
   try {
@@ -240,6 +252,7 @@ const note = {
   next_slice: nextSlice,
   lanes,
   session_id: sessionId,
+  ...(sessionHost ? { session_host: sessionHost } : {}),
   objective: (arg('objective') ?? '').trim() || null,
   risks: (arg('risks') ?? '').trim() || null,
   pointers: (arg('pointers') ?? '').trim() || null,
@@ -268,21 +281,28 @@ process.stdout.write(
   `rotation note written (single slot — this supersedes any prior note).\n` +
     `next_slice: ${note.next_slice}\n` +
     `lanes: ${lanes.length}\n` +
-    (sessionId ? `session_id: ${sessionId}\n` : 'session_id: unavailable (CLAUDE_CODE_SESSION_ID unset or not id-shaped) — the restore cannot name the session to resume\n') +
+    (sessionId ? `session_id: ${sessionId}\n` : `session_id: unavailable (${host === 'opencode' ? 'OPENCODE_SESSION_ID' : 'CLAUDE_CODE_SESSION_ID'} unset or not id-shaped) — the restore cannot name the session to resume\n`) +
     (note.branch ? `anchored: ${note.branch} @ ${note.head_sha?.slice(0, 8) ?? '?'}\n` : 'anchored: no git (drift disclosure unavailable)\n') +
     (note.commits_ahead !== null
       ? `commits_ahead: ${note.commits_ahead} (vs ${note.base_branch})\n`
       : 'commits_ahead: unavailable (no origin/HEAD, main, or master to diff against — pass --into to a future version if this recurs)\n') +
     // Silent when the set is a confirmed zero (P1 — nothing to check).
     (liveDispatches === null
-      ? 'live_dispatches: UNKNOWN — the dispatch register exists but could not be read; any subagent from this session cannot be resumed after the /clear — re-dispatch fresh if still needed\n'
+      ? `live_dispatches: UNKNOWN — the dispatch register exists but could not be read; any subagent from this session cannot be resumed after ${boundary} — re-dispatch fresh if still needed\n`
       : liveDispatches.length
-        ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — still running across the /clear but cannot be resumed from the new session: re-dispatch fresh if still needed (pass a --lane hand-off for each worth continuing)\n`
+        ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — still running across ${boundary} but cannot be resumed from the new session: re-dispatch fresh if still needed (pass a --lane hand-off for each worth continuing)\n`
         : '') +
     (uncertainDispatches && uncertainDispatches.length
       ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — lease expired, not confirmed dead; cannot be resumed from the new session either: re-dispatch fresh if still needed\n`
       : '') +
-    (note.reason === 'code-reload'
+    (host === 'opencode'
+      ? (note.reason === 'code-reload'
+          ? `CODE RELOAD REQUIRED (--reason=code-reload) — a new session alone will NOT load it (OpenCode loads plugins and MCP servers at startup). The sequence is:\n` +
+            `  1. exit and relaunch OpenCode now\n` +
+            `  2. THEN start a new session (/new) — the Sterling OpenCode plugin restores and consumes this note in that session's first turn\n`
+          : `Tell the user READY FOR NEW SESSION — on /new, the Sterling OpenCode plugin restores and consumes this note in the new session's first turn, single-shot.\n` +
+            `If plugin or MCP-server CODE changed since this session started (migration, update, rebuild), a new session alone will not reload it — EXIT AND RELAUNCH OpenCode first, THEN /new.\n`)
+      : note.reason === 'code-reload'
       ? `CODE RELOAD REQUIRED (--reason=code-reload) — /clear alone will NOT load it (MCP servers survive it). The sequence is:\n` +
         `  1. exit and relaunch the Claude Code CLI now — H1 restores and consumes this note automatically at that very startup\n` +
         `  2. THEN /clear — H1 restores and consumes this note automatically if step 1 hasn't already delivered it (single-shot: whichever of startup/clear happens first wins, and the other becomes a no-op)\n`
