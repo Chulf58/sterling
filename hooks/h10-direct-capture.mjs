@@ -8310,8 +8310,14 @@ function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
       throw e;
     }
   }
-  writeFileSync2(`${p}.tmp`, JSON.stringify(snapshot));
-  renameSync2(`${p}.tmp`, p);
+  const tmp = `${p}.${process.pid}.${randomUUID2()}.tmp`;
+  try {
+    writeFileSync2(tmp, JSON.stringify(snapshot));
+    renameSync2(tmp, p);
+  } catch (e) {
+    rmSync2(tmp, { force: true });
+    throw e;
+  }
   return true;
 }
 function gitTrackedSubset(root, paths) {
