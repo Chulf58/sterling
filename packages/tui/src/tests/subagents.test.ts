@@ -14,7 +14,7 @@ import {
   subagentTranscriptPath,
   type SubagentView,
 } from '../subagents.js';
-import { SPRITE_ROWS, TILE_BG, TILE_COLS } from '../avatars/index.js';
+import { QUADRANTS, SPRITE_ROWS, TILE_BG, TILE_COLS } from '../avatars/index.js';
 import { clearPixels, paintPixels } from '../render.js';
 
 // The terminal dashboard's live-subagent source is H22's dispatch register
@@ -70,6 +70,31 @@ test('register: rows with no ended are running; a recent ended row is done; an o
     assert.equal(a1.elapsedMs, 65_000);
     // a done row's elapsed time is its round's run time, not time since it ended
     assert.equal(src.rows[2]!.elapsedMs, 90_000);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('register: a row H10 stamped residue_reported_at is done at that stamp, never running, and lingers out like an ended one', () => {
+  const root = project();
+  try {
+    writeRegister(root, [
+      row('a1', 'implementor', 600_000, { residue_reported_at: iso(30_000) }),
+      row('a2', 'implementor', 600_000, { residue_reported_at: iso(3_000_000) }),
+      row('a3', 'implementor', 20_000),
+      row('a4', 'reviewer', 600_000, { ended: { at: iso(100_000), event: 'subagent-stop' }, residue_reported_at: iso(20_000) }),
+    ]);
+    const src = readSubagents(root, NOW);
+    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status]), [['a3', 'running'], ['a1', 'done'], ['a4', 'done']]);
+    const a1 = src.rows.find((r) => r.agentId === 'a1')!;
+    assert.equal(a1.endedAt, NOW - 30_000);
+    assert.equal(a1.elapsedMs, 570_000);
+    assert.equal(src.rows.find((r) => r.agentId === 'a4')!.endedAt, NOW - 100_000, 'a real ended wins over the residue stamp');
+    // only residue-stamped rows: nothing is active, so the animation timer (active > 0) stays off
+    writeRegister(root, [row('a1', 'implementor', 600_000, { residue_reported_at: iso(30_000) })]);
+    const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: join(root, 'none') }).view(NOW);
+    assert.equal(v.active, 0);
+    assert.equal(v.agents[0]!.status, 'done');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -200,6 +225,7 @@ test('block: a 6x3 portrait on an 8x3 tinted tile per agent, then type, status, 
   const first = b.pixels[0]!;
   assert.deepEqual({ x: first.x, y: first.y, ch: first.ch, bg: first.bg }, { x: 0, y: 2, ch: ' ', bg: TILE_BG });
   assert.ok(b.pixels.some((p) => p.ch !== ' ' && p.fg !== undefined && p.bg !== undefined), 'a quadrant cell carries both colours');
+  assert.ok(b.pixels.every((p) => [...QUADRANTS].includes(p.ch)), 'composition only emits quadrant glyphs');
   // the three text lines sit beside the tile, on its three rows
   const type = b.puts.find((p) => p.text === 'implementor')!;
   assert.equal(type.x, TILE_COLS + 1);
@@ -318,6 +344,41 @@ test('tracker: context % from the subagent transcript and the window table, "?" 
     const text = composeSubagentBlock(v, 160, 30, 0).puts.map((p) => p.text);
     assert.ok(text.includes('running · 25% ctx') && text.includes(' · claude-opus-5-5'), JSON.stringify(text));
     assert.ok(text.includes('running · ? ctx') && text.includes(' · model unknown'), JSON.stringify(text));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('tracker: a missing description is retried while the row runs, so the live-to-done rename race heals', () => {
+  const root = project();
+  try {
+    writeRegister(root, [row('a1', 'implementor', 10_000)]);
+    const tracker = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: join(root, 'none') });
+    assert.equal(tracker.view(NOW).agents[0]!.description, null);
+    writeState(root, 'done-raw-toolu_a1~none.json', { tool_use_id: 'toolu_a1', subagent_type: 'implementor', description: 'Fix the parser' });
+    assert.equal(tracker.view(NOW + 1000).agents[0]!.description, 'Fix the parser');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('tracker: a missing transcript is not searched again within the retry interval, and an agent that left the register is forgotten', () => {
+  const root = project();
+  try {
+    writeFileSync(join(root, '.sterling', 'config.json'), JSON.stringify({ context_watch: { windows: { 'claude-opus-5-5': 400_000 } } }));
+    writeRegister(root, [row('a1', 'implementor', 10_000)]);
+    const home = join(root, 'claude-home');
+    const tracker = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home });
+    assert.equal(tracker.view(NOW).agents[0]!.contextPct, null, 'no transcript yet');
+    claudeHome(root, 's1', 'a1', [transcriptLine('assistant', { input_tokens: 100_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })]);
+    assert.equal(tracker.view(NOW + 1000).agents[0]!.contextPct, null, 'the miss is remembered for the retry interval');
+    assert.equal(tracker.view(NOW + 60_000).agents[0]!.contextPct, 25, 'then the transcript is found');
+    // a1 leaves the register, then a resumed a1 shows up in another session with a bigger transcript
+    writeRegister(root, []);
+    tracker.view(NOW + 61_000);
+    claudeHome(root, 's2', 'a1', [transcriptLine('assistant', { input_tokens: 200_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })]);
+    writeRegister(root, [row('a1', 'implementor', 10_000, { session_id: 's2' })]);
+    assert.equal(tracker.view(NOW + 62_000).agents[0]!.contextPct, 50, 'no stale path or usage survives the gap');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

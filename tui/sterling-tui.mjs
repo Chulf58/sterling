@@ -51479,6 +51479,7 @@ function frameAt(tick, phase, running) {
 }
 
 // packages/tui/dist/subagents.js
+var TRANSCRIPT_RETRY_MS = 1e4;
 var DONE_LINGER_MS = 5 * 6e4;
 function roundOf(e) {
   return typeof e.round === "number" ? e.round : 1;
@@ -51500,7 +51501,8 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
     const startedAt = Date.parse(latest.at);
     if (Number.isNaN(startedAt))
       continue;
-    const endedAt = latest.ended ? Date.parse(latest.ended.at) : null;
+    const endStamp = latest.ended ? latest.ended.at : latest.residue_reported_at ? String(latest.residue_reported_at) : null;
+    const endedAt = endStamp === null ? null : Date.parse(endStamp);
     if (endedAt !== null && (Number.isNaN(endedAt) || now - endedAt > lingerMs))
       continue;
     const withId = rounds.find((r) => typeof r.tool_use_id === "string" && r.tool_use_id !== "");
@@ -51619,14 +51621,20 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
   let models = /* @__PURE__ */ new Map();
   const sharedWindows = readSharedWindows();
   const transcripts = /* @__PURE__ */ new Map();
+  const missing = /* @__PURE__ */ new Map();
   const usage = /* @__PURE__ */ new Map();
   let context = /* @__PURE__ */ new Map();
-  function contextOf(r, windows) {
-    let path = transcripts.get(r.agentId);
-    if (!path) {
+  const keyOf = (r) => `${r.sessionId}\0${r.agentId}`;
+  function contextOf(r, windows, now) {
+    const key = keyOf(r);
+    let path = transcripts.get(key);
+    if (!path && now >= (missing.get(key) ?? -Infinity)) {
       path = subagentTranscriptPath(projectRoot, r.sessionId, r.agentId, claudeConfigDir) ?? void 0;
-      if (path)
-        transcripts.set(r.agentId, path);
+      if (path) {
+        transcripts.set(key, path);
+        missing.delete(key);
+      } else
+        missing.set(key, now + TRANSCRIPT_RETRY_MS);
     }
     if (!path)
       return { model: null, pct: null };
@@ -51657,13 +51665,31 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
     avatars = assign(source.rows.map((r) => r.agentId), avatars.current, rng, { poolSize: POOL_SIZE, freed: avatars.freed });
     models = /* @__PURE__ */ new Map();
     for (const r of source.rows) {
-      if (r.toolUseId && !descriptions.has(r.toolUseId))
-        descriptions.set(r.toolUseId, readDispatchDescription(projectRoot, r.toolUseId));
+      if (r.toolUseId && !descriptions.has(r.toolUseId)) {
+        const d = readDispatchDescription(projectRoot, r.toolUseId);
+        if (d !== null || r.status === "done")
+          descriptions.set(r.toolUseId, d);
+      }
       if (r.agentType && !models.has(r.agentType))
         models.set(r.agentType, readAgentModel(projectRoot, r.agentType));
     }
     const windows = source.rows.length ? readProjectWindows(projectRoot) : {};
-    context = new Map(source.rows.map((r) => [r.agentId, contextOf(r, windows)]));
+    context = new Map(source.rows.map((r) => [r.agentId, contextOf(r, windows, now)]));
+    const keys = new Set(source.rows.map(keyOf));
+    for (const k of [...transcripts.keys()])
+      if (!keys.has(k))
+        transcripts.delete(k);
+    for (const k of [...missing.keys()])
+      if (!keys.has(k))
+        missing.delete(k);
+    const agents = new Set(source.rows.map((r) => r.agentId));
+    for (const k of [...usage.keys()])
+      if (!agents.has(k))
+        usage.delete(k);
+    const tools = new Set(source.rows.map((r) => r.toolUseId));
+    for (const k of [...descriptions.keys()])
+      if (!tools.has(k))
+        descriptions.delete(k);
   }
   return {
     view(now) {

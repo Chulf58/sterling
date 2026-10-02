@@ -27,6 +27,9 @@ import { deriveAgentTranscript, fillPct, latestUsage } from '../../../scripts/ho
 import { sterlingRootFrom } from '../../../scripts/lib/opencode-install.mjs';
 import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS, type AssignState } from './avatars/index.js';
 
+/** How long a missing subagent transcript is left unsearched before the next look. */
+const TRANSCRIPT_RETRY_MS = 10_000;
+
 /** How long an ended agent stays in the block, shown as done. */
 export const DONE_LINGER_MS = 5 * 60_000;
 
@@ -56,7 +59,9 @@ function roundOf(e: RegisterEntry): number {
 }
 
 /** Read the register and reduce it to one row per agent_id: running when its
- *  latest round has no `ended`, done when that round ended within lingerMs. */
+ *  latest round has neither `ended` nor `residue_reported_at`, done when that
+ *  round ended within lingerMs. H10 stamps residue_reported_at on a row whose
+ *  subagent is gone without a stop event, so the stamp counts as the end. */
 export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_LINGER_MS): SubagentSource {
   const reg = readRegister(projectRoot);
   if (reg.availability !== 'ok') return { availability: reg.availability, rows: [] };
@@ -72,7 +77,8 @@ export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_
     const latest = rounds[0]!;
     const startedAt = Date.parse(latest.at);
     if (Number.isNaN(startedAt)) continue;
-    const endedAt = latest.ended ? Date.parse(latest.ended.at) : null;
+    const endStamp = latest.ended ? latest.ended.at : latest.residue_reported_at ? String(latest.residue_reported_at) : null;
+    const endedAt = endStamp === null ? null : Date.parse(endStamp);
     if (endedAt !== null && (Number.isNaN(endedAt) || now - endedAt > lingerMs)) continue;
     const withId = rounds.find((r) => typeof r.tool_use_id === 'string' && r.tool_use_id !== '');
     rows.push({
@@ -251,17 +257,26 @@ export function createSubagentTracker(
   let models = new Map<string, string | null>();
   // the shipped window table, read once; the project override on every refresh
   const sharedWindows = readSharedWindows();
+  // transcript paths per (session, agent); a miss is remembered until its retry time, so a
+  // transcript that does not exist yet does not cost a directory scan on every refresh
   const transcripts = new Map<string, string>();
+  const missing = new Map<string, number>();
   // per agent: the transcript's size and mtime at the last tail read, so an
   // unchanged transcript is not read again
   const usage = new Map<string, { stamp: string; value: { tokens: number; model: string | null } | null }>();
   let context = new Map<string, { model: string | null; pct: number | null }>();
 
-  function contextOf(r: SubagentRow, windows: Record<string, number>): { model: string | null; pct: number | null } {
-    let path = transcripts.get(r.agentId);
-    if (!path) {
+  const keyOf = (r: SubagentRow): string => `${r.sessionId}\0${r.agentId}`;
+
+  function contextOf(r: SubagentRow, windows: Record<string, number>, now: number): { model: string | null; pct: number | null } {
+    const key = keyOf(r);
+    let path = transcripts.get(key);
+    if (!path && now >= (missing.get(key) ?? -Infinity)) {
       path = subagentTranscriptPath(projectRoot, r.sessionId, r.agentId, claudeConfigDir) ?? undefined;
-      if (path) transcripts.set(r.agentId, path);
+      if (path) {
+        transcripts.set(key, path);
+        missing.delete(key);
+      } else missing.set(key, now + TRANSCRIPT_RETRY_MS);
     }
     if (!path) return { model: null, pct: null };
     let stamp: string;
@@ -291,11 +306,23 @@ export function createSubagentTracker(
     avatars = assign(source.rows.map((r) => r.agentId), avatars.current, rng, { poolSize: POOL_SIZE, freed: avatars.freed });
     models = new Map();
     for (const r of source.rows) {
-      if (r.toolUseId && !descriptions.has(r.toolUseId)) descriptions.set(r.toolUseId, readDispatchDescription(projectRoot, r.toolUseId));
+      if (r.toolUseId && !descriptions.has(r.toolUseId)) {
+        // a null is final only for a done row: a running row's record may not have its new name yet
+        const d = readDispatchDescription(projectRoot, r.toolUseId);
+        if (d !== null || r.status === 'done') descriptions.set(r.toolUseId, d);
+      }
       if (r.agentType && !models.has(r.agentType)) models.set(r.agentType, readAgentModel(projectRoot, r.agentType));
     }
     const windows = source.rows.length ? readProjectWindows(projectRoot) : {};
-    context = new Map(source.rows.map((r) => [r.agentId, contextOf(r, windows)]));
+    context = new Map(source.rows.map((r) => [r.agentId, contextOf(r, windows, now)]));
+    // forget what belongs to agents that left the register
+    const keys = new Set(source.rows.map(keyOf));
+    for (const k of [...transcripts.keys()]) if (!keys.has(k)) transcripts.delete(k);
+    for (const k of [...missing.keys()]) if (!keys.has(k)) missing.delete(k);
+    const agents = new Set(source.rows.map((r) => r.agentId));
+    for (const k of [...usage.keys()]) if (!agents.has(k)) usage.delete(k);
+    const tools = new Set(source.rows.map((r) => r.toolUseId));
+    for (const k of [...descriptions.keys()]) if (!tools.has(k)) descriptions.delete(k);
   }
 
   return {
