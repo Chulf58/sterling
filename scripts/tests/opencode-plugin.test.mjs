@@ -835,6 +835,34 @@ test('a capture written during the turn pays the capture duty, and a no_capture 
   }
 });
 
+// research_owed needs research_tool events; on Claude Code only H16 writes them. The plugin
+// records the same shape when OpenCode's web tools complete. Tool names measured in the
+// OpenCode 2.0.21 binary: webfetch {url} and websearch {query}.
+test('a completed webfetch or websearch call is recorded as a research_tool event, and the research duty then fires', async () => {
+  const p = makeProject();
+  try {
+    const { ctx, plugin, cleanup } = await setupPlugin(p.dir, { now: isoNow });
+    await plugin.handlers.event(succeeded); // the first settlement sets the baseline, as in the register test below
+    const after = (tool, input, status = 'completed') =>
+      ctx.hooks.tool['execute.after']({ tool, sessionID: 'ses_1', agent: 'build', messageID: 'm1', id: `c-${tool}-${status}`, input, status, ...(status === 'completed' ? { result: { content: [{ type: 'text', text: 'ok' }] } } : { error: { message: 'x' } }) });
+    await after('webfetch', { url: 'https://example.com/spec' });
+    await after('websearch', { query: 'opencode plugin hooks' });
+    await after('webfetch', { url: 'https://example.com/failed' }, 'error');
+    await after('read', { path: join(p.dir, 'src', 'a.mjs') });
+    const events = JSON.parse(readFileSync(join(p.dir, '.sterling', 'transient', 'session-events.json'), 'utf8'));
+    assert.deepEqual(events.map(({ kind, detail }) => ({ kind, detail })), [
+      { kind: 'research_tool', detail: 'https://example.com/spec' },
+      { kind: 'research_tool', detail: 'opencode plugin hooks' },
+    ], 'completed web calls only, in order, with url and query as detail');
+    for (const e of events) assert.deepEqual(Object.keys(e), ['kind', 'detail', 'at'], 'the H16 shape, untagged');
+    await plugin.handlers.event(succeeded);
+    assert.match(noticeTexts(p.dir).join('\n'), /research.*https:\/\/example\.com\/spec/s, 'the research duty is raised from the recorded events');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('concept and research duties come from the session-event register; each event is weighed once', async () => {
   const p = makeProject();
   try {
