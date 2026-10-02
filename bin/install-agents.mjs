@@ -5117,9 +5117,11 @@ import { join } from "node:path";
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
   "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
-  "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" }
+  "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
+  "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
+  "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" }
 };
-var FENCE_WORD_RE = /(?:sterling|portable)[\s_-]*only/i;
+var FENCE_WORD_RE = /(?:sterling|portable|claude|opencode)[\s_-]*only/i;
 var COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
 var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
 function classify(line) {
@@ -5143,11 +5145,13 @@ function malformedMarkers(text, label) {
   }
   return out;
 }
+var NO_COUNTERPART_MARKER = "<!-- no-opencode-counterpart -->";
 var splitLines = (text) => text.replace(/\r\n/g, "\n").split("\n");
 function validateFences(text, label) {
   const violations = malformedMarkers(text.replace(/\r\n/g, "\n"), label);
   let openFence = null;
-  splitLines(text).forEach((line, index) => {
+  const lines = splitLines(text);
+  lines.forEach((line, index) => {
     const at = `${label}:${index + 1}`;
     const marker = classify(line);
     if (!marker) return;
@@ -5162,6 +5166,13 @@ function validateFences(text, label) {
     } else if (openFence.kind !== marker.kind) {
       violations.push({ kind: "fence_mismatched", detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
     } else {
+      if (marker.kind === "claude-only") {
+        const first = lines[openFence.line];
+        const next = lines.slice(index + 1).find((l) => l.trim() !== "");
+        if (first !== NO_COUNTERPART_MARKER && next !== FENCE_KINDS["opencode-only"].open) {
+          violations.push({ kind: "fence_claude_only_unpaired", detail: `${label}:${openFence.line}: the claude-only block is not followed by an opencode-only block; add one, or put '${NO_COUNTERPART_MARKER}' as the first line inside the block if OpenCode has no counterpart` });
+        }
+      }
       openFence = null;
     }
   });
@@ -5170,7 +5181,7 @@ function validateFences(text, label) {
   }
   return violations;
 }
-function render(text, label, keepKind) {
+function render(text, label, keepKinds) {
   const violations = validateFences(text, label);
   if (violations.length) {
     throw new Error(`agent fences invalid in ${label} \u2014 refusing to render (P5):
@@ -5180,17 +5191,18 @@ function render(text, label, keepKind) {
   let inside = null;
   for (const line of splitLines(text)) {
     const marker = classify(line);
+    if (line === NO_COUNTERPART_MARKER) continue;
     if (marker) {
       inside = marker.role === "open" ? marker.kind : null;
       continue;
     }
-    if (inside && inside !== keepKind) continue;
+    if (inside && !keepKinds.includes(inside)) continue;
     out.push(line);
   }
   return out.join("\n");
 }
 function renderClaudeText(text, label) {
-  return render(text, label, "sterling-only");
+  return render(text, label, ["sterling-only", "claude-only"]);
 }
 
 // scripts/lib/checks.mjs
