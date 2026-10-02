@@ -14,6 +14,7 @@ import { briefOf, notStagedLine, stageChild } from './staging.mjs';
 import { agentRole } from './agent-name.mjs';
 import { remember } from './bounded.mjs';
 import { sessionKind } from './dispatch.mjs';
+import { WORKER_ENV_FLAG } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
 
 const STATUS_TTL_MS = 10_000;
 // The undeclared-source scan spawns git twice, so a process reuses its answer for this long.
@@ -22,12 +23,13 @@ const UNDECLARED_TTL_MS = 5 * 60_000;
 /**
  * `getSession()` returns the plugin context's session domain, as restore.mjs and sync.mjs take it; a session it cannot classify gets the loud not-staged line.
  * `parents` is the session-to-parentID cache shared with the settlement gate. `sweepStale(root)` (dispatch.mjs sweepStaleDispatches)
- * runs once per process at the first root request and returns a line to show, or ''.
+ * runs once per process at the first root request and returns a line to show, or ''; never when `env` (process.env) carries the
+ * maintenance worker flag.
  * `rotationRestore(root, sessionID)` is restore.mjs's gate; `sessionSync(root, sessionID)` is sync.mjs's once-per-process step; `pluginRoot` is the
  * test override for the resolved Sterling root. Returns the handler and
  * `resetStatus(root)`, which drops the cached status line and maintenance summary.
  */
-export function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = new Map(), sweepStale }) {
+export function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = new Map(), sweepStale, env = process.env }) {
   const statusCache = new Map();
   // The undeclared-source scan, per project root: root sessions only, refreshed on UNDECLARED_TTL_MS.
   const undeclaredCache = new Map();
@@ -144,7 +146,10 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         logLine(root, `context: child staging skipped for ${input.sessionID}, session lookup failed: ${kind.why}`);
         blocks.push(notStagedLine('session-lookup-failed'));
       } else if (kind.kind === 'root') {
-        if (sweepStale && !swept.has(root)) {
+        // Never inside the maintenance worker's own `opencode run` child: its root
+        // context is not a new process boundary for the project, and a sweep there
+        // would end the parent's live background dispatches (settle.mjs skips it too).
+        if (sweepStale && env[WORKER_ENV_FLAG] !== '1' && !swept.has(root)) {
           swept.add(root);
           let line;
           try {

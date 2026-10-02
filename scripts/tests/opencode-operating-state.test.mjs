@@ -199,7 +199,7 @@ test('MACHINE ROLE appears when the project is the Sterling clone itself, and ne
   }
 });
 
-test('the undeclared-source scan discloses a tracked source file no toolchain covers, once per session', async () => {
+test('the undeclared-source scan discloses a tracked source file no toolchain covers, once per process', async () => {
   const dir = makeProject({ project_name: 'fixture-proj', toolchains: [{ adapter: 'node', path_globs: ['lib/**/*.mjs'], test_globs: ['tests/**'], run_commands: { test: 'node --test' } }] });
   try {
     const h = handler(dir, { sessions: { ses_root: {}, ses_other: {} } });

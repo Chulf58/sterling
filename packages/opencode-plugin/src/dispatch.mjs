@@ -149,19 +149,22 @@ export async function rootSessionGate(root, { session, sessionID, parents }) {
  * the first root request of a process (context.mjs). Inside one register lock
  * hold, every non-terminal dispatch-state record becomes terminal
  * {reason: 'session-boundary'}, old tombstones are pruned, and the register and
- * its orphaned staging files are deleted, in H1's order. Returns a line to show
- * the model when the sweep refused or could not take the lock, else ''.
+ * its orphaned staging files are deleted, in H1's order. Returns the text to show
+ * the model: a DEAD-DISPATCH RESIDUE line with the count of records it ended (as
+ * H1 reports residue), a line when it refused or could not take the lock, or ''.
  */
 export async function sweepStaleDispatches(root) {
   const transientDir = dirname(registerPath(root));
   try {
     mkdirSync(transientDir, { recursive: true });
     let refused = '';
+    let terminated = 0;
     await withRegisterLock(
       root,
       () => {
         const sweep = sessionBoundarySweep(root, { now: Date.now() });
         if (sweep.refused) refused = sweep.refused;
+        terminated = sweep.terminated ?? 0;
         rmSync(registerPath(root), { force: true });
         const registerBasename = basename(registerPath(root));
         for (const f of readdirSync(transientDir)) {
@@ -170,7 +173,15 @@ export async function sweepStaleDispatches(root) {
       },
       { retryMs: 100, timeoutMs: 2000 }
     );
-    return refused ? `STERLING DISPATCH SWEEP: ${refused}` : '';
+    const lines = [];
+    if (terminated) {
+      lines.push(
+        `DEAD-DISPATCH RESIDUE (OpenCode process start): ${terminated} dispatch record(s) a previous OpenCode process left live were ended (session-boundary) and the dispatch register was cleared. ` +
+          'Those subagents belonged to that process and cannot be resumed from this one: check git status for files they may have left half-written, and re-dispatch if the work is still needed.'
+      );
+    }
+    if (refused) lines.push(`STERLING DISPATCH SWEEP: ${refused}`);
+    return lines.join('\n\n');
   } catch (e) {
     if (e?.code !== 'register_lock_held') throw e;
     return `STERLING DISPATCH SWEEP SKIPPED: ${render(e)}. Dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;

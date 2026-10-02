@@ -454,8 +454,10 @@ test('the first root context of a process sweeps dispatch records a dead process
     const second = await setup(p.dir, { ses_root2: {}, ses_kid: { parentID: 'ses_root2' } });
     await second.ctx.hooks.session.context({ sessionID: 'ses_kid', agent: 'sterling/scout', system: [], messages: [], tools: {} });
     assert.ok(stateRecords(p.dir).some((r) => r.tool_use_id === 'call_dead' && !r.terminal), 'a child context does not sweep');
-    await second.ctx.hooks.session.context({ sessionID: 'ses_root2', agent: 'build', system: [], messages: [], tools: {} });
+    const root2 = { sessionID: 'ses_root2', agent: 'build', system: [], messages: [], tools: {} };
+    await second.ctx.hooks.session.context(root2);
     assert.ok(stateRecords(p.dir).every((r) => r.terminal), 'the stale record is terminal after the sweep');
+    assert.match(root2.system.map((x) => x.text).join('\n'), /DEAD-DISPATCH RESIDUE \(OpenCode process start\): 1 dispatch record/, 'the sweep says how many records it ended');
     assert.equal(existsSync(join(p.dir, '.sterling', 'transient', 'dispatch-register.json')), false, 'the register is cleared, as H1 clears it');
     assert.equal(server.liveDispatch(p.dir).live, false);
     await second.cleanup?.();
@@ -512,6 +514,27 @@ test('a torn notices file cannot reject the event handler, so the subscription l
     await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_unknown' } });
     assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /settle skipped: could not check whether session ses_unknown is a child/);
     await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('the maintenance worker child never sweeps: a parent\'s live background implementor stays live', async () => {
+  const p = makeProject({ records: [] });
+  try {
+    const parent = await setup(p.dir, { ses_root: {}, ses_impl: { parentID: 'ses_root' } });
+    const { before, result } = bgCall('call_live_impl', 'ses_impl');
+    await parent.ctx.hooks.tool['execute.before'](before);
+    await parent.ctx.hooks.tool['execute.after']({ ...before, status: 'completed', result });
+    const worker = await setup(p.dir, { ses_worker: {} }, { env: { STERLING_MAINTENANCE_WORKER: '1' } });
+    const ci = { sessionID: 'ses_worker', agent: 'build', system: [], messages: [], tools: {} };
+    await worker.ctx.hooks.session.context(ci);
+    assert.ok(ci.system.length, 'the worker child still gets its context');
+    assert.ok(stateRecords(p.dir).some((r) => r.tool_use_id === 'call_live_impl' && !r.terminal), "the parent's dispatch is still live");
+    assert.ok(registerRows(p.dir).some((r) => r.agent_id === 'ses_impl' && !r.ended), 'and its register round');
+    assert.equal(server.liveDispatch(p.dir).live, true);
+    await worker.cleanup?.();
+    await parent.cleanup?.();
   } finally {
     p.cleanup();
   }

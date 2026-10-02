@@ -115,7 +115,7 @@ export function createSterlingServer(deps = {}) {
   }
 
   const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore });
-  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
+  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, env: deps.env ?? process.env, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
   const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
   const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
   const dispatch = createDispatchHandlers({ rootOf, fenced });
