@@ -207,7 +207,7 @@ test('sterling-check.mjs: authoring bakes the clone path; installed bakes NO pat
     const empty = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, 'nothing-here'), XDG_CACHE_HOME: join(home, 'nothing-here') }, encoding: 'utf8', timeout: 30_000 });
     assert.equal(empty.status, 3, 'no installed version: exit 3 (the check never ran)');
     assert.match(empty.stderr, /no installed Sterling found under .*plugins.cache .*opencode.npm/);
-    assert.match(empty.stderr, /claude plugin install sterling@sterling .*opencode plugin add @chulf58\/sterling/, 'generated from a copy under neither root: both remedies');
+    assert.match(empty.stderr, /claude plugin install sterling@sterling .*opencode plugin add "github:Chulf58\/sterling#semver:>=0\.18\.0"/, 'generated from a copy under neither root: both remedies');
 
     // A newer copy in OpenCode's npm cache wins over the Claude Code cache's 1.10.0.
     const npmCopy = join(home, 'xdg', 'opencode', 'npm', '@chulf58', 'sterling@latest', '1759500000000', 'node_modules', '@chulf58', 'sterling');

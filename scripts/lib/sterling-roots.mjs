@@ -1,6 +1,6 @@
 // The one resolver for installed Sterling copies, on both hosts (board item
 // parity-p7-standalone-install-and-update-on-a-machine-with-op, slice S1; decisions
-// sterling-on-opencode-distributes-as-npm-package-via-opencode-plugin-add and
+// sterling-on-opencode-installs-from-a-git-release-branch-v2 and
 // dual-host-post-update-sync-newest-copy-wins). Every caller that looks for an
 // installed Sterling uses this module, so the install roots are named here only.
 //
@@ -8,8 +8,10 @@
 //   claude-code  <CLAUDE_CONFIG_DIR or ~/.claude>/plugins/cache/<marketplace>/sterling/<version>/
 //   opencode     <XDG_CACHE_HOME or ~/.cache>/opencode/npm/<key>/<timestamp>/node_modules/@chulf58/sterling/
 //                (finding 3b0d9ea0: `opencode plugin add` installs there and every update adds a
-//                new timestamp dir; the key is `name@spec`, so the scope may or may not be its
-//                own directory level, which is why the walk is depth-bounded instead of fixed.)
+//                new timestamp dir; the key is `name@spec` for a registry spec, so the scope may
+//                or may not be its own directory level, and `git-<slug>-<sha12>` for the Git spec
+//                Sterling ships with (STERLING_GIT_SPEC; measured 2026-10-02 on OpenCode 2.0.21),
+//                which is why the walk is depth-bounded instead of fixed.)
 // VERSION: read from the copy's own manifest, never from a directory name. A claude-code
 //   copy reads .claude-plugin/plugin.json first, an opencode copy package.json first; the
 //   other file is the fallback. A copy with neither, or with an unparsable one, is skipped
@@ -30,6 +32,16 @@
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
+
+/**
+ * The Git spec OpenCode installs Sterling from (decision
+ * sterling-on-opencode-installs-from-a-git-release-branch-v2): the v<version> tags on the
+ * opencode-release branch that /sterling:merge writes. `>=` rather than `^0.18.0`, which
+ * would stop at 0.18.x. `opencode plugin update` takes this string as configured. The
+ * install remedy inside RESOLVER_SOURCE spells it out, because that source is inlined
+ * into generated files; a test pins the two together.
+ */
+export const STERLING_GIT_SPEC = 'github:Chulf58/sterling#semver:>=0.18.0';
 
 /** The import lines a generated file needs before RESOLVER_SOURCE. */
 export const RESOLVER_IMPORTS = [
@@ -156,8 +168,8 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
 // host null: the asking host is unknown, so both commands are named.
 function sterlingInstallRemedy(host) {
   if (host === 'claude-code') return 'claude plugin install sterling@sterling';
-  if (host === 'opencode') return 'opencode plugin add @chulf58/sterling';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add @chulf58/sterling for OpenCode';
+  if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
   throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
 }
 
@@ -199,8 +211,8 @@ export const sterlingNotFoundMessage = api.sterlingNotFoundMessage;
 /** ('claude-code' | 'opencode' | null) -> how to update an installed copy; throws on any other host. */
 export function sterlingUpdateRemedy(host) {
   if (host === 'claude-code') return '/plugin (Installed tab → Update) or `claude plugin update sterling@<marketplace>`';
-  if (host === 'opencode') return '`opencode plugin update @chulf58/sterling`';
-  if (host === null) return '`claude plugin update sterling@<marketplace>` (Claude Code) or `opencode plugin update @chulf58/sterling` (OpenCode)';
+  if (host === 'opencode') return `\`opencode plugin update "${STERLING_GIT_SPEC}"\``;
+  if (host === null) return `\`claude plugin update sterling@<marketplace>\` (Claude Code) or \`opencode plugin update "${STERLING_GIT_SPEC}"\` (OpenCode)`;
   throw new Error(`sterlingUpdateRemedy: unknown host ${JSON.stringify(host)}`);
 }
 

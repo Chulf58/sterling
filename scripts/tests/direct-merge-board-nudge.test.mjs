@@ -342,6 +342,8 @@ test('4 [never-a-gate]: with an intersecting user todo present, the exit code an
 
     assert.ok(Object.prototype.hasOwnProperty.call(baselineJson, 'pushed'), "baseline stdout JSON must carry a 'pushed' key");
     assert.ok(Object.prototype.hasOwnProperty.call(nudgeJson, 'pushed'), "nudge-present stdout JSON must carry a 'pushed' key");
+    assert.equal(baselineJson.opencode_release, 'skipped', 'a hobby merge reports the OpenCode release step as opencode_release (here skipped: not the Sterling package)');
+    assert.equal('npm_publish' in baselineJson, false, 'the npm publish step is gone');
 
     const baselineKeys = Object.keys(baselineJson).sort();
     const nudgeKeys = Object.keys(nudgeJson).sort();
@@ -349,6 +351,27 @@ test('4 [never-a-gate]: with an intersecting user todo present, the exit code an
   } finally {
     baseline.cleanup();
     withNudge.cleanup();
+  }
+});
+
+test('a merge whose push to origin fails still reports opencode_release (skipped) in its stdout JSON', () => {
+  const { dir, cleanup } = makeGitProjectNoRun('sterling-dm-push-fails-');
+  try {
+    openStore(dir).close();
+    git(dir, ['remote', 'add', 'origin', join(dir, 'no-such-origin.git')]);
+    git(dir, ['checkout', '-b', 'feat/push-fails']);
+    writeFileSync(join(dir, 'src', 'x.mjs'), 'export const x = 2;\n');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', 'change x']);
+    const r = runDirectMerge(dir);
+    assert.equal(r.status, 1, `a failed push exits 1 — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /PUSH to origin FAILED/);
+    let json;
+    assert.doesNotThrow(() => { json = JSON.parse(r.stdout); }, 'stdout must be pure JSON');
+    assert.equal(json.pushed, false);
+    assert.equal(json.opencode_release, 'skipped', 'commands/merge.md: the stdout JSON always carries opencode_release');
+  } finally {
+    cleanup();
   }
 });
 

@@ -19,6 +19,7 @@ import {
   installHostOf,
   RESOLVER_SOURCE,
   RESOLVER_IMPORTS,
+  STERLING_GIT_SPEC,
 } from '../lib/sterling-roots.mjs';
 
 const tmp = (p) => mkdtempSync(join(tmpdir(), p));
@@ -172,7 +173,7 @@ test('nothing installed: null, and the not-found message names both roots, the s
     const oc = sterlingNotFoundMessage('opencode', {}, home);
     assert.ok(oc.includes(claudeCache(home)) && oc.includes(npmCache(home)), oc);
     assert.match(oc, /skipped .*1\.0\.0: no \.claude-plugin\/plugin\.json or package\.json/);
-    assert.match(oc, /opencode plugin add @chulf58\/sterling/);
+    assert.ok(oc.includes(`opencode plugin add "${STERLING_GIT_SPEC}"`), oc);
     assert.doesNotMatch(oc, /claude plugin install/);
     assert.match(sterlingNotFoundMessage('claude-code', {}, home), /claude plugin install sterling@sterling/);
   } finally {
@@ -180,12 +181,25 @@ test('nothing installed: null, and the not-found message names both roots, the s
   }
 });
 
+test('a Git-spec install (cache key git-<slug>-<sha12>, measured on OpenCode 2.0.21) is found, newest timestamp first', () => {
+  const home = tmp('sr-home-');
+  try {
+    opencodeCopy(home, '1790954287307', '0.18.53', ['git-sterling-85dff39ff2ae']);
+    const later = opencodeCopy(home, '1790954332021', '0.18.54', ['git-sterling-85dff39ff2ae']);
+    assert.deepEqual(newestInstalledSterling({}, home), { root: later, version: '0.18.54', host: 'opencode' });
+  } finally {
+    rm(home);
+  }
+});
+
 test('remedies per host; an unknown host names both; a misspelt host is a loud error', () => {
   assert.equal(sterlingInstallRemedy('claude-code'), 'claude plugin install sterling@sterling');
-  assert.equal(sterlingInstallRemedy('opencode'), 'opencode plugin add @chulf58/sterling');
-  assert.match(sterlingInstallRemedy(null), /claude plugin install sterling@sterling.*opencode plugin add @chulf58\/sterling/);
+  assert.equal(STERLING_GIT_SPEC, 'github:Chulf58/sterling#semver:>=0.18.0', 'a range with no upper bound, so 0.19 and 1.0 are found too');
+  assert.equal(sterlingInstallRemedy('opencode'), `opencode plugin add "${STERLING_GIT_SPEC}"`, 'the inlined RESOLVER_SOURCE literal matches the exported spec, quoted for the shell');
+  assert.ok(sterlingInstallRemedy(null).includes(`opencode plugin add "${STERLING_GIT_SPEC}" for OpenCode`));
+  assert.match(sterlingInstallRemedy(null), /^claude plugin install sterling@sterling for Claude Code, or /);
   assert.match(sterlingUpdateRemedy('claude-code'), /\/plugin .*claude plugin update sterling@/);
-  assert.equal(sterlingUpdateRemedy('opencode'), '`opencode plugin update @chulf58/sterling`');
+  assert.equal(sterlingUpdateRemedy('opencode'), `\`opencode plugin update "${STERLING_GIT_SPEC}"\``, 'plugin update takes the target as configured in opencode.json');
   assert.match(sterlingUpdateRemedy(null), /claude plugin update.*opencode plugin update/);
   assert.throws(() => sterlingInstallRemedy('claude'), /unknown host/);
   assert.throws(() => sterlingUpdateRemedy('vscode'), /unknown host/);
