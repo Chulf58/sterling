@@ -7951,13 +7951,6 @@ function repoRel(toolPath, cwd) {
   }
 }
 
-// scripts/hooks/lib/working-tree.mjs
-function isForeignTree(record, root) {
-  const wt = record?.working_tree;
-  if (!wt) return false;
-  return !(root && sameLocationAnyHost(String(wt), root));
-}
-
 // scripts/hooks/lib/hazard-lane-mode.mjs
 import { readFileSync as readFileSync3 } from "node:fs";
 import { join as join4 } from "node:path";
@@ -8761,6 +8754,13 @@ function hazardLaneMode(input2, root) {
   }
 }
 
+// scripts/hooks/lib/dispatch-prompt.mjs
+var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
+function extractPathCandidates(text) {
+  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
+  return [...new Set(found)];
+}
+
 // scripts/hooks/lib/plan-lock.mjs
 import { closeSync, constants as FS, existsSync as existsSync4, fstatSync, mkdirSync as mkdirSync3, openSync, readSync, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join5 } from "node:path";
@@ -8868,11 +8868,34 @@ function readLock(sterlingDir) {
   return { lock: parsed, raw };
 }
 
-// scripts/hooks/lib/dispatch-prompt.mjs
-var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
-function extractPathCandidates(text) {
-  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
-  return [...new Set(found)];
+// scripts/hooks/lib/working-tree.mjs
+function isForeignTree(record, root) {
+  const wt = record?.working_tree;
+  if (!wt) return false;
+  return !(root && sameLocationAnyHost(String(wt), root));
+}
+
+// scripts/hooks/lib/operating-state.mjs
+function readProjectConfig(cwd) {
+  let config = null;
+  let configUnreadable = false;
+  try {
+    config = loadConfig(cwd);
+  } catch {
+    config = null;
+    configUnreadable = true;
+  }
+  if (config !== null && (typeof config !== "object" || Array.isArray(config))) {
+    configUnreadable = true;
+  }
+  return { config, configUnreadable };
+}
+function tddPostureLine({ config, configUnreadable }) {
+  if (configUnreadable) {
+    return "TDD posture: UNKNOWN \u2014 the project config could not be read, so config.tdd.enabled could not be determined. This is NOT the default posture: repair the config, or state your posture explicitly.";
+  }
+  const tddOn = config?.tdd?.enabled !== false;
+  return `TDD posture: tests-first ${tddOn ? "ON" : "OFF"} (config.tdd.enabled \u2014 TUI System tab; explicit asks still work)`;
 }
 
 // scripts/hooks/lib/delivery.mjs
@@ -9597,65 +9620,147 @@ function payloadHeaderLine(rel) {
   return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
 }
 
-// scripts/hooks/h19-dispatch-staging.mjs
+// scripts/hooks/lib/stage-brief.mjs
 var SUBJECT_MAX_DECISIONS = 5;
 var EXEMPT_AGENT_TYPES = /* @__PURE__ */ new Set(["statusline-setup"]);
 var RETURN_CONTRACT = "STERLING DEFAULT RETURN CONTRACT \u2014 Explicit output requirements in your agent definition or dispatch brief take precedence. Otherwise, return the conclusion, not a work transcript: maximum ~250 words; no pasted diffs, raw logs, or step-by-step narration. Report only the outcome, decisive evidence, relevant files/tests, and unresolved risks.";
-var input = readStdin();
-var TDD_POSTURE_AGENT_TYPES = /* @__PURE__ */ new Set(["implementor"]);
-var tddPostureLine = "";
-try {
-  if (TDD_POSTURE_AGENT_TYPES.has(input.agent_type)) {
-    let cfg = null;
-    let cfgUnusable = false;
-    try {
-      cfg = loadConfig(input.cwd);
-    } catch {
-      cfg = null;
-      cfgUnusable = true;
-    }
-    if (cfg !== null && (typeof cfg !== "object" || Array.isArray(cfg))) {
-      cfgUnusable = true;
-    }
-    if (cfgUnusable) {
-      tddPostureLine = "TDD posture: UNKNOWN \u2014 the project config could not be read, so config.tdd.enabled could not be determined. This is NOT the default posture: repair the config, or state your posture explicitly.";
-    } else {
-      const tddOn = cfg?.tdd?.enabled !== false;
-      tddPostureLine = `TDD posture: tests-first ${tddOn ? "ON" : "OFF"} (config.tdd.enabled \u2014 TUI System tab; explicit asks still work)`;
-    }
-  }
-} catch {
-}
-var PLAN_LINE_AGENT_TYPES = /* @__PURE__ */ new Set(["implementor"]);
+var CHROME_AGENT_TYPES = /* @__PURE__ */ new Set(["implementor"]);
 var PLAN_TITLE_MAX = 120;
 var PLAN_PATH_MAX = 320;
-var activePlanLine = "";
+function dispatchChrome(cwd, agentType) {
+  let tddPostureLine3 = "";
+  let activePlanLine2 = "";
+  if (!CHROME_AGENT_TYPES.has(agentType)) return { tddPostureLine: tddPostureLine3, activePlanLine: activePlanLine2 };
+  try {
+    tddPostureLine3 = tddPostureLine(readProjectConfig(cwd));
+  } catch {
+  }
+  try {
+    const read = readLock(sterlingDirOf(cwd));
+    if (read.lock) {
+      const title = sanitizeForContext(read.lock.title, PLAN_TITLE_MAX);
+      const path = sanitizeForContext(read.lock.plan_path, PLAN_PATH_MAX);
+      if (title || path) {
+        activePlanLine2 = `ACTIVE PLAN: ${title || "(untitled plan)"} (${path || "no path recorded"}) \u2014 this lane belongs to one of its slices; the plan governs the objective's scope and ordering, standing store decisions still govern mechanisms.`;
+      }
+    }
+  } catch {
+  }
+  return { tddPostureLine: tddPostureLine3, activePlanLine: activePlanLine2 };
+}
+function composeContext({ agentType, activePlanLine: activePlanLine2 = "", payload = "", tddPostureLine: tddPostureLine3 = "", unattributableLine: unattributableLine2 = "" }) {
+  const out = [];
+  if (activePlanLine2) out.push(activePlanLine2);
+  if (payload) out.push(payload);
+  if (tddPostureLine3) out.push(tddPostureLine3);
+  if (unattributableLine2) out.push(unattributableLine2);
+  if (!EXEMPT_AGENT_TYPES.has(agentType)) out.push(RETURN_CONTRACT);
+  return out.join("\n\n");
+}
+var chromePart = (text) => ({ kind: "ordinary", pinned: true, contentClass: "chrome", text });
+function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = [], trailingChrome = [] }) {
+  const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
+  const rels = [...new Set(candidates.map((c) => repoRel(c, cwd)).filter(Boolean))].filter(
+    (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/")
+  );
+  const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !isForeignTree(r, cwd)) : [];
+  const hazards = rels.length ? store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 }) : [];
+  const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }) : [];
+  const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
+  const subjectMatches = [];
+  const seenSubject = /* @__PURE__ */ new Set();
+  for (const p of prompts) {
+    const subjectText = stripReviewTerritoryLine(p);
+    const terms = extractAxisTerms(subjectText, MAX_RANK_TERMS);
+    if (terms.length < AXIS_MIN_HITS) continue;
+    const candidatesBySubject = [...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }), ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })];
+    for (const r of candidatesBySubject) {
+      if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
+      const hits = axisHits(r, terms);
+      if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(r, subjectText)) {
+        seenSubject.add(r.id);
+        subjectMatches.push({ record: r, hits, prompt: subjectText });
+      }
+    }
+  }
+  subjectMatches.sort((a, b) => b.hits.length - a.hits.length);
+  if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) return null;
+  const gPath = guardPath(cwd, guardId.agentId, guardId.sessionId);
+  const guard = readGuard(gPath);
+  const hazardFresh = (r) => hazardMode === "pointer" ? !isKnownDelivered(guard, r) : !isSubstanceDelivered(guard, r);
+  const freshHazards = hazards.filter(hazardFresh);
+  const freshOwners = owners.filter((r) => isOwnerDiscoveryOnly(r) ? !isDiscoveryDelivered(guard, r) : !isSubstanceDelivered(guard, r));
+  const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !isDiscoveryDelivered(guard, r)));
+  const freshSubject = subjectMatches.filter((x) => x.record.type === "anti_pattern" ? hazardFresh(x.record) : !isDiscoveryDelivered(guard, x.record));
+  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return null;
+  loadConfig(cwd);
+  const subjectHazards = freshSubject.filter((x) => x.record.type === "anti_pattern").map((x) => x.record);
+  const subjectDecisions = freshSubject.filter((x) => x.record.type === "decision").map((x) => x.record);
+  const totalCap = resolveTotalCap(cwd);
+  const leadingChromeParts = leadingChrome.map(chromePart);
+  const trailingChromeParts = trailingChrome.map(chromePart);
+  const packageHazards = hazardMode === "whole" ? cappedHazards([...freshHazards, ...subjectHazards]) : null;
+  const channelCap = (list) => packageHazards ? packageHazards.filter((r) => list.includes(r)).length : HAZARD_CAP;
+  const channelCapLabel = (cap) => cap < HAZARD_CAP ? `cap ${HAZARD_CAP} per package, shared across the path and subject channels` : void 0;
+  const pathHazardCap = channelCap(freshHazards);
+  const subjectHazardCap = channelCap(subjectHazards);
+  const parts = [];
+  if (freshOwners.length || freshHazards.length || freshDecisions.length) {
+    const decisionWiden = `knowledge_query types:["decision"] file_keys:[${rels.map((r) => `"${r}"`).join(",")}] cap:${freshDecisions.length}`;
+    const ownerParts = freshOwners.map((r) => {
+      const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { root: cwd });
+      const contentClass = isOwnerDiscoveryOnly(r) ? "discovery" : "substance";
+      return { kind: "ordinary", contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
+    });
+    const decisionParts = freshDecisions.length ? [decisionPointerPart(rels.join(", "), freshDecisions, { widen: decisionWiden })] : [];
+    parts.push(
+      // PINNED (P5), like H20's header: under disclosure pressure at the
+      // transport ceiling a whole hazard falls to its pointer before a pinned
+      // header is evicted, so the lane never gets unattributed hazards.
+      chromePart(payloadHeaderLine(rels.join(", "))),
+      ...hazardParts(freshHazards, { fileKeys: rels, mode: hazardMode, cap: pathHazardCap, capLabel: channelCapLabel(pathHazardCap) }),
+      ...ownerParts,
+      ...decisionParts
+    );
+  }
+  if (subjectHazards.length || subjectDecisions.length) {
+    const matched = boundedTermClause(freshSubject.flatMap((x) => x.hits));
+    const central = boundedTermClause(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)));
+    const subjectLabel = `your task's SUBJECT`;
+    const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
+    const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectHazards.length || 1}`;
+    const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectDecisions.length || 1}`;
+    parts.push(
+      chromePart(
+        `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching ${subjectLabel} (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`
+      ),
+      ...hazardParts(subjectHazards, { remedy, matchLabel: "for this subject", mode: hazardMode, cap: subjectHazardCap, capLabel: channelCapLabel(subjectHazardCap) }),
+      ...subjectDecisions.length ? [decisionPointerPart("(subject match)", subjectDecisions, { widen: decisionRemedy, cap: SUBJECT_MAX_DECISIONS, remedy: decisionRemedy, matchLabel: "for this subject" })] : []
+    );
+  }
+  const assembled = assembleDelivery([...leadingChromeParts, ...parts, ...trailingChromeParts], totalCap);
+  return {
+    text: assembled.text,
+    // Guard only what the assembler says it actually emitted — never a re-scan
+    // of the composed text (decision 92088a62's ONE ASSEMBLER CONTRACT).
+    record: () => {
+      markSubstanceDelivered(guard, assembled.emittedSubstance);
+      markDiscoveryDelivered(guard, assembled.emittedDiscovery);
+      writeGuard(gPath, guard);
+    }
+  };
+}
+
+// scripts/hooks/h19-dispatch-staging.mjs
+var input = readStdin();
+var { tddPostureLine: tddPostureLine2, activePlanLine } = dispatchChrome(input.cwd, input.agent_type);
 var unattributableLine = "";
 var startPhase = "store";
 function notStagedLine(kase) {
   return `STERLING DISPATCH STAGING (H19): this spawn's dispatch could not be attributed at Start [${kase}] \u2014 YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first Read/Edit.`;
 }
-try {
-  if (PLAN_LINE_AGENT_TYPES.has(input.agent_type)) {
-    const read = readLock(sterlingDirOf(input.cwd));
-    if (read.lock) {
-      const title = sanitizeForContext(read.lock.title, PLAN_TITLE_MAX);
-      const path = sanitizeForContext(read.lock.plan_path, PLAN_PATH_MAX);
-      if (title || path) {
-        activePlanLine = `ACTIVE PLAN: ${title || "(untitled plan)"} (${path || "no path recorded"}) \u2014 this lane belongs to one of its slices; the plan governs the objective's scope and ordering, standing store decisions still govern mechanisms.`;
-      }
-    }
-  }
-} catch {
-}
 function combinedContext(payload) {
-  const out = [];
-  if (activePlanLine) out.push(activePlanLine);
-  if (payload) out.push(payload);
-  if (tddPostureLine) out.push(tddPostureLine);
-  if (unattributableLine) out.push(unattributableLine);
-  if (!EXEMPT_AGENT_TYPES.has(input.agent_type)) out.push(RETURN_CONTRACT);
-  return out.join("\n\n");
+  return composeContext({ agentType: input.agent_type, activePlanLine, payload, tddPostureLine: tddPostureLine2, unattributableLine });
 }
 function envelope(out) {
   return JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: out } });
@@ -9680,129 +9785,26 @@ async function main(input2) {
       unattributableLine = notStagedLine(resolution.case);
     }
     const prompts = typeof resolution.prompt === "string" ? [resolution.prompt] : [];
-    const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
-    const rels = [...new Set(candidates.map((c) => repoRel(c, input2.cwd)).filter(Boolean))].filter(
-      (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/")
-    );
-    const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !isForeignTree(r, input2.cwd)) : [];
-    const hazards = rels.length ? store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 }) : [];
-    const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }) : [];
-    const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
-    const subjectMatches = [];
-    const seenSubject = /* @__PURE__ */ new Set();
-    for (const p of prompts) {
-      const subjectText = stripReviewTerritoryLine(p);
-      const terms = extractAxisTerms(subjectText, MAX_RANK_TERMS);
-      if (terms.length < AXIS_MIN_HITS) continue;
-      const candidatesBySubject = [
-        ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
-        ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
-      ];
-      for (const r of candidatesBySubject) {
-        if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
-        const hits = axisHits(r, terms);
-        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(r, subjectText)) {
-          seenSubject.add(r.id);
-          subjectMatches.push({ record: r, hits, prompt: subjectText });
-        }
-      }
-    }
-    subjectMatches.sort((a, b) => b.hits.length - a.hits.length);
-    if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) return finish("");
-    const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
-    const guard = readGuard(gPath);
-    const hazardMode = hazardLaneMode(input2, input2.cwd);
-    const hazardFresh = (r) => hazardMode === "pointer" ? !isKnownDelivered(guard, r) : !isSubstanceDelivered(guard, r);
-    const freshHazards = hazards.filter(hazardFresh);
-    const freshOwners = owners.filter((r) => isOwnerDiscoveryOnly(r) ? !isDiscoveryDelivered(guard, r) : !isSubstanceDelivered(guard, r));
-    const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !isDiscoveryDelivered(guard, r)));
-    const freshSubject = subjectMatches.filter(
-      (x) => x.record.type === "anti_pattern" ? hazardFresh(x.record) : !isDiscoveryDelivered(guard, x.record)
-    );
-    if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return finish("");
-    loadConfig(input2.cwd);
-    const subjectHazards = freshSubject.filter((x) => x.record.type === "anti_pattern").map((x) => x.record);
-    const subjectDecisions = freshSubject.filter((x) => x.record.type === "decision").map((x) => x.record);
-    const totalCap = resolveTotalCap(input2.cwd);
-    const leadingChromeParts = activePlanLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: activePlanLine }] : [];
-    const trailingChromeParts = [
-      ...tddPostureLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: tddPostureLine }] : [],
-      ...unattributableLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: unattributableLine }] : [],
-      ...!EXEMPT_AGENT_TYPES.has(input2.agent_type) ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: RETURN_CONTRACT }] : []
-    ];
-    const packageHazards = hazardMode === "whole" ? cappedHazards([...freshHazards, ...subjectHazards]) : null;
-    const channelCap = (list) => packageHazards ? packageHazards.filter((r) => list.includes(r)).length : HAZARD_CAP;
-    const channelCapLabel = (cap) => cap < HAZARD_CAP ? `cap ${HAZARD_CAP} per package, shared across the path and subject channels` : void 0;
-    const pathHazardCap = channelCap(freshHazards);
-    const subjectHazardCap = channelCap(subjectHazards);
-    const assemble = () => {
-      const parts = [];
-      if (freshOwners.length || freshHazards.length || freshDecisions.length) {
-        const decisionWiden = `knowledge_query types:["decision"] file_keys:[${rels.map((r) => `"${r}"`).join(",")}] cap:${freshDecisions.length}`;
-        const ownerParts = freshOwners.map((r) => {
-          const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, { root: input2.cwd });
-          const contentClass = isOwnerDiscoveryOnly(r) ? "discovery" : "substance";
-          return { kind: "ordinary", contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
-        });
-        const decisionParts = freshDecisions.length ? [decisionPointerPart(rels.join(", "), freshDecisions, { widen: decisionWiden })] : [];
-        parts.push(
-          // PINNED (P5), like H20's header: under disclosure pressure at the
-          // transport ceiling a whole hazard falls to its pointer before a
-          // pinned header is evicted, so the lane never gets unattributed hazards.
-          { kind: "ordinary", pinned: true, contentClass: "chrome", text: payloadHeaderLine(rels.join(", ")) },
-          ...hazardParts(freshHazards, { fileKeys: rels, mode: hazardMode, cap: pathHazardCap, capLabel: channelCapLabel(pathHazardCap) }),
-          ...ownerParts,
-          ...decisionParts
-        );
-      }
-      if (subjectHazards.length || subjectDecisions.length) {
-        const matched = boundedTermClause(freshSubject.flatMap((x) => x.hits));
-        const central = boundedTermClause(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)));
-        const subjectLabel = `your task's SUBJECT`;
-        const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
-        const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectHazards.length || 1}`;
-        const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectDecisions.length || 1}`;
-        parts.push(
-          {
-            text: `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching ${subjectLabel} (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`,
-            kind: "ordinary",
-            pinned: true,
-            // P5, as the path header above
-            contentClass: "chrome"
-          },
-          ...hazardParts(subjectHazards, {
-            remedy,
-            matchLabel: "for this subject",
-            mode: hazardMode,
-            cap: subjectHazardCap,
-            capLabel: channelCapLabel(subjectHazardCap)
-          }),
-          ...subjectDecisions.length ? [
-            decisionPointerPart("(subject match)", subjectDecisions, {
-              widen: decisionRemedy,
-              cap: SUBJECT_MAX_DECISIONS,
-              remedy: decisionRemedy,
-              matchLabel: "for this subject"
-            })
-          ] : []
-        );
-      }
-      const allParts = [...leadingChromeParts, ...parts, ...trailingChromeParts];
-      const assembled = assembleDelivery(allParts, totalCap);
-      return { payload: assembled.text, emittedSubstance: assembled.emittedSubstance, emittedDiscovery: assembled.emittedDiscovery };
-    };
-    const built = assemble();
-    const out = built.payload;
-    const recordStaged = () => {
-      markSubstanceDelivered(guard, built.emittedSubstance);
-      markDiscoveryDelivered(guard, built.emittedDiscovery);
-      writeGuard(gPath, guard);
-    };
+    const staged = stageBrief({
+      store,
+      cwd: input2.cwd,
+      prompts,
+      guardId: { agentId: input2.agent_id, sessionId: input2.session_id },
+      hazardMode: hazardLaneMode(input2, input2.cwd),
+      leadingChrome: activePlanLine ? [activePlanLine] : [],
+      trailingChrome: [
+        ...tddPostureLine2 ? [tddPostureLine2] : [],
+        ...unattributableLine ? [unattributableLine] : [],
+        ...!EXEMPT_AGENT_TYPES.has(input2.agent_type) ? [RETURN_CONTRACT] : []
+      ]
+    });
+    if (!staged) return finish("");
+    const out = staged.text;
     if (!out) {
-      recordStaged();
+      staged.record();
       return allow();
     }
-    return exitAfterWrite(envelope(out), 0, { onWritten: recordStaged });
+    return exitAfterWrite(envelope(out), 0, { onWritten: staged.record });
   } catch (e) {
     try {
       process.stderr.write(`H19: dispatch staging failed: ${e && e.message || e}

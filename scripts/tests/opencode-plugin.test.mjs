@@ -113,7 +113,8 @@ function stubCtx(directory, sessions = {}) {
   };
 }
 
-async function setupPlugin(dir, deps = {}, sessions = {}) {
+// The default knows ses_1 as a root session (no parentID): only a root session settles (dispatch.mjs rootSessionGate).
+async function setupPlugin(dir, deps = {}, sessions = { ses_1: {} }) {
   const plugin = server.createSterlingServer({ claudeOnPath: () => false, ...deps });
   const ctx = stubCtx(dir, sessions);
   const cleanup = await plugin.setup(ctx);
@@ -320,6 +321,37 @@ test('rotation restore: the first new root session gets the note once and consum
     assert.match(await contextFor(ctx, 'ses_new'), /ROTATION-SLICE-42/, 'the restore stays in that session\'s later turns');
     assert.doesNotMatch(await contextFor(ctx, 'ses_next'), /ROTATION RESTORE/, 'a second new session does not get it');
     await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('the maintenance worker child (STERLING_MAINTENANCE_WORKER=1) leaves the rotation note, the pending notices and the TUI selection for the user\'s session', async () => {
+  const p = makeProject();
+  try {
+    writeNote(p.dir);
+    server.addNotice(p.dir, 'A NOTICE FOR THE USER', NOW);
+    const s = new SterlingStore(join(p.dir, '.sterling', 'sterling.db'));
+    s.writeSelection('feature_article', p.article.id, NOW);
+    s.close();
+    const worker = await setupPlugin(p.dir, { env: { STERLING_MAINTENANCE_WORKER: '1' } }, { ses_worker: { time: { created: after } } });
+    const text = await contextFor(worker.ctx, 'ses_worker');
+    assert.match(text, /STERLING STATUS/, 'the worker child still gets its context');
+    assert.doesNotMatch(text, /ROTATION RESTORE|A NOTICE FOR THE USER/);
+    assert.equal(noteExists(p.dir), true, 'the rotation note is not consumed');
+    const pi = promptInput('judge the queue');
+    await worker.ctx.hooks.session.prompt(pi);
+    assert.equal(pi.prompt.text, 'judge the queue', 'the selection is not appended');
+    await worker.cleanup?.();
+
+    const user = await setupPlugin(p.dir, {}, { ses_user: { time: { created: after } } });
+    const userText = await contextFor(user.ctx, 'ses_user');
+    assert.match(userText, /ROTATION-SLICE-42/, "the user's new session gets the restore");
+    assert.match(userText, /A NOTICE FOR THE USER/, 'and the notice, still unshown');
+    const up = promptInput('next');
+    await user.ctx.hooks.session.prompt(up);
+    assert.match(up.prompt.text, /TUI selection \(one-shot\)/, 'and the selection');
+    await user.cleanup?.();
   } finally {
     p.cleanup();
   }

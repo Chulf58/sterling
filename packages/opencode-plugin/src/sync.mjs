@@ -21,6 +21,7 @@ import { postUpdateApplies, postUpdateSync, runStepAsync } from '../../../script
 import { sterlingRoot } from './layer.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
+import { inWorkerChild } from './worker.mjs';
 import { installHostOf } from '../../../scripts/lib/sterling-roots.mjs';
 
 /**
@@ -93,7 +94,8 @@ export function createSessionSync(deps = {}) {
   }
 
   async function syncOnce(root, sessionID) {
-    if (started) return;
+    // The maintenance worker child leaves the sync to the user's process (worker.mjs inWorkerChild).
+    if (started || inWorkerChild(env)) return;
     const pluginRoot = deps.sterlingRoot ?? sterlingRoot();
     let applies;
     try {

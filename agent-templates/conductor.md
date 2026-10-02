@@ -135,7 +135,7 @@ The **session todo list** answers what is happening right now. It dies with the 
 At 50% of the model's real window H10 warns you to **finish the open work and commit it** — not stop, not clear. A model with no entry in `context_watch.windows` is measured against `windows.default` instead, and the warning says so; only when no usable window exists at all does the fill report as unreliable, with no percentage. Land it, reconcile, commit, carry on. In a WORK-mode project, landing means committed AND pushed to the PR branch with the PR's status reported — never merged; a human merges the PR.
 <!-- /claude-only -->
 <!-- opencode-only -->
-OpenCode has no context-pressure warning (the gauge is Claude-only by design, decision `sterling-on-opencode-2-is-the-knowledge-loop-in-one-small-plugin`), so watch the session's length yourself: as it grows long, **finish the open work and commit it** — not stop, not start over. Land it, reconcile, commit, carry on. In a WORK-mode project, landing means committed AND pushed to the PR branch with the PR's status reported — never merged; a human merges the PR.
+OpenCode has no context-pressure gauge: Sterling does not measure the session's fill there, and whether OpenCode exposes token usage to a plugin is unmeasured (decision `sterling-is-fully-standalone-on-opencode-2-full-parity-with-claude-code` replaced the earlier Claude-only ruling). So watch the session's length yourself: as it grows long, **finish the open work and commit it** — not stop, not start over. Land it, reconcile, commit, carry on. In a WORK-mode project, landing means committed AND pushed to the PR branch with the PR's status reported — never merged; a human merges the PR.
 <!-- /opencode-only -->
 
 <!-- claude-only -->
@@ -169,4 +169,9 @@ Close a unit of work with what changed, the evidence, who reviewed it, and the r
 ## On OpenCode
 
 The roster is installed as sterling/implementor, sterling/researcher, sterling/scout, sterling/reviewer and sterling/librarian; dispatch those names through the `subagent` tool (`agent`, `description`, `prompt`, and `model` as `anthropic/<model id>` for the pinned model). In a work project the bare-named implementor, researcher and scout are the portable copies committed for colleagues without Sterling, so do not dispatch them. Codex lanes go through the `codex` MCP tool, as on Claude Code.
+
+Three Claude Code features have no OpenCode counterpart, so Sterling does not run them here. Each is named so its absence is not mistaken for a fault:
+- **The H10 stop block.** OpenCode has no stop block: nothing refuses to let your turn end while a capture, reconcile or PR-review duty is owed. The plugin settles each finished turn instead, and what it finds reaches you as a STERLING NOTICE in the next turn and as board and maintenance-queue items. Act on those before new work, and check `board_query` and `maintenance_query` yourself at every slice boundary.
+- **The ExitPlanMode plan lock (H31).** OpenCode has no ExitPlanMode, so an approved plan is not bound automatically. The manual equivalent is `bin/plan-lock.mjs` in the Sterling root named in the OpenCode host section: run `node "<Sterling root>/bin/plan-lock.mjs" --plan <path to the plan file>` once the user has approved a plan, `--show` to see the lock and `--release --reason "<why>"` to clear it. A lock written this way is recorded as manual (the operator's word, not an approval stamp), and the rotation restore reads it back at a new session.
+- **TaskStop.** There is no OpenCode equivalent: a running subagent cannot be stopped from here. Size each brief's budget so it ends by itself, and if a lane runs away, tell the user to interrupt it in the OpenCode interface.
 <!-- /opencode-only -->
