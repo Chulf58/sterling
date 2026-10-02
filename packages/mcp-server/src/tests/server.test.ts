@@ -91,6 +91,10 @@ const SERVED_TOOLS = [
   // STAYS for both channels (decision config-writes-get-a-config-set-mcp-
   // tool-with-positive-key-allowlist-raw-edit-denial-stays).
   'config_set',
+  // Domains D2 (board 25c0d858; decision projects-mount-domains-and-sibling-
+  // projects): read or set a mounted domain's description, the store_meta row
+  // that decides which knowledge belongs in that domain.
+  'domain_describe',
 ];
 
 async function harness() {
@@ -310,6 +314,19 @@ test('MCP: research_finding gains file_keys — create normalizes it, query join
     });
     assert.equal(refused.isError, true, 'reference_material still has no file_keys field — the write is refused, not silently accepted');
     assert.match((refused.content as { text: string }[])[0].text, /'file_keys'/, 'the refusal names the offending field');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('MCP integration: domain_describe is served, refuses an unmounted domain in-band, and refuses unknown parameters (board 25c0d858)', async () => {
+  const { client, cleanup } = await harness();
+  try {
+    const unmounted = await client.callTool({ name: 'domain_describe', arguments: { domain: 'nope' } });
+    assert.equal(unmounted.isError, true);
+    assert.match((unmounted.content as { text: string }[])[0].text, /'nope' is not mounted/);
+    const bogus = await client.callTool({ name: 'domain_describe', arguments: { domain: 'nope', text: 'x' } });
+    assert.equal(bogus.isError, true, 'the input schema is strict');
   } finally {
     await cleanup();
   }

@@ -192,7 +192,7 @@ const STORE_WRITE_TOOLS = [
   'knowledge_create', 'knowledge_split', 'knowledge_extract', 'knowledge_retire', 'knowledge_supersede',
   'knowledge_update', 'knowledge_append', 'knowledge_edit', 'knowledge_line_ref_fix', 'knowledge_array_remove', 'knowledge_promote',
   'knowledge_link', 'board_add', 'board_remove', 'board_update', 'board_edit', 'maintenance_remove',
-  'config_set', 'no_capture', 'concept_designed', 'capture_pending',
+  'config_set', 'no_capture', 'concept_designed', 'capture_pending', 'domain_describe',
 ];
 // Every registered Sterling tool is classified READ or WRITE, so a newly
 // registered tool cannot slip past the implementor's deny-list unclassified.

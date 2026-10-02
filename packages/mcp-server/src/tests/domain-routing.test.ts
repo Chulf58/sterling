@@ -85,22 +85,32 @@ test('knowledge_update of a domain record supersedes IN the domain store; projec
 // sterling-claude-code-scale-down-boundary, 2ad87dd1) — createRun, getRun,
 // runState, handoffWrite, agentExit and runSignal no longer exist.
 
-test('§3.3 project-store-then-promote: a project-scoped reference surfaces ONE promotion_review; domain-scoped and non-candidate types do not', () => {
+// Domains D2 (decision projects-mount-domains-and-sibling-projects, PROPOSALS
+// ruling): the mint is driven by the domain's description, not by the type.
+// The harness describes the mount as 'test domain genesys', whose subject terms
+// are 'domain' and 'genesys', so a record fits when its text has both.
+const fittingRef = (scope: string) => ({ ...refFields(scope), summary: 'how the genesys domain routes a call' });
+
+test('§3.3 project-store-then-promote: a project-scoped record that fits the domain description surfaces ONE promotion_review; domain-scoped and non-fitting records do not', () => {
   const { tools, cleanup } = harness();
   try {
-    // project-scoped reference/research → domain-candidate → surfaces a promotion_review
-    const ref = tools.knowledgeCreate('reference_material', refFields('project')).record;
+    // project-scoped, no file_keys, fits the description → surfaces a promotion_review
+    const ref = tools.knowledgeCreate('reference_material', fittingRef('project')).record;
     const research = tools.knowledgeCreate('research_finding', {
-      scope: 'project', question: 'genesys retry semantics?', answer: 'a', source_urls: ['https://x'], source_date: '2026-06-16', capture_date: '2026-06-16',
+      scope: 'project', question: 'genesys domain retry semantics?', answer: 'a', source_urls: ['https://x'], source_date: '2026-06-16', capture_date: '2026-06-16',
     }).record;
-    // a reference already scoped to the domain is NOT a candidate (it is already shared)
-    tools.knowledgeCreate('reference_material', refFields('domain:genesys'));
-    // a non reference/research type is never a promotion candidate
+    // any promotable durable type is a candidate now, a decision included
+    const dec = tools.knowledgeCreate('decision', { title: 'genesys domain retry policy', statement: 's', alternatives_rejected: [], rationale: 'r' }).record;
+    // a record already scoped to the domain is NOT a candidate (it is already shared)
+    tools.knowledgeCreate('reference_material', fittingRef('domain:genesys'));
+    // a record that does not fit the description is not a candidate
     tools.knowledgeCreate('decision', { title: 'd', statement: 's', alternatives_rejected: [], rationale: 'r' });
+    // a record tied to this repo's files stays project, so it is not a candidate
+    tools.knowledgeCreate('decision', { title: 'genesys domain file rule', statement: 's', alternatives_rejected: [], rationale: 'r', file_keys: ['src/genesys.ts'] });
 
     const reviews = tools.maintenanceQuery({ system_reason: 'promotion_review', cap: 100 });
     const links = reviews.map((r) => (r as { feature_link?: string }).feature_link).sort();
-    assert.deepEqual(links, [ref.id, research.id].sort(), 'exactly the two project-scoped candidates surfaced, one item each');
+    assert.deepEqual(links, [ref.id, research.id, dec.id].sort(), 'exactly the three fitting project-scoped candidates surfaced, one item each');
   } finally {
     cleanup();
   }
@@ -122,7 +132,7 @@ test('§3.3 no domain mounted → no promotion noise: a project reference surfac
 test('§3.3 knowledge_promote: moves a project record into the domain store as a tombstone, draining its promotion_review', () => {
   const { store, tools, cleanup } = harness();
   try {
-    const ref = tools.knowledgeCreate('reference_material', refFields('project')).record;
+    const ref = tools.knowledgeCreate('reference_material', fittingRef('project')).record;
     const review = tools.maintenanceQuery({ system_reason: 'promotion_review', cap: 100 }).find((t) => (t as { feature_link?: string }).feature_link === ref.id);
     assert.ok(review, 'a project-scoped reference surfaced a promotion_review to drain');
 
