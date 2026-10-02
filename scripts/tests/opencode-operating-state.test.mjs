@@ -83,7 +83,7 @@ function makeProject(config = { project_name: 'fixture-proj' }) {
   return dir;
 }
 
-/** createContextHandler with every collaborator stubbed except the ones under test. */
+/** Builds a createContextHandler whose collaborators are stubbed, except the ones under test. stale-claim-ok */
 function handler(dir, { sessions = {}, pluginRoot, getSession } = {}) {
   const session = {
     get: async ({ sessionID }) => {
