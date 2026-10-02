@@ -216,11 +216,11 @@ test('applyModeToggle: an unreadable config reports the failure through onError 
 // portable agents; the handoff projection runs from init or /sterling:update. So
 // the work notice must name /sterling:update (or init) as the path that writes
 // BOTH file sets, and must never claim sync-agents writes the handoff files.
-// The notice is composed inline in main.ts (the terminal entry, which cannot be
-// imported under test), so this pins its source text.
+// The notice is composed inline in controller.ts (shared by the terminal entry
+// and the OpenCode plugin), so this pins its source text.
 test('mode toggle notice: work names /sterling:update (or init) for both file sets, never sync-agents for the handoff files', () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const src = readFileSync(join(here, '..', '..', 'src', 'main.ts'), 'utf8');
+  const src = readFileSync(join(here, '..', '..', 'src', 'controller.ts'), 'utf8');
   const work = src.match(/'project mode set to work[^']*'/)?.[0];
   assert.ok(work, 'the work notice is present');
   assert.match(work, /\/sterling:update/);
