@@ -34,7 +34,7 @@ function harness(domains: string[], opts: { missing?: string[] } = {}) {
   const tools = new SterlingTools({
     store,
     config,
-    domains: mountedDomainSurface(store, all),
+    domains: mountedDomainSurface(store),
     now: () => '2026-10-03T12:00:00.000Z',
     newId: randomUUID,
   });

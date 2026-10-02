@@ -183,14 +183,11 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   // never fails on a configured domain whose store is missing (board 675daf9d
   // (c) ruling): it is skipped and announced on stderr, one line per domain, and
   // stays on store.missingDomains. Creating it is an explicit createDomain call.
-  const mounts = resolveDomainMounts(config);
-  const store = new MountedStores(storePath, mounts, { skipMissing: true });
+  const store = new MountedStores(storePath, resolveDomainMounts(config), { skipMissing: true });
   for (const m of store.missingDomains) process.stderr.write(missingDomainWarning(m) + '\n');
   // store lives at <project>/.sterling/sterling.db (§2.3) — project root is two up;
-  // §3.2.5 repo-located doc mtime checks resolve against it. The domain surface
-  // gets the same mount list the stores were opened from, so domain_describe
-  // writes the database that is actually mounted.
-  const tools = new SterlingTools({ store, config, repoRoot: dirname(dirname(storePath)), domains: mountedDomainSurface(store, mounts) });
+  // §3.2.5 repo-located doc mtime checks resolve against it
+  const tools = new SterlingTools({ store, config, repoRoot: dirname(dirname(storePath)), domains: mountedDomainSurface(store) });
   // knowledge_create's description names the domains mounted at boot (Domains
   // D2). Each create receipt lists them live as mounted_domains, so a
   // description changed later through domain_describe shows there.
@@ -209,7 +206,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_create',
     {
       description:
-        "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." +
+        "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." +
         createDomainsNote,
       inputSchema: strict({ type: z.string(), fields: knowledgeCreateFieldsSchema, projection: z.enum(['full', 'digest']).optional() }),
     },
@@ -653,7 +650,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'domain_describe',
     {
       description:
-        "Read or set a mounted domain's description: the one line that says which knowledge belongs in that shared domain store. knowledge_create lists it, and the promotion_review mint matches project records against it. Omit `description` to read it ({domain, description}, null when unset); pass it to set it ({domain, description, previous_description, updated:true}). An unmounted domain and a blank description are refused with nothing written.",
+        "Read or set a mounted domain's description: the one line that says which knowledge belongs in that shared domain store. knowledge_create lists it, and the promotion_review mint matches project records against it. Promotion proposals go only to project records with no file_keys (an article's files count; a reference_material's location does not). Omit `description` to read it ({domain, description}, null when unset); pass it to set it ({domain, description, previous_description, updated:true}). An unmounted domain and a blank description are refused with nothing written.",
       inputSchema: strict({ domain: z.string(), description: z.string().optional() }),
     },
     ({ domain, description }) => json(tools.domainDescribe({ domain, description }))

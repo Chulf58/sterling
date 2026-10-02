@@ -21,9 +21,6 @@ import {
   classifyClaimPath,
   fitDomains,
   MountedStores,
-  SterlingStore,
-  DOMAIN_DESCRIPTION_KEY,
-  type DomainMount,
   type QueryOptions,
   type ToolStore,
 } from '@sterling/store';
@@ -652,9 +649,8 @@ export interface ToolDeps {
   newId?: () => string;
   /** project root for §3.2.5 repo-located doc mtime checks; absent → check inert */
   repoRoot?: string;
-  /** The mounted-domain surface (Domains D2). Absent: derived read-only from a
-   *  MountedStores `store` (domain_describe cannot SET through it), or none at
-   *  all for a plain single store. server.ts passes mountedDomainSurface. */
+  /** The mounted-domain surface (Domains D2). Absent: derived from a
+   *  MountedStores `store`, or none at all for a plain single store. */
   domains?: DomainSurface;
 }
 
@@ -670,40 +666,20 @@ export interface DomainSurface {
   names(): string[];
   /** A mounted domain's description, or undefined when its store has none. */
   description(name: string): string | undefined;
-  /** Store a mounted domain's description (already trimmed and non-blank). */
+  /** Store a mounted domain's description (the store trims it). */
   setDescription(name: string, description: string): void;
   /** Configured domains that are NOT mounted because their store is missing. */
   missing(): string[];
 }
 
-/**
- * The DomainSurface over a MountedStores. `mounts` is the list the stores were
- * opened from (the same resolveDomainMounts result); it is how a SET finds the
- * domain's database. MountedStores exposes getMeta through domainDescription
- * but no setter, so a set opens that one domain store on a second connection,
- * writes the store_meta row and closes it. SQLite serializes the write, and the
- * mounted handle reads the committed value on its next getMeta. Without
- * `mounts` the surface is read-only and a set is refused loudly.
- */
-export function mountedDomainSurface(stores: MountedStores, mounts?: DomainMount[]): DomainSurface {
+/** The DomainSurface over a MountedStores: every read and the one write go
+ *  through the stores' own surface (setDomainDescription), so the store
+ *  package stays the one write path. */
+export function mountedDomainSurface(stores: MountedStores): DomainSurface {
   return {
     names: () => stores.domainNames(),
     description: (name) => stores.domainDescription(name),
-    setDescription: (name, description) => {
-      if (!stores.domainNames().includes(name)) throw new Error(`domain '${name}' is not mounted`);
-      const mount = mounts?.find((m) => m.name === name);
-      if (!mount) {
-        throw new Error(
-          `domain '${name}' is mounted, but this tool surface was built without its store path, so its description cannot be set here; nothing was written`
-        );
-      }
-      const store = new SterlingStore(mount.dbPath);
-      try {
-        store.setMeta(DOMAIN_DESCRIPTION_KEY, description);
-      } finally {
-        store.close();
-      }
-    },
+    setDescription: (name, description) => stores.setDomainDescription(name, description),
     missing: () => stores.missingDomains.map((m) => m.name),
   };
 }

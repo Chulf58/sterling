@@ -430,6 +430,45 @@ test('MountedStores.domainDescription: an unmounted domain is refused, never ans
   }
 });
 
+test('MountedStores.setDomainDescription: sets the trimmed description on that domain store, durably, and touches no other store', () => {
+  const { dir, stores, cleanup } = harness(['genesys', 'salesforce']);
+  try {
+    stores.setDomainDescription('genesys', '  Genesys Cloud: queues and call routing  ');
+    assert.equal(stores.domainDescription('genesys'), 'Genesys Cloud: queues and call routing', 'stored trimmed, read back through the same handle');
+    assert.equal(stores.domainDescription('salesforce'), 'test domain salesforce', 'a sibling domain is untouched');
+    assert.equal(stores.project.getMeta('description'), undefined, 'the project store gains no description');
+    const reopened = new SterlingStore(join(dir, 'domains', 'genesys', 'sterling.db'));
+    try {
+      assert.equal(reopened.getMeta('description'), 'Genesys Cloud: queues and call routing', 'durable in the domain database');
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('MountedStores.setDomainDescription: an unmounted domain and a blank description are refused, nothing written', () => {
+  const { stores, cleanup } = harness(['genesys']);
+  try {
+    assert.throws(() => stores.setDomainDescription('nope', 'x'), /'nope' is not mounted/);
+    assert.throws(() => stores.setDomainDescription('genesys', '   '), /blank/);
+    assert.equal(stores.domainDescription('genesys'), 'test domain genesys');
+  } finally {
+    cleanup();
+  }
+});
+
+test('MountedStores.setDomainDescription: refused inside a transaction open on the project mount (mount affinity)', () => {
+  const { stores, cleanup } = harness(['genesys']);
+  try {
+    assert.throws(() => stores.withTransaction(() => stores.setDomainDescription('genesys', 'inside')), /setDomainDescription/);
+    assert.equal(stores.domainDescription('genesys'), 'test domain genesys');
+  } finally {
+    cleanup();
+  }
+});
+
 // -- read shares (board 675daf9d (b)) ------------------------------------------
 
 const shareDec = (title: string, scope = 'project') => ({ ...env('decision', scope), title, statement: 'shareterm', alternatives_rejected: [], rationale: 'r' });
