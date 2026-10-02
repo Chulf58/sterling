@@ -450,12 +450,15 @@ try {
 // queued locally because gh could not file them (lib/operating-state.mjs). A local
 // file read only, never a network call.
 let issueReportsContext = '';
+let issueReportsRoot = null;
 try {
-  const line = pendingIssueReportsLine({ cwd: input.cwd, pluginRoot: pluginRoot() });
-  if (line) issueReportsContext = `\n\n${line}`;
+  issueReportsRoot = pluginRoot();
 } catch {
-  // fail-open — an unresolved plugin root costs only this line
+  // a root that cannot be resolved stays null: the line then names the bin by
+  // its plugin-relative path instead of being dropped
 }
+const issueReportsLine = pendingIssueReportsLine({ cwd: input.cwd, pluginRoot: issueReportsRoot });
+if (issueReportsLine) issueReportsContext = `\n\n${issueReportsLine}`;
 
 // CLONE-CURRENCY SIGNAL (closes the gap decision foreign_be9168e8 surfaced and parked:
 // "a machine that never runs /sterling:update has no passive signal that it is
