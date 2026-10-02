@@ -113,6 +113,25 @@ test('controller: a model swap also re-renders the Sterling-full OpenCode agents
   }
 });
 
+test('controller: an OpenCode re-render failure is folded into the notice; the swap decision is still recorded', async () => {
+  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
+  // a directory where the implementor file belongs makes the re-render throw (EISDIR)
+  mkdirSync(join(f.dir, '.opencode', 'agents', 'sterling', 'implementor.md'), { recursive: true });
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.applyEffects([
+      { type: 'model_swap', key: 'implementor', from: { model: 'claude-a', effort: 'high' }, to: { model: 'claude-b', effort: 'low' }, agents: ['implementor'], decisionTitle: 'swap-decision-title' },
+    ]);
+    assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).models.implementor.model, 'claude-b');
+    assert.match(ctl.ui().notice ?? '', /OpenCode agent re-render failed/);
+    const decisions = ctl.store.query({ types: ['decision'], cap: 10 }) as Array<{ title: string }>;
+    assert.ok(decisions.some((d) => d.title === 'swap-decision-title'), 'the swap decision was written');
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test('controller: a model swap in a project without OpenCode agents writes no .opencode files', async () => {
   const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
   const ctl = openDashboard(f.storePath);

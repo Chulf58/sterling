@@ -48525,7 +48525,7 @@ var normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
 var IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
-  "import { join } from 'node:path';",
+  "import { dirname, join } from 'node:path';",
   "import { pathToFileURL } from 'node:url';"
 ].join("\n");
 function refusal(item, what, remedy) {
@@ -48745,10 +48745,14 @@ function openDashboard(storePath2, options = {}) {
           now: nowISO
         }));
       }
-      const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model });
-      const refused = (oc.rows ?? []).filter((r) => r.status === "refused");
-      if (refused.length)
-        ui = { ...ui, notice: `model swap for '${e.key}': OpenCode agent file(s) not updated \u2014 ${refused.map((r) => r.detail).join("; ")}` };
+      try {
+        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model });
+        const refused = (oc.rows ?? []).filter((r) => r.status === "refused");
+        if (refused.length)
+          ui = { ...ui, notice: `model swap for '${e.key}': OpenCode agent file(s) not updated \u2014 ${refused.map((r) => r.detail).join("; ")}` };
+      } catch (ocErr) {
+        ui = { ...ui, notice: `model swap for '${e.key}': config.models and the Claude agents were updated, but the OpenCode agent re-render failed \u2014 ${ocErr.message}` };
+      }
       store.create({
         id: randomUUID3(),
         type: "decision",

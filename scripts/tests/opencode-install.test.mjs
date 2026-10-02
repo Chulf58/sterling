@@ -311,7 +311,7 @@ function stubSterlingRoot(dir, tag) {
   mkdirSync(join(dir, 'mcp'), { recursive: true });
   writeFileSync(join(dir, 'opencode', 'sterling-server.mjs'), `export default { id: 'sterling.server', async setup(ctx) { return '${tag}:' + ctx.location.directory; } };\n`);
   writeFileSync(join(dir, 'opencode', 'sterling-tui', 'package.json'), JSON.stringify({ type: 'module', exports: { './tui': './tui.js' } }));
-  writeFileSync(join(dir, 'opencode', 'sterling-tui', 'tui.js'), `export default { id: 'sterling.tui.${tag}' };\n`);
+  writeFileSync(join(dir, 'opencode', 'sterling-tui', 'tui.js'), `export default { id: 'sterling.tui.${tag}', setup(api) { return '${tag}:' + api.location.directory; } };\n`);
   writeFileSync(join(dir, 'mcp', 'sterling-mcp.mjs'), `console.log('${tag} ' + JSON.stringify(process.argv.slice(2)));\n`);
   return dir;
 }
@@ -330,9 +330,70 @@ test('server and TUI shims delegate to the resolved Sterling; non-Sterling proje
   assert.equal(await server.setup({ location: { directory: dir } }), `clone:${dir}`);
   const tuiCopy = join(tmp('oc-tui-'), 'tui.mjs');
   copyFileSync(join(plugins, 'sterling-tui', 'tui.tsx'), tuiCopy);
-  assert.deepEqual((await import(pathToFileURL(tuiCopy).href)).default, { id: 'sterling.tui.clone' });
+  const tui = (await import(pathToFileURL(tuiCopy).href)).default;
+  assert.equal(tui.id, 'sterling.tui.clone');
+  // A non-Sterling project gets a no-op: the Sterling plugin's setup never runs.
+  const plain = tui.setup({ location: { directory: tmp('oc-plain-') } });
+  assert.equal(typeof plain, 'function', 'a no-op disposer');
+  assert.equal(tui.setup({ location: { directory: dir } }), `clone:${dir}`);
   const mcp = spawnSync(process.execPath, [mcpLauncherPath({ home }), '--store', '.sterling/sterling.db'], { encoding: 'utf8' });
   assert.equal(mcp.stdout.trim(), 'clone ["--store",".sterling/sterling.db"]');
+});
+
+test('no Sterling installed: the TUI shim imports cleanly and its setup logs ONE line and is a no-op; the server shim does the same inside a Sterling project', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  setupOpenCode({ projectDir: dir, pluginRoot: repoRoot, env: { HOME: home }, home, installed: true, probe: OC2 });
+  writeFileSync(join(dir, '.sterling', 'sterling.db'), '');
+  const plugins = join(opencodeConfigDir({ env: {}, home }), 'plugins');
+  const tuiCopy = join(tmp('oc-tui-'), 'tui.mjs');
+  copyFileSync(join(plugins, 'sterling-tui', 'tui.tsx'), tuiCopy);
+  const env = { ...process.env, HOME: home };
+  delete env.CLAUDE_CONFIG_DIR;
+  const probe = (shim, label) => spawnSync(process.execPath, ['--input-type=module', '-e', `
+    const p = (await import(${JSON.stringify(pathToFileURL(shim).href)})).default;
+    const r = await p.setup({ location: { directory: ${JSON.stringify(dir)} } });
+    console.log('${label}', typeof r);`], { encoding: 'utf8', env });
+  const t = probe(tuiCopy, 'tui');
+  assert.equal(t.status, 0, t.stderr);
+  assert.equal(t.stdout.trim(), 'tui function');
+  const tLines = t.stderr.trim().split('\n');
+  assert.equal(tLines.length, 1, t.stderr);
+  assert.match(tLines[0], /^Sterling not found; the dashboard is off\. Remove .*plugins\/sterling-tui or reinstall Sterling/);
+  const s = probe(join(plugins, 'sterling.js'), 'server');
+  assert.equal(s.status, 0, s.stderr);
+  assert.equal(s.stdout.trim(), 'server undefined');
+  const sLines = s.stderr.trim().split('\n');
+  assert.equal(sLines.length, 1, s.stderr);
+  assert.match(sLines[0], /^Sterling not found; the knowledge loop is off\. Remove .*plugins\/sterling\.js or reinstall Sterling/);
+});
+
+test('default_agent is set only when the conductor file is Sterling\'s; a refused conductor leaves it unset', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  mkdirSync(join(dir, STERLING_AGENTS_SUBDIR), { recursive: true });
+  writeFileSync(join(dir, STERLING_AGENTS_SUBDIR, 'conductor.md'), 'my own conductor\n');
+  const r = run(dir, home);
+  assert.equal(statusOf(r, '/conductor.md'), 'refused');
+  const cfg = JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8'));
+  assert.equal(cfg.default_agent, undefined);
+  assert.match(r.rows.find((x) => x.item === '.opencode/opencode.json').detail, /default_agent not set/);
+  rmSync(join(dir, STERLING_AGENTS_SUBDIR, 'conductor.md'));
+  run(dir, home);
+  assert.equal(JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).default_agent, CONDUCTOR_AGENT);
+});
+
+test('the TUI shim package.json is stamped: an edited one is refused and left byte-identical', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const pkgPath = join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling-tui', 'package.json');
+  assert.match(readFileSync(pkgPath, 'utf8'), /content_hash=[0-9a-f]{64}/);
+  assert.equal(statusOf(run(dir, home), 'sterling-tui/package.json'), 'matches');
+  const edited = readFileSync(pkgPath, 'utf8').replace('"./tui.tsx"', '"./mine.tsx"');
+  writeFileSync(pkgPath, edited);
+  assert.equal(statusOf(run(dir, home), 'sterling-tui/package.json'), 'refused');
+  assert.equal(readFileSync(pkgPath, 'utf8'), edited);
 });
 
 test('installed-copy shims pick the highest installed version at run time', () => {

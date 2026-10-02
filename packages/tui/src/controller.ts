@@ -234,9 +234,15 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // 2b. the Sterling-full OpenCode conductor and roster, re-rendered with the
       // matching OpenCode model (decision 48903a6f, DASHBOARD FUNCTIONS (a)). A
       // project that never installed them is skipped; a refused file is said.
-      const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model });
-      const refused = (oc.rows ?? []).filter((r) => r.status === 'refused');
-      if (refused.length) ui = { ...ui, notice: `model swap for '${e.key}': OpenCode agent file(s) not updated — ${refused.map((r) => r.detail).join('; ')}` };
+      // Its own try: an OpenCode failure is reported, and the decision below
+      // is still written for the Claude swap that already happened.
+      try {
+        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model });
+        const refused = (oc.rows ?? []).filter((r) => r.status === 'refused');
+        if (refused.length) ui = { ...ui, notice: `model swap for '${e.key}': OpenCode agent file(s) not updated — ${refused.map((r) => r.detail).join('; ')}` };
+      } catch (ocErr) {
+        ui = { ...ui, notice: `model swap for '${e.key}': config.models and the Claude agents were updated, but the OpenCode agent re-render failed — ${(ocErr as Error).message}` };
+      }
 
       // 3. durable swap decision (AC5) — reuse the decision type (decision foreign_98064d77)
       store.create({

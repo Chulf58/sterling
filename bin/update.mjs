@@ -9874,6 +9874,7 @@ var GENERATED_TRACKED = [
   /^mcp\/\.build-id$/,
   /^tui\/sterling-tui\.mjs$/,
   /^opencode\/sterling-server\.mjs$/,
+  /^opencode\/sterling-tui\/sterling-tui\.bundle\.tsx$/,
   /^architecture\.md$/,
   /^rulings\.md$/
 ];

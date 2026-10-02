@@ -26,6 +26,8 @@ type Route = { type: string; [k: string]: unknown };
 /** The slice of the OpenCode 2 TUI plugin context (@opencode/plugin/tui
  *  Context) this file uses; that package is not a dependency of this repo. */
 interface Api {
+  /** OpenCode 2's project location; undefined outside a project. */
+  location?: { directory: string };
   theme?: { text?: { muted?: string }; background?: { raised?: { high?: string } } };
   keymap: {
     layer(input: () => unknown): void;
@@ -41,15 +43,17 @@ interface Api {
 
 const [tick, setTick] = createSignal(0);
 let dashboard: Guarded<DashboardController> | undefined;
+/** The project directory setup() resolved: api.location.directory, else process.cwd(). */
+let projectDir = process.cwd();
 
 /** The shared controller, opened on first use. A failed open is retried on the
  *  next read, so a store created after OpenCode started is picked up. */
 function controller(): Guarded<DashboardController> {
   if (dashboard?.ok) return dashboard;
-  const storePath = findStorePath(process.cwd(), process.env);
+  const storePath = findStorePath(projectDir, process.env);
   dashboard = storePath
     ? guarded('Sterling store', () => openDashboard(storePath))
-    : { ok: false, error: `no .sterling/sterling.db at or above ${process.cwd()}` };
+    : { ok: false, error: `no .sterling/sterling.db at or above ${projectDir}` };
   return dashboard;
 }
 
@@ -188,6 +192,10 @@ function FullView(props: { api: Api; close: () => void }) {
 export default {
   id: 'sterling.dashboard',
   setup(api: Api) {
+    // Outside a Sterling project the plugin is a no-op: no slot, command or route.
+    const dir = api.location?.directory ?? process.cwd();
+    if (!findStorePath(dir, process.env)) return () => {};
+    projectDir = dir;
     let back: Route = { type: 'home' };
     const open = () => {
       const current = api.ui.router.current();
