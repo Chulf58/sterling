@@ -2,13 +2,15 @@
 // (decision sterling-on-opencode-2-is-the-knowledge-loop-in-one-small-plugin).
 // It reuses the libraries Claude Code's hooks run on and changes none of them:
 //   1. session context: the Sterling layer (templates/target-claude-md.md, the
-//      file init renders into CLAUDE.md) with its Claude-only phrases mapped
-//      to OpenCode, an OpenCode host tail naming the resolved Sterling root, a
+//      file init renders into CLAUDE.md) with each template claude-only block
+//      swapped for its opencode-only partner (layer.mjs), an OpenCode host tail
+//      naming the resolved Sterling root, a
 //      status line, pending notices, and the rotation restore in the first new
 //      root session after a rotation note (scripts/hooks/lib/rotation-restore.mjs,
 //      shared with H1);
-//   2. execute.before/after on read, edit and write: H19-style knowledge
-//      delivery appended to the tool result;
+//   2. execute.before/after on read, edit, write and patch: H19-style knowledge
+//      delivery appended to the tool result; on shell, H19's Bash pointers for
+//      the paths the command names;
 //   3. session.execution.succeeded: settlement (mint reconcile duties, then
 //      advance the settled snapshot), the maintenance worker, and a notice the
 //      model sees at the next turn;

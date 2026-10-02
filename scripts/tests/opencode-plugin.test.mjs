@@ -175,6 +175,8 @@ test('the host tail names the Sterling root and the Claude Code surfaces OpenCod
     assert.ok(tail.includes(term), `host tail names ${term}`);
   }
   assert.ok(!tail.includes('${CLAUDE_PLUGIN_ROOT}'), 'the tail names the variable without the shell form, so the layer greps clean');
+  assert.match(tail, /Sterling's commands are registered as OpenCode slash commands under the same names/, 'config.mjs registers the commands, so the tail says so');
+  assert.doesNotMatch(tail, /Slash commands[^.]*absent/, 'slash commands are not described as absent');
   assert.match(server.opencodeHostTail(null), /could not be resolved/, 'an unresolved root is said out loud');
 });
 
@@ -201,7 +203,11 @@ test('the injected layer is fully host-mapped: no unmapped Claude-only phrase, e
     assert.match(layer, /\.opencode\/agents\/sterling\/conductor\.md/);
     assert.match(layer, /default_agent/);
     assert.match(layer, /reconcile_needed.*STERLING NOTICE/s, 'H7 is mapped to settlement notices');
-    assert.match(layer, /article_missing.*concept_article_missing.*not minted on OpenCode yet/s, 'the missing H10 demands are disclosed');
+    // Settlement mints all four H10 duties on this branch (settle.mjs), so the layer says so
+    // instead of disclosing them as missing (the old expectation encoded the earlier gap).
+    assert.match(layer, /capture_owed.*article_missing.*concept_article_missing.*research_owed/s, 'the four H10 duties are named as minted');
+    assert.doesNotMatch(layer, /not minted on OpenCode yet|OpenCode does not mint it yet/, 'no stale disclosure of missing H10 duties');
+    assert.doesNotMatch(layer, /not yet to shell or patch|but not the shell/, 'no stale disclosure of shell and patch gaps');
     assert.match(layer, /codex.*MCP server is configured/s);
     // Every /sterling:<command> named in the layer carries its OpenCode equivalent.
     for (const m of layer.matchAll(/\/sterling:([a-z][a-z-]*)/g)) {
