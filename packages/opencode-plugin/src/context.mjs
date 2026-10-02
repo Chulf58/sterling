@@ -137,7 +137,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         layer = `STERLING LAYER UNAVAILABLE: ${errText(e)}\n\n${opencodeHostTail(pluginRoot)}`;
       }
       const blocks = [layer, statusLine(root)];
-      const state = operatingStateLines(root, pluginRoot);
+      const state = operatingStateLines(root, pluginRoot, { opener: openStore });
       blocks.push(...state.lines);
       blocks.push(...maintenanceBlocks(root, state.config));
       const kind = await sessionKind(getSession?.(), input.sessionID, parents);

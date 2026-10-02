@@ -1,14 +1,16 @@
 // The host-neutral operating-state lines H1 states at SessionStart: the project
 // config read with its three states, MACHINE ROLE, TDD posture, Project mode and
-// the pending Sterling issue-report count.
+// the pending Sterling issue-report count, and the mounted domain lines.
 // Extracted from h1-session-start.mjs so the OpenCode context hook
 // (packages/opencode-plugin/src/context.mjs) renders the SAME text from the SAME
 // code (board cbee2b3d, audit f2ba68c2 row 2). Each line function returns the
 // bare line, or '' when the line is not stated; the caller adds its own
-// separator. Builtins and ./common.mjs only: hooks bundle this module.
+// separator. Builtins, sibling libs and @sterling/store only: hooks bundle this module.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { missingDomainWarning } from '@sterling/store';
 import { loadConfig } from './common.mjs';
+import { describeMountedDomains } from './subject-fan.mjs';
 
 /**
  * H1 is SOFT (banner + conventions + counts): a malformed config must cost the
@@ -147,4 +149,35 @@ export function pendingIssueReportsLine({ cwd, pluginRoot }) {
     `Sterling issue reports: ${count} queued in .sterling/${PENDING_ISSUE_REPORTS}, not yet filed on GitHub. ` +
     `Send them with ${flush} once gh is installed and logged in; the next report sends them too.`
   );
+}
+
+/**
+ * MOUNTED DOMAINS (decision projects-mount-domains-and-sibling-projects: each
+ * domain's description is shown at session start, and a missing one fails loud):
+ * one line per domain in config.stack_tags, in manifest order. A described domain
+ * states its description; a store with no description, a configured domain with
+ * no store (the shared missingDomainWarning text) and a store that cannot be read
+ * are each a ⚠ line. No domain configured means no line. An unreadable config, or
+ * malformed domain fields, is one UNKNOWN line, never silence. `opener(dbPath)`
+ * opens a domain store (the OpenCode plugin passes its own); a store is opened
+ * only when it already exists, never created. Never throws.
+ */
+export function mountedDomainLines({ config, configUnreadable, opener }) {
+  if (configUnreadable) {
+    return ['⚠ Mounted domains: UNKNOWN — the project config could not be read, so config.stack_tags (the domain list) could not be determined.'];
+  }
+  let domains;
+  try {
+    domains = describeMountedDomains(config, opener ? { opener } : {});
+  } catch (e) {
+    return [`⚠ Mounted domains: UNKNOWN — config.stack_tags or config.domain_paths is malformed (${(e && e.message) || e}).`];
+  }
+  return domains.map((d) => {
+    if (d.state === 'described') return `Mounted domain '${d.name}': ${d.description}`;
+    if (d.state === 'missing') return `⚠ ${missingDomainWarning(d)}`;
+    if (d.state === 'undescribed') {
+      return `⚠ Mounted domain '${d.name}' has NO description: its store at '${d.dbPath}' has no store_meta 'description', so nothing says which knowledge belongs in it. Give it one before writing knowledge to it.`;
+    }
+    return `⚠ Mounted domain '${d.name}': UNKNOWN — its store at '${d.dbPath}' could not be read (${d.error}), so its description is not known this session.`;
+  });
 }

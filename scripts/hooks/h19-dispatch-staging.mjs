@@ -35,7 +35,8 @@
 // other (mirrors H25's two-advisory merge), and both arms stay inside this
 // file's existing try/warnNonBlocking shape — the fold does not change h19's
 // own failure posture.
-import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, exitAfterWrite } from './lib/common.mjs';
+import { openSubjectFan } from './lib/subject-fan.mjs';
 import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
 // Path extraction, the path and subject channels, the delivery assembler, the plan
 // and TDD lines and the return contract all live in lib/stage-brief.mjs — one
@@ -67,7 +68,7 @@ const { tddPostureLine, activePlanLine } = dispatchChrome(input.cwd, input.agent
 // because no Start-time key exists for same-type parallel Starts. A throw
 // before attribution settles is the same unattributable Start and gets the
 // same line in the catch below, named by the PHASE that threw: 'store' ->
-// [store-unavailable] (openStore failed, attribution never attempted),
+// [store-unavailable] (openSubjectFan failed, attribution never attempted),
 // 'resolution' -> [resolution-failed] (resolveDispatchStart itself threw).
 let unattributableLine = '';
 let startPhase = 'store';
@@ -107,7 +108,9 @@ function finish(payload) {
 // no longer stop the statements after it the way its hard exit did.
 async function main(input) {
   try {
-    const store = openStore(input.cwd);
+    // The subject fan: the project store plus the mounted domains. stageBrief's
+    // path arm passes file_keys, which the fan answers from the project store only.
+    const store = openSubjectFan(input.cwd);
     if (!store) return finish(''); // not a Sterling project — no ceremony for the payload half (P1)
     startPhase = 'resolution';
 
