@@ -9434,6 +9434,7 @@ import { join as join11 } from "node:path";
 import { existsSync as existsSync8, readFileSync as readFileSync6, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join10, resolve as resolve3, sep } from "node:path";
+var STERLING_GIT_SPEC = "github:Chulf58/sterling#semver:>=0.18.0";
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -9556,8 +9557,8 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
 // host null: the asking host is unknown, so both commands are named.
 function sterlingInstallRemedy(host) {
   if (host === 'claude-code') return 'claude plugin install sterling@sterling';
-  if (host === 'opencode') return 'opencode plugin add @chulf58/sterling';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add @chulf58/sterling for OpenCode';
+  if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
   throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
 }
 
@@ -9586,6 +9587,12 @@ var scanInstalledSterling = api.scanInstalledSterling;
 var newestInstalledSterling = api.newestInstalledSterling;
 var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
+function sterlingUpdateRemedy(host) {
+  if (host === "claude-code") return "/plugin (Installed tab \u2192 Update) or `claude plugin update sterling@<marketplace>`";
+  if (host === "opencode") return `\`opencode plugin update "${STERLING_GIT_SPEC}"\``;
+  if (host === null) return `\`claude plugin update sterling@<marketplace>\` (Claude Code) or \`opencode plugin update "${STERLING_GIT_SPEC}"\` (OpenCode)`;
+  throw new Error(`sterlingUpdateRemedy: unknown host ${JSON.stringify(host)}`);
+}
 function canonical(p) {
   try {
     return realpathSync3(p);
@@ -9636,7 +9643,7 @@ var HOST_TEXT = {
 };
 var UPDATE_ROUTE = {
   "claude-code": "update it through /plugin (Installed tab \u2192 Update)",
-  opencode: "update it with `opencode plugin update @chulf58/sterling`"
+  opencode: `update it with ${sterlingUpdateRemedy("opencode")}`
 };
 var ASKING_HOST_INSTALL = { claude: "claude-code", opencode: "opencode" };
 function hostText(host) {

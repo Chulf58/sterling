@@ -9547,8 +9547,8 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
 // host null: the asking host is unknown, so both commands are named.
 function sterlingInstallRemedy(host) {
   if (host === 'claude-code') return 'claude plugin install sterling@sterling';
-  if (host === 'opencode') return 'opencode plugin add @chulf58/sterling';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add @chulf58/sterling for OpenCode';
+  if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
   throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
 }
 

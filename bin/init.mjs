@@ -10224,8 +10224,8 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
 // host null: the asking host is unknown, so both commands are named.
 function sterlingInstallRemedy(host) {
   if (host === 'claude-code') return 'claude plugin install sterling@sterling';
-  if (host === 'opencode') return 'opencode plugin add @chulf58/sterling';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add @chulf58/sterling for OpenCode';
+  if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
   throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
 }
 
@@ -11021,7 +11021,7 @@ function materializeTui({ pluginRoot: pluginRoot2, env = process.env, home = hom
   const base2 = materializedTuiRoot({ home });
   const src = join19(pluginRoot2, "opencode", "sterling-tui");
   const v = readCopyVersion(pluginRoot2, "opencode");
-  if (!v.version) return [refusal(`${fwd5(base2)}/`, `the version of ${fwd5(pluginRoot2)} cannot be read: ${v.reason}`, "reinstall Sterling (opencode plugin add @chulf58/sterling), then rerun /sterling:update")];
+  if (!v.version) return [refusal(`${fwd5(base2)}/`, `the version of ${fwd5(pluginRoot2)} cannot be read: ${v.reason}`, `reinstall Sterling (${sterlingInstallRemedy("opencode")}), then rerun /sterling:update`)];
   const missing2 = TUI_MATERIALIZED_FILES.filter((f) => !existsSync10(join19(src, f)));
   if (missing2.length) return [refusal(`${fwd5(base2)}/`, `${fwd5(src)} lacks ${missing2.join(", ")}, so there is no dashboard to copy`, "update Sterling, then rerun /sterling:update")];
   const rows = [];
@@ -11089,7 +11089,8 @@ function ensureTuiShim(tuiDir, shim) {
     ensureStampedFile(join19(tuiDir, "tui.tsx"), shim, `${fwd5(tuiDir)}/tui.tsx`)
   ];
 }
-var namesNpmPackage = (s2) => typeof s2 === "string" && (s2 === STERLING_NPM_PACKAGE || s2.startsWith(`${STERLING_NPM_PACKAGE}@`));
+var STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+var namesNpmPackage = (s2) => typeof s2 === "string" && (s2 === STERLING_NPM_PACKAGE || s2.startsWith(`${STERLING_NPM_PACKAGE}@`) || STERLING_GIT_REPO.test(s2.split("#")[0]));
 function npmCopyOnMachine({ env = process.env, home = homedir7() } = {}) {
   const copies = scanInstalledSterling(env, home).copies.filter((c) => c.host === "opencode");
   copies.sort((a, b) => compareSterlingVersions(a.version, b.version) || (a.root > b.root ? 1 : a.root < b.root ? -1 : 0));

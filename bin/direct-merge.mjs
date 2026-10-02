@@ -8102,8 +8102,8 @@ function newestInstalledSterling(env = process.env, home = homedir()) {
 // host null: the asking host is unknown, so both commands are named.
 function sterlingInstallRemedy(host) {
   if (host === 'claude-code') return 'claude plugin install sterling@sterling';
-  if (host === 'opencode') return 'opencode plugin add @chulf58/sterling';
-  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add @chulf58/sterling for OpenCode';
+  if (host === 'opencode') return 'opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0"';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add "github:Chulf58/sterling#semver:>=0.18.0" for OpenCode';
   throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
 }
 
@@ -8549,82 +8549,169 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   exit: (code) => process.exit(code)
 });
 
-// scripts/lib/npm-publish.mjs
+// scripts/lib/opencode-release.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { mkdirSync as mkdirSync4, mkdtempSync as mkdtempSync2, rmSync as rmSync3 } from "node:fs";
+import { mkdtempSync as mkdtempSync2, rmSync as rmSync3 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join10 } from "node:path";
-var PUBLISH_PACKAGE = "@chulf58/sterling";
-var defaultNpm = (args, { cwd } = {}) => defaultExec("npm", args, { cwd, timeout: 3e5 });
+import { join as join10, resolve as resolve7 } from "node:path";
+var RELEASE_PACKAGE = "@chulf58/sterling";
+var RELEASE_BRANCH = "opencode-release";
+var BUILD_CLASS_SCRIPTS = ["postinstall", "build", "preinstall", "install", "prepack", "prepare"];
+var short = (sha) => sha ? sha.slice(0, 12) : "(none)";
+var output = (r) => `${r.stdout ?? ""}
+${r.stderr ?? ""}
+${r.error?.message ?? ""}`.trim();
+var quote = (s2) => /^[\w@%+=:,./-]+$/.test(s2) ? s2 : `"${s2.replace(/(["\\$`])/g, "\\$1")}"`;
+function releasePackageJson(text) {
+  const pkg = JSON.parse(text);
+  delete pkg.workspaces;
+  if (pkg.scripts && typeof pkg.scripts === "object") {
+    for (const k of BUILD_CLASS_SCRIPTS) delete pkg.scripts[k];
+    if (Object.keys(pkg.scripts).length === 0) delete pkg.scripts;
+  }
+  return `${JSON.stringify(pkg, null, 2)}
+`;
+}
+function git2(target2, args, { env, input } = {}) {
+  return spawnSync5("git", args, { cwd: target2, encoding: "utf8", timeout: 12e4, input, env: env ? { ...process.env, ...env } : process.env });
+}
+function defaultRemoteGit(args, { cwd, log = (m) => console.error(m), prefix = "opencode-release", run = spawnSync5, platform = process.platform }) {
+  const opts = { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } };
+  const first = run("git", args, opts);
+  if (first.status === 0 || platform === "win32") return first;
+  log(`${prefix}: \`git ${args[0]}\` failed; retrying through git.exe (Windows credential manager).`);
+  const win = run("git.exe", args, opts);
+  if (win.error) return first;
+  if (win.status === 0) return win;
+  return { ...first, stderr: `${first.stderr ?? ""}
+(the git.exe retry also failed, exit ${win.status}:)
+${output(win)}` };
+}
+function revParse(target2, rev) {
+  const r = git2(target2, ["rev-parse", "-q", "--verify", rev]);
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+var isAncestor = (target2, a, b) => git2(target2, ["merge-base", "--is-ancestor", a, b]).status === 0;
 function packageAt(target2, sha) {
-  const r = spawnSync5("git", ["show", `${sha}:package.json`], { cwd: target2, encoding: "utf8", timeout: 3e4 });
+  const r = git2(target2, ["show", `${sha}:package.json`]);
   if (r.status !== 0) return null;
   try {
-    return JSON.parse(r.stdout);
+    return { text: r.stdout, json: JSON.parse(r.stdout) };
   } catch {
     return null;
   }
 }
-function stageCommit(target2, sha, dest) {
-  const tar = join10(dest, "..", `${sha}.tar`);
-  const archive = spawnSync5("git", ["archive", "--format=tar", "-o", tar, sha], { cwd: target2, encoding: "utf8", timeout: 12e4 });
-  if (archive.status !== 0) throw new Error(`git archive ${sha} failed: ${(archive.stderr || archive.error?.message || "").trim()}`);
-  const x = spawnSync5("tar", ["-xf", tar, "-C", dest], { encoding: "utf8", timeout: 12e4 });
-  if (x.status !== 0) throw new Error(`tar -xf failed: ${(x.stderr || x.error?.message || "").trim()}`);
+function parseLsRemote(text) {
+  const refs = /* @__PURE__ */ new Map();
+  for (const line of text.split("\n")) {
+    const [sha, name] = line.trim().split(/\s+/);
+    if (sha && name) refs.set(name, sha);
+  }
+  return refs;
 }
-var output = (r) => `${r.stdout ?? ""}
-${r.stderr ?? ""}`.trim();
-function publishAfterMerge({ target: target2, baseSha, headSha, pushed: pushed2, npm = defaultNpm, log = (m) => console.error(m) }) {
+function must(r, what) {
+  if (r.status !== 0) throw new Error(`${what} failed: ${output(r)}`);
+  return r.stdout.trim();
+}
+function buildReleaseTree(target2, headSha, pkgText) {
+  const tmp = mkdtempSync2(join10(tmpdir(), "sterling-release-index-"));
+  try {
+    const env = { GIT_INDEX_FILE: join10(tmp, "index") };
+    must(git2(target2, ["read-tree", headSha], { env }), `git read-tree ${headSha}`);
+    const blob = must(git2(target2, ["hash-object", "-w", "--stdin"], { input: releasePackageJson(pkgText) }), "git hash-object");
+    must(git2(target2, ["update-index", "--cacheinfo", `100644,${blob},package.json`], { env }), "git update-index");
+    return must(git2(target2, ["write-tree"], { env }), "git write-tree");
+  } finally {
+    rmSync3(tmp, { recursive: true, force: true });
+  }
+}
+function rerunCommand(target2, ref) {
+  return `node ${quote(join10(resolve7(target2), "scripts", "opencode-release.mjs"))} --target ${quote(resolve7(target2))} --ref ${quote(ref)}`;
+}
+function releaseVersion({ target: target2, into: into2, headSha, version, pkgText, remoteGit, log, prefix }) {
+  const tag = `v${version}`;
+  const rerun = rerunCommand(target2, into2);
+  const stands = `THE MERGE STANDS: the base is merged and pushed. Only the OpenCode release is missing.`;
+  const refuse = (headline, detail) => {
+    log([``, `${prefix}: opencode release REFUSED for ${tag}: ${headline}`, stands, detail, `Re-run the release once fixed: ${rerun}`].filter(Boolean).join("\n"));
+    return { status: "refused", version, commit: null, reason: headline };
+  };
+  const failed = (detail, commit2 = null) => {
+    log([``, `${prefix}: opencode release FAILED for ${tag}.`, stands, `Re-run the release: ${rerun}`, detail].join("\n"));
+    return { status: "failed", version, commit: commit2, reason: detail };
+  };
+  const ls = remoteGit(["ls-remote", "origin", `refs/heads/${RELEASE_BRANCH}`, `refs/tags/${tag}`, `refs/tags/${tag}^{}`], { cwd: target2, log, prefix });
+  if (ls.status !== 0) return refuse("could not read origin (git ls-remote failed), so the tag and branch could not be checked.", output(ls));
+  const remote = parseLsRemote(ls.stdout);
+  const remoteBranch = remote.get(`refs/heads/${RELEASE_BRANCH}`) ?? null;
+  const remoteTag = remote.get(`refs/tags/${tag}^{}`) ?? remote.get(`refs/tags/${tag}`) ?? null;
+  if (remoteBranch) {
+    const fetch = remoteGit(["fetch", "--no-tags", "origin", `+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}`], { cwd: target2, log, prefix });
+    if (fetch.status !== 0) return refuse(`could not fetch origin's ${RELEASE_BRANCH}, so the release cannot build on it.`, output(fetch));
+  }
+  const localTag = revParse(target2, `refs/tags/${tag}^{commit}`);
+  const localBranch = revParse(target2, `refs/heads/${RELEASE_BRANCH}`);
+  if (localTag && remoteTag && localTag !== remoteTag) {
+    return refuse(`the local ${tag} tag (${short(localTag)}) differs from origin's (${short(remoteTag)}).`, `Inspect both; delete the wrong one by hand (git tag -d ${tag}, or the tag on origin).`);
+  }
+  let tree;
+  try {
+    tree = buildReleaseTree(target2, headSha, pkgText);
+  } catch (e) {
+    return failed(`Building the release tree failed: ${e.message}`);
+  }
+  const message = `Sterling ${version} for OpenCode
+
+Release of ${headSha} (${into2}): the merged tree with a package.json that installs from Git (no workspaces, no build-class scripts).
+`;
+  const commitOn = (parent) => git2(target2, ["commit-tree", tree, ...parent ? ["-p", parent] : [], "-F", "-"], { input: message });
+  let commit = remoteTag ?? localTag;
+  if (commit) {
+    const where = remoteTag ? "on origin" : "locally";
+    const existingTree = revParse(target2, `${commit}^{tree}`);
+    if (!existingTree) return refuse(`${tag} already exists ${where} at ${short(commit)}, a commit this clone does not have.`, `A version is released once. Bump the version in .claude-plugin/plugin.json and package.json for the next release.`);
+    if (existingTree !== tree) return refuse(`${tag} already exists ${where} at ${short(commit)} with other content.`, `A version is released once. Bump the version in .claude-plugin/plugin.json and package.json for the next release.`);
+    if (remoteTag && remoteBranch && (remoteBranch === commit || isAncestor(target2, commit, remoteBranch))) {
+      log(`${prefix}: opencode release ${tag} is already on origin at ${short(commit)}; nothing to push.`);
+      return { status: "published", version, commit, reason: null };
+    }
+    if (!remoteTag && remoteBranch && remoteBranch !== commit && !isAncestor(target2, remoteBranch, commit)) {
+      const made = commitOn(remoteBranch);
+      if (made.status !== 0) return failed(`git commit-tree failed: ${output(made)}`);
+      log(`${prefix}: the local ${tag} (${short(commit)}) is not a descendant of origin's ${RELEASE_BRANCH} (${short(remoteBranch)}), so it is rebuilt on origin's tip as ${short(made.stdout.trim())}.`);
+      commit = made.stdout.trim();
+    }
+  } else {
+    const made = commitOn(remoteBranch ?? localBranch);
+    if (made.status !== 0) return failed(`git commit-tree failed: ${output(made)}`);
+    commit = made.stdout.trim();
+  }
+  if (!(localBranch && (localBranch === commit || isAncestor(target2, commit, localBranch)))) {
+    const upd = git2(target2, ["update-ref", `refs/heads/${RELEASE_BRANCH}`, commit]);
+    if (upd.status !== 0) return failed(`git update-ref refs/heads/${RELEASE_BRANCH} failed: ${output(upd)}`, commit);
+  }
+  if (localTag !== commit) {
+    const t = git2(target2, ["tag", ...localTag ? ["-f"] : [], tag, commit]);
+    if (t.status !== 0) return failed(`git tag ${tag} failed: ${output(t)}`, commit);
+  }
+  const push = remoteGit(["push", "--atomic", "origin", `refs/heads/${RELEASE_BRANCH}:refs/heads/${RELEASE_BRANCH}`, `refs/tags/${tag}:refs/tags/${tag}`], { cwd: target2, log, prefix });
+  if (push.status !== 0) return failed(`git push --atomic origin ${RELEASE_BRANCH} ${tag} failed (the local branch and tag are kept for the re-run):
+${output(push)}`, commit);
+  log(`${prefix}: released ${RELEASE_PACKAGE} ${tag} on ${RELEASE_BRANCH} (${short(commit)}) and pushed both to origin.`);
+  return { status: "published", version, commit, reason: null };
+}
+function releaseAfterMerge({ target: target2, into: into2, baseSha, headSha, pushed: pushed2, remoteGit = defaultRemoteGit, log = (m) => console.error(m), prefix = "direct-merge" }) {
   const skip = (reason, version2 = null) => {
-    log(`direct-merge: npm publish SKIPPED: ${reason}.`);
-    return { status: "skipped", version: version2, reason };
+    log(`${prefix}: opencode release SKIPPED: ${reason}.`);
+    return { status: "skipped", version: version2, commit: null, reason };
   };
   const head = packageAt(target2, headSha);
-  if (head?.name !== PUBLISH_PACKAGE) return skip(`package.json names ${head?.name ?? "(no package.json)"}, not ${PUBLISH_PACKAGE}`);
-  const version = head.version ?? null;
-  if (!pushed2) return skip(`the base was not pushed, so ${PUBLISH_PACKAGE}@${version} would publish a release origin does not have`, version);
-  const before = packageAt(target2, baseSha)?.version ?? null;
+  if (head?.json?.name !== RELEASE_PACKAGE) return skip(`package.json names ${head?.json?.name ?? "(no package.json)"}, not ${RELEASE_PACKAGE}`);
+  const version = head.json.version ?? null;
+  if (!pushed2) return skip(`the base was not pushed, so v${version} would release a commit origin does not have`, version);
+  const before = packageAt(target2, baseSha)?.json?.version ?? null;
   if (!version || version === before) return skip(`the version did not change (${version})`, version);
-  const spec = `${PUBLISH_PACKAGE}@${version}`;
-  const byHand = `Publish by hand from a clean checkout of the merged base: npm publish --ignore-scripts`;
-  const refuse = (headline, detail) => {
-    log([``, `direct-merge: npm publish REFUSED for ${spec}: ${headline}`, `THE MERGE STANDS: the base is merged and pushed. Only the npm release is missing.`, detail].filter(Boolean).join("\n"));
-    return { status: "refused", version, reason: headline };
-  };
-  const who = npm(["whoami"], { cwd: target2 });
-  if (who.status !== 0) {
-    return refuse("npm whoami failed (no login, npm missing, or network)", `If npm has no login, run \`npm login\` once; then: ${byHand}
-${output(who)}`);
-  }
-  const view = npm(["view", spec, "version"], { cwd: target2 });
-  if (view.status === 0 && view.stdout.trim() === version) {
-    return refuse(`${version} is already published on npm.`, `Bump the version in .claude-plugin/plugin.json and package.json for the next release.`);
-  }
-  const firstPublish = view.status !== 0 && /\bE404\b/.test(output(view));
-  if (view.status !== 0 && !firstPublish) {
-    return refuse("the registry check failed, so the version could not be verified as unpublished.", `${byHand}
-${output(view)}`);
-  }
-  const failed = (detail) => {
-    log([``, `direct-merge: npm publish FAILED for ${spec}.`, `THE MERGE STANDS: the base is merged and pushed. Only the npm release is missing.`, byHand, detail].join("\n"));
-    return { status: "failed", version, reason: detail };
-  };
-  const stageRoot = mkdtempSync2(join10(tmpdir(), "sterling-publish-"));
-  try {
-    const dest = join10(stageRoot, "package");
-    mkdirSync4(dest);
-    try {
-      stageCommit(target2, headSha, dest);
-    } catch (e) {
-      return failed(`Staging the committed tree failed: ${e.message}`);
-    }
-    const pub = npm(["publish", "--ignore-scripts"], { cwd: dest });
-    if (pub.status !== 0) return failed(output(pub));
-    log(`direct-merge: published ${spec} to npm.`);
-    return { status: "published", version, reason: null };
-  } finally {
-    rmSync3(stageRoot, { recursive: true, force: true });
-  }
+  return releaseVersion({ target: target2, into: into2, headSha, version, pkgText: head.text, remoteGit, log, prefix });
 }
 
 // scripts/lib/parked-close.mjs
@@ -8651,7 +8738,7 @@ init_dist2();
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync6, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { delimiter, dirname as dirname6, join as join11 } from "node:path";
 var PR_ATTRIBUTION = "\u{1F916} Generated with [Claude Code](https://claude.com/claude-code)";
 function gh(cwd, args) {
@@ -8949,7 +9036,7 @@ function shipAsPr({ cwd, repo, branch: branch2, base: base2, mergeBase: mergeBas
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var prLoopPath = (root) => join11(root, PR_LOOP_REL);
 function writeAtomic(file, value) {
-  mkdirSync5(dirname6(file), { recursive: true });
+  mkdirSync4(dirname6(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync2(tmp, JSON.stringify(value, null, 2) + "\n");
   renameSync2(tmp, file);
@@ -9647,18 +9734,18 @@ if (process.argv.includes("--no-push")) {
           (push.stderr || push.stdout || String(push.error?.message ?? "")).trim()
         ].join("\n")
       );
-      console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed: false }, null, 2));
+      console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed: false, opencode_release: "skipped" }, null, 2));
       process.exit(1);
     }
   }
 }
 var mergedHead = spawnSync8("git", ["rev-parse", into], { cwd: target, encoding: "utf8", timeout: 3e4 });
-var npmPublish;
+var opencodeRelease;
 if (mergedHead.status === 0) {
-  npmPublish = publishAfterMerge({ target, baseSha: intoTip, headSha: mergedHead.stdout.trim(), pushed });
+  opencodeRelease = releaseAfterMerge({ target, into, baseSha: intoTip, headSha: mergedHead.stdout.trim(), pushed });
 } else {
-  console.error(`direct-merge: npm publish SKIPPED: could not resolve ${into} after the merge (${mergedHead.stderr.trim()}).`);
-  npmPublish = { status: "skipped" };
+  console.error(`direct-merge: opencode release SKIPPED: could not resolve ${into} after the merge (${mergedHead.stderr.trim()}).`);
+  opencodeRelease = { status: "skipped" };
 }
-console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed, npm_publish: npmPublish.status, ...parkedClosed ? { parked_items_closed: parkedClosed } : {} }, null, 2));
-if (npmPublish.status === "failed") process.exit(1);
+console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed, opencode_release: opencodeRelease.status, ...parkedClosed ? { parked_items_closed: parkedClosed } : {} }, null, 2));
+if (opencodeRelease.status === "failed") process.exit(1);
