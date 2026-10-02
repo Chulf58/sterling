@@ -202,8 +202,12 @@ test('labels: sterling-report, severity band and a sanitized project name', () =
 //   issues.json [{number, state, title, body, labels, comments: [body]}]
 //   auth_fail   present => `gh auth status` exits 1
 //   api_fail    present => every `gh api` call exits 1
+//   fail_create_after  N => issue creates after the Nth exit 1
+//   append_on_create   one JSON line, appended to $FAKE_GH_QUEUE after the next create (then deleted):
+//                      a concurrent report landing while a flush is mid-send
+//   kill_on_search     N => the Nth search SIGKILLs report-issue (the gh's parent): a flush killed mid-run
 const FAKE_GH_IMPL = `
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const state = process.env.FAKE_GH_STATE;
 const argv = process.argv.slice(2);
@@ -225,7 +229,10 @@ if (existsSync(join(state, 'api_fail'))) { console.error('error connecting to ap
 const method = flag('--method') ?? 'GET';
 const path = argv.find((x) => /^(repos|search)\\//.test(x));
 const url = (n) => 'https://github.com/Chulf58/sterling/issues/' + n;
+const bump = (name) => { const f = join(state, name); const n = (existsSync(f) ? Number(readFileSync(f, 'utf8')) : 0) + 1; writeFileSync(f, String(n)); return n; };
 if (method === 'GET' && path === 'search/issues') {
+  const searches = bump('search_count');
+  if (existsSync(join(state, 'kill_on_search')) && searches === Number(readFileSync(join(state, 'kill_on_search'), 'utf8'))) { process.kill(process.ppid, 'SIGKILL'); process.exit(1); }
   const fp = (one('q').match(/sterling-fp-[0-9a-f]{12}/) ?? [])[0];
   if (!fp || !/repo:Chulf58\\/sterling/.test(one('q'))) { console.error('fake gh: bad search ' + one('q')); process.exit(3); }
   const items = issues.filter((i) => i.body.includes(fp)).map((i) => ({ number: i.number, state: i.state, html_url: url(i.number), body: i.body }));
@@ -236,9 +243,12 @@ if (method === 'GET' && path === 'repos/Chulf58/sterling/issues') {
   console.log(JSON.stringify(hits.map((i) => ({ number: i.number, title: i.title, html_url: url(i.number), labels: i.labels.map((name) => ({ name })) })))); process.exit(0);
 }
 if (method === 'POST' && path === 'repos/Chulf58/sterling/issues') {
+  if (existsSync(join(state, 'fail_create_after')) && issues.length >= Number(readFileSync(join(state, 'fail_create_after'), 'utf8'))) { console.error('HTTP 502: Bad Gateway'); process.exit(1); }
   const number = 100 + issues.length;
   issues.push({ number, state: 'open', title: one('title'), body: one('body'), labels: fields['labels[]'] ?? [], comments: [] });
   writeFileSync(file, JSON.stringify(issues));
+  const append = join(state, 'append_on_create');
+  if (existsSync(append)) { appendFileSync(process.env.FAKE_GH_QUEUE, readFileSync(append, 'utf8')); rmSync(append); }
   console.log(JSON.stringify({ number, html_url: url(number) })); process.exit(0);
 }
 const m = method === 'POST' && (path ?? '').match(/^repos\\/Chulf58\\/sterling\\/issues\\/(\\d+)\\/comments$/);
@@ -265,7 +275,8 @@ function setup() {
   writeFileSync(impl, FAKE_GH_IMPL);
   writeFileSync(join(bin, 'gh'), `#!/bin/sh\nexec "${process.execPath}" "${impl}" "$@"\n`);
   chmodSync(join(bin, 'gh'), 0o755);
-  return { base, home, project, bin, state, queue: join(project, '.sterling', 'pending-issue-reports.jsonl') };
+  const queue = join(project, '.sterling', 'pending-issue-reports.jsonl');
+  return { base, home, project, bin, state, queue, lock: `${queue}.lock` };
 }
 
 function run(p, args, { path } = {}) {
@@ -273,7 +284,7 @@ function run(p, args, { path } = {}) {
     cwd: p.project,
     encoding: 'utf8',
     timeout: 60_000,
-    env: { ...process.env, HOME: p.home, PATH: path ?? `${p.bin}${delimiter}${process.env.PATH}`, FAKE_GH_STATE: p.state, OPENCODE: '', OPENCODE_SESSION_ID: '' },
+    env: { ...process.env, HOME: p.home, PATH: path ?? `${p.bin}${delimiter}${process.env.PATH}`, FAKE_GH_STATE: p.state, FAKE_GH_QUEUE: p.queue, OPENCODE: '', OPENCODE_SESSION_ID: '' },
   });
 }
 
@@ -443,4 +454,71 @@ test('cli --list: prints the open sterling-report issues', () =>
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /#3 .*Open one/);
     assert.ok(!r.stdout.includes('Closed one'));
+  }));
+
+// ---------- queue lock ----------
+
+/** Queue `titles` through the not-logged-in path, then log gh back in. */
+function queueReports(p, titles) {
+  writeFileSync(join(p.state, 'auth_fail'), '');
+  for (const title of titles) assert.equal(run(p, reportArgs({ title })).status, 1);
+  rmSync(join(p.state, 'auth_fail'));
+  assert.deepEqual(queued(p).map((e) => e.title), titles);
+}
+
+test('cli --flush: a report appended to the queue while a send is in flight survives the rewrite', () =>
+  withSetup((p) => {
+    queueReports(p, ['First queued']);
+    const appended = { v: 1, fingerprint: '0123456789ab', title: 'Appended meanwhile', body: 'b', labels: ['sterling-report'] };
+    writeFileSync(join(p.state, 'append_on_create'), `${JSON.stringify(appended)}\n`);
+    const r = run(p, ['--flush']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(issues(p).map((i) => i.title), ['First queued']);
+    assert.deepEqual(queued(p), [appended], 'only the sent entry is removed');
+    assert.ok(!existsSync(p.lock), 'the lock is released');
+  }));
+
+test('cli --flush: after a failed send only the unsent entries remain, and the lock is released', () =>
+  withSetup((p) => {
+    queueReports(p, ['One', 'Two', 'Three']);
+    writeFileSync(join(p.state, 'fail_create_after'), '1');
+    const r = run(p, ['--flush']);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /NOT FLUSHED.*502.*2 report\(s\) stay/);
+    assert.deepEqual(issues(p).map((i) => i.title), ['One']);
+    assert.deepEqual(queued(p).map((e) => e.title), ['Two', 'Three']);
+    assert.ok(!existsSync(p.lock));
+  }));
+
+test('cli --flush: a flush killed mid-run keeps only the unsent entries; the next run clears the stale lock and sends no duplicate', () =>
+  withSetup((p) => {
+    queueReports(p, ['One', 'Two', 'Three']);
+    writeFileSync(join(p.state, 'kill_on_search'), '2');
+    const killed = run(p, ['--flush']);
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    assert.deepEqual(issues(p).map((i) => i.title), ['One']);
+    assert.deepEqual(queued(p).map((e) => e.title), ['Two', 'Three'], 'the entry sent before the kill is already gone');
+    assert.ok(existsSync(p.lock), 'the killed run left its lock');
+    rmSync(join(p.state, 'kill_on_search'));
+    const r = run(p, ['--flush']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /removed a stale lock/);
+    assert.deepEqual(issues(p).map((i) => i.title), ['One', 'Two', 'Three']);
+    assert.ok(!existsSync(p.queue) && !existsSync(p.lock));
+  }));
+
+test('cli: a lock held by a running process refuses loudly with exit 2 and touches neither the queue nor gh', () =>
+  withSetup((p) => {
+    queueReports(p, ['Queued']);
+    const lockBody = JSON.stringify({ pid: process.pid, at: new Date().toISOString() });
+    writeFileSync(p.lock, lockBody);
+    const calls = ghLog(p).length;
+    for (const args of [['--flush'], reportArgs()]) {
+      const r = run(p, args);
+      assert.equal(r.status, 2, r.stdout + r.stderr);
+      assert.match(r.stderr, new RegExp(`pending-issue-reports\\.jsonl\\.lock is held by pid ${process.pid}`));
+    }
+    assert.equal(ghLog(p).length, calls, 'no gh call');
+    assert.deepEqual(queued(p).map((e) => e.title), ['Queued']);
+    assert.equal(readFileSync(p.lock, 'utf8'), lockBody, 'the holder keeps its lock');
   }));

@@ -19,10 +19,17 @@
 // never a REST token. When gh is missing, not logged in, or a call fails, the
 // report is appended to the queue with one loud line naming the gh that ran.
 //
+// Every run that sends or queues holds .sterling/pending-issue-reports.jsonl.lock
+// (an O_EXCL create) for its whole read-send-rewrite; a lock held by a live
+// process refuses the run, and one left by a dead process is removed with a
+// loud line. After each successful send the queue is re-read and only that
+// entry is removed, so an append that lands meanwhile survives and a flush
+// killed mid-run re-sends nothing it already sent.
+//
 // Exit codes: 0 sent (or dry run), 1 queued or a gh failure, 2 refused.
 // Builtins only: bundled to bin/report-issue.mjs.
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, delimiter, join } from 'node:path';
 import { pluginRoot } from './hooks/lib/plugin-root-walk.mjs';
@@ -43,6 +50,7 @@ import {
 } from './lib/issue-report.mjs';
 
 const QUEUE_NAME = 'pending-issue-reports.jsonl';
+const LOCK_NAME = `${QUEUE_NAME}.lock`;
 
 function refuse(message) {
   console.error(message);
@@ -196,6 +204,65 @@ function readQueue() {
   return entries;
 }
 
+/** Whether `pid` names a running process (EPERM: it runs as another user). */
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
+  }
+}
+
+/** A holder writes its pid right after the O_EXCL create, so a lock with no
+ * readable pid is taken as held unless it is older than this. */
+const UNREADABLE_LOCK_STALE_MS = 60_000;
+
+/** Take the queue lock for the rest of this process (released on exit), or
+ * refuse (exit 2) while another live run holds it. A lock whose pid is not
+ * running is removed with a loud line and taken. Two runs that find the same
+ * stale lock at the same instant can both remove it; the window is the gap
+ * between one run's removal and its create. */
+function acquireQueueLock() {
+  const lockPath = resolveStoreWritePath(projectRoot, '.sterling', LOCK_NAME);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), { flag: 'wx' });
+      process.on('exit', () => rmSync(lockPath, { force: true }));
+      return;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+    }
+    let holder = null;
+    try {
+      holder = JSON.parse(readFileSync(lockPath, 'utf8'));
+    } catch (e) {
+      if (e.code === 'ENOENT') continue;
+      if (!(e instanceof SyntaxError)) throw e;
+    }
+    const pid = Number.isInteger(holder?.pid) && holder.pid > 0 ? holder.pid : null;
+    let stale;
+    if (pid !== null) stale = !pidAlive(pid);
+    else {
+      try {
+        stale = Date.now() - statSync(lockPath).mtimeMs > UNREADABLE_LOCK_STALE_MS;
+      } catch (e) {
+        if (e.code === 'ENOENT') continue;
+        throw e;
+      }
+    }
+    if (!stale) {
+      refuse(
+        `report-issue: .sterling/${LOCK_NAME} is held by ${pid !== null ? `pid ${pid}` : 'a run whose pid is not yet written'}, another report-issue sending or queueing reports. ` +
+          `Nothing was sent or queued. Rerun once it finishes; if no report-issue is running, delete ${lockPath}.`
+      );
+    }
+    rmSync(lockPath, { force: true });
+    console.error(`report-issue: removed a stale lock .sterling/${LOCK_NAME} (${pid !== null ? `pid ${pid} is not running` : 'no pid, older than 60s'}); a previous run was killed mid-flush.`);
+  }
+  refuse(`report-issue: could not take .sterling/${LOCK_NAME} after removing a stale one; another run took it first. Rerun.`);
+}
+
 function writeQueue(entries) {
   if (entries.length === 0) {
     rmSync(queuePath, { force: true });
@@ -240,19 +307,29 @@ function send(gh, entry, { printBefore = true } = {}) {
   console.log(`report-issue: filed #${issue.number}${closed ? ` (recurs after #${closed.number})` : ''}: ${issue.html_url}\n${body}`);
 }
 
-/** Send the queue in order; on the first failure keep it and the rest. Returns the failure or null. */
+/** Drop the first queued entry equal to `sent` from the queue as it is NOW,
+ * keeping anything appended since the flush read it. */
+function removeSent(sent) {
+  const key = JSON.stringify(sent);
+  const current = readQueue();
+  const i = current.findIndex((e) => JSON.stringify(e) === key);
+  if (i >= 0) current.splice(i, 1);
+  writeQueue(current);
+}
+
+/** Send the queue in order, removing each entry once it is sent; on the first
+ * failure the entry and the rest stay queued. Caller holds the queue lock.
+ * Returns the failure or null. */
 function flush(gh) {
-  const pending = readQueue();
-  for (let i = 0; i < pending.length; i++) {
+  for (const entry of readQueue()) {
     try {
-      send(gh, pending[i]);
+      send(gh, entry);
     } catch (e) {
       if (!(e instanceof TransportError)) throw e;
-      writeQueue(pending.slice(i));
       return e.message;
     }
+    removeSent(entry);
   }
-  writeQueue([]);
   return null;
 }
 
@@ -286,6 +363,7 @@ if (mode === 'list') {
 }
 
 if (mode === 'flush') {
+  acquireQueueLock();
   const pending = readQueue();
   if (pending.length === 0) {
     console.log('report-issue: nothing pending.');
@@ -330,6 +408,7 @@ if (mode === 'dry-run') {
   process.exit(0);
 }
 
+acquireQueueLock();
 readQueue();
 console.log(`report-issue: report to file:\n${entry.body}\n`);
 const gh = makeGh();
