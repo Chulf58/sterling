@@ -39,6 +39,7 @@ import { renderTmuxLauncher } from './lib/launcher-tmux.mjs';
 import { isInstalledCopy } from './lib/installed-copy.mjs';
 import { cloneLauncherTarget, marketplaceAutoUpdate, autoUpdateWarning, cloneCleanupLines } from './lib/consumer-cutover.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
+import { setupOpenCode } from './lib/opencode-install.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -788,6 +789,17 @@ items.push({
     skipped: 'settings.json is not a valid JSON object — not touched',
   }[conductorActivation.autoMemory],
 });
+
+// Sterling on OpenCode 2 (decision
+// sterling-on-opencode-installs-global-plugins-plus-untracked-project-config): global
+// shims, this project's untracked .opencode/opencode.json and the Sterling-full roster.
+// Before the portable copies, so the exclude block never hides them.
+const opencodeSetup = setupOpenCode({ projectDir: target, pluginRoot });
+if (opencodeSetup.skipped) items.push({ item: 'Sterling on OpenCode 2', status: 'skipped', detail: opencodeSetup.skipped });
+for (const r of opencodeSetup.rows ?? []) {
+  items.push({ item: `OpenCode ${r.item}`, status: r.status, detail: r.detail ?? '' });
+  if (r.instruction) agentInstructions.push(r.instruction);
+}
 
 // OpenCode handoff (decision
 // init-prepares-opencode-portable-agents-and-target-handoff-projections): portable

@@ -9245,8 +9245,14 @@ function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
       throw e;
     }
   }
-  writeFileSync4(`${p}.tmp`, JSON.stringify(snapshot));
-  renameSync4(`${p}.tmp`, p);
+  const tmp = `${p}.${process.pid}.${randomUUID4()}.tmp`;
+  try {
+    writeFileSync4(tmp, JSON.stringify(snapshot));
+    renameSync4(tmp, p);
+  } catch (e) {
+    rmSync2(tmp, { force: true });
+    throw e;
+  }
   return true;
 }
 function writeInitialGitSettled(root, snapshot) {

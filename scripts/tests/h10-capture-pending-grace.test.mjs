@@ -676,7 +676,11 @@ test('PG-k2 (target field, one Stop): two declarations of one target with differ
     assert.equal(stopOnce(dir).code, 0, 'converting Stop');
     const items = captureOwed(store);
     assert.equal(items.length, 1, `REASON-IN-IDENTITY SHAPE if 2 (texts: ${JSON.stringify(items.map((t) => t.text))})`);
-    assert.match(items[0].text, /^capture owed: declared pending \(commit-dddd444 — second reason\)/, 'the readable head shows the latest declaration of the target');
+    assert.equal(
+      items[0].text,
+      `capture owed: declared pending (second reason) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close [target "commit-dddd444"]`,
+      'the readable head shows the latest declaration of the target; the target appears once, in the trailer',
+    );
   } finally {
     cleanup();
   }
@@ -695,7 +699,11 @@ test('PG-k3 (target field, clock skew): "latest" is the greatest valid `at`, not
     assert.equal(stopOnce(dir).code, 0, 'converting Stop');
     const items = captureOwed(store);
     assert.equal(items.length, 1, `texts: ${JSON.stringify(items.map((t) => t.text))}`);
-    assert.match(items[0].text, /^capture owed: declared pending \(commit-eeee555 — later reason\)/, 'ARRAY-ORDER SHAPE if "earlier reason": the head followed physical order, not `at`');
+    assert.equal(
+      items[0].text,
+      `capture owed: declared pending (later reason) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close [target "commit-eeee555"]`,
+      'ARRAY-ORDER SHAPE if "earlier reason": the head followed physical order, not `at`; the target appears once, in the trailer',
+    );
   } finally {
     cleanup();
   }

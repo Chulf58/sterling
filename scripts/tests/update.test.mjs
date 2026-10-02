@@ -1260,13 +1260,13 @@ test('the dirty refusal splits committed BUILD OUTPUTS from source and gives eac
 // decision foreign_a9b98b7d (the original hooks/architecture.md split this extends).
 // -----------------------------------------------------------------------------
 
-test('every tracked file under every registered bundle family (hooks, bin, mcp, tui) gets the discard remedy, never SOURCE CHANGES', () => {
-  // The plugin ships bin/, mcp/ and tui/ bundles committed beside hooks/; a dirty
+test('every tracked file under every registered bundle family (hooks, bin, mcp, tui, opencode, opencode-tui) gets the discard remedy, never SOURCE CHANGES', () => {
+  // The plugin ships bin/, mcp/, tui/ and opencode/ bundles committed beside hooks/; a dirty
   // one on a consumer clone must draw "discard", exactly like a hook bundle.
   // Iterates the REGISTRY and git's own file list, so a new family fails here
   // until GENERATED_TRACKED covers it.
   const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-  assert.deepEqual(BUNDLED_ARTIFACTS.map((a) => a.name).sort(), ['bin', 'hooks', 'mcp', 'tui']);
+  assert.deepEqual(BUNDLED_ARTIFACTS.map((a) => a.name).sort(), ['bin', 'hooks', 'mcp', 'opencode', 'opencode-tui', 'tui']);
   for (const a of BUNDLED_ARTIFACTS) {
     const r = spawnSync('git', ['ls-files', '--', a.shipped], { cwd: repo, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
