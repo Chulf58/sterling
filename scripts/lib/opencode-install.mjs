@@ -16,11 +16,14 @@
 //    installed copy is the newest one the shared resolver (scripts/lib/sterling-roots.mjs)
 //    finds in Claude Code's plugin cache or OpenCode's npm cache, so no versioned install
 //    path is ever written to disk. A file of the same name that Sterling did not write,
-//    or one edited since, is refused, never overwritten. When the Sterling in use is the
-//    npm package from `opencode plugin add`, no server shim is installed, because
-//    `plugin add` registers the server and a shim would load it twice; one an earlier
-//    init wrote is removed when its stamp verifies and kept with a KEPT row otherwise.
-//    That copy's dashboard is copied to <home>/.sterling/opencode/tui/<version>/
+//    or one edited since, is refused, never overwritten. When the npm package from
+//    `opencode plugin add` is registered on this machine (the copy running init is it,
+//    the resolver scan finds a copy in OpenCode's npm cache, or the global opencode.json
+//    `plugins` names it), no server shim is installed, because `plugin add` registers
+//    the server and a shim would load it twice; one an earlier init wrote is removed
+//    when its stamp verifies and kept with a KEPT row otherwise. This is machine state,
+//    so a dual-host machine gets the same answer whichever host runs init.
+//    The npm copy's dashboard is copied to <home>/.sterling/opencode/tui/<version>/
 //    (materializeTui), because OpenCode gives a TUI bundle its own solid-js only outside
 //    node_modules (finding 789147ca), and the TUI shim loads the newest copy there.
 //    Also once per machine: a `codex` entry under mcp.servers in <config dir>/opencode.json,
@@ -50,7 +53,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isInstalledCopy } from './installed-copy.mjs';
-import { RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, installHostOf, readCopyVersion, compareSterlingVersions } from './sterling-roots.mjs';
+import { RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, installHostOf, readCopyVersion, compareSterlingVersions, scanInstalledSterling } from './sterling-roots.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
 import { sha256, loadRegistry } from './agent-distribution.mjs';
 import { renderOpenCodeFullText } from './agent-fences.mjs';
@@ -435,17 +438,57 @@ function ensureTuiShim(tuiDir, shim) {
   ];
 }
 
-/** npmCopy: the Sterling in use is the `opencode plugin add` package. It registers its own server, so no server shim is installed (an unedited old one is removed), and its dashboard is materialized outside node_modules for the TUI shim to load. */
+const namesNpmPackage = (s) => typeof s === 'string' && (s === STERLING_NPM_PACKAGE || s.startsWith(`${STERLING_NPM_PACKAGE}@`));
+
+/**
+ * The `opencode plugin add` copy as this MACHINE has it, whichever host runs init:
+ * { root, configured, row? }. root is the newest npm copy the resolver scan finds in
+ * OpenCode's cache (null when none); configured is true when the global opencode.json
+ * `plugins` list names the package (a string, or an entry with a string field naming
+ * it). A global config that cannot be read is configured: false plus a loud row.
+ */
+export function npmCopyOnMachine({ env = process.env, home = homedir() } = {}) {
+  const copies = scanInstalledSterling(env, home).copies.filter((c) => c.host === 'opencode');
+  copies.sort((a, b) => compareSterlingVersions(a.version, b.version) || (a.root > b.root ? 1 : a.root < b.root ? -1 : 0));
+  const root = copies.length ? copies[copies.length - 1].root : null;
+  const path = join(opencodeConfigDir({ env, home }), 'opencode.json');
+  if (!existsSync(path)) return { root, configured: false };
+  const item = `${fwd(path)} plugins`;
+  let config;
+  try {
+    config = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    return { root, configured: false, row: { item, status: 'skipped', detail: `${fwd(path)} is not valid JSON (${err.message}), so whether it registers ${STERLING_NPM_PACKAGE} is unknown; the server shim is written unless the npm copy is in OpenCode's cache. Fix the file, then rerun /sterling:update` } };
+  }
+  const plugins = config && typeof config === 'object' && !Array.isArray(config) ? config.plugins : undefined;
+  const configured = Array.isArray(plugins) && plugins.some((e) => namesNpmPackage(e) || (e && typeof e === 'object' && Object.values(e).some(namesNpmPackage)));
+  return { root, configured };
+}
+
+/**
+ * npmCopy: the Sterling in use is the `opencode plugin add` package. Whether the
+ * server shim is installed and where the TUI shim points come from machine state
+ * (npmCopyOnMachine) as well, so a dual-host machine where Claude Code runs init gets
+ * the same files: when the npm package is registered it registers its own server, so
+ * no server shim is installed (an unedited old one is removed); when an npm copy
+ * exists, its dashboard is materialized outside node_modules for the TUI shim to load.
+ */
 export function installGlobal({ pluginRoot, installed, npmCopy = false, env = process.env, home = homedir() }) {
   const pluginsDir = join(opencodeConfigDir({ env, home }), 'plugins');
   const tuiDir = join(pluginsDir, 'sterling-tui');
   const rows = [];
-  if (npmCopy) {
+  const machine = npmCopyOnMachine({ env, home });
+  if (machine.row) rows.push(machine.row);
+  const npmRoot = npmCopy ? pluginRoot : machine.root;
+  if (npmCopy || machine.root !== null || machine.configured) {
     rows.push(retireServerShim(join(pluginsDir, 'sterling.js')));
-    rows.push(...materializeTui({ pluginRoot, env, home }));
-    rows.push(...ensureTuiShim(tuiDir, renderTuiShim(pluginRoot, installed, tuiDir, { materializedRoot: materializedTuiRoot({ home }) })));
   } else {
     rows.push(ensureStampedFile(join(pluginsDir, 'sterling.js'), renderServerShim(pluginRoot, installed, join(pluginsDir, 'sterling.js')), `${fwd(pluginsDir)}/sterling.js`));
+  }
+  if (npmRoot !== null) {
+    rows.push(...materializeTui({ pluginRoot: npmRoot, env, home }));
+    rows.push(...ensureTuiShim(tuiDir, renderTuiShim(npmRoot, installed, tuiDir, { materializedRoot: materializedTuiRoot({ home }) })));
+  } else {
     rows.push(...ensureTuiShim(tuiDir, renderTuiShim(pluginRoot, installed, tuiDir)));
   }
   rows.push(ensureStampedFile(mcpLauncherPath({ home }), renderMcpLauncher(pluginRoot, installed), fwd(mcpLauncherPath({ home }))));

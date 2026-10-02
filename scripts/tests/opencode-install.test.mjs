@@ -688,6 +688,58 @@ test('npm-installed copy: an edited or foreign server shim is KEPT with a loud r
   assert.equal(readFileSync(join(plugins2, 'sterling.js'), 'utf8'), 'export default { id: "mine" };\n');
 });
 
+// Dual-host machine: the server shim's suppression and the TUI shim's target come from
+// MACHINE STATE (an npm copy in OpenCode's cache, or the global opencode.json plugins list),
+// not from which copy runs init. Otherwise Claude's init writes a server shim next to the
+// registered npm package and OpenCode loads Sterling twice.
+test('dual-host machine, Claude runs init: the npm copy in the cache retires the server shim and the TUI shim points at the materialized dir', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home, { installed: true });
+  const plugins = join(opencodeConfigDir({ env: {}, home }), 'plugins');
+  assert.ok(existsSync(join(plugins, 'sterling.js')), 'precondition: before the npm copy exists, Claude init writes the server shim');
+  npmCopyRoot(home, '1.0.0');
+  const r = run(dir, home, { installed: true });
+  assert.equal(statusOf(r, '/sterling.js'), 'removed', 'the unedited shim is retired: the npm package registers the server');
+  assert.equal(existsSync(join(plugins, 'sterling.js')), false);
+  assert.equal(statusOf(r, '/tui/1.0.0/'), 'created', "the npm copy's dashboard is materialized from the npm copy, not from the Claude copy");
+  assert.match(readFileSync(join(plugins, 'sterling-tui', 'tui.tsx'), 'utf8'), /newestMaterializedTui\(\)/);
+  const again = run(dir, home, { installed: true });
+  assert.equal(statusOf(again, '/sterling.js'), 'skipped', 'a second Claude init does not write the shim back');
+  assert.equal(existsSync(join(plugins, 'sterling.js')), false);
+  assert.equal(statusOf(again, 'sterling-tui/tui.tsx'), 'matches');
+});
+
+test('dual-host machine: the global opencode.json naming @chulf58/sterling in plugins suppresses the server shim before the cache holds a copy', () => {
+  for (const entry of ['@chulf58/sterling', '@chulf58/sterling@latest', { package: '@chulf58/sterling' }]) {
+    const home = tmp('oc-home-');
+    const cfgDir = opencodeConfigDir({ env: {}, home });
+    mkdirSync(cfgDir, { recursive: true });
+    writeFileSync(join(cfgDir, 'opencode.json'), JSON.stringify({ plugins: ['other-plugin', entry] }));
+    const r = run(project('hobby'), home, { installed: true });
+    assert.equal(statusOf(r, '/sterling.js'), 'skipped', JSON.stringify(entry));
+    assert.equal(existsSync(join(cfgDir, 'plugins', 'sterling.js')), false, JSON.stringify(entry));
+    assert.doesNotMatch(readFileSync(join(cfgDir, 'plugins', 'sterling-tui', 'tui.tsx'), 'utf8'), /newestMaterializedTui/, 'no npm copy to materialize yet, so the TUI shim keeps the running copy');
+  }
+  const home = tmp('oc-home-');
+  const cfgDir = opencodeConfigDir({ env: {}, home });
+  mkdirSync(cfgDir, { recursive: true });
+  writeFileSync(join(cfgDir, 'opencode.json'), JSON.stringify({ plugins: ['@chulf58/sterling-other'] }));
+  assert.equal(statusOf(run(project('hobby'), home, { installed: true }), '/sterling.js'), 'created', 'a different package name does not count');
+});
+
+test('dual-host machine: an unreadable global opencode.json is said out loud and does not suppress the server shim', () => {
+  const home = tmp('oc-home-');
+  const cfgDir = opencodeConfigDir({ env: {}, home });
+  mkdirSync(cfgDir, { recursive: true });
+  writeFileSync(join(cfgDir, 'opencode.json'), '{ not json');
+  const r = run(project('hobby'), home, { installed: true });
+  assert.equal(statusOf(r, '/sterling.js'), 'created');
+  const row = r.rows.find((x) => /plugins$/.test(x.item) && x.item.includes('opencode.json'));
+  assert.ok(row, 'a row names the global config it could not read');
+  assert.match(row.detail, /not valid JSON/);
+});
+
 test('a clone or Claude-cache copy keeps today\'s shims and materializes nothing', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
