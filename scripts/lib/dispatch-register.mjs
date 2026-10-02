@@ -1269,7 +1269,8 @@ export function recordDispatchPre(root, stdin) {
 // review-territory-and-resume-inherits-prior-round, option A; finding h10-
 // article-demand-misses-live-lanes-same-type-fanout-and-out-of-territory-
 // files-october-2026). The CALLER holds withRegisterLock and has already
-// written the binding, so a crash between the two writes leaves the row as the
+// written the binding (a late Post, whose state record is already terminal,
+// writes none), so a crash between the two writes leaves the row as the
 // Start wrote it. territoryFor(prompt) is the caller's: it returns
 // {ok:true, files, file_entries} for a valid REVIEW-TERRITORY, else
 // {ok:false, reason}; without it nothing is filled (OpenCode registers its
@@ -1285,8 +1286,10 @@ export function recordDispatchPre(root, stdin) {
 // its declared territory, or any fill for a brief with no valid declaration.
 function fillUnattributableRowLocked(root, { sessionId, agentId, agentType, toolUseId, prompt }, territoryFor) {
   if (typeof territoryFor !== 'function') return [];
-  const leave = (facts, why) =>
-    [render(disclosure('dispatch_unattributable', { tool_use_id: toolUseId, agent_id: agentId, ...facts }, `Post for tool_use_id '${toolUseId}' bound agentId '${agentId}' but did not fill its register row: ${why}; the row keeps files [], so H10 will not defer the files this lane owns`))];
+  // What an empty row costs depends on the round: while it is live, H10 does
+  // not defer the lane's files; once it has ended, a resume copies the [].
+  const leave = (facts, why, ended = false) =>
+    [render(disclosure('dispatch_unattributable', { tool_use_id: toolUseId, agent_id: agentId, ...facts }, `Post for tool_use_id '${toolUseId}' bound agentId '${agentId}' but did not fill its register row: ${why}; the row keeps files [], so ${ended ? 'a resume will inherit no files' : "H10 will not defer this lane's files"}`))];
   const { availability, arr } = readRawArray(root);
   if (availability === 'absent') return [];
   if (availability === 'corrupt') return leave({ reason: 'register-corrupt' }, `the register at ${registerPath(root)} is unreadable`);
@@ -1295,17 +1298,17 @@ function fillUnattributableRowLocked(root, { sessionId, agentId, agentType, tool
     if (e && e.session_id === sessionId && e.agent_id === agentId) idx.push(i);
   });
   if (idx.length === 0) return [];
-  if (idx.length > 1) return leave({ reason: 'ambiguous', rows: idx.length }, `the lane has ${idx.length} register rows in this session, so which one this brief belongs to is not known`);
+  if (idx.length > 1) return leave({ reason: 'ambiguous', rows: idx.length }, `the lane has ${idx.length} register rows in this session, so which one this brief belongs to is not known`, idx.every((i) => arr[i].ended));
   const row = arr[idx[0]];
   if (row.tool_use_id === toolUseId) return [];
   if (row.files_source !== 'unattributable' || !Array.isArray(row.files) || row.files.length > 0 || (row.tool_use_id !== null && row.tool_use_id !== undefined)) {
-    return leave({ reason: 'row-not-unattributable', files_source: row.files_source ?? null, row_tool_use_id: row.tool_use_id ?? null }, `its row is not an empty unattributable one (files_source '${row.files_source}', ${Array.isArray(row.files) ? row.files.length : 'no'} files, tool_use_id ${JSON.stringify(row.tool_use_id ?? null)})`);
+    return leave({ reason: 'row-not-unattributable', files_source: row.files_source ?? null, row_tool_use_id: row.tool_use_id ?? null }, `its row is not an empty unattributable one (files_source '${row.files_source}', ${Array.isArray(row.files) ? row.files.length : 'no'} files, tool_use_id ${JSON.stringify(row.tool_use_id ?? null)})`, Boolean(row.ended));
   }
   if (typeof agentType !== 'string' || row.agent_type !== agentType) {
-    return leave({ reason: 'agent-type-mismatch', row_agent_type: row.agent_type ?? null, dispatched_type: agentType ?? null }, `the row's agent type '${row.agent_type}' differs from the dispatched '${agentType}'`);
+    return leave({ reason: 'agent-type-mismatch', row_agent_type: row.agent_type ?? null, dispatched_type: agentType ?? null }, `the row's agent type '${row.agent_type}' differs from the dispatched '${agentType}'`, Boolean(row.ended));
   }
   const territory = territoryFor(prompt);
-  if (!territory?.ok) return leave({ reason: 'no-review-territory' }, territory?.reason ?? 'the brief yielded no territory');
+  if (!territory?.ok) return leave({ reason: 'no-review-territory' }, territory?.reason ?? 'the brief yielded no territory', Boolean(row.ended));
   arr[idx[0]] = {
     ...row,
     files: territory.files.slice(),
@@ -1450,10 +1453,17 @@ export function recordDispatchPost(root, stdin, opts = {}) {
 
     const r = existing.record;
     if (r.terminal) {
+      // The state record stays as it is. The lane's register row is found by
+      // (session, agent_id), not through this record, and the prompt is in
+      // stdin: SubagentStop's sidecar fallback can end a foreground lane
+      // before its Post arrives, and the row it left empty is filled here.
       return {
         ok: true,
         action: 'late-post-noop',
-        disclosures: [render(disclosure('dispatch_post_late', { tool_use_id: toolUseId, agent_id: agentId }, `Post for tool_use_id '${toolUseId}' arrived after this record went terminal (${r.terminal.reason}) — no-op`))],
+        disclosures: [
+          render(disclosure('dispatch_post_late', { tool_use_id: toolUseId, agent_id: agentId }, `Post for tool_use_id '${toolUseId}' arrived after this record went terminal (${r.terminal.reason}) — the record is not bound`)),
+          ...fillRow(),
+        ],
       };
     }
     if (r.session_id !== null && sessionId !== null && r.session_id !== sessionId) {
@@ -1740,12 +1750,25 @@ export async function resolveAndRegisterStart(root, startStdin, entryBuilder) {
   // (the lock was never obtained, or the retry budget expired unresolved)
   // still needs its register entry written — one MORE hold is unavoidable
   // here, since no successful determination hold exists to piggyback on.
-  async function finalizeUnattributable(resolution) {
+  // A Post can take the lock between the hold that gave up and this one: it
+  // binds the lane, finds no row to fill and returns. So this hold determines
+  // once more before it writes, and registers from that resolution when it is
+  // attributable (the Post's binding, a resume, a now-unique derivation);
+  // otherwise it registers the fallback, which keeps the reason it gave up.
+  async function finalizeUnattributable(fallback) {
     try {
-      const entry = await registerStart(root, entryBuilder(resolution));
-      return { resolution, entry };
+      return await withRegisterLock(root, () => {
+        const again = attemptDetermine(root, { session_id, agent_id, agent_type, consumer });
+        const resolution = again.verdict === 'resolved' && again.value.source !== 'unattributable' ? again.value : fallback;
+        try {
+          return { resolution, entry: registerStartLocked(root, entryBuilder(resolution)) };
+        } catch (e) {
+          if (e?.kind === 'refusal') return { resolution, entry: null, refusal: e };
+          throw e;
+        }
+      });
     } catch (e) {
-      if (e?.kind === 'refusal') return { resolution, entry: null, refusal: e };
+      if (e?.kind === 'refusal') return { resolution: fallback, entry: null, refusal: e };
       throw e;
     }
   }
