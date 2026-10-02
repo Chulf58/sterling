@@ -355,8 +355,8 @@ export function formatElapsed(ms: number): string {
 // Composition. Coordinates are relative to the block's top-left corner, which
 // the renderer puts at the top of the Agents tab's body. The agents are cards
 // side by side in one row, wrapping to the next row only when the pane is too
-// narrow: each card is the 8x3 portrait tile with three text lines below it
-// (type, `status · N% ctx · model`, description), clipped to the card.
+// narrow: each card is the 8x3 portrait tile with four text lines below it
+// (type, `status · N% ctx`, model, description), clipped to the card.
 // ---------------------------------------------------------------------------
 
 export interface BlockAttr {
@@ -386,7 +386,7 @@ export interface SubagentBlock {
 
 const TILE_H = SPRITE_ROWS;
 const CARD_W = 24;
-const CARD_H = TILE_H + 3;
+const CARD_H = TILE_H + 4;
 const CARD_GAP = 2;
 const ROW_GAP = 1;
 /** a done card's portrait is blended this far toward the tile colour */
@@ -446,13 +446,10 @@ export function composeSubagentBlock(view: SubagentView, width: number, maxHeigh
     );
     const ty = y0 + TILE_H;
     puts.push({ x: x0, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, cardW) });
-    // status and context in the status colour, the model dim after them
     const status = `${a.status} · ${a.contextPct === null ? '?' : `${a.contextPct}%`} ctx`;
-    const line = [...clip(`${status} · ${a.model ?? 'model unknown'}`, cardW)];
-    const statusLen = Math.min(line.length, [...status].length);
-    puts.push({ x: x0, y: ty + 1, attr: done ? { dim: true } : { color: 'green' }, text: line.slice(0, statusLen).join('') });
-    if (line.length > statusLen) puts.push({ x: x0 + statusLen, y: ty + 1, attr: { dim: true }, text: line.slice(statusLen).join('') });
-    if (a.description) puts.push({ x: x0, y: ty + 2, attr: { dim: true }, text: clip(a.description, cardW) });
+    puts.push({ x: x0, y: ty + 1, attr: done ? { dim: true } : { color: 'green' }, text: clip(status, cardW) });
+    puts.push({ x: x0, y: ty + 2, attr: { dim: true }, text: clip(a.model ?? 'model unknown', cardW) });
+    if (a.description) puts.push({ x: x0, y: ty + 3, attr: { dim: true }, text: clip(a.description, cardW) });
   }
   const height = cardRows * CARD_H + (cardRows - 1) * ROW_GAP;
   if (hidden > 0 && height + 1 <= maxHeight) {

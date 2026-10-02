@@ -191,7 +191,7 @@ function view(agents: SubagentView['agents'], availability: SubagentView['availa
 }
 
 const AGENT = (agentId: string, avatar: number, status: 'running' | 'done' = 'running') => ({
-  agentId, avatar, type: 'implementor', description: 'Build the reader', model: 'claude-opus-5-5', status, elapsedMs: 65_000, contextPct: 42 as number | null,
+  agentId, avatar, type: 'implementor', description: 'Build the reader', model: 'claude-sonnet-5-5' as string | null, status, elapsedMs: 65_000, contextPct: 42 as number | null,
 });
 
 test('block: no agents draws one dim line, a readable register is never blank; no room draws nothing', () => {
@@ -216,12 +216,12 @@ test('block: a corrupt register is one dim line that says the state is unknown',
 
 test('block: the agents are cards side by side in ONE row, each an 8x3 tile with its three text lines below; no frame, no avatar numbers', () => {
   const b = composeSubagentBlock(view([AGENT('a1', 7), AGENT('a2', 31), AGENT('a3', 2, 'done')]), 160, 30, 0);
-  assert.equal(b.height, SPRITE_ROWS + 3, 'one card row: the tile and three text lines');
+  assert.equal(b.height, SPRITE_ROWS + 4, 'one card row: the tile and four text lines');
   const type = b.puts.filter((p) => p.text === 'implementor');
   assert.deepEqual(type.map((p) => [p.x, p.y]), [[0, 3], [26, 3], [52, 3]], 'three cards side by side, text on the row under the tile');
-  const statusRow = b.puts.filter((p) => p.y === 4).map((p) => p.text);
-  assert.ok(statusRow.includes('running · 42% ctx') && statusRow.includes(' · cla…') && statusRow.includes('done · 42% ctx'), JSON.stringify(statusRow));
-  assert.deepEqual(b.puts.filter((p) => p.text === 'Build the reader').map((p) => p.y), [5, 5, 5]);
+  assert.deepEqual(b.puts.filter((p) => p.y === 4).map((p) => p.text), ['running · 42% ctx', 'running · 42% ctx', 'done · 42% ctx']);
+  assert.deepEqual(b.puts.filter((p) => p.text === 'claude-sonnet-5-5').map((p) => [p.x, p.y]), [[0, 5], [26, 5], [52, 5]], 'the full model name has its own line');
+  assert.deepEqual(b.puts.filter((p) => p.text === 'Build the reader').map((p) => p.y), [6, 6, 6]);
   const text = b.puts.map((p) => p.text);
   assert.ok(!text.some((t) => /#\s?\d|\b(7|31)\b/.test(t)), 'no avatar number is printed');
   assert.ok(!text.some((t) => /[┌┐└┘│─]/.test(t)), 'no drawn frame');
@@ -248,11 +248,13 @@ test('block: a done card is dimmed, a running one is not; the same portrait is f
   assert.ok(done.pixels.every((p) => /^#[0-9a-f]{6}$/.test(p.bg ?? '')), 'faded colours stay valid hex');
 });
 
-test('block: the status line clips to the card width, keeping the status part first', () => {
-  const b = composeSubagentBlock(view([AGENT('a1', 3)]), 160, 30, 0);
-  const line = b.puts.filter((p) => p.y === 4);
-  assert.equal(line.map((p) => p.text).join(''), 'running · 42% ctx · cla…');
-  assert.ok(line.every((p) => p.x + [...p.text].length <= 24), 'nothing past the 24-column card');
+test('block: the model is shown whole unless longer than the card, and an unknown model says so', () => {
+  const at = (model: string | null) => composeSubagentBlock(view([{ ...AGENT('a1', 3), model }]), 160, 30, 0).puts.filter((p) => p.y === 5);
+  assert.deepEqual(at('claude-sonnet-5-5').map((p) => p.text), ['claude-sonnet-5-5']);
+  assert.deepEqual(at('claude-opus-5-5').map((p) => p.text), ['claude-opus-5-5']);
+  assert.deepEqual(at(null).map((p) => p.text), ['model unknown']);
+  assert.deepEqual(at('claude-a-model-name-longer-than-the-card').map((p) => p.text), ['claude-a-model-name-lon…']);
+  assert.ok(at('claude-a-model-name-longer-than-the-card').every((p) => [...p.text].length <= 24), 'nothing past the 24-column card');
 });
 
 test('block: only running portraits animate; a done portrait rests on frame 0', () => {
@@ -265,18 +267,18 @@ test('block: only running portraits animate; a done portrait rests on frame 0', 
 
 test('block: a narrow pane wraps cards to the next row, and what does not fit is counted', () => {
   const agents = [AGENT('a1', 1), AGENT('a2', 2), AGENT('a3', 3)];
-  // 60 columns hold two 24-column cards; 13 rows hold two card rows
-  const wrapped = composeSubagentBlock(view(agents), 60, 13, 0);
-  assert.equal(wrapped.height, 2 * (SPRITE_ROWS + 3) + 1, 'two card rows with a blank row between');
+  // 60 columns hold two 24-column cards; 15 rows hold two card rows
+  const wrapped = composeSubagentBlock(view(agents), 60, 15, 0);
+  assert.equal(wrapped.height, 2 * (SPRITE_ROWS + 4) + 1, 'two card rows with a blank row between');
   assert.equal(wrapped.pixels.length, 3 * TILE_COLS * SPRITE_ROWS);
-  assert.deepEqual(wrapped.puts.filter((p) => p.text === 'implementor').map((p) => [p.x, p.y]), [[0, 3], [26, 3], [0, 10]]);
+  assert.deepEqual(wrapped.puts.filter((p) => p.text === 'implementor').map((p) => [p.x, p.y]), [[0, 3], [26, 3], [0, 11]]);
   // one card row of room: two cards show and the rest is counted below them
-  const one = composeSubagentBlock(view(agents), 60, 7, 0);
+  const one = composeSubagentBlock(view(agents), 60, 8, 0);
   assert.equal(one.pixels.length, 2 * TILE_COLS * SPRITE_ROWS);
-  assert.ok(one.puts.some((p) => p.text === '1 more not shown' && p.y === 6));
+  assert.ok(one.puts.some((p) => p.text === '1 more not shown' && p.y === 7));
   assert.ok(one.puts.every((p) => p.x + [...p.text].length <= 60));
   // no room for a card row: a note, no portraits
-  const tight = composeSubagentBlock(view(agents), 60, 5, 0);
+  const tight = composeSubagentBlock(view(agents), 60, 6, 0);
   assert.equal(tight.pixels.length, 0);
   assert.deepEqual(tight.puts.map((p) => p.text), ['3 sub-agents, no room to show them']);
   assert.equal(composeSubagentBlock(view(agents), 60, 0, 0).height, 0);
@@ -361,8 +363,8 @@ test('tracker: context % from the subagent transcript and the window table, "?" 
     assert.equal(v.agents[0]!.model, 'claude-opus-5-5', 'the transcript names the model that actually ran');
     assert.equal(v.agents[1]!.contextPct, null);
     const text = composeSubagentBlock(v, 160, 30, 0).puts.map((p) => p.text);
-    assert.ok(text.includes('running · 25% ctx') && text.includes(' · cla…'), JSON.stringify(text));
-    assert.ok(text.includes('running · ? ctx') && text.includes(' · model…'), JSON.stringify(text));
+    assert.ok(text.includes('running · 25% ctx') && text.includes('claude-opus-5-5'), JSON.stringify(text));
+    assert.ok(text.includes('running · ? ctx') && text.includes('model unknown'), JSON.stringify(text));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

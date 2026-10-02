@@ -51718,7 +51718,7 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
 }
 var TILE_H = SPRITE_ROWS;
 var CARD_W = 24;
-var CARD_H = TILE_H + 3;
+var CARD_H = TILE_H + 4;
 var CARD_GAP = 2;
 var ROW_GAP = 1;
 var DONE_FADE = 0.55;
@@ -51761,7 +51761,7 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
     const done = a.status === "done";
     const x0 = i % perRow * (cardW + CARD_GAP);
     const y0 = Math.floor(i / perRow) * (CARD_H + ROW_GAP);
-    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done)).forEach((line2, r) => line2.forEach((cell, c) => {
+    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done)).forEach((line, r) => line.forEach((cell, c) => {
       const px = { x: x0 + c, y: y0 + r, ch: cell.ch };
       if (cell.fg !== void 0)
         px.fg = done ? fadeToTile(cell.fg, DONE_FADE) : cell.fg;
@@ -51772,13 +51772,10 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
     const ty = y0 + TILE_H;
     puts.push({ x: x0, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, cardW) });
     const status = `${a.status} \xB7 ${a.contextPct === null ? "?" : `${a.contextPct}%`} ctx`;
-    const line = [...clip(`${status} \xB7 ${a.model ?? "model unknown"}`, cardW)];
-    const statusLen = Math.min(line.length, [...status].length);
-    puts.push({ x: x0, y: ty + 1, attr: done ? { dim: true } : { color: "green" }, text: line.slice(0, statusLen).join("") });
-    if (line.length > statusLen)
-      puts.push({ x: x0 + statusLen, y: ty + 1, attr: { dim: true }, text: line.slice(statusLen).join("") });
+    puts.push({ x: x0, y: ty + 1, attr: done ? { dim: true } : { color: "green" }, text: clip(status, cardW) });
+    puts.push({ x: x0, y: ty + 2, attr: { dim: true }, text: clip(a.model ?? "model unknown", cardW) });
     if (a.description)
-      puts.push({ x: x0, y: ty + 2, attr: { dim: true }, text: clip(a.description, cardW) });
+      puts.push({ x: x0, y: ty + 3, attr: { dim: true }, text: clip(a.description, cardW) });
   }
   const height = cardRows * CARD_H + (cardRows - 1) * ROW_GAP;
   if (hidden > 0 && height + 1 <= maxHeight) {
