@@ -17,7 +17,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
 const NOW = Date.parse('2026-10-02T12:00:00.000Z');
 const HEAD = 'b'.repeat(40);
-const ARTICLE = '11111111-2222-4333-8444-555555555555';
+const FIXTURE_FEATURE_ID = '11111111-2222-4333-8444-555555555555';
 
 function fixture() {
   const base = mkdtempSync(join(tmpdir(), 'sterling-mworker-oc-'));
@@ -74,7 +74,7 @@ function opencodeRun(fx, items, { model = 'anthropic/claude-sonnet-5-5', token =
   writeFileSync(fx.paths.eligible, JSON.stringify({ token, head: HEAD, host: 'opencode', opencode_bin: '/opt/oc/opencode.exe', opencode_model: model, items }));
   return { root: fx.project, pluginRoot: fx.plugin, token, budgetUsd: 2, now: () => NOW, log: () => {} };
 }
-const ITEM = { id: 'item-a', file_keys: ['src/a.mjs'], feature_link: ARTICLE, slug: 'probe-article' };
+const ITEM = { id: 'item-a', file_keys: ['src/a.mjs'], feature_link: FIXTURE_FEATURE_ID, slug: 'probe-article' };
 const owes = (id = ITEM.id) => JSON.stringify({ item_id: id, article: 'probe-article', verdict: 'owes_prose', file_keys: ['forged'], reason: 'the article misses the new flag' });
 
 test('the measured OpenCode 2.0.21 events parse: an inner sterling call counts by its OWN status, errored reads are no evidence, a remove is journalled with its text, the last message is the result', () => {
@@ -85,7 +85,7 @@ test('the measured OpenCode 2.0.21 events parse: an inner sterling call counts b
   stream.feed(lines);
   const out = stream.end();
   assert.deepEqual(observed, [
-    ['mcp__sterling__knowledge_get', { id: ARTICLE }],
+    ['mcp__sterling__knowledge_get', { id: FIXTURE_FEATURE_ID }],
     ['Read', { file_path: 'src/a.mjs' }],
     ['Grep', { path: 'proj/src' }],
   ], 'the knowledge_get the model caught as an error and both errored reads are not evidence');
@@ -107,7 +107,7 @@ test('the measured OpenCode 2.0.21 events parse: an inner sterling call counts b
 test('[gate] an OpenCode run with knowledge_get on the article and a read of its file gives an evidence-backed verdict; the argv, model, config and PWD are the runner\'s', async () => {
   const fx = fixture();
   try {
-    const child = fakeOpencode([sterling('knowledge_get', { id: ARTICLE }), read('src/a.mjs'), stepFinish(0.12), text(owes()), stepFinish(0.03)]);
+    const child = fakeOpencode([sterling('knowledge_get', { id: FIXTURE_FEATURE_ID }), read('src/a.mjs'), stepFinish(0.12), text(owes()), stepFinish(0.03)]);
     assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 0);
     const [call] = child.calls;
     assert.equal(call.cmd, '/opt/oc/opencode.exe');
@@ -141,10 +141,10 @@ test('[gate] an OpenCode run with knowledge_get on the article and a read of its
 
 test('[gate] an OpenCode verdict without a successful tool result is refused: an errored inner knowledge_get, an errored read, or no tool call at all leaves it unjudged and the run no_progress', async () => {
   const cases = {
-    'inner call errored (the model caught it, so the execute itself completed)': [sterling('knowledge_get', { id: ARTICLE }, 'error', '{"ok":false}'), read('src/a.mjs')],
-    'read errored': [sterling('knowledge_get', { id: ARTICLE }), read('src/a.mjs', 'error')],
-    'read never finished': [sterling('knowledge_get', { id: ARTICLE }), part('read', { status: 'running', input: { path: 'src/a.mjs' } })],
-    'grep of another directory only': [sterling('knowledge_get', { id: ARTICLE }), grep('docs')],
+    'inner call errored (the model caught it, so the execute itself completed)': [sterling('knowledge_get', { id: FIXTURE_FEATURE_ID }, 'error', '{"ok":false}'), read('src/a.mjs')],
+    'read errored': [sterling('knowledge_get', { id: FIXTURE_FEATURE_ID }), read('src/a.mjs', 'error')],
+    'read never finished': [sterling('knowledge_get', { id: FIXTURE_FEATURE_ID }), part('read', { status: 'running', input: { path: 'src/a.mjs' } })],
+    'grep of another directory only': [sterling('knowledge_get', { id: FIXTURE_FEATURE_ID }), grep('docs')],
     'no tool call': [],
   };
   for (const [name, events] of Object.entries(cases)) {
@@ -373,7 +373,7 @@ test('[gate] an execute that FAILED is never evidence even when its inner call c
   const observed = [];
   const journal = [];
   const stream = opencodeStreamJournal((e) => journal.push(e), (name, input) => observed.push([name, input]));
-  stream.feed([failedExecute('knowledge_get', { id: ARTICLE }), failedExecute('maintenance_remove', { id: 'item-a' }), failedExecute('maintenance_remove', { id: 'item-b' }, 'error')].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  stream.feed([failedExecute('knowledge_get', { id: FIXTURE_FEATURE_ID }), failedExecute('maintenance_remove', { id: 'item-a' }), failedExecute('maintenance_remove', { id: 'item-b' }, 'error')].map((e) => JSON.stringify(e)).join('\n') + '\n');
   const out = stream.end();
   assert.deepEqual(observed, [], 'no evidence from a failed execute');
   assert.equal(out.sterlingOk, 1, 'only the completed remove is a successful sterling call');
@@ -386,7 +386,7 @@ test('[gate] an execute that FAILED is never evidence even when its inner call c
 test('[gate] runWorker: an owes_prose verdict resting on a knowledge_get inside a failed execute is unjudged', async () => {
   const fx = fixture();
   try {
-    const child = fakeOpencode([failedExecute('knowledge_get', { id: ARTICLE }), read('src/a.mjs'), text(owes())]);
+    const child = fakeOpencode([failedExecute('knowledge_get', { id: FIXTURE_FEATURE_ID }), read('src/a.mjs'), text(owes())]);
     assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 0);
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
     assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict, v.reason]), [['item-a', 'unjudged', 'no evidence']]);

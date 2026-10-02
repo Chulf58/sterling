@@ -8,8 +8,8 @@ var __export = (target, all) => {
 // scripts/hooks/h10-direct-capture.mjs
 import { randomUUID as randomUUID5, createHash as createHash3 } from "node:crypto";
 import { spawn, spawnSync as spawnSync6 } from "node:child_process";
-import { readFileSync as readFileSync9, writeFileSync as writeFileSync6, writeSync as writeSync2, rmSync as rmSync4, existsSync as existsSync9, mkdirSync as mkdirSync8, renameSync as renameSync6 } from "node:fs";
-import { join as join13, basename as basename2 } from "node:path";
+import { readFileSync as readFileSync9, writeFileSync as writeFileSync6, writeSync as writeSync2, rmSync as rmSync4, existsSync as existsSync10, mkdirSync as mkdirSync8, renameSync as renameSync6 } from "node:fs";
+import { join as join14, basename as basename2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -8856,12 +8856,55 @@ function readPrLoop(root) {
   return s2;
 }
 
+// scripts/hooks/lib/pr-loop-duty.mjs
+import { existsSync as existsSync8 } from "node:fs";
+import { join as join12 } from "node:path";
+var errMessage = (e) => String(e && e.message || e);
+function evaluatePrLoop(root) {
+  let mode;
+  try {
+    mode = readProjectMode(root);
+  } catch (e) {
+    if (existsSync8(join12(root, PR_LOOP_REL))) {
+      return {
+        state: null,
+        degraded: `\u2022 PR review loop: the project mode is unreadable (${errMessage(e)}) \u2014 ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
+      };
+    }
+    return { state: null, degraded: null };
+  }
+  if (mode !== "work") return { state: null, degraded: null };
+  let state;
+  try {
+    state = readPrLoop(root);
+  } catch (e) {
+    return { state: null, degraded: `\u2022 PR review loop: ${PR_LOOP_REL} is unreadable (${errMessage(e)}) \u2014 whether a loop is owed is UNKNOWN; rerun /sterling:merge to re-arm it, or delete the file if no PR is open.` };
+  }
+  if (!state || state.status !== "owed") return { state: null, degraded: null };
+  return { state, degraded: null };
+}
+function prLoopNext(state, waitScript) {
+  return `run the pr-review-loop skill: wait with node "${waitScript}" ${state.pr_url} (background), disposition each finding, push fixes via /sterling:merge; when the loop ends, settle it: node "${waitScript}" --settle <clean|capped|escalated> --pr ${state.pr_number}. Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`;
+}
+var prLoopOwedText = (state, next) => `\u2022 PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? "?").slice(0, 7)}, armed ${state.armed_at}) \u2014 ${next}`;
+var prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number} ${state.pr_url} \u2014 next: pr-review-loop skill, then --settle clean|capped|escalated --pr ${state.pr_number}.`;
+
 // scripts/hooks/lib/maintenance-worker.mjs
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync4, existsSync as existsSync8, mkdirSync as mkdirSync7, openSync as openSync4, readFileSync as readFileSync8, renameSync as renameSync5, rmSync as rmSync3, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync5, appendFileSync } from "node:fs";
-import { dirname as dirname8, isAbsolute as isAbsolute2, join as join12, resolve as resolve6, sep as sep2 } from "node:path";
+import { closeSync as closeSync4, existsSync as existsSync9, mkdirSync as mkdirSync7, openSync as openSync4, readFileSync as readFileSync8, renameSync as renameSync5, rmSync as rmSync3, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync5, appendFileSync } from "node:fs";
+import { dirname as dirname8, isAbsolute as isAbsolute2, join as join13, resolve as resolve6, sep as sep2 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
+
+// scripts/hooks/lib/maintenance-worker-opencode.mjs
+var SERVER = "sterling";
+var OPENCODE_DENIED_MCP = [
+  ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => `${SERVER}_knowledge_${v}`),
+  ...["add", "remove", "update", "edit"].map((v) => `${SERVER}_board_${v}`),
+  `${SERVER}_config_set`
+];
+
+// scripts/hooks/lib/maintenance-worker.mjs
 var WORKER_RUN_BUDGET_USD = 2;
 var BATCH_MIN_ITEMS = 5;
 var BATCH_MAX_WAIT_MS = 30 * 6e4;
@@ -8873,8 +8916,8 @@ var TAKEOVER_STALE_MS = 6e4;
 var ROTATE_BYTES = 1e6;
 var WORKER_ENV_FLAG = "STERLING_MAINTENANCE_WORKER";
 var WORKER_DISABLE_ENV = "STERLING_MAINTENANCE_WORKER_DISABLE";
-var SERVER = "sterling";
-var mcp = (name) => `mcp__${SERVER}__${name}`;
+var SERVER2 = "sterling";
+var mcp = (name) => `mcp__${SERVER2}__${name}`;
 var mcpPlugin = (name) => `mcp__plugin_sterling_sterling__${name}`;
 var WORKER_TOOLS = [mcp("maintenance_query"), mcp("knowledge_get"), mcp("maintenance_remove"), mcp("knowledge_line_ref_fix"), mcpPlugin("knowledge_line_ref_fix"), "Read", "Grep"];
 var WORKER_DISALLOWED_TOOLS = [
@@ -8885,22 +8928,26 @@ var WORKER_DISALLOWED_TOOLS = [
   "Edit",
   "Bash"
 ];
+var WORKER_HOSTS = ["claude", "opencode"];
+var OPENCODE_MODEL_KEY = "opencode_model";
+var opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
+var OPENCODE_MODEL_UNSET = `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
 function workerPaths(root) {
-  const sterling = join12(root, ".sterling");
+  const sterling = join13(root, ".sterling");
   return {
-    lock: join12(sterling, "transient", "maintenance-worker.lock"),
-    takeover: join12(sterling, "transient", "maintenance-worker.lock.takeover"),
-    lastLaunch: join12(sterling, "transient", "maintenance-worker.last-launch"),
-    eligible: join12(sterling, "transient", "maintenance-worker.eligible.json"),
-    state: join12(sterling, "transient", "maintenance-worker.state.json"),
-    log: join12(sterling, "maintenance-worker.log"),
-    journal: join12(sterling, "maintenance-worker.jsonl")
+    lock: join13(sterling, "transient", "maintenance-worker.lock"),
+    takeover: join13(sterling, "transient", "maintenance-worker.lock.takeover"),
+    lastLaunch: join13(sterling, "transient", "maintenance-worker.last-launch"),
+    eligible: join13(sterling, "transient", "maintenance-worker.eligible.json"),
+    state: join13(sterling, "transient", "maintenance-worker.state.json"),
+    log: join13(sterling, "maintenance-worker.log"),
+    journal: join13(sterling, "maintenance-worker.jsonl")
   };
 }
 function pluginRootFrom(moduleUrl = import.meta.url) {
   let dir = dirname8(fileURLToPath2(moduleUrl));
   for (let i = 0; i < 5; i++) {
-    if (existsSync8(join12(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync9(join13(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname8(dir);
   }
   return null;
@@ -9037,22 +9084,22 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   return readJson(paths.lock)?.token === token ? token : null;
 }
 function resolveMcpConfig(pluginRoot2, projectRoot2) {
-  const path = join12(pluginRoot2, ".claude-plugin", "sterling-mcp.json");
+  const path = join13(pluginRoot2, ".claude-plugin", "sterling-mcp.json");
   let parsed;
   try {
     parsed = JSON.parse(readFileSync8(path, "utf8"));
   } catch (e) {
     throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 it ships committed with the plugin, so this plugin tree is incomplete: restore it (git checkout -- .claude-plugin/sterling-mcp.json in a clone) or reinstall the plugin`);
   }
-  const entry = parsed?.mcpServers?.[SERVER];
+  const entry = parsed?.mcpServers?.[SERVER2];
   if (!entry || typeof entry.command !== "string" || !Array.isArray(entry.args)) {
-    throw new Error(`${path} has no mcpServers.${SERVER} {command, args} entry`);
+    throw new Error(`${path} has no mcpServers.${SERVER2} {command, args} entry`);
   }
   const bind = (s2) => String(s2).split("${CLAUDE_PLUGIN_ROOT}").join(pluginRoot2).split("${CLAUDE_PROJECT_DIR}").join(projectRoot2);
-  return JSON.stringify({ mcpServers: { [SERVER]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
+  return JSON.stringify({ mcpServers: { [SERVER2]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
 }
 function readWorkerPrompt(pluginRoot2) {
-  const path = join12(pluginRoot2, "templates", "maintenance-worker-prompt.md");
+  const path = join13(pluginRoot2, "templates", "maintenance-worker-prompt.md");
   try {
     return readFileSync8(path, "utf8");
   } catch (e) {
@@ -9145,18 +9192,27 @@ function launchWorker(opts) {
         detail: `${eligible.length} of ${BATCH_MIN_ITEMS} eligible reconcile items, oldest waited ${ageText(new Date(nowMs - oldestWaitMs).toISOString(), nowMs)} of ${Math.round(BATCH_MAX_WAIT_MS / 6e4)}m \u2014 no worker until ${BATCH_MIN_ITEMS} are eligible or the oldest has waited that long`
       };
     }
+    const host = opts.host ?? "claude";
+    if (!WORKER_HOSTS.includes(host)) return { launched: false, reason: "error", detail: failDetail(`unknown runner host '${host}'`) };
+    const model = opencodeModelOf(opts.config);
+    if (host === "opencode") {
+      if (typeof opts.opencodeBin !== "string" || !opts.opencodeBin) return { launched: false, reason: "error", detail: failDetail("the opencode host needs the path of the opencode binary") };
+      if (model === null) return { launched: false, reason: "error", detail: failDetail(OPENCODE_MODEL_UNSET) };
+      if (model !== null && (typeof model !== "string" || !model.trim())) return { launched: false, reason: "error", detail: failDetail(`config maintenance_worker.${OPENCODE_MODEL_KEY} must be a provider/model string, got ${JSON.stringify(model)}`) };
+    }
     const pluginRoot2 = opts.pluginRoot ?? pluginRootFrom();
     if (!pluginRoot2) return { launched: false, reason: "error", detail: failDetail("plugin root not found above the hook") };
     resolveMcpConfig(pluginRoot2, opts.root);
     readWorkerPrompt(pluginRoot2);
-    const runner = join12(pluginRoot2, "scripts", "maintenance-worker-run.mjs");
-    if (!existsSync8(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
+    const runner = join13(pluginRoot2, "scripts", "maintenance-worker-run.mjs");
+    if (!existsSync9(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
     mkdirSync7(dirname8(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: "already_running" };
     writeFileSync5(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
-    writeFileSync5(paths.eligible, JSON.stringify({ token, head: git.head, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
+    const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
+    writeFileSync5(paths.eligible, JSON.stringify({ token, head: git.head, ...runnerHost, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
     let logFd;
     try {
       rotateIfLarge(paths.log);
@@ -9169,7 +9225,7 @@ function launchWorker(opts) {
       child.on?.("error", () => releaseLock(paths, token));
       child.unref?.();
       writeFileSync5(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
-      return { launched: true, reason: "launched", pid: child.pid, items: eligible.length };
+      return { launched: true, reason: "launched", pid: child.pid, items: eligible.length, host };
     } catch (e) {
       releaseLock(paths, token);
       return { launched: false, reason: "error", detail: failDetail(`spawn: ${e?.message ?? e}`) };
@@ -9317,7 +9373,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
   }
   if (stampIds.size) {
     try {
-      mkdirSync8(join13(cwd, ".sterling", "transient"), { recursive: true });
+      mkdirSync8(join14(cwd, ".sterling", "transient"), { recursive: true });
       await withRegisterLock(
         cwd,
         () => {
@@ -9328,9 +9384,9 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
               entry.residue_reported_at = nowIso;
             }
           }
-          const transient = join13(cwd, ".sterling", "transient");
+          const transient = join14(cwd, ".sterling", "transient");
           mkdirSync8(transient, { recursive: true });
-          const tmpPath = join13(transient, `${basename2(registerPath2)}.tmp-${process.pid}`);
+          const tmpPath = join14(transient, `${basename2(registerPath2)}.tmp-${process.pid}`);
           writeFileSync6(tmpPath, JSON.stringify(fresh));
           renameSync6(tmpPath, registerPath2);
         },
@@ -9360,9 +9416,9 @@ if (!store) {
   if (residueLines.length) process.stderr.write(residueLines.join("\n\n"));
   allow();
 }
-var touchesPath = join13(input.cwd, ".sterling", "transient", "touches.json");
-var eventsPath = join13(input.cwd, ".sterling", "transient", "session-events.json");
-var nagMarker = join13(input.cwd, ".sterling", "transient", "capture-nagged.json");
+var touchesPath = join14(input.cwd, ".sterling", "transient", "touches.json");
+var eventsPath = join14(input.cwd, ".sterling", "transient", "session-events.json");
+var nagMarker = join14(input.cwd, ".sterling", "transient", "capture-nagged.json");
 try {
   const config = parseConfig(loadConfig(input.cwd) ?? {});
   const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -9380,12 +9436,12 @@ try {
 `);
     }
   };
-  const pressureMarker = join13(input.cwd, ".sterling", "transient", "pressure-nagged.json");
+  const pressureMarker = join14(input.cwd, ".sterling", "transient", "pressure-nagged.json");
   const loadSharedWindows = () => {
     try {
       const pluginDir = pluginRoot(import.meta.url);
       if (!pluginDir) return { error: "the Sterling plugin root was not found" };
-      const raw = JSON.parse(readFileSync9(join13(pluginDir, "templates", "context-windows.json"), "utf8"));
+      const raw = JSON.parse(readFileSync9(join14(pluginDir, "templates", "context-windows.json"), "utf8"));
       if (!raw || typeof raw.windows !== "object" || raw.windows === null || Array.isArray(raw.windows)) {
         return { error: 'templates/context-windows.json has no "windows" object' };
       }
@@ -9444,8 +9500,8 @@ try {
           sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...sourceFields, at: now };
         }
       }
-      mkdirSync8(join13(input.cwd, ".sterling", "transient"), { recursive: true });
-      writeFileSync6(join13(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
+      mkdirSync8(join14(input.cwd, ".sterling", "transient"), { recursive: true });
+      writeFileSync6(join14(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
       return sample;
     } catch (e) {
       try {
@@ -9484,7 +9540,7 @@ try {
     }
   };
   const spendPressureMarker = (level) => writeFileSync6(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
-  const gaugeMarker = join13(input.cwd, ".sterling", "transient", "gauge-warned.json");
+  const gaugeMarker = join14(input.cwd, ".sterling", "transient", "gauge-warned.json");
   const gaugeSpent = () => {
     try {
       return JSON.parse(readFileSync9(gaugeMarker, "utf8")).session_id === input.session_id;
@@ -9494,7 +9550,7 @@ try {
   };
   const spendGaugeMarker = () => writeFileSync6(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const gaugePart = () => `H10 window gauge: model '${pressure.unmapped_model}' has no entry in the shared window table or context_watch.windows \u2014 context fill is UNRELIABLE and is not reported. Add "${pressure.unmapped_model}": <window tokens> to templates/context-windows.json in the Sterling plugin (one edit serves every project). (once per session)`;
-  const sharedWarnMarker = join13(input.cwd, ".sterling", "transient", "shared-windows-warned.json");
+  const sharedWarnMarker = join14(input.cwd, ".sterling", "transient", "shared-windows-warned.json");
   const sharedWarnSpent = () => {
     try {
       return JSON.parse(readFileSync9(sharedWarnMarker, "utf8")).session_id === input.session_id;
@@ -9583,7 +9639,7 @@ try {
     touchesPath,
     () => {
       let orphanedTouches = [];
-      if (existsSync9(touchesClaimPath)) {
+      if (existsSync10(touchesClaimPath)) {
         try {
           orphanedTouches = parseTouchesContent(readFileSync9(touchesClaimPath, "utf8"));
         } catch {
@@ -9631,7 +9687,7 @@ try {
     withFileLock(
       touchesPath,
       () => {
-        if (existsSync9(touchesClaimPath) && !existsSync9(touchesPath)) renameSync6(touchesClaimPath, touchesPath);
+        if (existsSync10(touchesClaimPath) && !existsSync10(touchesPath)) renameSync6(touchesClaimPath, touchesPath);
       },
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
@@ -9639,7 +9695,7 @@ try {
   let settlementFailed = false;
   let sessionEvents = [];
   try {
-    if (existsSync9(eventsPath)) {
+    if (existsSync10(eventsPath)) {
       const raw = JSON.parse(readFileSync9(eventsPath, "utf8"));
       if (Array.isArray(raw)) sessionEvents = raw;
     }
@@ -9647,7 +9703,7 @@ try {
     sessionEvents = [];
   }
   const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
-    (p) => existsSync9(join13(input.cwd, p))
+    (p) => existsSync10(join14(input.cwd, p))
   );
   const staleMinutes = config.dispatch_register.stale_minutes;
   const nowMs = Date.parse(now);
@@ -9740,7 +9796,7 @@ try {
     return `\u2022 deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(", ")}]: ${pathsDisplay} \u2014 duty re-arms when they land`;
   };
   const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
-  const deferralNotedPath = join13(input.cwd, ".sterling", "transient", "deferral-noted.json");
+  const deferralNotedPath = join14(input.cwd, ".sterling", "transient", "deferral-noted.json");
   const deferralKey = deferredPaths.length ? createHash3("sha256").update(JSON.stringify({ owners: [...deferredAgents].sort(), paths: [...deferredPaths].sort() })).digest("hex") : null;
   const deferralNoted = (() => {
     if (!deferralKey || !hasSession) return false;
@@ -9765,7 +9821,7 @@ try {
       (f) => [...touchedKeys].some((k) => entryOwns(joinKey(f), k, fileEntries.has(f)))
     );
   });
-  const dispatchUnknownNotedPath = join13(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
+  const dispatchUnknownNotedPath = join14(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
   const dispatchUnknownNotedKeys = (() => {
     if (!hasSession) return /* @__PURE__ */ new Set();
     try {
@@ -9814,28 +9870,11 @@ try {
       )
     );
   }
-  const prLoopNaggedPath = join13(input.cwd, ".sterling", "transient", "pr-loop-nagged.json");
+  const prLoopNaggedPath = join14(input.cwd, ".sterling", "transient", "pr-loop-nagged.json");
   const prLoop = (() => {
-    let mode;
-    try {
-      mode = readProjectMode(input.cwd);
-    } catch (e) {
-      if (existsSync9(join13(input.cwd, PR_LOOP_REL))) {
-        degradationParts.push(
-          `\u2022 PR review loop: the project mode is unreadable (${String(e && e.message || e)}) \u2014 ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
-        );
-      }
-      return null;
-    }
-    if (mode !== "work") return null;
-    let state;
-    try {
-      state = readPrLoop(input.cwd);
-    } catch (e) {
-      degradationParts.push(`\u2022 PR review loop: ${PR_LOOP_REL} is unreadable (${String(e && e.message || e)}) \u2014 whether a loop is owed is UNKNOWN; rerun /sterling:merge to re-arm it, or delete the file if no PR is open.`);
-      return null;
-    }
-    if (!state || state.status !== "owed") return null;
+    const { state, degraded } = evaluatePrLoop(input.cwd);
+    if (degraded) degradationParts.push(degraded);
+    if (!state) return null;
     const spent = (() => {
       try {
         const m = JSON.parse(readFileSync9(prLoopNaggedPath, "utf8"));
@@ -9844,7 +9883,7 @@ try {
         return false;
       }
     })();
-    const next = `run the pr-review-loop skill: wait with node "\${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" ${state.pr_url} (background), disposition each finding, push fixes via /sterling:merge; when the loop ends, settle it: node "\${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" --settle <clean|capped|escalated> --pr ${state.pr_number}. Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`;
+    const next = prLoopNext(state, "${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs");
     if (!hasSession) {
       return {
         blockDue: false,
@@ -9853,8 +9892,8 @@ try {
     }
     return {
       blockDue: !input.stop_hook_active && !spent,
-      text: `\u2022 PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? "?").slice(0, 7)}, armed ${state.armed_at}) \u2014 ${next}`,
-      reminder: `PR review loop owed: PR #${state.pr_number} ${state.pr_url} \u2014 next: pr-review-loop skill, then --settle clean|capped|escalated --pr ${state.pr_number}.`,
+      text: prLoopOwedText(state, next),
+      reminder: prLoopReminderText(state),
       spend: () => {
         writeFileSync6(prLoopNaggedPath, JSON.stringify({ session_id: input.session_id, armed_at: state.armed_at, at: now }));
       }
@@ -9917,7 +9956,7 @@ try {
   const pendingHeld = Boolean(pendingDetail) && (liveDispatches.length > 0 || recentlyEndedDispatches.length > 0);
   const pendingDeclId = (e) => JSON.stringify([e.at ?? null, e.detail]);
   const graceSpentIds = (() => {
-    if (!existsSync9(nagMarker)) return /* @__PURE__ */ new Set();
+    if (!existsSync10(nagMarker)) return /* @__PURE__ */ new Set();
     try {
       const m = JSON.parse(readFileSync9(nagMarker, "utf8"));
       return new Set(Array.isArray(m?.capture_pending_spent) ? m.capture_pending_spent : []);
@@ -9934,7 +9973,7 @@ try {
   const releaseBase = git.ok && git.settled && !git.base_lost ? git.merge_base ?? git.settled.sha : null;
   const isReleaseMechanics = (p) => generatedProjections.has(p) || VERSION_ONLY_CANDIDATES.includes(p) && !Object.hasOwn(git.settled?.dirty ?? {}, p) && isVersionOnlyInWorkingTree(input.cwd, releaseBase, p);
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t) && !isReleaseMechanics(t.path));
-  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync9(join13(input.cwd, p)));
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync10(join14(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const dispatchEventReturnAt = (e) => {
     const laneRows = taggedWebLaneRows(e);
@@ -10066,7 +10105,7 @@ try {
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow("article-demand-carried-gitignore", "no_git");
     const prunable = new Set(
-      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync9(join13(input.cwd, p)))
+      carriedAll.filter((p) => exemptFromDemand(p) || (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync10(join14(input.cwd, p)))
     );
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
@@ -10188,7 +10227,7 @@ try {
     }
   }
   const H10_HEADER = "H10 \u25B8 act, then Stop again:";
-  if (!input.stop_hook_active && !existsSync9(nagMarker)) {
+  if (!input.stop_hook_active && !existsSync10(nagMarker)) {
     const parts = [deferralLine(3), ...degradationParts].filter(Boolean);
     const hasDebug = activeDebugEvents.length > 0;
     const captureLaneOpen = hasCaptureDuty && !captured && !pendingDetail;
@@ -10222,7 +10261,7 @@ try {
         deferral_owners: [...deferredAgents].sort()
       })
     ).digest("hex");
-    const dutyNaggedMarker = join13(input.cwd, ".sterling", "transient", "duty-nagged.json");
+    const dutyNaggedMarker = join14(input.cwd, ".sterling", "transient", "duty-nagged.json");
     const priorDutyNag = (() => {
       if (!input.session_id) return null;
       try {
@@ -10323,7 +10362,7 @@ ${parts.join("\n\n")}`;
   if (articleDemand) {
     const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
     const demandKeysRaw = overlapping ? overlapping.file_keys ?? [] : unowned;
-    const vanished = demandKeysRaw.filter((p) => !existsSync9(join13(input.cwd, p)));
+    const vanished = demandKeysRaw.filter((p) => !existsSync10(join14(input.cwd, p)));
     let demandKeys = demandKeysRaw;
     if (vanished.length) {
       const known = gitKnowsNow(vanished, input.cwd);

@@ -7800,6 +7800,16 @@ import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync, existsSync as existsSync4, mkdirSync as mkdirSync3, openSync, readFileSync as readFileSync4, renameSync as renameSync2, rmSync as rmSync2, rmdirSync as rmdirSync2, statSync as statSync2, writeFileSync as writeFileSync2, appendFileSync } from "node:fs";
 import { dirname as dirname4, isAbsolute as isAbsolute2, join as join5, resolve as resolve3, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// scripts/hooks/lib/maintenance-worker-opencode.mjs
+var SERVER = "sterling";
+var OPENCODE_DENIED_MCP = [
+  ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => `${SERVER}_knowledge_${v}`),
+  ...["add", "remove", "update", "edit"].map((v) => `${SERVER}_board_${v}`),
+  `${SERVER}_config_set`
+];
+
+// scripts/hooks/lib/maintenance-worker.mjs
 var WORKER_RUN_BUDGET_USD = 2;
 var BATCH_MIN_ITEMS = 5;
 var BATCH_MAX_WAIT_MS = 30 * 6e4;
@@ -7811,8 +7821,8 @@ var TAKEOVER_STALE_MS = 6e4;
 var ROTATE_BYTES = 1e6;
 var WORKER_ENV_FLAG = "STERLING_MAINTENANCE_WORKER";
 var WORKER_DISABLE_ENV = "STERLING_MAINTENANCE_WORKER_DISABLE";
-var SERVER = "sterling";
-var mcp = (name) => `mcp__${SERVER}__${name}`;
+var SERVER2 = "sterling";
+var mcp = (name) => `mcp__${SERVER2}__${name}`;
 var mcpPlugin = (name) => `mcp__plugin_sterling_sterling__${name}`;
 var WORKER_TOOLS = [mcp("maintenance_query"), mcp("knowledge_get"), mcp("maintenance_remove"), mcp("knowledge_line_ref_fix"), mcpPlugin("knowledge_line_ref_fix"), "Read", "Grep"];
 var WORKER_DISALLOWED_TOOLS = [
@@ -7823,6 +7833,10 @@ var WORKER_DISALLOWED_TOOLS = [
   "Edit",
   "Bash"
 ];
+var WORKER_HOSTS = ["claude", "opencode"];
+var OPENCODE_MODEL_KEY = "opencode_model";
+var opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
+var OPENCODE_MODEL_UNSET = `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
 function workerPaths(root) {
   const sterling = join5(root, ".sterling");
   return {
@@ -7982,12 +7996,12 @@ function resolveMcpConfig(pluginRoot, projectRoot2) {
   } catch (e) {
     throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 it ships committed with the plugin, so this plugin tree is incomplete: restore it (git checkout -- .claude-plugin/sterling-mcp.json in a clone) or reinstall the plugin`);
   }
-  const entry = parsed?.mcpServers?.[SERVER];
+  const entry = parsed?.mcpServers?.[SERVER2];
   if (!entry || typeof entry.command !== "string" || !Array.isArray(entry.args)) {
-    throw new Error(`${path} has no mcpServers.${SERVER} {command, args} entry`);
+    throw new Error(`${path} has no mcpServers.${SERVER2} {command, args} entry`);
   }
   const bind = (s2) => String(s2).split("${CLAUDE_PLUGIN_ROOT}").join(pluginRoot).split("${CLAUDE_PROJECT_DIR}").join(projectRoot2);
-  return JSON.stringify({ mcpServers: { [SERVER]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
+  return JSON.stringify({ mcpServers: { [SERVER2]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
 }
 function readWorkerPrompt(pluginRoot) {
   const path = join5(pluginRoot, "templates", "maintenance-worker-prompt.md");
@@ -8083,6 +8097,14 @@ function launchWorker(opts) {
         detail: `${eligible.length} of ${BATCH_MIN_ITEMS} eligible reconcile items, oldest waited ${ageText(new Date(nowMs - oldestWaitMs).toISOString(), nowMs)} of ${Math.round(BATCH_MAX_WAIT_MS / 6e4)}m \u2014 no worker until ${BATCH_MIN_ITEMS} are eligible or the oldest has waited that long`
       };
     }
+    const host = opts.host ?? "claude";
+    if (!WORKER_HOSTS.includes(host)) return { launched: false, reason: "error", detail: failDetail(`unknown runner host '${host}'`) };
+    const model = opencodeModelOf(opts.config);
+    if (host === "opencode") {
+      if (typeof opts.opencodeBin !== "string" || !opts.opencodeBin) return { launched: false, reason: "error", detail: failDetail("the opencode host needs the path of the opencode binary") };
+      if (model === null) return { launched: false, reason: "error", detail: failDetail(OPENCODE_MODEL_UNSET) };
+      if (model !== null && (typeof model !== "string" || !model.trim())) return { launched: false, reason: "error", detail: failDetail(`config maintenance_worker.${OPENCODE_MODEL_KEY} must be a provider/model string, got ${JSON.stringify(model)}`) };
+    }
     const pluginRoot = opts.pluginRoot ?? pluginRootFrom();
     if (!pluginRoot) return { launched: false, reason: "error", detail: failDetail("plugin root not found above the hook") };
     resolveMcpConfig(pluginRoot, opts.root);
@@ -8094,7 +8116,8 @@ function launchWorker(opts) {
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: "already_running" };
     writeFileSync2(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
-    writeFileSync2(paths.eligible, JSON.stringify({ token, head: git.head, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
+    const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
+    writeFileSync2(paths.eligible, JSON.stringify({ token, head: git.head, ...runnerHost, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
     let logFd;
     try {
       rotateIfLarge(paths.log);
@@ -8107,7 +8130,7 @@ function launchWorker(opts) {
       child.on?.("error", () => releaseLock(paths, token));
       child.unref?.();
       writeFileSync2(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
-      return { launched: true, reason: "launched", pid: child.pid, items: eligible.length };
+      return { launched: true, reason: "launched", pid: child.pid, items: eligible.length, host };
     } catch (e) {
       releaseLock(paths, token);
       return { launched: false, reason: "error", detail: failDetail(`spawn: ${e?.message ?? e}`) };

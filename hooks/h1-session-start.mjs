@@ -9829,13 +9829,23 @@ function probeSchemaVersion(dbPath) {
 // scripts/hooks/lib/maintenance-worker.mjs
 import { closeSync as closeSync4, existsSync as existsSync12, mkdirSync as mkdirSync9, openSync as openSync4, readFileSync as readFileSync10, renameSync as renameSync5, rmSync as rmSync4, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync7, appendFileSync } from "node:fs";
 import { dirname as dirname9, isAbsolute as isAbsolute2, join as join14, resolve as resolve4, sep as sep2 } from "node:path";
+
+// scripts/hooks/lib/maintenance-worker-opencode.mjs
+var SERVER = "sterling";
+var OPENCODE_DENIED_MCP = [
+  ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => `${SERVER}_knowledge_${v}`),
+  ...["add", "remove", "update", "edit"].map((v) => `${SERVER}_board_${v}`),
+  `${SERVER}_config_set`
+];
+
+// scripts/hooks/lib/maintenance-worker.mjs
 var BATCH_MAX_WAIT_MS = 30 * 6e4;
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;
 var WORKER_TIMEOUT_MS = 20 * 6e4;
 var LOCK_STALE_MS = 30 * 6e4;
-var SERVER = "sterling";
-var mcp = (name) => `mcp__${SERVER}__${name}`;
+var SERVER2 = "sterling";
+var mcp = (name) => `mcp__${SERVER2}__${name}`;
 var mcpPlugin = (name) => `mcp__plugin_sterling_sterling__${name}`;
 var WORKER_TOOLS = [mcp("maintenance_query"), mcp("knowledge_get"), mcp("maintenance_remove"), mcp("knowledge_line_ref_fix"), mcpPlugin("knowledge_line_ref_fix"), "Read", "Grep"];
 var WORKER_DISALLOWED_TOOLS = [
@@ -9846,6 +9856,8 @@ var WORKER_DISALLOWED_TOOLS = [
   "Edit",
   "Bash"
 ];
+var OPENCODE_MODEL_KEY = "opencode_model";
+var OPENCODE_MODEL_UNSET = `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
 function workerPaths(root) {
   const sterling = join14(root, ".sterling");
   return {
