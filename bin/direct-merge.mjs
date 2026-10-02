@@ -5497,7 +5497,7 @@ function rankTermDedupeKey(term) {
 }
 function newComparisonBudget() {
   let work2 = 0;
-  let output = 0;
+  let output2 = 0;
   return {
     chargeWork() {
       work2 += 1;
@@ -5506,8 +5506,8 @@ function newComparisonBudget() {
       }
     },
     chargeOutput() {
-      output += 1;
-      if (output > COMPARE_OUTPUT_BUDGET) {
+      output2 += 1;
+      if (output2 > COMPARE_OUTPUT_BUDGET) {
         throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its output-path budget (${COMPARE_OUTPUT_BUDGET} lost paths) \u2014 refusing rather than returning a partial loss list. A legitimate loss report never needs this many entries; this means the comparison is enumerating a pathologically large or heavily-shared subtree. Nothing was written \u2014 this throw always precedes the write transaction.`);
       }
     },
@@ -7709,9 +7709,9 @@ CREATE TABLE IF NOT EXISTS activity_log (
 });
 
 // scripts/direct-merge.mjs
-import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync6, readFileSync as readFileSync7 } from "node:fs";
-import { join as join11 } from "node:path";
+import { spawnSync as spawnSync8 } from "node:child_process";
+import { existsSync as existsSync7, readFileSync as readFileSync8 } from "node:fs";
+import { join as join13 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
@@ -7974,14 +7974,171 @@ function sweepMergedBranches({ cwd, into: into2 }) {
 
 // scripts/lib/update.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { dirname as dirname3, join as join6 } from "node:path";
+import { dirname as dirname3, join as join7 } from "node:path";
+
+// scripts/lib/sterling-roots.mjs
+import { existsSync as existsSync3, readFileSync as readFileSync2, readdirSync, realpathSync as realpathSync4 } from "node:fs";
+import { homedir } from "node:os";
+import { join as join4, resolve as resolve3, sep as sep2 } from "node:path";
+var RESOLVER_IMPORTS = [
+  "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
+  "import { homedir } from 'node:os';",
+  "import { join } from 'node:path';"
+].join("\n");
+var RESOLVER_SOURCE = String.raw`
+function installRoots(env = process.env, home = homedir()) {
+  return [
+    { host: 'claude-code', dir: join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache') },
+    { host: 'opencode', dir: join(env.XDG_CACHE_HOME || join(home, '.cache'), 'opencode', 'npm') },
+  ];
+}
+
+// ENOENT/ENOTDIR mean "no such level", the normal case; any other error is thrown.
+function sterlingRootsLs(dir) {
+  try {
+    return readdirSync(dir);
+  } catch (err) {
+    if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return [];
+    throw err;
+  }
+}
+
+function readCopyVersion(root, host) {
+  const manifests = host === 'opencode' ? ['package.json', '.claude-plugin/plugin.json'] : ['.claude-plugin/plugin.json', 'package.json'];
+  for (const rel of manifests) {
+    let text;
+    try {
+      text = readFileSync(join(root, rel), 'utf8');
+    } catch (err) {
+      if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) continue;
+      throw err;
+    }
+    let version;
+    try {
+      version = JSON.parse(text).version;
+    } catch (err) {
+      return { reason: rel + ' is not valid JSON (' + err.message + ')' };
+    }
+    if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
+    return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
+  }
+  return { reason: 'no .claude-plugin/plugin.json or package.json' };
+}
+
+// The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
+// precedence. Strict grammar: major.minor.patch with no leading zeros and no v prefix,
+// dot-separated prerelease identifiers, build metadata accepted and ignored. A prerelease
+// sorts below its release; prerelease identifiers compare one by one, numeric ones
+// numerically and below alphanumeric ones, and a longer list wins when all shared ones match.
+function parseSterlingVersion(v) {
+  const m = typeof v === 'string' ? /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(v) : null;
+  if (!m) return null;
+  return { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : [] };
+}
+
+function compareSterlingVersions(a, b) {
+  const x = parseSterlingVersion(a);
+  const y = parseSterlingVersion(b);
+  if (!x || !y) throw new Error('compareSterlingVersions: not a semver version: ' + JSON.stringify(x ? b : a));
+  for (let i = 0; i < 3; i++) if (x.core[i] !== y.core[i]) return x.core[i] < y.core[i] ? -1 : 1;
+  if (!x.pre.length || !y.pre.length) return x.pre.length === y.pre.length ? 0 : x.pre.length ? -1 : 1;
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    if (i >= x.pre.length) return -1;
+    if (i >= y.pre.length) return 1;
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === q) continue;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) return Number(p) < Number(q) ? -1 : 1;
+    if (pn !== qn) return pn ? -1 : 1;
+    return p < q ? -1 : 1;
+  }
+  return 0;
+}
+
+function scanInstalledSterling(env = process.env, home = homedir()) {
+  const roots = installRoots(env, home);
+  const copies = [];
+  const skipped = [];
+  const consider = (root, host) => {
+    const v = readCopyVersion(root, host);
+    if (v.version) copies.push({ root, version: v.version, host });
+    else skipped.push({ root, host, reason: v.reason });
+  };
+  for (const { host, dir } of roots) {
+    if (host === 'claude-code') {
+      for (const marketplace of sterlingRootsLs(dir)) {
+        for (const entry of sterlingRootsLs(join(dir, marketplace, 'sterling'))) consider(join(dir, marketplace, 'sterling', entry), host);
+      }
+      continue;
+    }
+    const walk = (d, depth) => {
+      const pkg = join(d, 'node_modules', '@chulf58', 'sterling');
+      if (existsSync(pkg)) consider(pkg, host);
+      if (depth === 0) return;
+      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules') walk(join(d, name), depth - 1);
+    };
+    walk(dir, 4);
+  }
+  return { roots, copies, skipped };
+}
+
+function newestInstalledSterling(env = process.env, home = homedir()) {
+  let best = null;
+  for (const c of scanInstalledSterling(env, home).copies) {
+    if (!best) {
+      best = c;
+      continue;
+    }
+    const d = compareSterlingVersions(c.version, best.version) ||
+      (c.host === best.host ? 0 : c.host === 'claude-code' ? 1 : -1) ||
+      (c.root > best.root ? 1 : c.root < best.root ? -1 : 0);
+    if (d > 0) best = c;
+  }
+  return best;
+}
+
+// host null: the asking host is unknown, so both commands are named.
+function sterlingInstallRemedy(host) {
+  if (host === 'claude-code') return 'claude plugin install sterling@sterling';
+  if (host === 'opencode') return 'opencode plugin add @chulf58/sterling';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add @chulf58/sterling for OpenCode';
+  throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
+}
+
+function sterlingNotFoundMessage(host, env = process.env, home = homedir()) {
+  const remedy = sterlingInstallRemedy(host);
+  const scan = scanInstalledSterling(env, home);
+  const where = scan.roots.map((r) => r.dir + ' (' + r.host + ')').join(' or ');
+  const why = scan.skipped.map((s) => '; skipped ' + s.root + ': ' + s.reason).join('');
+  return 'no installed Sterling found under ' + where + why + '. Install it: ' + remedy + '.';
+}
+`;
+var api = new Function(
+  "existsSync",
+  "readFileSync",
+  "readdirSync",
+  "join",
+  "homedir",
+  `${RESOLVER_SOURCE}
+return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
+)(existsSync3, readFileSync2, readdirSync, join4, homedir);
+var installRoots = api.installRoots;
+var readCopyVersion = api.readCopyVersion;
+var parseSterlingVersion = api.parseSterlingVersion;
+var compareSterlingVersions = api.compareSterlingVersions;
+var scanInstalledSterling = api.scanInstalledSterling;
+var newestInstalledSterling = api.newestInstalledSterling;
+var sterlingInstallRemedy = api.sterlingInstallRemedy;
+var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
 
 // scripts/lib/handoff-projection.mjs
-import { join as join5, resolve as resolve4 } from "node:path";
+import { join as join6, resolve as resolve5 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync2, readFileSync as readFileSync2, readdirSync, mkdirSync as mkdirSync2, openSync, writeSync, closeSync, unlinkSync, constants } from "node:fs";
-import { join as join4, resolve as resolve3 } from "node:path";
+import { lstatSync as lstatSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, mkdirSync as mkdirSync2, openSync, writeSync, closeSync, unlinkSync, constants } from "node:fs";
+import { join as join5, resolve as resolve4 } from "node:path";
 var ContainmentError = class extends Error {
   constructor(message) {
     super(message);
@@ -7999,9 +8156,9 @@ var lstatOrNull = (p) => {
 function containedPath(root, rel, leaf) {
   const segments = rel.split("/").filter(Boolean);
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
-  let cursor = resolve3(root);
+  let cursor = resolve4(root);
   for (const [index, part] of segments.entries()) {
-    cursor = join4(cursor, part);
+    cursor = join5(cursor, part);
     const st = lstatOrNull(cursor);
     if (!st) break;
     const isLeaf = index === segments.length - 1;
@@ -8021,7 +8178,7 @@ function existsContained(root, rel, leaf) {
   return lstatOrNull(containedPath(root, rel, leaf)) !== null;
 }
 function readContained(root, rel) {
-  return readFileSync2(containedPath(root, rel, "file"), "utf8");
+  return readFileSync3(containedPath(root, rel, "file"), "utf8");
 }
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
@@ -8032,7 +8189,7 @@ var ProjectModeError = class extends Error {
 };
 function readProjectMode(root) {
   const rel = ".sterling/config.json";
-  const where = `${fwd(resolve4(root))}/${rel}`;
+  const where = `${fwd(resolve5(root))}/${rel}`;
   if (!existsContained(root, rel, "file")) return "hobby";
   let parsed;
   try {
@@ -8070,13 +8227,13 @@ function defaultExec(cmd, args, { cwd, timeout = STEP_TIMEOUT_MS } = {}) {
   };
 }
 var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed-By-Agent", "review-ledger", "frozen-test"]);
-var UPDATE_MARKER_RELATIVE_PATH = join6(".sterling", "update-complete.json");
+var UPDATE_MARKER_RELATIVE_PATH = join7(".sterling", "update-complete.json");
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync2, renameSync } from "node:fs";
+import { readFileSync as readFileSync4, writeFileSync, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync2, renameSync } from "node:fs";
 init_dist2();
-import { join as join7, dirname as dirname4 } from "node:path";
+import { join as join8, dirname as dirname4 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
 init_dist();
@@ -8089,7 +8246,7 @@ function isForeignTree(record, root) {
 // scripts/hooks/lib/settlement.mjs
 function hashFile(root, rel) {
   try {
-    return createHash("sha256").update(readFileSync3(join7(root, rel))).digest("hex");
+    return createHash("sha256").update(readFileSync4(join8(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -8103,7 +8260,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync3(join7(root, ".sterling", "config.json"), "utf8");
+    const raw = readFileSync4(join8(root, ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -8271,15 +8428,15 @@ function isVersionOnlyBetweenCommits(root, baseSha, tipSha, path) {
 }
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync4, existsSync as existsSync3 } from "node:fs";
-import { dirname as dirname5, join as join8, resolve as resolve5 } from "node:path";
+import { readFileSync as readFileSync5, existsSync as existsSync4 } from "node:fs";
+import { dirname as dirname5, join as join9, resolve as resolve6 } from "node:path";
 init_dist();
 init_dist2();
 function projectRoot(from) {
   if (!from) return null;
-  let dir = resolve5(String(from));
+  let dir = resolve6(String(from));
   for (; ; ) {
-    if (existsSync3(join8(dir, ".sterling", "sterling.db"))) return dir;
+    if (existsSync4(join9(dir, ".sterling", "sterling.db"))) return dir;
     const parent = dirname5(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -8392,10 +8549,88 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   exit: (code) => process.exit(code)
 });
 
-// scripts/lib/parked-close.mjs
+// scripts/lib/npm-publish.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
+import { mkdirSync as mkdirSync4, mkdtempSync as mkdtempSync2, rmSync as rmSync3 } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as join10 } from "node:path";
+var PUBLISH_PACKAGE = "@chulf58/sterling";
+var defaultNpm = (args, { cwd } = {}) => defaultExec("npm", args, { cwd, timeout: 3e5 });
+function packageAt(target2, sha) {
+  const r = spawnSync5("git", ["show", `${sha}:package.json`], { cwd: target2, encoding: "utf8", timeout: 3e4 });
+  if (r.status !== 0) return null;
+  try {
+    return JSON.parse(r.stdout);
+  } catch {
+    return null;
+  }
+}
+function stageCommit(target2, sha, dest) {
+  const tar = join10(dest, "..", `${sha}.tar`);
+  const archive = spawnSync5("git", ["archive", "--format=tar", "-o", tar, sha], { cwd: target2, encoding: "utf8", timeout: 12e4 });
+  if (archive.status !== 0) throw new Error(`git archive ${sha} failed: ${(archive.stderr || archive.error?.message || "").trim()}`);
+  const x = spawnSync5("tar", ["-xf", tar, "-C", dest], { encoding: "utf8", timeout: 12e4 });
+  if (x.status !== 0) throw new Error(`tar -xf failed: ${(x.stderr || x.error?.message || "").trim()}`);
+}
+var output = (r) => `${r.stdout ?? ""}
+${r.stderr ?? ""}`.trim();
+function publishAfterMerge({ target: target2, baseSha, headSha, pushed: pushed2, npm = defaultNpm, log = (m) => console.error(m) }) {
+  const skip = (reason, version2 = null) => {
+    log(`direct-merge: npm publish SKIPPED: ${reason}.`);
+    return { status: "skipped", version: version2, reason };
+  };
+  const head = packageAt(target2, headSha);
+  if (head?.name !== PUBLISH_PACKAGE) return skip(`package.json names ${head?.name ?? "(no package.json)"}, not ${PUBLISH_PACKAGE}`);
+  const version = head.version ?? null;
+  if (!pushed2) return skip(`the base was not pushed, so ${PUBLISH_PACKAGE}@${version} would publish a release origin does not have`, version);
+  const before = packageAt(target2, baseSha)?.version ?? null;
+  if (!version || version === before) return skip(`the version did not change (${version})`, version);
+  const spec = `${PUBLISH_PACKAGE}@${version}`;
+  const byHand = `Publish by hand from a clean checkout of the merged base: npm publish --ignore-scripts`;
+  const refuse = (headline, detail) => {
+    log([``, `direct-merge: npm publish REFUSED for ${spec}: ${headline}`, `THE MERGE STANDS: the base is merged and pushed. Only the npm release is missing.`, detail].filter(Boolean).join("\n"));
+    return { status: "refused", version, reason: headline };
+  };
+  const who = npm(["whoami"], { cwd: target2 });
+  if (who.status !== 0) {
+    return refuse("npm whoami failed (no login, npm missing, or network)", `If npm has no login, run \`npm login\` once; then: ${byHand}
+${output(who)}`);
+  }
+  const view = npm(["view", spec, "version"], { cwd: target2 });
+  if (view.status === 0 && view.stdout.trim() === version) {
+    return refuse(`${version} is already published on npm.`, `Bump the version in .claude-plugin/plugin.json and package.json for the next release.`);
+  }
+  const firstPublish = view.status !== 0 && /\bE404\b/.test(output(view));
+  if (view.status !== 0 && !firstPublish) {
+    return refuse("the registry check failed, so the version could not be verified as unpublished.", `${byHand}
+${output(view)}`);
+  }
+  const failed = (detail) => {
+    log([``, `direct-merge: npm publish FAILED for ${spec}.`, `THE MERGE STANDS: the base is merged and pushed. Only the npm release is missing.`, byHand, detail].join("\n"));
+    return { status: "failed", version, reason: detail };
+  };
+  const stageRoot = mkdtempSync2(join10(tmpdir(), "sterling-publish-"));
+  try {
+    const dest = join10(stageRoot, "package");
+    mkdirSync4(dest);
+    try {
+      stageCommit(target2, headSha, dest);
+    } catch (e) {
+      return failed(`Staging the committed tree failed: ${e.message}`);
+    }
+    const pub = npm(["publish", "--ignore-scripts"], { cwd: dest });
+    if (pub.status !== 0) return failed(output(pub));
+    log(`direct-merge: published ${spec} to npm.`);
+    return { status: "published", version, reason: null };
+  } finally {
+    rmSync3(stageRoot, { recursive: true, force: true });
+  }
+}
+
+// scripts/lib/parked-close.mjs
+import { spawnSync as spawnSync6 } from "node:child_process";
 function deletedBetween(cwd, fromSha, toSha) {
-  const r = spawnSync5("git", ["diff", "--name-only", "--diff-filter=D", "--no-renames", "-z", fromSha, toSha], {
+  const r = spawnSync6("git", ["diff", "--name-only", "--diff-filter=D", "--no-renames", "-z", fromSha, toSha], {
     cwd,
     encoding: "utf8",
     timeout: 6e4
@@ -8415,12 +8650,12 @@ function parkedItemResolved(paths, deletedSet, existsFn) {
 init_dist2();
 
 // scripts/lib/work-pr.mjs
-import { spawnSync as spawnSync6 } from "node:child_process";
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { delimiter, dirname as dirname6, join as join9 } from "node:path";
+import { spawnSync as spawnSync7 } from "node:child_process";
+import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { delimiter, dirname as dirname6, join as join11 } from "node:path";
 var PR_ATTRIBUTION = "\u{1F916} Generated with [Claude Code](https://claude.com/claude-code)";
 function gh(cwd, args) {
-  return spawnSync6("gh", args, { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+  return spawnSync7("gh", args, { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
 }
 var streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? "")).trim();
 function resolveGhPath() {
@@ -8428,8 +8663,8 @@ function resolveGhPath() {
   for (const dir of String(process.env.PATH ?? "").split(delimiter)) {
     if (!dir) continue;
     for (const name of names) {
-      const candidate = join9(dir, name);
-      if (existsSync4(candidate)) return candidate;
+      const candidate = join11(dir, name);
+      if (existsSync5(candidate)) return candidate;
     }
   }
   return null;
@@ -8451,7 +8686,7 @@ function parseOriginRepo(url) {
   return { host, repo: `${host}/${owner}/${name}` };
 }
 function workPreflight(cwd) {
-  const url = spawnSync6("git", ["remote", "get-url", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const url = spawnSync7("git", ["remote", "get-url", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (url.status !== 0) {
     return { refusal: "direct-merge: work mode opens a PR against the 'origin' remote, and this repository has none. Add it: git remote add origin <url>" };
   }
@@ -8461,7 +8696,7 @@ function workPreflight(cwd) {
       refusal: `direct-merge: origin's URL '${url.stdout.trim()}' is not a GitHub repository URL (https://host/owner/repo, ssh://host/owner/repo or host:owner/repo) \u2014 work mode derives the PR repo from origin and will not guess one.`
     };
   }
-  const pushUrls = spawnSync6("git", ["remote", "get-url", "--push", "--all", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const pushUrls = spawnSync7("git", ["remote", "get-url", "--push", "--all", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (pushUrls.status !== 0) {
     return { refusal: `direct-merge: could not read origin's push URLs (git remote get-url --push --all origin, exit ${pushUrls.status}): ${streams(pushUrls)}` };
   }
@@ -8493,13 +8728,13 @@ Run: gh auth login --hostname ${origin.host}` };
   return { repo: origin.repo };
 }
 function localBranchRefusal(cwd, branch2) {
-  const fmt = spawnSync6("git", ["check-ref-format", "--branch", branch2], { cwd, encoding: "utf8", timeout: 3e4 });
-  const ref = spawnSync6("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch2}`], { cwd, encoding: "utf8", timeout: 3e4 });
+  const fmt = spawnSync7("git", ["check-ref-format", "--branch", branch2], { cwd, encoding: "utf8", timeout: 3e4 });
+  const ref = spawnSync7("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch2}`], { cwd, encoding: "utf8", timeout: 3e4 });
   if (fmt.status === 0 && ref.status === 0) return null;
   return `direct-merge: '${branch2}' is not a local branch (no refs/heads/${branch2}) \u2014 work mode pushes a local branch to open its PR. Check out the branch, or pass --branch <local branch>.`;
 }
 function prTextFromCommits(cwd, mergeBase2, branchTip2, branch2) {
-  const log = spawnSync6("git", ["log", "--no-merges", "--reverse", "--format=%s%x1f%b%x1e", `${mergeBase2}..${branchTip2}`], {
+  const log = spawnSync7("git", ["log", "--no-merges", "--reverse", "--format=%s%x1f%b%x1e", `${mergeBase2}..${branchTip2}`], {
     cwd,
     encoding: "utf8",
     timeout: 3e4
@@ -8543,7 +8778,7 @@ function findOpenPr(cwd, repo, branch2, base2) {
   return matches.length ? { url: matches[0].url, number: matches[0].number } : null;
 }
 function pushWithWindowsRetry(cwd, pushArgs, log) {
-  const tryPush = (cmd) => spawnSync6(cmd, ["push", ...pushArgs], {
+  const tryPush = (cmd) => spawnSync7(cmd, ["push", ...pushArgs], {
     cwd,
     encoding: "utf8",
     timeout: 12e4,
@@ -8634,7 +8869,7 @@ function shipAsPr({ cwd, repo, branch: branch2, base: base2, mergeBase: mergeBas
   state.pushed = true;
   log(`direct-merge: pushed ${branch2} (${branchTip2}) to origin.`);
   for (const [key, value] of [[`branch.${branch2}.remote`, "origin"], [`branch.${branch2}.merge`, `refs/heads/${branch2}`]]) {
-    const set = spawnSync6("git", ["config", key, value], { cwd, encoding: "utf8", timeout: 3e4 });
+    const set = spawnSync7("git", ["config", key, value], { cwd, encoding: "utf8", timeout: 3e4 });
     if (set.status !== 0) log(`direct-merge: could not set the upstream (${key}); the push and PR are unaffected. Set it with: git branch --set-upstream-to=origin/${branch2} ${branch2}`);
   }
   if (existing) {
@@ -8712,9 +8947,9 @@ function shipAsPr({ cwd, repo, branch: branch2, base: base2, mergeBase: mergeBas
   return null;
 }
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
-var prLoopPath = (root) => join9(root, PR_LOOP_REL);
+var prLoopPath = (root) => join11(root, PR_LOOP_REL);
 function writeAtomic(file, value) {
-  mkdirSync4(dirname6(file), { recursive: true });
+  mkdirSync5(dirname6(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync2(tmp, JSON.stringify(value, null, 2) + "\n");
   renameSync2(tmp, file);
@@ -8727,8 +8962,8 @@ function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE_
 
 // scripts/lib/attestation-inspection.mjs
 init_dist();
-import { existsSync as existsSync5, readFileSync as readFileSync6 } from "node:fs";
-import { join as join10 } from "node:path";
+import { existsSync as existsSync6, readFileSync as readFileSync7 } from "node:fs";
+import { join as join12 } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 var EXAMPLE_CAP = 5;
 var EXAMPLE_PRIORITY = ["rejected", "needs_rework", "uncovered", "approved"];
@@ -8744,9 +8979,9 @@ function parseNulPathList(stdout) {
 function readAttestationGlobs(projectRoot2) {
   const dropped = { invalid_container: false, non_string: 0, empty: 0, duplicates: [] };
   try {
-    const configPath = join10(projectRoot2, ".sterling", "config.json");
-    if (!existsSync5(configPath)) return { globs: [], dropped };
-    const raw = JSON.parse(readFileSync6(configPath, "utf8"));
+    const configPath = join12(projectRoot2, ".sterling", "config.json");
+    if (!existsSync6(configPath)) return { globs: [], dropped };
+    const raw = JSON.parse(readFileSync7(configPath, "utf8"));
     const declared = raw && typeof raw === "object" ? raw.attestation_path_globs : void 0;
     if (declared !== void 0 && !Array.isArray(declared)) {
       dropped.invalid_container = true;
@@ -8790,8 +9025,8 @@ function inspectAttestations({ projectRoot: projectRoot2, touchedPaths, declared
   }
   const touched = Array.isArray(touchedPaths) ? [...new Set(touchedPaths.filter((p) => typeof p === "string" && p).map(normalizePath))] : [];
   const globs = Array.isArray(declaredGlobs) ? declaredGlobs.filter((g) => typeof g === "string" && g) : [];
-  const dbPath = join10(projectRoot2, ".sterling", "sterling.db");
-  if (!existsSync5(dbPath)) {
+  const dbPath = join12(projectRoot2, ".sterling", "sterling.db");
+  if (!existsSync6(dbPath)) {
     return { available: false, reason: `no Sterling store at ${dbPath} \u2014 nothing to compare against` };
   }
   let rows;
@@ -8928,7 +9163,7 @@ function fail2(message, code = 1) {
 stage("git-repo");
 if (!isGitRepo(target)) fail2(`direct-merge: not a git repository: '${target}'`);
 if (linkedWorktree && !modeError && mode !== "work") {
-  const head = spawnSync7("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
+  const head = spawnSync8("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const wtBranch = head.status === 0 && head.stdout.trim() ? head.stdout.trim() : "<branch>";
   fail2(
     `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree of '${linkedWorktree.mainRoot}' \u2014 refusing before the battery.
@@ -8958,7 +9193,7 @@ if (mode === "work") {
 }
 stage("branch");
 var into = arg("--into") ?? defaultBranch(target);
-var symbolic = spawnSync7("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
+var symbolic = spawnSync8("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
 if (symbolic.error || symbolic.status !== 0 && !(symbolic.status === 1 && !(symbolic.stderr ?? "").trim())) {
   fail2(
     `direct-merge: could not determine the checked-out branch (git symbolic-ref HEAD ${symbolic.error ? `failed to run: ${symbolic.error.message}` : `exited ${symbolic.status ?? `by signal ${symbolic.signal}`}: ${(symbolic.stderr || symbolic.stdout || "").trim()}`}) \u2014 refusing before the battery.`
@@ -8995,7 +9230,7 @@ if (mode === "work") {
   if (notBranch) fail2(notBranch, 2);
 }
 stage("dirty-tree");
-var dirtyCheck = spawnSync7("git", ["status", "--porcelain"], { cwd: target, encoding: "utf8", timeout: 6e4 });
+var dirtyCheck = spawnSync8("git", ["status", "--porcelain"], { cwd: target, encoding: "utf8", timeout: 6e4 });
 if (dirtyCheck.status !== 0) {
   fail2(`direct-merge: git status --porcelain failed (${dirtyCheck.status}): ${(dirtyCheck.stderr || dirtyCheck.stdout || "").trim()}`);
 }
@@ -9032,16 +9267,16 @@ ${untracked.length} untracked path(s):`,
 }
 stage("resolve");
 var resolveSha = (ref, label) => {
-  const r = spawnSync7("git", ["rev-parse", ref], { cwd: target, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync8("git", ["rev-parse", ref], { cwd: target, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) fail2(`direct-merge: git rev-parse ${label} ('${ref}') failed: ${(r.stderr || "").trim()}`);
   return r.stdout.trim();
 };
 var intoTip = resolveSha(into, "into");
 var branchTip = resolveSha(branch, "branch");
-var mergeBaseR = spawnSync7("git", ["merge-base", intoTip, branchTip], { cwd: target, encoding: "utf8", timeout: 3e4 });
+var mergeBaseR = spawnSync8("git", ["merge-base", intoTip, branchTip], { cwd: target, encoding: "utf8", timeout: 3e4 });
 if (mergeBaseR.status !== 0) fail2(`direct-merge: git merge-base ${intoTip} ${branchTip} failed: ${(mergeBaseR.stderr || "").trim()}`);
 var mergeBase = mergeBaseR.stdout.trim();
-var diff = spawnSync7("git", ["-c", "core.quotePath=false", "diff", "--name-only", "--end-of-options", mergeBase, branchTip], { cwd: target, encoding: "utf8", timeout: 6e4 });
+var diff = spawnSync8("git", ["-c", "core.quotePath=false", "diff", "--name-only", "--end-of-options", mergeBase, branchTip], { cwd: target, encoding: "utf8", timeout: 6e4 });
 if (diff.status !== 0) fail2(`direct-merge: git diff ${mergeBase} ${branchTip} failed: ${(diff.stderr || "").trim()}`);
 var changed = new Set(diff.stdout.split("\n").map((l) => l.trim()).filter(Boolean));
 var versionOnlyPaths = VERSION_ONLY_CANDIDATES.filter((p) => changed.has(p) && isVersionOnlyBetweenCommits(target, mergeBase, branchTip, p));
@@ -9206,7 +9441,7 @@ direct-merge: RECONCILE DEBT DISCLOSED \u2014 ${headline} cover files this branc
 stage("version");
 var GENERATED_ONLY = loadGeneratedProjections(storeRoot);
 var pluginManifestRel = ".claude-plugin/plugin.json";
-if (existsSync6(join11(target, pluginManifestRel))) {
+if (existsSync7(join13(target, pluginManifestRel))) {
   const substantive = [...changed].filter((f) => !GENERATED_ONLY.has(f));
   if (substantive.length > 0 && !process.argv.includes("--allow-same-version")) {
     const readVersion = (raw, label) => {
@@ -9216,10 +9451,10 @@ if (existsSync6(join11(target, pluginManifestRel))) {
         fail2(`direct-merge: could not parse ${label} while checking the version bump`);
       }
     };
-    const pkgPath = join11(target, "package.json");
-    const branchPlugin = readVersion(readFileSync7(join11(target, pluginManifestRel), "utf8"), pluginManifestRel);
-    const branchPkg = existsSync6(pkgPath) ? readVersion(readFileSync7(pkgPath, "utf8"), "package.json") : null;
-    const baseShow = spawnSync7("git", ["show", `${into}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
+    const pkgPath = join13(target, "package.json");
+    const branchPlugin = readVersion(readFileSync8(join13(target, pluginManifestRel), "utf8"), pluginManifestRel);
+    const branchPkg = existsSync7(pkgPath) ? readVersion(readFileSync8(pkgPath, "utf8"), "package.json") : null;
+    const baseShow = spawnSync8("git", ["show", `${into}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
     const basePlugin = baseShow.status === 0 ? readVersion(baseShow.stdout, `${into}:${pluginManifestRel}`) : null;
     if (branchPkg !== null && branchPlugin !== branchPkg) {
       fail2(
@@ -9236,8 +9471,8 @@ The version is the clone-currency signal consumers read: bump BOTH ${pluginManif
   }
 }
 stage("battery");
-var pkgJsonPath = join11(target, "package.json");
-var hasCheck = existsSync6(pkgJsonPath) && !!JSON.parse(readFileSync7(pkgJsonPath, "utf8")).scripts?.check;
+var pkgJsonPath = join13(target, "package.json");
+var hasCheck = existsSync7(pkgJsonPath) && !!JSON.parse(readFileSync8(pkgJsonPath, "utf8")).scripts?.check;
 if (hasCheck) {
   console.error("direct-merge: running the consistency-check battery (npm run check)\u2026");
   const check = defaultExec("npm", ["run", "check"], { cwd: target, timeout: 3e5 });
@@ -9254,7 +9489,7 @@ var attestationDisclosure = (() => {
     const { globs: declaredGlobs, dropped } = readAttestationGlobs(storeRoot);
     const hasDrop = dropped.invalid_container || dropped.non_string > 0 || dropped.empty > 0 || dropped.duplicates.length > 0;
     if (declaredGlobs.length === 0 && !hasDrop) return [];
-    const d = spawnSync7("git", ["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", "--end-of-options", mergeBase, branchTip], {
+    const d = spawnSync8("git", ["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", "--end-of-options", mergeBase, branchTip], {
       cwd: target,
       encoding: "utf8",
       timeout: 6e4
@@ -9291,8 +9526,8 @@ try {
 merged.attestation_disclosure = attestationDisclosure;
 try {
   if (changed.size > 0) {
-    const dbPath = join11(storeRoot, ".sterling", "sterling.db");
-    if (!existsSync6(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
+    const dbPath = join13(storeRoot, ".sterling", "sterling.db");
+    if (!existsSync7(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
     const nudgeStore = new SterlingStore(dbPath);
     let items;
     try {
@@ -9332,8 +9567,8 @@ try {
   console.log(JSON.stringify({ ...merged, branches_swept: null, sweep_failed: true }, null, 2));
   process.exit(1);
 }
-var bundleChecker = join11(target, "scripts", "check-bundles-fresh.mjs");
-if (existsSync6(bundleChecker)) {
+var bundleChecker = join13(target, "scripts", "check-bundles-fresh.mjs");
+if (existsSync7(bundleChecker)) {
   console.error("direct-merge: rebuilding packages so the post-merge bundle check compares against MERGED source\u2026");
   const rebuilt = defaultExec("npm", ["run", "build"], { cwd: target, timeout: 6e5 });
   if (rebuilt.status !== 0) {
@@ -9350,7 +9585,7 @@ if (existsSync6(bundleChecker)) {
     console.log(JSON.stringify({ ...merged, branches_swept: swept, bundles_unverified: true }, null, 2));
     process.exit(1);
   }
-  const bundles = spawnSync7(process.execPath, [bundleChecker], { cwd: target, encoding: "utf8", timeout: 3e5 });
+  const bundles = spawnSync8(process.execPath, [bundleChecker], { cwd: target, encoding: "utf8", timeout: 3e5 });
   if (bundles.status !== 0) {
     console.error(
       [
@@ -9370,14 +9605,14 @@ if (existsSync6(bundleChecker)) {
 }
 var parkedClosed = 0;
 try {
-  const postMergeHead = spawnSync7("git", ["rev-parse", "HEAD"], { cwd: target, encoding: "utf8", timeout: 3e4 });
+  const postMergeHead = spawnSync8("git", ["rev-parse", "HEAD"], { cwd: target, encoding: "utf8", timeout: 3e4 });
   const deletedSet = postMergeHead.status === 0 ? deletedBetween(target, intoTip, postMergeHead.stdout.trim()) : null;
   const { store: post } = openProject(target);
   try {
     for (const t of post.query({ types: ["todo"], cap: 1e3 })) {
       if (t.source !== "system" || t.system_reason !== "file_parked") continue;
       const paths = t.file_keys ?? [];
-      if (parkedItemResolved(paths, deletedSet, (k) => existsSync6(join11(target, k)))) {
+      if (parkedItemResolved(paths, deletedSet, (k) => existsSync7(join13(target, k)))) {
         post.remove(t.id, (/* @__PURE__ */ new Date()).toISOString());
         parkedClosed += 1;
       }
@@ -9392,7 +9627,7 @@ var pushed = false;
 if (process.argv.includes("--no-push")) {
   console.error("direct-merge: push to origin SKIPPED (--no-push) \u2014 consumers cannot see this merge until you push.");
 } else {
-  const remotes = spawnSync7("git", ["remote"], { cwd: target, encoding: "utf8", timeout: 3e4 });
+  const remotes = spawnSync8("git", ["remote"], { cwd: target, encoding: "utf8", timeout: 3e4 });
   const hasOrigin = remotes.status === 0 && remotes.stdout.split("\n").map((r) => r.trim()).includes("origin");
   if (!hasOrigin) {
     console.error("direct-merge: no 'origin' remote \u2014 push skipped (loud).");
@@ -9417,4 +9652,13 @@ if (process.argv.includes("--no-push")) {
     }
   }
 }
-console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed, ...parkedClosed ? { parked_items_closed: parkedClosed } : {} }, null, 2));
+var mergedHead = spawnSync8("git", ["rev-parse", into], { cwd: target, encoding: "utf8", timeout: 3e4 });
+var npmPublish;
+if (mergedHead.status === 0) {
+  npmPublish = publishAfterMerge({ target, baseSha: intoTip, headSha: mergedHead.stdout.trim(), pushed });
+} else {
+  console.error(`direct-merge: npm publish SKIPPED: could not resolve ${into} after the merge (${mergedHead.stderr.trim()}).`);
+  npmPublish = { status: "skipped" };
+}
+console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed, npm_publish: npmPublish.status, ...parkedClosed ? { parked_items_closed: parkedClosed } : {} }, null, 2));
+if (npmPublish.status === "failed") process.exit(1);

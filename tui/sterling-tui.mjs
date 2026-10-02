@@ -4380,23 +4380,23 @@ var require_core = __commonJS({
       return this;
     };
     Promise2.callback = function(fn) {
-      return new Promise2((resolve3, reject) => {
+      return new Promise2((resolve4, reject) => {
         fn((error, arg) => {
           if (error) {
             reject(error);
           } else {
-            resolve3(arg);
+            resolve4(arg);
           }
         });
       });
     };
     Promise2.callbackAll = function(fn) {
-      return new Promise2((resolve3, reject) => {
+      return new Promise2((resolve4, reject) => {
         fn((error, ...args2) => {
           if (error) {
             reject(error);
           } else {
-            resolve3(args2);
+            resolve4(args2);
           }
         });
       });
@@ -4449,19 +4449,19 @@ var require_core = __commonJS({
       setTimeout(() => this.resolve(value), timeout);
     };
     Promise2.resolveTimeout = Promise2.fulfillTimeout = function(timeout, value) {
-      return new Promise2((resolve3) => setTimeout(() => resolve3(value), timeout));
+      return new Promise2((resolve4) => setTimeout(() => resolve4(value), timeout));
     };
     Promise2.prototype.rejectTimeout = function(timeout, error) {
       setTimeout(() => this.reject(error), timeout);
     };
     Promise2.rejectTimeout = function(timeout, error) {
-      return new Promise2((resolve3, reject) => setTimeout(() => reject(error), timeout));
+      return new Promise2((resolve4, reject) => setTimeout(() => reject(error), timeout));
     };
     Promise2.resolveNextTick = Promise2.fulfillNextTick = function(value) {
-      return new Promise2((resolve3) => nextTick(() => resolve3(value)));
+      return new Promise2((resolve4) => nextTick(() => resolve4(value)));
     };
     Promise2.rejectNextTick = function(error) {
-      return new Promise2((resolve3, reject) => nextTick(() => reject(error)));
+      return new Promise2((resolve4, reject) => nextTick(() => reject(error)));
     };
     Promise2.dormant = function(fn) {
       var promise = new Promise2();
@@ -4482,10 +4482,10 @@ var require_core = __commonJS({
       if (thenable instanceof Promise2) {
         return thenable;
       }
-      return new Promise2((resolve3, reject) => {
+      return new Promise2((resolve4, reject) => {
         thenable.then(
           (value) => {
-            resolve3(value);
+            resolve4(value);
           },
           (error) => {
             reject(error);
@@ -4580,10 +4580,10 @@ var require_core = __commonJS({
         window.requestAnimationFrame(() => this.reject(error));
       };
       Promise2.resolveAtAnimationFrame = function(value) {
-        return new Promise2((resolve3) => window.requestAnimationFrame(() => resolve3(value)));
+        return new Promise2((resolve4) => window.requestAnimationFrame(() => resolve4(value)));
       };
       Promise2.rejectAtAnimationFrame = function(error) {
-        return new Promise2((resolve3, reject) => window.requestAnimationFrame(() => reject(error)));
+        return new Promise2((resolve4, reject) => window.requestAnimationFrame(() => reject(error)));
       };
     }
   }
@@ -5039,11 +5039,11 @@ var require_wrapper = __commonJS({
     "use strict";
     var Promise2 = require_seventh();
     Promise2.timeLimit = (timeout, asyncFnOrPromise) => {
-      return new Promise2((resolve3, reject) => {
+      return new Promise2((resolve4, reject) => {
         if (typeof asyncFnOrPromise === "function") {
           asyncFnOrPromise = asyncFnOrPromise();
         }
-        Promise2.resolve(asyncFnOrPromise).then(resolve3, reject);
+        Promise2.resolve(asyncFnOrPromise).then(resolve4, reject);
         setTimeout(() => reject(new Error("Timeout")), timeout);
       });
     };
@@ -5065,13 +5065,13 @@ var require_wrapper = __commonJS({
       return oneTry();
     };
     Promise2.onceEvent = (emitter, eventName) => {
-      return new Promise2((resolve3) => emitter.once(eventName, resolve3));
+      return new Promise2((resolve4) => emitter.once(eventName, resolve4));
     };
     Promise2.onceEventAll = (emitter, eventName) => {
-      return new Promise2((resolve3) => emitter.once(eventName, (...args2) => resolve3(args2)));
+      return new Promise2((resolve4) => emitter.once(eventName, (...args2) => resolve4(args2)));
     };
     Promise2.onceEventOrError = (emitter, eventName, excludeEvents, _internalAllArgs = false) => {
-      return new Promise2((resolve3, reject) => {
+      return new Promise2((resolve4, reject) => {
         var altRejects;
         var resolve_ = (...args2) => {
           emitter.removeListener("error", reject_);
@@ -5080,7 +5080,7 @@ var require_wrapper = __commonJS({
               emitter.removeListener(event2, altRejects[event2]);
             }
           }
-          resolve3(_internalAllArgs ? args2 : args2[0]);
+          resolve4(_internalAllArgs ? args2 : args2[0]);
         };
         var reject_ = (arg) => {
           emitter.removeListener(eventName, resolve_);
@@ -5128,7 +5128,7 @@ var require_decorators = __commonJS({
     Promise2.promisifyAll = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
         return (...args2) => {
-          return new Promise2((resolve3, reject) => {
+          return new Promise2((resolve4, reject) => {
             nodeAsyncFn.call(thisBinding, ...args2, (error, ...cbArgs) => {
               if (error) {
                 if (cbArgs.length && error instanceof Error) {
@@ -5136,14 +5136,14 @@ var require_decorators = __commonJS({
                 }
                 reject(error);
               } else {
-                resolve3(cbArgs);
+                resolve4(cbArgs);
               }
             });
           });
         };
       }
       return function(...args2) {
-        return new Promise2((resolve3, reject) => {
+        return new Promise2((resolve4, reject) => {
           nodeAsyncFn.call(this, ...args2, (error, ...cbArgs) => {
             if (error) {
               if (cbArgs.length && error instanceof Error) {
@@ -5151,7 +5151,7 @@ var require_decorators = __commonJS({
               }
               reject(error);
             } else {
-              resolve3(cbArgs);
+              resolve4(cbArgs);
             }
           });
         });
@@ -5160,7 +5160,7 @@ var require_decorators = __commonJS({
     Promise2.promisify = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
         return (...args2) => {
-          return new Promise2((resolve3, reject) => {
+          return new Promise2((resolve4, reject) => {
             nodeAsyncFn.call(thisBinding, ...args2, (error, cbArg) => {
               if (error) {
                 if (cbArg !== void 0 && error instanceof Error) {
@@ -5168,14 +5168,14 @@ var require_decorators = __commonJS({
                 }
                 reject(error);
               } else {
-                resolve3(cbArg);
+                resolve4(cbArg);
               }
             });
           });
         };
       }
       return function(...args2) {
-        return new Promise2((resolve3, reject) => {
+        return new Promise2((resolve4, reject) => {
           nodeAsyncFn.call(this, ...args2, (error, cbArg) => {
             if (error) {
               if (cbArg !== void 0 && error instanceof Error) {
@@ -5183,7 +5183,7 @@ var require_decorators = __commonJS({
               }
               reject(error);
             } else {
-              resolve3(cbArg);
+              resolve4(cbArg);
             }
           });
         });
@@ -5791,42 +5791,42 @@ var require_api = __commonJS({
   "node_modules/seventh/lib/api.js"() {
     "use strict";
     var Promise2 = require_seventh();
-    Promise2.promisifyNodeApi = (api, suffix, multiSuffix, filter, anything) => {
+    Promise2.promisifyNodeApi = (api2, suffix, multiSuffix, filter, anything) => {
       var keys;
       suffix = suffix || "Async";
       multiSuffix = multiSuffix || "AsyncAll";
       filter = filter || ((key) => key[0] !== "_" && !key.endsWith("Sync"));
       if (anything) {
         keys = [];
-        for (let key in api) {
-          if (typeof api[key] === "function") {
+        for (let key in api2) {
+          if (typeof api2[key] === "function") {
             keys.push(key);
           }
         }
       } else {
-        keys = Object.keys(api);
+        keys = Object.keys(api2);
       }
       keys.filter((key) => {
-        if (typeof api[key] !== "function") {
+        if (typeof api2[key] !== "function") {
           return false;
         }
-        for (let trash in api[key].prototype) {
+        for (let trash in api2[key].prototype) {
           return false;
         }
-        return filter(key, api);
+        return filter(key, api2);
       }).forEach((key) => {
         const targetKey = key + suffix;
         const multiTargetKey = key + multiSuffix;
-        if (!api[targetKey]) {
-          api[targetKey] = Promise2.promisify(api[key], api);
+        if (!api2[targetKey]) {
+          api2[targetKey] = Promise2.promisify(api2[key], api2);
         }
-        if (!api[multiTargetKey]) {
-          api[multiTargetKey] = Promise2.promisifyAll(api[key], api);
+        if (!api2[multiTargetKey]) {
+          api2[multiTargetKey] = Promise2.promisifyAll(api2[key], api2);
         }
       });
     };
-    Promise2.promisifyAnyNodeApi = (api, suffix, multiSuffix, filter) => {
-      Promise2.promisifyNodeApi(api, suffix, multiSuffix, filter, true);
+    Promise2.promisifyAnyNodeApi = (api2, suffix, multiSuffix, filter) => {
+      Promise2.promisifyNodeApi(api2, suffix, multiSuffix, filter, true);
     };
   }
 });
@@ -5876,9 +5876,9 @@ var require_misc3 = __commonJS({
           listener(exitCode, timeout);
           return Promise2.dummy;
         }
-        return new Promise2((resolve3) => {
+        return new Promise2((resolve4) => {
           listener(exitCode, timeout, () => {
-            resolve3();
+            resolve4();
           });
         });
       };
@@ -5886,11 +5886,11 @@ var require_misc3 = __commonJS({
       setTimeout(() => process.exit(exitCode), timeout);
     };
     Promise2.resolveSafeTimeout = function(timeout, value) {
-      return new Promise2((resolve3) => {
+      return new Promise2((resolve4) => {
         setTimeout(() => {
           setTimeout(() => {
             setTimeout(() => {
-              setTimeout(() => resolve3(value), 0);
+              setTimeout(() => resolve4(value), 0);
             }, timeout / 2);
           }, timeout / 2);
         }, 0);
@@ -6065,7 +6065,7 @@ var require_detectTerminal = __commonJS({
     };
     function getParentProcess(pid) {
       var parentPid, appName;
-      return new Promise2((resolve3, reject) => {
+      return new Promise2((resolve4, reject) => {
         exec("ps -h -o ppid -p " + pid, (error, stdout) => {
           if (error) {
             reject(error);
@@ -6082,7 +6082,7 @@ var require_detectTerminal = __commonJS({
               return;
             }
             appName = stdout_.trim();
-            resolve3({ pid: parentPid, appName });
+            resolve4({ pid: parentPid, appName });
           });
         });
       });
@@ -9601,13 +9601,13 @@ var require_NextGenEvents = __commonJS({
       return this.addListener(eventName, fn, options);
     };
     NextGenEvents.prototype.waitFor = function(eventName) {
-      return new Promise((resolve3) => {
-        this.addListener(eventName, (firstArg) => resolve3(firstArg), { once: true });
+      return new Promise((resolve4) => {
+        this.addListener(eventName, (firstArg) => resolve4(firstArg), { once: true });
       });
     };
     NextGenEvents.prototype.waitForAll = function(eventName) {
-      return new Promise((resolve3) => {
-        this.addListener(eventName, (...args2) => resolve3(args2), { once: true });
+      return new Promise((resolve4) => {
+        this.addListener(eventName, (...args2) => resolve4(args2), { once: true });
       });
     };
     NextGenEvents.prototype.removeListener = function(eventName, id) {
@@ -9751,8 +9751,8 @@ var require_NextGenEvents = __commonJS({
       return NextGenEvents.emitEvent(event2);
     };
     NextGenEvents.prototype.waitForEmit = function(...args2) {
-      return new Promise((resolve3) => {
-        this.emit(...args2, (interrupt) => resolve3(interrupt));
+      return new Promise((resolve4) => {
+        this.emit(...args2, (interrupt) => resolve4(interrupt));
       });
     };
     NextGenEvents.createEvent = function(emitter, ...args2) {
@@ -10119,13 +10119,13 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForFirst = function(emitters, eventName) {
-      return new Promise((resolve3) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (firstArg) => resolve3(firstArg));
+      return new Promise((resolve4) => {
+        NextGenEvents.groupOnceFirst(emitters, eventName, (firstArg) => resolve4(firstArg));
       });
     };
     NextGenEvents.groupWaitForFirstAll = function(emitters, eventName) {
-      return new Promise((resolve3) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (...args2) => resolve3(args2));
+      return new Promise((resolve4) => {
+        NextGenEvents.groupOnceFirst(emitters, eventName, (...args2) => resolve4(args2));
       });
     };
     NextGenEvents.groupOnceLast = function(emitters, eventName, fn, options) {
@@ -10155,13 +10155,13 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForLast = function(emitters, eventName) {
-      return new Promise((resolve3) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (firstArg) => resolve3(firstArg));
+      return new Promise((resolve4) => {
+        NextGenEvents.groupOnceLast(emitters, eventName, (firstArg) => resolve4(firstArg));
       });
     };
     NextGenEvents.groupWaitForLastAll = function(emitters, eventName) {
-      return new Promise((resolve3) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (...args2) => resolve3(args2));
+      return new Promise((resolve4) => {
+        NextGenEvents.groupOnceLast(emitters, eventName, (...args2) => resolve4(args2));
       });
     };
     NextGenEvents.groupRemoveListener = function(emitters, eventName, id) {
@@ -10210,8 +10210,8 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForEmit = function(emitters, ...args2) {
-      return new Promise((resolve3) => {
-        NextGenEvents.groupEmit(emitters, ...args2, (interrupt) => resolve3(interrupt));
+      return new Promise((resolve4) => {
+        NextGenEvents.groupEmit(emitters, ...args2, (interrupt) => resolve4(interrupt));
       });
     };
     NextGenEvents.groupDefineStates = function(emitters, ...args2) {
@@ -39067,11 +39067,11 @@ var require_termkit_no_lazy_require = __commonJS({
 });
 
 // packages/tui/dist/main.js
-import { dirname as dirname7, join as join9 } from "node:path";
+import { dirname as dirname7, join as join10 } from "node:path";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync6, writeFileSync as writeFileSync4, existsSync as existsSync5 } from "node:fs";
-import { basename as basename2, dirname as dirname4, join as join6 } from "node:path";
+import { readFileSync as readFileSync7, writeFileSync as writeFileSync4, existsSync as existsSync6 } from "node:fs";
+import { basename as basename2, dirname as dirname4, join as join7 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
@@ -48322,6 +48322,12 @@ function validateFences(text, label) {
     } else if (openFence.kind !== marker.kind) {
       violations.push({ kind: "fence_mismatched", detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
     } else {
+      if (marker.kind === "claude-only" || marker.kind === "opencode-only") {
+        const body = lines.slice(openFence.line, index).filter((l) => l !== NO_COUNTERPART_MARKER);
+        if (!body.some((l) => l.trim() !== "")) {
+          violations.push({ kind: "fence_empty_block", detail: `${label}:${openFence.line}: the ${marker.kind} block is empty; give it the text that replaces its partner, or remove the pair` });
+        }
+      }
       if (marker.kind === "claude-only") {
         const first = lines[openFence.line];
         const next = lines.slice(index + 1).find((l) => l.trim() !== "");
@@ -48477,12 +48483,169 @@ function userScopeCodexServer({ env = process.env, home = homedir2(), readFile =
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync5, readdirSync as readdirSync3, statSync as statSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname3, isAbsolute, join as join5, resolve } from "node:path";
+import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6, readdirSync as readdirSync4, rmSync, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname3, isAbsolute, join as join6, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// scripts/lib/sterling-roots.mjs
+import { existsSync as existsSync4, readFileSync as readFileSync4, readdirSync as readdirSync2, realpathSync as realpathSync2 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join5, resolve, sep } from "node:path";
+var RESOLVER_IMPORTS = [
+  "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
+  "import { homedir } from 'node:os';",
+  "import { join } from 'node:path';"
+].join("\n");
+var RESOLVER_SOURCE = String.raw`
+function installRoots(env = process.env, home = homedir()) {
+  return [
+    { host: 'claude-code', dir: join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache') },
+    { host: 'opencode', dir: join(env.XDG_CACHE_HOME || join(home, '.cache'), 'opencode', 'npm') },
+  ];
+}
+
+// ENOENT/ENOTDIR mean "no such level", the normal case; any other error is thrown.
+function sterlingRootsLs(dir) {
+  try {
+    return readdirSync(dir);
+  } catch (err) {
+    if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return [];
+    throw err;
+  }
+}
+
+function readCopyVersion(root, host) {
+  const manifests = host === 'opencode' ? ['package.json', '.claude-plugin/plugin.json'] : ['.claude-plugin/plugin.json', 'package.json'];
+  for (const rel of manifests) {
+    let text;
+    try {
+      text = readFileSync(join(root, rel), 'utf8');
+    } catch (err) {
+      if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) continue;
+      throw err;
+    }
+    let version;
+    try {
+      version = JSON.parse(text).version;
+    } catch (err) {
+      return { reason: rel + ' is not valid JSON (' + err.message + ')' };
+    }
+    if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
+    return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
+  }
+  return { reason: 'no .claude-plugin/plugin.json or package.json' };
+}
+
+// The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
+// precedence. Strict grammar: major.minor.patch with no leading zeros and no v prefix,
+// dot-separated prerelease identifiers, build metadata accepted and ignored. A prerelease
+// sorts below its release; prerelease identifiers compare one by one, numeric ones
+// numerically and below alphanumeric ones, and a longer list wins when all shared ones match.
+function parseSterlingVersion(v) {
+  const m = typeof v === 'string' ? /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(v) : null;
+  if (!m) return null;
+  return { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : [] };
+}
+
+function compareSterlingVersions(a, b) {
+  const x = parseSterlingVersion(a);
+  const y = parseSterlingVersion(b);
+  if (!x || !y) throw new Error('compareSterlingVersions: not a semver version: ' + JSON.stringify(x ? b : a));
+  for (let i = 0; i < 3; i++) if (x.core[i] !== y.core[i]) return x.core[i] < y.core[i] ? -1 : 1;
+  if (!x.pre.length || !y.pre.length) return x.pre.length === y.pre.length ? 0 : x.pre.length ? -1 : 1;
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    if (i >= x.pre.length) return -1;
+    if (i >= y.pre.length) return 1;
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === q) continue;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) return Number(p) < Number(q) ? -1 : 1;
+    if (pn !== qn) return pn ? -1 : 1;
+    return p < q ? -1 : 1;
+  }
+  return 0;
+}
+
+function scanInstalledSterling(env = process.env, home = homedir()) {
+  const roots = installRoots(env, home);
+  const copies = [];
+  const skipped = [];
+  const consider = (root, host) => {
+    const v = readCopyVersion(root, host);
+    if (v.version) copies.push({ root, version: v.version, host });
+    else skipped.push({ root, host, reason: v.reason });
+  };
+  for (const { host, dir } of roots) {
+    if (host === 'claude-code') {
+      for (const marketplace of sterlingRootsLs(dir)) {
+        for (const entry of sterlingRootsLs(join(dir, marketplace, 'sterling'))) consider(join(dir, marketplace, 'sterling', entry), host);
+      }
+      continue;
+    }
+    const walk = (d, depth) => {
+      const pkg = join(d, 'node_modules', '@chulf58', 'sterling');
+      if (existsSync(pkg)) consider(pkg, host);
+      if (depth === 0) return;
+      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules') walk(join(d, name), depth - 1);
+    };
+    walk(dir, 4);
+  }
+  return { roots, copies, skipped };
+}
+
+function newestInstalledSterling(env = process.env, home = homedir()) {
+  let best = null;
+  for (const c of scanInstalledSterling(env, home).copies) {
+    if (!best) {
+      best = c;
+      continue;
+    }
+    const d = compareSterlingVersions(c.version, best.version) ||
+      (c.host === best.host ? 0 : c.host === 'claude-code' ? 1 : -1) ||
+      (c.root > best.root ? 1 : c.root < best.root ? -1 : 0);
+    if (d > 0) best = c;
+  }
+  return best;
+}
+
+// host null: the asking host is unknown, so both commands are named.
+function sterlingInstallRemedy(host) {
+  if (host === 'claude-code') return 'claude plugin install sterling@sterling';
+  if (host === 'opencode') return 'opencode plugin add @chulf58/sterling';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add @chulf58/sterling for OpenCode';
+  throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
+}
+
+function sterlingNotFoundMessage(host, env = process.env, home = homedir()) {
+  const remedy = sterlingInstallRemedy(host);
+  const scan = scanInstalledSterling(env, home);
+  const where = scan.roots.map((r) => r.dir + ' (' + r.host + ')').join(' or ');
+  const why = scan.skipped.map((s) => '; skipped ' + s.root + ': ' + s.reason).join('');
+  return 'no installed Sterling found under ' + where + why + '. Install it: ' + remedy + '.';
+}
+`;
+var api = new Function(
+  "existsSync",
+  "readFileSync",
+  "readdirSync",
+  "join",
+  "homedir",
+  `${RESOLVER_SOURCE}
+return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
+)(existsSync4, readFileSync4, readdirSync2, join5, homedir3);
+var installRoots = api.installRoots;
+var readCopyVersion = api.readCopyVersion;
+var parseSterlingVersion = api.parseSterlingVersion;
+var compareSterlingVersions = api.compareSterlingVersions;
+var scanInstalledSterling = api.scanInstalledSterling;
+var newestInstalledSterling = api.newestInstalledSterling;
+var sterlingInstallRemedy = api.sterlingInstallRemedy;
+var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
+
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync2, readFileSync as readFileSync4, readdirSync as readdirSync2, mkdirSync as mkdirSync4, openSync, writeSync, closeSync, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { lstatSync as lstatSync2, readFileSync as readFileSync5, readdirSync as readdirSync3, mkdirSync as mkdirSync4, openSync, writeSync, closeSync, unlinkSync as unlinkSync2, constants } from "node:fs";
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/opencode-agents.mjs
@@ -48544,6 +48707,13 @@ var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "li
 var FULL_HEADER_RE = /^<!-- sterling-full renderer=opencode-full\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
 var fwd = (p) => p.replace(/\\/g, "/");
 var normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
+var RESOLVER_SOURCE2 = `${RESOLVER_SOURCE}
+function sterlingInstallRoot() {
+  const found = newestInstalledSterling();
+  if (!found) throw new Error('Sterling: ' + sterlingNotFoundMessage('opencode'));
+  return found.root;
+}
+`;
 var IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -48565,10 +48735,10 @@ var FULL_PERMISSIONS = {
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
 function storeWriteTools(pluginRoot = sterlingRootFrom()) {
-  const fm = normalize3(readFileSync5(join5(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+  const fm = normalize3(readFileSync6(join6(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
   const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
   const tools = [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
-  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd(join5(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
+  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd(join6(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
   return tools;
 }
 function opencodeModelRef(model) {
@@ -48578,7 +48748,7 @@ function opencodeModelRef(model) {
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname3(fileURLToPath(moduleUrl));
   for (let dir = start; ; dir = dirname3(dir)) {
-    if (existsSync4(join5(dir, "agent-templates", "registry.json"))) return dir;
+    if (existsSync5(join6(dir, "agent-templates", "registry.json"))) return dir;
     if (dirname3(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
@@ -48609,19 +48779,19 @@ function frontmatterModel(content) {
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
 function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
-  const registry = loadRegistry(join5(pluginRoot, "agent-templates", "registry.json"));
+  const registry = loadRegistry(join6(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const rows = [];
   for (const name of ROSTER) {
     const entry = registry.agents.find((a) => a.name === name);
     if (!entry) throw new Error(`opencode roster: '${name}' is not in agent-templates/registry.json (P5)`);
     const rel = `${STERLING_AGENTS_SUBDIR}/${name}.md`;
-    const path = join5(projectDir, rel);
+    const path = join6(projectDir, rel);
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const disk = existsSync4(path) ? normalize3(readFileSync5(path, "utf8")) : null;
+    const disk = existsSync5(path) ? normalize3(readFileSync6(path, "utf8")) : null;
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
       if (!m || m[1] !== name) {
@@ -48635,7 +48805,7 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       }
     }
     const model = models[name] ?? (disk === null ? void 0 : frontmatterModel(disk));
-    const agent = renderFullOpenCodeAgent(readFileSync5(join5(pluginRoot, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name === "conductor", model, writeTools });
+    const agent = renderFullOpenCodeAgent(readFileSync6(join6(pluginRoot, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name === "conductor", model, writeTools });
     if (agent.name !== name) throw new Error(`opencode roster: '${entry.file}' renders as '${agent.name}', not '${name}' (P5)`);
     if (disk === agent.content) {
       rows.push({ item: rel, status: "matches" });
@@ -48648,7 +48818,7 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   return rows;
 }
 function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
-  if (!existsSync4(join5(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync5(join6(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelRef(model);
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
@@ -48659,9 +48829,9 @@ function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
 // packages/tui/dist/controller.js
 function openDashboard(storePath2, options = {}) {
   const disabled = options.disabledEffects ?? {};
-  const configPath2 = join6(dirname4(storePath2), "config.json");
+  const configPath2 = join7(dirname4(storePath2), "config.json");
   const projectRoot = dirname4(dirname4(storePath2));
-  const agentsDir = join6(projectRoot, ".claude", "agents");
+  const agentsDir = join7(projectRoot, ".claude", "agents");
   function resolveProjectHeadSha() {
     try {
       const sha = execFileSync2("git", ["rev-parse", "HEAD"], {
@@ -48677,7 +48847,7 @@ function openDashboard(storePath2, options = {}) {
   let mounts = [];
   let domainsAvailable = true;
   try {
-    const config = parseConfig(JSON.parse(readFileSync6(configPath2, "utf8")));
+    const config = parseConfig(JSON.parse(readFileSync7(configPath2, "utf8")));
     mounts = resolveDomainMounts(config);
   } catch {
     mounts = [];
@@ -48690,7 +48860,7 @@ function openDashboard(storePath2, options = {}) {
   let roster;
   function readInstalledModelEffort(name) {
     try {
-      const content = readFileSync6(join6(agentsDir, `${name}.md`), "utf8");
+      const content = readFileSync7(join7(agentsDir, `${name}.md`), "utf8");
       const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
       const block = fm ? fm[1] : "";
       return {
@@ -48706,7 +48876,7 @@ function openDashboard(storePath2, options = {}) {
   }
   function readRawMode() {
     try {
-      const raw = JSON.parse(readFileSync6(configPath2, "utf8"));
+      const raw = JSON.parse(readFileSync7(configPath2, "utf8"));
       return raw.mode === void 0 ? void 0 : typeof raw.mode === "string" ? raw.mode : JSON.stringify(raw.mode);
     } catch (err) {
       ui = { ...ui, notice: `project mode unknown \u2014 config unreadable: ${err.message}` };
@@ -48717,7 +48887,7 @@ function openDashboard(storePath2, options = {}) {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     let config;
     try {
-      config = parseConfig(JSON.parse(readFileSync6(configPath2, "utf8")));
+      config = parseConfig(JSON.parse(readFileSync7(configPath2, "utf8")));
     } catch {
       config = { models: {}, models_catalog: { staleness_days: 45 } };
     }
@@ -48727,7 +48897,7 @@ function openDashboard(storePath2, options = {}) {
     const tdd = { enabled: cfg.tdd?.enabled ?? true };
     const mode = readRawMode();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync5(join6(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync6(join7(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
@@ -48752,7 +48922,7 @@ function openDashboard(storePath2, options = {}) {
   }
   function applySparringModel(e) {
     try {
-      const raw = JSON.parse(readFileSync6(configPath2, "utf8"));
+      const raw = JSON.parse(readFileSync7(configPath2, "utf8"));
       const sp = { ...raw.sparring_partner };
       if (e.model)
         sp.model = e.model;
@@ -48767,15 +48937,15 @@ function openDashboard(storePath2, options = {}) {
   async function applySwap(e) {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     try {
-      const raw = JSON.parse(readFileSync6(configPath2, "utf8"));
+      const raw = JSON.parse(readFileSync7(configPath2, "utf8"));
       raw.models = raw.models ?? {};
       raw.models[e.key] = { model: e.to.model, effort: e.to.effort };
       writeFileSync4(configPath2, JSON.stringify(raw, null, 2) + "\n");
       for (const name of e.agents) {
-        const p = join6(agentsDir, `${name}.md`);
-        if (!existsSync5(p))
+        const p = join7(agentsDir, `${name}.md`);
+        if (!existsSync6(p))
           continue;
-        const content = readFileSync6(p, "utf8");
+        const content = readFileSync7(p, "utf8");
         const hdr = parseInstalledHeader(content);
         writeFileSync4(p, setInstalledModelEffort(content, {
           model: e.to.model,
@@ -49060,17 +49230,17 @@ function mouseToEvent(name, data) {
 }
 
 // packages/tui/dist/subagents.js
-import { existsSync as existsSync8, readFileSync as readFileSync8, readdirSync as readdirSync6, statSync as statSync5 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join8 } from "node:path";
+import { existsSync as existsSync9, readFileSync as readFileSync9, readdirSync as readdirSync7, statSync as statSync5 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join9 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync7, writeFileSync as writeFileSync5, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync6, lstatSync as lstatSync3, readdirSync as readdirSync4, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { join as join7, resolve as resolve2, dirname as dirname5, isAbsolute as isAbsolute2 } from "node:path";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync5, rmSync as rmSync2, rmdirSync, renameSync as renameSync2, existsSync as existsSync7, lstatSync as lstatSync3, readdirSync as readdirSync5, realpathSync as realpathSync3, chmodSync } from "node:fs";
+import { join as join8, resolve as resolve3, dirname as dirname5, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash as createHash2 } from "node:crypto";
 function registerPath(root) {
-  return join7(root, ".sterling", "transient", "dispatch-register.json");
+  return join8(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -49092,10 +49262,10 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync6(p)) return { availability: "absent", arr: [] };
+  if (!existsSync7(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
-    raw = readFileSync7(p, "utf8");
+    raw = readFileSync8(p, "utf8");
   } catch {
     return { availability: "corrupt", arr: [] };
   }
@@ -49124,7 +49294,7 @@ var MAX_PROMPT_BYTES = 512 * 1024;
 var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 function dispatchStateDir(root) {
-  return join7(root, ".sterling", "transient", "dispatch-state");
+  return join8(root, ".sterling", "transient", "dispatch-state");
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
@@ -49132,24 +49302,24 @@ function dispatchStateKey(toolUseId) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync2, readSync, closeSync as closeSync2, fstatSync, existsSync as existsSync7, statSync as statSync4, readdirSync as readdirSync5 } from "node:fs";
+import { openSync as openSync2, readSync, closeSync as closeSync2, fstatSync, existsSync as existsSync8, statSync as statSync4, readdirSync as readdirSync6 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
   const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
-  if (existsSync7(flat)) return flat;
+  if (existsSync8(flat)) return flat;
   const wfRoot = `${sessionDir}/subagents/workflows`;
   try {
-    for (const d of readdirSync5(wfRoot)) {
+    for (const d of readdirSync6(wfRoot)) {
       const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
-      if (existsSync7(candidate)) return candidate;
+      if (existsSync8(candidate)) return candidate;
     }
   } catch {
   }
   return flat;
 }
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync7(path)) return null;
+  if (!existsSync8(path)) return null;
   const fd = openSync2(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -51563,15 +51733,15 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
 function readDispatchDescription(projectRoot, toolUseId) {
   const dir = dispatchStateDir(projectRoot);
   const key = dispatchStateKey(toolUseId);
-  let file = join8(dir, `live-${key}.json`);
+  let file = join9(dir, `live-${key}.json`);
   try {
-    if (!existsSync8(file)) {
-      const done = readdirSync6(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
+    if (!existsSync9(file)) {
+      const done = readdirSync7(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
       if (!done)
         return null;
-      file = join8(dir, done);
+      file = join9(dir, done);
     }
-    const rec = JSON.parse(readFileSync8(file, "utf8"));
+    const rec = JSON.parse(readFileSync9(file, "utf8"));
     return rec.tool_use_id === toolUseId && typeof rec.description === "string" && rec.description ? rec.description : null;
   } catch {
     return null;
@@ -51579,7 +51749,7 @@ function readDispatchDescription(projectRoot, toolUseId) {
 }
 function readAgentModel(projectRoot, type) {
   try {
-    const content = readFileSync8(join8(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
+    const content = readFileSync9(join9(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
     const model = content.match(/^---\n([\s\S]*?)\n---\n/)?.[1]?.match(/^model:\s*(\S+)/m)?.[1];
     if (model)
       return model;
@@ -51589,7 +51759,7 @@ function readAgentModel(projectRoot, type) {
   if (!key)
     return null;
   try {
-    const raw = JSON.parse(readFileSync8(join8(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync9(join9(projectRoot, ".sterling", "config.json"), "utf8"));
     const model = raw.models?.[key]?.model;
     return typeof model === "string" && model ? model : null;
   } catch {
@@ -51597,23 +51767,23 @@ function readAgentModel(projectRoot, type) {
   }
 }
 function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir = defaultClaudeConfigDir()) {
-  const projects = join8(claudeConfigDir, "projects");
+  const projects = join9(claudeConfigDir, "projects");
   const slug = projectRoot.replace(/[^A-Za-z0-9]/g, "-");
-  const sessionUnder = (dir2) => existsSync8(join8(projects, dir2, sessionId));
+  const sessionUnder = (dir2) => existsSync9(join9(projects, dir2, sessionId));
   let dir = sessionUnder(slug) ? slug : void 0;
   if (!dir) {
     let all;
     try {
-      all = readdirSync6(projects);
+      all = readdirSync7(projects);
     } catch {
       return null;
     }
     dir = all.find((d) => d !== slug && sessionUnder(d));
   }
-  return dir ? deriveAgentTranscript(join8(projects, dir, `${sessionId}.jsonl`), agentId) : null;
+  return dir ? deriveAgentTranscript(join9(projects, dir, `${sessionId}.jsonl`), agentId) : null;
 }
 function defaultClaudeConfigDir() {
-  return process.env.CLAUDE_CONFIG_DIR || join8(homedir3(), ".claude");
+  return process.env.CLAUDE_CONFIG_DIR || join9(homedir4(), ".claude");
 }
 function readContextUsage(path) {
   try {
@@ -51635,7 +51805,7 @@ function contextPercent(tokens, window2) {
 }
 function readSharedWindows() {
   try {
-    const raw = JSON.parse(readFileSync8(join8(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
+    const raw = JSON.parse(readFileSync9(join9(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
     return parseConfig({ context_watch: { windows: raw.windows } }).context_watch.windows;
   } catch {
     return null;
@@ -51643,7 +51813,7 @@ function readSharedWindows() {
 }
 function readProjectWindows(projectRoot) {
   try {
-    const raw = JSON.parse(readFileSync8(join8(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync9(join9(projectRoot, ".sterling", "config.json"), "utf8"));
     return parseConfig(raw).context_watch.windows;
   } catch {
     return {};
@@ -51815,7 +51985,7 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
 }
 
 // packages/tui/dist/lock.js
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync9, rmSync as rmSync2, writeFileSync as writeFileSync6 } from "node:fs";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync10, rmSync as rmSync3, writeFileSync as writeFileSync6 } from "node:fs";
 import { dirname as dirname6 } from "node:path";
 function pidIsAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0)
@@ -51829,7 +51999,7 @@ function pidIsAlive(pid) {
 }
 function procStartTime(pid) {
   try {
-    const stat = readFileSync9(`/proc/${pid}/stat`, "utf8");
+    const stat = readFileSync10(`/proc/${pid}/stat`, "utf8");
     const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
     return fields[19] ?? null;
   } catch {
@@ -51855,7 +52025,7 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
     }
     let parts;
     try {
-      parts = readFileSync9(lockPath2, "utf8").trim().split(/\s+/);
+      parts = readFileSync10(lockPath2, "utf8").trim().split(/\s+/);
     } catch {
       continue;
     }
@@ -51866,14 +52036,14 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
     if (isAlive(owner2) && ownerStillHolds(parts[1], startTimeOf(owner2)))
       return owner2;
     try {
-      const cur = readFileSync9(lockPath2, "utf8").trim().split(/\s+/)[0];
+      const cur = readFileSync10(lockPath2, "utf8").trim().split(/\s+/)[0];
       if (cur === ownerRaw)
-        rmSync2(lockPath2, { force: true });
+        rmSync3(lockPath2, { force: true });
     } catch {
     }
   }
   try {
-    const owner2 = Number(readFileSync9(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    const owner2 = Number(readFileSync10(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 !== pid && isAlive(owner2))
       return owner2;
   } catch {
@@ -51886,9 +52056,9 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
 }
 function releaseTuiLock(lockPath2, pid) {
   try {
-    const owner2 = Number(readFileSync9(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    const owner2 = Number(readFileSync10(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 === pid)
-      rmSync2(lockPath2, { force: true });
+      rmSync3(lockPath2, { force: true });
   } catch {
   }
 }
@@ -51912,7 +52082,7 @@ if (smoke) {
   console.error(`sterling-tui smoke: terminal stack loaded (${term.width}x${term.height})`);
   process.exit(0);
 }
-var lockPath = join9(dirname7(storePath), "transient", "tui.lock");
+var lockPath = join10(dirname7(storePath), "transient", "tui.lock");
 var owner = acquireTuiLock(lockPath, process.pid);
 if (owner !== null) {
   console.error(`sterling-tui: already running (pid ${owner}) for this store \u2014 exiting politely (\xA711)`);
