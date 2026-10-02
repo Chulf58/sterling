@@ -93,7 +93,7 @@ export function createSterlingServer(deps = {}) {
   }
 
   const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore });
-  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync: deps.syncSession ?? createSessionSync(deps), pluginRoot: deps.sterlingRoot });
+  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
   const { onBefore, onAfter } = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
   const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker });
   const settle = createSettle({ openStore, now, launchWorkerFor });
