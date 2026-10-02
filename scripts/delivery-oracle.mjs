@@ -98,6 +98,7 @@ import {
 import { arg, hasFlag } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
 import { isForeignTree } from './hooks/lib/working-tree.mjs';
+import { OUTPUT_AXIS_CLIP } from './hooks/lib/axis-compose.mjs';
 
 export const ORACLE_VERSION = 1;
 
@@ -105,7 +106,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..');
 
 // The hook predicates this oracle mirrors, named once (h19-knowledge-delivery
-// :86, h19-bash-delivery:103, h23-output-axis:165, h10-direct-capture:1117).
+// :86, h19-bash-delivery:103, h23-output-axis's outputAxisReadGated, h10-direct-capture:1117).
 const OWNER_TYPES = ['feature_article', 'reference_material'];
 const HOOK_CAP = 100;          // H19/H23's ownership cap
 const ENUM_CAP = 5000;         // enumeration only — never a predicate
@@ -128,13 +129,13 @@ const H20 = 'h20-mechanism-axis.mjs';
 // and scored every H10 case as harness_error on 2026-09-08 (correctly loud).
 const H10_DUTIES_MARKER = 'H10 ▸';
 
-// H23's own clip + candidate cap, mirrored verbatim (h23-output-axis.mjs:85,
-// :181-182) so a rename there is the only place these constants must move.
-const OUTPUT_AXIS_CLIP = 16_000;
+// H23's clip is imported from the shared composition (lib/axis-compose.mjs), so
+// there is one copy of it. The candidate cap is that composition's own per-type
+// store.query cap (the literal 40 in composeOutputAxis), mirrored here.
 const OUTPUT_AXIS_CANDIDATE_CAP = 40;
 
-// 'output_axis_pointers' is the kind the live H23 hook actually enqueues
-// (h23-output-axis.mjs:236) and is therefore the ONLY output-axis name here.
+// 'output_axis_pointers' is the output-axis kind this oracle carries in
+// QUEUE_KINDS and is therefore the ONLY output-axis name here.
 // An earlier draft also pre-seeded 'output_axis', a name the test pins had
 // assumed while blind and which nothing emits; it was removed rather than
 // aliased, because an oracle bucket keyed on a kind no hook produces can pass
