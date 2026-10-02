@@ -8052,6 +8052,26 @@ export class SterlingTools {
         next.history = [...hist.slice(0, genesis), ...hist.slice(hist.length - recentKeep)];
       }
     }
+    // ONE WRITE RULE on the shared update path (decision
+    // projects-mount-domains-and-sibling-projects): repo paths never enter a
+    // shared domain store through the tool surface. knowledge_create refuses
+    // them at birth; this covers knowledge_update, _append and _edit, which all
+    // merge through here. The test is the PHYSICAL holder (scopeOfHolder), and
+    // only paths this write ADDS are refused, so a row written before the rule
+    // can still be corrected, including by dropping its paths.
+    const holderScope = this.store.scopeOfHolder(old.id);
+    if (holderScope.startsWith('domain:')) {
+      const had = new Set(declaredRepoPaths(old.type, old as unknown as Record<string, unknown>));
+      const added = declaredRepoPaths(old.type, next).filter((p) => !had.has(p));
+      if (added.length) {
+        const field = old.type === 'feature_article' ? 'files' : 'file_keys';
+        throw new Error(
+          `${toolName}: ${old.id} is held by the shared domain store '${holderScope}', and this write adds repo paths to its ${field} ` +
+            `(${added.slice(0, 5).join(', ')}${added.length > 5 ? ', …' : ''}). Repo paths stay in project-scoped records; ` +
+            `put them on a project record that links to this one. Nothing was written.`
+        );
+      }
+    }
     // THE CLAIM CHECK, over the FULLY MERGED CANDIDATE and before any write:
     // an update of a record that still carries a stale directory claim refuses
     // even when the patch touches an unrelated field, by design (decision
@@ -11623,6 +11643,20 @@ export class SterlingTools {
     } catch (err) {
       if (err instanceof ZodError) throw this.renderValidationFailure(err, type, 'knowledge_supersede');
       throw err;
+    }
+    // ONE WRITE RULE, same as knowledgeUpdate: the replacement lands in the
+    // old row's physical store, so a domain-held record's replacement may not
+    // bring repo paths the old row did not have.
+    const supersedeHolder = this.store.scopeOfHolder(old.id);
+    if (supersedeHolder.startsWith('domain:')) {
+      const had = new Set(declaredRepoPaths(type, old as unknown as Record<string, unknown>));
+      const added = declaredRepoPaths(type, parsed).filter((p) => !had.has(p));
+      if (added.length) {
+        throw new Error(
+          `knowledge_supersede: ${old.id} is held by the shared domain store '${supersedeHolder}', and its replacement adds repo paths ` +
+            `(${added.slice(0, 5).join(', ')}${added.length > 5 ? ', …' : ''}). Repo paths stay in project-scoped records. Nothing was written.`
+        );
+      }
     }
     // Cited-id resolution warnings (board fc053051, F3 review finding: every
     // other write path emits these — knowledge_supersede was the one gap).

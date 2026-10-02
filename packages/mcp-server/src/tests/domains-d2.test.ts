@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
 import { MountedStores, createDomain, type DomainMount } from '@sterling/store';
 import { SterlingTools, mountedDomainSurface } from '../tools.js';
+import { seedRecordRaw } from './test-helpers/raw-seed.js';
 
 // Domains D2, the MCP surface (board 25c0d858; decision
 // projects-mount-domains-and-sibling-projects, amended head): knowledge_create
@@ -139,6 +140,49 @@ test('knowledge_create refuses a domain-scoped feature_article that owns files',
       /domain:genesys[\s\S]*src\/routing\.ts/
     );
     assert.equal(store.count({}), before);
+  } finally {
+    cleanup();
+  }
+});
+
+test('update, append, edit and supersede that add repo paths to a domain-held record are refused, with nothing written (task-end review 2026-10-03)', () => {
+  const { store, tools, cleanup } = harness(['genesys']);
+  try {
+    const dec = tools.knowledgeCreate('decision', decision('genesys call routing retry', { scope: 'domain:genesys', file_keys: [] })).record;
+    const version = (id: string) => (store.get(id) as unknown as { version: number }).version;
+    const v0 = version(dec.id);
+    const refused = (err: Error, op: string, path: string) => {
+      assert.match(err.message, new RegExp(op));
+      assert.match(err.message, /domain:genesys/);
+      assert.ok(err.message.includes(path), err.message);
+      assert.match(err.message, /nothing was written/i);
+      return true;
+    };
+    assert.throws(() => tools.knowledgeUpdate(dec.id, { file_keys: ['src/routing.ts'] }), (e: Error) => refused(e, 'knowledge_update', 'src/routing.ts'));
+    assert.throws(() => tools.knowledgeAppend(dec.id, 'file_keys', ['src/queue.ts']), (e: Error) => refused(e, 'knowledge_append', 'src/queue.ts'));
+    assert.throws(
+      () => tools.knowledgeSupersede(dec.id, decision('genesys call routing retry v2', { file_keys: ['src/supersede.ts'] })),
+      (e: Error) => refused(e, 'knowledge_supersede', 'src/supersede.ts')
+    );
+    assert.equal(version(dec.id), v0, 'the decision is unchanged');
+    assert.equal(store.get(dec.id)?.status, 'active', 'and not superseded');
+    assert.deepEqual((store.get(dec.id) as unknown as { file_keys: string[] }).file_keys, []);
+
+    // A domain article that owns files can only exist from before the rule (seeded raw);
+    // an edit that points one of them at a new repo path is refused the same way.
+    const art = seedRecordRaw(
+      store,
+      'feature_article',
+      article('genesys-legacy-article', 'Genesys legacy', [{ path: 'src/a.ts', role: 'impl' }], { scope: 'domain:genesys' }),
+      '2026-10-03T12:00:00.000Z'
+    );
+    const a0 = version(art.id);
+    assert.throws(() => tools.knowledgeEdit(art.id, 'files[path=src/a.ts].path', 'src/a.ts', 'src/b.ts'), (e: Error) => refused(e, 'knowledge_edit', 'src/b.ts'));
+    assert.equal(version(art.id), a0, 'the article is unchanged');
+
+    // Not a blanket lock: a write that adds no repo path still lands, on both.
+    tools.knowledgeUpdate(dec.id, { rationale: 'retry after the routing timeout' });
+    assert.equal(version(dec.id), v0 + 1);
   } finally {
     cleanup();
   }
