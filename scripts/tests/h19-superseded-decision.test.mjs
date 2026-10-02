@@ -143,3 +143,133 @@ test('H19 file touch CONTROL: a decision with no inbound supersedes edge keeps [
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// H19 dispatch staging (scripts/hooks/lib/stage-brief.mjs): the path channel
+// (decisions on a file the brief names) and the subject channel (decisions the
+// brief's vocabulary matches). A dispatch is declared through H22's real
+// PreToolUse seam, then SubagentStart stages the brief.
+// ---------------------------------------------------------------------------
+
+function stage(dir, prompt) {
+  const transcript = join(dir, 'no-such-parent-transcript.jsonl');
+  const pre = spawnSync(process.execPath, [join(HOOKS, 'h22-dispatch-register.mjs')], {
+    input: JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Task',
+      tool_use_id: `toolu_sup_${randomUUID().slice(0, 8)}`,
+      tool_input: { subagent_type: 'general-purpose', prompt, description: 'a lane' },
+      session_id: 's1',
+      cwd: dir,
+      transcript_path: transcript,
+      prompt_id: 'p1',
+    }),
+    encoding: 'utf8',
+    cwd: dir,
+    timeout: 60_000,
+  });
+  assert.notEqual(pre.status, 2, `PreToolUse never denies: ${pre.stderr}`);
+  const r = spawnSync(process.execPath, [join(HOOKS, 'h19-dispatch-staging.mjs')], {
+    input: JSON.stringify({
+      hook_event_name: 'SubagentStart',
+      session_id: 's1',
+      transcript_path: transcript,
+      cwd: dir,
+      prompt_id: 'p1',
+      agent_id: 'agent-1',
+      agent_type: 'general-purpose',
+    }),
+    encoding: 'utf8',
+    cwd: dir,
+    timeout: 60_000,
+  });
+  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+const SUBJECT_PROMPT = 'Investigate: how long is one farm day in seconds, and how many farm days does peacetime last before the breach?';
+const SUBJECT_OLD = 'One farm day lasts 150 seconds and peacetime lasts 8 farm days before the breach.';
+const SUBJECT_NEW = 'One farm day lasts 900 seconds and peacetime lasts about 2 farm days before the breach.';
+
+for (const [channel, prompt, fileKeys, oldStatement, newStatement] of [
+  ['path', `Change the day length in ${FILE}.`, [FILE], 'One day is 150 seconds and peacetime is 8 days.', 'One day is 900 seconds and peacetime is about 2 days.'],
+  ['subject', SUBJECT_PROMPT, [], SUBJECT_OLD, SUBJECT_NEW],
+]) {
+  test(`H19 staging, ${channel} channel: a superseded decision is never labelled [standing] and names its superseder`, () => {
+    const { dir, store, cleanup } = makeProject();
+    try {
+      const oldRec = store.create(decision(OLD_SLUG, oldStatement, { file_keys: fileKeys }));
+      const newRec = store.create(
+        decision(NEW_SLUG, newStatement, { file_keys: fileKeys, links: [{ rel: 'supersedes', target_id: oldRec.id }] })
+      );
+      const ctx = ctxOf(stage(dir, prompt));
+      const oldLine = lineOf(ctx, oldRec);
+      assert.ok(oldLine, `the superseded decision is staged:\n${ctx}`);
+      assert.doesNotMatch(oldLine, /\[standing\]/, `a superseded decision must not read as standing:\n${oldLine}`);
+      assert.ok(oldLine.includes(`SUPERSEDED, whole or in part, by ${NEW_SLUG} (${newRec.id.slice(0, 8)})`), `names the superseder:\n${oldLine}`);
+      const newLine = lineOf(ctx, newRec);
+      assert.ok(newLine, `the superseder is staged:\n${ctx}`);
+      assert.match(newLine, /\[standing\]/);
+      assert.doesNotMatch(newLine, /SUPERSEDED/);
+    } finally {
+      cleanup();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode file-touch delivery (packages/opencode-plugin/src/delivery.mjs),
+// driven through the server plugin's tool.execute.before/after hooks.
+// ---------------------------------------------------------------------------
+
+function stubCtx(directory) {
+  const hooks = { session: {}, tool: {} };
+  return {
+    hooks,
+    location: { directory },
+    session: {
+      hook: async (name, fn) => void (hooks.session[name] = fn),
+      get: async ({ sessionID }) => ({ id: sessionID, time: { created: Date.now() } }),
+    },
+    tool: { hook: async (name, fn) => void (hooks.tool[name] = fn) },
+    command: { transform: async () => ({ dispose: async () => {} }) },
+    skill: { transform: async () => ({ dispose: async () => {} }) },
+    mcp: { transform: async () => ({ dispose: async () => {} }) },
+    event: {
+      subscribe: ({ signal } = {}) => ({
+        async *[Symbol.asyncIterator]() {
+          while (!signal?.aborted) await new Promise((r) => setTimeout(r, 20));
+        },
+      }),
+    },
+  };
+}
+
+test('OpenCode file touch: a superseded decision is never labelled [standing] and names its superseder', async () => {
+  const server = await import(pathToFileURL(join(root, 'packages', 'opencode-plugin', 'src', 'server.mjs')).href);
+  const { dir, store, cleanup } = makeProject();
+  let teardown;
+  try {
+    mkdirSync(join(dir, 'game', 'sim'), { recursive: true });
+    writeFileSync(join(dir, FILE), 'extends Node\n');
+    const oldRec = store.create(decision(OLD_SLUG, 'One day is 150 seconds and peacetime is 8 days.'));
+    const newRec = store.create(
+      decision(NEW_SLUG, 'One day is 900 seconds and peacetime is about 2 days.', { links: [{ rel: 'supersedes', target_id: oldRec.id }] })
+    );
+    const ctx = stubCtx(dir);
+    teardown = await server.createSterlingServer({ claudeOnPath: () => false }).setup(ctx);
+    const call = { tool: 'read', sessionID: 'ses_1', id: 'c1', input: { path: FILE } };
+    await ctx.hooks.tool['execute.before'](call);
+    const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'read' }] } };
+    await ctx.hooks.tool['execute.after'](after);
+    assert.equal(after.result.content.length, 2, 'the delivery was appended to the tool result');
+    const text = after.result.content[1].text;
+    const oldLine = lineOf(text, oldRec);
+    assert.ok(oldLine, `the superseded decision is delivered:\n${text}`);
+    assert.doesNotMatch(oldLine, /\[standing\]/, `a superseded decision must not read as standing:\n${oldLine}`);
+    assert.ok(oldLine.includes(`SUPERSEDED, whole or in part, by ${NEW_SLUG} (${newRec.id.slice(0, 8)})`), `names the superseder:\n${oldLine}`);
+    assert.match(lineOf(text, newRec), /\[standing\]/);
+  } finally {
+    await teardown?.();
+    cleanup();
+  }
+});

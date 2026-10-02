@@ -11286,7 +11286,7 @@ function governedRel(raw, root, directory) {
 function buildDelivery(store, root, rel, sessionID, guard = readGuard(guardPath(root, void 0, sessionID))) {
   const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, root));
   const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
-  const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
+  const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 }).map((r) => withInboundSupersedes(store, r));
   const gPath = guardPath(root, void 0, sessionID);
   const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
   const freshOwners = owners.filter((r) => isOwnerDiscoveryOnly(r) ? !isDiscoveryDelivered(guard, r) : !isSubstanceDelivered(guard, r));
@@ -13591,7 +13591,7 @@ function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = 
   );
   const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !isForeignTree(r, cwd)) : [];
   const hazards = rels.length ? store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 }) : [];
-  const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }) : [];
+  const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }).map((r) => withInboundSupersedes(store, r)) : [];
   const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
   const subjectMatches = [];
   const seenSubject = /* @__PURE__ */ new Set();
@@ -13599,7 +13599,7 @@ function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = 
     const subjectText = stripReviewTerritoryLine(p);
     const terms = extractAxisTerms(subjectText, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) continue;
-    const candidatesBySubject = [...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }), ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })];
+    const candidatesBySubject = [...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }), ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 }).map((r) => withInboundSupersedes(store, r))];
     for (const r of candidatesBySubject) {
       if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
       const hits = axisHits(r, terms);

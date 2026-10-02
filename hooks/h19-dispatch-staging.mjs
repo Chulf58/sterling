@@ -9014,6 +9014,19 @@ function authorityMarker(record) {
   if (Array.isArray(record?.inbound_supersedes) && record.inbound_supersedes.length) return "";
   return record?.authority ? `[${record.authority}] ` : "";
 }
+function withInboundSupersedes(store, record) {
+  const inbound = store.inboundSupersedes(record.id);
+  if (!inbound.length) return record;
+  return {
+    ...record,
+    inbound_supersedes: inbound.map((s2) => ({
+      id: s2.id,
+      ...s2.slug ? { slug: s2.slug } : {},
+      ...s2.title ? { title: s2.title } : {},
+      status: s2.status
+    }))
+  };
+}
 function clip(text, cap) {
   const s2 = String(text ?? "");
   let out = "";
@@ -9676,7 +9689,7 @@ function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = 
   );
   const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !isForeignTree(r, cwd)) : [];
   const hazards = rels.length ? store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 }) : [];
-  const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }) : [];
+  const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }).map((r) => withInboundSupersedes(store, r)) : [];
   const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
   const subjectMatches = [];
   const seenSubject = /* @__PURE__ */ new Set();
@@ -9684,7 +9697,7 @@ function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = 
     const subjectText = stripReviewTerritoryLine(p);
     const terms = extractAxisTerms(subjectText, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) continue;
-    const candidatesBySubject = [...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }), ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })];
+    const candidatesBySubject = [...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }), ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 }).map((r) => withInboundSupersedes(store, r))];
     for (const r of candidatesBySubject) {
       if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
       const hits = axisHits(r, terms);
