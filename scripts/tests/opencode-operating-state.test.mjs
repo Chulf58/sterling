@@ -20,7 +20,11 @@ const NOW = '2026-10-02T12:00:00.000Z';
 let SterlingStore;
 let lib;
 let contextMod;
+let stageLib;
+let maintLib;
 before(async () => {
+  maintLib = await import(pathToFileURL(join(repo, 'scripts', 'hooks', 'lib', 'maintenance-state.mjs')).href);
+  stageLib = await import(pathToFileURL(join(repo, 'scripts', 'hooks', 'lib', 'stage-brief.mjs')).href);
   ({ SterlingStore } = await import(pathToFileURL(join(repo, 'packages', 'store', 'dist', 'index.js')).href));
   lib = await import(pathToFileURL(join(repo, 'scripts', 'hooks', 'lib', 'operating-state.mjs')).href);
   contextMod = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'context.mjs')).href);
@@ -236,9 +240,11 @@ test('a child session gets the territory records for the paths its own brief nam
     assert.match(text, /a-article/, 'the owning article');
     assert.match(text, /Hazard a-hazard/, 'the governing hazard');
     assert.match(text, /src\/a\.mjs/);
+    // The system prompt is rebuilt per request, so the staged text rides every request of the child (as the rotation restore does).
     const again = input('ses_child', [userMsg('Fix the bug in src/a.mjs and report back.')]);
     await h.onContext(again);
-    assert.doesNotMatch(textOf(again), /a-article does the thing/, 'delivered records are not resent on the child\'s next request');
+    assert.match(textOf(again), /a-article does the thing/, 'the child keeps its staged records on later requests');
+    assert.match(textOf(again), /Hazard a-hazard/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -290,6 +296,132 @@ test('when the session lookup fails the child is not guessed at: no staging, the
     const i = input('ses_child', [userMsg('Fix src/a.mjs')]);
     await h.onContext(i);
     assert.doesNotMatch(textOf(i), /a-article/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- the shared staging lib (scripts/hooks/lib/stage-brief.mjs) ------------
+
+test('stage-brief lib: composeContext orders plan, payload, TDD, disclosure, return contract and exempts statusline-setup', () => {
+  const full = stageLib.composeContext({ agentType: 'implementor', activePlanLine: 'PLAN', payload: 'PAYLOAD', tddPostureLine: 'TDD', unattributableLine: 'NOTSTAGED' });
+  assert.deepEqual(full.split('\n\n').slice(0, 4), ['PLAN', 'PAYLOAD', 'TDD', 'NOTSTAGED']);
+  assert.ok(full.endsWith(stageLib.RETURN_CONTRACT));
+  assert.equal(stageLib.composeContext({ agentType: 'statusline-setup', payload: '' }), '');
+  assert.equal(stageLib.composeContext({ agentType: 'researcher', payload: '' }), stageLib.RETURN_CONTRACT);
+});
+
+test('stage-brief lib: dispatchChrome gives the TDD posture line to implementors only, from the live config', () => {
+  const dir = makeProject({ project_name: 'fixture-proj', tdd: { enabled: false } });
+  try {
+    assert.match(stageLib.dispatchChrome(dir, 'implementor').tddPostureLine, /tests-first OFF/);
+    assert.equal(stageLib.dispatchChrome(dir, 'researcher').tddPostureLine, '');
+    assert.equal(stageLib.dispatchChrome(dir, 'implementor').activePlanLine, '', 'no plan lock, no plan line');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stage-brief lib: stageBrief returns null when nothing governs the brief, a payload plus record() otherwise', () => {
+  const dir = makeProject();
+  try {
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    try {
+      const args = { store, cwd: dir, prompts: ['Fix src/a.mjs'], guardId: { agentId: 'ag1', sessionId: 's1' }, hazardMode: 'whole', leadingChrome: ['PLAN-LINE'], trailingChrome: ['TRAILER'] };
+      assert.equal(stageLib.stageBrief({ ...args, prompts: ['nothing to see here'] }), null);
+      const built = stageLib.stageBrief(args);
+      assert.match(built.text, /^PLAN-LINE\n\nSTERLING KNOWLEDGE DELIVERY \(H19\)/);
+      assert.match(built.text, /a-article/);
+      assert.ok(built.text.endsWith('TRAILER'));
+      assert.notEqual(stageLib.stageBrief(args), null, 'not delivered until record() runs');
+      built.record();
+      assert.equal(stageLib.stageBrief(args), null, 'after record() every record is already delivered');
+    } finally {
+      store.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- child chrome: plan line, TDD posture, return contract -----------------
+
+test('a child session carries the return contract, and an implementor child the TDD posture, even when nothing is staged', async () => {
+  const dir = makeProject({ project_name: 'fixture-proj', tdd: { enabled: false } });
+  try {
+    const h = handler(dir, { sessions: { ses_child: { parentID: 'ses_root' } } });
+    const i = input('ses_child', [userMsg('Summarize nothing in particular.')]);
+    i.agent = 'implementor';
+    await h.onContext(i);
+    assert.match(textOf(i), /STERLING DEFAULT RETURN CONTRACT/);
+    assert.match(textOf(i), /TDD posture: tests-first OFF/);
+    const r = input('ses_child', [userMsg('Summarize nothing in particular.')]);
+    r.agent = 'researcher';
+    const h2 = handler(dir, { sessions: { ses_child: { parentID: 'ses_root' } } });
+    await h2.onContext(r);
+    assert.match(textOf(r), /STERLING DEFAULT RETURN CONTRACT/);
+    assert.equal((textOf(r).match(/TDD posture:/g) ?? []).length, 1, 'only the conductor-level line; the researcher child gets no second one');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a root session never gets the return contract', async () => {
+  const dir = makeProject();
+  try {
+    const h = handler(dir, { sessions: { ses_root: {} } });
+    const i = input('ses_root');
+    await h.onContext(i);
+    assert.doesNotMatch(textOf(i), /STERLING DEFAULT RETURN CONTRACT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- queue depth and reconcile backlog ------------------------------------
+
+const sysItem = (store, reason, createdAt = NOW) =>
+  store.create({
+    id: randomUUID(), type: 'todo', created_at: createdAt, updated_at: createdAt, author: 'system', status: 'active', superseded_by: null,
+    links: [], scope: 'project', stack_tags: [], text: `item ${reason}`, source: 'system', system_reason: reason, file_keys: ['src/a.mjs'],
+  });
+
+test('shared lib: queueDepthLine is silent below the threshold, then names the lanes, then the biggest lane', () => {
+  const lib2 = maintLib;
+  const state = (n, parked = 0) => ({ drainable: n, parked, queueReasonEntries: [['capture_owed', n]], queueReasons: [`${n} items in lane capture_owed`] });
+  assert.equal(lib2.queueDepthLine({ ...state(14), deepThreshold: 15 }), '');
+  assert.match(lib2.queueDepthLine({ ...state(15, 2), deepThreshold: 15 }), /^MAINTENANCE QUEUE IS DEEP — 15 drainable items \(15 items in lane capture_owed\) plus 2 file_parked/);
+  assert.match(lib2.queueDepthLine({ ...state(150), deepThreshold: 15 }), /^MAINTENANCE QUEUE IS VERY DEEP — 150 drainable items across 1 lane\(s\)/);
+  assert.match(lib2.queueDepthLine({ ...state(1), deepThreshold: 0 }), /^MAINTENANCE QUEUE IS (VERY )?DEEP/, 'a threshold below 1 is clamped to 1');
+});
+
+test('the root session context states a deep maintenance queue and the reconcile backlog', async () => {
+  const dir = makeProject({ project_name: 'fixture-proj', maintenance_queue: { deep_threshold: 2 } });
+  try {
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    sysItem(store, 'reconcile_needed', '2026-09-29T12:00:00.000Z');
+    sysItem(store, 'capture_owed');
+    sysItem(store, 'file_parked');
+    store.close();
+    const h = handler(dir, { sessions: { ses_root: {} } });
+    const i = input('ses_root');
+    await h.onContext(i);
+    assert.match(textOf(i), /MAINTENANCE QUEUE IS DEEP — 2 drainable items/);
+    assert.match(textOf(i), /plus 1 file_parked/);
+    assert.match(textOf(i), /RECONCILE BACKLOG: 1 item in lane reconcile_needed, the oldest open since 2026-09-29T12:00:00\.000Z/);
+    assert.match(textOf(i), /worker not running/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a shallow queue with no reconcile items adds no queue or backlog line', async () => {
+  const dir = makeProject();
+  try {
+    const h = handler(dir, { sessions: { ses_root: {} } });
+    const i = input('ses_root');
+    await h.onContext(i);
+    assert.doesNotMatch(textOf(i), /MAINTENANCE QUEUE|RECONCILE BACKLOG/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

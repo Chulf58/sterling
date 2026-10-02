@@ -2,6 +2,7 @@
 // (board cbee2b3d, audit f2ba68c2 row 2): MACHINE ROLE, TDD posture, Project mode
 // and the undeclared-source scan. The line text and the config reading are
 // scripts/hooks/lib/operating-state.mjs, shared with h1-session-start.mjs.
+// The deep-queue and reconcile-backlog lines are scripts/hooks/lib/maintenance-state.mjs.
 // Left to Claude Code, with the reason: agent currency and the conductor-activation
 // diagnostic (both read .claude/agents and .claude/settings.json), the INSTALLED
 // PLUGIN role text (it names /plugin's Installed tab), the clone-behind probe (it
@@ -9,6 +10,7 @@
 // rotation, dispatch-residue and registry sections (their writers are Claude hooks).
 import { computeUndeclaredSourceDisclosure } from '../../../scripts/hooks/lib/undeclared-source-scan.mjs';
 import { renderUnavailable } from '../../../scripts/hooks/lib/undeclared-source.mjs';
+import { queueDepthLine, reconcileBacklog } from '../../../scripts/hooks/lib/maintenance-state.mjs';
 import { machineRoleLine, projectModeLine, readProjectConfig, tddPostureLine } from '../../../scripts/hooks/lib/operating-state.mjs';
 import { samePath } from '../../../scripts/lib/post-update-sync.mjs';
 
@@ -36,4 +38,15 @@ export function undeclaredSourceBlock(root, config) {
   } catch (e) {
     return renderUnavailable(`unexpected error: ${(e && e.message) || e}`);
   }
+}
+
+/**
+ * The maintenance-queue lines (the deep-queue signal and the reconcile backlog)
+ * for a state read by `readMaintenanceState`. `config` supplies the deep-queue
+ * threshold. Both lines are '' when there is nothing to say.
+ */
+export function maintenanceLines(state, config, root) {
+  const queue = queueDepthLine({ ...state, deepThreshold: config?.maintenance_queue?.deep_threshold });
+  const backlog = reconcileBacklog({ reconcile: state.reconcile, cwd: root });
+  return [queue, backlog.line].filter(Boolean);
 }
