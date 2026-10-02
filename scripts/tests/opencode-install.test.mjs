@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   setupOpenCode, formatOpenCodeRows, opencodeConfigDir, mcpLauncherPath, STERLING_AGENTS_SUBDIR, CONDUCTOR_AGENT,
-  swapFullAgentModel, opencodeModelRef, sterlingRootFrom, storeWriteTools,
+  swapFullAgentModel, opencodeModelRef, sterlingRootFrom, storeWriteTools, materializeTui,
 } from '../lib/opencode-install.mjs';
 import { renderPortableText } from '../lib/agent-fences.mjs';
 
@@ -487,110 +487,162 @@ test('project config: an mcp.sterling entry that differs from what Sterling wrot
   assert.deepEqual(JSON.parse(readFileSync(cfg, 'utf8')).mcp.sterling, mine);
 });
 
-// Finding f3adf829: the TUI half of the npm package needs an entry in
-// <XDG_CONFIG_HOME or ~/.config>/opencode/cli.json, which `opencode plugin add` does not write.
-function npmCopyRoot(home) {
-  const root = join(home, '.cache', 'opencode', 'npm', '@chulf58', 'sterling@latest', '1759500000000', 'node_modules', '@chulf58', 'sterling');
+// Finding 789147ca: OpenCode gives a TUI bundle its own solid-js only when the bundle
+// lives outside any node_modules path, so for the npm-installed copy the dashboard is
+// copied ("materialized") to ~/.sterling/opencode/tui/<version>/ and the normal TUI
+// shim loads the newest copy there. No cli.json entry is needed.
+function npmCopyRoot(home, version = '1.0.0', bundle = 'export default { id: "sterling.dashboard" };\n') {
+  const root = join(home, '.cache', 'opencode', 'npm', '@chulf58', 'sterling@latest', `ts-${version}`, 'node_modules', '@chulf58', 'sterling');
   stubSterlingRoot(root, 'npm');
-  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@chulf58/sterling', version: '1.0.0' }));
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@chulf58/sterling', version }));
+  writeFileSync(join(root, 'opencode', 'sterling-tui', 'package.json'), JSON.stringify({ name: 'sterling-tui', type: 'module', exports: { './tui': './sterling-tui.bundle.tsx' } }));
+  writeFileSync(join(root, 'opencode', 'sterling-tui', 'sterling-tui.bundle.tsx'), bundle);
   cpSync(join(repoRoot, 'agent-templates'), join(root, 'agent-templates'), { recursive: true });
   return root;
 }
 const runNpm = (dir, home, env = { HOME: home }) => setupOpenCode({ projectDir: dir, pluginRoot: npmCopyRoot(home), env, home, probe: OC2 });
-const cliJson = (home, env = {}) => join(opencodeConfigDir({ env, home }), 'cli.json');
+const tuiBase = (home) => join(home, '.sterling', 'opencode', 'tui');
+const rowOf = (rows, suffix) => rows.find((r) => r.item.endsWith(suffix));
 
-test('npm-installed copy: @chulf58/sterling goes into cli.json plugins, idempotently, and the TUI shim is not installed', () => {
+test('materializeTui: copies the TUI bundle out of the npm cache into ~/.sterling/opencode/tui/<version>/, idempotently', () => {
   const home = tmp('oc-home-');
-  const dir = project('hobby');
-  const first = runNpm(dir, home);
-  assert.equal(statusOf(first, 'cli.json plugins'), 'created');
-  assert.deepEqual(JSON.parse(readFileSync(cliJson(home), 'utf8')), { plugins: ['@chulf58/sterling'] });
-  assert.equal(existsSync(join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling-tui')), false, 'no shim TUI beside the package TUI');
-  assert.equal(statusOf(first, 'sterling-tui/'), 'skipped');
-  assert.equal(existsSync(join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling.js')), false, 'no server shim: plugin add registers the server, a shim would load it twice');
-  assert.equal(statusOf(first, '/sterling.js'), 'skipped');
-  assert.match(first.rows.find((x) => x.item.endsWith('/sterling.js')).detail, /opencode plugin add registers .*server/);
-  assert.equal(statusOf(runNpm(dir, home), 'cli.json plugins'), 'matches');
-  assert.deepEqual(JSON.parse(readFileSync(cliJson(home), 'utf8')), { plugins: ['@chulf58/sterling'] }, 'not added twice');
+  const root = npmCopyRoot(home, '1.0.0');
+  const first = materializeTui({ pluginRoot: root, home, env: {} });
+  assert.equal(rowOf(first, '/tui/1.0.0/').status, 'created');
+  for (const f of ['package.json', 'sterling-tui.bundle.tsx']) {
+    assert.equal(readFileSync(join(tuiBase(home), '1.0.0', f), 'utf8'), readFileSync(join(root, 'opencode', 'sterling-tui', f), 'utf8'), f);
+  }
+  assert.equal(join(tuiBase(home), '1.0.0').includes('node_modules'), false);
+  assert.equal(rowOf(materializeTui({ pluginRoot: root, home, env: {} }), '/tui/1.0.0/').status, 'matches');
+  writeFileSync(join(root, 'opencode', 'sterling-tui', 'sterling-tui.bundle.tsx'), 'export default { id: "rebuilt" };\n');
+  assert.equal(rowOf(materializeTui({ pluginRoot: root, home, env: {} }), '/tui/1.0.0/').status, 'refreshed');
+  assert.match(readFileSync(join(tuiBase(home), '1.0.0', 'sterling-tui.bundle.tsx'), 'utf8'), /rebuilt/);
 });
 
-test('npm-installed copy: cli.json keeps its other keys and plugins; a versioned spec of the package counts as present', () => {
+test('materializeTui: keeps the newest two versions, removes older ones Sterling wrote, keeps anything else loudly', () => {
   const home = tmp('oc-home-');
-  const xdg = tmp('oc-xdg-');
-  const env = { HOME: home, XDG_CONFIG_HOME: xdg };
-  const dir = project('hobby');
-  mkdirSync(join(xdg, 'opencode'), { recursive: true });
-  writeFileSync(cliJson(home, env), JSON.stringify({ theme: 'x', plugins: ['other-tui'] }));
-  assert.equal(statusOf(runNpm(dir, home, env), 'cli.json plugins'), 'refreshed');
-  assert.deepEqual(JSON.parse(readFileSync(cliJson(home, env), 'utf8')), { theme: 'x', plugins: ['other-tui', '@chulf58/sterling'] });
-
-  writeFileSync(cliJson(home, env), JSON.stringify({ plugins: ['@chulf58/sterling@1.2.3'] }));
-  assert.equal(statusOf(runNpm(dir, home, env), 'cli.json plugins'), 'matches');
-  assert.deepEqual(JSON.parse(readFileSync(cliJson(home, env), 'utf8')), { plugins: ['@chulf58/sterling@1.2.3'] });
-});
-
-test('npm-installed copy: an invalid cli.json, or one whose plugins is not an array, is refused and left unchanged', () => {
-  const home = tmp('oc-home-');
-  const dir = project('hobby');
-  mkdirSync(opencodeConfigDir({ env: {}, home }), { recursive: true });
-  for (const body of ['{ nope', '{"plugins":"@chulf58/sterling"}', '[]']) {
-    writeFileSync(cliJson(home), body);
-    const r = runNpm(dir, home);
-    const row = r.rows.find((x) => x.item.endsWith('cli.json plugins'));
-    assert.equal(row.status, 'refused', body);
-    assert.match(row.instruction, /^REFUSED: .*Remedy: /);
-    assert.equal(readFileSync(cliJson(home), 'utf8'), body);
+  for (const v of ['0.9.0', '0.10.0']) materializeTui({ pluginRoot: npmCopyRoot(home, v), home, env: {} });
+  mkdirSync(join(tuiBase(home), '0.1.0'));
+  writeFileSync(join(tuiBase(home), '0.1.0', 'mine.txt'), 'x\n');
+  writeFileSync(join(tuiBase(home), '0.9.0', 'sterling-tui.bundle.tsx'), '// edited\n');
+  materializeTui({ pluginRoot: npmCopyRoot(home, '0.11.0'), home, env: {} });
+  assert.ok(existsSync(join(tuiBase(home), '0.10.0')), 'with 0.11.0 newest, 0.10.0 is still one of the newest two');
+  const rows = materializeTui({ pluginRoot: npmCopyRoot(home, '1.0.0'), home, env: {} });
+  assert.deepEqual(['1.0.0', '0.11.0'].map((v) => existsSync(join(tuiBase(home), v))), [true, true], 'the newest two stay');
+  assert.equal(existsSync(join(tuiBase(home), '0.10.0')), false, 'an older unedited copy Sterling wrote is removed');
+  assert.equal(rowOf(rows, '/tui/0.10.0/').status, 'removed');
+  for (const v of ['0.9.0', '0.1.0']) {
+    assert.ok(existsSync(join(tuiBase(home), v)), `${v} stays`);
+    assert.match(rowOf(rows, `/tui/${v}/`).detail, /^KEPT: /, v);
   }
 });
 
-test('npm-installed copy: server and TUI shims an earlier init wrote, unedited, are removed', () => {
+test('materializeTui: a copy without a version or without the TUI bundle is refused, nothing written', () => {
+  const home = tmp('oc-home-');
+  const root = npmCopyRoot(home, '1.0.0');
+  rmSync(join(root, 'opencode', 'sterling-tui', 'sterling-tui.bundle.tsx'));
+  const missing = materializeTui({ pluginRoot: root, home, env: {} });
+  assert.equal(missing[0].status, 'refused');
+  assert.match(missing[0].detail, /sterling-tui\.bundle\.tsx/);
+  writeFileSync(join(root, 'package.json'), '{}');
+  assert.match(materializeTui({ pluginRoot: root, home, env: {} })[0].detail, /no semver version/);
+  assert.equal(existsSync(tuiBase(home)), false);
+});
+
+test('npm-installed copy: no server shim, the TUI is materialized and the TUI shim points at the materialized dir; no cli.json', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  const first = runNpm(dir, home);
+  const plugins = join(opencodeConfigDir({ env: {}, home }), 'plugins');
+  assert.equal(existsSync(join(plugins, 'sterling.js')), false, 'plugin add registers the server, a shim would load it twice');
+  assert.equal(statusOf(first, '/sterling.js'), 'skipped');
+  assert.match(rowOf(first.rows, '/sterling.js').detail, /opencode plugin add registers .*server/);
+  assert.equal(statusOf(first, '/tui/1.0.0/'), 'created');
+  assert.equal(statusOf(first, 'sterling-tui/tui.tsx'), 'created');
+  const shim = readFileSync(join(plugins, 'sterling-tui', 'tui.tsx'), 'utf8');
+  assert.ok(shim.includes(JSON.stringify(tuiBase(home).replace(/\\/g, '/'))), 'the shim names the unversioned materialized root');
+  assert.equal(shim.includes('sterling@latest'), false, 'the shim never names the npm cache copy');
+  assert.equal(existsSync(join(opencodeConfigDir({ env: {}, home }), 'cli.json')), false);
+  const again = runNpm(dir, home);
+  assert.equal(statusOf(again, 'sterling-tui/tui.tsx'), 'matches');
+});
+
+test('materialized TUI shim: loads the NEWEST materialized version at load time', async () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  runNpm(dir, home);
+  for (const v of ['1.9.0', '1.10.0']) {
+    const d = join(tuiBase(home), v);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, 'package.json'), JSON.stringify({ type: 'module', exports: { './tui': './t.mjs' } }));
+    writeFileSync(join(d, 't.mjs'), `export default { id: 'tui-${v}', setup(api) { return '${v}:' + api.location.directory; } };\n`);
+  }
+  const shimCopy = join(tmp('oc-tui-'), 'tui.mjs');
+  copyFileSync(join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling-tui', 'tui.tsx'), shimCopy);
+  const tui = (await import(pathToFileURL(shimCopy).href)).default;
+  assert.equal(tui.id, 'tui-1.10.0');
+  writeFileSync(join(dir, '.sterling', 'sterling.db'), '');
+  assert.equal(tui.setup({ location: { directory: dir } }), `1.10.0:${dir}`);
+});
+
+test('materialized TUI shim: an import failure is LOUD in a Sterling project, naming the file and the cause', async () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  setupOpenCode({ projectDir: dir, pluginRoot: npmCopyRoot(home, '1.0.0', "import '@opentui/solid-not-here';\nexport default {};\n"), env: { HOME: home }, home, probe: OC2 });
+  const d = join(tuiBase(home), '1.0.0');
+  writeFileSync(join(d, 'package.json'), JSON.stringify({ type: 'module', exports: { './tui': './broken.mjs' } }));
+  writeFileSync(join(d, 'broken.mjs'), "import '@opentui/solid-not-here';\nexport default {};\n");
+  const shimCopy = join(tmp('oc-tui-'), 'tui.mjs');
+  copyFileSync(join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling-tui', 'tui.tsx'), shimCopy);
+  const tui = (await import(pathToFileURL(shimCopy).href)).default;
+  assert.equal(typeof tui.setup({ location: { directory: tmp('oc-plain-') } }), 'function', 'a non-Sterling project is not disturbed');
+  writeFileSync(join(dir, '.sterling', 'sterling.db'), '');
+  assert.throws(() => tui.setup({ location: { directory: dir } }), (err) => {
+    assert.match(err.message, /importing the dashboard .*\/tui\/1\.0\.0\/broken\.mjs failed: .*@opentui\/solid-not-here/);
+    assert.match(err.message, /dashboard is off/);
+    return true;
+  });
+});
+
+test('npm-installed copy: an unedited server shim an earlier init wrote is removed, and the TUI shim is rewritten to the materialized dir', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   run(dir, home, { installed: true });
   const plugins = join(opencodeConfigDir({ env: {}, home }), 'plugins');
   writeFileSync(join(plugins, 'neighbour.js'), 'export default {};\n');
-  assert.ok(existsSync(join(plugins, 'sterling.js')) && existsSync(join(plugins, 'sterling-tui', 'tui.tsx')), 'precondition: the earlier shims exist');
   const r = runNpm(dir, home);
   assert.equal(statusOf(r, '/sterling.js'), 'removed');
-  assert.equal(statusOf(r, 'sterling-tui/'), 'removed');
   assert.equal(existsSync(join(plugins, 'sterling.js')), false);
-  assert.equal(existsSync(join(plugins, 'sterling-tui')), false);
+  assert.equal(statusOf(r, 'sterling-tui/tui.tsx'), 'refreshed');
+  assert.match(readFileSync(join(plugins, 'sterling-tui', 'tui.tsx'), 'utf8'), /newestMaterializedTui\(\)/);
   assert.equal(readFileSync(join(plugins, 'neighbour.js'), 'utf8'), 'export default {};\n', 'nothing else in plugins/ is touched');
   assert.equal(statusOf(runNpm(dir, home), '/sterling.js'), 'skipped', 'a second run has nothing left to remove');
 });
 
-test('npm-installed copy: an edited or foreign shim, or a TUI dir holding other files, is KEPT with a loud row and left untouched', () => {
+test('npm-installed copy: an edited or foreign server shim is KEPT with a loud row and left untouched', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   run(dir, home, { installed: true });
-  const plugins = join(opencodeConfigDir({ env: {}, home }), 'plugins');
-  const server = join(plugins, 'sterling.js');
+  const server = join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling.js');
   const edited = readFileSync(server, 'utf8') + '// my tweak\n';
   writeFileSync(server, edited);
-  writeFileSync(join(plugins, 'sterling-tui', 'mine.ts'), 'x\n');
-  const r = runNpm(dir, home);
-  for (const suffix of ['/sterling.js', 'sterling-tui/']) {
-    const row = r.rows.find((x) => x.item.endsWith(suffix));
-    assert.equal(row.status, 'skipped', suffix);
-    assert.match(row.detail, /^KEPT: .*loads? .*twice/, suffix);
-  }
+  assert.match(rowOf(runNpm(dir, home).rows, '/sterling.js').detail, /^KEPT: .*edited after Sterling wrote it.*load twice/);
   assert.equal(readFileSync(server, 'utf8'), edited);
-  assert.ok(existsSync(join(plugins, 'sterling-tui', 'tui.tsx')) && existsSync(join(plugins, 'sterling-tui', 'mine.ts')));
 
   const home2 = tmp('oc-home-');
   const plugins2 = join(opencodeConfigDir({ env: {}, home: home2 }), 'plugins');
   mkdirSync(plugins2, { recursive: true });
   writeFileSync(join(plugins2, 'sterling.js'), 'export default { id: "mine" };\n');
-  const r2 = runNpm(project('hobby'), home2);
-  assert.match(r2.rows.find((x) => x.item.endsWith('/sterling.js')).detail, /^KEPT: .*Sterling did not write it/);
+  assert.match(rowOf(runNpm(project('hobby'), home2).rows, '/sterling.js').detail, /^KEPT: .*Sterling did not write it/);
   assert.equal(readFileSync(join(plugins2, 'sterling.js'), 'utf8'), 'export default { id: "mine" };\n');
 });
 
-test('a clone or Claude-cache copy keeps the shim TUI and writes no cli.json', () => {
+test('a clone or Claude-cache copy keeps today\'s shims and materializes nothing', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   const r = run(dir, home, { installed: true });
+  assert.equal(statusOf(r, '/sterling.js'), 'created');
   assert.equal(statusOf(r, 'sterling-tui/tui.tsx'), 'created');
-  assert.equal(r.rows.some((x) => x.item.endsWith('cli.json plugins')), false);
-  assert.equal(existsSync(cliJson(home)), false);
+  assert.equal(existsSync(tuiBase(home)), false);
+  assert.doesNotMatch(readFileSync(join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling-tui', 'tui.tsx'), 'utf8'), /newestMaterializedTui/);
 });
