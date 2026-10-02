@@ -37,6 +37,8 @@ import {
   resolveTotalCap,
   decisionPointerPart,
   statusAnnotation,
+  authorityMarker,
+  withInboundSupersedes,
   DECISION_STATEMENT_CLIP,
   DECISION_REJECTED_CLIP,
   boundedTermClause,
@@ -343,7 +345,11 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
   // early slice silently dropped the sixth match with no count and no
   // degraded flag. decisionPointerPart caps the rendered pointers AND the
   // credited identities at MAX_DECISIONS and discloses the rest.
-  const decisions = fresh.filter((x) => x.record.type === 'decision');
+  // Each decision carries its inbound supersedes edges (board 7e4850cf (c)),
+  // so a record another one supersedes is never rendered as [standing].
+  const decisions = fresh
+    .filter((x) => x.record.type === 'decision')
+    .map((x) => ({ ...x, record: withInboundSupersedes(store, x.record) }));
   // NOT sliced here — renderArticlePointers itself caps at ARTICLE_POINTER_CAP
   // and discloses the overflow, the same shape as renderHazards/
   // renderDecisionPointers; slicing early would lose the true matched count
@@ -424,7 +430,7 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
           .filter(Boolean)
           .join('; ');
         return (
-          `${pointerHead(d, d.slug || d.title || d.statement)} — ${d.authority ? `[${d.authority}] ` : ''}${clip(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` +
+          `${pointerHead(d, d.slug || d.title || d.statement)} — ${authorityMarker(d)}${clip(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` +
           (rejected ? ` — rejected: ${clip(rejected, DECISION_REJECTED_CLIP)}` : '')
         );
       }),

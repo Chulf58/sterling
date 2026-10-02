@@ -8277,7 +8277,18 @@ function statusBracket(record) {
   return `${status}\xB7${scope}${record?.superseded_by ? `, superseded_by: ${record.superseded_by}` : ""}`;
 }
 function statusAnnotation(record) {
-  return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
+  return (record?.status === "active" ? "" : ` [${statusBracket(record)}]`) + supersededAnnotation(record);
+}
+function supersededAnnotation(record) {
+  if (typeof record?.supersession_unknown === "string") {
+    return ` [supersession UNKNOWN (the lookup failed: ${clip(record.supersession_unknown, 120)}): read it before relying on this]`;
+  }
+  const inbound = Array.isArray(record?.inbound_supersedes) ? record.inbound_supersedes : [];
+  if (!inbound.length) return "";
+  const names = inbound.map(
+    (s2) => `${clip(s2.slug || s2.title || s2.id, 80)} (${String(s2.id).slice(0, 8)}${s2.status && s2.status !== "active" ? `, ${s2.status}` : ""})`
+  );
+  return ` [SUPERSEDED, whole or in part, by ${names.join("; ")}: read it before relying on this]`;
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");

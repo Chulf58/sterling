@@ -36,6 +36,7 @@ import {
   renderPayload,
   renderReference,
   resolveTotalCap,
+  withInboundSupersedes,
   writeGuard,
 } from '../../../scripts/hooks/lib/delivery.mjs';
 
@@ -71,7 +72,8 @@ function governedRel(raw, root, directory) {
 function buildDelivery(store, root, rel, sessionID, guard = readGuard(guardPath(root, undefined, sessionID))) {
   const owners = store.query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, root));
   const hazards = store.query({ types: ['anti_pattern'], file_keys: [rel], cap: 100 });
-  const decisions = store.query({ types: ['decision'], file_keys: [rel], cap: 100 });
+  // Inbound supersedes edges ride each decision (board 7e4850cf (c)), as in H19.
+  const decisions = store.query({ types: ['decision'], file_keys: [rel], cap: 100 }).map((r) => withInboundSupersedes(store, r));
   const gPath = guardPath(root, undefined, sessionID);
   const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
   const freshOwners = owners.filter((r) => (isOwnerDiscoveryOnly(r) ? !isDiscoveryDelivered(guard, r) : !isSubstanceDelivered(guard, r)));

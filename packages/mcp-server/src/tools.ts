@@ -4270,8 +4270,57 @@ export class SterlingTools {
     if (!Array.isArray(entries) || entries.length === 0) {
       throw new Error(`knowledge_append: 'entries' must be a non-empty array — nothing to append`);
     }
-    if (field === 'links') {
+    // ARRAY-ELEMENT ADDRESSING (board 7e4850cf, sub-item d; Dome Farmer
+    // FRICTION 2026-10-02): `arr[key=value].sub` appends to the array held by
+    // ONE element, canonically `live_test_refs[ac_id=AC4].test_paths`. Before
+    // this, adding one test path to one AC meant a whole-array
+    // knowledge_update of live_test_refs, which can miscopy the other
+    // entries. knowledge_edit's grammar and its shared ownership predicate
+    // (elementOwnsScalar), so the selectors cannot diverge; the selector must
+    // match exactly one element and `sub` must already be an array on it.
+    const selector = /^([A-Za-z_]\w*)\[([A-Za-z_]\w*)=(.+)\]\.([A-Za-z_]\w*)$/.exec(field);
+    const base = selector ? selector[1] : field;
+    if (base === 'links') {
       throw new Error(`knowledge_append: 'links' is not appendable here — use knowledge_link, which also maintains the record_links index`);
+    }
+    if (selector) {
+      const [, , key, value, sub] = selector;
+      this.refuseServerOwnedFields({ [base]: entries }, 'knowledge_append');
+      this.refuseUnknownFields(old.type, { [base]: entries }, 'knowledge_append');
+      const arr = (old as unknown as Record<string, unknown>)[base];
+      if (!Array.isArray(arr)) {
+        throw new Error(
+          `knowledge_append: '${base}' on ${old.type} is ${arr === undefined ? 'absent' : typeof arr}, not an array — the [${key}=…] selector addresses array elements; nothing was written`
+        );
+      }
+      const hits = arr.filter((el) => elementOwnsScalar(el, key) && String(el[key]) === value);
+      if (hits.length !== 1) {
+        throw new Error(
+          `knowledge_append: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required, nothing was written. ` +
+            (hits.length === 0 ? `Confirm the ${key} value against the live array.` : `Select on a key whose value is unique in the array.`)
+        );
+      }
+      const el = hits[0] as Record<string, unknown>;
+      const cur = el[sub];
+      if (!Array.isArray(cur)) {
+        throw new Error(
+          `knowledge_append: '${sub}' on the selected ${base} element is ${cur === undefined ? 'absent' : typeof cur}, not an array — append only extends array fields; nothing was written`
+        );
+      }
+      const nextArr = arr.map((e) => (e === el ? { ...el, [sub]: [...cur, ...entries] } : e));
+      const { record, claims_check } = this.splitSameSubject(
+        this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_append')
+      );
+      return {
+        record,
+        warnings: [
+          ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record),
+          ...this.articleOversizeWarnings(record),
+          ...this.citedIdWarnings(JSON.stringify(entries)),
+          ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+        ],
+        ...(claims_check ? { claims_check } : {}),
+      };
     }
     this.refuseServerOwnedFields({ [field]: entries }, 'knowledge_append');
     this.refuseUnknownFields(old.type, { [field]: entries }, 'knowledge_append');

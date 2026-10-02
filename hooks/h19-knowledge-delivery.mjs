@@ -7915,7 +7915,43 @@ function statusBracket(record) {
   return `${status}\xB7${scope}${record?.superseded_by ? `, superseded_by: ${record.superseded_by}` : ""}`;
 }
 function statusAnnotation(record) {
-  return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
+  return (record?.status === "active" ? "" : ` [${statusBracket(record)}]`) + supersededAnnotation(record);
+}
+function supersededAnnotation(record) {
+  if (typeof record?.supersession_unknown === "string") {
+    return ` [supersession UNKNOWN (the lookup failed: ${clip(record.supersession_unknown, 120)}): read it before relying on this]`;
+  }
+  const inbound = Array.isArray(record?.inbound_supersedes) ? record.inbound_supersedes : [];
+  if (!inbound.length) return "";
+  const names = inbound.map(
+    (s2) => `${clip(s2.slug || s2.title || s2.id, 80)} (${String(s2.id).slice(0, 8)}${s2.status && s2.status !== "active" ? `, ${s2.status}` : ""})`
+  );
+  return ` [SUPERSEDED, whole or in part, by ${names.join("; ")}: read it before relying on this]`;
+}
+function authorityInDoubt(record) {
+  return typeof record?.supersession_unknown === "string" || Array.isArray(record?.inbound_supersedes) && record.inbound_supersedes.length > 0;
+}
+function authorityMarker(record) {
+  if (authorityInDoubt(record)) return "";
+  return record?.authority ? `[${record.authority}] ` : "";
+}
+function withInboundSupersedes(store, record) {
+  let inbound;
+  try {
+    inbound = store.inboundSupersedes(record.id);
+  } catch (e) {
+    return { ...record, supersession_unknown: String(e?.message ?? e) };
+  }
+  if (!inbound.length) return record;
+  return {
+    ...record,
+    inbound_supersedes: inbound.map((s2) => ({
+      id: s2.id,
+      ...s2.slug ? { slug: s2.slug } : {},
+      ...s2.title ? { title: s2.title } : {},
+      status: s2.status
+    }))
+  };
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
@@ -8202,6 +8238,7 @@ var DECISION_AUTHORITY_RANK = { standing: 0, session_scoped: 2, one_off: 3 };
 var DECISION_AUTHORITY_UNSTATED = 1;
 function rankFileDecisionPointers(decisions) {
   const authority = (d) => {
+    if (authorityInDoubt(d)) return DECISION_AUTHORITY_UNSTATED;
     const a = typeof d?.authority === "string" ? d.authority : "";
     return Object.hasOwn(DECISION_AUTHORITY_RANK, a) ? DECISION_AUTHORITY_RANK[a] : DECISION_AUTHORITY_UNSTATED;
   };
@@ -8224,8 +8261,7 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
     `\u25B8 DECISIONS ${matchLabel} (${fullTotal}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
   for (const d of shown) {
-    const authorityMarker = d.authority ? `[${d.authority}] ` : "";
-    lines.push(`  \u2192 ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`);
+    lines.push(`  \u2192 ${authorityMarker(d)}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
@@ -8610,7 +8646,7 @@ function main(input2) {
     const migrationNotice = claimLegacyInjectionRungNotice(input2.cwd, rawRung);
     const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, input2.cwd));
     const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
-    const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
+    const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 }).map((r) => withInboundSupersedes(store, r));
     const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
     const guard = readGuard(gPath);
     const hazardMode = hazardLaneMode(input2, input2.cwd);

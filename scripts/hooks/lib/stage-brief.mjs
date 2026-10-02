@@ -39,6 +39,7 @@ import {
   ownerSuffix,
   payloadHeaderLine,
   rankFileDecisionPointers,
+  withInboundSupersedes,
   readGuard,
   recordCentralityHits,
   recordRevision,
@@ -151,7 +152,10 @@ export function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingCh
   // is exactly the case path-scoping is structurally blind to.
   const owners = rels.length ? store.query({ types: ['feature_article', 'reference_material'], file_keys: rels, cap: 100 }).filter((r) => !isForeignTree(r, cwd)) : [];
   const hazards = rels.length ? store.query({ types: ['anti_pattern'], file_keys: rels, cap: 100 }) : [];
-  const decisions = rels.length ? store.query({ types: ['decision'], file_keys: rels, cap: 100 }) : [];
+  // Each decision carries its inbound supersedes edges (board 7e4850cf (c)),
+  // so a record another one supersedes is never rendered as [standing]. The
+  // subject channel below does the same for its decision candidates.
+  const decisions = rels.length ? store.query({ types: ['decision'], file_keys: rels, cap: 100 }).map((r) => withInboundSupersedes(store, r)) : [];
 
   // SUBJECT CHANNEL (relevance slice 3): the same mechanism-axis match H20
   // applies at the conductor's dispatch seam, run over the brief text and
@@ -172,7 +176,7 @@ export function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingCh
     const subjectText = stripReviewTerritoryLine(p);
     const terms = extractAxisTerms(subjectText, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) continue;
-    const candidatesBySubject = [...store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }), ...store.query({ types: ['decision'], rank_terms: terms, cap: 40 })];
+    const candidatesBySubject = [...store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }), ...store.query({ types: ['decision'], rank_terms: terms, cap: 40 }).map((r) => withInboundSupersedes(store, r))];
     for (const r of candidatesBySubject) {
       if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
       const hits = axisHits(r, terms);

@@ -20,7 +20,10 @@ const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // sha256 of templates/target-claude-md.md before the host blocks (a2f5c31). The Claude render
 // must stay byte-identical to it until a deliberate wording change moves this pin.
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = '3b6c6d1eb57939c924702aa4181e838e79546b78b6db357fccbe11ebf55db9b8';
+// Moved 2026-10-02 (from 3b6c6d1e…): the deliberate rewrite of the "Stamp Sterling's version when
+// reporting on Sterling" bullet for report-issue.mjs (decision
+// projects-file-sterling-issues-as-scrubbed-github-issues-automatically).
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'cea77543553037c65767bc59ae33a95899f4df0130ada042dc4ba1458b9ba9bc';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);
