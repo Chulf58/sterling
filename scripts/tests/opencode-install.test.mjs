@@ -400,21 +400,35 @@ test('the TUI shim package.json is stamped: an edited one is refused and left by
   assert.equal(readFileSync(pkgPath, 'utf8'), edited);
 });
 
-test('installed-copy shims pick the highest installed version at run time', () => {
+/** A stub copy carrying the manifest the shared resolver reads its version from. */
+function stubInstalledCopy(dir, version, manifest = join('.claude-plugin', 'plugin.json')) {
+  stubSterlingRoot(dir, `v${version}`);
+  mkdirSync(dirname(join(dir, manifest)), { recursive: true });
+  writeFileSync(join(dir, manifest), JSON.stringify({ name: 'sterling', version }));
+  return dir;
+}
+
+test('installed-copy shims pick the highest installed version at run time, across the Claude Code and OpenCode caches', () => {
   const home = tmp('oc-home-');
   const cache = join(home, '.claude', 'plugins', 'cache', 'sterling');
-  stubSterlingRoot(join(cache, 'sterling', '0.9.0'), 'v0.9.0');
-  stubSterlingRoot(join(cache, 'sterling', '0.10.0'), 'v0.10.0');
+  const npm = join(home, '.cache', 'opencode', 'npm', '@chulf58', 'sterling@latest');
+  stubInstalledCopy(join(cache, 'sterling', '0.9.0'), '0.9.0');
+  stubInstalledCopy(join(cache, 'sterling', '0.10.0'), '0.10.0');
   const dir = project('hobby');
   setupOpenCode({ projectDir: dir, pluginRoot: repoRoot, env: { HOME: home }, home, installed: true, probe: OC2 });
   const env = { ...process.env, HOME: home };
   delete env.CLAUDE_CONFIG_DIR;
-  const mcp = spawnSync(process.execPath, [mcpLauncherPath({ home }), '--store', 's.db'], { encoding: 'utf8', env });
-  assert.equal(mcp.stdout.trim(), 'v0.10.0 ["--store","s.db"]');
+  delete env.XDG_CACHE_HOME;
+  const runMcp = () => spawnSync(process.execPath, [mcpLauncherPath({ home }), '--store', 's.db'], { encoding: 'utf8', env });
+  assert.equal(runMcp().stdout.trim(), 'v0.10.0 ["--store","s.db"]');
+  stubInstalledCopy(join(npm, '1759500000000', 'node_modules', '@chulf58', 'sterling'), '0.11.0', 'package.json');
+  assert.equal(runMcp().stdout.trim(), 'v0.11.0 ["--store","s.db"]', 'a newer OpenCode npm-cache copy wins');
   rmSync(join(cache, 'sterling'), { recursive: true });
-  const none = spawnSync(process.execPath, [mcpLauncherPath({ home }), '--store', 's.db'], { encoding: 'utf8', env });
+  rmSync(join(home, '.cache'), { recursive: true });
+  const none = runMcp();
   assert.notEqual(none.status, 0);
-  assert.match(none.stderr, /no installed Sterling plugin under .*claude plugin install sterling@sterling/);
+  assert.match(none.stderr, /no installed Sterling found under .*plugins.cache .*opencode.npm .*opencode plugin add @chulf58\/sterling/);
+  assert.doesNotMatch(none.stderr, /claude plugin install/, 'the OpenCode shims name the OpenCode remedy');
 });
 
 test('storeWriteTools throws, naming the template, when disallowedTools has no mcp__sterling__* entry', () => {

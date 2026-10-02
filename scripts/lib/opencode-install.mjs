@@ -13,9 +13,9 @@
 //    walking up from its own import.meta.url. Plus <home>/.sterling/opencode/
 //    sterling-mcp.mjs, the MCP launcher every project's opencode.json names. All three
 //    resolve the Sterling root at RUN time: the authoring clone's path is baked (a clone
-//    does not move on update), an installed copy is found as the highest-version
-//    <CLAUDE_CONFIG_DIR or ~/.claude>/plugins/cache/*/sterling/<version>/ directory, so
-//    no versioned cache path is ever written to disk. A file of the same name that
+//    does not move on update), an installed copy is the newest one the shared resolver
+//    (scripts/lib/sterling-roots.mjs) finds in Claude Code's plugin cache or OpenCode's
+//    npm cache, so no versioned install path is ever written to disk. A file of the same name that
 //    Sterling did not write, or one edited since, is refused, never overwritten.
 //    Also once per machine: a `codex` entry under mcp.servers in <config dir>/opencode.json,
 //    written only for a Codex whose `mcp-server --help` prints mcp-server help.
@@ -41,6 +41,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isInstalledCopy } from './installed-copy.mjs';
+import { RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE } from './sterling-roots.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
 import { sha256, loadRegistry } from './agent-distribution.mjs';
 import { renderOpenCodeFullText } from './agent-fences.mjs';
@@ -82,28 +83,13 @@ export function probeOpenCode({ env = process.env } = {}) {
 
 // ---------- generated files -------------------------------------------------
 
-// Builtins-only source inlined into every generated file. ENOENT/ENOTDIR mean "no
-// such cache level", which is the normal case; any other error is thrown (P5).
-const RESOLVER_SOURCE = `
-function newestInstalledSterling() {
-  const ls = (d) => {
-    try { return readdirSync(d); } catch (err) { if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return []; throw err; }
-  };
-  const cache = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'plugins', 'cache');
-  const found = [];
-  for (const marketplace of ls(cache)) {
-    for (const version of ls(join(cache, marketplace, 'sterling'))) {
-      const m = /^(\\d+)\\.(\\d+)\\.(\\d+)(?:-(.+))?$/.exec(version);
-      if (m) found.push({ dir: join(cache, marketplace, 'sterling', version), nums: [+m[1], +m[2], +m[3]], pre: m[4] });
-    }
-  }
-  found.sort((a, b) =>
-    a.nums[0] - b.nums[0] || a.nums[1] - b.nums[1] || a.nums[2] - b.nums[2] ||
-    (a.pre === b.pre ? 0 : a.pre === undefined ? 1 : b.pre === undefined ? -1 : a.pre < b.pre ? -1 : 1));
-  if (!found.length) {
-    throw new Error('Sterling: no installed Sterling plugin under ' + cache + ' — install it (claude plugin install sterling@sterling), then run /sterling:update in a Sterling project.');
-  }
-  return found[found.length - 1].dir;
+// Builtins-only source inlined into every generated file: the shared resolver
+// (sterling-roots.mjs) plus a wrapper that fails loud with the OpenCode remedy.
+const RESOLVER_SOURCE = `${STERLING_RESOLVER_SOURCE}
+function sterlingInstallRoot() {
+  const found = newestInstalledSterling();
+  if (!found) throw new Error('Sterling: ' + sterlingNotFoundMessage('opencode'));
+  return found.root;
 }
 `;
 
@@ -115,7 +101,7 @@ const IMPORTS = [
 ].join('\n');
 
 function rootExpr(pluginRoot, installed) {
-  return installed ? 'newestInstalledSterling()' : JSON.stringify(fwd(resolve(pluginRoot)));
+  return installed ? 'sterlingInstallRoot()' : JSON.stringify(fwd(resolve(pluginRoot)));
 }
 
 /** The one stderr line a shim prints when no Sterling can be resolved, naming the file to remove. */
