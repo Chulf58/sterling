@@ -9,7 +9,7 @@
 // Mechanism (decision 2026-06-16, store-internals are the implementor's choice
 // per §12): composition over SQLite ATTACH — each store is a self-contained,
 // already-tested SterlingStore; this layer only mounts, routes, and merges.
-import { mkdirSync, existsSync, rmSync } from 'node:fs';
+import { mkdirSync, existsSync, rmSync, openSync, closeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { SterlingStore, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions } from './index.js';
@@ -85,20 +85,32 @@ export function missingDomainWarning(m: DomainMount): string {
  * no file left behind, when the description is missing or blank or when a store
  * already exists at dbPath (an existing domain is described with setMeta on its
  * store, not re-created).
+ *
+ * The file is claimed with an exclusive create (O_EXCL) before SQLite opens it,
+ * so a store another process creates at the same path in the meantime is never
+ * adopted, re-described, or deleted by this call's cleanup: that call fails with
+ * the already-exists error instead. SQLite opens the empty file as a new database.
  */
 export function createDomain(name: string, description: string, dbPath: string): void {
   if (typeof name !== 'string' || name.trim().length === 0) throw new Error('createDomain: a domain name is required');
   if (typeof description !== 'string' || description.trim().length === 0) {
     throw new Error(`createDomain: domain '${name}' needs a description saying which knowledge belongs in it; none was given, so nothing was created`);
   }
-  if (existsSync(dbPath)) {
-    throw new Error(`createDomain: a store for domain '${name}' already exists at '${dbPath}'; set its description on that store instead of re-creating it`);
-  }
-  const store = open(dbPath);
+  mkdirSync(dirname(dbPath), { recursive: true });
   try {
+    closeSync(openSync(dbPath, 'wx'));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === 'EEXIST') {
+      throw new Error(`createDomain: a store for domain '${name}' already exists at '${dbPath}'; set its description on that store instead of re-creating it`);
+    }
+    throw e;
+  }
+  let store: SterlingStore | undefined;
+  try {
+    store = new SterlingStore(dbPath);
     store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
   } catch (e) {
-    store.close();
+    store?.close();
     for (const suffix of ['', '-wal', '-shm', '-journal']) rmSync(dbPath + suffix, { force: true });
     throw e;
   }

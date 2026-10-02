@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { MountedStores, SterlingStore, createDomain, missingDomainWarning } from '../index.js';
@@ -628,3 +628,41 @@ test('withTransaction (pre-existing, project-only) still works unchanged — reg
 // the staged-pipeline run/handoff protocol (decision
 // sterling-claude-code-scale-down-boundary, 2ad87dd1) — setRunReviewMandatory
 // no longer exists on SterlingStore or MountedStores.
+
+test('createDomain: a setMeta that throws leaves no db, -wal, -shm or -journal file behind (task-end review 2026-10-03)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-createdomain-fail-'));
+  const dbPath = join(dir, 'domains', 'broken', 'sterling.db');
+  const real = SterlingStore.prototype.setMeta;
+  try {
+    SterlingStore.prototype.setMeta = function (this: SterlingStore) {
+      // A rollback journal can be left mid-write in DELETE mode; plant one so its cleanup is pinned too.
+      writeFileSync(`${dbPath}-journal`, 'partial');
+      throw new Error('disk I/O error');
+    };
+    assert.throws(() => createDomain('broken', 'a description', dbPath), /disk I\/O error/);
+  } finally {
+    SterlingStore.prototype.setMeta = real;
+  }
+  try {
+    for (const suffix of ['', '-wal', '-shm', '-journal']) assert.equal(existsSync(dbPath + suffix), false, `${dbPath}${suffix} was removed`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('createDomain: the create is exclusive, so a store that appears at the path is never adopted or deleted', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-createdomain-race-'));
+  const dbPath = join(dir, 'domains', 'raced', 'sterling.db');
+  try {
+    createDomain('raced', 'first description', dbPath);
+    assert.throws(() => createDomain('raced', 'second description', dbPath), /already exists/);
+    const s = new SterlingStore(dbPath);
+    try {
+      assert.equal(s.getMeta('description'), 'first description', 'the existing store keeps its description');
+    } finally {
+      s.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
