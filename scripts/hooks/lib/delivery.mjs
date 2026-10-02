@@ -435,6 +435,9 @@ export function statusAnnotation(record) {
  *  reader can follow the chain. The store cannot say whether an edge replaces
  *  the whole record or one clause, so the note says both. */
 export function supersededAnnotation(record) {
+  if (typeof record?.supersession_unknown === 'string') {
+    return ` [supersession UNKNOWN (the lookup failed: ${clip(record.supersession_unknown, 120)}): read it before relying on this]`;
+  }
   const inbound = Array.isArray(record?.inbound_supersedes) ? record.inbound_supersedes : [];
   if (!inbound.length) return '';
   const names = inbound.map(
@@ -443,19 +446,34 @@ export function supersededAnnotation(record) {
   return ` [SUPERSEDED, whole or in part, by ${names.join('; ')}: read it before relying on this]`;
 }
 
+/** True when the record's own `authority` cannot be taken at face value:
+ *  something supersedes it, or the supersession lookup failed. */
+function authorityInDoubt(record) {
+  return typeof record?.supersession_unknown === 'string' || (Array.isArray(record?.inbound_supersedes) && record.inbound_supersedes.length > 0);
+}
+
 /** The `[authority] ` marker a decision pointer opens with, or ''. A record
  *  something supersedes gets NO marker: its own `authority: standing` was true
- *  when written and is not true now (see supersededAnnotation). */
+ *  when written and is not true now (see supersededAnnotation). Neither does a
+ *  record whose supersession lookup failed: it may be superseded. */
 export function authorityMarker(record) {
-  if (Array.isArray(record?.inbound_supersedes) && record.inbound_supersedes.length) return '';
+  if (authorityInDoubt(record)) return '';
   return record?.authority ? `[${record.authority}] ` : '';
 }
 
 /** A copy of `record` carrying `inbound_supersedes` from the store's
  *  record_relations (SterlingStore.inboundSupersedes), or the record itself
- *  when nothing supersedes it. Read-only: never touches status or lifecycle. */
+ *  when nothing supersedes it. Read-only: never touches status or lifecycle.
+ *  A lookup that throws costs only this record's supersession state, not the
+ *  delivery: the copy carries `supersession_unknown` (the error message), so
+ *  the pointer prints "supersession UNKNOWN" in place of its authority. */
 export function withInboundSupersedes(store, record) {
-  const inbound = store.inboundSupersedes(record.id);
+  let inbound;
+  try {
+    inbound = store.inboundSupersedes(record.id);
+  } catch (e) {
+    return { ...record, supersession_unknown: String(e?.message ?? e) };
+  }
   if (!inbound.length) return record;
   return {
     ...record,
@@ -1217,7 +1235,11 @@ export function rankFileDecisionPointers(decisions) {
   // sound. An unrecognised string must land on the unstated rung exactly as this
   // function documents — own-property lookup is what makes the documentation
   // true rather than true-for-most-inputs.
+  // A decision something supersedes (or whose supersession lookup failed) is
+  // ranked on the unstated rung: its own `authority: standing` was true when
+  // written and is not known to be true now (authorityMarker drops it too).
   const authority = (d) => {
+    if (authorityInDoubt(d)) return DECISION_AUTHORITY_UNSTATED;
     const a = typeof d?.authority === 'string' ? d.authority : '';
     return Object.hasOwn(DECISION_AUTHORITY_RANK, a) ? DECISION_AUTHORITY_RANK[a] : DECISION_AUTHORITY_UNSTATED;
   };

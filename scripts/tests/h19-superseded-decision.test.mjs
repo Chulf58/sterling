@@ -273,3 +273,41 @@ test('OpenCode file touch: a superseded decision is never labelled [standing] an
     cleanup();
   }
 });
+
+// ---- pure helpers: a failed lookup and the ranking ---------------------------
+
+test('withInboundSupersedes: one record whose lookup throws is marked supersession-unknown and the others still come back', async () => {
+  const { withInboundSupersedes, authorityMarker, statusAnnotation } = await import(pathToFileURL(join(HOOKS, 'lib', 'delivery.mjs')).href);
+  const store = {
+    inboundSupersedes(id) {
+      if (id === 'bad') throw new Error('SQLITE_BUSY: database is locked');
+      return id === 'old' ? [{ id: 'cccccccc-0000-0000-0000-000000000000', slug: 'newer-ruling', status: 'active' }] : [];
+    },
+  };
+  const recs = [
+    { id: 'old', status: 'active', authority: 'standing' },
+    { id: 'bad', status: 'active', authority: 'standing' },
+    { id: 'fine', status: 'active', authority: 'standing' },
+  ].map((r) => withInboundSupersedes(store, r));
+  assert.equal(recs.length, 3, 'one failed lookup loses no record');
+  assert.equal(recs[0].inbound_supersedes[0].slug, 'newer-ruling');
+  assert.equal(recs[1].supersession_unknown, 'SQLITE_BUSY: database is locked');
+  assert.equal(authorityMarker(recs[1]), '', 'an unknown supersession never renders [standing]');
+  assert.equal(statusAnnotation(recs[1]), ' [supersession UNKNOWN (the lookup failed: SQLITE_BUSY: database is locked): read it before relying on this]');
+  assert.equal(authorityMarker(recs[2]), '[standing] ');
+  assert.equal(statusAnnotation(recs[2]), '');
+});
+
+test('rankFileDecisionPointers: a standing decision with inbound supersedes, or an unknown supersession, ranks as unstated authority', async () => {
+  const { rankFileDecisionPointers } = await import(pathToFileURL(join(HOOKS, 'lib', 'delivery.mjs')).href);
+  const d = (id, authority, extra = {}) => ({ id, authority, file_keys: [FILE], updated_at: NOW, ...extra });
+  const superseded = d('z-superseded', 'standing', { inbound_supersedes: [{ id: 'x', slug: 'x', status: 'active' }] });
+  const unknown = d('y-unknown', 'standing', { supersession_unknown: 'boom' });
+  const unstated = d('c-unstated', undefined, { updated_at: '2026-10-01T00:00:00.000Z' });
+  const live = d('d-live', 'standing');
+  const sessionScoped = d('e-session', 'session_scoped');
+  const ranked = rankFileDecisionPointers([sessionScoped, superseded, unknown, unstated, live]).map((x) => x.id);
+  assert.equal(ranked[0], 'd-live', 'the live standing ruling leads');
+  assert.equal(ranked.at(-1), 'e-session', 'a self-declared session_scoped still ranks below the unstated rung');
+  assert.deepEqual(ranked.slice(1, 4).sort(), ['c-unstated', 'y-unknown', 'z-superseded'], 'superseded and unknown share the unstated rung (their ids would sort them first on the standing rung)');
+});
