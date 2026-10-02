@@ -1,8 +1,12 @@
 // The public npm package @chulf58/sterling (decision
 // sterling-on-opencode-distributes-as-npm-package-via-opencode-plugin-add) is
 // what `opencode plugin add` installs: a registry tarball, no lifecycle
-// scripts, entries resolved through exports ./server and ./tui (finding
+// scripts, the server entry resolved through exports ./server (finding
 // 3b0d9ea0), running from OpenCode's npm cache dir (finding f3adf829).
+// There is no ./tui export and no peers: the dashboard gets the host's solid
+// only from a bundle outside node_modules, and solid copies beside it freeze
+// it (finding 789147ca). The TUI bundle still ships, for the installer to copy
+// out of node_modules.
 //
 // This packs the TRACKED files (working-tree content, nothing untracked), as
 // the publish step does from `git archive`, installs the tarball into a temp
@@ -45,13 +49,13 @@ function pack() {
   return packed;
 }
 
-test('the package is the public @chulf58/sterling with ./server and ./tui exports and the host UI packages as peers', () => {
+test('the package is the public @chulf58/sterling with only the ./server export and no dependencies or peers', () => {
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
   assert.equal(pkg.name, '@chulf58/sterling');
   assert.equal(pkg.private, undefined);
   assert.equal(pkg.publishConfig?.access, 'public');
-  assert.deepEqual(pkg.exports, { './server': './opencode/sterling-server.mjs', './tui': './opencode/sterling-tui/sterling-tui.bundle.tsx' });
-  assert.deepEqual(Object.keys(pkg.peerDependencies ?? {}).sort(), ['@opentui/solid', 'solid-js']);
+  assert.deepEqual(pkg.exports, { './server': './opencode/sterling-server.mjs' }, 'no ./tui export: a TUI loaded from the cache path gets no host solid (finding 789147ca)');
+  assert.equal(pkg.peerDependencies, undefined, 'solid peers beside the bundle freeze the dashboard (finding 789147ca)');
   assert.equal(pkg.dependencies, undefined, 'the package installs with no dependencies of its own');
 });
 
@@ -86,8 +90,8 @@ test('installed from the tarball with no repo node_modules, ./server loads and f
   const inst = join(work, 'install');
   mkdirSync(inst);
   writeFileSync(join(inst, 'package.json'), JSON.stringify({ name: 'probe', private: true }));
-  // --legacy-peer-deps: the UI peers are the TUI's, and fetching them would need the network.
-  const install = defaultExec('npm', ['install', '--offline', '--ignore-scripts', '--legacy-peer-deps', '--no-audit', '--no-fund', '--no-package-lock', tarball], { cwd: inst });
+  // --offline: a package with no dependencies and no peers installs from the tarball alone.
+  const install = defaultExec('npm', ['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock', tarball], { cwd: inst });
   assert.equal(install.status, 0, install.stdout + install.stderr);
   const pkgRoot = realpathSync(join(inst, 'node_modules', '@chulf58', 'sterling'));
   assert.equal(existsSync(join(pkgRoot, 'node_modules')), false, 'the package brought no dependencies');
@@ -97,13 +101,15 @@ test('installed from the tarball with no repo node_modules, ./server loads and f
   const probe = [
     "const m = await import('@chulf58/sterling/server');",
     "const layer = m.renderSterlingLayer(process.argv[1]);",
-    "console.log(JSON.stringify({ plugin: typeof m.default, root: m.sterlingRoot(), tui: import.meta.resolve('@chulf58/sterling/tui'), layerHasCommands: layer.includes('commands') }));",
+    "let tui; try { tui = import.meta.resolve('@chulf58/sterling/tui'); } catch (e) { tui = e.code; }",
+    "console.log(JSON.stringify({ plugin: typeof m.default, root: m.sterlingRoot(), tui, layerHasCommands: layer.includes('commands') }));",
   ].join('\n');
   const r = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', '--input-type=module', '-e', probe, project], { cwd: inst, encoding: 'utf8', env: { ...process.env, NODE_PATH: '' } });
   assert.equal(r.status, 0, r.stderr);
   const out = JSON.parse(r.stdout.trim().split('\n').pop());
   assert.notEqual(out.plugin, 'undefined', 'the server module has a default export');
   assert.equal(realpathSync(out.root), pkgRoot, 'sterlingRootFrom resolves to the installed package, not the repo');
-  assert.equal(realpathSync(fileURLToPath(out.tui)), join(pkgRoot, 'opencode', 'sterling-tui', 'sterling-tui.bundle.tsx'));
+  assert.equal(out.tui, 'ERR_PACKAGE_PATH_NOT_EXPORTED', 'the TUI is not loadable from the cache path');
+  assert.ok(existsSync(join(pkgRoot, 'opencode', 'sterling-tui', 'sterling-tui.bundle.tsx')), 'the TUI bundle ships for the installer to copy out of node_modules');
   assert.equal(out.layerHasCommands, true, 'the Sterling layer renders from the shipped templates/ and commands/');
 });

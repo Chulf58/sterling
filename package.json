@@ -7,8 +7,7 @@
     "access": "public"
   },
   "exports": {
-    "./server": "./opencode/sterling-server.mjs",
-    "./tui": "./opencode/sterling-tui/sterling-tui.bundle.tsx"
+    "./server": "./opencode/sterling-server.mjs"
   },
   "files": [
     ".claude-plugin/",
@@ -26,10 +25,6 @@
     "templates/",
     "tui/"
   ],
-  "peerDependencies": {
-    "@opentui/solid": ">=0.4.5 <1",
-    "solid-js": "^1.9.0"
-  },
   "workspaces": [
     "packages/*"
   ],
