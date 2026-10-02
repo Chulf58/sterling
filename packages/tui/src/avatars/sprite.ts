@@ -1,7 +1,7 @@
 // Host-neutral avatar sprites: pure data and functions, no terminal library.
-// Each avatar is 6x6 pixels, drawn natively at that size, in 4 frames (0 rest, 1 blink, 2 bob,
-// 3 tilt). Two pixel rows pack into one terminal row with half blocks, so a sprite is 3 rows of 6
-// cells, the height of the three text lines beside it.
+// Each avatar is 12x6 pixels in 4 frames (0 rest, 1 blink, 2 bob, 3 tilt). A terminal cell shows a
+// 2x2 block of pixels with one Unicode quadrant character and two colours, so a sprite is 3 rows of
+// 6 cells, the height of the three text lines beside it. The pool holds at most 2 colours per block.
 import pool from './pool.json' with { type: 'json' };
 
 export const POOL_SIZE: number = pool.avatars.length;
@@ -14,18 +14,44 @@ export const TILE_COLS = SPRITE_COLS + 2 * TILE_PAD;
 export const TILE_BG = '#2a2e37';
 export const FRAME_COUNT = 4;
 
-// A transparent pixel yields no fg or bg, so the host background shows through.
+/** One terminal cell: a quadrant block character (or space) drawn in fg over bg. A transparent
+ *  pixel yields no colour, so an unset bg shows the host (or the tile) behind it. */
 export interface Cell {
-  ch: '▀' | '▄' | ' ';
+  ch: string;
   fg?: string;
   bg?: string;
 }
+
+/** The quadrant character for a 4-bit mask of lit pixels: bit 0 upper left, 1 upper right, 2 lower left, 3 lower right. */
+export const QUADRANTS = ' ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█';
 
 const palette: Readonly<Record<string, string>> = pool.palette;
 
 function colourAt(rows: readonly string[], r: number, c: number): string | undefined {
   const ch = rows[r]?.[c];
   return ch === undefined || ch === '.' ? undefined : palette[ch];
+}
+
+/** One cell from a 2x2 block of pixel colours (upper left, upper right, lower left, lower right;
+ *  undefined is transparent). At most 2 distinct values may appear; a third is a pool defect and throws.
+ *  A transparent pixel is never painted: it is left to the bg behind the cell. Otherwise the more
+ *  common colour is the bg (a tie goes to the first seen) and the other is the fg. */
+export function quadrantCell(px: readonly (string | undefined)[]): Cell {
+  const keys: (string | undefined)[] = [];
+  for (const c of px) if (!keys.includes(c)) keys.push(c);
+  if (keys.length > 2) throw new Error(`a 2x2 block holds ${keys.length} colours, at most 2 fit one cell`);
+  if (keys.length === 1) return keys[0] === undefined ? { ch: ' ' } : { ch: '█', fg: keys[0] };
+  const count = (k: string | undefined): number => px.filter((c) => c === k).length;
+  let bg: string | undefined;
+  let fg: string | undefined;
+  if (keys[0] === undefined || keys[1] === undefined) {
+    bg = undefined;
+    fg = keys[0] === undefined ? keys[1] : keys[0];
+  } else {
+    [bg, fg] = count(keys[1]) > count(keys[0]) ? [keys[1], keys[0]] : [keys[0], keys[1]];
+  }
+  const mask = px.reduce<number>((m, c, i) => (c === fg ? m | (1 << i) : m), 0);
+  return bg === undefined ? { ch: QUADRANTS[mask]!, fg } : { ch: QUADRANTS[mask]!, fg, bg };
 }
 
 // avatarIndex wraps into the pool and frame wraps into the 4 frames, so any integer is safe.
@@ -36,12 +62,9 @@ export function cells(avatarIndex: number, frame: number): Cell[][] {
   for (let r = 0; r < SPRITE_ROWS; r++) {
     const line: Cell[] = [];
     for (let c = 0; c < SPRITE_COLS; c++) {
-      const top = colourAt(rows, r * 2, c);
-      const bottom = colourAt(rows, r * 2 + 1, c);
-      if (top && bottom) line.push({ ch: '▀', fg: top, bg: bottom });
-      else if (top) line.push({ ch: '▀', fg: top });
-      else if (bottom) line.push({ ch: '▄', fg: bottom });
-      else line.push({ ch: ' ' });
+      line.push(
+        quadrantCell([colourAt(rows, r * 2, c * 2), colourAt(rows, r * 2, c * 2 + 1), colourAt(rows, r * 2 + 1, c * 2), colourAt(rows, r * 2 + 1, c * 2 + 1)]),
+      );
     }
     out.push(line);
   }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assign, mulberry32, cells, tileCells, frameAt, phaseFor, POOL_SIZE, SPRITE_ROWS, SPRITE_COLS, TILE_BG, TILE_COLS } from '../avatars/index.js';
+import { assign, mulberry32, cells, quadrantCell, QUADRANTS, tileCells, frameAt, phaseFor, POOL_SIZE, SPRITE_ROWS, SPRITE_COLS, TILE_BG, TILE_COLS } from '../avatars/index.js';
 import pool from '../avatars/pool.json' with { type: 'json' };
 
 const ids = (n: number, p = 's'): string[] => Array.from({ length: n }, (_, i) => `${p}${i}`);
@@ -79,7 +79,11 @@ test('exhaustion: a shared avatar is the least recently freed one', () => {
   assert.equal(st.current.get('z'), idxA); // pool exhausted: least recently freed is shared
 });
 
-test('sprite: every avatar and frame is 3 rows of 6 cells', () => {
+const pal: Record<string, string> = pool.palette;
+const EYE = '#1d1e1c';
+const hexRe = /^#[0-9a-f]{6}$/;
+
+test('sprite: every avatar and frame is 3 rows of 6 quadrant cells', () => {
   assert.equal(POOL_SIZE, 48);
   assert.equal(SPRITE_ROWS, 3);
   assert.equal(SPRITE_COLS, 6);
@@ -89,70 +93,88 @@ test('sprite: every avatar and frame is 3 rows of 6 cells', () => {
       assert.equal(g.length, SPRITE_ROWS);
       for (const row of g) {
         assert.equal(row.length, SPRITE_COLS);
-        for (const cell of row) assert.ok(cell.ch === '▀' || cell.ch === '▄' || cell.ch === ' ');
+        for (const cell of row) assert.ok([...QUADRANTS].includes(cell.ch), `unexpected cell character ${cell.ch}`);
       }
     }
   }
 });
 
-test('sprite: transparent pixels carry no fg or bg, opaque ones carry hex colours', () => {
-  const hex = /^#[0-9a-f]{6}$/;
+test('quadrant mapping: all 16 masks of lit pixels give the right character, fg lit over bg', () => {
+  const expected = [' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█'];
+  assert.deepEqual([...QUADRANTS], expected);
+  const FG = '#ff0000';
+  const BG = '#0000ff';
+  for (let mask = 1; mask < 15; mask++) {
+    // both colours opaque: bg is the more common colour, the lit pixels are fg (tie: the first seen is bg)
+    const px = [0, 1, 2, 3].map((i) => ((mask >> i) & 1 ? FG : BG));
+    const lit = px.filter((c) => c === FG).length;
+    const cell = quadrantCell(px);
+    const fgIsMinority = lit < 2 || (lit === 2 && px[0] === BG);
+    if (fgIsMinority) assert.deepEqual(cell, { ch: expected[mask], fg: FG, bg: BG }, `mask ${mask}`);
+    else assert.deepEqual(cell, { ch: expected[15 - mask], fg: BG, bg: FG }, `mask ${mask} swapped`);
+    // transparent against one colour: the transparent pixels are never painted, so no bg
+    const t = [0, 1, 2, 3].map((i) => ((mask >> i) & 1 ? FG : undefined));
+    assert.deepEqual(quadrantCell(t), { ch: expected[mask], fg: FG }, `mask ${mask} on transparent`);
+  }
+  assert.deepEqual(quadrantCell([undefined, undefined, undefined, undefined]), { ch: ' ' });
+  assert.deepEqual(quadrantCell([FG, FG, FG, FG]), { ch: '█', fg: FG });
+  assert.throws(() => quadrantCell([FG, BG, '#00ff00', FG]), /at most 2/);
+});
+
+test('sprite: every cell draws at most 2 colours; transparent pixels carry no colour', () => {
   let blanks = 0;
-  let single = 0;
-  let both = 0;
+  let solid = 0;
+  let two = 0;
   for (let a = 0; a < POOL_SIZE; a++) {
+    for (let f = 0; f < 4; f++) {
+      const rows = pool.avatars[a]!.frames[f]!;
+      for (let r = 0; r < 3; r++) {
+        for (let c = 0; c < 6; c++) {
+          const block = [rows[r * 2]![c * 2]!, rows[r * 2]![c * 2 + 1]!, rows[r * 2 + 1]![c * 2]!, rows[r * 2 + 1]![c * 2 + 1]!];
+          assert.ok(new Set(block).size <= 2, `avatar ${a} frame ${f} cell ${r},${c} holds ${new Set(block).size} colours`);
+        }
+      }
+    }
     for (const cell of cells(a, 0).flat()) {
       if (cell.ch === ' ') {
         blanks++;
         assert.equal(cell.fg, undefined);
         assert.equal(cell.bg, undefined);
-      } else if (cell.bg === undefined) {
-        single++;
-        assert.match(cell.fg ?? '', hex);
       } else {
-        both++;
-        assert.equal(cell.ch, '▀');
-        assert.match(cell.fg ?? '', hex);
-        assert.match(cell.bg, hex);
+        assert.match(cell.fg ?? '', hexRe);
+        if (cell.bg === undefined) solid++;
+        else {
+          two++;
+          assert.match(cell.bg, hexRe);
+        }
       }
     }
   }
-  assert.ok(blanks > 0 && single > 0 && both > 0);
+  assert.ok(blanks > 0 && solid > 0 && two > 0);
   // the first pixel row of every avatar is empty at the left edge, so that cell is fully transparent
   assert.deepEqual(cells(0, 0)[0]![0], { ch: ' ' });
 });
 
-test('sprite: a cell packs the top pixel into fg and the bottom pixel into bg', () => {
-  const pal: Record<string, string> = pool.palette;
+test('sprite: a cell is the quadrant mapping of its 2x2 block of the pool pixels', () => {
   for (const a of [0, 17, 47]) {
     const rows = pool.avatars[a]!.frames[0]!;
-    const g = cells(a, 0);
-    for (let r = 0; r < SPRITE_ROWS; r++) {
-      for (let c = 0; c < SPRITE_COLS; c++) {
-        const top = rows[r * 2]![c]!;
-        const bottom = rows[r * 2 + 1]![c]!;
-        const cell = g[r]![c]!;
-        if (top !== '.' && bottom !== '.') assert.deepEqual(cell, { ch: '▀', fg: pal[top], bg: pal[bottom] });
-        else if (top !== '.') assert.deepEqual(cell, { ch: '▀', fg: pal[top] });
-        else if (bottom !== '.') assert.deepEqual(cell, { ch: '▄', fg: pal[bottom] });
-        else assert.deepEqual(cell, { ch: ' ' });
-      }
-    }
+    const colour = (r: number, c: number): string | undefined => (rows[r]![c] === '.' ? undefined : pal[rows[r]![c]!]);
+    cells(a, 0).forEach((row, r) => row.forEach((cell, c) => assert.deepEqual(cell, quadrantCell([colour(r * 2, c * 2), colour(r * 2, c * 2 + 1), colour(r * 2 + 1, c * 2), colour(r * 2 + 1, c * 2 + 1)]))));
   }
 });
 
-test('pool: 48 portraits of 4 frames, each 6 strings of 6 pixels, native to that size', () => {
+test('pool: 48 portraits of 4 frames, each 6 strings of 12 pixels', () => {
   assert.equal(pool.avatars.length, 48);
-  const pal: Record<string, string> = pool.palette;
   for (const a of pool.avatars) {
     assert.equal(a.frames.length, 4);
     for (const f of a.frames) {
       assert.equal(f.length, 6);
       for (const row of f) {
-        assert.equal(row.length, 6);
+        assert.equal(row.length, 12);
         for (const ch of row) assert.ok(ch === '.' || pal[ch] !== undefined, `unknown palette key ${ch}`);
       }
     }
+    assert.equal(new Set(a.frames.map((f) => f.join('/'))).size, 4, 'rest, blink, bob and tilt all look different');
   }
   assert.equal(new Set(pool.avatars.map((a) => a.frames[0]!.join('/'))).size, 48, 'every portrait differs at rest');
 });
@@ -164,22 +186,13 @@ test('pool: the 3 skin tones are balanced and the ruled-out looks are absent', (
   assert.ok(!pool.avatars.some((a) => Object.values(a.parts).some((v) => banned.includes(String(v)))));
 });
 
-test('pool: two dark eyes on row 2, a blink turns them to skin, bob moves only the top row, tilt only rows 0-1, no pixel lost', () => {
-  const pal: Record<string, string> = pool.palette;
-  const count = (row: string): number => row.replace(/\./g, '').length;
-  const darkIn = (rows: readonly string[]): number => rows.join('').split('').filter((ch) => pal[ch] === '#1d1e1c').length;
+test('pool: two dark eyes stay visible in rest, bob and tilt, and a blink turns them to skin', () => {
+  const dark = (rows: readonly string[]): number => rows.join('').split('').filter((ch) => pal[ch] === EYE).length;
   for (const a of pool.avatars) {
     const [rest, blink, bob, tilt] = a.frames as [string[], string[], string[], string[]];
-    assert.equal(darkIn(rest), 2);
-    assert.equal(darkIn([rest[2]!]), 2, 'the eyes are on row 2');
-    assert.equal(darkIn(blink), 0);
-    assert.equal(count(blink.join('')), count(rest.join('')));
-    const top = rest.findIndex((r) => /[^.]/.test(r));
-    assert.deepEqual(bob.filter((_, i) => i !== top), rest.filter((_, i) => i !== top));
-    assert.notEqual(bob[top], rest[top]);
-    assert.equal(count(bob[top]!), count(rest[top]!));
-    assert.deepEqual(tilt.slice(2), rest.slice(2));
-    for (const r of [0, 1]) assert.equal(count(tilt[r]!), count(rest[r]!));
+    for (const f of [rest, bob, tilt]) assert.equal(dark(f), 2, JSON.stringify(a.parts));
+    assert.equal(dark([rest[2]!]), 2, 'the eyes are on pixel row 2 of the picked rows');
+    assert.equal(dark(blink), 0);
   }
 });
 
@@ -193,8 +206,8 @@ test('tile: 8 cols by 3 rows, padded one col each side, every cell on the tile c
       assert.deepEqual(row[0], { ch: ' ', bg: TILE_BG });
       assert.deepEqual(row[TILE_COLS - 1], { ch: ' ', bg: TILE_BG });
       for (const cell of row) {
-        assert.match(cell.bg ?? '', /^#[0-9a-f]{6}$/, 'a bg on every cell');
-        assert.ok(cell.ch === '▀' || cell.ch === '▄' || cell.ch === ' ');
+        assert.match(cell.bg ?? '', hexRe, 'a bg on every cell');
+        assert.ok([...QUADRANTS].includes(cell.ch));
       }
     }
     // inside the padding the sprite is unchanged; only a missing bg is filled with the tile colour

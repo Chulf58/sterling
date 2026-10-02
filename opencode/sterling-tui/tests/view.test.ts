@@ -174,14 +174,14 @@ const plain = (line: SpanLine) => line.map((sp) => sp.text).join('');
 const widthOf = (line: SpanLine) => [...plain(line)].length;
 const row = (over: Partial<SubagentRow> = {}): SubagentRow => ({ id: kid(2), title: 'review the diff', status: 'active', context: '25%', model: 'big-pickle', ...over });
 
-test('portrait: a 6x3 half-block sprite on an 8x3 tinted tile, no drawn frame, explicit bg on every span', () => {
+test('portrait: a 6x3 quadrant-block sprite on an 8x3 tinted tile, no drawn frame, explicit bg on every span', () => {
   const lines = portraitLines(5, 0);
   assert.equal(PORTRAIT_WIDTH, 8);
   assert.equal(PORTRAIT_HEIGHT, 3);
   assert.equal(lines.length, 3);
   assert.ok(lines.every((l) => widthOf(l) === PORTRAIT_WIDTH), lines.map(plain).join('\n'));
   const spans = lines.flat();
-  assert.ok(spans.every((sp) => /^[▀▄ ]+$/.test(sp.text)), 'half blocks and spaces only: no box-drawing frame');
+  assert.ok(spans.every((sp) => /^[ ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█]+$/.test(sp.text)), 'quadrant blocks and spaces only: no box-drawing frame');
   assert.ok(spans.every((sp) => /^#[0-9a-f]{6}$/.test(sp.bg ?? '')), 'a bg on every span, so no colour is left unset');
   assert.ok(spans.some((sp) => sp.fg && sp.bg && sp.bg !== TILE_BG), 'a pixel pair carries both halves');
   for (const l of lines) {

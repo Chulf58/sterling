@@ -199,7 +199,7 @@ test('block: a 6x3 portrait on an 8x3 tinted tile per agent, then type, status, 
   assert.ok(b.pixels.every((p) => p.bg !== undefined), 'a bg on every tile cell');
   const first = b.pixels[0]!;
   assert.deepEqual({ x: first.x, y: first.y, ch: first.ch, bg: first.bg }, { x: 0, y: 2, ch: ' ', bg: TILE_BG });
-  assert.ok(b.pixels.some((p) => p.ch === '▀' && p.fg !== undefined && p.bg !== undefined));
+  assert.ok(b.pixels.some((p) => p.ch !== ' ' && p.fg !== undefined && p.bg !== undefined), 'a quadrant cell carries both colours');
   // the three text lines sit beside the tile, on its three rows
   const type = b.puts.find((p) => p.text === 'implementor')!;
   assert.equal(type.x, TILE_COLS + 1);
