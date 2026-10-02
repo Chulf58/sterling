@@ -44,6 +44,8 @@ function git(dir, args) {
 function buildConsumerFixture(prefix) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+  // init creates the declared domain stores under HOME: a scratch one, removed after the spawn
+  const home = mkdtempSync(join(tmpdir(), 'sterling-consumer-home-'));
   const initResult = spawnSync(
     process.execPath,
     [
@@ -51,6 +53,7 @@ function buildConsumerFixture(prefix) {
       '--target', dir,
       '--project-name', 'consumer-fixture',
       '--stack-tags', 'node',
+      '--domain-description', 'node=test domain node',
       '--toolchain', 'node:**/*.mjs',
       '--backup-path', 'backups',
     ],
@@ -58,9 +61,10 @@ function buildConsumerFixture(prefix) {
       encoding: 'utf8',
       cwd: dir,
       timeout: 180_000,
-      env: { ...process.env, STERLING_REGISTRY_DB: join(dir, 'registry.db') },
+      env: { ...process.env, HOME: home, STERLING_REGISTRY_DB: join(dir, 'registry.db') },
     }
   );
+  rmSync(home, { recursive: true, force: true });
   assert.equal(initResult.status, 0, `consumer fixture init failed: ${initResult.stdout}${initResult.stderr}`);
   return dir;
 }

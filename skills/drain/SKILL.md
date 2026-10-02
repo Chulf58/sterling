@@ -51,7 +51,7 @@ Removing an item you have not fulfilled makes the store lie — the exact drift 
 
 3. **Delegate the gated items — never auto-resolve them inside a drain** (P1: keep the gate where being wrong is costly):
    - `deletion_candidate` → hand to `/sterling:cleanup` (the gated deletion SOP). Leave the item; cleanup's deletion artifact removes it.
-   - `promotion_review` → present the candidate to the human as a keep-or-promote decision; only on yes run `knowledge_promote` (promoting drains the matching review). Never auto-promote.
+   - `promotion_review` → read the item text, which says how many mounted domains fit the candidate (decision projects-mount-domains-and-sibling-projects). **`exactly one fit: drainable`** → promote it yourself with `knowledge_promote` to that domain; promoting drains the matching review. **`several fit: ask the user`**, or no fit named → put the candidate to the user through the question form (keep, or promote to which domain) and promote only on their answer. `knowledge_promote` may need a permission rule in the user's settings: the auto-mode classifier denied it on 2026-10-02, so if the call is denied, report that and leave the item rather than working around the denial.
 
 4. **Verify + close.** If the drain changed files, run `npm run check` and the touched toolchains' tests; a store-only drain needs neither. `maintenance_query` again (paged until `capped` is false): the queue is empty, or holds only the gated items you delegated, the `file_parked` items waiting on their branch, and anything you reported as unclassifiable or anomalous. State what was drained (the drain log is the audit) and what was handed off or left, to whom and why.
 

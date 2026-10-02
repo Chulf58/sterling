@@ -81,6 +81,27 @@ const liveStamps = () => Object.fromEntries(LIVE_PLUGIN_ARTIFACTS.map((rel) => {
 }));
 const LIVE_STAMPS_AT_LOAD = liveStamps();
 
+// Init creates every declared domain store (~/.sterling/domains/<tag>/) and refuses a new
+// domain that has no description. So each spawn gets a scratch HOME, stable per target dir
+// (a re-run must see the stores the first run made), and a --domain-description for every
+// declared tag the case did not describe itself; the declared tags are the recorded config's
+// when one exists (it wins on a re-run), else the --stack-tags argument.
+const scratchHomes = new Map();
+function scratchHome(dir) {
+  if (!scratchHomes.has(dir)) scratchHomes.set(dir, scratchPluginRoot());
+  return scratchHomes.get(dir);
+}
+function withDomainDescriptions(dir, args) {
+  const configPath = join(dir, '.sterling', 'config.json');
+  const i = args.indexOf('--stack-tags');
+  const tags = existsSync(configPath)
+    ? JSON.parse(readFileSync(configPath, 'utf8')).stack_tags ?? []
+    : i === -1 ? [] : String(args[i + 1] ?? '').split(',').filter(Boolean);
+  const described = new Set(args.flatMap((a, j) => (args[j - 1] === '--domain-description' ? [a.split('=')[0]] : [])));
+  const extra = tags.filter((t) => t !== 'sterling' && !described.has(t)).flatMap((t) => ['--domain-description', `${t}=test domain ${t}`]);
+  return [...args, ...extra];
+}
+
 function init(dir, args = [], extraEnv = {}) {
   if ('STERLING_PLUGIN_ROOT_MATCH' in extraEnv && extraEnv.STERLING_PLUGIN_ROOT_MATCH === undefined) {
     throw new Error('init(): STERLING_PLUGIN_ROOT_MATCH must never be deleted — unset means init ensures THIS clone\'s live .claude-plugin/sterling-mcp.json (see the containment note above). Pass a scratch dir, or omit the key to take the helper default.');
@@ -91,7 +112,7 @@ function init(dir, args = [], extraEnv = {}) {
   // fresh EMPTY scratch dir so no test ever reads the developer's real ~/.claude.json
   // (determinism: "codex missing" unless a case plants one). An explicit value wins.
   const claudeConfigDir = extraEnv.CLAUDE_CONFIG_DIR ?? scratchPluginRoot();
-  const r = spawnSync(process.execPath, [join(root, 'scripts', 'init.mjs'), '--target', dir, ...args], {
+  const r = spawnSync(process.execPath, [join(root, 'scripts', 'init.mjs'), '--target', dir, ...withDomainDescriptions(dir, args)], {
     encoding: 'utf8',
     cwd: dir,
     timeout: 180_000,
@@ -112,6 +133,7 @@ function init(dir, args = [], extraEnv = {}) {
       STERLING_CODEX_PROBE: 'absent',
       STERLING_CLAUDE_PROBE: 'ok',
       CLAUDE_CONFIG_DIR: claudeConfigDir,
+      HOME: scratchHome(dir),
       ...extraEnv,
     },
   });
