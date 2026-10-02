@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assign, mulberry32, cells, frameAt, phaseFor, POOL_SIZE, SPRITE_ROWS, SPRITE_COLS } from '../avatars/index.js';
+import { assign, mulberry32, cells, tileCells, frameAt, phaseFor, POOL_SIZE, SPRITE_ROWS, SPRITE_COLS, TILE_BG, TILE_COLS } from '../avatars/index.js';
 import pool from '../avatars/pool.json' with { type: 'json' };
 
 const ids = (n: number, p = 's'): string[] => Array.from({ length: n }, (_, i) => `${p}${i}`);
@@ -79,8 +79,10 @@ test('exhaustion: a shared avatar is the least recently freed one', () => {
   assert.equal(st.current.get('z'), idxA); // pool exhausted: least recently freed is shared
 });
 
-test('sprite: every avatar and frame is 6 rows of 12 cells', () => {
+test('sprite: every avatar and frame is 3 rows of 6 cells', () => {
   assert.equal(POOL_SIZE, 48);
+  assert.equal(SPRITE_ROWS, 3);
+  assert.equal(SPRITE_COLS, 6);
   for (let a = 0; a < POOL_SIZE; a++) {
     for (let f = 0; f < 4; f++) {
       const g = cells(a, f);
@@ -125,8 +127,8 @@ test('sprite: a cell packs the top pixel into fg and the bottom pixel into bg', 
   for (const a of [0, 17, 47]) {
     const rows = pool.avatars[a]!.frames[0]!;
     const g = cells(a, 0);
-    for (let r = 0; r < 6; r++) {
-      for (let c = 0; c < 12; c++) {
+    for (let r = 0; r < SPRITE_ROWS; r++) {
+      for (let c = 0; c < SPRITE_COLS; c++) {
         const top = rows[r * 2]![c]!;
         const bottom = rows[r * 2 + 1]![c]!;
         const cell = g[r]![c]!;
@@ -136,6 +138,67 @@ test('sprite: a cell packs the top pixel into fg and the bottom pixel into bg', 
         else assert.deepEqual(cell, { ch: ' ' });
       }
     }
+  }
+});
+
+test('pool: 48 portraits of 4 frames, each 6 strings of 6 pixels, native to that size', () => {
+  assert.equal(pool.avatars.length, 48);
+  const pal: Record<string, string> = pool.palette;
+  for (const a of pool.avatars) {
+    assert.equal(a.frames.length, 4);
+    for (const f of a.frames) {
+      assert.equal(f.length, 6);
+      for (const row of f) {
+        assert.equal(row.length, 6);
+        for (const ch of row) assert.ok(ch === '.' || pal[ch] !== undefined, `unknown palette key ${ch}`);
+      }
+    }
+  }
+  assert.equal(new Set(pool.avatars.map((a) => a.frames[0]!.join('/'))).size, 48, 'every portrait differs at rest');
+});
+
+test('pool: the 3 skin tones are balanced and the ruled-out looks are absent', () => {
+  const tones = pool.avatars.map((a) => a.parts.skin);
+  for (const t of [0, 1, 2]) assert.equal(tones.filter((x) => x === t).length, 16);
+  const banned = ['monocle', 'glasses', 'headphones'];
+  assert.ok(!pool.avatars.some((a) => Object.values(a.parts).some((v) => banned.includes(String(v)))));
+});
+
+test('pool: two dark eyes on row 2, a blink turns them to skin, bob moves only the top row, tilt only rows 0-1, no pixel lost', () => {
+  const pal: Record<string, string> = pool.palette;
+  const count = (row: string): number => row.replace(/\./g, '').length;
+  const darkIn = (rows: readonly string[]): number => rows.join('').split('').filter((ch) => pal[ch] === '#1d1e1c').length;
+  for (const a of pool.avatars) {
+    const [rest, blink, bob, tilt] = a.frames as [string[], string[], string[], string[]];
+    assert.equal(darkIn(rest), 2);
+    assert.equal(darkIn([rest[2]!]), 2, 'the eyes are on row 2');
+    assert.equal(darkIn(blink), 0);
+    assert.equal(count(blink.join('')), count(rest.join('')));
+    const top = rest.findIndex((r) => /[^.]/.test(r));
+    assert.deepEqual(bob.filter((_, i) => i !== top), rest.filter((_, i) => i !== top));
+    assert.notEqual(bob[top], rest[top]);
+    assert.equal(count(bob[top]!), count(rest[top]!));
+    assert.deepEqual(tilt.slice(2), rest.slice(2));
+    for (const r of [0, 1]) assert.equal(count(tilt[r]!), count(rest[r]!));
+  }
+});
+
+test('tile: 8 cols by 3 rows, padded one col each side, every cell on the tile colour, no frame glyphs', () => {
+  assert.equal(TILE_COLS, 8);
+  for (let a = 0; a < POOL_SIZE; a++) {
+    const t = tileCells(a, 0);
+    assert.equal(t.length, 3);
+    for (const row of t) {
+      assert.equal(row.length, TILE_COLS);
+      assert.deepEqual(row[0], { ch: ' ', bg: TILE_BG });
+      assert.deepEqual(row[TILE_COLS - 1], { ch: ' ', bg: TILE_BG });
+      for (const cell of row) {
+        assert.match(cell.bg ?? '', /^#[0-9a-f]{6}$/, 'a bg on every cell');
+        assert.ok(cell.ch === '▀' || cell.ch === '▄' || cell.ch === ' ');
+      }
+    }
+    // inside the padding the sprite is unchanged; only a missing bg is filled with the tile colour
+    cells(a, 0).forEach((row, r) => row.forEach((c, i) => assert.deepEqual(t[r]![i + 1], { ...c, bg: c.bg ?? TILE_BG })));
   }
 });
 

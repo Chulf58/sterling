@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { boardDisplayLabel } from '@sterling/schemas';
 import type { SterlingStore } from '@sterling/store';
 import { KNOWLEDGE_TAB, type UiEvent, type UiState } from '@sterling/tui/dist/state.js';
-import { assign, cells, frameAt, phaseFor, POOL_SIZE, SPRITE_COLS, SPRITE_ROWS, type AssignState } from '@sterling/tui/dist/avatars/index.js';
+import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS, type AssignState } from '@sterling/tui/dist/avatars/index.js';
 
 /** OpenCode 2.0.21's sidebar content width, measured: a session title wraps at 34 columns. */
 export const SIDEBAR_WIDTH = 34;
@@ -117,6 +117,8 @@ export interface SubagentRow {
   /** '42%' of the model's context window, or '?' when either side is unknown */
   context: string;
   model: string;
+  /** a one-line description of the task, shown on the third line when the host supplies one */
+  description?: string;
 }
 
 /** The distinguishing end of an OpenCode session id: ids are time-ordered, so
@@ -178,14 +180,12 @@ export interface Span {
 /** One screen line as styled runs; the host draws them left to right. */
 export type SpanLine = Span[];
 
-/** A portrait's outer size: the 12x6 half-block sprite plus a one-cell frame. */
-export const PORTRAIT_WIDTH = SPRITE_COLS + 2;
-export const PORTRAIT_HEIGHT = SPRITE_ROWS + 2;
+/** A portrait's size: the 6x3 half-block sprite on its tile, one padding column each side. */
+export const PORTRAIT_WIDTH = TILE_COLS;
+export const PORTRAIT_HEIGHT = SPRITE_ROWS;
 /** Columns the text beside a portrait needs (the model name is the long one); narrower puts the text underneath. */
 const SIDE_TEXT_MIN = 16;
 const GAP = 1;
-/** where the three text lines start beside a portrait: roughly centred on its 8 rows */
-const SIDE_TEXT_TOP = 2;
 
 /** Board rows the full view's Tasks body may show. Above the body sit the
  *  header, tab bar and spacer; below it the sub-agent block (`extraLines`),
@@ -207,55 +207,51 @@ export function stepAvatars(prev: AvatarState, familyIds: readonly string[], rng
   return assign(familyIds, prev.current, rng, { poolSize: POOL_SIZE, freed: prev.freed });
 }
 
-/** A framed portrait: border cells muted, the sprite as half blocks with a
- *  fg and bg span per colour run. Transparent pixels carry no colour at all. */
+/** A portrait on its tinted tile, no drawn frame: the sprite as half blocks
+ *  with a fg and bg span per colour run. Every span carries a bg (the tile
+ *  colour wherever a pixel is transparent), so nothing is left unset. */
 export function portraitLines(avatar: number, frame: number): SpanLine[] {
-  const inner = '─'.repeat(SPRITE_COLS);
-  const out: SpanLine[] = [[{ text: `┌${inner}┐`, dim: true }]];
-  for (const row of cells(avatar, frame)) {
-    const line: SpanLine = [{ text: '│', dim: true }];
+  return tileCells(avatar, frame).map((row) => {
+    const line: SpanLine = [];
     for (const c of row) {
-      const last = line[line.length - 1]!;
-      if (line.length > 1 && last.fg === c.fg && last.bg === c.bg) last.text += c.ch;
+      const last = line[line.length - 1];
+      if (last && last.fg === c.fg && last.bg === c.bg) last.text += c.ch;
       else line.push({ text: c.ch, fg: c.fg, bg: c.bg });
     }
-    line.push({ text: '│', dim: true });
-    out.push(line);
-  }
-  out.push([{ text: `└${inner}┘`, dim: true }]);
-  return out;
+    return line;
+  });
 }
 
-/** The text of a row: title, `status · N% ctx`, model, each clipped to `width`. */
+/** The text of a row: title, `status · N% ctx · model`, description, each clipped to `width`. */
 function rowText(r: SubagentRow, width: number): SpanLine[] {
   return [
     [{ text: clip(r.title, width) }],
-    [{ text: clip(`${r.status} · ${r.context} ctx`, width), dim: true }],
-    [{ text: clip(r.model, width), dim: true }],
+    [{ text: clip(`${r.status} · ${r.context} ctx · ${r.model}`, width), dim: true }],
+    [{ text: clip(r.description ?? '', width), dim: true }],
   ];
 }
 
-/** One sub-agent row: the portrait on the left with the text beside it, or the
- *  text under the portrait when `width` cannot hold both. No avatar number is shown. */
+/** One sub-agent row: the tile on the left with the three text lines beside it,
+ *  or the text under the tile when `width` cannot hold both. No avatar number is shown. */
 export function subagentRowLines(r: SubagentRow, avatar: number, tick: number, width: number): SpanLine[] {
   const portrait = portraitLines(avatar, frameAt(tick, phaseFor(avatar), r.status === 'active'));
   const sideWidth = width - PORTRAIT_WIDTH - GAP;
   if (sideWidth < SIDE_TEXT_MIN) return [...portrait, ...rowText(r, width)];
   const text = rowText(r, sideWidth);
-  return portrait.map((line, i) => {
-    const t = text[i - SIDE_TEXT_TOP];
-    return t ? [...line, { text: ' '.repeat(GAP) }, ...t] : line;
-  });
+  return portrait.map((line, i) => [...line, { text: ' '.repeat(GAP) }, ...text[i]!]);
 }
 
 /** The sub-agent block: a heading with the active count, then a portrait row
- *  per sub-agent. `avatars` maps session id to pool index; a row without one
+ *  per sub-agent, a blank line between rows so the tiles do not run together. `avatars` maps session id to pool index; a row without one
  *  (it should not happen) falls back to index 0 rather than dropping the row. */
 export function subagentSpanLines(rows: readonly SubagentRow[], avatars: ReadonlyMap<string, number>, tick: number, width = SIDEBAR_WIDTH): SpanLine[] {
   const active = rows.filter((r) => r.status === 'active').length;
   const lines: SpanLine[] = [[{ text: `Sub-agents (${active} active)` }]];
   if (rows.length === 0) return [...lines, [{ text: 'no sub-agents', dim: true }]];
-  for (const r of rows) lines.push(...subagentRowLines(r, avatars.get(r.id) ?? 0, tick, width));
+  rows.forEach((r, i) => {
+    if (i > 0) lines.push([]);
+    lines.push(...subagentRowLines(r, avatars.get(r.id) ?? 0, tick, width));
+  });
   return lines;
 }
 

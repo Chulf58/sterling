@@ -1,6 +1,6 @@
 // The terminal dashboard's Sub-agents block: a read-only view of H22's
 // dispatch register (.sterling/transient/dispatch-register.json) and the
-// composition of one framed, animated portrait per subagent.
+// composition of one animated portrait on a tinted tile per subagent.
 //
 // The register is read WITHOUT its lock: readRegister is a plain file read,
 // and the register is rewritten by an atomic rename, so the dashboard never
@@ -25,7 +25,7 @@ import { AGENT_MODEL_KEY, parseConfig } from '@sterling/schemas';
 import { readRegister, dispatchStateDir, dispatchStateKey, type RegisterEntry } from '../../../scripts/lib/dispatch-register.mjs';
 import { deriveAgentTranscript, fillPct, latestUsage } from '../../../scripts/hooks/lib/transcript.mjs';
 import { sterlingRootFrom } from '../../../scripts/lib/opencode-install.mjs';
-import { assign, cells, frameAt, phaseFor, POOL_SIZE, SPRITE_COLS, SPRITE_ROWS, type AssignState } from './avatars/index.js';
+import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS, type AssignState } from './avatars/index.js';
 
 /** How long an ended agent stays in the block, shown as done. */
 export const DONE_LINGER_MS = 5 * 60_000;
@@ -327,7 +327,8 @@ export function formatElapsed(ms: number): string {
 // ---------------------------------------------------------------------------
 // Composition. Coordinates are relative to the block's top-left corner; the
 // renderer offsets them. Row 0 is a blank separator, row 1 the header, then
-// tile rows of a frame (SPRITE_ROWS + 2 high) with four text lines beside it.
+// tile rows (SPRITE_ROWS high, a blank row between them) with three text
+// lines beside each tile: type, `status · N% ctx · model`, description.
 // ---------------------------------------------------------------------------
 
 export interface BlockAttr {
@@ -355,8 +356,8 @@ export interface SubagentBlock {
   pixels: BlockPixel[];
 }
 
-const FRAME_W = SPRITE_COLS + 2;
-const TILE_H = SPRITE_ROWS + 2;
+const TILE_H = SPRITE_ROWS;
+const ROW_GAP = 1;
 const TEXT_GAP = 1;
 const TEXT_MAX = 36;
 const TEXT_MIN = 8;
@@ -379,11 +380,11 @@ export function composeSubagentBlock(view: SubagentView, width: number, maxHeigh
   }
   if (view.agents.length === 0) return empty;
 
-  const textW = Math.min(TEXT_MAX, width - FRAME_W - TEXT_GAP);
+  const textW = Math.min(TEXT_MAX, width - TILE_COLS - TEXT_GAP);
   const fitsTile = textW >= TEXT_MIN;
-  const tileW = FRAME_W + TEXT_GAP + textW;
+  const tileW = TILE_COLS + TEXT_GAP + textW;
   const perRow = fitsTile ? Math.max(1, Math.floor((width + TILE_GAP) / (tileW + TILE_GAP))) : 0;
-  const tileRows = fitsTile ? Math.min(Math.ceil(view.agents.length / perRow), Math.floor((maxHeight - HEAD_ROWS) / TILE_H)) : 0;
+  const tileRows = fitsTile ? Math.min(Math.ceil(view.agents.length / perRow), Math.floor((maxHeight - HEAD_ROWS + ROW_GAP) / (TILE_H + ROW_GAP))) : 0;
   const shown = Math.min(view.agents.length, tileRows * perRow);
   const hidden = view.agents.length - shown;
 
@@ -395,33 +396,27 @@ export function composeSubagentBlock(view: SubagentView, width: number, maxHeigh
   for (let i = 0; i < shown; i++) {
     const a = view.agents[i]!;
     const x0 = (i % perRow) * (tileW + TILE_GAP);
-    const y0 = HEAD_ROWS + Math.floor(i / perRow) * TILE_H;
-    const frame = { dim: true };
-    puts.push({ x: x0, y: y0, attr: frame, text: '┌' + '─'.repeat(SPRITE_COLS) + '┐' });
-    for (let r = 1; r <= SPRITE_ROWS; r++) {
-      puts.push({ x: x0, y: y0 + r, attr: frame, text: '│' });
-      puts.push({ x: x0 + FRAME_W - 1, y: y0 + r, attr: frame, text: '│' });
-    }
-    puts.push({ x: x0, y: y0 + TILE_H - 1, attr: frame, text: '└' + '─'.repeat(SPRITE_COLS) + '┘' });
+    const y0 = HEAD_ROWS + Math.floor(i / perRow) * (TILE_H + ROW_GAP);
 
-    const grid = cells(a.avatar, frameAt(tick, phaseFor(a.avatar), a.status === 'running'));
-    grid.forEach((line, r) =>
+    // the tile: every cell carries a bg, so the tint covers the padding and the transparent pixels
+    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), a.status === 'running')).forEach((line, r) =>
       line.forEach((cell, c) => {
-        const px: BlockPixel = { x: x0 + 1 + c, y: y0 + 1 + r, ch: cell.ch };
+        const px: BlockPixel = { x: x0 + c, y: y0 + r, ch: cell.ch };
         if (cell.fg !== undefined) px.fg = cell.fg;
         if (cell.bg !== undefined) px.bg = cell.bg;
         pixels.push(px);
       }),
     );
 
-    const tx = x0 + FRAME_W + TEXT_GAP;
-    puts.push({ x: tx, y: y0 + 1, attr: { bold: true }, text: clip(a.type, textW) });
-    if (a.description) puts.push({ x: tx, y: y0 + 2, attr: {}, text: clip(a.description, textW) });
-    puts.push({ x: tx, y: y0 + 3, attr: { dim: true }, text: clip(a.model ?? 'model unknown', textW) });
-    // status and context always; the elapsed time when it fits
+    const tx = x0 + TILE_COLS + TEXT_GAP;
+    puts.push({ x: tx, y: y0, attr: { bold: true }, text: clip(a.type, textW) });
+    // status and context in the status colour, the model dim after them
     const status = `${a.status} · ${a.contextPct === null ? '?' : `${a.contextPct}%`} ctx`;
-    const timed = `${status} · ${formatElapsed(a.elapsedMs)}`;
-    puts.push({ x: tx, y: y0 + 4, attr: a.status === 'running' ? { color: 'green' } : { dim: true }, text: clip([...timed].length <= textW ? timed : status, textW) });
+    const line = [...clip(`${status} · ${a.model ?? 'model unknown'}`, textW)];
+    const statusLen = Math.min(line.length, [...status].length);
+    puts.push({ x: tx, y: y0 + 1, attr: a.status === 'running' ? { color: 'green' } : { dim: true }, text: line.slice(0, statusLen).join('') });
+    if (line.length > statusLen) puts.push({ x: tx + statusLen, y: y0 + 1, attr: { dim: true }, text: line.slice(statusLen).join('') });
+    if (a.description) puts.push({ x: tx, y: y0 + 2, attr: { dim: true }, text: clip(a.description, textW) });
   }
-  return { height: HEAD_ROWS + tileRows * TILE_H, puts, pixels };
+  return { height: HEAD_ROWS + tileRows * TILE_H + Math.max(0, tileRows - 1) * ROW_GAP, puts, pixels };
 }

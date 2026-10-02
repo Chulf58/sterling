@@ -49200,59 +49200,54 @@ var pool_default = {
     B: "#6c3a86",
     C: "#f0d6bd",
     D: "#1d1e1c",
-    E: "#e9c8b0",
-    F: "#f0c040",
-    G: "#a08c52",
-    H: "#bfa96a",
-    I: "#e0731f",
-    J: "#2b2830",
-    K: "#1c1a20",
-    L: "#efc9a6",
-    M: "#e2b792",
-    N: "#8eaac8",
-    O: "#a9c3de",
-    P: "#25252b",
-    Q: "#7a4a2a",
-    R: "#5f391f",
-    S: "#2a3150",
-    T: "#3a4363",
-    U: "#f4f1ea",
-    V: "#7a45a8",
-    W: "#d9732a",
-    X: "#b45a1a",
-    Y: "#e88aa0",
-    Z: "#e8c547",
-    a: "#a8472a",
-    b: "#85361f",
-    c: "#1b8f84",
-    d: "#2ec4b6",
-    e: "#b0801e",
-    f: "#9e7322",
-    g: "#f7e4d4",
-    h: "#ecd3bf",
-    i: "#cfd2d6",
-    j: "#2e8b57",
-    k: "#e8d9a0",
-    l: "#2f5fa8",
-    m: "#234781",
-    n: "#e8dcc0",
-    o: "#cbbd9c",
-    p: "#a0764a",
-    q: "#b8322e",
-    r: "#8c2420",
-    s: "#4a3326",
-    t: "#6e5fa2",
-    u: "#8b7bbd",
-    v: "#baae96",
-    w: "#c8b9a3",
-    x: "#96261f",
-    y: "#36251b",
-    z: "#86603a",
-    "0": "#3f7d4a",
-    "1": "#2c5a36",
-    "2": "#c9ced6",
-    "3": "#9aa1ad",
-    "4": "#cdbd80"
+    E: "#f0c040",
+    F: "#bfa96a",
+    G: "#e0731f",
+    H: "#2b2830",
+    I: "#efc9a6",
+    J: "#e2b792",
+    K: "#8eaac8",
+    L: "#a9c3de",
+    M: "#25252b",
+    N: "#7a4a2a",
+    O: "#f4f1ea",
+    P: "#7a45a8",
+    Q: "#2a3150",
+    R: "#d9732a",
+    S: "#e8c547",
+    T: "#a8472a",
+    U: "#3a4363",
+    V: "#2ec4b6",
+    W: "#b0801e",
+    X: "#f7e4d4",
+    Y: "#9e7322",
+    Z: "#cfd2d6",
+    a: "#2e8b57",
+    b: "#e8d9a0",
+    c: "#2f5fa8",
+    d: "#234781",
+    e: "#e9c8b0",
+    f: "#85361f",
+    g: "#ecd3bf",
+    h: "#e8dcc0",
+    i: "#cbbd9c",
+    j: "#a0764a",
+    k: "#b8322e",
+    l: "#8c2420",
+    m: "#4a3326",
+    n: "#8b7bbd",
+    o: "#6e5fa2",
+    p: "#baae96",
+    q: "#c8b9a3",
+    r: "#96261f",
+    s: "#1c1a20",
+    t: "#86603a",
+    u: "#3f7d4a",
+    v: "#2c5a36",
+    w: "#c9ced6",
+    x: "#9aa1ad",
+    y: "#cdbd80",
+    z: "#b45a1a"
   },
   avatars: [
     {
@@ -49267,60 +49262,36 @@ var pool_default = {
       },
       frames: [
         [
-          "...AAAAA....",
-          "..AAAAAAAA..",
-          "..BBBBBBBBB.",
-          "..CCCCCCCC..",
-          "..CCDCCDCC..",
-          ".ECCCCCCCCE.",
-          ".FCCCEECCCF.",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".AAAA.",
+          ".BBBBB",
+          "CDCCDC",
+          "ECCCCE",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "...AAAAA....",
-          "..AAAAAAAA..",
-          "..BBBBBBBBB.",
-          "..CCCCCCCC..",
-          "..CCCCCCCC..",
-          ".ECCCCCCCCE.",
-          ".FCCCEECCCF.",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".AAAA.",
+          ".BBBBB",
+          "CCCCCC",
+          "ECCCCE",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "....AAAAA...",
-          "..AAAAAAAA..",
-          "..BBBBBBBBB.",
-          "..CCCCCCCC..",
-          "..CCDCCDCC..",
-          ".ECCCCCCCCE.",
-          ".FCCCEECCCF.",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..AAAA",
+          ".BBBBB",
+          "CDCCDC",
+          "ECCCCE",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "....AAAAA...",
-          "...AAAAAAAA.",
-          "...BBBBBBBBB",
-          "...CCCCCCCC.",
-          "...CCDCCDCC.",
-          "..ECCCCCCCCE",
-          "..FCCCEECCCF",
-          "....CCCCCC..",
-          ".....CCCE...",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "AAAA..",
+          "BBBBB.",
+          "CDCCDC",
+          "ECCCCE",
+          "FGGGGF",
+          "FFGGFF"
         ]
       ]
     },
@@ -49336,60 +49307,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "..JJJJJJJK..",
-          ".JJJJJJJJJJ.",
-          ".JJLLLLLLJJ.",
-          ".JJLDLLDLJJ.",
-          ".JJLLLLLLJJ.",
-          ".JKLMLLMLKJ.",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".HHHH.",
+          ".HHHH.",
+          "HDIIDH",
+          "IIJJII",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "............",
-          "..JJJJJJJK..",
-          ".JJJJJJJJJJ.",
-          ".JJLLLLLLJJ.",
-          ".JJLLLLLLJJ.",
-          ".JJLLLLLLJJ.",
-          ".JKLMLLMLKJ.",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".HHHH.",
+          ".HHHH.",
+          "HIIIIH",
+          "IIJJII",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "............",
-          "...JJJJJJJK.",
-          ".JJJJJJJJJJ.",
-          ".JJLLLLLLJJ.",
-          ".JJLDLLDLJJ.",
-          ".JJLLLLLLJJ.",
-          ".JKLMLLMLKJ.",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..HHHH",
+          ".HHHH.",
+          "HDIIDH",
+          "IIJJII",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "............",
-          "...JJJJJJJK.",
-          "..JJJJJJJJJJ",
-          "..JJLLLLLLJJ",
-          "..JJLDLLDLJJ",
-          "..JJLLLLLLJJ",
-          "..JKLMLLMLKJ",
-          "....LLMMLL..",
-          ".....LLLM...",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..HHHH",
+          "..HHHH",
+          "HDIIDH",
+          "IIJJII",
+          "KLMMLK",
+          "KLMMLK"
         ]
       ]
     },
@@ -49405,60 +49352,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "..QQQQQQQR..",
-          "..QQQQQQQR..",
-          ".QQCCCCCCQQ.",
-          ".QQCDCCDCQQ.",
-          ".QQCCCCCCQQ.",
-          ".QQQCEECQQQ.",
-          ".QQQQQQQQQQ.",
-          ".QQ.CCCE.QQ.",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          ".NNNN.",
+          ".NNNN.",
+          "NDCCDN",
+          "CNNNNC",
+          "NOPPON",
+          "NQPPQN"
         ],
         [
-          "............",
-          "..QQQQQQQR..",
-          "..QQQQQQQR..",
-          ".QQCCCCCCQQ.",
-          ".QQCCCCCCQQ.",
-          ".QQCCCCCCQQ.",
-          ".QQQCEECQQQ.",
-          ".QQQQQQQQQQ.",
-          ".QQ.CCCE.QQ.",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          ".NNNN.",
+          ".NNNN.",
+          "NCCCCN",
+          "CNNNNC",
+          "NOPPON",
+          "NQPPQN"
         ],
         [
-          "............",
-          "...QQQQQQQR.",
-          "..QQQQQQQR..",
-          ".QQCCCCCCQQ.",
-          ".QQCDCCDCQQ.",
-          ".QQCCCCCCQQ.",
-          ".QQQCEECQQQ.",
-          ".QQQQQQQQQQ.",
-          ".QQ.CCCE.QQ.",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          "..NNNN",
+          ".NNNN.",
+          "NDCCDN",
+          "CNNNNC",
+          "NOPPON",
+          "NQPPQN"
         ],
         [
-          "............",
-          "...QQQQQQQR.",
-          "...QQQQQQQR.",
-          "..QQCCCCCCQQ",
-          "..QQCDCCDCQQ",
-          "..QQCCCCCCQQ",
-          "..QQQCEECQQQ",
-          "..QQQQQQQQQQ",
-          "..QQ.CCCE.QQ",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          "..NNNN",
+          "..NNNN",
+          "NDCCDN",
+          "CNNNNC",
+          "NOPPON",
+          "NQPPQN"
         ]
       ]
     },
@@ -49474,60 +49397,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "..WWWWWWWX..",
-          ".WWWWWWWWWW.",
-          ".WWLLLLLLWY.",
-          ".WWLDLLDLWZ.",
-          ".WWLLLLLLWW.",
-          ".WWWLMMLWWW.",
-          "...WWWWWW...",
-          "....LLLM....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".RRRR.",
+          ".RRRR.",
+          "RDIIDS",
+          "IRRRRI",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "............",
-          "..WWWWWWWX..",
-          ".WWWWWWWWWW.",
-          ".WWLLLLLLWY.",
-          ".WWLLLLLLWZ.",
-          ".WWLLLLLLWW.",
-          ".WWWLMMLWWW.",
-          "...WWWWWW...",
-          "....LLLM....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".RRRR.",
+          ".RRRR.",
+          "RIIIIS",
+          "IRRRRI",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "............",
-          "...WWWWWWWX.",
-          ".WWWWWWWWWW.",
-          ".WWLLLLLLWY.",
-          ".WWLDLLDLWZ.",
-          ".WWLLLLLLWW.",
-          ".WWWLMMLWWW.",
-          "...WWWWWW...",
-          "....LLLM....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..RRRR",
+          ".RRRR.",
+          "RDIIDS",
+          "IRRRRI",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "............",
-          "...WWWWWWWX.",
-          "..WWWWWWWWWW",
-          "..WWLLLLLLWY",
-          "..WWLDLLDLWZ",
-          "..WWLLLLLLWW",
-          "..WWWLMMLWWW",
-          "....WWWWWW..",
-          ".....LLLM...",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..RRRR",
+          "..RRRR",
+          "RDIIDS",
+          "IRRRRI",
+          "KLMMLK",
+          "KLMMLK"
         ]
       ]
     },
@@ -49543,60 +49442,36 @@ var pool_default = {
       },
       frames: [
         [
-          "..a..a.a....",
-          "..aaaaaaab..",
-          "..aaaaaaab..",
-          "..bLLLLLLbY.",
-          "..LLDLLDLLZ.",
-          ".MLLLLLLLLM.",
-          "..LLMLLMLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          ".T.T..",
+          ".TTTT.",
+          "IDIIDS",
+          "IIJJII",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "..a..a.a....",
-          "..aaaaaaab..",
-          "..aaaaaaab..",
-          "..bLLLLLLbY.",
-          "..LLLLLLLLZ.",
-          ".MLLLLLLLLM.",
-          "..LLMLLMLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          ".T.T..",
+          ".TTTT.",
+          "IIIIIS",
+          "IIJJII",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "...a..a.a...",
-          "..aaaaaaab..",
-          "..aaaaaaab..",
-          "..bLLLLLLbY.",
-          "..LLDLLDLLZ.",
-          ".MLLLLLLLLM.",
-          "..LLMLLMLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          "..T.T.",
+          ".TTTT.",
+          "IDIIDS",
+          "IIJJII",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "...a..a.a...",
-          "...aaaaaaab.",
-          "...aaaaaaab.",
-          "...bLLLLLLbY",
-          "...LLDLLDLLZ",
-          "..MLLLLLLLLM",
-          "...LLMLLMLL.",
-          "....LLMMLL..",
-          ".....LLLM...",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          "..T.T.",
+          "..TTTT",
+          "IDIIDS",
+          "IIJJII",
+          "QOPPOQ",
+          "UQPPQU"
         ]
       ]
     },
@@ -49612,60 +49487,36 @@ var pool_default = {
       },
       frames: [
         [
-          "cdQ..Q.Q....",
-          "..QQQQQQQR..",
-          "..QQQQQQQR..",
-          "..RLLLLLLR..",
-          "..LLDLLDLL..",
-          ".MLLLLLLLLM.",
-          "..LLMLLMLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".N.NV.",
+          ".NNNN.",
+          "IDIIDI",
+          "IIJJII",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "cdQ..Q.Q....",
-          "..QQQQQQQR..",
-          "..QQQQQQQR..",
-          "..RLLLLLLR..",
-          "..LLLLLLLL..",
-          ".MLLLLLLLLM.",
-          "..LLMLLMLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".N.NV.",
+          ".NNNN.",
+          "IIIIII",
+          "IIJJII",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "ccdQ..Q.Q...",
-          "..QQQQQQQR..",
-          "..QQQQQQQR..",
-          "..RLLLLLLR..",
-          "..LLDLLDLL..",
-          ".MLLLLLLLLM.",
-          "..LLMLLMLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..N.NV",
+          ".NNNN.",
+          "IDIIDI",
+          "IIJJII",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          ".cdQ..Q.Q...",
-          "...QQQQQQQR.",
-          "...QQQQQQQR.",
-          "...RLLLLLLR.",
-          "...LLDLLDLL.",
-          "..MLLLLLLLLM",
-          "...LLMLLMLL.",
-          "....LLMMLL..",
-          ".....LLLM...",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..N.NV",
+          "..NNNN",
+          "IDIIDI",
+          "IIJJII",
+          "KLMMLK",
+          "KLMMLK"
         ]
       ]
     },
@@ -49681,60 +49532,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          ".ccdCCCC....",
-          "...CCCCCC...",
-          "..CCCCCCCC..",
-          "..CCDCCDCC..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "......",
+          ".CCCCV",
+          "CDCCDC",
+          "CCCCCC",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "............",
-          ".ccdCCCC....",
-          "...CCCCCC...",
-          "..CCCCCCCC..",
-          "..CCCCCCCC..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "......",
+          ".CCCCV",
+          "CCCCCC",
+          "CCCCCC",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "............",
-          "..ccdCCCC...",
-          "...CCCCCC...",
-          "..CCCCCCCC..",
-          "..CCDCCDCC..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "......",
+          "CCCCV.",
+          "CDCCDC",
+          "CCCCCC",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "............",
-          "..ccdCCCC...",
-          "....CCCCCC..",
-          "...CCCCCCCC.",
-          "...CCDCCDCC.",
-          "..ECCCCCCCCE",
-          "...CCCEECCC.",
-          "....CCCCCC..",
-          ".....CCCE...",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "......",
+          "CCCCV.",
+          "CDCCDC",
+          "CCCCCC",
+          "FGGGGF",
+          "FFGGFF"
         ]
       ]
     },
@@ -49750,60 +49577,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "ccdeeeeeef..",
-          "..eeeeeeeef.",
-          "..eeeggggf..",
-          "..fgDggDgf..",
-          ".hggggggggh.",
-          "..ggeeeegg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          ".WWWWV",
+          ".WWWX.",
+          "YDXXDX",
+          "XXWWXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "............",
-          "ccdeeeeeef..",
-          "..eeeeeeeef.",
-          "..eeeggggf..",
-          "..fggggggf..",
-          ".hggggggggh.",
-          "..ggeeeegg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          ".WWWWV",
+          ".WWWX.",
+          "YXXXXX",
+          "XXWWXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "............",
-          ".ccdeeeeeef.",
-          "..eeeeeeeef.",
-          "..eeeggggf..",
-          "..fgDggDgf..",
-          ".hggggggggh.",
-          "..ggeeeegg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "WWWWV.",
+          ".WWWX.",
+          "YDXXDX",
+          "XXWWXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "............",
-          ".ccdeeeeeef.",
-          "...eeeeeeeef",
-          "...eeeggggf.",
-          "...fgDggDgf.",
-          "..hggggggggh",
-          "...ggeeeegg.",
-          "....gghhgg..",
-          ".....gggh...",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "WWWWV.",
+          "WWWX..",
+          "YDXXDX",
+          "XXWWXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ]
       ]
     },
@@ -49819,60 +49622,36 @@ var pool_default = {
       },
       frames: [
         [
-          "...k.kk.....",
-          "..kkkkkkkk..",
-          ".kkkkkkkkkk.",
-          ".kkCCCCCCkk.",
-          ".kCCDCCDCCk.",
-          ".ECCCCCCCCE.",
-          ".FkkCEECkkF.",
-          "...kkkkkk...",
-          "....CCCE....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          ".b.bb.",
+          ".bbbb.",
+          "bDCCDb",
+          "EbbbbE",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "...k.kk.....",
-          "..kkkkkkkk..",
-          ".kkkkkkkkkk.",
-          ".kkCCCCCCkk.",
-          ".kCCCCCCCCk.",
-          ".ECCCCCCCCE.",
-          ".FkkCEECkkF.",
-          "...kkkkkk...",
-          "....CCCE....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          ".b.bb.",
+          ".bbbb.",
+          "bCCCCb",
+          "EbbbbE",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "....k.kk....",
-          "..kkkkkkkk..",
-          ".kkkkkkkkkk.",
-          ".kkCCCCCCkk.",
-          ".kCCDCCDCCk.",
-          ".ECCCCCCCCE.",
-          ".FkkCEECkkF.",
-          "...kkkkkk...",
-          "....CCCE....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          "..b.bb",
+          ".bbbb.",
+          "bDCCDb",
+          "EbbbbE",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "....k.kk....",
-          "...kkkkkkkk.",
-          "..kkkkkkkkkk",
-          "..kkCCCCCCkk",
-          "..kCCDCCDCCk",
-          "..ECCCCCCCCE",
-          "..FkkCEECkkF",
-          "....kkkkkk..",
-          ".....CCCE...",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          "..b.bb",
+          "..bbbb",
+          "bDCCDb",
+          "EbbbbE",
+          "QOPPOQ",
+          "UQPPQU"
         ]
       ]
     },
@@ -49888,60 +49667,36 @@ var pool_default = {
       },
       frames: [
         [
-          ".ccdllll....",
-          "..llllllll..",
-          "..mmmmmmmm..",
-          "..CCCCCCCC..",
-          "..CDCCCCDC..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".ccccV",
+          ".dddd.",
+          "CDCCDC",
+          "CeeeeC",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          ".ccdllll....",
-          "..llllllll..",
-          "..mmmmmmmm..",
-          "..CCCCCCCC..",
-          "..CCCCCCCC..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".ccccV",
+          ".dddd.",
+          "CCCCCC",
+          "CeeeeC",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "..ccdllll...",
-          "..llllllll..",
-          "..mmmmmmmm..",
-          "..CCCCCCCC..",
-          "..CDCCCCDC..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "ccccV.",
+          ".dddd.",
+          "CDCCDC",
+          "CeeeeC",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "..ccdllll...",
-          "...llllllll.",
-          "...mmmmmmmm.",
-          "...CCCCCCCC.",
-          "...CDCCCCDC.",
-          "..ECCCCCCCCE",
-          "...CCCEECCC.",
-          "....CCCCCC..",
-          ".....CCCE...",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "ccccV.",
+          "dddd..",
+          "CDCCDC",
+          "CeeeeC",
+          "KLMMLK",
+          "KLMMLK"
         ]
       ]
     },
@@ -49957,60 +49712,36 @@ var pool_default = {
       },
       frames: [
         [
-          ".....aa.....",
-          "..aaaaaaab..",
-          "..aaaaaaab..",
-          "..bggggggbY.",
-          "..ggDggDggZ.",
-          ".hggggggggh.",
-          "..gghgghgg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..TT..",
+          ".fTTf.",
+          "XDXXDS",
+          "XXggXX",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          ".....aa.....",
-          "..aaaaaaab..",
-          "..aaaaaaab..",
-          "..bggggggbY.",
-          "..ggggggggZ.",
-          ".hggggggggh.",
-          "..gghgghgg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..TT..",
+          ".fTTf.",
+          "XXXXXS",
+          "XXggXX",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "......aa....",
-          "..aaaaaaab..",
-          "..aaaaaaab..",
-          "..bggggggbY.",
-          "..ggDggDggZ.",
-          ".hggggggggh.",
-          "..gghgghgg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "...TT.",
+          ".fTTf.",
+          "XDXXDS",
+          "XXggXX",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "......aa....",
-          "...aaaaaaab.",
-          "...aaaaaaab.",
-          "...bggggggbY",
-          "...ggDggDggZ",
-          "..hggggggggh",
-          "...gghgghgg.",
-          "....gghhgg..",
-          ".....gggh...",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "...TT.",
+          "..fTTf",
+          "XDXXDS",
+          "XXggXX",
+          "FGGGGF",
+          "FFGGFF"
         ]
       ]
     },
@@ -50026,60 +49757,36 @@ var pool_default = {
       },
       frames: [
         [
-          "....nnnn....",
-          "...nnnnnn...",
-          ".oooooooooo.",
-          "..gggggggg..",
-          "..ggDggDgg..",
-          ".hggggggggh.",
-          ".FggppppggF.",
-          "...gghhgg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "..hh..",
+          ".iiii.",
+          "iDXXDi",
+          "EXjjXE",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "....nnnn....",
-          "...nnnnnn...",
-          ".oooooooooo.",
-          "..gggggggg..",
-          "..gggggggg..",
-          ".hggggggggh.",
-          ".FggppppggF.",
-          "...gghhgg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "..hh..",
+          ".iiii.",
+          "iXXXXi",
+          "EXjjXE",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          ".....nnnn...",
-          "...nnnnnn...",
-          ".oooooooooo.",
-          "..gggggggg..",
-          "..ggDggDgg..",
-          ".hggggggggh.",
-          ".FggppppggF.",
-          "...gghhgg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "...hh.",
+          ".iiii.",
+          "iDXXDi",
+          "EXjjXE",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          ".....nnnn...",
-          "....nnnnnn..",
-          "..oooooooooo",
-          "...gggggggg.",
-          "...ggDggDgg.",
-          "..hggggggggh",
-          "..FggppppggF",
-          "....gghhgg..",
-          ".....gggh...",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "...hh.",
+          "..iiii",
+          "iDXXDi",
+          "EXjjXE",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ]
       ]
     },
@@ -50095,60 +49802,36 @@ var pool_default = {
       },
       frames: [
         [
-          "...qqqqq....",
-          "..qqqqqqqq..",
-          "..rrrrrrrrr.",
-          "..CCCCCCCC..",
-          "..CCDCCDCC..",
-          ".ECCCCCCCCE.",
-          ".FssCEECssF.",
-          "...ssssss...",
-          "....CCCE....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".kkkk.",
+          ".lllll",
+          "CDCCDC",
+          "EmmmmE",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "...qqqqq....",
-          "..qqqqqqqq..",
-          "..rrrrrrrrr.",
-          "..CCCCCCCC..",
-          "..CCCCCCCC..",
-          ".ECCCCCCCCE.",
-          ".FssCEECssF.",
-          "...ssssss...",
-          "....CCCE....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".kkkk.",
+          ".lllll",
+          "CCCCCC",
+          "EmmmmE",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "....qqqqq...",
-          "..qqqqqqqq..",
-          "..rrrrrrrrr.",
-          "..CCCCCCCC..",
-          "..CCDCCDCC..",
-          ".ECCCCCCCCE.",
-          ".FssCEECssF.",
-          "...ssssss...",
-          "....CCCE....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..kkkk",
+          ".lllll",
+          "CDCCDC",
+          "EmmmmE",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "....qqqqq...",
-          "...qqqqqqqq.",
-          "...rrrrrrrrr",
-          "...CCCCCCCC.",
-          "...CCDCCDCC.",
-          "..ECCCCCCCCE",
-          "..FssCEECssF",
-          "....ssssss..",
-          ".....CCCE...",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "kkkk..",
+          "lllll.",
+          "CDCCDC",
+          "EmmmmE",
+          "FGGGGF",
+          "FFGGFF"
         ]
       ]
     },
@@ -50164,60 +49847,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "..eeeeeeef..",
-          "..eeeeeeef..",
-          ".eeCCCCCCeY.",
-          ".eeCDCCDCeZ.",
-          ".eeCCCCCCee.",
-          ".efCECCECfe.",
-          ".eeCCEECCee.",
-          ".ee.CCCE.ee.",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".WWWW.",
+          ".WWWW.",
+          "WDCCDS",
+          "CCeeCC",
+          "WLMMLW",
+          "WLMMLW"
         ],
         [
-          "............",
-          "..eeeeeeef..",
-          "..eeeeeeef..",
-          ".eeCCCCCCeY.",
-          ".eeCCCCCCeZ.",
-          ".eeCCCCCCee.",
-          ".efCECCECfe.",
-          ".eeCCEECCee.",
-          ".ee.CCCE.ee.",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".WWWW.",
+          ".WWWW.",
+          "WCCCCS",
+          "CCeeCC",
+          "WLMMLW",
+          "WLMMLW"
         ],
         [
-          "............",
-          "...eeeeeeef.",
-          "..eeeeeeef..",
-          ".eeCCCCCCeY.",
-          ".eeCDCCDCeZ.",
-          ".eeCCCCCCee.",
-          ".efCECCECfe.",
-          ".eeCCEECCee.",
-          ".ee.CCCE.ee.",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..WWWW",
+          ".WWWW.",
+          "WDCCDS",
+          "CCeeCC",
+          "WLMMLW",
+          "WLMMLW"
         ],
         [
-          "............",
-          "...eeeeeeef.",
-          "...eeeeeeef.",
-          "..eeCCCCCCeY",
-          "..eeCDCCDCeZ",
-          "..eeCCCCCCee",
-          "..efCECCECfe",
-          "..eeCCEECCee",
-          "..ee.CCCE.ee",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..WWWW",
+          "..WWWW",
+          "WDCCDS",
+          "CCeeCC",
+          "WLMMLW",
+          "WLMMLW"
         ]
       ]
     },
@@ -50233,60 +49892,36 @@ var pool_default = {
       },
       frames: [
         [
-          "....AAAA....",
-          "..AAAAAAAA..",
-          "..BBBBBBBB..",
-          "..gggggggg..",
-          "..gDggggDg..",
-          ".hggggggggh.",
-          ".FggghhgggF.",
-          "...gggggg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          ".AAAA.",
+          ".BBBB.",
+          "XDXXDX",
+          "EggggE",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "....AAAA....",
-          "..AAAAAAAA..",
-          "..BBBBBBBB..",
-          "..gggggggg..",
-          "..gggggggg..",
-          ".hggggggggh.",
-          ".FggghhgggF.",
-          "...gggggg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          ".AAAA.",
+          ".BBBB.",
+          "XXXXXX",
+          "EggggE",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          ".....AAAA...",
-          "..AAAAAAAA..",
-          "..BBBBBBBB..",
-          "..gggggggg..",
-          "..gDggggDg..",
-          ".hggggggggh.",
-          ".FggghhgggF.",
-          "...gggggg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "..AAAA",
+          ".BBBB.",
+          "XDXXDX",
+          "EggggE",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          ".....AAAA...",
-          "...AAAAAAAA.",
-          "...BBBBBBBB.",
-          "...gggggggg.",
-          "...gDggggDg.",
-          "..hggggggggh",
-          "..FggghhgggF",
-          "....gggggg..",
-          ".....gggh...",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "..AAAA",
+          "..BBBB",
+          "XDXXDX",
+          "EggggE",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ]
       ]
     },
@@ -50302,60 +49937,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "....LLLL....",
-          "...LLLLLL...",
-          "..LLLLLLLL..",
-          "..LLDLLDLL..",
-          ".MLLLLLLLLM.",
-          ".FLLLMMLLLF.",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          "......",
+          ".IIII.",
+          "IDIIDI",
+          "EIIIIE",
+          "noOOon",
+          "nnOOnn"
         ],
         [
-          "............",
-          "....LLLL....",
-          "...LLLLLL...",
-          "..LLLLLLLL..",
-          "..LLLLLLLL..",
-          ".MLLLLLLLLM.",
-          ".FLLLMMLLLF.",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          "......",
+          ".IIII.",
+          "IIIIII",
+          "EIIIIE",
+          "noOOon",
+          "nnOOnn"
         ],
         [
-          "............",
-          ".....LLLL...",
-          "...LLLLLL...",
-          "..LLLLLLLL..",
-          "..LLDLLDLL..",
-          ".MLLLLLLLLM.",
-          ".FLLLMMLLLF.",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          "......",
+          "..IIII",
+          "IDIIDI",
+          "EIIIIE",
+          "noOOon",
+          "nnOOnn"
         ],
         [
-          "............",
-          ".....LLLL...",
-          "....LLLLLL..",
-          "...LLLLLLLL.",
-          "...LLDLLDLL.",
-          "..MLLLLLLLLM",
-          "..FLLLMMLLLF",
-          "....LLLLLL..",
-          ".....LLLM...",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          "......",
+          "..IIII",
+          "IDIIDI",
+          "EIIIIE",
+          "noOOon",
+          "nnOOnn"
         ]
       ]
     },
@@ -50371,60 +49982,36 @@ var pool_default = {
       },
       frames: [
         [
-          "....llll....",
-          "...llllll...",
-          ".mmmmmmmmmm.",
-          "..LLLLLLLL..",
-          "..LLDLLDLL..",
-          ".MLLLLLLLLM.",
-          "..LLLMMLLL..",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "..cc..",
+          ".dddd.",
+          "dDIIDd",
+          "IIIIII",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "....llll....",
-          "...llllll...",
-          ".mmmmmmmmmm.",
-          "..LLLLLLLL..",
-          "..LLLLLLLL..",
-          ".MLLLLLLLLM.",
-          "..LLLMMLLL..",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "..cc..",
+          ".dddd.",
+          "dIIIId",
+          "IIIIII",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          ".....llll...",
-          "...llllll...",
-          ".mmmmmmmmmm.",
-          "..LLLLLLLL..",
-          "..LLDLLDLL..",
-          ".MLLLLLLLLM.",
-          "..LLLMMLLL..",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "...cc.",
+          ".dddd.",
+          "dDIIDd",
+          "IIIIII",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          ".....llll...",
-          "....llllll..",
-          "..mmmmmmmmmm",
-          "...LLLLLLLL.",
-          "...LLDLLDLL.",
-          "..MLLLLLLLLM",
-          "...LLLMMLLL.",
-          "....LLLLLL..",
-          ".....LLLM...",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "...cc.",
+          "..dddd",
+          "dDIIDd",
+          "IIIIII",
+          "pqrrqp",
+          "pqrrqp"
         ]
       ]
     },
@@ -50440,60 +50027,36 @@ var pool_default = {
       },
       frames: [
         [
-          "ccdJ........",
-          "..JJJJJJK...",
-          "..JJJJJJJK..",
-          "..KggggggK..",
-          "..KgDggDgK..",
-          ".hggggggggh.",
-          "..JJghhgJJ..",
-          "...JJJJJJ...",
-          "....gggh....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..HV..",
+          ".sHHs.",
+          "XDXXDX",
+          "XHHHHX",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "ccdJ........",
-          "..JJJJJJK...",
-          "..JJJJJJJK..",
-          "..KggggggK..",
-          "..KggggggK..",
-          ".hggggggggh.",
-          "..JJghhgJJ..",
-          "...JJJJJJ...",
-          "....gggh....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..HV..",
+          ".sHHs.",
+          "XXXXXX",
+          "XHHHHX",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          ".ccdJ.......",
-          "..JJJJJJK...",
-          "..JJJJJJJK..",
-          "..KggggggK..",
-          "..KgDggDgK..",
-          ".hggggggggh.",
-          "..JJghhgJJ..",
-          "...JJJJJJ...",
-          "....gggh....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "...HV.",
+          ".sHHs.",
+          "XDXXDX",
+          "XHHHHX",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          ".ccdJ.......",
-          "...JJJJJJK..",
-          "...JJJJJJJK.",
-          "...KggggggK.",
-          "...KgDggDgK.",
-          "..hggggggggh",
-          "...JJghhgJJ.",
-          "....JJJJJJ..",
-          ".....gggh...",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "...HV.",
+          "..sHHs",
+          "XDXXDX",
+          "XHHHHX",
+          "FGGGGF",
+          "FFGGFF"
         ]
       ]
     },
@@ -50509,60 +50072,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "cdsssssssy..",
-          ".ssssssssss.",
-          ".ssCCCCCCss.",
-          ".ssCDCCDCss.",
-          ".ssCCCCCCss.",
-          ".syCECCECys.",
-          "...CCEECC...",
-          "....CCCE....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".mmmmV",
+          ".mmmm.",
+          "mDCCDm",
+          "CCeeCC",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "............",
-          "cdsssssssy..",
-          ".ssssssssss.",
-          ".ssCCCCCCss.",
-          ".ssCCCCCCss.",
-          ".ssCCCCCCss.",
-          ".syCECCECys.",
-          "...CCEECC...",
-          "....CCCE....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".mmmmV",
+          ".mmmm.",
+          "mCCCCm",
+          "CCeeCC",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "............",
-          "ccdsssssssy.",
-          ".ssssssssss.",
-          ".ssCCCCCCss.",
-          ".ssCDCCDCss.",
-          ".ssCCCCCCss.",
-          ".syCECCECys.",
-          "...CCEECC...",
-          "....CCCE....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "mmmmV.",
+          ".mmmm.",
+          "mDCCDm",
+          "CCeeCC",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "............",
-          ".cdsssssssy.",
-          "..ssssssssss",
-          "..ssCCCCCCss",
-          "..ssCDCCDCss",
-          "..ssCCCCCCss",
-          "..syCECCECys",
-          "....CCEECC..",
-          ".....CCCE...",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "mmmmV.",
+          "mmmm..",
+          "mDCCDm",
+          "CCeeCC",
+          "KLMMLK",
+          "KLMMLK"
         ]
       ]
     },
@@ -50578,60 +50117,36 @@ var pool_default = {
       },
       frames: [
         [
-          "....llll....",
-          "..llllllll..",
-          "..mmmmmmmm..",
-          "..LLLLLLLL..",
-          "..LDLLLLDL..",
-          ".MLLLLLLLLM.",
-          "..LLLMMLLL..",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          ".cccc.",
+          ".dddd.",
+          "IDIIDI",
+          "IJJJJI",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "....llll....",
-          "..llllllll..",
-          "..mmmmmmmm..",
-          "..LLLLLLLL..",
-          "..LLLLLLLL..",
-          ".MLLLLLLLLM.",
-          "..LLLMMLLL..",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          ".cccc.",
+          ".dddd.",
+          "IIIIII",
+          "IJJJJI",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          ".....llll...",
-          "..llllllll..",
-          "..mmmmmmmm..",
-          "..LLLLLLLL..",
-          "..LDLLLLDL..",
-          ".MLLLLLLLLM.",
-          "..LLLMMLLL..",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          "..cccc",
+          ".dddd.",
+          "IDIIDI",
+          "IJJJJI",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          ".....llll...",
-          "...llllllll.",
-          "...mmmmmmmm.",
-          "...LLLLLLLL.",
-          "...LDLLLLDL.",
-          "..MLLLLLLLLM",
-          "...LLLMMLLL.",
-          "....LLLLLL..",
-          ".....LLLM...",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          "..cccc",
+          "..dddd",
+          "IDIIDI",
+          "IJJJJI",
+          "QOPPOQ",
+          "UQPPQU"
         ]
       ]
     },
@@ -50647,60 +50162,36 @@ var pool_default = {
       },
       frames: [
         [
-          "..ccdee.....",
-          "..eeeeeeef..",
-          "..eeeeeeef..",
-          "..fggggggf..",
-          "..gDggggDg..",
-          ".hggggggggh.",
-          "..ggghhggg..",
-          "...gggggg...",
-          "....gggh....",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          "..WWV.",
+          ".YWWY.",
+          "XDXXDX",
+          "XggggX",
+          "noOOon",
+          "nnOOnn"
         ],
         [
-          "..ccdee.....",
-          "..eeeeeeef..",
-          "..eeeeeeef..",
-          "..fggggggf..",
-          "..gggggggg..",
-          ".hggggggggh.",
-          "..ggghhggg..",
-          "...gggggg...",
-          "....gggh....",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          "..WWV.",
+          ".YWWY.",
+          "XXXXXX",
+          "XggggX",
+          "noOOon",
+          "nnOOnn"
         ],
         [
-          "...ccdee....",
-          "..eeeeeeef..",
-          "..eeeeeeef..",
-          "..fggggggf..",
-          "..gDggggDg..",
-          ".hggggggggh.",
-          "..ggghhggg..",
-          "...gggggg...",
-          "....gggh....",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          "...WWV",
+          ".YWWY.",
+          "XDXXDX",
+          "XggggX",
+          "noOOon",
+          "nnOOnn"
         ],
         [
-          "...ccdee....",
-          "...eeeeeeef.",
-          "...eeeeeeef.",
-          "...fggggggf.",
-          "...gDggggDg.",
-          "..hggggggggh",
-          "...ggghhggg.",
-          "....gggggg..",
-          ".....gggh...",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          "...WWV",
+          "..YWWY",
+          "XDXXDX",
+          "XggggX",
+          "noOOon",
+          "nnOOnn"
         ]
       ]
     },
@@ -50716,60 +50207,36 @@ var pool_default = {
       },
       frames: [
         [
-          "....nnnn....",
-          "...nnnnnn...",
-          ".oooooooooo.",
-          "..CCCCCCCCY.",
-          "..CDCCCCDCZ.",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..hh..",
+          ".iiii.",
+          "iDCCDS",
+          "CeeeeC",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "....nnnn....",
-          "...nnnnnn...",
-          ".oooooooooo.",
-          "..CCCCCCCCY.",
-          "..CCCCCCCCZ.",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..hh..",
+          ".iiii.",
+          "iCCCCS",
+          "CeeeeC",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          ".....nnnn...",
-          "...nnnnnn...",
-          ".oooooooooo.",
-          "..CCCCCCCCY.",
-          "..CDCCCCDCZ.",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "...hh.",
+          ".iiii.",
+          "iDCCDS",
+          "CeeeeC",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          ".....nnnn...",
-          "....nnnnnn..",
-          "..oooooooooo",
-          "...CCCCCCCCY",
-          "...CDCCCCDCZ",
-          "..ECCCCCCCCE",
-          "...CCCEECCC.",
-          "....CCCCCC..",
-          ".....CCCE...",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "...hh.",
+          "..iiii",
+          "iDCCDS",
+          "CeeeeC",
+          "FGGGGF",
+          "FFGGFF"
         ]
       ]
     },
@@ -50785,60 +50252,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "..pppppppz..",
-          "..pppppppz..",
-          ".ppLLLLLLpp.",
-          ".ppLDLLDLpp.",
-          ".ppLLLLLLpp.",
-          ".FzLppppLzF.",
-          ".ppLLMMLLpp.",
-          ".pp.LLLM.pp.",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".jjjj.",
+          ".jjjj.",
+          "jDIIDj",
+          "EIjjIE",
+          "jLMMLj",
+          "jLMMLj"
         ],
         [
-          "............",
-          "..pppppppz..",
-          "..pppppppz..",
-          ".ppLLLLLLpp.",
-          ".ppLLLLLLpp.",
-          ".ppLLLLLLpp.",
-          ".FzLppppLzF.",
-          ".ppLLMMLLpp.",
-          ".pp.LLLM.pp.",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".jjjj.",
+          ".jjjj.",
+          "jIIIIj",
+          "EIjjIE",
+          "jLMMLj",
+          "jLMMLj"
         ],
         [
-          "............",
-          "...pppppppz.",
-          "..pppppppz..",
-          ".ppLLLLLLpp.",
-          ".ppLDLLDLpp.",
-          ".ppLLLLLLpp.",
-          ".FzLppppLzF.",
-          ".ppLLMMLLpp.",
-          ".pp.LLLM.pp.",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..jjjj",
+          ".jjjj.",
+          "jDIIDj",
+          "EIjjIE",
+          "jLMMLj",
+          "jLMMLj"
         ],
         [
-          "............",
-          "...pppppppz.",
-          "...pppppppz.",
-          "..ppLLLLLLpp",
-          "..ppLDLLDLpp",
-          "..ppLLLLLLpp",
-          "..FzLppppLzF",
-          "..ppLLMMLLpp",
-          "..pp.LLLM.pp",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..jjjj",
+          "..jjjj",
+          "jDIIDj",
+          "EIjjIE",
+          "jLMMLj",
+          "jLMMLj"
         ]
       ]
     },
@@ -50854,60 +50297,36 @@ var pool_default = {
       },
       frames: [
         [
-          ".....pp.....",
-          "..pppppppz..",
-          "..pppppppz..",
-          "..zCCCCCCz..",
-          "..CDCCCCDC..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..jj..",
+          ".tjjt.",
+          "CDCCDC",
+          "CeeeeC",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          ".....pp.....",
-          "..pppppppz..",
-          "..pppppppz..",
-          "..zCCCCCCz..",
-          "..CCCCCCCC..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..jj..",
+          ".tjjt.",
+          "CCCCCC",
+          "CeeeeC",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "......pp....",
-          "..pppppppz..",
-          "..pppppppz..",
-          "..zCCCCCCz..",
-          "..CDCCCCDC..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "...jj.",
+          ".tjjt.",
+          "CDCCDC",
+          "CeeeeC",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "......pp....",
-          "...pppppppz.",
-          "...pppppppz.",
-          "...zCCCCCCz.",
-          "...CDCCCCDC.",
-          "..ECCCCCCCCE",
-          "...CCCEECCC.",
-          "....CCCCCC..",
-          ".....CCCE...",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "...jj.",
+          "..tjjt",
+          "CDCCDC",
+          "CeeeeC",
+          "KLMMLK",
+          "KLMMLK"
         ]
       ]
     },
@@ -50923,60 +50342,36 @@ var pool_default = {
       },
       frames: [
         [
-          "....0000....",
-          "..00000000..",
-          "..11111111..",
-          "..LLLLLLLLY.",
-          "..LLDLLDLLZ.",
-          ".MLLLLLLLLM.",
-          "..LLssssLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".uuuu.",
+          ".vvvv.",
+          "IDIIDS",
+          "IImmII",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "....0000....",
-          "..00000000..",
-          "..11111111..",
-          "..LLLLLLLLY.",
-          "..LLLLLLLLZ.",
-          ".MLLLLLLLLM.",
-          "..LLssssLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".uuuu.",
+          ".vvvv.",
+          "IIIIIS",
+          "IImmII",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          ".....0000...",
-          "..00000000..",
-          "..11111111..",
-          "..LLLLLLLLY.",
-          "..LLDLLDLLZ.",
-          ".MLLLLLLLLM.",
-          "..LLssssLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..uuuu",
+          ".vvvv.",
+          "IDIIDS",
+          "IImmII",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          ".....0000...",
-          "...00000000.",
-          "...11111111.",
-          "...LLLLLLLLY",
-          "...LLDLLDLLZ",
-          "..MLLLLLLLLM",
-          "...LLssssLL.",
-          "....LLMMLL..",
-          ".....LLLM...",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..uuuu",
+          "..vvvv",
+          "IDIIDS",
+          "IImmII",
+          "FGGGGF",
+          "FFGGFF"
         ]
       ]
     },
@@ -50992,60 +50387,36 @@ var pool_default = {
       },
       frames: [
         [
-          "...p........",
-          "..ppppppz...",
-          "..pppppppz..",
-          "..zCCCCCCz..",
-          "..zDCCCCDz..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "..j...",
+          ".tjjt.",
+          "CDCCDC",
+          "CeeeeC",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "...p........",
-          "..ppppppz...",
-          "..pppppppz..",
-          "..zCCCCCCz..",
-          "..zCCCCCCz..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "..j...",
+          ".tjjt.",
+          "CCCCCC",
+          "CeeeeC",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "....p.......",
-          "..ppppppz...",
-          "..pppppppz..",
-          "..zCCCCCCz..",
-          "..zDCCCCDz..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "...j..",
+          ".tjjt.",
+          "CDCCDC",
+          "CeeeeC",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "....p.......",
-          "...ppppppz..",
-          "...pppppppz.",
-          "...zCCCCCCz.",
-          "...zDCCCCDz.",
-          "..ECCCCCCCCE",
-          "...CCCEECCC.",
-          "....CCCCCC..",
-          ".....CCCE...",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "...j..",
+          "..tjjt",
+          "CDCCDC",
+          "CeeeeC",
+          "pqrrqp",
+          "pqrrqp"
         ]
       ]
     },
@@ -51061,60 +50432,36 @@ var pool_default = {
       },
       frames: [
         [
-          "...lllll....",
-          "..llllllll..",
-          "..mmmmmmmmm.",
-          "..LLLLLLLLY.",
-          "..LLDLLDLLZ.",
-          ".MLLLLLLLLM.",
-          "..LLaaaaLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          ".cccc.",
+          ".ddddd",
+          "IDIIDS",
+          "IITTII",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "...lllll....",
-          "..llllllll..",
-          "..mmmmmmmmm.",
-          "..LLLLLLLLY.",
-          "..LLLLLLLLZ.",
-          ".MLLLLLLLLM.",
-          "..LLaaaaLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          ".cccc.",
+          ".ddddd",
+          "IIIIIS",
+          "IITTII",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "....lllll...",
-          "..llllllll..",
-          "..mmmmmmmmm.",
-          "..LLLLLLLLY.",
-          "..LLDLLDLLZ.",
-          ".MLLLLLLLLM.",
-          "..LLaaaaLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "..cccc",
+          ".ddddd",
+          "IDIIDS",
+          "IITTII",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "....lllll...",
-          "...llllllll.",
-          "...mmmmmmmmm",
-          "...LLLLLLLLY",
-          "...LLDLLDLLZ",
-          "..MLLLLLLLLM",
-          "...LLaaaaLL.",
-          "....LLMMLL..",
-          ".....LLLM...",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "cccc..",
+          "ddddd.",
+          "IDIIDS",
+          "IITTII",
+          "pqrrqp",
+          "pqrrqp"
         ]
       ]
     },
@@ -51130,60 +50477,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "..pppppppp..",
-          "..ppppppppp.",
-          "..zLLLLLLzp.",
-          "..zLDLLDLLp.",
-          ".MLLLLLLLLp.",
-          "..LLMLLMLLp.",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".jjjj.",
+          ".jjjj.",
+          "IDIIDj",
+          "IIJJII",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "............",
-          "..pppppppp..",
-          "..ppppppppp.",
-          "..zLLLLLLzp.",
-          "..zLLLLLLLp.",
-          ".MLLLLLLLLp.",
-          "..LLMLLMLLp.",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".jjjj.",
+          ".jjjj.",
+          "IIIIIj",
+          "IIJJII",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "............",
-          "...pppppppp.",
-          "..ppppppppp.",
-          "..zLLLLLLzp.",
-          "..zLDLLDLLp.",
-          ".MLLLLLLLLp.",
-          "..LLMLLMLLp.",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..jjjj",
+          ".jjjj.",
+          "IDIIDj",
+          "IIJJII",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "............",
-          "...pppppppp.",
-          "...ppppppppp",
-          "...zLLLLLLzp",
-          "...zLDLLDLLp",
-          "..MLLLLLLLLp",
-          "...LLMLLMLLp",
-          "....LLMMLL..",
-          ".....LLLM...",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..jjjj",
+          "..jjjj",
+          "IDIIDj",
+          "IIJJII",
+          "FGGGGF",
+          "FFGGFF"
         ]
       ]
     },
@@ -51199,60 +50522,36 @@ var pool_default = {
       },
       frames: [
         [
-          "...2........",
-          "..2222223...",
-          "..22222223..",
-          "..3LLLLLL3Y.",
-          "..3LDLLDL3Z.",
-          ".MLLLLLLLLM.",
-          "..LL2222LL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..w...",
+          ".xwwx.",
+          "IDIIDS",
+          "IIwwII",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "...2........",
-          "..2222223...",
-          "..22222223..",
-          "..3LLLLLL3Y.",
-          "..3LLLLLL3Z.",
-          ".MLLLLLLLLM.",
-          "..LL2222LL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..w...",
+          ".xwwx.",
+          "IIIIIS",
+          "IIwwII",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "....2.......",
-          "..2222223...",
-          "..22222223..",
-          "..3LLLLLL3Y.",
-          "..3LDLLDL3Z.",
-          ".MLLLLLLLLM.",
-          "..LL2222LL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "...w..",
+          ".xwwx.",
+          "IDIIDS",
+          "IIwwII",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "....2.......",
-          "...2222223..",
-          "...22222223.",
-          "...3LLLLLL3Y",
-          "...3LDLLDL3Z",
-          "..MLLLLLLLLM",
-          "...LL2222LL.",
-          "....LLMMLL..",
-          ".....LLLM...",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "...w..",
+          "..xwwx",
+          "IDIIDS",
+          "IIwwII",
+          "FGGGGF",
+          "FFGGFF"
         ]
       ]
     },
@@ -51268,60 +50567,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "...kkkkkk4..",
-          "..kkkkkkkk4.",
-          "..kkkgggg4..",
-          "..4gDggDg4..",
-          ".hggggggggh.",
-          ".FggghhgggF.",
-          "...gggggg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          ".bbbb.",
+          ".bbbX.",
+          "yDXXDX",
+          "EXXXXE",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "............",
-          "...kkkkkk4..",
-          "..kkkkkkkk4.",
-          "..kkkgggg4..",
-          "..4gggggg4..",
-          ".hggggggggh.",
-          ".FggghhgggF.",
-          "...gggggg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          ".bbbb.",
+          ".bbbX.",
+          "yXXXXX",
+          "EXXXXE",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "............",
-          "....kkkkkk4.",
-          "..kkkkkkkk4.",
-          "..kkkgggg4..",
-          "..4gDggDg4..",
-          ".hggggggggh.",
-          ".FggghhgggF.",
-          "...gggggg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "..bbbb",
+          ".bbbX.",
+          "yDXXDX",
+          "EXXXXE",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "............",
-          "....kkkkkk4.",
-          "...kkkkkkkk4",
-          "...kkkgggg4.",
-          "...4gDggDg4.",
-          "..hggggggggh",
-          "..FggghhgggF",
-          "....gggggg..",
-          ".....gggh...",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "..bbbb",
+          "..bbbX",
+          "yDXXDX",
+          "EXXXXE",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ]
       ]
     },
@@ -51337,60 +50612,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "....CCCC....",
-          "...CCCCCC...",
-          "..CCCCCCCC..",
-          "..CCDCCDCC..",
-          ".ECCCCCCCCE.",
-          ".FCC2222CCF.",
-          "...CCEECC...",
-          "....CCCE....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "......",
+          ".CCCC.",
+          "CDCCDC",
+          "ECwwCE",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "............",
-          "....CCCC....",
-          "...CCCCCC...",
-          "..CCCCCCCC..",
-          "..CCCCCCCC..",
-          ".ECCCCCCCCE.",
-          ".FCC2222CCF.",
-          "...CCEECC...",
-          "....CCCE....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "......",
+          ".CCCC.",
+          "CCCCCC",
+          "ECwwCE",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "............",
-          ".....CCCC...",
-          "...CCCCCC...",
-          "..CCCCCCCC..",
-          "..CCDCCDCC..",
-          ".ECCCCCCCCE.",
-          ".FCC2222CCF.",
-          "...CCEECC...",
-          "....CCCE....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "......",
+          "..CCCC",
+          "CDCCDC",
+          "ECwwCE",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "............",
-          ".....CCCC...",
-          "....CCCCCC..",
-          "...CCCCCCCC.",
-          "...CCDCCDCC.",
-          "..ECCCCCCCCE",
-          "..FCC2222CCF",
-          "....CCEECC..",
-          ".....CCCE...",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "......",
+          "..CCCC",
+          "CDCCDC",
+          "ECwwCE",
+          "pqrrqp",
+          "pqrrqp"
         ]
       ]
     },
@@ -51406,60 +50657,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "...aaaaaab..",
-          "..aaaaaaaab.",
-          "..aaaCCCCb..",
-          "..bDCCCCDb..",
-          ".ECCCCCCCCE.",
-          ".FCCCEECCCF.",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          ".TTTT.",
+          ".TTTC.",
+          "fDCCDC",
+          "EeeeeE",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "............",
-          "...aaaaaab..",
-          "..aaaaaaaab.",
-          "..aaaCCCCb..",
-          "..bCCCCCCb..",
-          ".ECCCCCCCCE.",
-          ".FCCCEECCCF.",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          ".TTTT.",
+          ".TTTC.",
+          "fCCCCC",
+          "EeeeeE",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "............",
-          "....aaaaaab.",
-          "..aaaaaaaab.",
-          "..aaaCCCCb..",
-          "..bDCCCCDb..",
-          ".ECCCCCCCCE.",
-          ".FCCCEECCCF.",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "..TTTT",
+          ".TTTC.",
+          "fDCCDC",
+          "EeeeeE",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "............",
-          "....aaaaaab.",
-          "...aaaaaaaab",
-          "...aaaCCCCb.",
-          "...bDCCCCDb.",
-          "..ECCCCCCCCE",
-          "..FCCCEECCCF",
-          "....CCCCCC..",
-          ".....CCCE...",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "..TTTT",
+          "..TTTC",
+          "fDCCDC",
+          "EeeeeE",
+          "pqrrqp",
+          "pqrrqp"
         ]
       ]
     },
@@ -51475,60 +50702,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          ".ccdgggg....",
-          "...gggggg...",
-          "..gggggggg..",
-          "..ggDggDgg..",
-          ".hggggggggh.",
-          "..gghgghgg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "......",
+          ".XXXXV",
+          "XDXXDX",
+          "XXggXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "............",
-          ".ccdgggg....",
-          "...gggggg...",
-          "..gggggggg..",
-          "..gggggggg..",
-          ".hggggggggh.",
-          "..gghgghgg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "......",
+          ".XXXXV",
+          "XXXXXX",
+          "XXggXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "............",
-          "..ccdgggg...",
-          "...gggggg...",
-          "..gggggggg..",
-          "..ggDggDgg..",
-          ".hggggggggh.",
-          "..gghgghgg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "......",
+          "XXXXV.",
+          "XDXXDX",
+          "XXggXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "............",
-          "..ccdgggg...",
-          "....gggggg..",
-          "...gggggggg.",
-          "...ggDggDgg.",
-          "..hggggggggh",
-          "...gghgghgg.",
-          "....gghhgg..",
-          ".....gggh...",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "......",
+          "XXXXV.",
+          "XDXXDX",
+          "XXggXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ]
       ]
     },
@@ -51544,60 +50747,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "..kkkkkkkk..",
-          "..kkkkkkkkk.",
-          "..4gggggg4k.",
-          "..4DggggDgk.",
-          ".hggggggggk.",
-          "..ggghhgggk.",
-          "...gggggg...",
-          "....gggh....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".bbbb.",
+          ".bbbb.",
+          "XDXXDb",
+          "XggggX",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "............",
-          "..kkkkkkkk..",
-          "..kkkkkkkkk.",
-          "..4gggggg4k.",
-          "..4gggggggk.",
-          ".hggggggggk.",
-          "..ggghhgggk.",
-          "...gggggg...",
-          "....gggh....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".bbbb.",
+          ".bbbb.",
+          "XXXXXb",
+          "XggggX",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "............",
-          "...kkkkkkkk.",
-          "..kkkkkkkkk.",
-          "..4gggggg4k.",
-          "..4DggggDgk.",
-          ".hggggggggk.",
-          "..ggghhgggk.",
-          "...gggggg...",
-          "....gggh....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..bbbb",
+          ".bbbb.",
+          "XDXXDb",
+          "XggggX",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "............",
-          "...kkkkkkkk.",
-          "...kkkkkkkkk",
-          "...4gggggg4k",
-          "...4DggggDgk",
-          "..hggggggggk",
-          "...ggghhgggk",
-          "....gggggg..",
-          ".....gggh...",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..bbbb",
+          "..bbbb",
+          "XDXXDb",
+          "XggggX",
+          "FGGGGF",
+          "FFGGFF"
         ]
       ]
     },
@@ -51613,60 +50792,36 @@ var pool_default = {
       },
       frames: [
         [
-          "...W........",
-          "..WWWWWWX...",
-          "..WWWWWWWX..",
-          "..XCCCCCCX..",
-          "..XCDCCDCX..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..R...",
+          ".zRRz.",
+          "CDCCDC",
+          "CCCCCC",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "...W........",
-          "..WWWWWWX...",
-          "..WWWWWWWX..",
-          "..XCCCCCCX..",
-          "..XCCCCCCX..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..R...",
+          ".zRRz.",
+          "CCCCCC",
+          "CCCCCC",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "....W.......",
-          "..WWWWWWX...",
-          "..WWWWWWWX..",
-          "..XCCCCCCX..",
-          "..XCDCCDCX..",
-          ".ECCCCCCCCE.",
-          "..CCCEECCC..",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "...R..",
+          ".zRRz.",
+          "CDCCDC",
+          "CCCCCC",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "....W.......",
-          "...WWWWWWX..",
-          "...WWWWWWWX.",
-          "...XCCCCCCX.",
-          "...XCDCCDCX.",
-          "..ECCCCCCCCE",
-          "...CCCEECCC.",
-          "....CCCCCC..",
-          ".....CCCE...",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "...R..",
+          "..zRRz",
+          "CDCCDC",
+          "CCCCCC",
+          "KLMMLK",
+          "KLMMLK"
         ]
       ]
     },
@@ -51682,60 +50837,36 @@ var pool_default = {
       },
       frames: [
         [
-          "...00000....",
-          "..00000000..",
-          "..111111111.",
-          "..ggggggggY.",
-          "..gDggggDgZ.",
-          ".hggggggggh.",
-          "..ggghhggg..",
-          "...gggggg...",
-          "....gggh....",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          ".uuuu.",
+          ".vvvvv",
+          "XDXXDS",
+          "XggggX",
+          "noOOon",
+          "nnOOnn"
         ],
         [
-          "...00000....",
-          "..00000000..",
-          "..111111111.",
-          "..ggggggggY.",
-          "..ggggggggZ.",
-          ".hggggggggh.",
-          "..ggghhggg..",
-          "...gggggg...",
-          "....gggh....",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          ".uuuu.",
+          ".vvvvv",
+          "XXXXXS",
+          "XggggX",
+          "noOOon",
+          "nnOOnn"
         ],
         [
-          "....00000...",
-          "..00000000..",
-          "..111111111.",
-          "..ggggggggY.",
-          "..gDggggDgZ.",
-          ".hggggggggh.",
-          "..ggghhggg..",
-          "...gggggg...",
-          "....gggh....",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          "..uuuu",
+          ".vvvvv",
+          "XDXXDS",
+          "XggggX",
+          "noOOon",
+          "nnOOnn"
         ],
         [
-          "....00000...",
-          "...00000000.",
-          "...111111111",
-          "...ggggggggY",
-          "...gDggggDgZ",
-          "..hggggggggh",
-          "...ggghhggg.",
-          "....gggggg..",
-          ".....gggh...",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          "uuuu..",
+          "vvvvv.",
+          "XDXXDS",
+          "XggggX",
+          "noOOon",
+          "nnOOnn"
         ]
       ]
     },
@@ -51751,60 +50882,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "..pppppppp..",
-          "..ppppppppp.",
-          "..zCCCCCCzY.",
-          "..zDCCCCDCZ.",
-          ".ECCCCCCCCp.",
-          "..CCCEECCCp.",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          ".jjjj.",
+          ".jjjj.",
+          "CDCCDS",
+          "CeeeeC",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "............",
-          "..pppppppp..",
-          "..ppppppppp.",
-          "..zCCCCCCzY.",
-          "..zCCCCCCCZ.",
-          ".ECCCCCCCCp.",
-          "..CCCEECCCp.",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          ".jjjj.",
+          ".jjjj.",
+          "CCCCCS",
+          "CeeeeC",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "............",
-          "...pppppppp.",
-          "..ppppppppp.",
-          "..zCCCCCCzY.",
-          "..zDCCCCDCZ.",
-          ".ECCCCCCCCp.",
-          "..CCCEECCCp.",
-          "...CCCCCC...",
-          "....CCCE....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          "..jjjj",
+          ".jjjj.",
+          "CDCCDS",
+          "CeeeeC",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "............",
-          "...pppppppp.",
-          "...ppppppppp",
-          "...zCCCCCCzY",
-          "...zDCCCCDCZ",
-          "..ECCCCCCCCp",
-          "...CCCEECCCp",
-          "....CCCCCC..",
-          ".....CCCE...",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          "..jjjj",
+          "..jjjj",
+          "CDCCDS",
+          "CeeeeC",
+          "QOPPOQ",
+          "UQPPQU"
         ]
       ]
     },
@@ -51820,60 +50927,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "...WWWWWWX..",
-          "..WWWWWWWWX.",
-          "..WWWLLLLX..",
-          "..XLDLLDLX..",
-          ".MLLLLLLLLM.",
-          ".FLLLMMLLLF.",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".RRRR.",
+          ".RRRI.",
+          "zDIIDI",
+          "EIIIIE",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "............",
-          "...WWWWWWX..",
-          "..WWWWWWWWX.",
-          "..WWWLLLLX..",
-          "..XLLLLLLX..",
-          ".MLLLLLLLLM.",
-          ".FLLLMMLLLF.",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".RRRR.",
+          ".RRRI.",
+          "zIIIII",
+          "EIIIIE",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "............",
-          "....WWWWWWX.",
-          "..WWWWWWWWX.",
-          "..WWWLLLLX..",
-          "..XLDLLDLX..",
-          ".MLLLLLLLLM.",
-          ".FLLLMMLLLF.",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..RRRR",
+          ".RRRI.",
+          "zDIIDI",
+          "EIIIIE",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "............",
-          "....WWWWWWX.",
-          "...WWWWWWWWX",
-          "...WWWLLLLX.",
-          "...XLDLLDLX.",
-          "..MLLLLLLLLM",
-          "..FLLLMMLLLF",
-          "....LLLLLL..",
-          ".....LLLM...",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "..RRRR",
+          "..RRRI",
+          "zDIIDI",
+          "EIIIIE",
+          "FGGGGF",
+          "FFGGFF"
         ]
       ]
     },
@@ -51889,60 +50972,36 @@ var pool_default = {
       },
       frames: [
         [
-          "...e.ee.....",
-          "..eeeeeeee..",
-          ".eeeeeeeeee.",
-          ".eeLLLLLLee.",
-          ".eLDLLLLDLe.",
-          ".MLLLLLLLLM.",
-          ".FLLLMMLLLF.",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          ".W.WW.",
+          ".WWWW.",
+          "WDIIDW",
+          "EJJJJE",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "...e.ee.....",
-          "..eeeeeeee..",
-          ".eeeeeeeeee.",
-          ".eeLLLLLLee.",
-          ".eLLLLLLLLe.",
-          ".MLLLLLLLLM.",
-          ".FLLLMMLLLF.",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          ".W.WW.",
+          ".WWWW.",
+          "WIIIIW",
+          "EJJJJE",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "....e.ee....",
-          "..eeeeeeee..",
-          ".eeeeeeeeee.",
-          ".eeLLLLLLee.",
-          ".eLDLLLLDLe.",
-          ".MLLLLLLLLM.",
-          ".FLLLMMLLLF.",
-          "...LLLLLL...",
-          "....LLLM....",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          "..W.WW",
+          ".WWWW.",
+          "WDIIDW",
+          "EJJJJE",
+          "QOPPOQ",
+          "UQPPQU"
         ],
         [
-          "....e.ee....",
-          "...eeeeeeee.",
-          "..eeeeeeeeee",
-          "..eeLLLLLLee",
-          "..eLDLLLLDLe",
-          "..MLLLLLLLLM",
-          "..FLLLMMLLLF",
-          "....LLLLLL..",
-          ".....LLLM...",
-          ".STTUVVUTTS.",
-          "STTTUUVUTTTS",
-          "STTTTUVUTTTS"
+          "..W.WW",
+          "..WWWW",
+          "WDIIDW",
+          "EJJJJE",
+          "QOPPOQ",
+          "UQPPQU"
         ]
       ]
     },
@@ -51958,60 +51017,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "cdWWWWWWWW..",
-          "..WWWWWWWWW.",
-          "..XggggggXW.",
-          "..XgDggDggW.",
-          ".hggggggggW.",
-          "..gghgghggW.",
-          "...gghhgg...",
-          "....gggh....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".RRRRV",
+          ".RRRR.",
+          "XDXXDR",
+          "XXggXX",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "............",
-          "cdWWWWWWWW..",
-          "..WWWWWWWWW.",
-          "..XggggggXW.",
-          "..XgggggggW.",
-          ".hggggggggW.",
-          "..gghgghggW.",
-          "...gghhgg...",
-          "....gggh....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".RRRRV",
+          ".RRRR.",
+          "XXXXXR",
+          "XXggXX",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "............",
-          "ccdWWWWWWWW.",
-          "..WWWWWWWWW.",
-          "..XggggggXW.",
-          "..XgDggDggW.",
-          ".hggggggggW.",
-          "..gghgghggW.",
-          "...gghhgg...",
-          "....gggh....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "RRRRV.",
+          ".RRRR.",
+          "XDXXDR",
+          "XXggXX",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "............",
-          ".cdWWWWWWWW.",
-          "...WWWWWWWWW",
-          "...XggggggXW",
-          "...XgDggDggW",
-          "..hggggggggW",
-          "...gghgghggW",
-          "....gghhgg..",
-          ".....gggh...",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "RRRRV.",
+          "RRRR..",
+          "XDXXDR",
+          "XXggXX",
+          "KLMMLK",
+          "KLMMLK"
         ]
       ]
     },
@@ -52027,60 +51062,36 @@ var pool_default = {
       },
       frames: [
         [
-          ".....ee.....",
-          "..eeeeeeef..",
-          "..eeeeeeef..",
-          "..fLLLLLLf..",
-          "..LLDLLDLL..",
-          ".MLLLLLLLLM.",
-          "..LLeeeeLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "..WW..",
+          ".YWWY.",
+          "IDIIDI",
+          "IIWWII",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          ".....ee.....",
-          "..eeeeeeef..",
-          "..eeeeeeef..",
-          "..fLLLLLLf..",
-          "..LLLLLLLL..",
-          ".MLLLLLLLLM.",
-          "..LLeeeeLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "..WW..",
+          ".YWWY.",
+          "IIIIII",
+          "IIWWII",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "......ee....",
-          "..eeeeeeef..",
-          "..eeeeeeef..",
-          "..fLLLLLLf..",
-          "..LLDLLDLL..",
-          ".MLLLLLLLLM.",
-          "..LLeeeeLL..",
-          "...LLMMLL...",
-          "....LLLM....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "...WW.",
+          ".YWWY.",
+          "IDIIDI",
+          "IIWWII",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "......ee....",
-          "...eeeeeeef.",
-          "...eeeeeeef.",
-          "...fLLLLLLf.",
-          "...LLDLLDLL.",
-          "..MLLLLLLLLM",
-          "...LLeeeeLL.",
-          "....LLMMLL..",
-          ".....LLLM...",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "...WW.",
+          "..YWWY",
+          "IDIIDI",
+          "IIWWII",
+          "pqrrqp",
+          "pqrrqp"
         ]
       ]
     },
@@ -52096,60 +51107,36 @@ var pool_default = {
       },
       frames: [
         [
-          "...s.ss.....",
-          "..ssssssss..",
-          ".ssssssssss.",
-          ".ssggggggss.",
-          ".sggDggDggs.",
-          ".hggggggggh.",
-          "..gghgghgg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".m.mm.",
+          ".mmmm.",
+          "mDXXDm",
+          "XXggXX",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "...s.ss.....",
-          "..ssssssss..",
-          ".ssssssssss.",
-          ".ssggggggss.",
-          ".sggggggggs.",
-          ".hggggggggh.",
-          "..gghgghgg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          ".m.mm.",
+          ".mmmm.",
+          "mXXXXm",
+          "XXggXX",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "....s.ss....",
-          "..ssssssss..",
-          ".ssssssssss.",
-          ".ssggggggss.",
-          ".sggDggDggs.",
-          ".hggggggggh.",
-          "..gghgghgg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..m.mm",
+          ".mmmm.",
+          "mDXXDm",
+          "XXggXX",
+          "KLMMLK",
+          "KLMMLK"
         ],
         [
-          "....s.ss....",
-          "...ssssssss.",
-          "..ssssssssss",
-          "..ssggggggss",
-          "..sggDggDggs",
-          "..hggggggggh",
-          "...gghgghgg.",
-          "....gghhgg..",
-          ".....gggh...",
-          ".NNOOPPOONN.",
-          "NNOOOOPOOONN",
-          "NNOOOOPOOONN"
+          "..m.mm",
+          "..mmmm",
+          "mDXXDm",
+          "XXggXX",
+          "KLMMLK",
+          "KLMMLK"
         ]
       ]
     },
@@ -52165,60 +51152,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "cdQQQQQQQR..",
-          "..QQQQQQQR..",
-          ".QQggggggQQ.",
-          ".QQgDggDgQQ.",
-          ".QQggggggQQ.",
-          ".QRgQQQQgRQ.",
-          ".QQgghhggQQ.",
-          ".QQ.gggh.QQ.",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          ".NNNNV",
+          ".NNNN.",
+          "NDXXDN",
+          "XXNNXX",
+          "NqrrqN",
+          "NqrrqN"
         ],
         [
-          "............",
-          "cdQQQQQQQR..",
-          "..QQQQQQQR..",
-          ".QQggggggQQ.",
-          ".QQggggggQQ.",
-          ".QQggggggQQ.",
-          ".QRgQQQQgRQ.",
-          ".QQgghhggQQ.",
-          ".QQ.gggh.QQ.",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          ".NNNNV",
+          ".NNNN.",
+          "NXXXXN",
+          "XXNNXX",
+          "NqrrqN",
+          "NqrrqN"
         ],
         [
-          "............",
-          "ccdQQQQQQQR.",
-          "..QQQQQQQR..",
-          ".QQggggggQQ.",
-          ".QQgDggDgQQ.",
-          ".QQggggggQQ.",
-          ".QRgQQQQgRQ.",
-          ".QQgghhggQQ.",
-          ".QQ.gggh.QQ.",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "NNNNV.",
+          ".NNNN.",
+          "NDXXDN",
+          "XXNNXX",
+          "NqrrqN",
+          "NqrrqN"
         ],
         [
-          "............",
-          ".cdQQQQQQQR.",
-          "...QQQQQQQR.",
-          "..QQggggggQQ",
-          "..QQgDggDgQQ",
-          "..QQggggggQQ",
-          "..QRgQQQQgRQ",
-          "..QQgghhggQQ",
-          "..QQ.gggh.QQ",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "NNNNV.",
+          "NNNN..",
+          "NDXXDN",
+          "XXNNXX",
+          "NqrrqN",
+          "NqrrqN"
         ]
       ]
     },
@@ -52234,60 +51197,36 @@ var pool_default = {
       },
       frames: [
         [
-          "ccdJ.JJ.....",
-          "..JJJJJJJJ..",
-          ".JJJJJJJJJJ.",
-          ".JJLLLLLLJJ.",
-          ".JLLDLLDLLJ.",
-          ".MLLLLLLLLM.",
-          "..JJLMMLJJ..",
-          "...JJJJJJ...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".H.HHV",
+          ".HHHH.",
+          "HDIIDH",
+          "IHHHHI",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          "ccdJ.JJ.....",
-          "..JJJJJJJJ..",
-          ".JJJJJJJJJJ.",
-          ".JJLLLLLLJJ.",
-          ".JLLLLLLLLJ.",
-          ".MLLLLLLLLM.",
-          "..JJLMMLJJ..",
-          "...JJJJJJ...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          ".H.HHV",
+          ".HHHH.",
+          "HIIIIH",
+          "IHHHHI",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          ".ccdJ.JJ....",
-          "..JJJJJJJJ..",
-          ".JJJJJJJJJJ.",
-          ".JJLLLLLLJJ.",
-          ".JLLDLLDLLJ.",
-          ".MLLLLLLLLM.",
-          "..JJLMMLJJ..",
-          "...JJJJJJ...",
-          "....LLLM....",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "H.HHV.",
+          ".HHHH.",
+          "HDIIDH",
+          "IHHHHI",
+          "FGGGGF",
+          "FFGGFF"
         ],
         [
-          ".ccdJ.JJ....",
-          "...JJJJJJJJ.",
-          "..JJJJJJJJJJ",
-          "..JJLLLLLLJJ",
-          "..JLLDLLDLLJ",
-          "..MLLLLLLLLM",
-          "...JJLMMLJJ.",
-          "....JJJJJJ..",
-          ".....LLLM...",
-          ".GGHIIIIHGG.",
-          "GGHHHIIHHHGG",
-          "GGHHHHIHHHGG"
+          "H.HHV.",
+          "HHHH..",
+          "HDIIDH",
+          "IHHHHI",
+          "FGGGGF",
+          "FFGGFF"
         ]
       ]
     },
@@ -52303,60 +51242,36 @@ var pool_default = {
       },
       frames: [
         [
-          "............",
-          "..kkkkkkk4..",
-          ".kkkkkkkkkk.",
-          ".kkggggggkY.",
-          ".kkgDggDgkZ.",
-          ".kkggggggkk.",
-          ".k4ghgghg4k.",
-          "...gghhgg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          ".bbbb.",
+          ".bbbb.",
+          "bDXXDS",
+          "XXggXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "............",
-          "..kkkkkkk4..",
-          ".kkkkkkkkkk.",
-          ".kkggggggkY.",
-          ".kkggggggkZ.",
-          ".kkggggggkk.",
-          ".k4ghgghg4k.",
-          "...gghhgg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          ".bbbb.",
+          ".bbbb.",
+          "bXXXXS",
+          "XXggXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "............",
-          "...kkkkkkk4.",
-          ".kkkkkkkkkk.",
-          ".kkggggggkY.",
-          ".kkgDggDgkZ.",
-          ".kkggggggkk.",
-          ".k4ghgghg4k.",
-          "...gghhgg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "..bbbb",
+          ".bbbb.",
+          "bDXXDS",
+          "XXggXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "............",
-          "...kkkkkkk4.",
-          "..kkkkkkkkkk",
-          "..kkggggggkY",
-          "..kkgDggDgkZ",
-          "..kkggggggkk",
-          "..k4ghgghg4k",
-          "....gghhgg..",
-          ".....gggh...",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "..bbbb",
+          "..bbbb",
+          "bDXXDS",
+          "XXggXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ]
       ]
     },
@@ -52372,60 +51287,36 @@ var pool_default = {
       },
       frames: [
         [
-          "..Q..Q.Q....",
-          "..QQQQQQQR..",
-          "..QQQQQQQR..",
-          "..RCCCCCCRY.",
-          "..CCDCCDCCZ.",
-          ".ECCCCCCCCE.",
-          "..CCQQQQCC..",
-          "...CCEECC...",
-          "....CCCE....",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          ".N.N..",
+          ".NNNN.",
+          "CDCCDS",
+          "CCNNCC",
+          "noOOon",
+          "nnOOnn"
         ],
         [
-          "..Q..Q.Q....",
-          "..QQQQQQQR..",
-          "..QQQQQQQR..",
-          "..RCCCCCCRY.",
-          "..CCCCCCCCZ.",
-          ".ECCCCCCCCE.",
-          "..CCQQQQCC..",
-          "...CCEECC...",
-          "....CCCE....",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          ".N.N..",
+          ".NNNN.",
+          "CCCCCS",
+          "CCNNCC",
+          "noOOon",
+          "nnOOnn"
         ],
         [
-          "...Q..Q.Q...",
-          "..QQQQQQQR..",
-          "..QQQQQQQR..",
-          "..RCCCCCCRY.",
-          "..CCDCCDCCZ.",
-          ".ECCCCCCCCE.",
-          "..CCQQQQCC..",
-          "...CCEECC...",
-          "....CCCE....",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          "..N.N.",
+          ".NNNN.",
+          "CDCCDS",
+          "CCNNCC",
+          "noOOon",
+          "nnOOnn"
         ],
         [
-          "...Q..Q.Q...",
-          "...QQQQQQQR.",
-          "...QQQQQQQR.",
-          "...RCCCCCCRY",
-          "...CCDCCDCCZ",
-          "..ECCCCCCCCE",
-          "...CCQQQQCC.",
-          "....CCEECC..",
-          ".....CCCE...",
-          ".tuuUUUUuut.",
-          "ttuuuUUuuutt",
-          "ttuuuuUuuutt"
+          "..N.N.",
+          "..NNNN",
+          "CDCCDS",
+          "CCNNCC",
+          "noOOon",
+          "nnOOnn"
         ]
       ]
     },
@@ -52441,60 +51332,36 @@ var pool_default = {
       },
       frames: [
         [
-          "....0000....",
-          "...000000...",
-          ".1111111111.",
-          "..gggggggg..",
-          "..ggDggDgg..",
-          ".hggggggggh.",
-          "..ggghhggg..",
-          "...gggggg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "..uu..",
+          ".vvvv.",
+          "vDXXDv",
+          "XXXXXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          "....0000....",
-          "...000000...",
-          ".1111111111.",
-          "..gggggggg..",
-          "..gggggggg..",
-          ".hggggggggh.",
-          "..ggghhggg..",
-          "...gggggg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "..uu..",
+          ".vvvv.",
+          "vXXXXv",
+          "XXXXXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          ".....0000...",
-          "...000000...",
-          ".1111111111.",
-          "..gggggggg..",
-          "..ggDggDgg..",
-          ".hggggggggh.",
-          "..ggghhggg..",
-          "...gggggg...",
-          "....gggh....",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "...uu.",
+          ".vvvv.",
+          "vDXXDv",
+          "XXXXXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ],
         [
-          ".....0000...",
-          "....000000..",
-          "..1111111111",
-          "...gggggggg.",
-          "...ggDggDgg.",
-          "..hggggggggh",
-          "...ggghhggg.",
-          "....gggggg..",
-          ".....gggh...",
-          ".iiUUjjUUii.",
-          "iiUUUUjUUUii",
-          "iiUUUUjUUUii"
+          "...uu.",
+          "..vvvv",
+          "vDXXDv",
+          "XXXXXX",
+          "ZOaaOZ",
+          "ZOaaOZ"
         ]
       ]
     },
@@ -52510,60 +51377,36 @@ var pool_default = {
       },
       frames: [
         [
-          "cdW..W.W....",
-          "..WWWWWWWX..",
-          "..WWWWWWWX..",
-          "..XggggggX..",
-          "..ggDggDgg..",
-          ".hggggggggh.",
-          "..gghgghgg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          ".R.RV.",
+          ".RRRR.",
+          "XDXXDX",
+          "XXggXX",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "cdW..W.W....",
-          "..WWWWWWWX..",
-          "..WWWWWWWX..",
-          "..XggggggX..",
-          "..gggggggg..",
-          ".hggggggggh.",
-          "..gghgghgg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          ".R.RV.",
+          ".RRRR.",
+          "XXXXXX",
+          "XXggXX",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          "ccdW..W.W...",
-          "..WWWWWWWX..",
-          "..WWWWWWWX..",
-          "..XggggggX..",
-          "..ggDggDgg..",
-          ".hggggggggh.",
-          "..gghgghgg..",
-          "...gghhgg...",
-          "....gggh....",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "..R.RV",
+          ".RRRR.",
+          "XDXXDX",
+          "XXggXX",
+          "pqrrqp",
+          "pqrrqp"
         ],
         [
-          ".cdW..W.W...",
-          "...WWWWWWWX.",
-          "...WWWWWWWX.",
-          "...XggggggX.",
-          "...ggDggDgg.",
-          "..hggggggggh",
-          "...gghgghgg.",
-          "....gghhgg..",
-          ".....gggh...",
-          ".vvwwxxwwvv.",
-          "vvwwwwxwwwvv",
-          "vvwwwwxwwwvv"
+          "..R.RV",
+          "..RRRR",
+          "XDXXDX",
+          "XXggXX",
+          "pqrrqp",
+          "pqrrqp"
         ]
       ]
     }
@@ -52572,8 +51415,11 @@ var pool_default = {
 
 // packages/tui/dist/avatars/sprite.js
 var POOL_SIZE = pool_default.avatars.length;
-var SPRITE_ROWS = 6;
-var SPRITE_COLS = 12;
+var SPRITE_ROWS = 3;
+var SPRITE_COLS = 6;
+var TILE_PAD = 1;
+var TILE_COLS = SPRITE_COLS + 2 * TILE_PAD;
+var TILE_BG = "#2a2e37";
 var FRAME_COUNT = 4;
 var palette = pool_default.palette;
 function colourAt(rows, r, c) {
@@ -52601,6 +51447,12 @@ function cells(avatarIndex, frame) {
     out.push(line);
   }
   return out;
+}
+function tileCells(avatarIndex, frame) {
+  return cells(avatarIndex, frame).map((row) => {
+    const pad = { ch: " ", bg: TILE_BG };
+    return [pad, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), pad];
+  });
 }
 var SEQUENCE = [0, 0, 1, 0, 2, 0, 3, 0];
 function phaseFor(avatarIndex) {
@@ -52818,17 +51670,8 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
     }
   };
 }
-function formatElapsed(ms) {
-  const s2 = Math.max(0, Math.floor(ms / 1e3));
-  if (s2 < 60)
-    return `${s2}s`;
-  const m = Math.floor(s2 / 60);
-  if (m < 60)
-    return `${m}m${String(s2 % 60).padStart(2, "0")}s`;
-  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
-}
-var FRAME_W = SPRITE_COLS + 2;
-var TILE_H = SPRITE_ROWS + 2;
+var TILE_H = SPRITE_ROWS;
+var ROW_GAP = 1;
 var TEXT_GAP = 1;
 var TEXT_MAX = 36;
 var TEXT_MIN = 8;
@@ -52849,11 +51692,11 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
   }
   if (view.agents.length === 0)
     return empty;
-  const textW = Math.min(TEXT_MAX, width - FRAME_W - TEXT_GAP);
+  const textW = Math.min(TEXT_MAX, width - TILE_COLS - TEXT_GAP);
   const fitsTile = textW >= TEXT_MIN;
-  const tileW = FRAME_W + TEXT_GAP + textW;
+  const tileW = TILE_COLS + TEXT_GAP + textW;
   const perRow = fitsTile ? Math.max(1, Math.floor((width + TILE_GAP) / (tileW + TILE_GAP))) : 0;
-  const tileRows = fitsTile ? Math.min(Math.ceil(view.agents.length / perRow), Math.floor((maxHeight - HEAD_ROWS) / TILE_H)) : 0;
+  const tileRows = fitsTile ? Math.min(Math.ceil(view.agents.length / perRow), Math.floor((maxHeight - HEAD_ROWS + ROW_GAP) / (TILE_H + ROW_GAP))) : 0;
   const shown = Math.min(view.agents.length, tileRows * perRow);
   const hidden = view.agents.length - shown;
   const puts = [];
@@ -52863,33 +51706,27 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
   for (let i = 0; i < shown; i++) {
     const a = view.agents[i];
     const x0 = i % perRow * (tileW + TILE_GAP);
-    const y0 = HEAD_ROWS + Math.floor(i / perRow) * TILE_H;
-    const frame = { dim: true };
-    puts.push({ x: x0, y: y0, attr: frame, text: "\u250C" + "\u2500".repeat(SPRITE_COLS) + "\u2510" });
-    for (let r = 1; r <= SPRITE_ROWS; r++) {
-      puts.push({ x: x0, y: y0 + r, attr: frame, text: "\u2502" });
-      puts.push({ x: x0 + FRAME_W - 1, y: y0 + r, attr: frame, text: "\u2502" });
-    }
-    puts.push({ x: x0, y: y0 + TILE_H - 1, attr: frame, text: "\u2514" + "\u2500".repeat(SPRITE_COLS) + "\u2518" });
-    const grid = cells(a.avatar, frameAt(tick, phaseFor(a.avatar), a.status === "running"));
-    grid.forEach((line, r) => line.forEach((cell, c) => {
-      const px = { x: x0 + 1 + c, y: y0 + 1 + r, ch: cell.ch };
+    const y0 = HEAD_ROWS + Math.floor(i / perRow) * (TILE_H + ROW_GAP);
+    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), a.status === "running")).forEach((line2, r) => line2.forEach((cell, c) => {
+      const px = { x: x0 + c, y: y0 + r, ch: cell.ch };
       if (cell.fg !== void 0)
         px.fg = cell.fg;
       if (cell.bg !== void 0)
         px.bg = cell.bg;
       pixels.push(px);
     }));
-    const tx = x0 + FRAME_W + TEXT_GAP;
-    puts.push({ x: tx, y: y0 + 1, attr: { bold: true }, text: clip(a.type, textW) });
-    if (a.description)
-      puts.push({ x: tx, y: y0 + 2, attr: {}, text: clip(a.description, textW) });
-    puts.push({ x: tx, y: y0 + 3, attr: { dim: true }, text: clip(a.model ?? "model unknown", textW) });
+    const tx = x0 + TILE_COLS + TEXT_GAP;
+    puts.push({ x: tx, y: y0, attr: { bold: true }, text: clip(a.type, textW) });
     const status = `${a.status} \xB7 ${a.contextPct === null ? "?" : `${a.contextPct}%`} ctx`;
-    const timed = `${status} \xB7 ${formatElapsed(a.elapsedMs)}`;
-    puts.push({ x: tx, y: y0 + 4, attr: a.status === "running" ? { color: "green" } : { dim: true }, text: clip([...timed].length <= textW ? timed : status, textW) });
+    const line = [...clip(`${status} \xB7 ${a.model ?? "model unknown"}`, textW)];
+    const statusLen = Math.min(line.length, [...status].length);
+    puts.push({ x: tx, y: y0 + 1, attr: a.status === "running" ? { color: "green" } : { dim: true }, text: line.slice(0, statusLen).join("") });
+    if (line.length > statusLen)
+      puts.push({ x: tx + statusLen, y: y0 + 1, attr: { dim: true }, text: line.slice(statusLen).join("") });
+    if (a.description)
+      puts.push({ x: tx, y: y0 + 2, attr: { dim: true }, text: clip(a.description, textW) });
   }
-  return { height: HEAD_ROWS + tileRows * TILE_H, puts, pixels };
+  return { height: HEAD_ROWS + tileRows * TILE_H + Math.max(0, tileRows - 1) * ROW_GAP, puts, pixels };
 }
 
 // packages/tui/dist/lock.js

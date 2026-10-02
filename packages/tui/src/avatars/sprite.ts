@@ -1,11 +1,17 @@
 // Host-neutral avatar sprites: pure data and functions, no terminal library.
-// Each avatar is 12x12 pixels in 4 frames (0 rest, 1 blink, 2 bob, 3 tilt). Two pixel rows
-// pack into one terminal row with half blocks, so a sprite is 6 rows of 12 cells.
+// Each avatar is 6x6 pixels, drawn natively at that size, in 4 frames (0 rest, 1 blink, 2 bob,
+// 3 tilt). Two pixel rows pack into one terminal row with half blocks, so a sprite is 3 rows of 6
+// cells, the height of the three text lines beside it.
 import pool from './pool.json' with { type: 'json' };
 
 export const POOL_SIZE: number = pool.avatars.length;
-export const SPRITE_ROWS = 6;
-export const SPRITE_COLS = 12;
+export const SPRITE_ROWS = 3;
+export const SPRITE_COLS = 6;
+/** The portrait sits on a tinted square tile: one padding column each side, so 8 cols by 3 rows. */
+export const TILE_PAD = 1;
+export const TILE_COLS = SPRITE_COLS + 2 * TILE_PAD;
+/** Slightly lighter than a dark panel, so the portrait reads as a tile without a drawn frame. */
+export const TILE_BG = '#2a2e37';
 export const FRAME_COUNT = 4;
 
 // A transparent pixel yields no fg or bg, so the host background shows through.
@@ -40,6 +46,15 @@ export function cells(avatarIndex: number, frame: number): Cell[][] {
     out.push(line);
   }
   return out;
+}
+
+/** The sprite on its tile: TILE_COLS cells per row, every cell with a bg (transparent pixels and the
+ *  padding show the tile colour). The fg stays unset only on cells that draw no pixel. */
+export function tileCells(avatarIndex: number, frame: number): Cell[][] {
+  return cells(avatarIndex, frame).map((row) => {
+    const pad: Cell = { ch: ' ', bg: TILE_BG };
+    return [pad, ...row.map((c): Cell => ({ ...c, bg: c.bg ?? TILE_BG })), pad];
+  });
 }
 
 // Animation sequence while running: rest, rest, blink, rest, bob, rest, tilt, rest.

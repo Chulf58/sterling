@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { SterlingStore } from '@sterling/store';
 import { initialUi } from '@sterling/tui/dist/state.js';
-import { mulberry32, POOL_SIZE, SEQUENCE } from '@sterling/tui/dist/avatars/index.js';
+import { mulberry32, POOL_SIZE, SEQUENCE, TILE_BG } from '@sterling/tui/dist/avatars/index.js';
 import * as view from '../view.ts';
 import { SIDEBAR_WIDTH, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, readSubagents, sidebarLines, bodyLinesFor, emptyAvatars, portraitLines, stepAvatars, subagentRowLines, subagentSpanLines, PORTRAIT_HEIGHT, PORTRAIT_WIDTH, type SpanLine, type SubagentRow, type SidebarSummary, type SubagentSource } from '../view.ts';
 
@@ -174,30 +174,36 @@ const plain = (line: SpanLine) => line.map((sp) => sp.text).join('');
 const widthOf = (line: SpanLine) => [...plain(line)].length;
 const row = (over: Partial<SubagentRow> = {}): SubagentRow => ({ id: kid(2), title: 'review the diff', status: 'active', context: '25%', model: 'big-pickle', ...over });
 
-test('portrait: a framed 12x6 half-block sprite, border muted, transparent pixels carry no colour', () => {
+test('portrait: a 6x3 half-block sprite on an 8x3 tinted tile, no drawn frame, explicit bg on every span', () => {
   const lines = portraitLines(5, 0);
-  assert.equal(lines.length, PORTRAIT_HEIGHT);
+  assert.equal(PORTRAIT_WIDTH, 8);
+  assert.equal(PORTRAIT_HEIGHT, 3);
+  assert.equal(lines.length, 3);
   assert.ok(lines.every((l) => widthOf(l) === PORTRAIT_WIDTH), lines.map(plain).join('\n'));
-  assert.equal(plain(lines[0]!), '┌────────────┐');
-  assert.equal(plain(lines.at(-1)!), '└────────────┘');
-  const inner = lines.slice(1, -1).flat().filter((sp) => !sp.dim);
-  assert.ok(inner.some((sp) => sp.fg && sp.bg), 'a pixel pair with both halves set has fg and bg');
-  assert.ok(inner.every((sp) => /^[▀▄ ]+$/.test(sp.text)));
-  assert.ok(inner.some((sp) => !sp.fg && !sp.bg && /^ +$/.test(sp.text)), 'a fully transparent run leaves fg and bg unset');
-  assert.ok(inner.every((sp) => !sp.bg || sp.fg), 'a bg is only ever set together with an fg');
+  const spans = lines.flat();
+  assert.ok(spans.every((sp) => /^[▀▄ ]+$/.test(sp.text)), 'half blocks and spaces only: no box-drawing frame');
+  assert.ok(spans.every((sp) => /^#[0-9a-f]{6}$/.test(sp.bg ?? '')), 'a bg on every span, so no colour is left unset');
+  assert.ok(spans.some((sp) => sp.fg && sp.bg && sp.bg !== TILE_BG), 'a pixel pair carries both halves');
+  for (const l of lines) {
+    assert.equal(l[0]!.bg, TILE_BG);
+    assert.ok(l[0]!.text.startsWith(' ') && l.at(-1)!.text.endsWith(' '), 'one padding column each side');
+  }
 });
 
-test('subagent row: portrait left with title, status, context and model on its right, and no avatar number', () => {
-  const lines = subagentRowLines(row(), 7, 0, SIDEBAR_WIDTH);
+test('subagent row: tile left with title, `status · ctx · model` and description on its right, and no avatar number', () => {
+  const lines = subagentRowLines(row({ description: 'check the new tile layout' }), 7, 0, 60);
   assert.equal(lines.length, PORTRAIT_HEIGHT);
-  assert.ok(lines.every((l) => widthOf(l) <= SIDEBAR_WIDTH), lines.map(plain).join('\n'));
-  const text = lines.map(plain).join('\n');
-  assert.match(text, /review the diff/);
-  assert.match(text, /active · 25% ctx/);
-  assert.match(text, /big-pickle/);
-  const side = lines.filter((l) => widthOf(l) > PORTRAIT_WIDTH);
-  assert.equal(side.length, 3, 'three text lines beside the portrait');
-  assert.ok(!/#\d|avatar|\b7\b/.test(text), 'no avatar number anywhere');
+  assert.ok(lines.every((l) => widthOf(l) <= 60), lines.map(plain).join('\n'));
+  const side = lines.map((l) => plain(l).slice(PORTRAIT_WIDTH + 1));
+  assert.deepEqual(side, ['review the diff', 'active · 25% ctx · big-pickle', 'check the new tile layout']);
+  assert.ok(lines.every((l) => widthOf(l) > PORTRAIT_WIDTH), 'three text lines beside the portrait');
+  assert.ok(!/#\d|avatar|\b7\b/.test(lines.map(plain).join('\n')), 'no avatar number anywhere');
+  // without a description the third line is empty rather than missing
+  assert.equal(plain(subagentRowLines(row(), 7, 0, 60)[2]!).slice(PORTRAIT_WIDTH + 1), '');
+  // the ~34-col sidebar leaves 25 columns for text: the status line clips, the title and portrait stay whole
+  const narrow = subagentRowLines(row({ model: 'claude-opus-5-5' }), 7, 0, SIDEBAR_WIDTH).map(plain);
+  assert.ok(narrow.every((l) => [...l].length <= SIDEBAR_WIDTH));
+  assert.equal(narrow[1]!.slice(PORTRAIT_WIDTH + 1), 'active · 25% ctx · claud…');
 });
 
 test('subagent row: a long title and model clip to the text column', () => {
@@ -226,7 +232,7 @@ test('subagent block: heading counts active ones, one portrait row each, none sa
   const rows = readSubagents(source());
   const lines = subagentSpanLines(rows, new Map(rows.map((r, i) => [r.id, i])), 0, SIDEBAR_WIDTH);
   assert.equal(plain(lines[0]!), 'Sub-agents (1 active)');
-  assert.equal(lines.length, 1 + rows.length * PORTRAIT_HEIGHT);
+  assert.equal(lines.length, 1 + rows.length * PORTRAIT_HEIGHT + (rows.length - 1), 'one blank line between rows');
   assert.ok(lines.every((l) => widthOf(l) <= SIDEBAR_WIDTH));
   assert.deepEqual(subagentSpanLines([], new Map(), 0).map(plain), ['Sub-agents (0 active)', 'no sub-agents']);
   // the full view draws the same rows at its wider width: portrait and text side by side
@@ -261,6 +267,6 @@ test('avatars: leaving the family frees the portrait for the next arrival', () =
 
 test('full view: the controller body window shrinks by the sub-agent block so the cursor stays visible', () => {
   assert.equal(bodyLinesFor(40, 0), 32);
-  assert.equal(bodyLinesFor(40, 1 + 1 + 2 * PORTRAIT_HEIGHT), 32 - 18);
+  assert.equal(bodyLinesFor(40, 1 + 1 + 2 * PORTRAIT_HEIGHT + 1), 32 - 9);
   assert.equal(bodyLinesFor(20, 50), 3, 'never below three rows');
 });

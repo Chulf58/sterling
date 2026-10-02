@@ -14,7 +14,7 @@ import {
   subagentTranscriptPath,
   type SubagentView,
 } from '../subagents.js';
-import { SPRITE_COLS, SPRITE_ROWS } from '../avatars/index.js';
+import { SPRITE_ROWS, TILE_BG, TILE_COLS } from '../avatars/index.js';
 import { clearPixels, paintPixels } from '../render.js';
 
 // The terminal dashboard's live-subagent source is H22's dispatch register
@@ -184,28 +184,37 @@ test('block: a corrupt register is one dim line that says the state is unknown',
   assert.ok(b.puts.every((p) => p.attr.dim));
 });
 
-test('block: a framed 12x6 portrait per agent, then type, description, model and status; no avatar numbers', () => {
+test('block: a 6x3 portrait on an 8x3 tinted tile per agent, then type, status, context, model and description; no frame, no avatar numbers', () => {
   const b = composeSubagentBlock(view([AGENT('a1', 7), AGENT('a2', 31), AGENT('a3', 2, 'done')]), 160, 30, 0);
   const text = b.puts.map((p) => p.text);
   assert.ok(text.includes('Sub-agents (2 active)'));
-  assert.equal(b.height, 1 + 1 + SPRITE_ROWS + 2);
-  for (const want of ['implementor', 'Build the reader', 'claude-opus-5-5', 'running · 42% ctx · 1m05s', 'done · 42% ctx · 1m05s']) {
-    assert.ok(text.some((t) => t === want), `missing '${want}' in ${JSON.stringify(text)}`);
-  }
+  assert.equal(b.height, 1 + 1 + SPRITE_ROWS, 'the three tiles share one tile row at 160 columns');
+  for (const want of ['implementor', 'Build the reader']) assert.ok(text.some((t) => t === want), `missing '${want}' in ${JSON.stringify(text)}`);
+  assert.ok(text.includes('running · 42% ctx') && text.includes(' · claude-opus-5-5'), 'status and context, then the model, on one line');
+  assert.ok(text.includes('done · 42% ctx'));
   assert.ok(!text.some((t) => /#\s?\d|\b(7|31)\b/.test(t)), 'no avatar number is printed');
-  // every agent gets exactly one 12x6 pixel grid inside its frame
-  assert.equal(b.pixels.length, 3 * SPRITE_ROWS * SPRITE_COLS);
-  const tops = b.puts.filter((p) => p.text.startsWith('┌'));
-  assert.equal(tops.length, 3);
-  assert.equal(tops[0]!.text, '┌' + '─'.repeat(SPRITE_COLS) + '┐');
-  const firstPixel = b.pixels[0]!;
-  assert.equal(firstPixel.x, tops[0]!.x + 1);
-  assert.equal(firstPixel.y, tops[0]!.y + 1);
-  // a transparent pixel carries no colour, so the default background shows through
-  assert.ok(b.pixels.some((p) => p.ch === ' ' && p.fg === undefined && p.bg === undefined));
+  assert.ok(!text.some((t) => /[┌┐└┘│─]/.test(t)), 'no drawn frame');
+  // every agent gets one 8x3 tile: 6x3 portrait cells plus a padding column each side, all on the tile colour
+  assert.equal(b.pixels.length, 3 * TILE_COLS * SPRITE_ROWS);
+  assert.ok(b.pixels.every((p) => p.bg !== undefined), 'a bg on every tile cell');
+  const first = b.pixels[0]!;
+  assert.deepEqual({ x: first.x, y: first.y, ch: first.ch, bg: first.bg }, { x: 0, y: 2, ch: ' ', bg: TILE_BG });
   assert.ok(b.pixels.some((p) => p.ch === '▀' && p.fg !== undefined && p.bg !== undefined));
+  // the three text lines sit beside the tile, on its three rows
+  const type = b.puts.find((p) => p.text === 'implementor')!;
+  assert.equal(type.x, TILE_COLS + 1);
+  assert.equal(type.y, 2);
+  assert.equal(b.puts.find((p) => p.text === 'running · 42% ctx')!.y, 3);
+  assert.equal(b.puts.find((p) => p.text === 'Build the reader')!.y, 4);
   // nothing is drawn past the width
   assert.ok(b.puts.every((p) => p.x + [...p.text].length <= 160));
+});
+
+test('block: the status line clips to the text width, keeping the status part first', () => {
+  const b = composeSubagentBlock(view([AGENT('a1', 3)]), TILE_COLS + 1 + 20, 30, 0);
+  const line = b.puts.filter((p) => p.y === 3);
+  assert.equal(line.map((p) => p.text).join(''), 'running · 42% ctx ·…');
+  assert.ok(b.puts.every((p) => p.x + [...p.text].length <= TILE_COLS + 1 + 20));
 });
 
 test('block: only running portraits animate; a done portrait rests on frame 0', () => {
@@ -216,14 +225,22 @@ test('block: only running portraits animate; a done portrait rests on frame 0', 
   for (const t of [1, 2, 3, 5]) assert.deepEqual(done(t), done(0));
 });
 
+test('block: tile rows are separated by one blank row', () => {
+  const b = composeSubagentBlock(view([AGENT('a1', 1), AGENT('a2', 2)]), 60, 30, 0);
+  assert.equal(b.height, 2 + SPRITE_ROWS + 1 + SPRITE_ROWS);
+  const ys = new Set(b.pixels.map((p) => p.y));
+  assert.ok(!ys.has(2 + SPRITE_ROWS), 'the gap row holds no tile cell');
+  assert.ok(ys.has(2 + SPRITE_ROWS + 1));
+});
+
 test('block: a narrow pane wraps tiles, and what does not fit is counted in the header', () => {
   const agents = [AGENT('a1', 1), AGENT('a2', 2), AGENT('a3', 3)];
-  const b = composeSubagentBlock(view(agents), 60, 12, 0);
-  assert.equal(b.pixels.length, SPRITE_ROWS * SPRITE_COLS, 'one tile per row at 60 columns, and 12 rows fit one tile row');
+  const b = composeSubagentBlock(view(agents), 60, 6, 0);
+  assert.equal(b.pixels.length, SPRITE_ROWS * TILE_COLS, 'one tile per row at 60 columns, and 6 rows fit one tile row');
   assert.ok(b.puts.some((p) => p.text === 'Sub-agents (3 active) · 2 more not shown'));
   assert.ok(b.puts.every((p) => p.x + [...p.text].length <= 60));
   // no room for a tile row: the header alone
-  const tight = composeSubagentBlock(view(agents), 60, 5, 0);
+  const tight = composeSubagentBlock(view(agents), 60, 4, 0);
   assert.equal(tight.height, 2);
   assert.equal(tight.pixels.length, 0);
   assert.equal(composeSubagentBlock(view(agents), 60, 1, 0).height, 0);
@@ -299,8 +316,8 @@ test('tracker: context % from the subagent transcript and the window table, "?" 
     assert.equal(v.agents[0]!.model, 'claude-opus-5-5', 'the transcript names the model that actually ran');
     assert.equal(v.agents[1]!.contextPct, null);
     const text = composeSubagentBlock(v, 160, 30, 0).puts.map((p) => p.text);
-    assert.ok(text.includes('running · 25% ctx · 10s'), JSON.stringify(text));
-    assert.ok(text.includes('running · ? ctx · 10s'));
+    assert.ok(text.includes('running · 25% ctx') && text.includes(' · claude-opus-5-5'), JSON.stringify(text));
+    assert.ok(text.includes('running · ? ctx') && text.includes(' · model unknown'), JSON.stringify(text));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
