@@ -619,7 +619,16 @@ export function ensureProjectConfig({ projectDir, home = homedir(), tracked, con
   // The edit deny does not cover the shell tool: `printf >> .sterling/sterling.db`
   // got through until this shell rule was added (finding
   // opencode-2-0-21-tool-shapes-execpath-and-shell-store-guard-october-2026). Same merge as edit.
-  let shell = permission.shell ?? { '*': 'allow' };
+  // With no shell block, "*" is seeded from a bash block (a string, or its "*" rule), so a
+  // user's `bash: "ask"` is not loosened to allow when Sterling adds the shell key.
+  let shell = permission.shell;
+  if (shell === undefined) {
+    const bash = permission.bash;
+    if (bash === undefined) shell = { '*': 'allow' };
+    else if (typeof bash === 'string') shell = { '*': bash };
+    else if (typeof bash === 'object' && bash !== null && !Array.isArray(bash)) shell = bash['*'] === undefined ? { '*': 'allow' } : { '*': bash['*'] };
+    else return [refusal(rel, `${rel}: "permission.bash" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
+  }
   if (typeof shell === 'string') shell = { '*': shell };
   if (typeof shell !== 'object' || shell === null || Array.isArray(shell)) return [refusal(rel, `${rel}: "permission.shell" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
   const shellGuarded = { '*': 'allow', ...Object.fromEntries(Object.entries(shell).filter(([k]) => k !== SHELL_STORE_GUARD_PATTERN)) };

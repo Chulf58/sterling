@@ -176,6 +176,30 @@ test('project config: the shell deny is merged into an existing shell block with
   assert.equal(statusOf(run(dir, home), 'opencode.json'), 'refused');
 });
 
+test('project config: with no permission.shell, the shell "*" rule is seeded from permission.bash, so a user\'s bash "ask" is not loosened', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  mkdirSync(join(dir, '.opencode'));
+  const cfg = join(dir, '.opencode', 'opencode.json');
+  const shellAfter = (permission) => {
+    writeFileSync(cfg, JSON.stringify({ permission }));
+    run(dir, home);
+    const got = JSON.parse(readFileSync(cfg, 'utf8')).permission;
+    return { shell: Object.entries(got.shell), bash: got.bash };
+  };
+  let r = shellAfter({ bash: 'ask' });
+  assert.deepEqual(r.shell, [['*', 'ask'], ['*sterling.db*', 'deny']], 'a string bash value seeds "*"');
+  assert.equal(r.bash, 'ask', 'the bash key itself is left alone');
+  r = shellAfter({ bash: { '*': 'deny', 'ls*': 'allow' } });
+  assert.deepEqual(r.shell, [['*', 'deny'], ['*sterling.db*', 'deny']], 'an object bash value seeds "*" from its "*" rule');
+  r = shellAfter({ bash: { 'ls*': 'allow' } });
+  assert.deepEqual(r.shell, [['*', 'allow'], ['*sterling.db*', 'deny']], 'a bash object without "*" leaves the default');
+  r = shellAfter({ bash: 'ask', shell: { '*': 'allow' } });
+  assert.deepEqual(r.shell, [['*', 'allow'], ['*sterling.db*', 'deny']], 'an existing shell block wins over bash');
+  writeFileSync(cfg, JSON.stringify({ permission: { bash: 7 } }));
+  assert.equal(statusOf(run(dir, home), 'opencode.json'), 'refused', 'a bash value that is neither a string nor an object is refused');
+});
+
 test('project config: invalid JSON or a tracked opencode.json is refused and not touched', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
