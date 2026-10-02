@@ -28,7 +28,7 @@ STORE="$WORKDIR/.sterling/sterling.db"
 # --- fail loud on missing inputs (P5) ---
 [ -n "$NODE_BIN" ] || { echo "sterling-launch: 'node' not found on PATH (set NODE_BIN)" >&2; exit 1; }
 command -v tmux >/dev/null || { echo "sterling-launch: 'tmux' not installed" >&2; exit 1; }
-[ -n "$TUI_BUNDLE" ] && [ -f "$TUI_BUNDLE" ] || { echo "sterling-launch: TUI bundle missing: ${TUI_BUNDLE:-none installed under the Claude plugin cache}" >&2; exit 1; }
+[ -n "$TUI_BUNDLE" ] && [ -f "$TUI_BUNDLE" ] || { echo "sterling-launch: TUI bundle missing: ${TUI_BUNDLE:-no installed Sterling found}" >&2; exit 1; }
 [ -f "$STORE" ]      || { echo "sterling-launch: store missing: $STORE (run from a project root)" >&2; exit 1; }
 
 # Re-split the TUI as a right pane in the session's active window.

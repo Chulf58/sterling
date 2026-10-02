@@ -6,16 +6,20 @@
 //   `--plugin-dir <clone>` and the TUI is the clone's committed bundle,
 //   <clone>/tui/sterling-tui.mjs.
 //
-//   INSTALLED COPY (no .git): nothing may name a versioned cache directory, because
-//   the next plugin update moves it. So NO `--plugin-dir` (the installed plugin is
-//   already active) and the TUI bundle is resolved at RUN time as the highest-version
-//   ~/.claude/plugins/cache/*/sterling/*/tui/sterling-tui.mjs (GNU `sort -V`, keyed on
-//   the version directory name, so the marketplace directory never decides the order).
-//   Known limit: `sort -V` is not full semver for pre-release tags (1.0.0-rc1 sorts
-//   after 1.0.0).
+//   INSTALLED COPY (no .git): nothing may name a versioned install directory, because
+//   the next update moves it. So NO `--plugin-dir` (the installed plugin is already
+//   active) and the TUI bundle is <newest copy>/tui/sterling-tui.mjs, resolved at RUN
+//   time by the shared resolver (scripts/lib/sterling-roots.mjs: Claude Code's plugin
+//   cache and OpenCode's npm cache, semver order). The resolver is inlined into a quoted
+//   heredoc run by node, because the launcher cannot import from a versioned directory.
+//   node is looked up the same way the template looks it up further down (NODE_BIN,
+//   PATH, then the ~/.local tarball), since PLUGIN_PATHS comes before that lookup. When
+//   nothing is installed the resolver prints the roots searched and the Claude Code
+//   install command, and the template's TUI-bundle check then stops the launcher.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isInstalledCopy } from './installed-copy.mjs';
+import { RESOLVER_IMPORTS, RESOLVER_SOURCE } from './sterling-roots.mjs';
 
 const fwd = (p) => p.replace(/\\/g, '/');
 
@@ -23,14 +27,18 @@ const AUTHORING_PATHS = (pluginRoot) =>
   [`PLUGIN_DIR="${fwd(pluginRoot)}"`, `TUI_BUNDLE="${fwd(pluginRoot)}/tui/sterling-tui.mjs"`].join('\n');
 
 const INSTALLED_PATHS = [
-  '# installed plugin copy: nothing below names a versioned cache directory',
-  'PLUGIN_CACHE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache"',
-  'TUI_BUNDLE="$(',
-  '  for f in "$PLUGIN_CACHE"/*/sterling/*/tui/sterling-tui.mjs; do',
-  '    [ -f "$f" ] || continue',
-  '    v="${f%/tui/sterling-tui.mjs}"',
-  '    printf \'%s\\t%s\\n\' "${v##*/}" "$f"',
-  '  done | sort -t "$(printf \'\\t\')" -k1,1V | tail -n 1 | cut -f2',
+  '# installed copy: nothing below names a versioned install directory; the newest',
+  '# installed Sterling (Claude Code or OpenCode) is resolved when this runs',
+  'RESOLVER_NODE="${NODE_BIN:-$(command -v node || true)}"',
+  '[ -n "$RESOLVER_NODE" ] || RESOLVER_NODE="$(ls -d "$HOME"/.local/node-v*-linux-x64/bin/node 2>/dev/null | head -1)"',
+  'TUI_BUNDLE=""',
+  '[ -z "$RESOLVER_NODE" ] || TUI_BUNDLE="$("$RESOLVER_NODE" --input-type=module <<\'STERLING_RESOLVER\'',
+  RESOLVER_IMPORTS,
+  RESOLVER_SOURCE.trim(),
+  'const found = newestInstalledSterling();',
+  "if (found) process.stdout.write(join(found.root, 'tui', 'sterling-tui.mjs'));",
+  "else console.error('sterling-launch: ' + sterlingNotFoundMessage('claude-code'));",
+  'STERLING_RESOLVER',
   ')"',
 ].join('\n');
 

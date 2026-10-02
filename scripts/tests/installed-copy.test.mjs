@@ -77,3 +77,20 @@ test('a sibling directory whose name merely STARTS with "cache" is not under the
     rmSync(config, { recursive: true, force: true });
   }
 });
+
+test('a root under OpenCode\'s npm cache (<XDG_CACHE_HOME or ~/.cache>/opencode/npm) is an installed copy EVEN WITH a .git', () => {
+  const home = mkdtempSync(join(tmpdir(), 'sterling-home-'));
+  try {
+    const pkg = join('@chulf58', 'sterling@latest', '1759500000000', 'node_modules', '@chulf58', 'sterling');
+    const cached = join(home, '.cache', 'opencode', 'npm', pkg);
+    mkdirSync(join(cached, '.git'), { recursive: true });
+    assert.equal(isInstalledCopy(cached, { env: {}, home }), true);
+    const xdg = join(home, 'xdg-cache');
+    const underXdg = join(xdg, 'opencode', 'npm', pkg);
+    mkdirSync(join(underXdg, '.git'), { recursive: true });
+    assert.equal(isInstalledCopy(underXdg, { env: { XDG_CACHE_HOME: xdg }, home }), true, 'XDG_CACHE_HOME moves the root');
+    assert.equal(isInstalledCopy(cached, { env: { XDG_CACHE_HOME: xdg }, home }), false, 'XDG_CACHE_HOME replaces ~/.cache, it does not add to it');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

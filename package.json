@@ -1,9 +1,30 @@
 {
-  "name": "sterling",
-  "private": true,
+  "name": "@chulf58/sterling",
   "type": "module",
-  "version": "0.18.51",
+  "version": "0.18.52",
   "description": "Sterling monorepo — plugin sources. The shipped plugin is described in STERLING-SPEC.md section 2.2.",
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    "./server": "./opencode/sterling-server.mjs"
+  },
+  "files": [
+    ".claude-plugin/",
+    "agent-templates/",
+    "bin/",
+    "commands/",
+    "hooks/",
+    "mcp/",
+    "opencode/sterling-server.mjs",
+    "opencode/sterling-tui/package.json",
+    "opencode/sterling-tui/sterling-tui.bundle.tsx",
+    "scripts/",
+    "!scripts/tests/",
+    "skills/",
+    "templates/",
+    "tui/"
+  ],
   "workspaces": [
     "packages/*"
   ],

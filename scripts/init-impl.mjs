@@ -41,6 +41,7 @@ import { cloneLauncherTarget, marketplaceAutoUpdate, autoUpdateWarning, cloneCle
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
 import { setupOpenCode } from './lib/opencode-install.mjs';
 import { probeClaude } from './lib/claude-probe.mjs';
+import { renderClaudeText } from './lib/agent-fences.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -362,7 +363,10 @@ const renderAgentsMd = (conventionsSection) => agentsMdTemplateRaw.replace(CONVE
 const DEFAULT_CONVENTIONS = '(grows only via architecture-altering decision records — nothing yet)';
 const expectedAgentsMd = renderAgentsMd(DEFAULT_CONVENTIONS);
 
-const expectedClaudeMd = assertNoDeadTerms('CLAUDE.md', readFileSync(join(pluginRoot, 'templates', 'target-claude-md.md'), 'utf8')
+// CLAUDE.md is the template's CLAUDE render (decision sterling-layer-is-one-source-with-host-blocks):
+// claude-only lines kept, opencode-only blocks and every fence marker dropped. The OpenCode
+// plugin renders the same file for OpenCode from the template's block pairs.
+const expectedClaudeMd = assertNoDeadTerms('CLAUDE.md', renderClaudeText(readFileSync(join(pluginRoot, 'templates', 'target-claude-md.md'), 'utf8'), 'templates/target-claude-md.md')
   .replaceAll('{{PROJECT_NAME}}', eff.projectName));
 
 const agentsMdPath = join(target, 'AGENTS.md');

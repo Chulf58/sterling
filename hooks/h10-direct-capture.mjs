@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h10-direct-capture.mjs
-import { randomUUID as randomUUID4, createHash as createHash3 } from "node:crypto";
+import { randomUUID as randomUUID5, createHash as createHash3 } from "node:crypto";
 import { spawn, spawnSync as spawnSync6 } from "node:child_process";
 import { readFileSync as readFileSync9, writeFileSync as writeFileSync6, writeSync as writeSync2, rmSync as rmSync4, existsSync as existsSync9, mkdirSync as mkdirSync8, renameSync as renameSync6 } from "node:fs";
 import { join as join13, basename as basename2 } from "node:path";
@@ -9193,10 +9193,104 @@ function ageText(iso, nowMs = Date.now()) {
   return hours > 0 ? `${hours}h` : `${mins}m`;
 }
 
-// scripts/hooks/h10-direct-capture.mjs
+// scripts/hooks/lib/session-duties.mjs
+import { randomUUID as randomUUID4 } from "node:crypto";
+var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+var isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
+var IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
+var NO_CAPTURE_LANES2 = ["research", "capture", "all"];
+var noCaptureLaneOf = (e) => {
+  if (e.lane === void 0 || e.lane === null) return "capture";
+  return NO_CAPTURE_LANES2.includes(e.lane) ? e.lane : null;
+};
+function noCaptureCutoffs(sessionEvents) {
+  const noCaptureEvents = sessionEvents.filter((e) => e.kind === "no_capture");
+  const cutoffForLane = (lane) => noCaptureEvents.filter((e) => {
+    const declared = noCaptureLaneOf(e);
+    return declared === lane || declared === "all";
+  }).map((e) => e.at).filter(isValidAt).sort().at(-1) ?? null;
+  return { capture: cutoffForLane("capture"), research: cutoffForLane("research") };
+}
+var dischargedByCutoff = (at, cutoff) => cutoff !== null && isValidAt(at) && at <= cutoff;
+function conceptFamiliesFrom(sessionEvents) {
+  const conceptFamilies = /* @__PURE__ */ new Map();
+  for (const e of sessionEvents.filter((ev) => ev.kind === "concept_designed" && ev.detail)) {
+    const at = isValidAt(e.at) ? e.at : null;
+    if (!conceptFamilies.has(e.detail)) {
+      conceptFamilies.set(e.detail, at);
+      continue;
+    }
+    const prior = conceptFamilies.get(e.detail);
+    if (at !== null && (prior === null || at < prior)) conceptFamilies.set(e.detail, at);
+  }
+  return conceptFamilies;
+}
+var CAPTURE_TYPES = ["decision", "anti_pattern", "feature_article", "research_finding", "disconfirmed_hypothesis", "open_question"];
+var capturedSince = (store2, earliest) => store2.query({ types: CAPTURE_TYPES, cap: 1e3 }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
+var RESEARCH_TYPES = ["research_finding", "decision", "anti_pattern"];
+var researchCapturedSince = (store2, earliest) => store2.query({ types: RESEARCH_TYPES, cap: 1e3 }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
+var CONCEPT_PRE_EVENT_WINDOW_MS = 15 * 6e4;
+function unmetConceptFamilies(store2, conceptFamilies, earliestSessionAt) {
+  const articles = store2.query({ types: ["feature_article"], cap: 1e3 });
+  return [...conceptFamilies.entries()].filter(([family, since]) => {
+    if (since === null) return true;
+    const windowStart = since < earliestSessionAt ? since : earliestSessionAt;
+    const sinceMs = Date.parse(since);
+    const preStart = Number.isFinite(sinceMs) ? sinceMs - CONCEPT_PRE_EVENT_WINDOW_MS : null;
+    return !articles.some((a) => {
+      if (a.concept_family !== family) return false;
+      if (a.created_at >= windowStart || a.updated_at >= windowStart) return true;
+      if (preStart === null) return false;
+      const created = Date.parse(a.created_at);
+      const updated = Date.parse(a.updated_at);
+      return Number.isFinite(created) && created >= preStart && created <= sinceMs || Number.isFinite(updated) && updated >= preStart && updated <= sinceMs;
+    });
+  }).map(([family]) => family);
+}
+function ownershipJoin(store2, root) {
+  const ownersSeen = /* @__PURE__ */ new Map();
+  const ownerRows = (p) => {
+    if (ownersSeen.has(p)) return ownersSeen.get(p);
+    const filter = { types: ["feature_article", "reference_material"], file_keys: [p] };
+    const total = store2.count(filter);
+    const rows = total === 0 ? [] : store2.query({ ...filter, cap: total });
+    ownersSeen.set(p, rows);
+    return rows;
+  };
+  const isUnowned = (p) => !ownerRows(p).some((r) => !isForeignTree(r, root));
+  return { ownerRows, isUnowned };
+}
+function demandExemption(config, generatedProjections) {
+  const ignoreGlobs = config.article_demand.ignore_globs;
+  return (p) => generatedProjections.has(p) || ignoreGlobs.some((g) => matchesGlob(p, g));
+}
 function articleMissingText(fileKeys, { newlyCreated = 0 } = {}) {
   return `article missing: ${fileKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newlyCreated ? ` (${newlyCreated} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`;
 }
+var conceptArticleMissingText = (family) => `concept article missing: design settled for concept family '${family}' and the session ended without its concept article \u2014 create/update the feature_article with concept_family '${family}'`;
+var researchOwedText = (queryTexts) => `research owed: session research not captured (queries/agents: ${queryTexts})`;
+var captureOwedText = (count, clipped) => `capture owed: direct-mode session touched ${count} file(s) and ended without capture${clipped}`;
+function systemTodo(now, fields) {
+  return {
+    id: randomUUID4(),
+    type: "todo",
+    created_at: now,
+    updated_at: now,
+    author: "system",
+    status: "active",
+    superseded_by: null,
+    links: [],
+    scope: "project",
+    stack_tags: [],
+    text: fields.text,
+    source: "system",
+    system_reason: fields.system_reason,
+    ...fields.file_keys !== void 0 ? { file_keys: fields.file_keys } : {}
+  };
+}
+var hasOpenSystemTodo = (store2, reason) => store2.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === reason);
+
+// scripts/hooks/h10-direct-capture.mjs
 async function computeDeadDispatchResidue(cwd, sessionId) {
   const registerPath2 = registerPath(cwd);
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
@@ -9790,7 +9884,7 @@ try {
       if (git.ok && git.base_lost) {
         const text = `capture owed: settlement history rewritten \u2014 persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}; duties for commits between them could not be derived. Reconcile them by hand from git log.`;
         const exists = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed" && t.text === text);
-        if (!exists) store.enqueueSystemTodo({ id: randomUUID4(), type: "todo", created_at: now, updated_at: now, author: "system", status: "active", superseded_by: null, links: [], scope: "project", stack_tags: [], text, source: "system", system_reason: "capture_owed", file_keys: [] });
+        if (!exists) store.enqueueSystemTodo({ id: randomUUID5(), type: "todo", created_at: now, updated_at: now, author: "system", status: "active", superseded_by: null, links: [], scope: "project", stack_tags: [], text, source: "system", system_reason: "capture_owed", file_keys: [] });
       }
       if (git.ok && !deferredPaths.length) writeGitSettled(input.cwd, git.next);
     } catch (e) {
@@ -9807,33 +9901,9 @@ try {
     releaseWithPressure();
   }
   const paths = touchedExisting.filter((p) => !isDeferred(p));
-  const ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-  const isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
   const debugEvents = sessionEvents.filter((e) => e.kind === "debug_scope");
-  const conceptEvents = sessionEvents.filter((e) => e.kind === "concept_designed" && e.detail);
-  const conceptFamilies = /* @__PURE__ */ new Map();
-  for (const e of conceptEvents) {
-    const at = isValidAt(e.at) ? e.at : null;
-    if (!conceptFamilies.has(e.detail)) {
-      conceptFamilies.set(e.detail, at);
-      continue;
-    }
-    const prior = conceptFamilies.get(e.detail);
-    if (at !== null && (prior === null || at < prior)) conceptFamilies.set(e.detail, at);
-  }
-  const NO_CAPTURE_LANES2 = ["research", "capture", "all"];
-  const laneOf = (e) => {
-    if (e.lane === void 0 || e.lane === null) return "capture";
-    return NO_CAPTURE_LANES2.includes(e.lane) ? e.lane : null;
-  };
-  const noCaptureEvents = sessionEvents.filter((e) => e.kind === "no_capture");
-  const cutoffForLane = (lane) => noCaptureEvents.filter((e) => {
-    const declared = laneOf(e);
-    return declared === lane || declared === "all";
-  }).map((e) => e.at).filter(isValidAt).sort().at(-1) ?? null;
-  const captureLaneCutoff = cutoffForLane("capture");
-  const researchLaneCutoff = cutoffForLane("research");
-  const dischargedByCutoff = (at, cutoff) => cutoff !== null && isValidAt(at) && at <= cutoff;
+  const conceptFamilies = conceptFamiliesFrom(sessionEvents);
+  const { capture: captureLaneCutoff, research: researchLaneCutoff } = noCaptureCutoffs(sessionEvents);
   const dischargedOnCaptureLane = (at) => dischargedByCutoff(at, captureLaneCutoff);
   const dischargedOnResearchLane = (at) => dischargedByCutoff(at, researchLaneCutoff);
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail);
@@ -9860,7 +9930,6 @@ try {
   const spendPendingGrace = () => writeFileSync6(nagMarker, JSON.stringify({ at: now, capture_pending_spent: capturePendingEvents.map(pendingDeclId) }));
   const testRepairEvents = sessionEvents.filter((e) => e.kind === "test_repair" && e.detail && isValidAt(e.at));
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
-  const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
   const generatedProjections = loadGeneratedProjections(input.cwd);
   const releaseBase = git.ok && git.settled && !git.base_lost ? git.merge_base ?? git.settled.sha : null;
   const isReleaseMechanics = (p) => generatedProjections.has(p) || VERSION_ONLY_CANDIDATES.includes(p) && !Object.hasOwn(git.settled?.dirty ?? {}, p) && isVersionOnlyInWorkingTree(input.cwd, releaseBase, p);
@@ -9909,7 +9978,7 @@ try {
       const targetPrefix = `${target} \u2014 `;
       const reason = detail.startsWith(targetPrefix) && detail.length > targetPrefix.length ? detail.slice(targetPrefix.length).trim() : "";
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID5(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -9928,16 +9997,7 @@ try {
   };
   const hasResearchDuty = activeResearchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
-  const ownersSeen = /* @__PURE__ */ new Map();
-  const ownerRows = (p) => {
-    if (ownersSeen.has(p)) return ownersSeen.get(p);
-    const filter = { types: ["feature_article", "reference_material"], file_keys: [p] };
-    const total = store.count(filter);
-    const rows = total === 0 ? [] : store.query({ ...filter, cap: total });
-    ownersSeen.set(p, rows);
-    return rows;
-  };
-  const isUnowned = (p) => !ownerRows(p).some((r) => !isForeignTree(r, input.cwd));
+  const { ownerRows, isUnowned } = ownershipJoin(store, input.cwd);
   const ownerRowsNote = (p) => {
     const rows = ownerRows(p);
     if (!rows.length) return "none";
@@ -9957,8 +10017,7 @@ try {
     }
     return seen;
   };
-  const ignoreGlobs = config.article_demand.ignore_globs;
-  const exemptFromDemand = (p) => generatedProjections.has(p) || ignoreGlobs.some((g) => matchesGlob(p, g));
+  const exemptFromDemand = demandExemption(config, generatedProjections);
   let unowned = paths.filter((p) => !exemptFromDemand(p)).filter(isUnowned);
   if (unowned.length) {
     const ignored = gitIgnored(unowned, input.cwd);
@@ -10080,34 +10139,19 @@ try {
   }
   const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(isValidAt).sort();
   const earliest = allTimestamps.length ? allTimestamps[0] : now;
-  const captured = store.query({ types: ["decision", "anti_pattern", "feature_article", "research_finding", "disconfirmed_hypothesis", "open_question"], cap: 1e3 }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
+  const captured = capturedSince(store, earliest);
   let researchSatisfied = true;
   let earliestResearch = null;
   if (hasResearchDuty) {
     const rts = activeResearchEvents.map((e) => e.at).filter(isValidAt).sort();
     earliestResearch = rts.length ? rts[0] : now;
-    researchSatisfied = store.query({ types: ["research_finding", "decision", "anti_pattern"], cap: 1e3 }).some((r) => r.created_at >= earliestResearch || r.updated_at >= earliestResearch);
+    researchSatisfied = researchCapturedSince(store, earliestResearch);
   }
-  const CONCEPT_PRE_EVENT_WINDOW_MS = 15 * 6e4;
   let unmetFamilies = [];
   if (hasConceptDuty) {
     const sessionAts = sessionEvents.map((e) => e.at).filter(isValidAt).sort();
     const earliestSessionAt = sessionAts.length ? sessionAts[0] : now;
-    const articles = store.query({ types: ["feature_article"], cap: 1e3 });
-    unmetFamilies = [...conceptFamilies.entries()].filter(([family, since]) => {
-      if (since === null) return true;
-      const windowStart = since < earliestSessionAt ? since : earliestSessionAt;
-      const sinceMs = Date.parse(since);
-      const preStart = Number.isFinite(sinceMs) ? sinceMs - CONCEPT_PRE_EVENT_WINDOW_MS : null;
-      return !articles.some((a) => {
-        if (a.concept_family !== family) return false;
-        if (a.created_at >= windowStart || a.updated_at >= windowStart) return true;
-        if (preStart === null) return false;
-        const created = Date.parse(a.created_at);
-        const updated = Date.parse(a.updated_at);
-        return Number.isFinite(created) && created >= preStart && created <= sinceMs || Number.isFinite(updated) && updated >= preStart && updated <= sinceMs;
-      });
-    }).map(([family]) => family);
+    unmetFamilies = unmetConceptFamilies(store, conceptFamilies, earliestSessionAt);
   }
   const conceptSatisfied = unmetFamilies.length === 0;
   const captureSatisfied = !hasCaptureDuty || captured;
@@ -10272,24 +10316,8 @@ ${parts.join("\n\n")}`;
   if (hasCaptureDuty && !captured && pendingDetail) {
     if (!pendingHeld) enqueuePendingDebt(pendingDefersCapture ? pendingLapsed : capturePendingEvents);
   } else if (hasCaptureDuty && !captured) {
-    const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
-    if (!open) {
-      store.enqueueSystemTodo({
-        id: randomUUID4(),
-        type: "todo",
-        created_at: now,
-        updated_at: now,
-        author: "system",
-        status: "active",
-        superseded_by: null,
-        links: [],
-        scope: "project",
-        stack_tags: [],
-        text: `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture${clipped}`,
-        source: "system",
-        system_reason: "capture_owed",
-        file_keys: owedKeys
-      });
+    if (!hasOpenSystemTodo(store, "capture_owed")) {
+      store.enqueueSystemTodo(systemTodo(now, { text: captureOwedText(activePaths.length, clipped), system_reason: "capture_owed", file_keys: owedKeys }));
     }
   }
   if (articleDemand) {
@@ -10303,62 +10331,18 @@ ${parts.join("\n\n")}`;
       else demandKeys = demandKeysRaw.filter((p) => !vanished.includes(p) || known.has(p));
     }
     if (demandKeys.length) {
-      store.enqueueSystemTodo({
-        id: randomUUID4(),
-        type: "todo",
-        created_at: now,
-        updated_at: now,
-        author: "system",
-        status: "active",
-        superseded_by: null,
-        links: [],
-        scope: "project",
-        stack_tags: [],
-        text: articleMissingText(demandKeys, { newlyCreated: newUnowned.length }),
-        source: "system",
-        system_reason: "article_missing",
-        file_keys: demandKeys
-      });
+      store.enqueueSystemTodo(systemTodo(now, { text: articleMissingText(demandKeys, { newlyCreated: newUnowned.length }), system_reason: "article_missing", file_keys: demandKeys }));
     }
   }
   if (!conceptSatisfied) {
     for (const family of unmetFamilies) {
-      store.enqueueSystemTodo({
-        id: randomUUID4(),
-        type: "todo",
-        created_at: now,
-        updated_at: now,
-        author: "system",
-        status: "active",
-        superseded_by: null,
-        links: [],
-        scope: "project",
-        stack_tags: [],
-        text: `concept article missing: design settled for concept family '${family}' and the session ended without its concept article \u2014 create/update the feature_article with concept_family '${family}'`,
-        source: "system",
-        system_reason: "concept_article_missing"
-      });
+      store.enqueueSystemTodo(systemTodo(now, { text: conceptArticleMissingText(family), system_reason: "concept_article_missing" }));
     }
   }
   if (hasResearchDuty && !researchSatisfied) {
-    const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "research_owed");
-    if (!open) {
+    if (!hasOpenSystemTodo(store, "research_owed")) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join("; ");
-      store.enqueueSystemTodo({
-        id: randomUUID4(),
-        type: "todo",
-        created_at: now,
-        updated_at: now,
-        author: "system",
-        status: "active",
-        superseded_by: null,
-        links: [],
-        scope: "project",
-        stack_tags: [],
-        text: `research owed: session research not captured (queries/agents: ${queryTexts})`,
-        source: "system",
-        system_reason: "research_owed"
-      });
+      store.enqueueSystemTodo(systemTodo(now, { text: researchOwedText(queryTexts), system_reason: "research_owed" }));
     }
   }
   if (!pendingDefersCapture) runSettlement();

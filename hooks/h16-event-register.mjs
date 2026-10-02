@@ -5,10 +5,6 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// scripts/hooks/h16-event-register.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3 } from "node:fs";
-import { join as join3, dirname as dirname3 } from "node:path";
-
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join as join2, resolve } from "node:path";
@@ -7629,36 +7625,42 @@ function openStore(cwd) {
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
+// scripts/hooks/lib/session-events.mjs
+import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync } from "node:fs";
+import { dirname as dirname3, join as join3 } from "node:path";
+var SESSION_EVENTS_REL = join3(".sterling", "transient", "session-events.json");
+function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
+  const event = { kind: "research_tool", detail: String(detail ?? ""), at };
+  if (typeof agentId === "string" && agentId !== "") event.agent_id = agentId;
+  return event;
+}
+function appendSessionEvent(projectDir, event) {
+  const eventsPath = join3(projectDir, SESSION_EVENTS_REL);
+  mkdirSync2(dirname3(eventsPath), { recursive: true });
+  const events = existsSync3(eventsPath) ? JSON.parse(readFileSync2(eventsPath, "utf8")) : [];
+  events.push(event);
+  writeFileSync(eventsPath, JSON.stringify(events));
+}
+
 // scripts/hooks/h16-event-register.mjs
 var input = readStdin();
 var store = openStore(input.cwd);
 if (!store) allow();
 try {
   const tool = input.tool_name;
-  let kind, detail;
-  if (tool === "WebSearch") {
-    kind = "research_tool";
-    detail = String(input.tool_input?.query ?? "");
-  } else if (tool === "WebFetch") {
-    kind = "research_tool";
-    detail = String(input.tool_input?.url ?? "");
+  const at = (/* @__PURE__ */ new Date()).toISOString();
+  let event;
+  if (tool === "WebSearch" || tool === "WebFetch") {
+    event = researchToolEvent(tool === "WebSearch" ? input.tool_input?.query : input.tool_input?.url, { at, agentId: input.agent_id });
   } else {
-    kind = "agent_dispatch";
-    detail = String(input.tool_input?.subagent_type ?? "");
+    event = { kind: "agent_dispatch", detail: String(input.tool_input?.subagent_type ?? ""), at };
   }
-  const event = { kind, detail, at: (/* @__PURE__ */ new Date()).toISOString() };
-  if (kind === "research_tool") {
-    if (typeof input.agent_id === "string" && input.agent_id !== "") event.agent_id = input.agent_id;
-  } else {
+  if (event.kind === "agent_dispatch") {
     const agentId = input.tool_response?.agentId;
     if (typeof agentId === "string" && agentId !== "") event.agent_id = agentId;
     if (typeof input.tool_use_id === "string" && input.tool_use_id !== "") event.tool_use_id = input.tool_use_id;
   }
-  const eventsPath = join3(input.cwd, ".sterling", "transient", "session-events.json");
-  mkdirSync2(dirname3(eventsPath), { recursive: true });
-  const events = existsSync3(eventsPath) ? JSON.parse(readFileSync2(eventsPath, "utf8")) : [];
-  events.push(event);
-  writeFileSync(eventsPath, JSON.stringify(events));
+  appendSessionEvent(input.cwd, event);
   allow();
 } catch (e) {
   warnNonBlocking(`H16: session-event registration failed: ${e.message}`);

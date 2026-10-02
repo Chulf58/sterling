@@ -3,9 +3,8 @@
 // to .sterling/transient/session-events.json in direct mode.
 // Missing store: allow, no recording (fail-open, mirrors H7).
 // Never deduplicates: the register is a pure append log.
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
 import { readStdin, allow, warnNonBlocking, openStore } from './lib/common.mjs';
+import { appendSessionEvent, researchToolEvent } from './lib/session-events.mjs';
 
 const input = readStdin();
 const store = openStore(input.cwd);
@@ -14,20 +13,14 @@ if (!store) allow();
 try {
   // direct mode: derive kind + detail from the tool call, then append
   const tool = input.tool_name;
-  let kind, detail;
-  if (tool === 'WebSearch') {
-    kind = 'research_tool';
-    detail = String(input.tool_input?.query ?? '');
-  } else if (tool === 'WebFetch') {
-    kind = 'research_tool';
-    detail = String(input.tool_input?.url ?? '');
+  const at = new Date().toISOString();
+  let event;
+  if (tool === 'WebSearch' || tool === 'WebFetch') {
+    event = researchToolEvent(tool === 'WebSearch' ? input.tool_input?.query : input.tool_input?.url, { at, agentId: input.agent_id });
   } else {
     // Task or Agent
-    kind = 'agent_dispatch';
-    detail = String(input.tool_input?.subagent_type ?? '');
+    event = { kind: 'agent_dispatch', detail: String(input.tool_input?.subagent_type ?? ''), at };
   }
-
-  const event = { kind, detail, at: new Date().toISOString() };
   // Board d33d8ac4: an agent_dispatch event's OWN H22 register entry is only
   // joinable if the event carries the id that entry is keyed by. PostToolUse
   // on a background Task|Agent dispatch returns it at launch as
@@ -43,9 +36,8 @@ try {
   // call's own, never a launch id, so it is deliberately not recorded: H10's
   // join would otherwise treat a register row's launch tool_use_id as another
   // round's. A conductor web call has no agent_id and stays untagged.
-  if (kind === 'research_tool') {
-    if (typeof input.agent_id === 'string' && input.agent_id !== '') event.agent_id = input.agent_id;
-  } else {
+  // (researchToolEvent above adds that agent_id.)
+  if (event.kind === 'agent_dispatch') {
     const agentId = input.tool_response?.agentId;
     if (typeof agentId === 'string' && agentId !== '') event.agent_id = agentId;
     // Sol review HIGH (board d33d8ac4): agent_id alone recurs across ROUNDS
@@ -60,11 +52,7 @@ try {
     if (typeof input.tool_use_id === 'string' && input.tool_use_id !== '') event.tool_use_id = input.tool_use_id;
   }
 
-  const eventsPath = join(input.cwd, '.sterling', 'transient', 'session-events.json');
-  mkdirSync(dirname(eventsPath), { recursive: true });
-  const events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, 'utf8')) : [];
-  events.push(event);
-  writeFileSync(eventsPath, JSON.stringify(events));
+  appendSessionEvent(input.cwd, event);
   allow();
 } catch (e) {
   warnNonBlocking(`H16: session-event registration failed: ${e.message}`);

@@ -288,7 +288,7 @@ test('init from an installed copy: replaces the clone launcher, deletes the clon
 
   const launcher = readFileSync(join(target, 'sterling-launch.sh'), 'utf8');
   assert.doesNotMatch(launcher, /--plugin-dir/, 'the launcher no longer overrides the installed plugin');
-  assert.match(launcher, /plugins\/cache"/, 'it is the installed shape');
+  assert.match(launcher, /newestInstalledSterling\(\)/, 'it is the installed shape');
   assert.match(row(out, 'sterling-launch.sh'), /replaced/);
   assert.ok(row(out, 'sterling-launch.sh').includes(clone), 'the replaced row names the old clone');
 

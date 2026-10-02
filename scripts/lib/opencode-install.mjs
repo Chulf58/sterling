@@ -11,17 +11,28 @@
 //    shims import <root>/opencode/sterling-server.mjs and the './tui' export of
 //    <root>/opencode/sterling-tui/ IN PLACE: the server bundle finds the plugin root by
 //    walking up from its own import.meta.url. Plus <home>/.sterling/opencode/
-//    sterling-mcp.mjs, the MCP launcher every project's opencode.json names. All three
-//    resolve the Sterling root at RUN time: the authoring clone's path is baked (a clone
-//    does not move on update), an installed copy is found as the highest-version
-//    <CLAUDE_CONFIG_DIR or ~/.claude>/plugins/cache/*/sterling/<version>/ directory, so
-//    no versioned cache path is ever written to disk. A file of the same name that
-//    Sterling did not write, or one edited since, is refused, never overwritten.
+//    sterling-mcp.mjs, the MCP launcher. All three resolve the Sterling root at RUN
+//    time: the authoring clone's path is baked (a clone does not move on update), an
+//    installed copy is the newest one the shared resolver (scripts/lib/sterling-roots.mjs)
+//    finds in Claude Code's plugin cache or OpenCode's npm cache, so no versioned install
+//    path is ever written to disk. A file of the same name that Sterling did not write,
+//    or one edited since, is refused, never overwritten. When the npm package from
+//    `opencode plugin add` is registered on this machine (the copy running init is it,
+//    the resolver scan finds a copy in OpenCode's npm cache, or the global opencode.json
+//    `plugins` names it), no server shim is installed, because `plugin add` registers
+//    the server and a shim would load it twice; one an earlier init wrote is removed
+//    when its stamp verifies and kept with a KEPT row otherwise. This is machine state,
+//    so a dual-host machine gets the same answer whichever host runs init.
+//    The npm copy's dashboard is copied to <home>/.sterling/opencode/tui/<version>/
+//    (materializeTui), because OpenCode gives a TUI bundle its own solid-js only outside
+//    node_modules (finding 789147ca), and the TUI shim loads the newest copy there.
 //    Also once per machine: a `codex` entry under mcp.servers in <config dir>/opencode.json,
 //    written only for a Codex whose `mcp-server --help` prints mcp-server help.
-// 2. PER PROJECT: <project>/.opencode/opencode.json gets the `sterling` local MCP entry,
-//    the store-guard edit-deny rules and default_agent, merged into whatever else the
-//    file holds. What Sterling writes under .opencode/ is kept out of git through a
+// 2. PER PROJECT: <project>/.opencode/opencode.json gets the store-guard edit and shell deny rules
+//    and default_agent, merged into whatever else the file holds. It gets no `sterling`
+//    MCP entry: the server plugin adds that itself (decision
+//    sterling-opencode-plugin-injects-its-own-mcp-entry), and an entry an earlier init
+//    wrote is removed when it is exactly Sterling's. What Sterling writes under .opencode/ is kept out of git through a
 //    managed block in .git/info/exclude (the committed .gitignore is never edited):
 //    the whole /.opencode/ in a hobby project with nothing tracked there, otherwise
 //    only Sterling's own paths, so a work project's committed portable agents
@@ -36,11 +47,13 @@
 // OpenCode not installed, or not 2.x: one loud skip line, nothing written.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isInstalledCopy } from './installed-copy.mjs';
+import { RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, installHostOf, readCopyVersion, compareSterlingVersions, scanInstalledSterling } from './sterling-roots.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
 import { sha256, loadRegistry } from './agent-distribution.mjs';
 import { renderOpenCodeFullText } from './agent-fences.mjs';
@@ -52,7 +65,10 @@ export const STERLING_AGENTS_SUBDIR = '.opencode/agents/sterling';
 export const PROJECT_CONFIG_REL = '.opencode/opencode.json';
 export const CONDUCTOR_AGENT = 'sterling/conductor';
 export const ROSTER = ['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'librarian'];
-export const STORE_GUARD_PATTERNS = ['**/.sterling/sterling.db*', '.sterling/sterling.db*'];
+/** The npm package `opencode plugin add` installs (decision sterling-on-opencode-distributes-as-npm-package-via-opencode-plugin-add). */
+export const STERLING_NPM_PACKAGE = '@chulf58/sterling';
+export const STORE_GUARD_PATTERNS =['**/.sterling/sterling.db*', '.sterling/sterling.db*'];
+export const SHELL_STORE_GUARD_PATTERN = '*sterling.db*';
 const PACKAGE_MARKER = 'sterling-generated';
 const EXCLUDE_BEGIN = '# >>> sterling opencode (managed by Sterling init/update; per-user files, never committed)';
 const EXCLUDE_END = '# <<< sterling opencode';
@@ -82,28 +98,13 @@ export function probeOpenCode({ env = process.env } = {}) {
 
 // ---------- generated files -------------------------------------------------
 
-// Builtins-only source inlined into every generated file. ENOENT/ENOTDIR mean "no
-// such cache level", which is the normal case; any other error is thrown (P5).
-const RESOLVER_SOURCE = `
-function newestInstalledSterling() {
-  const ls = (d) => {
-    try { return readdirSync(d); } catch (err) { if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return []; throw err; }
-  };
-  const cache = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'plugins', 'cache');
-  const found = [];
-  for (const marketplace of ls(cache)) {
-    for (const version of ls(join(cache, marketplace, 'sterling'))) {
-      const m = /^(\\d+)\\.(\\d+)\\.(\\d+)(?:-(.+))?$/.exec(version);
-      if (m) found.push({ dir: join(cache, marketplace, 'sterling', version), nums: [+m[1], +m[2], +m[3]], pre: m[4] });
-    }
-  }
-  found.sort((a, b) =>
-    a.nums[0] - b.nums[0] || a.nums[1] - b.nums[1] || a.nums[2] - b.nums[2] ||
-    (a.pre === b.pre ? 0 : a.pre === undefined ? 1 : b.pre === undefined ? -1 : a.pre < b.pre ? -1 : 1));
-  if (!found.length) {
-    throw new Error('Sterling: no installed Sterling plugin under ' + cache + ' — install it (claude plugin install sterling@sterling), then run /sterling:update in a Sterling project.');
-  }
-  return found[found.length - 1].dir;
+// Builtins-only source inlined into every generated file: the shared resolver
+// (sterling-roots.mjs) plus a wrapper that fails loud with the OpenCode remedy.
+const RESOLVER_SOURCE = `${STERLING_RESOLVER_SOURCE}
+function sterlingInstallRoot() {
+  const found = newestInstalledSterling();
+  if (!found) throw new Error('Sterling: ' + sterlingNotFoundMessage('opencode'));
+  return found.root;
 }
 `;
 
@@ -115,7 +116,7 @@ const IMPORTS = [
 ].join('\n');
 
 function rootExpr(pluginRoot, installed) {
-  return installed ? 'newestInstalledSterling()' : JSON.stringify(fwd(resolve(pluginRoot)));
+  return installed ? 'sterlingInstallRoot()' : JSON.stringify(fwd(resolve(pluginRoot)));
 }
 
 /** The one stderr line a shim prints when no Sterling can be resolved, naming the file to remove. */
@@ -156,12 +157,28 @@ export default {
 `, '//');
 }
 
-export function renderTuiShim(pluginRoot, installed, shimDir) {
+/** materializedRoot: load the newest <materializedRoot>/<version>/ (the npm copy's dashboard, copied outside node_modules) instead of <root>/opencode/sterling-tui. */
+export function renderTuiShim(pluginRoot, installed, shimDir, { materializedRoot } = {}) {
+  const pkgDirExpr = materializedRoot ? 'newestMaterializedTui()' : `join(${rootExpr(pluginRoot, installed)}, 'opencode', 'sterling-tui')`;
+  const materialized = materializedRoot
+    ? `
+// The npm-installed Sterling's dashboard, copied out of the npm cache because OpenCode
+// gives a TUI bundle its own solid-js only outside node_modules (finding 789147ca).
+// The newest copied version is taken when this loads, so an update needs no new shim.
+function newestMaterializedTui() {
+  const base = ${JSON.stringify(fwd(materializedRoot))};
+  const versions = sterlingRootsLs(base).filter((n) => /^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$/.test(n));
+  if (!versions.length) throw new Error('Sterling: no dashboard has been copied to ' + base + ' — rerun /sterling:update (or /sterling:init) so Sterling copies it out of the npm cache.');
+  versions.sort(compareSterlingVersions);
+  return join(base, versions[versions.length - 1]);
+}
+`
+    : '';
   return stampBody(`// Sterling OpenCode TUI shim — generated by /sterling:init and /sterling:update; do not edit.
 ${IMPORTS}
-${RESOLVER_SOURCE}
+${RESOLVER_SOURCE}${materialized}
 async function loadSterlingTui() {
-  const pkgDir = join(${rootExpr(pluginRoot, installed)}, 'opencode', 'sterling-tui');
+  const pkgDir = ${pkgDirExpr};
   const pkgPath = join(pkgDir, 'package.json');
   if (!existsSync(pkgPath)) {
     throw new Error('Sterling: ' + pkgPath + ' is missing — this Sterling has no OpenCode TUI plugin; update Sterling, then run /sterling:update.');
@@ -169,8 +186,16 @@ async function loadSterlingTui() {
   const exp = (JSON.parse(readFileSync(pkgPath, 'utf8')).exports || {})['./tui'];
   const rel = typeof exp === 'string' ? exp : exp && (exp.import || exp.default);
   if (typeof rel !== 'string') throw new Error('Sterling: ' + pkgPath + " has no exports['./tui'].");
-  return (await import(pathToFileURL(join(pkgDir, rel)).href)).default;
+  const file = join(pkgDir, rel);
+  try {
+    return (await import(pathToFileURL(file).href)).default;
+  } catch (err) {
+    const failed = new Error('Sterling: importing the dashboard ' + file + ' failed: ' + String((err && err.message) || err), { cause: err });
+    failed.name = IMPORT_FAILED;
+    throw failed;
+  }
 }
+const IMPORT_FAILED = 'SterlingDashboardImportError';
 
 // The nearest .sterling/sterling.db at or above dir decides whether this is a Sterling project.
 function inSterlingProject(dir) {
@@ -180,8 +205,9 @@ function inSterlingProject(dir) {
   }
 }
 
-// A missing Sterling must not break OpenCode at import: the failure is kept and
-// reported once, from setup.
+// A missing or broken Sterling must not break OpenCode at import: the failure is kept.
+// From setup, a missing Sterling logs one line; a dashboard that fails to import is
+// thrown in a Sterling project, naming the file and the cause.
 let plugin;
 let loadError;
 try {
@@ -193,7 +219,7 @@ try {
 export default {
   id: (plugin && plugin.id) || 'sterling.dashboard',
   setup(api) {
-    if (loadError) {
+    if (loadError && loadError.name !== IMPORT_FAILED) {
       const err = loadError;
       ${notFoundLine('the dashboard', shimDir)}
       return () => {};
@@ -201,6 +227,11 @@ export default {
     // Non-Sterling projects get no slot, command or route.
     const dir = (api && api.location && api.location.directory) || process.cwd();
     if (!inSterlingProject(dir)) return () => {};
+    // A Sterling that was found but whose dashboard does not import is thrown, not logged:
+    // a logged line is invisible in the TUI (finding 789147ca saw it swallowed).
+    if (loadError) {
+      throw new Error(String((loadError && loadError.message) || loadError) + ' — the Sterling dashboard is off. Fix the cause above, or remove ' + ${JSON.stringify(fwd(shimDir))} + '.', { cause: loadError });
+    }
     return plugin.setup(api);
   },
 };
@@ -270,29 +301,195 @@ function refusal(item, what, remedy) {
   return { item, status: 'refused', refused: true, detail: what, instruction: `REFUSED: ${what}. Sterling will not overwrite it. Remedy: ${remedy}.` };
 }
 
-export function installGlobal({ pluginRoot, installed, env = process.env, home = homedir() }) {
-  const pluginsDir = join(opencodeConfigDir({ env, home }), 'plugins');
+const TWICE = 'the npm package is registered too, so Sterling would load twice; remove it unless you mean it to';
+
+// Npm copy: `opencode plugin add` registers the server, so the global server shim
+// would load it a second time. One an earlier init wrote and nobody edited (its stamp
+// verifies) is removed; anything else is kept, loudly.
+function retireServerShim(path) {
+  const item = fwd(path);
+  if (!existsSync(path)) return { item, status: 'skipped', detail: `not installed: opencode plugin add registers the ${STERLING_NPM_PACKAGE} server itself, so a shim would load it twice` };
+  if (!statSync(path).isFile()) return { item, status: 'skipped', detail: `KEPT: ${item} is not a file, so it stays; ${TWICE}` };
+  const stamp = verifyStamp(normalize(readFileSync(path, 'utf8')), '//');
+  if (stamp === null) return { item, status: 'skipped', detail: `KEPT: ${item} exists and Sterling did not write it, so it stays; if it loads Sterling, ${TWICE}` };
+  if (!stamp.unmodified) return { item, status: 'skipped', detail: `KEPT: ${item} was edited after Sterling wrote it, so it stays; ${TWICE}` };
+  unlinkSync(path);
+  return { item, status: 'removed', detail: `the server shim an earlier init wrote: opencode plugin add registers the ${STERLING_NPM_PACKAGE} server, so the shim would load it twice` };
+}
+
+// ---------- materialized TUI (npm copy) --------------------------------------
+// Finding 789147ca: OpenCode gives a TUI bundle the host's solid-js only when the bundle
+// lives outside any node_modules path; imported from the npm cache it fails ('Cannot find
+// package @opentui/solid'). So the npm copy's dashboard files are copied to
+// <home>/.sterling/opencode/tui/<version>/ and the TUI shim loads the newest version
+// there at load time. A marker file lists the hashes Sterling wrote, which is how an
+// old version is known to be Sterling's and unedited before it is removed.
+
+export const TUI_MATERIALIZED_FILES = ['package.json', 'sterling-tui.bundle.tsx'];
+export const TUI_MATERIALIZED_KEEP = 2;
+const MATERIALIZED_MARKER = '.sterling-materialized.json';
+const SEMVER_DIR = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+// Raw bytes, no line-ending normalization: the marker records exactly what was copied.
+const bytesHash = (b) => createHash('sha256').update(b).digest('hex');
+
+/** <home>/.sterling/opencode/tui — one directory per materialized version. */
+export function materializedTuiRoot({ home = homedir() } = {}) {
+  return join(home, '.sterling', 'opencode', 'tui');
+}
+
+// 'ours' (marker present, only Sterling's files, every hash matches), 'edited', or 'foreign'.
+function materializedState(dir) {
+  let marker;
+  try {
+    marker = JSON.parse(readFileSync(join(dir, MATERIALIZED_MARKER), 'utf8'));
+  } catch (err) {
+    if (err.code === 'ENOENT' || err instanceof SyntaxError) return 'foreign';
+    throw err;
+  }
+  const files = marker && typeof marker.files === 'object' ? marker.files : null;
+  if (!files) return 'foreign';
+  const extra = readdirSync(dir).filter((n) => n !== MATERIALIZED_MARKER && !(n in files));
+  if (extra.length) return 'edited';
+  for (const [name, hash] of Object.entries(files)) {
+    if (!existsSync(join(dir, name)) || bytesHash(readFileSync(join(dir, name))) !== hash) return 'edited';
+  }
+  return 'ours';
+}
+
+/**
+ * Copies the npm copy's TUI bundle files (TUI_MATERIALIZED_FILES from
+ * <pluginRoot>/opencode/sterling-tui/) to <home>/.sterling/opencode/tui/<version>/,
+ * then keeps the newest TUI_MATERIALIZED_KEEP versions (and always this one) and
+ * removes older versions Sterling wrote and nobody edited. Returns rows; called by
+ * setupOpenCode for the npm copy and, after `opencode plugin update`, by the post-update sync.
+ */
+export function materializeTui({ pluginRoot, env = process.env, home = homedir() }) {
+  void env;
+  const base = materializedTuiRoot({ home });
+  const src = join(pluginRoot, 'opencode', 'sterling-tui');
+  const v = readCopyVersion(pluginRoot, 'opencode');
+  if (!v.version) return [refusal(`${fwd(base)}/`, `the version of ${fwd(pluginRoot)} cannot be read: ${v.reason}`, 'reinstall Sterling (opencode plugin add @chulf58/sterling), then rerun /sterling:update')];
+  const missing = TUI_MATERIALIZED_FILES.filter((f) => !existsSync(join(src, f)));
+  if (missing.length) return [refusal(`${fwd(base)}/`, `${fwd(src)} lacks ${missing.join(', ')}, so there is no dashboard to copy`, 'update Sterling, then rerun /sterling:update')];
   const rows = [];
-  rows.push(ensureStampedFile(join(pluginsDir, 'sterling.js'), renderServerShim(pluginRoot, installed, join(pluginsDir, 'sterling.js')), `${fwd(pluginsDir)}/sterling.js`));
-  const tuiDir = join(pluginsDir, 'sterling-tui');
+  const dest = join(base, v.version);
+  const item = `${fwd(dest)}/`;
+  const content = Object.fromEntries(TUI_MATERIALIZED_FILES.map((f) => [f, readFileSync(join(src, f))]));
+  const hashes = Object.fromEntries(Object.entries(content).map(([f, b]) => [f, bytesHash(b)]));
+  const write = () => {
+    mkdirSync(dest, { recursive: true });
+    for (const [f, b] of Object.entries(content)) writeFileSync(join(dest, f), b);
+    writeFileSync(join(dest, MATERIALIZED_MARKER), `${JSON.stringify({ version: v.version, files: hashes }, null, 2)}\n`);
+  };
+  if (!existsSync(dest)) {
+    write();
+    rows.push({ item, status: 'created', detail: `the dashboard copied out of the npm cache (OpenCode gives its own solid-js only outside node_modules)` });
+  } else {
+    const state = statSync(dest).isDirectory() ? materializedState(dest) : 'foreign';
+    if (state === 'foreign') rows.push(refusal(item, `${item} exists and Sterling did not write it`, `move it aside, then rerun /sterling:update`));
+    else if (state === 'edited') rows.push(refusal(item, `${item} was edited after Sterling wrote it`, `delete it so Sterling can copy the dashboard again, then rerun /sterling:update`));
+    else if (TUI_MATERIALIZED_FILES.every((f) => bytesHash(readFileSync(join(dest, f))) === hashes[f])) rows.push({ item, status: 'matches' });
+    else {
+      write();
+      rows.push({ item, status: 'refreshed' });
+    }
+  }
+  const versions = readdirSync(base).filter((n) => SEMVER_DIR.test(n) && statSync(join(base, n)).isDirectory());
+  versions.sort((a, b) => compareSterlingVersions(b, a));
+  const keep = new Set([...versions.slice(0, TUI_MATERIALIZED_KEEP), v.version]);
+  for (const old of versions.filter((n) => !keep.has(n))) {
+    const dir = join(base, old);
+    const oldItem = `${fwd(dir)}/`;
+    const state = materializedState(dir);
+    if (state === 'ours') {
+      rmSync(dir, { recursive: true });
+      rows.push({ item: oldItem, status: 'removed', detail: `older than the newest ${TUI_MATERIALIZED_KEEP} materialized dashboards` });
+    } else {
+      rows.push({ item: oldItem, status: 'skipped', detail: `KEPT: ${oldItem} ${state === 'foreign' ? 'was not written by Sterling' : 'was edited after Sterling wrote it'}, so it stays although it is older than the newest ${TUI_MATERIALIZED_KEEP}` });
+    }
+  }
+  return rows;
+}
+
+// The TUI shim directory: a package.json exporting './tui' to the stamped tui.tsx.
+function ensureTuiShim(tuiDir, shim) {
   const pkgPath = join(tuiDir, 'package.json');
   const pkgLabel = `${fwd(tuiDir)}/package.json`;
   const pkg = renderTuiPackageJson();
   const pkgState = existsSync(pkgPath) && statSync(pkgPath).isFile() ? tuiPackageState(normalize(readFileSync(pkgPath, 'utf8'))) : null;
   if (existsSync(tuiDir) && !statSync(tuiDir).isDirectory()) {
-    rows.push(refusal(`${fwd(tuiDir)}/`, `${fwd(tuiDir)} exists and is not a directory`, 'move it aside, then rerun /sterling:update'));
-  } else if (pkgState === 'foreign') {
-    rows.push(refusal(pkgLabel, `${fwd(tuiDir)}/ holds a package.json Sterling did not write`, `rename or remove ${fwd(tuiDir)}/, then rerun /sterling:update`));
-  } else if (pkgState === 'edited') {
-    rows.push(refusal(pkgLabel, `${fwd(pkgPath)} was edited after Sterling wrote it`, `delete it so Sterling can regenerate it, then rerun /sterling:update`));
-  } else if (existsSync(tuiDir) && !existsSync(pkgPath) && readdirSync(tuiDir).length > 0) {
-    rows.push(refusal(`${fwd(tuiDir)}/`, `${fwd(tuiDir)}/ exists with files Sterling did not write and no package.json`, `rename or remove ${fwd(tuiDir)}/, then rerun /sterling:update`));
+    return [refusal(`${fwd(tuiDir)}/`, `${fwd(tuiDir)} exists and is not a directory`, 'move it aside, then rerun /sterling:update')];
+  }
+  if (pkgState === 'foreign') {
+    return [refusal(pkgLabel, `${fwd(tuiDir)}/ holds a package.json Sterling did not write`, `rename or remove ${fwd(tuiDir)}/, then rerun /sterling:update`)];
+  }
+  if (pkgState === 'edited') {
+    return [refusal(pkgLabel, `${fwd(pkgPath)} was edited after Sterling wrote it`, `delete it so Sterling can regenerate it, then rerun /sterling:update`)];
+  }
+  if (existsSync(tuiDir) && !existsSync(pkgPath) && readdirSync(tuiDir).length > 0) {
+    return [refusal(`${fwd(tuiDir)}/`, `${fwd(tuiDir)}/ exists with files Sterling did not write and no package.json`, `rename or remove ${fwd(tuiDir)}/, then rerun /sterling:update`)];
+  }
+  const before = existsSync(pkgPath) ? normalize(readFileSync(pkgPath, 'utf8')) : null;
+  mkdirSync(tuiDir, { recursive: true });
+  if (before !== pkg) writeFileSync(pkgPath, pkg);
+  return [
+    { item: pkgLabel, status: before === null ? 'created' : before === pkg ? 'matches' : 'refreshed' },
+    ensureStampedFile(join(tuiDir, 'tui.tsx'), shim, `${fwd(tuiDir)}/tui.tsx`),
+  ];
+}
+
+const namesNpmPackage = (s) => typeof s === 'string' && (s === STERLING_NPM_PACKAGE || s.startsWith(`${STERLING_NPM_PACKAGE}@`));
+
+/**
+ * The `opencode plugin add` copy as this MACHINE has it, whichever host runs init:
+ * { root, configured, row? }. root is the newest npm copy the resolver scan finds in
+ * OpenCode's cache (null when none); configured is true when the global opencode.json
+ * `plugins` list names the package (a string, or an entry with a string field naming
+ * it). A global config that cannot be read is configured: false plus a loud row.
+ */
+export function npmCopyOnMachine({ env = process.env, home = homedir() } = {}) {
+  const copies = scanInstalledSterling(env, home).copies.filter((c) => c.host === 'opencode');
+  copies.sort((a, b) => compareSterlingVersions(a.version, b.version) || (a.root > b.root ? 1 : a.root < b.root ? -1 : 0));
+  const root = copies.length ? copies[copies.length - 1].root : null;
+  const path = join(opencodeConfigDir({ env, home }), 'opencode.json');
+  if (!existsSync(path)) return { root, configured: false };
+  const item = `${fwd(path)} plugins`;
+  let config;
+  try {
+    config = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    return { root, configured: false, row: { item, status: 'skipped', detail: `${fwd(path)} is not valid JSON (${err.message}), so whether it registers ${STERLING_NPM_PACKAGE} is unknown; the server shim is written unless the npm copy is in OpenCode's cache. Fix the file, then rerun /sterling:update` } };
+  }
+  const plugins = config && typeof config === 'object' && !Array.isArray(config) ? config.plugins : undefined;
+  const configured = Array.isArray(plugins) && plugins.some((e) => namesNpmPackage(e) || (e && typeof e === 'object' && Object.values(e).some(namesNpmPackage)));
+  return { root, configured };
+}
+
+/**
+ * npmCopy: the Sterling in use is the `opencode plugin add` package. Whether the
+ * server shim is installed and where the TUI shim points come from machine state
+ * (npmCopyOnMachine) as well, so a dual-host machine where Claude Code runs init gets
+ * the same files: when the npm package is registered it registers its own server, so
+ * no server shim is installed (an unedited old one is removed); when an npm copy
+ * exists, its dashboard is materialized outside node_modules for the TUI shim to load.
+ */
+export function installGlobal({ pluginRoot, installed, npmCopy = false, env = process.env, home = homedir() }) {
+  const pluginsDir = join(opencodeConfigDir({ env, home }), 'plugins');
+  const tuiDir = join(pluginsDir, 'sterling-tui');
+  const rows = [];
+  const machine = npmCopyOnMachine({ env, home });
+  if (machine.row) rows.push(machine.row);
+  const npmRoot = npmCopy ? pluginRoot : machine.root;
+  if (npmCopy || machine.root !== null || machine.configured) {
+    rows.push(retireServerShim(join(pluginsDir, 'sterling.js')));
   } else {
-    const before = existsSync(pkgPath) ? normalize(readFileSync(pkgPath, 'utf8')) : null;
-    mkdirSync(tuiDir, { recursive: true });
-    if (before !== pkg) writeFileSync(pkgPath, pkg);
-    rows.push({ item: pkgLabel, status: before === null ? 'created' : before === pkg ? 'matches' : 'refreshed' });
-    rows.push(ensureStampedFile(join(tuiDir, 'tui.tsx'), renderTuiShim(pluginRoot, installed, tuiDir), `${fwd(tuiDir)}/tui.tsx`));
+    rows.push(ensureStampedFile(join(pluginsDir, 'sterling.js'), renderServerShim(pluginRoot, installed, join(pluginsDir, 'sterling.js')), `${fwd(pluginsDir)}/sterling.js`));
+  }
+  if (npmRoot !== null) {
+    rows.push(...materializeTui({ pluginRoot: npmRoot, env, home }));
+    rows.push(...ensureTuiShim(tuiDir, renderTuiShim(npmRoot, installed, tuiDir, { materializedRoot: materializedTuiRoot({ home }) })));
+  } else {
+    rows.push(...ensureTuiShim(tuiDir, renderTuiShim(pluginRoot, installed, tuiDir)));
   }
   rows.push(ensureStampedFile(mcpLauncherPath({ home }), renderMcpLauncher(pluginRoot, installed), fwd(mcpLauncherPath({ home }))));
   return rows;
@@ -410,12 +607,18 @@ export function mcpCommand({ home = homedir() } = {}) {
   return ['node', '--disable-warning=ExperimentalWarning', fwd(mcpLauncherPath({ home })), '--store', '.sterling/sterling.db'];
 }
 
-/** Merge Sterling's keys into .opencode/opencode.json without touching any other key. */
+/**
+ * Merge Sterling's keys (store guard, default_agent) into .opencode/opencode.json without
+ * touching any other key. Returns one row, or two when an mcp.sterling entry Sterling did
+ * not write is kept. No mcp.sterling entry is written any more: the Sterling server plugin
+ * adds it (decision sterling-opencode-plugin-injects-its-own-mcp-entry). An entry an
+ * earlier init wrote is removed only when it is exactly the entry Sterling wrote.
+ */
 export function ensureProjectConfig({ projectDir, home = homedir(), tracked, conductorOk = true }) {
   const rel = PROJECT_CONFIG_REL;
   const path = join(projectDir, rel);
   if (tracked.includes(rel)) {
-    return refusal(rel, `${rel} is tracked by git, and Sterling's MCP entry names a per-user path that must not be committed`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`);
+    return [refusal(rel, `${rel} is tracked by git, and Sterling writes .opencode/ config only into untracked files (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config)`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`)];
   }
   let config = {};
   let before = null;
@@ -424,37 +627,65 @@ export function ensureProjectConfig({ projectDir, home = homedir(), tracked, con
     try {
       config = JSON.parse(before);
     } catch (err) {
-      return refusal(rel, `${rel} is not valid JSON (${err.message})`, `fix or remove ${rel}, then rerun /sterling:update`);
+      return [refusal(rel, `${rel} is not valid JSON (${err.message})`, `fix or remove ${rel}, then rerun /sterling:update`)];
     }
     if (config === null || typeof config !== 'object' || Array.isArray(config)) {
-      return refusal(rel, `${rel} is not a JSON object`, `fix or remove ${rel}, then rerun /sterling:update`);
+      return [refusal(rel, `${rel} is not a JSON object`, `fix or remove ${rel}, then rerun /sterling:update`)];
     }
   }
   const notes = [];
+  const extraRows = [];
   const mcp = config.mcp ?? {};
-  if (typeof mcp !== 'object' || Array.isArray(mcp)) return refusal(rel, `${rel}: "mcp" is not an object`, `fix ${rel}, then rerun /sterling:update`);
-  config.mcp = { ...mcp, sterling: { type: 'local', command: mcpCommand({ home }) } };
+  if (typeof mcp !== 'object' || mcp === null || Array.isArray(mcp)) return [refusal(rel, `${rel}: "mcp" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+  if (mcp.sterling !== undefined) {
+    const written = { type: 'local', command: mcpCommand({ home }) };
+    if (JSON.stringify(mcp.sterling) === JSON.stringify(written)) {
+      const { sterling, ...rest } = mcp;
+      if (Object.keys(rest).length) config.mcp = rest;
+      else delete config.mcp;
+      notes.push('removed the sterling MCP entry an earlier init wrote (the Sterling plugin now adds it)');
+    } else {
+      extraRows.push({ item: `${rel} mcp.sterling`, status: 'skipped', detail: `KEPT: ${rel} has an mcp.sterling entry that differs from the entry Sterling wrote, so it is yours and stays; the Sterling plugin now adds its own sterling MCP entry, so remove yours unless you mean it to replace Sterling's` });
+    }
+  }
   // Store guard. A string value ("allow"/"ask") becomes the "*" rule so its meaning is
   // kept; Sterling's deny rules are re-added LAST so they win over any broader rule.
   const permission = config.permission ?? {};
-  if (typeof permission !== 'object' || Array.isArray(permission)) return refusal(rel, `${rel}: "permission" is not an object`, `fix ${rel}, then rerun /sterling:update`);
+  if (typeof permission !== 'object' || Array.isArray(permission)) return [refusal(rel, `${rel}: "permission" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
   // The shape measured live on 2.0.21 (finding 25892d42): "*": "allow" first, then the
   // deny rules. An existing "*" (or a bare string, which becomes "*") is kept as is.
   let edit = permission.edit ?? { '*': 'allow' };
   if (typeof edit === 'string') edit = { '*': edit };
-  if (typeof edit !== 'object' || Array.isArray(edit)) return refusal(rel, `${rel}: "permission.edit" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`);
+  if (typeof edit !== 'object' || Array.isArray(edit)) return [refusal(rel, `${rel}: "permission.edit" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
   const guarded = { '*': 'allow', ...Object.fromEntries(Object.entries(edit).filter(([k]) => !STORE_GUARD_PATTERNS.includes(k))) };
   for (const p of STORE_GUARD_PATTERNS) guarded[p] = 'deny';
-  config.permission = { ...permission, edit: guarded };
+  // The edit deny does not cover the shell tool: `printf >> .sterling/sterling.db`
+  // got through until this shell rule was added (finding
+  // opencode-2-0-21-tool-shapes-execpath-and-shell-store-guard-october-2026). Same merge as edit.
+  // With no shell block, "*" is seeded from a bash block (a string, or its "*" rule), so a
+  // user's `bash: "ask"` is not loosened to allow when Sterling adds the shell key.
+  let shell = permission.shell;
+  if (shell === undefined) {
+    const bash = permission.bash;
+    if (bash === undefined) shell = { '*': 'allow' };
+    else if (typeof bash === 'string') shell = { '*': bash };
+    else if (typeof bash === 'object' && bash !== null && !Array.isArray(bash)) shell = bash['*'] === undefined ? { '*': 'allow' } : { '*': bash['*'] };
+    else return [refusal(rel, `${rel}: "permission.bash" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
+  }
+  if (typeof shell === 'string') shell = { '*': shell };
+  if (typeof shell !== 'object' || shell === null || Array.isArray(shell)) return [refusal(rel, `${rel}: "permission.shell" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
+  const shellGuarded = { '*': 'allow', ...Object.fromEntries(Object.entries(shell).filter(([k]) => k !== SHELL_STORE_GUARD_PATTERN)) };
+  shellGuarded[SHELL_STORE_GUARD_PATTERN] = 'deny';
+  config.permission = { ...permission, edit: guarded, shell: shellGuarded };
   if (!conductorOk) {
     if (config.default_agent === undefined) notes.push(`default_agent not set: the ${CONDUCTOR_AGENT} agent file was refused`);
   } else if (config.default_agent === undefined) config.default_agent = CONDUCTOR_AGENT;
   else if (config.default_agent !== CONDUCTOR_AGENT) notes.push(`default_agent kept as ${JSON.stringify(config.default_agent)} (yours), so OpenCode does not start in ${CONDUCTOR_AGENT}`);
   const after = `${JSON.stringify(config, null, 2)}\n`;
-  if (after === before) return { item: rel, status: 'matches', detail: notes.join('; ') || undefined };
+  if (after === before) return [{ item: rel, status: 'matches', detail: notes.join('; ') || undefined }, ...extraRows];
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, after);
-  return { item: rel, status: before === null ? 'created' : 'refreshed', detail: notes.join('; ') || 'sterling MCP entry, store-guard edit deny, default_agent' };
+  return [{ item: rel, status: before === null ? 'created' : 'refreshed', detail: notes.join('; ') || 'store-guard edit and shell deny, default_agent' }, ...extraRows];
 }
 
 function excludeLines(wholeDir) {
@@ -629,7 +860,7 @@ export function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
 /**
  * Steps 1-3 for one project. Returns { skipped } when OpenCode is absent or not 2.x,
  * else { rows } — every row { item, status, detail?, refused?, instruction? }, with
- * status created | matches | refreshed | skipped | refused.
+ * status created | matches | refreshed | removed | skipped | refused.
  */
 export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home = homedir(), installed, probe = probeOpenCode }) {
   if (!isAbsolute(projectDir)) throw new TypeError(`setupOpenCode: projectDir must be absolute, got ${projectDir}`);
@@ -639,7 +870,8 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   if (!oc.installed) return { skipped: `OpenCode not installed (${oc.reason}) — Sterling on OpenCode SKIPPED; install OpenCode 2, then run /sterling:update` };
   if (oc.major < 2) return { skipped: `OpenCode ${oc.version} found, but Sterling on OpenCode needs 2.x — SKIPPED; upgrade OpenCode (opencode upgrade), then run /sterling:update` };
   const isInstalled = installed ?? isInstalledCopy(pluginRoot, { env, home });
-  const rows = installGlobal({ pluginRoot, installed: isInstalled, env, home });
+  const npmCopy = isInstalled && installHostOf(pluginRoot, { env, home }) === 'opencode';
+  const rows = installGlobal({ pluginRoot, installed: isInstalled, npmCopy, env, home });
   rows.push(ensureCodexServer({ env, home }));
   const ls = git(projectDir, ['ls-files', '--', '.opencode']);
   const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
@@ -657,7 +889,7 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   const agentRows = ensureFullAgents({ projectDir, pluginRoot, tracked });
   const conductorRow = agentRows.find((r) => r.item === `${STERLING_AGENTS_SUBDIR}/conductor.md`);
   const conductorOk = ['created', 'matches', 'refreshed'].includes(conductorRow?.status);
-  rows.push(ensureProjectConfig({ projectDir, home, tracked, conductorOk }));
+  rows.push(...ensureProjectConfig({ projectDir, home, tracked, conductorOk }));
   rows.push(...agentRows);
   return { rows };
 }

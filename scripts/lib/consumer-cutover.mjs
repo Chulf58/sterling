@@ -44,7 +44,7 @@ export function cloneLauncherTarget(text) {
   return null;
 }
 
-/** <CLAUDE_CONFIG_DIR or <home>/.claude>/settings.json — the same root as pluginCacheDir. */
+/** <CLAUDE_CONFIG_DIR or <home>/.claude>/settings.json — the same config dir that holds Claude Code's plugin cache (installRoots in sterling-roots.mjs). */
 export function userSettingsPath({ env = process.env, home = homedir() } = {}) {
   return join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'settings.json');
 }

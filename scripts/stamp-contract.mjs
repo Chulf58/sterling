@@ -28,6 +28,7 @@ import {
   FENCE,
   fenceSpans,
   extractBlock,
+  extractTemplateBlock,
   readTemplateBullets,
 } from './lib/contract-bullets.mjs';
 
@@ -108,7 +109,7 @@ const variants = historicalVariants({
   repoRoot,
   templateRels: TEMPLATE_RELS,
   leads: HISTORY_LEADS,
-  extractBlock,
+  extractBlock: extractTemplateBlock,
   currentBlocks: current,
 });
 const layerFileName = (rel) => (rel === AGENTS_TEMPLATE_REL ? 'AGENTS.md' : 'CLAUDE.md');

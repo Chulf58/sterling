@@ -2163,11 +2163,48 @@ test('installed copy (no .git at the plugin root): /sterling:update refuses befo
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {}, pluginRoot });
     assert.equal(report.exit, 2);
     assert.deepEqual(calls, [], 'nothing runs on an installed copy');
-    assert.match(lines.join('\n'), /Sterling is installed as a plugin — update it with \/plugin \(Installed tab → Update\) or `claude plugin update sterling@/);
+    assert.match(lines.join('\n'), /Sterling is installed as a plugin — update it with `claude plugin update sterling@<marketplace>` \(Claude Code\) or `opencode plugin update @chulf58\/sterling` \(OpenCode\)/, 'a copy under neither install root names both hosts');
     assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(pluginRoot, { recursive: true, force: true });
+  }
+});
+
+test('installed copy under OpenCode\'s npm cache: the refusal names `opencode plugin update`, never /plugin', async () => {
+  const cwd = authoringCwd();
+  const home = mkdtempSync(join(tmpdir(), 'sterling-update-oc-home-'));
+  try {
+    const pluginRoot = join(home, '.cache', 'opencode', 'npm', '@chulf58', 'sterling@latest', '1759500000000', 'node_modules', '@chulf58', 'sterling');
+    mkdirSync(join(pluginRoot, '.git'), { recursive: true });
+    const { exec, calls } = fakeExec({ behind: 2 });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {}, pluginRoot, env: {}, home });
+    assert.equal(report.exit, 2);
+    assert.deepEqual(calls, [], 'nothing runs on an installed copy, even one carrying a .git');
+    assert.match(report.refusal, /installed as an OpenCode plugin — update it with `opencode plugin update @chulf58\/sterling`/);
+    assert.doesNotMatch(report.refusal, /\/plugin \(|claude plugin update/);
+    assert.match(lines.join('\n'), /opencode plugin update/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('installed copy under the Claude Code plugin cache: the refusal names /plugin and `claude plugin update`', async () => {
+  const cwd = authoringCwd();
+  const home = mkdtempSync(join(tmpdir(), 'sterling-update-cc-home-'));
+  try {
+    const pluginRoot = join(home, '.claude', 'plugins', 'cache', 'sterling', 'sterling', '1.0.0');
+    mkdirSync(join(pluginRoot, '.git'), { recursive: true });
+    const { exec } = fakeExec({ behind: 2 });
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: REG_P, invokingProject: '/tmp/p', opts: {}, pluginRoot, env: {}, home });
+    assert.equal(report.exit, 2);
+    assert.match(report.refusal, /installed as a Claude Code plugin — update it with \/plugin \(Installed tab → Update\) or `claude plugin update sterling@<marketplace>`/);
+    assert.doesNotMatch(report.refusal, /opencode/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

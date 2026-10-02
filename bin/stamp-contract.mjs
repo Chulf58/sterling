@@ -7,8 +7,8 @@ var __export = (target, all) => {
 };
 
 // scripts/stamp-contract.mjs
-import { readFileSync as readFileSync3, writeFileSync, existsSync as existsSync2, realpathSync as realpathSync2 } from "node:fs";
-import { join as join5, dirname as dirname2, resolve as resolve2 } from "node:path";
+import { readFileSync as readFileSync4, writeFileSync, existsSync as existsSync3, realpathSync as realpathSync2 } from "node:fs";
+import { join as join6, dirname as dirname2, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // packages/store/dist/index.js
@@ -5201,13 +5201,170 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
 
 // scripts/lib/contract-history.mjs
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { join as join3 } from "node:path";
+import { readFileSync as readFileSync2 } from "node:fs";
+import { join as join4 } from "node:path";
 
 // scripts/lib/installed-copy.mjs
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync as existsSync2 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join3 } from "node:path";
+
+// scripts/lib/sterling-roots.mjs
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join2, resolve, sep } from "node:path";
+var RESOLVER_IMPORTS = [
+  "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
+  "import { homedir } from 'node:os';",
+  "import { join } from 'node:path';"
+].join("\n");
+var RESOLVER_SOURCE = String.raw`
+function installRoots(env = process.env, home = homedir()) {
+  return [
+    { host: 'claude-code', dir: join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins', 'cache') },
+    { host: 'opencode', dir: join(env.XDG_CACHE_HOME || join(home, '.cache'), 'opencode', 'npm') },
+  ];
+}
+
+// ENOENT/ENOTDIR mean "no such level", the normal case; any other error is thrown.
+function sterlingRootsLs(dir) {
+  try {
+    return readdirSync(dir);
+  } catch (err) {
+    if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return [];
+    throw err;
+  }
+}
+
+function readCopyVersion(root, host) {
+  const manifests = host === 'opencode' ? ['package.json', '.claude-plugin/plugin.json'] : ['.claude-plugin/plugin.json', 'package.json'];
+  for (const rel of manifests) {
+    let text;
+    try {
+      text = readFileSync(join(root, rel), 'utf8');
+    } catch (err) {
+      if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) continue;
+      throw err;
+    }
+    let version;
+    try {
+      version = JSON.parse(text).version;
+    } catch (err) {
+      return { reason: rel + ' is not valid JSON (' + err.message + ')' };
+    }
+    if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
+    return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
+  }
+  return { reason: 'no .claude-plugin/plugin.json or package.json' };
+}
+
+// The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
+// precedence. Strict grammar: major.minor.patch with no leading zeros and no v prefix,
+// dot-separated prerelease identifiers, build metadata accepted and ignored. A prerelease
+// sorts below its release; prerelease identifiers compare one by one, numeric ones
+// numerically and below alphanumeric ones, and a longer list wins when all shared ones match.
+function parseSterlingVersion(v) {
+  const m = typeof v === 'string' ? /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(v) : null;
+  if (!m) return null;
+  return { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : [] };
+}
+
+function compareSterlingVersions(a, b) {
+  const x = parseSterlingVersion(a);
+  const y = parseSterlingVersion(b);
+  if (!x || !y) throw new Error('compareSterlingVersions: not a semver version: ' + JSON.stringify(x ? b : a));
+  for (let i = 0; i < 3; i++) if (x.core[i] !== y.core[i]) return x.core[i] < y.core[i] ? -1 : 1;
+  if (!x.pre.length || !y.pre.length) return x.pre.length === y.pre.length ? 0 : x.pre.length ? -1 : 1;
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    if (i >= x.pre.length) return -1;
+    if (i >= y.pre.length) return 1;
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === q) continue;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) return Number(p) < Number(q) ? -1 : 1;
+    if (pn !== qn) return pn ? -1 : 1;
+    return p < q ? -1 : 1;
+  }
+  return 0;
+}
+
+function scanInstalledSterling(env = process.env, home = homedir()) {
+  const roots = installRoots(env, home);
+  const copies = [];
+  const skipped = [];
+  const consider = (root, host) => {
+    const v = readCopyVersion(root, host);
+    if (v.version) copies.push({ root, version: v.version, host });
+    else skipped.push({ root, host, reason: v.reason });
+  };
+  for (const { host, dir } of roots) {
+    if (host === 'claude-code') {
+      for (const marketplace of sterlingRootsLs(dir)) {
+        for (const entry of sterlingRootsLs(join(dir, marketplace, 'sterling'))) consider(join(dir, marketplace, 'sterling', entry), host);
+      }
+      continue;
+    }
+    const walk = (d, depth) => {
+      const pkg = join(d, 'node_modules', '@chulf58', 'sterling');
+      if (existsSync(pkg)) consider(pkg, host);
+      if (depth === 0) return;
+      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules') walk(join(d, name), depth - 1);
+    };
+    walk(dir, 4);
+  }
+  return { roots, copies, skipped };
+}
+
+function newestInstalledSterling(env = process.env, home = homedir()) {
+  let best = null;
+  for (const c of scanInstalledSterling(env, home).copies) {
+    if (!best) {
+      best = c;
+      continue;
+    }
+    const d = compareSterlingVersions(c.version, best.version) ||
+      (c.host === best.host ? 0 : c.host === 'claude-code' ? 1 : -1) ||
+      (c.root > best.root ? 1 : c.root < best.root ? -1 : 0);
+    if (d > 0) best = c;
+  }
+  return best;
+}
+
+// host null: the asking host is unknown, so both commands are named.
+function sterlingInstallRemedy(host) {
+  if (host === 'claude-code') return 'claude plugin install sterling@sterling';
+  if (host === 'opencode') return 'opencode plugin add @chulf58/sterling';
+  if (host === null) return 'claude plugin install sterling@sterling for Claude Code, or opencode plugin add @chulf58/sterling for OpenCode';
+  throw new Error('sterlingInstallRemedy: unknown host ' + JSON.stringify(host));
+}
+
+function sterlingNotFoundMessage(host, env = process.env, home = homedir()) {
+  const remedy = sterlingInstallRemedy(host);
+  const scan = scanInstalledSterling(env, home);
+  const where = scan.roots.map((r) => r.dir + ' (' + r.host + ')').join(' or ');
+  const why = scan.skipped.map((s) => '; skipped ' + s.root + ': ' + s.reason).join('');
+  return 'no installed Sterling found under ' + where + why + '. Install it: ' + remedy + '.';
+}
+`;
+var api = new Function(
+  "existsSync",
+  "readFileSync",
+  "readdirSync",
+  "join",
+  "homedir",
+  `${RESOLVER_SOURCE}
+return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
+)(existsSync, readFileSync, readdirSync, join2, homedir2);
+var installRoots = api.installRoots;
+var readCopyVersion = api.readCopyVersion;
+var parseSterlingVersion = api.parseSterlingVersion;
+var compareSterlingVersions = api.compareSterlingVersions;
+var scanInstalledSterling = api.scanInstalledSterling;
+var newestInstalledSterling = api.newestInstalledSterling;
+var sterlingInstallRemedy = api.sterlingInstallRemedy;
+var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
 function canonical(p) {
   try {
     return realpathSync(p);
@@ -5216,17 +5373,21 @@ function canonical(p) {
     throw err;
   }
 }
-function pluginCacheDir({ env = process.env, home = homedir2() } = {}) {
-  return join2(env.CLAUDE_CONFIG_DIR || join2(home, ".claude"), "plugins", "cache");
+function installHostOf(root, { env = process.env, home = homedir2() } = {}) {
+  const real = canonical(root);
+  for (const { host, dir } of installRoots(env, home)) {
+    if (real.startsWith(canonical(dir) + sep)) return host;
+  }
+  return null;
 }
-function isInstalledCopy(root, { env = process.env, home = homedir2() } = {}) {
+
+// scripts/lib/installed-copy.mjs
+function isInstalledCopy(root, { env = process.env, home = homedir3() } = {}) {
   if (typeof root !== "string" || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  if (!existsSync(join2(root, ".git"))) return true;
-  const cache = canonical(pluginCacheDir({ env, home }));
-  const real = canonical(root);
-  return real.startsWith(cache + sep);
+  if (!existsSync2(join3(root, ".git"))) return true;
+  return installHostOf(root, { env, home }) !== null;
 }
 
 // scripts/lib/contract-history.mjs
@@ -5254,7 +5415,7 @@ function gitVariants({ repoRoot: repoRoot2, templateRels, leads, extractBlock: e
 function loadSnapshot(path) {
   let raw;
   try {
-    raw = readFileSync(path, "utf8");
+    raw = readFileSync2(path, "utf8");
   } catch (err) {
     if (err?.code === "ENOENT") return { ok: false, reason: `${path} is missing` };
     throw err;
@@ -5281,7 +5442,7 @@ function historicalVariants({
   const fromGit = gitVariants({ repoRoot: repoRoot2, templateRels, leads, extractBlock: extractBlock2, git });
   if (fromGit) return fromGit;
   const currentOnly = () => new Map(leads.map((l) => [l, new Set(currentBlocks.has(l) ? [currentBlocks.get(l)] : [])]));
-  const snapshot = loadSnapshot(join3(repoRoot2, CONTRACT_HISTORY_REL));
+  const snapshot = loadSnapshot(join4(repoRoot2, CONTRACT_HISTORY_REL));
   if (!snapshot.ok) {
     warn(`stamp-contract: DEGRADED \u2014 no git history at ${repoRoot2} (installed plugin copy) and ${snapshot.reason} \u2014 only the current template text counts as template-descended; older bullets read as drift`);
     return currentOnly();
@@ -5289,15 +5450,114 @@ function historicalVariants({
   const variants2 = currentOnly();
   const absent = leads.filter((l) => !Object.hasOwn(snapshot.blocks, l));
   if (absent.length) {
-    warn(`stamp-contract: DEGRADED \u2014 ${join3(repoRoot2, CONTRACT_HISTORY_REL)} has no entry for ${absent.length} lead(s) (${absent.join(" | ")}) \u2014 only their current template text counts as template-descended`);
+    warn(`stamp-contract: DEGRADED \u2014 ${join4(repoRoot2, CONTRACT_HISTORY_REL)} has no entry for ${absent.length} lead(s) (${absent.join(" | ")}) \u2014 only their current template text counts as template-descended`);
   }
   for (const lead of leads) for (const block of snapshot.blocks[lead] ?? []) variants2.get(lead).add(block);
   return variants2;
 }
 
 // scripts/lib/contract-bullets.mjs
-import { readFileSync as readFileSync2 } from "node:fs";
-import { join as join4 } from "node:path";
+import { readFileSync as readFileSync3 } from "node:fs";
+import { join as join5 } from "node:path";
+
+// scripts/lib/agent-fences.mjs
+var FENCE_KINDS = {
+  "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
+  "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" },
+  "claude-only": { open: "<!-- claude-only -->", close: "<!-- /claude-only -->" },
+  "opencode-only": { open: "<!-- opencode-only -->", close: "<!-- /opencode-only -->" }
+};
+var FENCE_WORD_RE = /(?:sterling|portable|claude|opencode)[\s_-]*only/i;
+var COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
+var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
+function classify(line) {
+  for (const [kind, { open, close }] of Object.entries(FENCE_KINDS)) {
+    if (line === open) return { kind, role: "open" };
+    if (line === close) return { kind, role: "close" };
+  }
+  return null;
+}
+function malformedMarkers(text, label) {
+  const lines = text.split("\n");
+  const out = [];
+  for (const m of text.matchAll(COMMENT_RE)) {
+    if (!FENCE_WORD_RE.test(m[0])) continue;
+    const lineIndex = text.slice(0, m.index).split("\n").length - 1;
+    if (EXACT_MARKERS.has(m[0]) && lines[lineIndex] === m[0]) continue;
+    out.push({
+      kind: "fence_malformed",
+      detail: `${label}:${lineIndex + 1}: ${JSON.stringify(m[0].slice(0, 80))} names a fence but is not exactly a marker line (${Object.values(FENCE_KINDS).map((f) => `'${f.open}'/'${f.close}'`).join(", ")}) \u2014 case, spacing and line breaks must match`
+    });
+  }
+  return out;
+}
+var NO_COUNTERPART_MARKER = "<!-- no-opencode-counterpart -->";
+var splitLines = (text) => text.replace(/\r\n/g, "\n").split("\n");
+function validateFences(text, label) {
+  const violations = malformedMarkers(text.replace(/\r\n/g, "\n"), label);
+  let openFence = null;
+  const lines = splitLines(text);
+  lines.forEach((line, index) => {
+    const at = `${label}:${index + 1}`;
+    const marker = classify(line);
+    if (!marker) return;
+    if (marker.role === "open") {
+      if (openFence) {
+        violations.push({ kind: "fence_nested", detail: `${at}: '${line}' opens inside the ${openFence.kind} fence opened at line ${openFence.line} \u2014 fences never nest` });
+      } else {
+        openFence = { kind: marker.kind, line: index + 1 };
+      }
+    } else if (!openFence) {
+      violations.push({ kind: "fence_unopened", detail: `${at}: '${line}' closes a fence that was never opened` });
+    } else if (openFence.kind !== marker.kind) {
+      violations.push({ kind: "fence_mismatched", detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
+    } else {
+      if (marker.kind === "claude-only" || marker.kind === "opencode-only") {
+        const body = lines.slice(openFence.line, index).filter((l) => l !== NO_COUNTERPART_MARKER);
+        if (!body.some((l) => l.trim() !== "")) {
+          violations.push({ kind: "fence_empty_block", detail: `${label}:${openFence.line}: the ${marker.kind} block is empty; give it the text that replaces its partner, or remove the pair` });
+        }
+      }
+      if (marker.kind === "claude-only") {
+        const first = lines[openFence.line];
+        const next = lines.slice(index + 1).find((l) => l.trim() !== "");
+        if (first !== NO_COUNTERPART_MARKER && next !== FENCE_KINDS["opencode-only"].open) {
+          violations.push({ kind: "fence_claude_only_unpaired", detail: `${label}:${openFence.line}: the claude-only block is not followed by an opencode-only block; add one, or put '${NO_COUNTERPART_MARKER}' as the first line inside the block if OpenCode has no counterpart` });
+        }
+      }
+      openFence = null;
+    }
+  });
+  if (openFence) {
+    violations.push({ kind: "fence_unclosed", detail: `${label}:${openFence.line}: the ${openFence.kind} fence is never closed` });
+  }
+  return violations;
+}
+function render(text, label, keepKinds) {
+  const violations = validateFences(text, label);
+  if (violations.length) {
+    throw new Error(`agent fences invalid in ${label} \u2014 refusing to render (P5):
+  ${violations.map((v) => `[${v.kind}] ${v.detail}`).join("\n  ")}`);
+  }
+  const out = [];
+  let inside = null;
+  for (const line of splitLines(text)) {
+    const marker = classify(line);
+    if (line === NO_COUNTERPART_MARKER) continue;
+    if (marker) {
+      inside = marker.role === "open" ? marker.kind : null;
+      continue;
+    }
+    if (inside && !keepKinds.includes(inside)) continue;
+    out.push(line);
+  }
+  return out.join("\n");
+}
+function renderClaudeText(text, label) {
+  return render(text, label, ["sterling-only", "claude-only"]);
+}
+
+// scripts/lib/contract-bullets.mjs
 var AGENTS_TEMPLATE_REL = "templates/target-agents-md.md";
 var CLAUDE_TEMPLATE_REL = "templates/target-claude-md.md";
 var TEMPLATE_RELS = [AGENTS_TEMPLATE_REL, CLAUDE_TEMPLATE_REL];
@@ -5397,15 +5657,18 @@ function extractBlock(text, lead) {
   while (end < lines.length && !/^(- |#|\s*$)/.test(lines[end]) && !FENCE.test(lines[end])) end++;
   return { start, end, block: lines.slice(start, end).join("\n") };
 }
+function extractTemplateBlock(text, lead) {
+  return extractBlock(renderClaudeText(text, "template"), lead);
+}
 function readTemplateBullets(repoRoot2) {
-  const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync2(join4(repoRoot2, rel), "utf8")]));
+  const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync3(join5(repoRoot2, rel), "utf8")]));
   const leadLayer2 = /* @__PURE__ */ new Map();
   const current2 = /* @__PURE__ */ new Map();
   for (const lead of TARGET_LEADS) {
-    const home = TEMPLATE_RELS.find((rel) => extractBlock(templates.get(rel), lead));
+    const home = TEMPLATE_RELS.find((rel) => extractTemplateBlock(templates.get(rel), lead));
     if (!home) throw new Error(`stamp-contract: no template carries target bullet '${lead}' \u2014 refusing (P5)`);
     leadLayer2.set(lead, home);
-    current2.set(lead, extractBlock(templates.get(home), lead).block);
+    current2.set(lead, extractTemplateBlock(templates.get(home), lead).block);
   }
   return { templates, leadLayer: leadLayer2, current: current2 };
 }
@@ -5417,7 +5680,7 @@ var onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
   if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve2(process.argv[++i]));
 }
-var repoRoot = join5(dirname2(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+var repoRoot = join6(dirname2(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
 var INSERT_AFTER = /* @__PURE__ */ new Map([
   ["- **Concept articles \u2014 capture design the moment it settles", ["- **Reconcile _every affected_ article, not just the primary one**"]],
   ["- **Codex runs through the MCP tool, never the shell.**", ["- **Knowledge is born structured.**"]],
@@ -5460,7 +5723,7 @@ var variants = historicalVariants({
   repoRoot,
   templateRels: TEMPLATE_RELS,
   leads: HISTORY_LEADS,
-  extractBlock,
+  extractBlock: extractTemplateBlock,
   currentBlocks: current
 });
 var layerFileName = (rel) => rel === AGENTS_TEMPLATE_REL ? "AGENTS.md" : "CLAUDE.md";
@@ -5477,25 +5740,25 @@ var drift = 0;
 for (const p of projects) {
   const repo = p.repo_path;
   if (onlyProjects.length && !onlyProjects.includes(resolve2(repo))) continue;
-  if (!existsSync2(repo)) {
+  if (!existsSync3(repo)) {
     results.push({ project: p.name, status: "missing_path", detail: repo });
     continue;
   }
   if (realpathSync2(repo) === selfPath) continue;
-  const agentsMd = join5(repo, "AGENTS.md");
-  const claudeMd = join5(repo, "CLAUDE.md");
-  if (!existsSync2(agentsMd)) {
+  const agentsMd = join6(repo, "AGENTS.md");
+  const claudeMd = join6(repo, "CLAUDE.md");
+  if (!existsSync3(agentsMd)) {
     results.push({ project: p.name, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node scripts/init.mjs --target ${repo}` });
     drift++;
     continue;
   }
-  if (!existsSync2(claudeMd)) {
+  if (!existsSync3(claudeMd)) {
     results.push({ project: p.name, status: "no_claude_md", detail: claudeMd });
     drift++;
     continue;
   }
   const loadSibling = (path) => {
-    const raw = readFileSync3(path, "utf8");
+    const raw = readFileSync4(path, "utf8");
     return { path, eol: detectEol(raw), text: normalizeEol(raw) };
   };
   const siblingFiles = /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, loadSibling(agentsMd)], [CLAUDE_TEMPLATE_REL, loadSibling(claudeMd)]]);
