@@ -81,7 +81,10 @@ test('global install writes both shims and the MCP launcher, idempotently, honou
   const shim = readFileSync(join(plugins, 'sterling.js'), 'utf8');
   assert.ok(shim.includes(JSON.stringify(repoRoot.replace(/\\/g, '/'))), 'authoring clone: the clone path is baked');
   const second = setupOpenCode({ projectDir: dir, pluginRoot: repoRoot, env, home, installed: false, probe: OC2 });
-  assert.deepEqual([...new Set(second.rows.map((r) => r.status))], ['matches']);
+  // The codex row skips here (no Codex in the temp HOME); opencode-codex-mcp.test.mjs covers it.
+  const codex = second.rows.filter((r) => r.item.endsWith('mcp.servers.codex'));
+  assert.deepEqual(codex.map((r) => r.status), ['skipped']);
+  assert.deepEqual([...new Set(second.rows.filter((r) => !codex.includes(r)).map((r) => r.status))], ['matches']);
 });
 
 test('installed copy: no versioned cache path is written; the shims resolve the newest at run time', () => {
@@ -231,11 +234,12 @@ test('Sterling-full roster: conductor primary, Sterling lines kept, permissions 
   const home = tmp('oc-home-');
   const dir = project('work');
   const r = run(dir, home);
-  for (const n of ['conductor', 'implementor', 'researcher', 'scout']) assert.equal(statusOf(r, `${STERLING_AGENTS_SUBDIR}/${n}.md`), 'created', n);
+  for (const n of ['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'librarian']) assert.equal(statusOf(r, `${STERLING_AGENTS_SUBDIR}/${n}.md`), 'created', n);
   const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
   assert.match(read('conductor'), /^---\ndescription: .+\nmode: primary\n---\n<!-- sterling-full /);
   assert.match(read('conductor'), /dispatch those names/);
-  assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\n---\n/);
+  // The implementor's only permissions are the store-write denies its Claude disallowedTools carry.
+  assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\npermission:\n( {2}sterling_\w+: deny\n)+---\n/);
   assert.match(read('researcher'), /\npermission:\n {2}edit: deny\n/);
   assert.match(read('scout'), /\n {2}bash: deny\n/);
   // Sterling-only lines survive: the full body is longer than the portable render of the same template.
