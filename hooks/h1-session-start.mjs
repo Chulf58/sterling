@@ -9226,17 +9226,20 @@ function readProjectConfig(cwd) {
   }
   return { config: config2, configUnreadable: configUnreadable2 };
 }
-function machineRoleLine({ atClone, installedCopy, config: config2 }) {
+var MACHINE_ROLE_LAYER = { claude: "Sterling layer in CLAUDE.md's", opencode: "Sterling layer's" };
+function machineRoleLine({ atClone, installedCopy, config: config2, host = "claude" }) {
+  if (!Object.hasOwn(MACHINE_ROLE_LAYER, host)) throw new Error(`machineRoleLine: unknown host '${host}'`);
+  const layer = MACHINE_ROLE_LAYER[host];
   if (installedCopy) {
     return "MACHINE ROLE: INSTALLED PLUGIN (consumer) \u2014 updates via /plugin (Installed tab \u2192 Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.";
   }
   if (!atClone) return "";
   const role = config2?.machine_role;
   if (role === "authoring") {
-    return "MACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) \u2014 Sterling work lands and merges here; the Sterling layer in CLAUDE.md's authoring contract applies.";
+    return `MACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) \u2014 Sterling work lands and merges here; the ${layer} authoring contract applies.`;
   }
   if (role === "consumer") {
-    return `MACHINE ROLE: CONSUMER \u2014 this clone consumes via /sterling:update. The Sterling layer in CLAUDE.md's "this machine authors" language does NOT apply on this machine: never commit here, never hand-reconcile drift; a dirty generated file is discarded (git checkout -- <path>); currency comes only from /sterling:update.`;
+    return `MACHINE ROLE: CONSUMER \u2014 this clone consumes via /sterling:update. The ${layer} "this machine authors" language does NOT apply on this machine: never commit here, never hand-reconcile drift; a dirty generated file is discarded (git checkout -- <path>); currency comes only from /sterling:update.`;
   }
   return 'MACHINE ROLE: UNDECLARED \u2014 treat as CONSUMER (the safe posture) until declared. The authoring machine declares machine_role:"authoring" in .sterling/config.json once; a successful /sterling:update stamps "consumer" automatically.';
 }
