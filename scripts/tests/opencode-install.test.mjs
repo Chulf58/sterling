@@ -711,7 +711,7 @@ test('dual-host machine, Claude runs init: the npm copy in the cache retires the
 });
 
 test('dual-host machine: the global opencode.json naming Sterling (the Git spec or the package name) in plugins suppresses the server shim before the cache holds a copy', () => {
-  for (const entry of ['github:Chulf58/sterling#semver:>=0.18.0', 'Chulf58/sterling#opencode-release', 'git+https://github.com/Chulf58/sterling.git#semver:>=0.18.0', 'git+ssh://git@github.com/chulf58/sterling.git', { package: 'github:Chulf58/sterling#semver:>=0.18.0' }, '@chulf58/sterling', '@chulf58/sterling@latest', { package: '@chulf58/sterling' }]) {
+  for (const entry of ['github:Chulf58/sterling#semver:>=0.18.0', 'Chulf58/sterling#opencode-release', 'git+https://github.com/Chulf58/sterling.git#semver:>=0.18.0', 'git+ssh://git@github.com/chulf58/sterling.git', 'ssh://git@github.com/Chulf58/sterling.git', 'https://www.github.com/Chulf58/sterling', 'git+https://www.github.com/Chulf58/sterling.git#opencode-release', { package: 'github:Chulf58/sterling#semver:>=0.18.0' }, '@chulf58/sterling', '@chulf58/sterling@latest', { package: '@chulf58/sterling' }]) {
     const home = tmp('oc-home-');
     const cfgDir = opencodeConfigDir({ env: {}, home });
     mkdirSync(cfgDir, { recursive: true });

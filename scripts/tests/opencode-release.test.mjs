@@ -11,7 +11,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { RELEASE_BRANCH, RELEASE_PACKAGE, releaseAfterMerge, releasePackageJson } from '../lib/opencode-release.mjs';
+import { RELEASE_BRANCH, RELEASE_PACKAGE, defaultRemoteGit, releaseAfterMerge, releasePackageJson, rerunRelease } from '../lib/opencode-release.mjs';
 
 const work = mkdtempSync(join(tmpdir(), 'sterling-opencode-release-'));
 after(() => rmSync(work, { recursive: true, force: true }));
@@ -204,6 +204,92 @@ test('a failed push reports failed with the re-run command; the re-run reuses th
   const third = run(fx);
   assert.equal(third.result.status, 'published');
   assert.match(third.out, /already on origin/);
+});
+
+test('a release kept after a failed push is rebuilt onto origin\'s newer tip, never force-pushed', () => {
+  // Clone C bumps to 1.0.4 and its release push fails; clone D then releases 1.0.5.
+  // C's kept v1.0.4 is no longer a descendant of origin's opencode-release, so the
+  // re-run rebuilds it (same tree) as a child of origin's tip and publishes it.
+  const fx = fixture();
+  const first = run(fx).result.commit;
+  const c = bump(fx.repo, '1.0.4');
+  const failing = (args, opts) => (args[0] === 'push' ? { status: 1, stdout: '', stderr: 'remote: denied' } : spawnSync('git', args, { ...opts, encoding: 'utf8' }));
+  assert.equal(run({ ...fx, ...c }, { remoteGit: failing }).result.status, 'failed');
+  const kept = ref(fx.repo, 'refs/tags/v1.0.4');
+  assert.equal(git(fx.repo, 'rev-parse', `${kept}^`), first);
+
+  const d = join(fx.dir, 'clone-d');
+  git(fx.dir, 'clone', '-q', '--no-tags', '--single-branch', '-b', 'main', fx.origin, d);
+  identity(d);
+  const dBump = bump(d, '1.0.5');
+  const v105 = run({ ...fx, repo: d, ...dBump });
+  assert.equal(v105.result.status, 'published', v105.out);
+
+  const again = run({ ...fx, ...c });
+  assert.equal(again.result.status, 'published', again.out);
+  const rebuilt = again.result.commit;
+  assert.notEqual(rebuilt, kept, 'the kept commit is replaced');
+  assert.equal(git(fx.repo, 'rev-parse', `${rebuilt}^`), v105.result.commit, "the rebuilt release is a child of origin's tip");
+  assert.equal(git(fx.repo, 'rev-parse', `${rebuilt}^{tree}`), git(fx.repo, 'rev-parse', `${kept}^{tree}`), 'same tree');
+  assert.equal(ref(fx.origin, 'refs/tags/v1.0.4'), rebuilt);
+  assert.equal(ref(fx.origin, `refs/heads/${RELEASE_BRANCH}`), rebuilt);
+  assert.equal(ref(fx.origin, 'refs/tags/v1.0.5'), v105.result.commit, 'the newer tag is untouched');
+  assert.equal(ref(fx.repo, 'refs/tags/v1.0.4'), rebuilt, 'the local tag moved');
+  assert.equal(ref(fx.repo, `refs/heads/${RELEASE_BRANCH}`), rebuilt, 'the local branch moved');
+  assert.match(again.out, /rebuil/i);
+});
+
+test('an annotated tag on origin and a lightweight local tag on the same commit is the same release', () => {
+  const fx = fixture();
+  const first = run(fx).result.commit;
+  git(fx.origin, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'tag', '-f', '-a', '-m', 'annotated', 'v1.0.1', first);
+  assert.notEqual(ref(fx.origin, 'refs/tags/v1.0.1'), first, 'precondition: origin\'s tag is a tag object');
+  const { result, out } = run(fx);
+  assert.equal(result.status, 'published', out);
+  assert.equal(result.commit, first);
+  assert.match(out, /already on origin/);
+});
+
+test('the re-run refuses a --ref that is not a branch, naming the remedy', () => {
+  const fx = fixture();
+  git(fx.repo, 'tag', 'some-tag', 'main');
+  for (const r of ['some-tag', fx.head]) {
+    const lines = [];
+    const result = rerunRelease({ target: fx.repo, ref: r, log: (m) => lines.push(m) });
+    const out = lines.join('\n');
+    assert.equal(result.status, 'refused', out);
+    assert.match(out, /--ref must be the branch that was merged into/);
+    assert.doesNotMatch(out, /not on origin's/);
+  }
+  assert.equal(ref(fx.repo, `refs/heads/${RELEASE_BRANCH}`), null);
+});
+
+test('defaultRemoteGit keeps the first failure when the git.exe retry also fails, and logs the retry', () => {
+  const results = {
+    git: { status: 1, stdout: '', stderr: ' ! [rejected] opencode-release -> opencode-release (non-fast-forward)' },
+    'git.exe': { status: 128, stdout: '', stderr: "fatal: detected dubious ownership in repository" },
+  };
+  const calls = [];
+  const lines = [];
+  const runner = (cmd, args) => (calls.push([cmd, args]), results[cmd]);
+  const r = defaultRemoteGit(['push', 'origin', 'x'], { cwd: work, run: runner, log: (m) => lines.push(m), platform: 'linux' });
+  assert.equal(r.status, 1, 'the first status is kept');
+  assert.match(r.stderr, /non-fast-forward/, 'the first error is kept');
+  assert.match(r.stderr, /git\.exe.*\n.*dubious ownership/s, "git.exe's error is appended, labelled");
+  assert.deepEqual(calls.map(([cmd]) => cmd), ['git', 'git.exe']);
+  assert.deepEqual(calls[1][1], ['push', 'origin', 'x']);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /`git push` failed.*retrying through git\.exe/);
+
+  results['git.exe'] = { status: 0, stdout: 'ok', stderr: '' };
+  assert.equal(defaultRemoteGit(['push'], { cwd: work, run: runner, log: () => {}, platform: 'linux' }), results['git.exe'], 'a git.exe success is adopted');
+
+  results['git.exe'] = { status: null, stdout: '', stderr: '', error: new Error('spawnSync git.exe ENOENT') };
+  assert.equal(defaultRemoteGit(['push'], { cwd: work, run: runner, log: () => {}, platform: 'linux' }), results.git, 'a git.exe that cannot spawn keeps the original failure');
+
+  calls.length = 0;
+  defaultRemoteGit(['push'], { cwd: work, run: runner, log: () => {}, platform: 'win32' });
+  assert.deepEqual(calls.map(([cmd]) => cmd), ['git'], 'no retry on native Windows');
 });
 
 test('an unreachable origin refuses before writing anything', () => {

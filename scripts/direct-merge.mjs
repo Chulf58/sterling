@@ -905,7 +905,7 @@ if (process.argv.includes('--no-push')) {
           (push.stderr || push.stdout || String(push.error?.message ?? '')).trim(),
         ].join('\n')
       );
-      console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed: false }, null, 2));
+      console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed: false, opencode_release: 'skipped' }, null, 2));
       process.exit(1);
     }
   }

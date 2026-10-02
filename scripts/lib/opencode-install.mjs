@@ -441,7 +441,7 @@ function ensureTuiShim(tuiDir, shim) {
 // A `plugins` entry is the spec as typed (finding e18e1c71): the Git spec in any of the
 // forms npm-package-arg reads as Chulf58/sterling on GitHub, with any #committish or
 // #semver range, or the package name as a registry spec.
-const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|ssh|git):\/\/(?:git@)?github\.com[/:]|(?:https?|git):\/\/github\.com\/|git@github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
 const namesNpmPackage = (s) =>
   typeof s === 'string' && (s === STERLING_NPM_PACKAGE || s.startsWith(`${STERLING_NPM_PACKAGE}@`) || STERLING_GIT_REPO.test(s.split('#')[0]));
 

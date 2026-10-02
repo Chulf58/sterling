@@ -53,15 +53,22 @@ function git(target, args, { env, input } = {}) {
   return spawnSync('git', args, { cwd: target, encoding: 'utf8', timeout: 120_000, input, env: env ? { ...process.env, ...env } : process.env });
 }
 
-/** Run a git command against origin; on WSL a failed `git` is retried through git.exe (credentials live in GCM), as pushWithWindowsRetry does. */
-export function defaultRemoteGit(args, { cwd }) {
-  const run = (cmd) => spawnSync(cmd, args, { cwd, encoding: 'utf8', timeout: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
-  let r = run('git');
-  if (r.status !== 0 && process.platform !== 'win32') {
-    const win = run('git.exe');
-    if (!win.error) r = win;
-  }
-  return r;
+/**
+ * Run a git command against origin; on WSL a failed `git` is retried through git.exe
+ * (credentials live in GCM), as pushWithWindowsRetry does. Only a git.exe success
+ * replaces the first result: a git.exe that also failed has its error appended to
+ * the first one, which stays the reported failure, and a git.exe that cannot spawn
+ * keeps the first result as it was.
+ */
+export function defaultRemoteGit(args, { cwd, log = (m) => console.error(m), prefix = 'opencode-release', run = spawnSync, platform = process.platform }) {
+  const opts = { cwd, encoding: 'utf8', timeout: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } };
+  const first = run('git', args, opts);
+  if (first.status === 0 || platform === 'win32') return first;
+  log(`${prefix}: \`git ${args[0]}\` failed; retrying through git.exe (Windows credential manager).`);
+  const win = run('git.exe', args, opts);
+  if (win.error) return first;
+  if (win.status === 0) return win;
+  return { ...first, stderr: `${first.stderr ?? ''}\n(the git.exe retry also failed, exit ${win.status}:)\n${output(win)}` };
 }
 
 function revParse(target, rev) {
@@ -136,13 +143,15 @@ function releaseVersion({ target, into, headSha, version, pkgText, remoteGit, lo
     return { status: 'failed', version, commit, reason: detail };
   };
 
-  const ls = remoteGit(['ls-remote', 'origin', `refs/heads/${RELEASE_BRANCH}`, `refs/tags/${tag}`], { cwd: target });
+  // The peeled pattern makes ls-remote print an annotated tag's commit as `<tag>^{}`;
+  // without it only the tag object is listed and compares unequal to the local commit.
+  const ls = remoteGit(['ls-remote', 'origin', `refs/heads/${RELEASE_BRANCH}`, `refs/tags/${tag}`, `refs/tags/${tag}^{}`], { cwd: target, log, prefix });
   if (ls.status !== 0) return refuse('could not read origin (git ls-remote failed), so the tag and branch could not be checked.', output(ls));
   const remote = parseLsRemote(ls.stdout);
   const remoteBranch = remote.get(`refs/heads/${RELEASE_BRANCH}`) ?? null;
   const remoteTag = remote.get(`refs/tags/${tag}^{}`) ?? remote.get(`refs/tags/${tag}`) ?? null;
   if (remoteBranch) {
-    const fetch = remoteGit(['fetch', '--no-tags', 'origin', `+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}`], { cwd: target });
+    const fetch = remoteGit(['fetch', '--no-tags', 'origin', `+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}`], { cwd: target, log, prefix });
     if (fetch.status !== 0) return refuse(`could not fetch origin's ${RELEASE_BRANCH}, so the release cannot build on it.`, output(fetch));
   }
   const localTag = revParse(target, `refs/tags/${tag}^{commit}`);
@@ -158,6 +167,9 @@ function releaseVersion({ target, into, headSha, version, pkgText, remoteGit, lo
     return failed(`Building the release tree failed: ${e.message}`);
   }
 
+  const message = `Sterling ${version} for OpenCode\n\nRelease of ${headSha} (${into}): the merged tree with a package.json that installs from Git (no workspaces, no build-class scripts).\n`;
+  const commitOn = (parent) => git(target, ['commit-tree', tree, ...(parent ? ['-p', parent] : []), '-F', '-'], { input: message });
+
   let commit = remoteTag ?? localTag;
   if (commit) {
     const where = remoteTag ? 'on origin' : 'locally';
@@ -168,10 +180,20 @@ function releaseVersion({ target, into, headSha, version, pkgText, remoteGit, lo
       log(`${prefix}: opencode release ${tag} is already on origin at ${short(commit)}; nothing to push.`);
       return { status: 'published', version, commit, reason: null };
     }
+    // A release kept after a failed push is pushed as a fast-forward of origin's
+    // branch. Once that branch has moved (another clone released meanwhile), the kept
+    // commit is no longer a descendant of its tip and every re-run would be rejected
+    // non-fast-forward. Origin has no such tag, so nothing was published from it:
+    // write the same tree again on origin's tip and move the local tag and branch to
+    // it. Never a force-push.
+    if (!remoteTag && remoteBranch && remoteBranch !== commit && !isAncestor(target, remoteBranch, commit)) {
+      const made = commitOn(remoteBranch);
+      if (made.status !== 0) return failed(`git commit-tree failed: ${output(made)}`);
+      log(`${prefix}: the local ${tag} (${short(commit)}) is not a descendant of origin's ${RELEASE_BRANCH} (${short(remoteBranch)}), so it is rebuilt on origin's tip as ${short(made.stdout.trim())}.`);
+      commit = made.stdout.trim();
+    }
   } else {
-    const parent = remoteBranch ?? localBranch;
-    const message = `Sterling ${version} for OpenCode\n\nRelease of ${headSha} (${into}): the merged tree with a package.json that installs from Git (no workspaces, no build-class scripts).\n`;
-    const made = git(target, ['commit-tree', tree, ...(parent ? ['-p', parent] : []), '-F', '-'], { input: message });
+    const made = commitOn(remoteBranch ?? localBranch);
     if (made.status !== 0) return failed(`git commit-tree failed: ${output(made)}`);
     commit = made.stdout.trim();
   }
@@ -180,11 +202,11 @@ function releaseVersion({ target, into, headSha, version, pkgText, remoteGit, lo
     const upd = git(target, ['update-ref', `refs/heads/${RELEASE_BRANCH}`, commit]);
     if (upd.status !== 0) return failed(`git update-ref refs/heads/${RELEASE_BRANCH} failed: ${output(upd)}`, commit);
   }
-  if (!localTag) {
-    const t = git(target, ['tag', tag, commit]);
+  if (localTag !== commit) {
+    const t = git(target, ['tag', ...(localTag ? ['-f'] : []), tag, commit]);
     if (t.status !== 0) return failed(`git tag ${tag} failed: ${output(t)}`, commit);
   }
-  const push = remoteGit(['push', '--atomic', 'origin', `refs/heads/${RELEASE_BRANCH}:refs/heads/${RELEASE_BRANCH}`, `refs/tags/${tag}:refs/tags/${tag}`], { cwd: target });
+  const push = remoteGit(['push', '--atomic', 'origin', `refs/heads/${RELEASE_BRANCH}:refs/heads/${RELEASE_BRANCH}`, `refs/tags/${tag}:refs/tags/${tag}`], { cwd: target, log, prefix });
   if (push.status !== 0) return failed(`git push --atomic origin ${RELEASE_BRANCH} ${tag} failed (the local branch and tag are kept for the re-run):\n${output(push)}`, commit);
   log(`${prefix}: released ${RELEASE_PACKAGE} ${tag} on ${RELEASE_BRANCH} (${short(commit)}) and pushed both to origin.`);
   return { status: 'published', version, commit, reason: null };
@@ -215,13 +237,18 @@ export function rerunRelease({ target, ref, remoteGit = defaultRemoteGit, log = 
     log(`${prefix}: opencode release SKIPPED: ${reason}.`);
     return { status: 'skipped', version, commit: null, reason };
   };
-  const headSha = revParse(target, `${ref}^{commit}`);
-  if (!headSha) return skip(`${ref} does not resolve to a commit in ${target}`);
+  // The release is checked against origin's refs/heads/<ref>, so a tag or a commit
+  // would always read as "not on origin". Refuse it and name the remedy instead.
+  const headSha = revParse(target, `refs/heads/${ref}^{commit}`);
+  if (!headSha) {
+    log(`${prefix}: opencode release REFUSED: --ref ${ref} is not a local branch in ${target}. --ref must be the branch that was merged into (for example --ref main), not a tag or a commit.`);
+    return { status: 'refused', version: null, commit: null, reason: `--ref ${ref} is not a local branch; --ref must be the branch that was merged into` };
+  }
   const head = packageAt(target, headSha);
   if (head?.json?.name !== RELEASE_PACKAGE) return skip(`package.json at ${ref} names ${head?.json?.name ?? '(no package.json)'}, not ${RELEASE_PACKAGE}`);
   const version = head.json.version ?? null;
   if (!version) return skip(`package.json at ${ref} has no version`);
-  const ls = remoteGit(['ls-remote', 'origin', `refs/heads/${ref}`], { cwd: target });
+  const ls = remoteGit(['ls-remote', 'origin', `refs/heads/${ref}`], { cwd: target, log, prefix });
   if (ls.status !== 0) {
     log(`${prefix}: opencode release REFUSED for v${version}: could not read origin (git ls-remote failed).\n${output(ls)}`);
     return { status: 'refused', version, commit: null, reason: 'could not read origin (git ls-remote failed)' };
