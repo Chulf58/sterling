@@ -1264,7 +1264,61 @@ export function recordDispatchPre(root, stdin) {
   }));
 }
 
-export function recordDispatchPost(root, stdin) {
+// fillUnattributableRowLocked — a Post that binds a lane fills that lane's
+// register row when its Start had given up (decision h22-dispatch-files-from-
+// review-territory-and-resume-inherits-prior-round, option A; finding h10-
+// article-demand-misses-live-lanes-same-type-fanout-and-out-of-territory-
+// files-october-2026). The CALLER holds withRegisterLock and has already
+// written the binding, so a crash between the two writes leaves the row as the
+// Start wrote it. territoryFor(prompt) is the caller's: it returns
+// {ok:true, files, file_entries} for a valid REVIEW-TERRITORY, else
+// {ok:false, reason}; without it nothing is filled (OpenCode registers its
+// round at Post, so it has no such row).
+//
+// Fills only when exactly one row of this (session, agent_id) exists and it is
+// still unattributable: files_source 'unattributable', files [], no
+// tool_use_id, and the agent type the brief was dispatched as. No row is the
+// ordinary order (the Start comes later and resolves through this binding);
+// one row already carrying this tool_use_id is a repeated Post. Both are
+// silent no-ops. Every other shape leaves the register as it is and returns a
+// disclosure (P5). NOT GUARANTEED: ownership of files the lane writes outside
+// its declared territory, or any fill for a brief with no valid declaration.
+function fillUnattributableRowLocked(root, { sessionId, agentId, agentType, toolUseId, prompt }, territoryFor) {
+  if (typeof territoryFor !== 'function') return [];
+  const leave = (facts, why) =>
+    [render(disclosure('dispatch_unattributable', { tool_use_id: toolUseId, agent_id: agentId, ...facts }, `Post for tool_use_id '${toolUseId}' bound agentId '${agentId}' but did not fill its register row: ${why}; the row keeps files [], so H10 will not defer the files this lane owns`))];
+  const { availability, arr } = readRawArray(root);
+  if (availability === 'absent') return [];
+  if (availability === 'corrupt') return leave({ reason: 'register-corrupt' }, `the register at ${registerPath(root)} is unreadable`);
+  const idx = [];
+  arr.forEach((e, i) => {
+    if (e && e.session_id === sessionId && e.agent_id === agentId) idx.push(i);
+  });
+  if (idx.length === 0) return [];
+  if (idx.length > 1) return leave({ reason: 'ambiguous', rows: idx.length }, `the lane has ${idx.length} register rows in this session, so which one this brief belongs to is not known`);
+  const row = arr[idx[0]];
+  if (row.tool_use_id === toolUseId) return [];
+  if (row.files_source !== 'unattributable' || !Array.isArray(row.files) || row.files.length > 0 || (row.tool_use_id !== null && row.tool_use_id !== undefined)) {
+    return leave({ reason: 'row-not-unattributable', files_source: row.files_source ?? null, row_tool_use_id: row.tool_use_id ?? null }, `its row is not an empty unattributable one (files_source '${row.files_source}', ${Array.isArray(row.files) ? row.files.length : 'no'} files, tool_use_id ${JSON.stringify(row.tool_use_id ?? null)})`);
+  }
+  if (typeof agentType !== 'string' || row.agent_type !== agentType) {
+    return leave({ reason: 'agent-type-mismatch', row_agent_type: row.agent_type ?? null, dispatched_type: agentType ?? null }, `the row's agent type '${row.agent_type}' differs from the dispatched '${agentType}'`);
+  }
+  const territory = territoryFor(prompt);
+  if (!territory?.ok) return leave({ reason: 'no-review-territory' }, territory?.reason ?? 'the brief yielded no territory');
+  arr[idx[0]] = {
+    ...row,
+    files: territory.files.slice(),
+    file_entries: territory.file_entries.slice(),
+    files_source: 'review-territory',
+    tool_use_id: toolUseId,
+    filled_at_post: new Date().toISOString(),
+  };
+  writeRawArrayAtomic(root, arr);
+  return [];
+}
+
+export function recordDispatchPost(root, stdin, opts = {}) {
   return withRegisterLock(root, () => catchContainmentRefusal(() => {
     const toolUseId = stdin?.tool_use_id;
     const tr = stdin?.tool_response;
@@ -1306,6 +1360,12 @@ export function recordDispatchPost(root, stdin) {
         disclosures: [render(disclosure('dispatch_state_poisoned', { tool_use_id: toolUseId, reason: existing.reason, file: existing.file }, `Post for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}: ${existing.file ?? '(unnamed)'}) — not bound`))],
       };
     }
+    const fillRow = () =>
+      fillUnattributableRowLocked(
+        root,
+        { sessionId: stringField(stdin?.session_id), agentId, agentType: stringField(stdin?.tool_input?.subagent_type), toolUseId, prompt: inputPrompt },
+        opts.territoryFor
+      );
 
     // POST FAIL-CLOSED ON THE SESSION (X4): a binding that cannot be
     // session-scoped is not a binding — a missing stdin.session_id refuses
@@ -1382,6 +1442,7 @@ export function recordDispatchPost(root, stdin) {
               `Post for tool_use_id '${toolUseId}' created a NEW dispatch-state record (origin 'post-only') — no Pre had been recorded for it; stronger evidence is never refused for weaker evidence's absence`
             )
           ),
+          ...fillRow(),
         ],
         record,
       };
@@ -1413,7 +1474,7 @@ export function recordDispatchPost(root, stdin) {
     if (!r.started) {
       const updated = { ...r, post_binding: { agent_id: agentId, at } };
       writeLiveRecord(root, key, updated);
-      return { ok: true, action: 'post-bound', disclosures: [], record: updated };
+      return { ok: true, action: 'post-bound', disclosures: fillRow(), record: updated };
     }
     if (r.started.agent_id === agentId) {
       const updated = { ...r, post_binding: { agent_id: agentId, at, confirmed_derived: true } };
