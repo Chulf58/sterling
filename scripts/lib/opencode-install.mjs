@@ -25,7 +25,7 @@
 //    only Sterling's own paths, so a work project's committed portable agents
 //    (.opencode/agents/<name>.md) stay committed.
 // 3. The Sterling-FULL conductor (mode primary) and roster (implementor, researcher,
-//    scout) go to .opencode/agents/sterling/, which OpenCode 2.0.21 loads as
+//    scout, reviewer, librarian) go to .opencode/agents/sterling/, which OpenCode 2.0.21 loads as
 //    sterling/<name> (measured: {agent,agents}/**/*.md, the subdirectory becomes a name
 //    prefix). Bare names would collide with the committed portable copies, and a
 //    project .opencode/agents/<name>.md wins over every other same-named definition
@@ -41,7 +41,7 @@ import { fileURLToPath } from 'node:url';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
 import { sha256, loadRegistry } from './agent-distribution.mjs';
-import { renderClaudeText } from './agent-fences.mjs';
+import { renderOpenCodeFullText } from './agent-fences.mjs';
 import { renderOpenCodeAgent, parseOpenCodeHeader } from './opencode-agents.mjs';
 import { ignoredPaths } from './git-ignore-check.mjs';
 import { readProjectMode } from './handoff-projection.mjs';
@@ -49,7 +49,7 @@ import { readProjectMode } from './handoff-projection.mjs';
 export const STERLING_AGENTS_SUBDIR = '.opencode/agents/sterling';
 export const PROJECT_CONFIG_REL = '.opencode/opencode.json';
 export const CONDUCTOR_AGENT = 'sterling/conductor';
-export const ROSTER = ['conductor', 'implementor', 'researcher', 'scout'];
+export const ROSTER = ['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'librarian'];
 export const STORE_GUARD_PATTERNS = ['**/.sterling/sterling.db*', '.sterling/sterling.db*'];
 const PACKAGE_MARKER = 'sterling-generated';
 const EXCLUDE_BEGIN = '# >>> sterling opencode (managed by Sterling init/update; per-user files, never committed)';
@@ -386,11 +386,34 @@ export function ensureExcluded({ projectDir, mode, tracked }) {
   return { item: label, status: 'created', detail: excludeLines(wholeDir).join(' ') };
 }
 
-const CONDUCTOR_OPENCODE_NOTE = `
-## On OpenCode
+// The conductor's OpenCode description: its template line names .claude/settings.json.
+const CONDUCTOR_OPENCODE_DESCRIPTION = "Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Activated by default_agent \"sterling/conductor\" in the project's .opencode/opencode.json (written by /sterling:init and /sterling:update); never dispatched as a subagent.";
 
-On OpenCode this roster is installed as sterling/implementor, sterling/researcher and sterling/scout; dispatch those names. In a work project the bare-named implementor, researcher and scout are the portable copies committed for colleagues without Sterling, so do not dispatch them.
-`;
+// Sterling-full permissions for the roles with no portable copy (no registry
+// `opencode` block, so they never reach the committed set). They mirror the Claude
+// tool grants: the reviewer has Read/Grep/Glob/Bash and store reads; the librarian
+// has Read/Grep and the store tools, with no Edit, Write, Bash or web tool.
+const FULL_PERMISSIONS = {
+  reviewer: { edit: 'deny', webfetch: 'deny', task: 'deny' },
+  librarian: { edit: 'deny', bash: 'deny', webfetch: 'deny', task: 'deny' },
+};
+
+// Roles that may write the store on OpenCode, as on Claude: every other subagent
+// gets an explicit deny for each store-write tool.
+const STORE_WRITERS = new Set(['conductor', 'librarian']);
+
+/**
+ * The store-write tools as OpenCode names them (<mcp server>_<tool>, the server
+ * entry being `sterling`), read from the implementor template's disallowedTools,
+ * which is the one list of what a non-writing agent may not call.
+ */
+export function storeWriteTools(pluginRoot = sterlingRootFrom()) {
+  const fm = normalize(readFileSync(join(pluginRoot, 'agent-templates', 'implementor.md'), 'utf8')).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? '';
+  const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? '';
+  const tools = [...new Set(list.split(',').map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
+  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd(join(pluginRoot, 'agent-templates', 'implementor.md'))} disallowedTools (P5)`);
+  return tools;
+}
 
 /**
  * The OpenCode model for a config.models Claude model id: OpenCode names a model
@@ -410,13 +433,24 @@ export function sterlingRootFrom(moduleUrl = import.meta.url) {
   }
 }
 
-/** The Sterling-full render: Claude body (Sterling lines kept), OpenCode frontmatter, and the OpenCode model when one is pinned. */
-export function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, model } = {}) {
-  const claudeText = renderClaudeText(templateContent, label);
-  const out = renderOpenCodeAgent(claudeText, label, { permission: entry.opencode?.permission });
+/**
+ * The Sterling-full render: the template's OpenCode-host text with Sterling lines
+ * kept, OpenCode frontmatter, the role's permissions (store-write tools denied to
+ * every role that may not write the store), and the OpenCode model when one is pinned.
+ */
+export function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, model, writeTools } = {}) {
+  const hostText = renderOpenCodeFullText(templateContent, label);
+  const permission = FULL_PERMISSIONS[entry.name] ?? entry.opencode?.permission;
+  const out = renderOpenCodeAgent(hostText, label, { permission, description: primary ? CONDUCTOR_OPENCODE_DESCRIPTION : undefined });
   const header = parseOpenCodeHeader(out.content);
   let content = normalize(out.content).replace(`${header.headerLine}\n`, '');
-  if (primary) content = content.replace(/^mode: subagent$/m, 'mode: primary') + CONDUCTOR_OPENCODE_NOTE;
+  if (primary) content = content.replace(/^mode: subagent$/m, 'mode: primary');
+  if (!STORE_WRITERS.has(entry.name)) {
+    const denies = (writeTools ?? storeWriteTools()).map((t) => `  ${t}: deny`);
+    const close = content.indexOf('\n---\n', 4);
+    const block = /^permission:$/m.test(content.slice(0, close)) ? denies : ['permission:', ...denies];
+    content = `${content.slice(0, close)}\n${block.join('\n')}${content.slice(close)}`;
+  }
   if (model) content = content.replace(/^(mode: \w+)$/m, `$1\nmodel: ${model}`);
   const fmEnd = content.indexOf('\n---\n', 4) + 5;
   const fullHeader = `<!-- sterling-full renderer=opencode-full/1 template=${out.name} template_hash=${sha256(templateContent)} content_hash=${sha256(content)} -->`;
@@ -436,6 +470,7 @@ function frontmatterModel(content) {
  */
 export function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   const registry = loadRegistry(join(pluginRoot, 'agent-templates', 'registry.json'));
+  const writeTools = storeWriteTools(pluginRoot);
   const rows = [];
   for (const name of ROSTER) {
     const entry = registry.agents.find((a) => a.name === name);
@@ -459,7 +494,7 @@ export function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} 
       }
     }
     const model = models[name] ?? (disk === null ? undefined : frontmatterModel(disk));
-    const agent = renderFullOpenCodeAgent(readFileSync(join(pluginRoot, 'agent-templates', entry.file), 'utf8'), entry.file, entry, { primary: name === 'conductor', model });
+    const agent = renderFullOpenCodeAgent(readFileSync(join(pluginRoot, 'agent-templates', entry.file), 'utf8'), entry.file, entry, { primary: name === 'conductor', model, writeTools });
     if (agent.name !== name) throw new Error(`opencode roster: '${entry.file}' renders as '${agent.name}', not '${name}' (P5)`);
     if (disk === agent.content) {
       rows.push({ item: rel, status: 'matches' });

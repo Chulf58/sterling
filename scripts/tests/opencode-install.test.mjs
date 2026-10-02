@@ -231,11 +231,12 @@ test('Sterling-full roster: conductor primary, Sterling lines kept, permissions 
   const home = tmp('oc-home-');
   const dir = project('work');
   const r = run(dir, home);
-  for (const n of ['conductor', 'implementor', 'researcher', 'scout']) assert.equal(statusOf(r, `${STERLING_AGENTS_SUBDIR}/${n}.md`), 'created', n);
+  for (const n of ['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'librarian']) assert.equal(statusOf(r, `${STERLING_AGENTS_SUBDIR}/${n}.md`), 'created', n);
   const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
   assert.match(read('conductor'), /^---\ndescription: .+\nmode: primary\n---\n<!-- sterling-full /);
   assert.match(read('conductor'), /dispatch those names/);
-  assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\n---\n/);
+  // The implementor's only permissions are the store-write denies its Claude disallowedTools carry.
+  assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\npermission:\n( {2}sterling_\w+: deny\n)+---\n/);
   assert.match(read('researcher'), /\npermission:\n {2}edit: deny\n/);
   assert.match(read('scout'), /\n {2}bash: deny\n/);
   // Sterling-only lines survive: the full body is longer than the portable render of the same template.
