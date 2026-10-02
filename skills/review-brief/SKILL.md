@@ -11,7 +11,7 @@ The rubric is the body of the `reviewer` agent (`agent-templates/reviewer.md`, i
 
 ## Dispatching
 
-- **Claude reviewer** (Opus, or Fable while Sol is capped): dispatch the `reviewer` agent with the model pinned on the call. Its tool grant is read-only, so the lane cannot edit files or write to the store. Resume the same warm reviewer for the one re-check.
+- **Claude reviewer** (Opus, including while Sol is capped): dispatch the `reviewer` agent with the model pinned on the call. Its tool grant is read-only, so the lane cannot edit files or write to the store. Resume the same warm reviewer for the one re-check.
 - **Codex Sol**: call the `codex` MCP tool at `sandbox: read-only`, with the call-site shape in `CLAUDE.md`, "Codex runs through the MCP tool, never the shell". Start the prompt with the body of `.claude/agents/reviewer.md`: everything after the closing `---` of its frontmatter, unedited. Then append the brief below. Do not paraphrase or shorten the body, and do not paste the frontmatter, which names Claude tools Sol does not have. In a clone that has no installed copy, read `agent-templates/reviewer.md` instead.
 
 Riskiest means runtime/product code, config, permissions, credentials, lifecycle, migrations, generated catalogs, third-party patches; docs, probe scripts and generated projections go unreviewed.
