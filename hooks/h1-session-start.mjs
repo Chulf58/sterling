@@ -9211,6 +9211,56 @@ function renderUnavailable(reason) {
   return `${UNAVAILABLE_MARKER}: ${bounded}`;
 }
 
+// scripts/hooks/lib/operating-state.mjs
+function readProjectConfig(cwd) {
+  let config2 = null;
+  let configUnreadable2 = false;
+  try {
+    config2 = loadConfig(cwd);
+  } catch {
+    config2 = null;
+    configUnreadable2 = true;
+  }
+  if (config2 !== null && (typeof config2 !== "object" || Array.isArray(config2))) {
+    configUnreadable2 = true;
+  }
+  return { config: config2, configUnreadable: configUnreadable2 };
+}
+var MACHINE_ROLE_LAYER = { claude: "Sterling layer in CLAUDE.md's", opencode: "Sterling layer's" };
+function machineRoleLine({ atClone, installedCopy, config: config2, host = "claude" }) {
+  if (!Object.hasOwn(MACHINE_ROLE_LAYER, host)) throw new Error(`machineRoleLine: unknown host '${host}'`);
+  const layer = MACHINE_ROLE_LAYER[host];
+  if (installedCopy) {
+    return "MACHINE ROLE: INSTALLED PLUGIN (consumer) \u2014 updates via /plugin (Installed tab \u2192 Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.";
+  }
+  if (!atClone) return "";
+  const role = config2?.machine_role;
+  if (role === "authoring") {
+    return `MACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) \u2014 Sterling work lands and merges here; the ${layer} authoring contract applies.`;
+  }
+  if (role === "consumer") {
+    return `MACHINE ROLE: CONSUMER \u2014 this clone consumes via /sterling:update. The ${layer} "this machine authors" language does NOT apply on this machine: never commit here, never hand-reconcile drift; a dirty generated file is discarded (git checkout -- <path>); currency comes only from /sterling:update.`;
+  }
+  return 'MACHINE ROLE: UNDECLARED \u2014 treat as CONSUMER (the safe posture) until declared. The authoring machine declares machine_role:"authoring" in .sterling/config.json once; a successful /sterling:update stamps "consumer" automatically.';
+}
+function tddPostureLine({ config: config2, configUnreadable: configUnreadable2 }) {
+  if (configUnreadable2) {
+    return "TDD posture: UNKNOWN \u2014 the project config could not be read, so config.tdd.enabled could not be determined. This is NOT the default posture: repair the config, or state your posture explicitly.";
+  }
+  const tddOn = config2?.tdd?.enabled !== false;
+  return `TDD posture: tests-first ${tddOn ? "ON" : "OFF"} (config.tdd.enabled \u2014 TUI System tab; explicit asks still work)`;
+}
+function projectModeLine({ config: config2, configUnreadable: configUnreadable2 }) {
+  if (configUnreadable2) {
+    return "Project mode: UNKNOWN \u2014 the project config could not be read, so config.mode could not be determined. This is NOT the hobby default: repair the config.";
+  }
+  const mode = config2?.mode;
+  if (mode === void 0 || mode === "hobby" || mode === "work") {
+    return `Project mode: ${mode === "work" ? "WORK" : "HOBBY"} (config.mode \u2014 TUI System tab) \u2014 ` + (mode === "work" ? "the OpenCode agents and handoff files are written and maintained." : "the OpenCode agents and handoff files are not written or maintained in hobby mode; existing ones may remain from an earlier work period.");
+  }
+  return `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) \u2014 config.mode must be 'hobby' or 'work'; init, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).`;
+}
+
 // scripts/hooks/lib/undeclared-source-scan.mjs
 init_dist();
 import { spawnSync as spawnSync3 } from "node:child_process";
@@ -9962,6 +10012,82 @@ function ageText(iso, nowMs = Date.now()) {
   return hours > 0 ? `${hours}h` : `${mins}m`;
 }
 
+// scripts/hooks/lib/maintenance-state.mjs
+function readMaintenanceState(store2, cwd) {
+  const reconcile2 = { count: 0, owesProse: 0, oldest: null };
+  let queueReasonEntries2 = [];
+  let queueReasons2 = [];
+  let drainable2 = 0;
+  let parked2 = 0;
+  const systemTotal = store2.count({ types: ["todo"], source: "system" });
+  const system = systemTotal > 0 ? store2.query({ types: ["todo"], source: "system", cap: systemTotal }) : [];
+  const reconcileItems = system.filter((t) => t.system_reason === "reconcile_needed");
+  reconcile2.count = reconcileItems.length;
+  try {
+    const verdicts = owesProseVerdicts(cwd);
+    reconcile2.owesProse = reconcileItems.filter((t) => isJudgedOwesProse(t, verdicts)).length;
+  } catch {
+    reconcile2.owesProse = null;
+  }
+  reconcile2.oldest = reconcileItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
+  const drainableItems = system.filter((t) => t.system_reason !== "file_parked");
+  drainable2 = drainableItems.length;
+  parked2 = system.length - drainable2;
+  const byReason = /* @__PURE__ */ new Map();
+  for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
+  queueReasonEntries2 = [...byReason.entries()].sort((a, b) => b[1] - a[1]);
+  queueReasons2 = queueReasonEntries2.map(([r, n]) => `${n} item${n === 1 ? "" : "s"} in lane ${r}`);
+  return { total: systemTotal, reconcile: reconcile2, drainable: drainable2, parked: parked2, queueReasonEntries: queueReasonEntries2, queueReasons: queueReasons2 };
+}
+function queueDepthLine({ drainable: drainable2, parked: parked2, queueReasons: queueReasons2, queueReasonEntries: queueReasonEntries2, deepThreshold: rawThreshold }) {
+  const TOO_DEEP_MULTIPLIER = 10;
+  let queueContext2 = "";
+  const deepThreshold = Math.max(1, rawThreshold ?? 15);
+  if (drainable2 >= deepThreshold) {
+    const parkedNote = parked2 > 0 ? ` plus ${parked2} file_parked (close at branch merge, not by drain \u2014 excluded from this count)` : "";
+    if (drainable2 >= deepThreshold * TOO_DEEP_MULTIPLIER && queueReasonEntries2.length) {
+      const topLanes = queueReasons2.slice(0, 3);
+      const [topReason, topCount] = queueReasonEntries2[0];
+      const topPhrase = `${topCount} item${topCount === 1 ? "" : "s"} in lane ${topReason}`;
+      const laneLead = queueReasonEntries2.length > topLanes.length ? `Too many lanes to name in full, and "drain it all before new work" is not a workable ask at this size. The biggest lanes: ${topLanes.join(", ")}. ` : `"Drain it all before new work" is not a workable ask at this size. The lane split: ${topLanes.join(", ")}. `;
+      queueContext2 = `
+
+MAINTENANCE QUEUE IS VERY DEEP \u2014 ${drainable2} drainable items across ${queueReasonEntries2.length} lane(s)${parkedNote}.
+` + laneLead + `Drain the biggest lane now (${topPhrase}), or board a dedicated drain slice for the rest \u2014 don't try to clear the whole queue in one pass. Expect much of it to be ALREADY DONE work never closed, so verify each item against HEAD before writing anything back (an already-paid item closes with board_remove and NO knowledge_update). A queue this deep is itself a signal: items are arriving faster than anyone is closing them.`;
+    } else {
+      queueContext2 = `
+
+MAINTENANCE QUEUE IS DEEP \u2014 ${drainable2} drainable items (${queueReasons2.join(", ")})${parkedNote}.
+Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first (an already-paid item closes with board_remove and NO knowledge_update \u2014 a version bump claiming a reconcile that added nothing is itself drift). A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
+    }
+    queueContext2 += " This is a persistent visibility count by design \u2014 items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.";
+  }
+  return queueContext2.replace(/^\n\n/, "");
+}
+function reconcileBacklog({ reconcile: reconcile2, cwd }) {
+  let reconcileBanner2 = "";
+  let reconcileContext2 = "";
+  if (reconcile2.count > 0) {
+    let worker = "worker not running";
+    let lastRunNote = "";
+    try {
+      const ws = workerStatus(cwd);
+      if (ws.running) worker = `worker running (pid ${ws.pid}, since ${ws.since})`;
+      const broken = workerBreakage(ws.lastRun);
+      if (broken) lastRunNote = `; last worker run FAILED at ${broken.at}: ${broken.reason} (log: .sterling/maintenance-worker.log)`;
+    } catch (e) {
+      worker = `worker state unreadable (${e?.message ?? e})`;
+    }
+    const age = ageText(reconcile2.oldest);
+    const inLane = (n) => `${n} item${n === 1 ? "" : "s"} in lane reconcile_needed`;
+    reconcileBanner2 = ` \xB7 ${inLane(reconcile2.count)}, oldest ${age}, ${worker}${lastRunNote}`;
+    reconcileContext2 = `
+
+RECONCILE BACKLOG: ${inLane(reconcile2.count)}, the oldest open since ${reconcile2.oldest ?? "unknown"} (${age}). ` + (reconcile2.owesProse === null ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items owe prose is unknown. ` : `Of these, ${inLane(reconcile2.owesProse)} are judged 'owes prose' by the background worker (.sterling/maintenance-worker.jsonl) and wait on you to draft the article change. `) + `${worker}${lastRunNote}.`;
+  }
+  return { banner: reconcileBanner2, line: reconcileContext2.replace(/^\n\n/, "") };
+}
+
 // scripts/hooks/h1-session-start.mjs
 async function deleteRegisterUnderLock(cwd) {
   const transientDir = join15(cwd, ".sterling", "transient");
@@ -10159,64 +10285,30 @@ if (!store) {
   await deleteRegisterUnderLock(input.cwd);
   allow();
 }
-var config = null;
-var configUnreadable = false;
-try {
-  config = loadConfig(input.cwd);
-} catch {
-  config = null;
-  configUnreadable = true;
-}
-if (config !== null && (typeof config !== "object" || Array.isArray(config))) {
-  configUnreadable = true;
-}
+var { config, configUnreadable } = readProjectConfig(input.cwd);
 var roleContext = "";
 try {
   const root = pluginRoot2();
-  if (root && !samePath2(input.cwd, root) && isInstalledCopy(root)) {
-    roleContext = "\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) \u2014 updates via /plugin (Installed tab \u2192 Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.";
-  } else if (root && samePath2(input.cwd, root)) {
-    const role = config?.machine_role;
-    if (role === "authoring") {
-      roleContext = "\n\nMACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) \u2014 Sterling work lands and merges here; the Sterling layer in CLAUDE.md's authoring contract applies.";
-    } else if (role === "consumer") {
-      roleContext = `
+  const installedCopy = Boolean(root && !samePath2(input.cwd, root) && isInstalledCopy(root));
+  const atClone = Boolean(root && samePath2(input.cwd, root));
+  const line = machineRoleLine({ atClone, installedCopy, config });
+  if (line) roleContext = `
 
-MACHINE ROLE: CONSUMER \u2014 this clone consumes via /sterling:update. The Sterling layer in CLAUDE.md's "this machine authors" language does NOT apply on this machine: never commit here, never hand-reconcile drift; a dirty generated file is discarded (git checkout -- <path>); currency comes only from /sterling:update.`;
-    } else {
-      roleContext = '\n\nMACHINE ROLE: UNDECLARED \u2014 treat as CONSUMER (the safe posture) until declared. The authoring machine declares machine_role:"authoring" in .sterling/config.json once; a successful /sterling:update stamps "consumer" automatically.';
-    }
-  }
+${line}`;
 } catch {
 }
 var tddPostureContext = "";
 try {
-  if (configUnreadable) {
-    tddPostureContext = "\n\nTDD posture: UNKNOWN \u2014 the project config could not be read, so config.tdd.enabled could not be determined. This is NOT the default posture: repair the config, or state your posture explicitly.";
-  } else {
-    const tddOn = config?.tdd?.enabled !== false;
-    tddPostureContext = `
+  tddPostureContext = `
 
-TDD posture: tests-first ${tddOn ? "ON" : "OFF"} (config.tdd.enabled \u2014 TUI System tab; explicit asks still work)`;
-  }
+${tddPostureLine({ config, configUnreadable })}`;
 } catch {
 }
 var modeContext = "";
 try {
-  if (configUnreadable) {
-    modeContext = "\n\nProject mode: UNKNOWN \u2014 the project config could not be read, so config.mode could not be determined. This is NOT the hobby default: repair the config.";
-  } else {
-    const mode = config?.mode;
-    if (mode === void 0 || mode === "hobby" || mode === "work") {
-      modeContext = `
+  modeContext = `
 
-Project mode: ${mode === "work" ? "WORK" : "HOBBY"} (config.mode \u2014 TUI System tab) \u2014 ` + (mode === "work" ? "the OpenCode agents and handoff files are written and maintained." : "the OpenCode agents and handoff files are not written or maintained in hobby mode; existing ones may remain from an earlier work period.");
-    } else {
-      modeContext = `
-
-Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) \u2014 config.mode must be 'hobby' or 'work'; init, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).`;
-    }
-  }
+${projectModeLine({ config, configUnreadable })}`;
 } catch {
 }
 var currencyWarning = "";
@@ -10474,70 +10566,25 @@ try {
   const grouped = userTodos.filter((t) => t.objective);
   counts.groupedTodos = grouped.length;
   counts.objectives = new Set(grouped.map((t) => t.objective)).size;
-  const systemTotal = store.count({ types: ["todo"], source: "system" });
-  counts.maintenance = systemTotal;
-  const system = systemTotal > 0 ? store.query({ types: ["todo"], source: "system", cap: systemTotal }) : [];
-  const reconcileItems = system.filter((t) => t.system_reason === "reconcile_needed");
-  reconcile.count = reconcileItems.length;
-  try {
-    const verdicts = owesProseVerdicts(input.cwd);
-    reconcile.owesProse = reconcileItems.filter((t) => isJudgedOwesProse(t, verdicts)).length;
-  } catch {
-    reconcile.owesProse = null;
-  }
-  reconcile.oldest = reconcileItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
-  const drainableItems = system.filter((t) => t.system_reason !== "file_parked");
-  drainable = drainableItems.length;
-  parked = system.length - drainable;
-  const byReason = /* @__PURE__ */ new Map();
-  for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
-  queueReasonEntries = [...byReason.entries()].sort((a, b) => b[1] - a[1]);
-  queueReasons = queueReasonEntries.map(([r, n]) => `${n} item${n === 1 ? "" : "s"} in lane ${r}`);
+  const m = readMaintenanceState(store, input.cwd);
+  counts.maintenance = m.total;
+  reconcile = m.reconcile;
+  drainable = m.drainable;
+  parked = m.parked;
+  queueReasonEntries = m.queueReasonEntries;
+  queueReasons = m.queueReasons;
 } finally {
   store.close();
 }
-var TOO_DEEP_MULTIPLIER = 10;
-var queueContext = "";
-var deepThreshold = Math.max(1, config?.maintenance_queue?.deep_threshold ?? 15);
-if (drainable >= deepThreshold) {
-  const parkedNote = parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain \u2014 excluded from this count)` : "";
-  if (drainable >= deepThreshold * TOO_DEEP_MULTIPLIER && queueReasonEntries.length) {
-    const topLanes = queueReasons.slice(0, 3);
-    const [topReason, topCount] = queueReasonEntries[0];
-    const topPhrase = `${topCount} item${topCount === 1 ? "" : "s"} in lane ${topReason}`;
-    const laneLead = queueReasonEntries.length > topLanes.length ? `Too many lanes to name in full, and "drain it all before new work" is not a workable ask at this size. The biggest lanes: ${topLanes.join(", ")}. ` : `"Drain it all before new work" is not a workable ask at this size. The lane split: ${topLanes.join(", ")}. `;
-    queueContext = `
+var queueLine = queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: config?.maintenance_queue?.deep_threshold });
+var queueContext = queueLine ? `
 
-MAINTENANCE QUEUE IS VERY DEEP \u2014 ${drainable} drainable items across ${queueReasonEntries.length} lane(s)${parkedNote}.
-` + laneLead + `Drain the biggest lane now (${topPhrase}), or board a dedicated drain slice for the rest \u2014 don't try to clear the whole queue in one pass. Expect much of it to be ALREADY DONE work never closed, so verify each item against HEAD before writing anything back (an already-paid item closes with board_remove and NO knowledge_update). A queue this deep is itself a signal: items are arriving faster than anyone is closing them.`;
-  } else {
-    queueContext = `
+${queueLine}` : "";
+var backlog = reconcileBacklog({ reconcile, cwd: input.cwd });
+var reconcileBanner = backlog.banner;
+var reconcileContext = backlog.line ? `
 
-MAINTENANCE QUEUE IS DEEP \u2014 ${drainable} drainable items (${queueReasons.join(", ")})${parkedNote}.
-Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first (an already-paid item closes with board_remove and NO knowledge_update \u2014 a version bump claiming a reconcile that added nothing is itself drift). A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
-  }
-  queueContext += " This is a persistent visibility count by design \u2014 items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.";
-}
-var reconcileBanner = "";
-var reconcileContext = "";
-if (reconcile.count > 0) {
-  let worker = "worker not running";
-  let lastRunNote = "";
-  try {
-    const ws = workerStatus(input.cwd);
-    if (ws.running) worker = `worker running (pid ${ws.pid}, since ${ws.since})`;
-    const broken = workerBreakage(ws.lastRun);
-    if (broken) lastRunNote = `; last worker run FAILED at ${broken.at}: ${broken.reason} (log: .sterling/maintenance-worker.log)`;
-  } catch (e) {
-    worker = `worker state unreadable (${e?.message ?? e})`;
-  }
-  const age = ageText(reconcile.oldest);
-  const inLane = (n) => `${n} item${n === 1 ? "" : "s"} in lane reconcile_needed`;
-  reconcileBanner = ` \xB7 ${inLane(reconcile.count)}, oldest ${age}, ${worker}${lastRunNote}`;
-  reconcileContext = `
-
-RECONCILE BACKLOG: ${inLane(reconcile.count)}, the oldest open since ${reconcile.oldest ?? "unknown"} (${age}). ` + (reconcile.owesProse === null ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items owe prose is unknown. ` : `Of these, ${inLane(reconcile.owesProse)} are judged 'owes prose' by the background worker (.sterling/maintenance-worker.jsonl) and wait on you to draft the article change. `) + `${worker}${lastRunNote}.`;
-}
+${backlog.line}` : "";
 var registryContext = "";
 if (existsSync13(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, "/");
