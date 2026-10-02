@@ -6209,6 +6209,22 @@ var init_mounted = __esm({
           throw new Error(`domainDescription: domain '${name}' is not mounted`);
         return store.getMeta(DOMAIN_DESCRIPTION_KEY);
       }
+      /** Set a mounted domain's description (store_meta 'description'), trimmed,
+       *  on that domain's own store. The write path for an existing domain;
+       *  createDomain sets it for a new one. An unmounted name and a blank
+       *  description are refused with nothing written, and so is a call inside a
+       *  transaction open on another mount (the same affinity rule as every write
+       *  through this class). */
+      setDomainDescription(name, description) {
+        const store = this.domains.get(name);
+        if (!store)
+          throw new Error(`setDomainDescription: domain '${name}' is not mounted`);
+        if (typeof description !== "string" || description.trim().length === 0) {
+          throw new Error(`setDomainDescription: the description for domain '${name}' is blank; nothing was written`);
+        }
+        this.assertMountAffinity("setDomainDescription", store, `domain '${name}'`);
+        store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
+      }
       /** Scope-routed write (§3.3): project → the project store; domain:<name> → that
        *  domain store. Routing is MECHANICAL here; the tool layer owns the policy
        *  (feature_article always project, reference/research project-then-promote).

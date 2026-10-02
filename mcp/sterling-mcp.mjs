@@ -22958,6 +22958,22 @@ var MountedStores = class {
       throw new Error(`domainDescription: domain '${name}' is not mounted`);
     return store.getMeta(DOMAIN_DESCRIPTION_KEY);
   }
+  /** Set a mounted domain's description (store_meta 'description'), trimmed,
+   *  on that domain's own store. The write path for an existing domain;
+   *  createDomain sets it for a new one. An unmounted name and a blank
+   *  description are refused with nothing written, and so is a call inside a
+   *  transaction open on another mount (the same affinity rule as every write
+   *  through this class). */
+  setDomainDescription(name, description) {
+    const store = this.domains.get(name);
+    if (!store)
+      throw new Error(`setDomainDescription: domain '${name}' is not mounted`);
+    if (typeof description !== "string" || description.trim().length === 0) {
+      throw new Error(`setDomainDescription: the description for domain '${name}' is blank; nothing was written`);
+    }
+    this.assertMountAffinity("setDomainDescription", store, `domain '${name}'`);
+    store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
+  }
   /** Scope-routed write (§3.3): project → the project store; domain:<name> → that
    *  domain store. Routing is MECHANICAL here; the tool layer owns the policy
    *  (feature_article always project, reference/research project-then-promote).
@@ -26254,24 +26270,11 @@ function textRowRecord(record2) {
   }
   return out;
 }
-function mountedDomainSurface(stores, mounts) {
+function mountedDomainSurface(stores) {
   return {
     names: () => stores.domainNames(),
     description: (name) => stores.domainDescription(name),
-    setDescription: (name, description) => {
-      if (!stores.domainNames().includes(name))
-        throw new Error(`domain '${name}' is not mounted`);
-      const mount = mounts?.find((m) => m.name === name);
-      if (!mount) {
-        throw new Error(`domain '${name}' is mounted, but this tool surface was built without its store path, so its description cannot be set here; nothing was written`);
-      }
-      const store = new SterlingStore(mount.dbPath);
-      try {
-        store.setMeta(DOMAIN_DESCRIPTION_KEY, description);
-      } finally {
-        store.close();
-      }
-    },
+    setDescription: (name, description) => stores.setDomainDescription(name, description),
     missing: () => stores.missingDomains.map((m) => m.name)
   };
 }
@@ -33336,11 +33339,10 @@ var strict = (shape) => external_exports.object(shape).strict();
 function createSterlingServer(storePath2) {
   const configPath = join5(dirname5(storePath2), "config.json");
   const config2 = parseConfig(existsSync4(configPath) ? JSON.parse(readFileSync2(configPath, "utf8")) : {});
-  const mounts = resolveDomainMounts(config2);
-  const store = new MountedStores(storePath2, mounts, { skipMissing: true });
+  const store = new MountedStores(storePath2, resolveDomainMounts(config2), { skipMissing: true });
   for (const m of store.missingDomains)
     process.stderr.write(missingDomainWarning(m) + "\n");
-  const tools = new SterlingTools({ store, config: config2, repoRoot: dirname5(dirname5(storePath2)), domains: mountedDomainSurface(store, mounts) });
+  const tools = new SterlingTools({ store, config: config2, repoRoot: dirname5(dirname5(storePath2)), domains: mountedDomainSurface(store) });
   const bootDomains = store.domainNames().map((name) => {
     const description = store.domainDescription(name);
     return description ? `${name} ("${description}")` : `${name} (no description)`;
@@ -33349,7 +33351,7 @@ function createSterlingServer(storePath2) {
   const server2 = new McpServer({ name: "sterling", version: "0.1.0" });
   const json = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
   server2.registerTool("knowledge_create", {
-    description: "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." + createDomainsNote,
+    description: "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." + createDomainsNote,
     inputSchema: strict({ type: external_exports.string(), fields: knowledgeCreateFieldsSchema, projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ type, fields, projection }) => {
     const { type: fieldsType, ...restFields } = fields;
@@ -33572,7 +33574,7 @@ function createSterlingServer(storePath2) {
     })
   }, ({ path, value, expected_digest }) => json(tools.configSet({ path, value, expected_digest })));
   server2.registerTool("domain_describe", {
-    description: "Read or set a mounted domain's description: the one line that says which knowledge belongs in that shared domain store. knowledge_create lists it, and the promotion_review mint matches project records against it. Omit `description` to read it ({domain, description}, null when unset); pass it to set it ({domain, description, previous_description, updated:true}). An unmounted domain and a blank description are refused with nothing written.",
+    description: "Read or set a mounted domain's description: the one line that says which knowledge belongs in that shared domain store. knowledge_create lists it, and the promotion_review mint matches project records against it. Promotion proposals go only to project records with no file_keys (an article's files count; a reference_material's location does not). Omit `description` to read it ({domain, description}, null when unset); pass it to set it ({domain, description, previous_description, updated:true}). An unmounted domain and a blank description are refused with nothing written.",
     inputSchema: strict({ domain: external_exports.string(), description: external_exports.string().optional() })
   }, ({ domain, description }) => json(tools.domainDescribe({ domain, description })));
   server2.registerTool("knowledge_link", {
