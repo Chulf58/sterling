@@ -44,8 +44,7 @@ import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy, fileEntriesO
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 import { publishNotice } from './lib/delivery.mjs';
-import { readProjectMode } from '../lib/handoff-projection.mjs';
-import { readPrLoop, PR_LOOP_REL } from '../lib/work-pr.mjs';
+import { evaluatePrLoop, prLoopNext, prLoopOwedText, prLoopReminderText } from './lib/pr-loop-duty.mjs';
 import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
 import {
   IMAGE_BINARY_EXT,
@@ -1153,28 +1152,9 @@ try {
   // mode with a pr-loop.json present is disclosed as not evaluated.
   const prLoopNaggedPath = join(input.cwd, '.sterling', 'transient', 'pr-loop-nagged.json');
   const prLoop = (() => {
-    let mode;
-    try {
-      mode = readProjectMode(input.cwd);
-    } catch (e) {
-      // Never guessed as work — but an ARMED loop is never silently suppressed
-      // either (Sol review): say that its state was not evaluated.
-      if (existsSync(join(input.cwd, PR_LOOP_REL))) {
-        degradationParts.push(
-          `• PR review loop: the project mode is unreadable (${String((e && e.message) || e)}) — ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
-        );
-      }
-      return null;
-    }
-    if (mode !== 'work') return null;
-    let state;
-    try {
-      state = readPrLoop(input.cwd);
-    } catch (e) {
-      degradationParts.push(`• PR review loop: ${PR_LOOP_REL} is unreadable (${String((e && e.message) || e)}) — whether a loop is owed is UNKNOWN; rerun /sterling:merge to re-arm it, or delete the file if no PR is open.`);
-      return null;
-    }
-    if (!state || state.status !== 'owed') return null;
+    const { state, degraded } = evaluatePrLoop(input.cwd);
+    if (degraded) degradationParts.push(degraded);
+    if (!state) return null;
     const spent = (() => {
       try {
         const m = JSON.parse(readFileSync(prLoopNaggedPath, 'utf8'));
@@ -1183,10 +1163,7 @@ try {
         return false;
       }
     })();
-    const next =
-      `run the pr-review-loop skill: wait with node "\${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" ${state.pr_url} (background), disposition each finding, push fixes via /sterling:merge; ` +
-      `when the loop ends, settle it: node "\${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs" --settle <clean|capped|escalated> --pr ${state.pr_number}. ` +
-      `Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`;
+    const next = prLoopNext(state, '${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs');
     // SESSIONLESS (Sol review): without a session identity the once-per-session
     // marker cannot be kept, so blocking would repeat on every Stop. Degrade to
     // a loud NON-blocking reminder instead.
@@ -1198,8 +1175,8 @@ try {
     }
     return {
       blockDue: !input.stop_hook_active && !spent,
-      text: `• PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? '?').slice(0, 7)}, armed ${state.armed_at}) — ${next}`,
-      reminder: `PR review loop owed: PR #${state.pr_number} ${state.pr_url} — next: pr-review-loop skill, then --settle clean|capped|escalated --pr ${state.pr_number}.`,
+      text: prLoopOwedText(state, next),
+      reminder: prLoopReminderText(state),
       spend: () => {
         writeFileSync(prLoopNaggedPath, JSON.stringify({ session_id: input.session_id, armed_at: state.armed_at, at: now }));
       },

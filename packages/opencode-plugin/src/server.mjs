@@ -30,7 +30,7 @@
 //   context.mjs (the context handler)         delivery.mjs (tool delivery)
 //   settle.mjs (settlement)                   worker.mjs (maintenance worker)
 //   selection.mjs (prompt hook)               compaction.mjs (receipt reset)
-//   research.mjs (research_tool events)
+//   research.mjs (research_tool events)       pr-loop.mjs (the PR review loop owed notice)
 //   config.mjs (registration), sync.mjs (post-update sync)
 //   notices.mjs, log.mjs, store.mjs (shared plumbing)
 import { createCompactionHandler } from './compaction.mjs';
@@ -39,6 +39,7 @@ import { createContextHandler } from './context.mjs';
 import { createDeliveryHandlers } from './delivery.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { NOTICES_REL, addNotice } from './notices.mjs';
+import { createPrLoopNotice } from './pr-loop.mjs';
 import { createRotationRestore } from './restore.mjs';
 import { createResearchRecorder } from './research.mjs';
 import { createPromptHandler } from './selection.mjs';
@@ -109,6 +110,7 @@ export function createSterlingServer(deps = {}) {
   }
   const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker });
   const settle = createSettle({ openStore, now, launchWorkerFor });
+  const prLoopNotice = createPrLoopNotice({ now, pluginRoot: deps.sterlingRoot });
   const onPrompt = createPromptHandler({ openStore, rootOf, fenced });
   const onCompaction = createCompactionHandler({ rootOf, fenced });
   const configure = deps.configure ?? createConfigHandler(deps);
@@ -119,6 +121,7 @@ export function createSterlingServer(deps = {}) {
     if (!root) return;
     resetStatus(root);
     await fenced('settle', root, () => settle(root));
+    await fenced('settle', root, () => prLoopNotice(root));
   }
 
   const handlers = { context: onContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };

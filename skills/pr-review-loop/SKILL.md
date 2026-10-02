@@ -9,7 +9,13 @@ Decision `project-mode-hobby-work-toggle-decides-flow`. Sol has already reviewed
 
 ## Owner and tools
 
+<!-- claude-only -->
 - **One owner: you, the conductor.** Waiting runs only through `node "${CLAUDE_PLUGIN_ROOT}/bin/pr-review-wait.mjs"`, launched as a **background Bash** (`run_in_background`): one call ends with one JSON line, so one completion notification is exactly what you need. Keep the default `--timeout` (540s, under the 10-minute Bash window); a `timeout` result means run it again, and it is not a round.
+<!-- /claude-only -->
+<!-- opencode-only -->
+On OpenCode, the owner-and-waiting bullet reads as follows.
+- **One owner: you, the conductor.** Waiting runs only through `node "${CLAUDE_PLUGIN_ROOT}/bin/pr-review-wait.mjs"`, run detached in the shell (there is no `run_in_background` flag, and nothing notifies you when a detached process ends). Remove the last output, then launch: `mkdir -p .sterling/transient && rm -f .sterling/transient/pr-wait.json && nohup node "${CLAUDE_PLUGIN_ROOT}/bin/pr-review-wait.mjs" <args> > .sterling/transient/pr-wait.json 2> .sterling/transient/pr-wait.err < /dev/null &`. The helper ends with exactly one JSON line, so the wait is over when `pr-wait.json` holds that line: check it between other work or with a short shell call (`sleep 30; cat .sterling/transient/pr-wait.json`). Keep the default `--timeout` (540s); a `timeout` result means run it again, and it is not a round. Whether a detached child outlives the shell tool call is unmeasured on OpenCode 2.0.21: if the output file stays empty and `pgrep -f pr-review-wait` finds no process, the child died with the call, so run the helper in the foreground with a `--timeout` below the shell tool's call limit instead, and rerun on `timeout`.
+<!-- /opencode-only -->
 - **Fixes go to an implementor** (brief: the finding, the file, the acceptance). You disposition findings and reply on GitHub.
 - Everything uses `gh`; the helper binds the repo to origin.
 
@@ -38,7 +44,12 @@ Then settle H10's duty. This is a deliberate act, and it names the PR: `node "${
 
 ## Interrupted mid-loop
 
+<!-- claude-only -->
 If the session ends before the loop does, leave a board item pointing at the PR and its state (round, consumed review id, head), and put the PR link plus the next action in the rotation note. H10 keeps nagging once per session until the loop is settled; it never blocks indefinitely.
+<!-- /claude-only -->
+<!-- opencode-only -->
+On OpenCode, if the session ends before the loop does, leave a board item pointing at the PR and its state (round, consumed review id, head), and put the PR link plus the next action in the rotation note. The Sterling plugin raises a 'PR review loop owed' notice at the end of each execution until the loop is settled (the full next action the first time after OpenCode starts, a short reminder after that); it never blocks.
+<!-- /opencode-only -->
 
 ## S0: first real run (UNVERIFIED assumptions)
 
