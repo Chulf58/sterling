@@ -14,7 +14,7 @@ import { briefOf, notStagedLine, stageChild } from './staging.mjs';
 import { agentRole } from './agent-name.mjs';
 import { remember } from './bounded.mjs';
 import { sessionKind } from './dispatch.mjs';
-import { WORKER_ENV_FLAG } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
+import { inWorkerChild } from './worker.mjs';
 
 const STATUS_TTL_MS = 10_000;
 // The undeclared-source scan spawns git twice, so a process reuses its answer for this long.
@@ -149,7 +149,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         // Never inside the maintenance worker's own `opencode run` child: its root
         // context is not a new process boundary for the project, and a sweep there
         // would end the parent's live background dispatches (settle.mjs skips it too).
-        if (sweepStale && env[WORKER_ENV_FLAG] !== '1' && !swept.has(root)) {
+        if (sweepStale && !inWorkerChild(env) && !swept.has(root)) {
           swept.add(root);
           let line;
           try {
@@ -170,7 +170,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         if (staged) blocks.push(staged);
       }
       if (restore) blocks.push(restore);
-      const notices = takeNotices(root, now());
+      // The worker child must not stamp the user's notices shown: settlement would then prune them unseen.
+      const notices = inWorkerChild(env) ? [] : takeNotices(root, now());
       if (notices.length) blocks.push(`STERLING NOTICES (from the end of the last turn):\n${notices.map((n) => `- ${n.text}`).join('\n')}`);
       input.system.push({ type: 'text', text: blocks.join('\n\n') });
     });

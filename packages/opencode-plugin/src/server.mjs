@@ -55,9 +55,8 @@ import { createPromptHandler } from './selection.mjs';
 import { createSettle, liveDispatch } from './settle.mjs';
 import { BUSY_TIMEOUT_MS, openProjectStore } from './store.mjs';
 import { createSessionSync } from './sync.mjs';
-import { createWorkerLaunch } from './worker.mjs';
+import { createWorkerLaunch, inWorkerChild } from './worker.mjs';
 import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
-import { WORKER_ENV_FLAG } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
 
 export { BUSY_TIMEOUT_MS, LOG_REL, NOTICES_REL, addNotice, liveDispatch, openProjectStore };
 export { defaultTemplatePath, hostBlockPairs, opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
@@ -114,7 +113,7 @@ export function createSterlingServer(deps = {}) {
     }
   }
 
-  const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore });
+  const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env: deps.env ?? process.env });
   const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, env: deps.env ?? process.env, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
   const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
   const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
@@ -139,7 +138,7 @@ export function createSterlingServer(deps = {}) {
   const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker });
   const settle = createSettle({ openStore, now, launchWorkerFor });
   const prLoopNotice = createPrLoopNotice({ now, pluginRoot: deps.sterlingRoot });
-  const onPrompt = createPromptHandler({ openStore, rootOf, fenced });
+  const onPrompt = createPromptHandler({ openStore, rootOf, fenced, env: deps.env ?? process.env });
   const onCompaction = createCompactionHandler({ rootOf, fenced });
   const configure = deps.configure ?? createConfigHandler(deps);
 
@@ -148,7 +147,7 @@ export function createSterlingServer(deps = {}) {
     // Inside the maintenance worker's own `opencode run` child (the runner sets
     // the flag), this globally installed plugin must not settle or launch a
     // worker: it would race the parent's settlement on the same store.
-    if ((deps.env ?? process.env)[WORKER_ENV_FLAG] === '1') return;
+    if (inWorkerChild(deps.env ?? process.env)) return;
     const root = rootOf();
     if (!root) return;
     const sessionID = ev.data?.sessionID;

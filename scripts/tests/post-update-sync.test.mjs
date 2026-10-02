@@ -389,6 +389,18 @@ test('OpenCode sync: a child session does nothing; the first ROOT session syncs 
   }
 });
 
+test('OpenCode sync: inside the maintenance worker child (STERLING_MAINTENANCE_WORKER=1) the sync never runs and looks nothing up', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const session = sessionStub({ ses_worker: {} });
+  const syncOnce = ocSync(plugin, session, { env: { ...process.env, STERLING_MAINTENANCE_WORKER: '1' } });
+  await syncOnce(project, 'ses_worker');
+  await syncOnce.idle();
+  assert.equal(markerOf(project), '0.0.1\n', 'the worker child leaves the sync to the parent process');
+  assert.deepEqual(session.calls, [], 'no session lookup');
+  assert.deepEqual(noticeTexts(project), []);
+});
+
 test('OpenCode sync: the sync runs in the background, so the context request does not wait for it', async () => {
   const plugin = makePluginRoot();
   writeFileSync(join(plugin, 'scripts', 'sync-agents.mjs'), `setTimeout(() => process.exit(0), 1500);\n`);

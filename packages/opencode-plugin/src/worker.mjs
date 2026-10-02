@@ -11,9 +11,21 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
-import { maybeLaunchMaintenanceWorker, OPENCODE_MODEL_UNSET, opencodeModelOf } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
+import { maybeLaunchMaintenanceWorker, OPENCODE_MODEL_UNSET, opencodeModelOf, WORKER_ENV_FLAG } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
 import { errText, logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
+
+/**
+ * Whether this plugin runs inside the maintenance worker's own `opencode run`
+ * child (the runner sets WORKER_ENV_FLAG). That child loads this plugin too, and
+ * its root session is not the user's: every handler that consumes or resets
+ * state shared with the user's process (settlement, the dispatch sweep, the
+ * rotation restore, the post-update sync, pending notices, the TUI selection)
+ * skips there.
+ */
+export function inWorkerChild(env = process.env) {
+  return env?.[WORKER_ENV_FLAG] === '1';
+}
 
 const onPath = (name) => (process.env.PATH ?? '').split(delimiter).some((d) => d && existsSync(join(d, name)));
 
