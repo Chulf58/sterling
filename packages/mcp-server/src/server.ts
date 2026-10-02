@@ -190,9 +190,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   const tools = new SterlingTools({ store, config, repoRoot: dirname(dirname(storePath)), domains: mountedDomainSurface(store) });
   // knowledge_create's description names the domains mounted at boot (Domains
   // D2). Each create receipt lists them live as mounted_domains, so a
-  // description changed later through domain_describe shows there.
+  // description changed later through domain_describe shows there. A
+  // description that cannot be read (a pre-v2 domain store, any other read
+  // failure) is named in the note; it never fails boot.
   const bootDomains = store.domainNames().map((name) => {
-    const description = store.domainDescription(name);
+    let description: string | undefined;
+    try {
+      description = store.domainDescription(name);
+    } catch (e) {
+      return `${name} (description unreadable: ${(e as Error)?.message ?? String(e)})`;
+    }
     return description ? `${name} ("${description}")` : `${name} (no description)`;
   });
   const createDomainsNote = bootDomains.length

@@ -1650,9 +1650,17 @@ export class SterlingTools {
   }
 
   /** Every mounted domain with its description (null when its store has none),
-   *  in manifest order. */
-  private mountedDomainList(): { name: string; description: string | null }[] {
-    return (this.domains?.names() ?? []).map((name) => ({ name, description: this.domains!.description(name) ?? null }));
+   *  in manifest order. A description that cannot be read (a pre-v2 domain
+   *  store, or any other read failure) reads 'description unreadable: <reason>'
+   *  with `unreadable: true`, so a create receipt still goes out and says so. */
+  private mountedDomainList(): { name: string; description: string | null; unreadable?: true }[] {
+    return (this.domains?.names() ?? []).map((name) => {
+      try {
+        return { name, description: this.domains!.description(name) ?? null };
+      } catch (e) {
+        return { name, description: `description unreadable: ${(e as Error)?.message ?? String(e)}`, unreadable: true as const };
+      }
+    });
   }
 
   /** `{ missing_domains }` when a configured domain was skipped for having no
@@ -3975,7 +3983,7 @@ export class SterlingTools {
     if (declaredRepoPaths(type, body).length) return undefined;
     const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
     if (!registered) return undefined;
-    const candidates = this.mountedDomainList().filter((d) => d.name !== 'sterling' && d.description);
+    const candidates = this.mountedDomainList().filter((d) => d.name !== 'sterling' && d.description && !d.unreadable);
     if (!candidates.length) return undefined;
     const fits = fitDomains(registered.fts(body), candidates, { exclude: ['sterling'] });
     if (!fits.length) return undefined;

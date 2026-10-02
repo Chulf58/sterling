@@ -8,6 +8,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { DatabaseSync } from 'node:sqlite';
 import { parseConfig, RECORD_TYPES } from '@sterling/schemas';
 import { SterlingStore, createDomain } from '@sterling/store';
 import { createSterlingServer } from '../server.js';
@@ -1154,6 +1155,67 @@ test('MCP boot with a configured domain whose store is MISSING still starts, war
     assert.ok(q.records.some((r) => r.id === inDomain.record.id), 'knowledge_query reads the remaining domain');
     const refused = await client.callTool({ name: 'knowledge_create', arguments: { type: 'reference_material', fields: { ...fields, scope: 'domain:ghost' } } });
     assert.equal(refused.isError, true, 'a write to the missing domain is refused, not silently created');
+  } finally {
+    await client.close();
+    await server.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('MCP boot with a PRE-V2 domain store mounted succeeds: its description reads as unreadable, and knowledge_create and domain_describe still work (task-end review 2026-10-03)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mcp-legacy-domain-'));
+  const presentDb = join(dir, 'domains', 'present', 'sterling.db');
+  const legacyDb = join(dir, 'domains', 'legacy', 'sterling.db');
+  createDomain('present', 'present domain', presentDb);
+  mkdirSync(dirname(legacyDb), { recursive: true });
+  const raw = new DatabaseSync(legacyDb);
+  // The real v1 (S1-era) layout, as scripts/tests/migration-runner.test.mjs createLegacyDb builds it.
+  raw.exec(`
+    CREATE TABLE records (id TEXT PRIMARY KEY, type TEXT NOT NULL, status TEXT NOT NULL, superseded_by TEXT, scope TEXT NOT NULL,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL, author TEXT NOT NULL, derived_unconfirmed INTEGER NOT NULL DEFAULT 0, body TEXT NOT NULL);
+    CREATE INDEX idx_records_type_status ON records(type, status);
+    CREATE TABLE record_stack_tags (record_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY (record_id, tag));
+    CREATE TABLE record_file_keys (record_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (record_id, path));
+    CREATE INDEX idx_file_keys_path ON record_file_keys(path);
+    CREATE TABLE record_links (source_id TEXT NOT NULL, rel TEXT NOT NULL, target_id TEXT NOT NULL, PRIMARY KEY (source_id, rel, target_id));
+    CREATE INDEX idx_links_target ON record_links(target_id);
+    CREATE VIRTUAL TABLE records_fts USING fts5(record_id UNINDEXED, text);
+    PRAGMA user_version = 1;
+  `);
+  raw.close();
+  writeFileSync(
+    join(dir, 'config.json'),
+    JSON.stringify({ stack_tags: ['present', 'legacy'], domain_paths: { present: presentDb, legacy: legacyDb } })
+  );
+  const { server, store } = createSterlingServer(join(dir, 'sterling.db'));
+  const client = new Client({ name: 'test-client', version: '0.0.1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const listed = await client.listTools();
+    const create = listed.tools.find((t) => t.name === 'knowledge_create');
+    assert.match(create!.description ?? '', /present \("present domain"\); legacy \(description unreadable: /, 'the boot note names the unreadable description');
+    const created = payload(
+      await client.callTool({
+        name: 'knowledge_create',
+        arguments: {
+          type: 'reference_material',
+          fields: { type: 'reference_material', title: 'legacy boot ref', kind: 'doc', location: 'https://example.com/x', summary: 'legacybootterm', source_date: '2026-06-16', capture_date: '2026-06-16', basis: 'platform' },
+          projection: 'full',
+        },
+      })
+    ) as { record: { id: string; scope: string }; mounted_domains: { name: string; description: string | null }[] };
+    assert.equal(created.record.scope, 'project');
+    const legacy = created.mounted_domains.find((d) => d.name === 'legacy');
+    assert.match(legacy?.description ?? '', /^description unreadable: /, JSON.stringify(created.mounted_domains));
+    assert.deepEqual(created.mounted_domains.find((d) => d.name === 'present'), { name: 'present', description: 'present domain' });
+    assert.equal((legacy as { unreadable?: boolean }).unreadable, true);
+    const described = payload(await client.callTool({ name: 'domain_describe', arguments: { domain: 'present' } }));
+    assert.match(JSON.stringify(described), /present domain/, 'domain_describe still reads the readable domain');
+    // Not covered here: knowledge_query and knowledge_get fan over every mount and
+    // fail on the legacy store's missing v2 tables (record_relations). That is the
+    // store's legacy read surface, outside this description-read fix.
   } finally {
     await client.close();
     await server.close();
