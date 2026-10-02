@@ -399,9 +399,12 @@ export function explainReconcileDebtLiveness(store, root, item) {
 // git candidate when it differs from that snapshot: changed since `sha` and
 // not recorded at its current content in `dirty`, or recorded in `dirty` at
 // different content (a revert or a delete of earlier dirt).
-// SET BY: writeGitSettled, called by H10 ONLY after a settlement pass that
+// SET BY: writeGitSettled, called by H10 and by the OpenCode server plugin
+// (packages/opencode-plugin/src/server.mjs) ONLY after a settlement pass that
 // succeeded with nothing deferred — never before the duties for the range are
-// minted, so a failed mint re-derives the same range at the next Stop.
+// minted, so a failed mint re-derives the same range at the next Stop. Both
+// can settle the same project at once, so each write goes through its own
+// temp file and an atomic rename; the last rename wins whole.
 // FIRST RUN (no state file): git contributes NO candidates and the register
 // is used unfiltered (exactly the pre-slice behaviour); the first successful
 // settlement then records the tree as it stands. Chosen over merge-base/HEAD~
@@ -519,8 +522,17 @@ export function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
       throw e;
     }
   }
-  writeFileSync(`${p}.tmp`, JSON.stringify(snapshot));
-  renameSync(`${p}.tmp`, p);
+  // A per-writer temp name (pid plus random): a shared `${p}.tmp` let two
+  // concurrent settlers truncate each other's temp and fail the second rename
+  // with ENOENT. A failed write removes its own temp before rethrowing.
+  const tmp = `${p}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(snapshot));
+    renameSync(tmp, p);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
   return true;
 }
 
