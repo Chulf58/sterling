@@ -8086,6 +8086,9 @@ function statusAnnotation(record) {
   return (record?.status === "active" ? "" : ` [${statusBracket(record)}]`) + supersededAnnotation(record);
 }
 function supersededAnnotation(record) {
+  if (typeof record?.supersession_unknown === "string") {
+    return ` [supersession UNKNOWN (the lookup failed: ${clip(record.supersession_unknown, 120)}): read it before relying on this]`;
+  }
   const inbound = Array.isArray(record?.inbound_supersedes) ? record.inbound_supersedes : [];
   if (!inbound.length) return "";
   const names = inbound.map(
@@ -8093,12 +8096,20 @@ function supersededAnnotation(record) {
   );
   return ` [SUPERSEDED, whole or in part, by ${names.join("; ")}: read it before relying on this]`;
 }
+function authorityInDoubt(record) {
+  return typeof record?.supersession_unknown === "string" || Array.isArray(record?.inbound_supersedes) && record.inbound_supersedes.length > 0;
+}
 function authorityMarker(record) {
-  if (Array.isArray(record?.inbound_supersedes) && record.inbound_supersedes.length) return "";
+  if (authorityInDoubt(record)) return "";
   return record?.authority ? `[${record.authority}] ` : "";
 }
 function withInboundSupersedes(store, record) {
-  const inbound = store.inboundSupersedes(record.id);
+  let inbound;
+  try {
+    inbound = store.inboundSupersedes(record.id);
+  } catch (e) {
+    return { ...record, supersession_unknown: String(e?.message ?? e) };
+  }
   if (!inbound.length) return record;
   return {
     ...record,

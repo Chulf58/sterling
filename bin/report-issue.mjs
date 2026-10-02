@@ -3,7 +3,7 @@ import { createRequire as __cr } from "node:module"; const require = __cr(import
 
 // scripts/report-issue.mjs
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync as existsSync4, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync as existsSync4, readFileSync as readFileSync2, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { basename, delimiter, join as join5 } from "node:path";
 
@@ -346,6 +346,25 @@ var STERLING_ISSUE_REPO = "Chulf58/sterling";
 var SEVERITIES = ["BLOCKED", "WORKAROUND", "FRICTION"];
 var CAPS = { title: 120, component: 80, observed: 600, expected: 400, evidenceLine: 300, evidenceLines: 12 };
 var STERLING_PREFIXES = ["scripts/", "packages/", "hooks/", "bin/", "mcp/", "opencode/", "agent-templates/", "skills/", "templates/", "commands/", "tui/", ".claude-plugin/"];
+var STERLING_STATE_NAMES = [
+  "config.json",
+  "sterling.db",
+  "sterling.db-wal",
+  "sterling.db-shm",
+  "plan-lock.json",
+  "synced-version",
+  "pending-issue-reports.jsonl",
+  "pending-issue-reports.jsonl.lock",
+  "maintenance-worker.log",
+  "maintenance-worker.jsonl",
+  "update-complete.json",
+  "enforcement-baseline.json",
+  "agents-md-migration-preview.diff",
+  "transient",
+  "runs",
+  "delivery-audit",
+  "opencode"
+];
 var ReportRefusal = class extends Error {
 };
 var PLACEHOLDER = "<project-path>";
@@ -368,7 +387,7 @@ function isSterlingPath(token, sterlingPathExists) {
   const path = token.replace(/[.,:;!?]+$/, "").replace(/:\d+(?:-\d+)?$/, "");
   if (!/^[A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]*)+$/.test(path)) return false;
   if (path.split("/").some((seg) => seg === ".." || seg === ".")) return false;
-  if (path.startsWith(".sterling/")) return true;
+  if (path.startsWith(".sterling/")) return STERLING_STATE_NAMES.includes(path.slice(".sterling/".length).replace(/\/$/, ""));
   return STERLING_PREFIXES.some((p) => path.startsWith(p)) && sterlingPathExists(path.replace(/\/+$/, ""));
 }
 function scrub(text, { projectRoot: projectRoot2, home, sterlingPathExists }) {
@@ -432,9 +451,16 @@ function fence(text) {
 ${text}
 ${f}`;
 }
+function inlineCode(text) {
+  const t = text.replace(/\s+/g, " ");
+  const longest = Math.max(0, ...(t.match(/`+/g) ?? []).map((r) => r.length));
+  const d = "`".repeat(longest + 1);
+  const pad = t.startsWith("`") || t.endsWith("`") ? " " : "";
+  return `${d}${pad}${t}${pad}${d}`;
+}
 function renderBody(report2, stamps2, { recursAfter } = {}) {
   const body = [
-    `Component: ${report2.component}`,
+    `Component: ${inlineCode(report2.component)}`,
     `Severity: ${report2.severity}`,
     `Sterling version: ${stamps2.version}${stamps2.head ? ` (HEAD ${stamps2.head})` : ""}`,
     `Host: ${stamps2.host}`,
@@ -470,6 +496,7 @@ function labelsFor(severity, projectName2) {
 
 // scripts/report-issue.mjs
 var QUEUE_NAME = "pending-issue-reports.jsonl";
+var LOCK_NAME = `${QUEUE_NAME}.lock`;
 function refuse(message) {
   console.error(message);
   process.exit(2);
@@ -599,6 +626,53 @@ function readQueue() {
   });
   return entries;
 }
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+var UNREADABLE_LOCK_STALE_MS = 6e4;
+function acquireQueueLock() {
+  const lockPath = resolveStoreWritePath(projectRoot, ".sterling", LOCK_NAME);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: (/* @__PURE__ */ new Date()).toISOString() }), { flag: "wx" });
+      process.on("exit", () => rmSync(lockPath, { force: true }));
+      return;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+    let holder = null;
+    try {
+      holder = JSON.parse(readFileSync2(lockPath, "utf8"));
+    } catch (e) {
+      if (e.code === "ENOENT") continue;
+      if (!(e instanceof SyntaxError)) throw e;
+    }
+    const pid = Number.isInteger(holder?.pid) && holder.pid > 0 ? holder.pid : null;
+    let stale;
+    if (pid !== null) stale = !pidAlive(pid);
+    else {
+      try {
+        stale = Date.now() - statSync(lockPath).mtimeMs > UNREADABLE_LOCK_STALE_MS;
+      } catch (e) {
+        if (e.code === "ENOENT") continue;
+        throw e;
+      }
+    }
+    if (!stale) {
+      refuse(
+        `report-issue: .sterling/${LOCK_NAME} is held by ${pid !== null ? `pid ${pid}` : "a run whose pid is not yet written"}, another report-issue sending or queueing reports. Nothing was sent or queued. Rerun once it finishes; if no report-issue is running, delete ${lockPath}.`
+      );
+    }
+    rmSync(lockPath, { force: true });
+    console.error(`report-issue: removed a stale lock .sterling/${LOCK_NAME} (${pid !== null ? `pid ${pid} is not running` : "no pid, older than 60s"}); a previous run was killed mid-flush.`);
+  }
+  refuse(`report-issue: could not take .sterling/${LOCK_NAME} after removing a stale one; another run took it first. Rerun.`);
+}
 function writeQueue(entries) {
   if (entries.length === 0) {
     rmSync(queuePath, { force: true });
@@ -645,18 +719,23 @@ ${body2}`);
   console.log(`report-issue: filed #${issue.number}${closed ? ` (recurs after #${closed.number})` : ""}: ${issue.html_url}
 ${body}`);
 }
+function removeSent(sent) {
+  const key = JSON.stringify(sent);
+  const current = readQueue();
+  const i = current.findIndex((e) => JSON.stringify(e) === key);
+  if (i >= 0) current.splice(i, 1);
+  writeQueue(current);
+}
 function flush(gh2) {
-  const pending = readQueue();
-  for (let i = 0; i < pending.length; i++) {
+  for (const entry2 of readQueue()) {
     try {
-      send(gh2, pending[i]);
+      send(gh2, entry2);
     } catch (e) {
       if (!(e instanceof TransportError)) throw e;
-      writeQueue(pending.slice(i));
       return e.message;
     }
+    removeSent(entry2);
   }
-  writeQueue([]);
   return null;
 }
 var { mode, values } = parseArgs(process.argv.slice(2));
@@ -685,6 +764,7 @@ if (mode === "list") {
   process.exit(0);
 }
 if (mode === "flush") {
+  acquireQueueLock();
   const pending = readQueue();
   if (pending.length === 0) {
     console.log("report-issue: nothing pending.");
@@ -728,6 +808,7 @@ ${entry.body}
   console.log(`report-issue: it would search for sterling-fp-${entry.fingerprint}: an open match gets a comment, a closed match a new issue saying 'Recurs after #N', no match a new issue.`);
   process.exit(0);
 }
+acquireQueueLock();
 readQueue();
 console.log(`report-issue: report to file:
 ${entry.body}

@@ -10328,13 +10328,15 @@ ${projectModeLine({ config, configUnreadable })}`;
 } catch {
 }
 var issueReportsContext = "";
+var issueReportsRoot = null;
 try {
-  const line = pendingIssueReportsLine({ cwd: input.cwd, pluginRoot: pluginRoot2() });
-  if (line) issueReportsContext = `
-
-${line}`;
+  issueReportsRoot = pluginRoot2();
 } catch {
 }
+var issueReportsLine = pendingIssueReportsLine({ cwd: input.cwd, pluginRoot: issueReportsRoot });
+if (issueReportsLine) issueReportsContext = `
+
+${issueReportsLine}`;
 var currencyWarning = "";
 var currencyContext = "";
 try {
