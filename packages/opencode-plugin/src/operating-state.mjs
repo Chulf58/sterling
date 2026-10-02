@@ -1,7 +1,8 @@
 // H1's host-neutral operating-state lines for the OpenCode conductor's context
-// (board cbee2b3d, audit f2ba68c2 row 2): MACHINE ROLE, TDD posture, Project mode
-// and the undeclared-source scan. The line text and the config reading are
-// scripts/hooks/lib/operating-state.mjs, shared with h1-session-start.mjs.
+// (board cbee2b3d, audit f2ba68c2 row 2): MACHINE ROLE, TDD posture, Project mode,
+// the pending Sterling issue-report count and the undeclared-source scan. The line
+// text and the config reading are scripts/hooks/lib/operating-state.mjs, shared
+// with h1-session-start.mjs.
 // The deep-queue and reconcile-backlog lines are scripts/hooks/lib/maintenance-state.mjs.
 // Left to Claude Code, with the reason: agent currency and the conductor-activation
 // diagnostic (both read .claude/agents and .claude/settings.json), the INSTALLED
@@ -11,7 +12,7 @@
 import { computeUndeclaredSourceDisclosure } from '../../../scripts/hooks/lib/undeclared-source-scan.mjs';
 import { renderUnavailable } from '../../../scripts/hooks/lib/undeclared-source.mjs';
 import { queueDepthLine, reconcileBacklog } from '../../../scripts/hooks/lib/maintenance-state.mjs';
-import { machineRoleLine, projectModeLine, readProjectConfig, tddPostureLine } from '../../../scripts/hooks/lib/operating-state.mjs';
+import { machineRoleLine, pendingIssueReportsLine, projectModeLine, readProjectConfig, tddPostureLine } from '../../../scripts/hooks/lib/operating-state.mjs';
 import { samePath } from '../../../scripts/lib/post-update-sync.mjs';
 
 /**
@@ -23,7 +24,7 @@ import { samePath } from '../../../scripts/lib/post-update-sync.mjs';
 export function operatingStateLines(root, pluginRoot) {
   const { config, configUnreadable } = readProjectConfig(root);
   const atClone = Boolean(pluginRoot && samePath(root, pluginRoot));
-  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable })].filter(Boolean);
+  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
   return { lines, config };
 }
 

@@ -5617,7 +5617,11 @@ var TARGET_LEADS = [
   // sibling that predates them gets them through INSERT_AFTER. Solve stays BEFORE Close-on-commit
   // here because Close-on-commit anchors on it.
   "- **Solve, don't board.**",
-  "- **Close-on-commit: a commit that fulfils a board item pays it**"
+  "- **Close-on-commit: a commit that fulfils a board item pays it**",
+  // 2026-10-02: Sterling defects are filed as scrubbed GitHub issues through report-issue.mjs
+  // (decision projects-file-sterling-issues-as-scrubbed-github-issues-automatically). The bullet
+  // already exists in every sibling under this lead, so the REPLACE path carries the new wording.
+  "- **Stamp Sterling's version when reporting on Sterling.**"
 ];
 var RENAMED_LEADS = /* @__PURE__ */ new Map([
   ["- **Knowledge is born structured.**", ["- **Notes are the user's surface.**"]],
