@@ -10,6 +10,7 @@ import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ProjectRegistry } from '@sterling/store';
 import { findDeadTerms } from '../lib/agent-distribution.mjs';
+import { renderClaudeText } from '../lib/agent-fences.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -185,6 +186,10 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     const agentsMd = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
     const claudeMd = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
     assert.match(claudeMd, /^@AGENTS\.md\n/, 'CLAUDE.md opens with the @AGENTS.md import');
+    // One source with host blocks (decision sterling-layer-is-one-source-with-host-blocks):
+    // CLAUDE.md is the template's Claude render, with no fence marker and no OpenCode text.
+    assert.equal(claudeMd, renderClaudeText(readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8'), 'target-claude-md.md').replaceAll('{{PROJECT_NAME}}', 'ensure-target'));
+    assert.doesNotMatch(claudeMd, /<!-- \/?(claude|opencode)-only -->|READY FOR NEW SESSION|\{\{STERLING_ROOT\}\}/);
     assert.match(agentsMd, /^# AGENTS\.md — ensure-target\n/, 'AGENTS.md renders the project name');
     assert.ok(agentsMd.includes('Stack tags (= domain mount manifest): node, sterling'), 'AGENTS.md carries the project facts');
     assert.ok(!claudeMd.includes('{{'), 'no unresolved placeholder survives in CLAUDE.md');
@@ -392,7 +397,7 @@ test('real-world gap (Dome Farmer), control arm: a STUB CLAUDE.md (already the @
     mkdirSync(dir, { recursive: true });
     const realAgentsMd = '# AGENTS.md — ensure-target\n\nreal, previously migrated content\n';
     writeFileSync(join(dir, 'AGENTS.md'), realAgentsMd);
-    const stubClaudeMd = readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8').replaceAll('{{PROJECT_NAME}}', 'ensure-target');
+    const stubClaudeMd = renderClaudeText(readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8'), 'target-claude-md.md').replaceAll('{{PROJECT_NAME}}', 'ensure-target');
     assert.equal(stubClaudeMd.split(/\r?\n/, 1)[0], '@AGENTS.md', 'fixture sanity: this IS the stub form');
     writeFileSync(join(dir, 'CLAUDE.md'), stubClaudeMd);
     const r = init(dir, FRESH_FLAGS);
@@ -413,7 +418,7 @@ test('real-world gap (Dome Farmer), CRLF stub recognition: a CRLF stub CLAUDE.md
     mkdirSync(dir, { recursive: true });
     const realAgentsMd = '# AGENTS.md — ensure-target\r\n\r\nreal, previously migrated content\r\n';
     writeFileSync(join(dir, 'AGENTS.md'), realAgentsMd);
-    const stubClaudeMd = readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8').replaceAll('{{PROJECT_NAME}}', 'ensure-target').replace(/\n/g, '\r\n');
+    const stubClaudeMd = renderClaudeText(readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8'), 'target-claude-md.md').replaceAll('{{PROJECT_NAME}}', 'ensure-target').replace(/\n/g, '\r\n');
     writeFileSync(join(dir, 'CLAUDE.md'), stubClaudeMd);
     const r = init(dir, FRESH_FLAGS);
     assert.equal(r.code, 0, r.stderr);

@@ -189,11 +189,11 @@ test('the injected layer is fully host-mapped: no unmapped Claude-only phrase, e
   try {
     const root = server.sterlingRoot();
     const layer = server.renderSterlingLayer(p.dir, root);
-    for (const claudeOnly of ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', '@AGENTS.md', 'sterling:de-ai-writing', 'H22 warns', 'H10 holds the demand', 'H19 delivery helps', '(Enforced: H15', 'session-start banner prints', 'backgrounds itself and returns', "Claude Code's hook, frontmatter and transcript mechanics move"]) {
+    for (const claudeOnly of ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion', '@AGENTS.md', 'sterling:de-ai-writing', 'H22 warns', 'H10 holds the demand', 'H19 delivery helps', '(Enforced: H15', 'session-start banner prints', 'backgrounds itself and returns', "Claude Code's hook, frontmatter and transcript mechanics move"]) {
       assert.ok(!layer.includes(claudeOnly), `layer still carries the Claude-only phrase ${claudeOnly}`);
     }
     assert.match(layer, /^- \*\*Say `READY FOR NEW SESSION` plainly when it is time\.\*\*.*\/new/m, 'the clear line is the ruled new-session line');
-    assert.match(layer, /`question` tool \(AskUserQuestion on Claude Code\)/);
+    assert.match(layer, /through OpenCode's `question` tool\.\*\*/);
     assert.match(layer, /\.opencode\/agents\/sterling\/conductor\.md/);
     assert.match(layer, /default_agent/);
     assert.match(layer, /reconcile_needed.*STERLING NOTICE/s, 'H7 is mapped to settlement notices');
@@ -215,7 +215,7 @@ test('the injected layer is fully host-mapped: no unmapped Claude-only phrase, e
   }
 });
 
-test('template drift is loud: a mapped phrase that vanished, or a new unmapped Claude-only phrase, fails the render', () => {
+test('template drift is loud: invalid host blocks fail the render; an unmapped Claude-only phrase or command is flagged at the top of the layer', () => {
   const p = makeProject({ withGit: false });
   const fake = mkdtempSync(join(tmpdir(), 'sterling-oc-fake-root-'));
   try {
@@ -225,14 +225,16 @@ test('template drift is loud: a mapped phrase that vanished, or a new unmapped C
     mkdirSync(join(fake, 'commands'));
     for (const c of ['task', 'drain']) writeFileSync(join(fake, 'commands', `${c}.md`), 'x');
     const tpl = join(fake, 'templates', 'target-claude-md.md');
-    writeFileSync(tpl, real.replace('so H10 holds the demand at session end', 'so the demand is held'));
-    assert.throws(() => server.renderSterlingLayer(p.dir, fake), /host mapping 'concept-designed-h10'.*not found/);
+    writeFileSync(tpl, real.replace('<!-- /opencode-only -->', ''));
+    assert.throws(() => server.renderSterlingLayer(p.dir, fake), /host blocks invalid.*fence/s);
     writeFileSync(tpl, `${real}\n- run \`node "\${CLAUDE_PLUGIN_ROOT}/bin/new-thing.mjs"\`\n`);
-    assert.ok(server.renderSterlingLayer(p.dir, fake).includes(`\`node "${fake}/bin/new-thing.mjs"\``), 'any plugin-root reference becomes the resolved root');
+    const rooted = server.renderSterlingLayer(p.dir, fake);
+    assert.ok(rooted.includes(`\`node "${fake}/bin/new-thing.mjs"\``), 'any plugin-root reference becomes the resolved root');
+    assert.doesNotMatch(rooted, /STERLING LAYER HOST CHECK/);
     writeFileSync(tpl, `${real}\n- then print READY TO CLEAR and run /clear\n`);
-    assert.throws(() => server.renderSterlingLayer(p.dir, fake), /unmapped Claude-only phrase.*READY TO CLEAR.*\/clear/);
+    assert.match(server.renderSterlingLayer(p.dir, fake), /^STERLING LAYER HOST CHECK.*Claude-only phrase\(s\) left in the text: READY TO CLEAR, \/clear\./s);
     writeFileSync(tpl, `${real}\n- drained by \`/sterling:nosuch\`\n`);
-    assert.throws(() => server.renderSterlingLayer(p.dir, fake), /\/sterling:nosuch.*commands\/nosuch\.md/);
+    assert.match(server.renderSterlingLayer(p.dir, fake), /^STERLING LAYER HOST CHECK.*\/sterling:nosuch.*commands\/nosuch\.md/s);
   } finally {
     p.cleanup();
     rmSync(fake, { recursive: true, force: true });

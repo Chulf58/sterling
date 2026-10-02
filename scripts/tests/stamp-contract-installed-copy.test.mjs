@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProjectRegistry } from '@sterling/store';
 import { contractHistoryJson } from '../lib/contract-bullets.mjs';
+import { renderClaudeText } from '../lib/agent-fences.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const AGENTS_REL = 'templates/target-agents-md.md';
@@ -66,7 +67,8 @@ function commitCurrentTemplates(dir) {
 }
 
 function renderTemplate(rel) {
-  return realTemplate(rel)
+  // CLAUDE.md is the template's Claude render (decision sterling-layer-is-one-source-with-host-blocks).
+  return renderClaudeText(realTemplate(rel), rel)
     .replaceAll('{{PROJECT_NAME}}', 'installed-sibling')
     .replaceAll('{{STACK_TAGS}}', 'node')
     .replaceAll('{{TOOLCHAINS}}', 'node (**/*.mjs)')

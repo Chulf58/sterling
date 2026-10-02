@@ -23,7 +23,7 @@
 // .sterling/sterling.db above the session directory) every handler is a no-op.
 // The handlers live in one module each beside this file; this file wires them
 // (deps injection, the fence, the event chain) and re-exports what tests import:
-//   layer.mjs (render, host map, host tail)   restore.mjs (rotation restore)
+//   layer.mjs (render, host blocks, host tail) restore.mjs (rotation restore)
 //   context.mjs (the context handler)         delivery.mjs (tool delivery)
 //   settle.mjs (settlement)                   worker.mjs (maintenance worker)
 //   selection.mjs (prompt hook)               compaction.mjs (receipt reset)
@@ -44,7 +44,7 @@ import { createWorkerLaunch } from './worker.mjs';
 import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
 
 export { BUSY_TIMEOUT_MS, LOG_REL, NOTICES_REL, addNotice, liveDispatch, openProjectStore };
-export { defaultTemplatePath, hostMapLayer, opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
+export { defaultTemplatePath, hostBlockPairs, opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
 
 export const PLUGIN_ID = 'sterling.server';
 

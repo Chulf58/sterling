@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProjectRegistry } from '@sterling/store';
+import { renderClaudeText } from '../lib/agent-fences.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -26,7 +27,8 @@ function runStampContract(regDb, args = ['--apply', '--verbose']) {
 // that IS what the templates contain. Building it by rendering the real templates (not typing
 // bullet text by hand) is what proves the fixture stays complete as TARGET_LEADS grows.
 function renderTemplate(rel, projectName) {
-  return readFileSync(join(root, rel), 'utf8')
+  // CLAUDE.md is the template's Claude render (decision sterling-layer-is-one-source-with-host-blocks).
+  return renderClaudeText(readFileSync(join(root, rel), 'utf8'), rel)
     .replaceAll('{{PROJECT_NAME}}', projectName)
     .replaceAll('{{STACK_TAGS}}', 'node')
     .replaceAll('{{TOOLCHAINS}}', 'node (**/*.mjs)')
