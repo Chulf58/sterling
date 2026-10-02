@@ -31,6 +31,14 @@ function pluginRoot({ git }) {
 
 const OPTS = { session: 'sterling-demo', splitPercent: 40 };
 
+/** A Claude Code cache copy with its manifest (the resolver reads the version there) and a TUI bundle. */
+function claudeCacheCopy(cache, mkt, version) {
+  const dir = join(cache, mkt, 'sterling', version);
+  touch(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version }));
+  touch(join(dir, 'tui', 'sterling-tui.mjs'));
+  return dir;
+}
+
 test('authoring clone: the tmux launcher keeps --plugin-dir <clone> and the clone TUI bundle', () => {
   const root = pluginRoot({ git: true });
   try {
@@ -51,8 +59,8 @@ test('installed copy: the tmux launcher has no --plugin-dir and resolves the TUI
     const out = renderTmuxLauncher(root, OPTS);
     assert.doesNotMatch(out, /--plugin-dir/, 'an installed plugin is already active: no --plugin-dir');
     assert.ok(!out.includes(root), 'nothing names the plugin root, which on an installed copy is a versioned cache directory');
-    assert.match(out, /plugins\/cache"/, 'the plugin cache is the resolution root');
-    assert.match(out, /\/\*\/sterling\/\*\/tui\/sterling-tui\.mjs/, 'the TUI is globbed across marketplaces and versions at run time');
+    assert.match(out, /newestInstalledSterling\(\)/, 'the shared resolver picks the copy at run time');
+    assert.match(out, /'tui', 'sterling-tui\.mjs'/, 'the TUI bundle is taken from the resolved copy');
     assert.doesNotMatch(out, /\{\{[A-Z_]+\}\}/, 'no placeholder left unresolved');
   } finally {
     rm(root);
@@ -83,12 +91,31 @@ test('installed copy, run time: the launcher picks the HIGHEST version (1.10.0 o
   let run;
   try {
     const cache = join(home, '.claude', 'plugins', 'cache');
-    for (const [mkt, ver] of [['mkt-a', '1.9.0'], ['mkt-b', '1.10.0'], ['mkt-z', '0.2.0']]) touch(join(cache, mkt, 'sterling', ver, 'tui', 'sterling-tui.mjs'));
+    for (const [mkt, ver] of [['mkt-a', '1.9.0'], ['mkt-b', '1.10.0'], ['mkt-z', '0.2.0']]) claudeCacheCopy(cache, mkt, ver);
     run = runLauncher(renderTmuxLauncher(root, OPTS), 'tui', { home });
     assert.equal(run.r.status, 0, run.r.stderr);
     const split = run.calls.split('\n').find((l) => l.startsWith('split-window')) ?? '';
     assert.ok(split.includes(join(cache, 'mkt-b', 'sterling', '1.10.0', 'tui', 'sterling-tui.mjs')), `the newest version's bundle runs — got: ${split}`);
     assert.ok(!split.includes('1.9.0') && !split.includes('0.2.0'), 'no older version is used');
+  } finally {
+    run?.cleanup();
+    rm(home, root);
+  }
+});
+
+test('installed copy, run time: a newer copy in OpenCode\'s npm cache wins over the Claude Code cache', () => {
+  const home = tmp('sterling-lic-home-');
+  const root = pluginRoot({ git: false });
+  let run;
+  try {
+    claudeCacheCopy(join(home, '.claude', 'plugins', 'cache'), 'mkt', '1.10.0');
+    const npmCopy = join(home, '.cache', 'opencode', 'npm', '@chulf58', 'sterling@latest', '1759500000000', 'node_modules', '@chulf58', 'sterling');
+    touch(join(npmCopy, 'package.json'), JSON.stringify({ name: '@chulf58/sterling', version: '1.11.0' }));
+    touch(join(npmCopy, 'tui', 'sterling-tui.mjs'));
+    run = runLauncher(renderTmuxLauncher(root, OPTS), 'tui', { home });
+    assert.equal(run.r.status, 0, run.r.stderr);
+    const split = run.calls.split('\n').find((l) => l.startsWith('split-window')) ?? '';
+    assert.ok(split.includes(join(npmCopy, 'tui', 'sterling-tui.mjs')), `the OpenCode copy's bundle runs — got: ${split}`);
   } finally {
     run?.cleanup();
     rm(home, root);
@@ -102,7 +129,8 @@ test('installed copy, run time: no installed Sterling version is a loud refusal 
   try {
     run = runLauncher(renderTmuxLauncher(root, OPTS), 'tui', { home });
     assert.notEqual(run.r.status, 0);
-    assert.match(run.r.stderr, /TUI bundle missing: none installed under the Claude plugin cache/);
+    assert.match(run.r.stderr, /no installed Sterling found under .*plugins.cache .*opencode.npm.* claude plugin install sterling@sterling/);
+    assert.match(run.r.stderr, /TUI bundle missing/);
     assert.equal(run.calls, '', 'tmux was never asked to do anything');
   } finally {
     run?.cleanup();
@@ -116,7 +144,7 @@ test('installed copy, run time: a fresh session starts claude with no --plugin-d
   const cloneRoot = pluginRoot({ git: true });
   const runs = [];
   try {
-    touch(join(home, '.claude', 'plugins', 'cache', 'm', 'sterling', '2.0.0', 'tui', 'sterling-tui.mjs'));
+    claudeCacheCopy(join(home, '.claude', 'plugins', 'cache'), 'm', '2.0.0');
     touch(join(cloneRoot, 'tui', 'sterling-tui.mjs'));
     const installed = runLauncher(renderTmuxLauncher(installedRoot, OPTS), 'up', { home });
     runs.push(installed);
@@ -166,18 +194,28 @@ test('sterling-check.mjs: authoring bakes the clone path; installed bakes NO pat
   try {
     const cache = join(home, '.claude', 'plugins', 'cache', 'mkt', 'sterling');
     for (const v of ['1.9.0', '1.10.0']) {
+      touch(join(cache, v, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: v }));
       for (const s of ['check-record-citations.mjs', 'check-stale-claims.mjs']) touch(join(cache, v, 'scripts', s), `console.log('STUB ' + import.meta.url);\n`);
     }
     writeFileSync(join(project, 'sterling-check.mjs'), installed);
-    const env = { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude') };
+    const env = { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude'), XDG_CACHE_HOME: join(home, 'xdg') };
     const r = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env, encoding: 'utf8', timeout: 30_000 });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /STUB file:.*\/1\.10\.0\/scripts\/check-record-citations\.mjs/, 'the highest version ran the citation check');
     assert.doesNotMatch(r.stdout, /1\.9\.0/, 'the older version did not run');
 
-    const empty = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, 'nothing-here') }, encoding: 'utf8', timeout: 30_000 });
+    const empty = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, 'nothing-here'), XDG_CACHE_HOME: join(home, 'nothing-here') }, encoding: 'utf8', timeout: 30_000 });
     assert.equal(empty.status, 3, 'no installed version: exit 3 (the check never ran)');
-    assert.match(empty.stderr, /no installed Sterling plugin found/);
+    assert.match(empty.stderr, /no installed Sterling found under .*plugins.cache .*opencode.npm/);
+    assert.match(empty.stderr, /claude plugin install sterling@sterling .*opencode plugin add @chulf58\/sterling/, 'generated from a copy under neither root: both remedies');
+
+    // A newer copy in OpenCode's npm cache wins over the Claude Code cache's 1.10.0.
+    const npmCopy = join(home, 'xdg', 'opencode', 'npm', '@chulf58', 'sterling@latest', '1759500000000', 'node_modules', '@chulf58', 'sterling');
+    touch(join(npmCopy, 'package.json'), JSON.stringify({ name: '@chulf58/sterling', version: '1.11.0' }));
+    for (const s of ['check-record-citations.mjs', 'check-stale-claims.mjs']) touch(join(npmCopy, 'scripts', s), `console.log('STUB ' + import.meta.url);\n`);
+    const oc = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: env, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(oc.status, 0, oc.stdout + oc.stderr);
+    assert.match(oc.stdout, /STUB file:.*\/node_modules\/@chulf58\/sterling\/scripts\/check-record-citations\.mjs/, 'the OpenCode copy ran');
   } finally {
     rm(home, project);
   }
@@ -189,12 +227,13 @@ test('sterling-check.mjs prefers <plugin>/bin/<check>.mjs over the scripts/ sour
   const project = tmp('sterling-lic-project-');
   try {
     const v = join(home, '.claude', 'plugins', 'cache', 'mkt', 'sterling', '3.0.0');
+    touch(join(v, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: '3.0.0' }));
     for (const s of ['check-record-citations.mjs', 'check-stale-claims.mjs']) {
       touch(join(v, 'bin', s), `console.log('BIN ' + import.meta.url);\n`);
       touch(join(v, 'scripts', s), `console.log('SOURCE ' + import.meta.url); process.exit(1);\n`);
     }
     writeFileSync(join(project, 'sterling-check.mjs'), installed);
-    const r = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude') }, encoding: 'utf8', timeout: 30_000 });
+    const r = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude'), XDG_CACHE_HOME: join(home, 'xdg') }, encoding: 'utf8', timeout: 30_000 });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /BIN file:.*\/bin\/check-record-citations\.mjs/);
     assert.match(r.stdout, /BIN file:.*\/bin\/check-stale-claims\.mjs/);
@@ -220,7 +259,7 @@ test('sterling-check.mjs on an installed copy runs the REAL bundled checks with 
     git('init', '-q');
     git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init');
     writeFileSync(join(project, 'sterling-check.mjs'), installed);
-    const r = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude') }, encoding: 'utf8', timeout: 60_000 });
+    const r = spawnSync(process.execPath, [join(project, 'sterling-check.mjs'), '--base', 'HEAD'], { cwd: project, env: { ...process.env, CLAUDE_CONFIG_DIR: join(home, '.claude'), XDG_CACHE_HOME: join(home, 'xdg') }, encoding: 'utf8', timeout: 60_000 });
     const out = r.stdout + r.stderr;
     assert.doesNotMatch(out, /ERR_MODULE_NOT_FOUND|Cannot find (package|module)/, `every check loaded: ${out}`);
     assert.notEqual(r.status, 3, `no check failed to run: ${out}`);

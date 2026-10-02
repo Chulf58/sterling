@@ -20,6 +20,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs
 import { join } from 'node:path';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
+import { RESOLVER_SOURCE, installHostOf } from './sterling-roots.mjs';
 
 export const CONSUMER_CHECK_LAUNCHER_NAME = 'sterling-check.mjs';
 
@@ -45,12 +46,25 @@ const fwd = (p) => p.replace(/\\/g, '/');
 // INSTALLED COPY (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-
 // keeps-its-clone, ruling point 3): no path into a versioned plugin cache may be baked,
 // since the next plugin update moves it. The placeholder becomes a call to the
-// template's own newestInstalledPluginDir(), which picks the highest-version
-// ~/.claude/plugins/cache/*/sterling/* directory at RUN time.
-export function renderConsumerCheckLauncher(pluginRoot, { installed = isInstalledCopy(pluginRoot) } = {}) {
+// generated newestInstalledPluginDir(), which picks the newest installed Sterling at
+// RUN time through the shared resolver (scripts/lib/sterling-roots.mjs), inlined
+// because the generated file cannot import from a versioned install directory. Its
+// not-found remedy names the host of the copy that generated it (both hosts when that
+// copy lies under neither install root).
+export function renderConsumerCheckLauncher(pluginRoot, { installed = isInstalledCopy(pluginRoot), host = installHostOf(pluginRoot) } = {}) {
   const template = readFileSync(join(pluginRoot, 'templates', 'check-consumer.mjs'), 'utf8');
   const pluginDirExpr = installed ? 'newestInstalledPluginDir()' : JSON.stringify(fwd(pluginRoot));
-  const body = template.replace('{{PLUGIN_DIR}}', () => pluginDirExpr);
+  const resolver = `${RESOLVER_SOURCE.trim()}
+
+function newestInstalledPluginDir() {
+  const found = newestInstalledSterling();
+  if (!found) {
+    console.error('sterling-check: ' + sterlingNotFoundMessage(${JSON.stringify(host)}));
+    process.exit(3);
+  }
+  return found.root;
+}`;
+  const body = template.replace('{{STERLING_RESOLVER}}', () => resolver).replace('{{PLUGIN_DIR}}', () => pluginDirExpr);
   return stampBody(body, '//');
 }
 

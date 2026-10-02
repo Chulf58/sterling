@@ -23,36 +23,18 @@
 // copy is left untouched by the ensure pass (§12 semantics) — it is reported
 // as differing, never silently overwritten or silently used.
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // Used only when this file was generated from an INSTALLED plugin copy (the placeholder
-// below then calls it instead of carrying a baked path, because nothing may point into
-// a versioned plugin cache directory): the highest-version
-// <claude config dir>/plugins/cache/*/sterling/<version> directory, by numeric
-// major.minor.patch (a pre-release sorts below its release). Exits 3 — the check never
-// ran — when no installed Sterling version is found.
-function newestInstalledPluginDir() {
-  const ls = (d) => { try { return readdirSync(d); } catch { return []; } };
-  const cache = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'plugins', 'cache');
-  const found = [];
-  for (const marketplace of ls(cache)) {
-    for (const version of ls(join(cache, marketplace, 'sterling'))) {
-      const m = /^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/.exec(version);
-      if (m) found.push({ dir: join(cache, marketplace, 'sterling', version), nums: [+m[1], +m[2], +m[3]], pre: m[4] });
-    }
-  }
-  found.sort((a, b) =>
-    a.nums[0] - b.nums[0] || a.nums[1] - b.nums[1] || a.nums[2] - b.nums[2] ||
-    (a.pre === b.pre ? 0 : a.pre === undefined ? 1 : b.pre === undefined ? -1 : a.pre < b.pre ? -1 : 1));
-  if (!found.length) {
-    console.error(`sterling-check: no installed Sterling plugin found under ${cache} — install or update the plugin, or run the checks from the Sterling clone.`);
-    process.exit(3);
-  }
-  return found[found.length - 1].dir;
-}
+// below then calls newestInstalledPluginDir() instead of carrying a baked path, because
+// nothing may point into a versioned install directory). Generation replaces the next
+// line with Sterling's shared resolver (scripts/lib/sterling-roots.mjs): the newest
+// installed Sterling across Claude Code's plugin cache and OpenCode's npm cache. Exits
+// 3 (the check never ran) when no installed Sterling is found.
+{{STERLING_RESOLVER}}
 
 // Baked at generation time as the POSIX/WSL form (the form init/update run
 // under) via JSON.stringify — a self-quoting, correctly escaped literal

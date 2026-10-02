@@ -35,6 +35,7 @@ import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './con
 import { readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './handoff-projection.mjs';
 import { ContainmentError } from './contained-fs.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
+import { installHostOf, sterlingUpdateRemedy } from './sterling-roots.mjs';
 
 // Build + test batteries dominate an update (measured on this machine: build
 // ~19s, check ~12s, tests ~87s), so the ceiling is generous — a timeout here
@@ -465,8 +466,12 @@ function ownPluginRoot() {
   return null;
 }
 
-export const INSTALLED_COPY_REFUSAL =
-  'Sterling is installed as a plugin — update it with /plugin (Installed tab → Update) or `claude plugin update sterling@<marketplace>`. /sterling:update serves only a git clone of Sterling.';
+/** The refusal for an installed copy, naming the update command of the host it was
+ *  installed by (installHostOf); null (a copy under neither install root) names both. */
+export function installedCopyRefusal(host) {
+  const by = host === 'claude-code' ? 'as a Claude Code plugin' : host === 'opencode' ? 'as an OpenCode plugin' : 'as a plugin';
+  return `Sterling is installed ${by} — update it with ${sterlingUpdateRemedy(host)}. /sterling:update serves only a git clone of Sterling.`;
+}
 
 /** Existing project + domain stores, without opening any database connection. */
 export function machineStores(cwd) {
@@ -537,13 +542,15 @@ export function probeSchemaVersion(dbPath) {
  * so on a fresh clone the fan-out list must be resolved LATE, at its own step,
  * not at startup.
  */
-export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {}, reexec = null, invokingProject = null, projectDir = null, pluginRoot = ownPluginRoot() }) {
+export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {}, reexec = null, invokingProject = null, projectDir = null, pluginRoot = ownPluginRoot(), env = process.env, home = homedir() }) {
   // INSTALLED COPY (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
-  // design point D): a /plugin-installed Sterling has no .git at its plugin root and /plugin owns its
-  // updates — there is nothing here to fetch, build or fan out. Refused before anything else runs.
-  if (pluginRoot && isInstalledCopy(pluginRoot)) {
-    log(`\n✗ ${INSTALLED_COPY_REFUSAL}`);
-    return { exit: 2, currency: null, steps: [], projects: [], migrations: [], refusal: INSTALLED_COPY_REFUSAL };
+  // design point D): an installed Sterling (Claude Code's /plugin or `opencode plugin add`) is
+  // updated by its host — there is nothing here to fetch, build or fan out. Refused before anything
+  // else runs. env/home locate the install roots (scripts/lib/sterling-roots.mjs); tests inject them.
+  if (pluginRoot && isInstalledCopy(pluginRoot, { env, home })) {
+    const refusal = installedCopyRefusal(installHostOf(pluginRoot, { env, home }));
+    log(`\n✗ ${refusal}`);
+    return { exit: 2, currency: null, steps: [], projects: [], migrations: [], refusal };
   }
   const git = gitFrom(exec, cwd);
   const nodeBin = opts.nodeBin ?? process.execPath;
