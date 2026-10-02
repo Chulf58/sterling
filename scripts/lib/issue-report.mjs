@@ -6,11 +6,16 @@
 // the home dir and a predicate that says whether a repo-relative path exists in
 // the running Sterling copy.
 //
-// The repo is public, so the scrub is fail-closed: a path token that is not a
-// file Sterling ships becomes <project-path>, even when that also blanks a
-// harmless token such as "and/or". The printed body shows the result before it
-// is sent. Known residual risk (accepted in the decision): a quoted Sterling
-// message that embeds a project record title passes the scrub.
+// The repo is public, so the scrub is fail-closed for what it can see: the
+// project root and the home dir (with any path below them, spaces included),
+// UUIDs, and every whitespace-free token holding a / or \ that is not a file
+// Sterling ships or a Sterling-owned .sterling/ name. That blanks harmless
+// tokens such as "and/or" too. What it does NOT guarantee: any other path that
+// contains spaces is cut at each space, so the words between them stay
+// ("/mnt/d/Acme Client Billing/x.ts" keeps "Client"). The printed body shows
+// the result before it is sent. Known residual risk (accepted in the
+// decision): a quoted Sterling message that embeds a project record title
+// passes the scrub.
 //
 // Builtins only: bin/report-issue.mjs bundles this module.
 import { createHash } from 'node:crypto';
@@ -25,6 +30,30 @@ export const CAPS = { title: 120, component: 80, observed: 600, expected: 400, e
 
 /** Top-level directories of the Sterling repo whose files a report may cite. */
 export const STERLING_PREFIXES = ['scripts/', 'packages/', 'hooks/', 'bin/', 'mcp/', 'opencode/', 'agent-templates/', 'skills/', 'templates/', 'commands/', 'tui/', '.claude-plugin/'];
+
+/** The names under a project's .sterling/ that Sterling itself writes. A
+ * .sterling/ path is kept only when it is exactly one of these (a directory
+ * with nothing below it, or a file); every other .sterling/ path is project
+ * territory (domains/<name>/, transient/<file>, a file a project put there). */
+export const STERLING_STATE_NAMES = [
+  'config.json',
+  'sterling.db',
+  'sterling.db-wal',
+  'sterling.db-shm',
+  'plan-lock.json',
+  'synced-version',
+  'pending-issue-reports.jsonl',
+  'pending-issue-reports.jsonl.lock',
+  'maintenance-worker.log',
+  'maintenance-worker.jsonl',
+  'update-complete.json',
+  'enforcement-baseline.json',
+  'agents-md-migration-preview.diff',
+  'transient',
+  'runs',
+  'delivery-audit',
+  'opencode',
+];
 
 /** A report the script will not file; the message names the remedy. */
 export class ReportRefusal extends Error {}
@@ -54,7 +83,7 @@ function isSterlingPath(token, sterlingPathExists) {
   const path = token.replace(/[.,:;!?]+$/, '').replace(/:\d+(?:-\d+)?$/, '');
   if (!/^[A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]*)+$/.test(path)) return false;
   if (path.split('/').some((seg) => seg === '..' || seg === '.')) return false;
-  if (path.startsWith('.sterling/')) return true;
+  if (path.startsWith('.sterling/')) return STERLING_STATE_NAMES.includes(path.slice('.sterling/'.length).replace(/\/$/, ''));
   return STERLING_PREFIXES.some((p) => path.startsWith(p)) && sterlingPathExists(path.replace(/\/+$/, ''));
 }
 
@@ -149,10 +178,21 @@ function fence(text) {
   return `${f}text\n${text}\n${f}`;
 }
 
+/** One-line free text as inline code, delimited by a backtick run longer than
+ * any inside it, so an @mention or markdown in it renders inert. Whitespace
+ * runs collapse to one space so the span cannot break across a blank line. */
+function inlineCode(text) {
+  const t = text.replace(/\s+/g, ' ');
+  const longest = Math.max(0, ...(t.match(/`+/g) ?? []).map((r) => r.length));
+  const d = '`'.repeat(longest + 1);
+  const pad = t.startsWith('`') || t.endsWith('`') ? ' ' : '';
+  return `${d}${pad}${t}${pad}${d}`;
+}
+
 /** The issue body. stamps: { version, head (null on an installed copy), host, project }. */
 export function renderBody(report, stamps, { recursAfter } = {}) {
   const body = [
-    `Component: ${report.component}`,
+    `Component: ${inlineCode(report.component)}`,
     `Severity: ${report.severity}`,
     `Sterling version: ${stamps.version}${stamps.head ? ` (HEAD ${stamps.head})` : ''}`,
     `Host: ${stamps.host}`,

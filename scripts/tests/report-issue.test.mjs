@@ -79,6 +79,21 @@ test('scrub: a Sterling repo-relative path is kept; one under a Sterling prefix 
   assert.equal(scrub('see scripts/../../etc/passwd', ctx), 'see <project-path>');
 });
 
+test('scrub: only the fixed set of Sterling-owned .sterling/ names is kept; any other .sterling/ path becomes <project-path>', () => {
+  assert.equal(scrub('see .sterling/domains/acme-client-secret/notes.md', ctx), 'see <project-path>');
+  assert.equal(scrub('wrote .sterling/acme-billing-export.json', ctx), 'wrote <project-path>');
+  assert.equal(scrub('in .sterling/transient/acme-secret.json', ctx), 'in <project-path>');
+  assert.equal(
+    scrub('read .sterling/sterling.db, .sterling/pending-issue-reports.jsonl:3 and .sterling/plan-lock.json', ctx),
+    'read .sterling/sterling.db, .sterling/pending-issue-reports.jsonl:3 and .sterling/plan-lock.json'
+  );
+  assert.equal(scrub('under .sterling/transient/ only', ctx), 'under .sterling/transient/ only');
+});
+
+test('scrub: a path with spaces outside the project root and home is NOT fully scrubbed (documented limit: the words between its spaces stay)', () => {
+  assert.equal(scrub('read /mnt/d/Acme Client Billing/src/x.ts failed', ctx), 'read <project-path> Client <project-path> failed');
+});
+
 test('scrub: a UUID becomes <id>', () => {
   assert.equal(scrub('record 630e54e6-8c61-4b73-beee-de569a5ec852 missing', ctx), 'record <id> missing');
 });
@@ -157,6 +172,15 @@ test('render: stamps, fenced free text, and the visible fingerprint line', () =>
   const installed = renderBody(r, { version: '0.18.54', head: null, host: 'opencode', project: 'acme' });
   assert.match(installed, /Sterling version: 0\.18\.54\n/);
   assert.match(renderBody(r, { version: '1', head: null, host: 'claude-code', project: 'a' }, { recursAfter: 41 }), /^Recurs after #41\./);
+});
+
+test('render: the Component line is inline code, so an @mention or markdown in it renders inert', () => {
+  const stamp = { version: '1', head: null, host: 'claude-code', project: 'a' };
+  const body = renderBody(validateReport({ ...good(), component: 'H19 @someone [x](https://e.x)' }, ctx), stamp);
+  assert.match(body, /^Component: `H19 @someone \[x\]\(<project-path>\)`$/m);
+  assert.match(renderBody(validateReport({ ...good(), component: 'a `b` c' }, ctx), stamp), /^Component: ``a `b` c``$/m, 'the delimiter outruns any backtick run inside');
+  assert.match(renderBody(validateReport({ ...good(), component: '`edge`' }, ctx), stamp), /^Component: `` `edge` ``$/m, 'a leading or trailing backtick is padded');
+  assert.match(renderBody(validateReport({ ...good(), component: 'two\nlines' }, ctx), stamp), /^Component: `two lines`$/m, 'whitespace runs collapse so the span stays on one line');
 });
 
 test('detectHost: OPENCODE env decides, as rotation-note does', () => {
