@@ -19,6 +19,7 @@ import { defaultExec } from './lib/update.mjs';
 import { mintSettlementReconcile, explainReconcileDebtLiveness, loadGeneratedProjections } from './hooks/lib/settlement.mjs';
 import { VERSION_ONLY_CANDIDATES, isVersionOnlyBetweenCommits, readVersionAtCommit } from './lib/version-only.mjs';
 import { projectRoot } from './hooks/lib/common.mjs';
+import { publishAfterMerge } from './lib/npm-publish.mjs';
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
 import { readProjectMode } from './lib/handoff-projection.mjs';
@@ -910,4 +911,20 @@ if (process.argv.includes('--no-push')) {
   }
 }
 
-console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed, ...(parkedClosed ? { parked_items_closed: parkedClosed } : {}) }, null, 2));
+// PUBLISH TO NPM (decision sterling-on-opencode-distributes-as-npm-package-via-
+// opencode-plugin-add): a pushed hobby merge that moved package.json's version
+// publishes @chulf58/sterling, which `opencode plugin update` reads. Any other
+// merge skips with one line. A refusal (no npm login, version already on npm,
+// registry check failed) never fails the merge; a publish that ran and failed
+// exits non-zero after THE MERGE STANDS, like a failed push.
+const mergedHead = spawnSync('git', ['rev-parse', into], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+let npmPublish;
+if (mergedHead.status === 0) {
+  npmPublish = publishAfterMerge({ target, baseSha: intoTip, headSha: mergedHead.stdout.trim(), pushed });
+} else {
+  console.error(`direct-merge: npm publish SKIPPED: could not resolve ${into} after the merge (${mergedHead.stderr.trim()}).`);
+  npmPublish = { status: 'skipped' };
+}
+
+console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed, npm_publish: npmPublish.status, ...(parkedClosed ? { parked_items_closed: parkedClosed } : {}) }, null, 2));
+if (npmPublish.status === 'failed') process.exit(1);
