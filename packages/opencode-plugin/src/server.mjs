@@ -9,8 +9,10 @@
 //   3. session.execution.succeeded: settlement (mint reconcile duties, then
 //      advance the settled snapshot), the maintenance worker, and a notice the
 //      model sees at the next turn;
-//   4. sterlingPermissionConfig(): the permission rules that deny edits of the
-//      store file. Nothing here installs them.
+//   4. the prompt hook: a record selected in the dashboard is taken once from
+//      the store and appended to the next prompt, as H2 does on Claude Code.
+// The store guard (edit deny on .sterling/sterling.db) is not here: the
+// installer writes it into .opencode/opencode.json (scripts/lib/opencode-install.mjs).
 // Every handler is fenced: a throw is logged to .sterling/transient and turned
 // into a notice, never raised into OpenCode. Outside a Sterling project (no
 // .sterling/sterling.db above the session directory) every handler is a no-op.
@@ -61,7 +63,7 @@ export const BUSY_TIMEOUT_MS = 1000;
 
 // Per-handler budgets. The store calls are synchronous and cannot be cut off
 // mid-call; the budget bounds the awaited part and logs any overrun.
-export const BUDGET_MS = { context: 4000, delivery: 4000, settle: 30000 };
+export const BUDGET_MS = { context: 4000, delivery: 4000, settle: 30000, prompt: 4000 };
 
 export const NOTICES_REL = '.sterling/transient/opencode-notices.json';
 export const LOG_REL = '.sterling/transient/opencode-plugin.log';
@@ -80,14 +82,6 @@ export const OPENCODE_HOST_TAIL = [
   '- **The conductor role** (agent-templates/conductor.md) is yours in the main session. Dispatch subagents with the `subagent` tool.',
   '- **The codex MCP tool** is available only if it is configured in OpenCode\'s MCP settings; otherwise skip the Codex lanes and say so.',
 ].join('\n');
-
-/** The OpenCode permission rules that deny editing or writing the store file. Returned, never installed. */
-export function sterlingPermissionConfig() {
-  const resources = ['.sterling/sterling.db', '**/.sterling/sterling.db'];
-  return {
-    permissions: ['edit', 'write'].flatMap((action) => resources.map((resource) => ({ action, resource, effect: 'deny' }))),
-  };
-}
 
 /** Open the project store with the short in-process busy timeout. */
 export function openProjectStore(dbPath) {
@@ -409,6 +403,25 @@ export function createSterlingServer(deps = {}) {
     }
   }
 
+  /** H2's one-shot selection handoff: the pending selection row is consumed and added to the prompt text. */
+  async function onPrompt(input) {
+    const root = rootOf();
+    if (!root) return;
+    await fenced('prompt', root, () => {
+      // Checked before the take, so an unknown shape never consumes the selection.
+      if (typeof input?.prompt?.text !== 'string') throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
+      const store = openStore(join(root, '.sterling', 'sterling.db'));
+      let selection;
+      try {
+        selection = store.takeSelection();
+      } finally {
+        store.close();
+      }
+      if (!selection) return;
+      input.prompt.text = `${input.prompt.text}\n\nTUI selection (one-shot): the user has selected ${selection.type} '${selection.record_id}'. Resolve the selected record via knowledge_get before answering.`;
+    });
+  }
+
   async function onEvent(ev) {
     if (ev?.type !== 'session.execution.succeeded') return;
     const root = rootOf();
@@ -417,7 +430,7 @@ export function createSterlingServer(deps = {}) {
     await fenced('settle', root, () => settle(root));
   }
 
-  const handlers = { context: onContext, before: onBefore, after: onAfter, event: onEvent };
+  const handlers = { context: onContext, prompt: onPrompt, before: onBefore, after: onAfter, event: onEvent };
 
   return {
     id: PLUGIN_ID,
@@ -431,6 +444,7 @@ export function createSterlingServer(deps = {}) {
     async setup(ctx) {
       directory = ctx?.location?.directory ?? process.cwd();
       await ctx.session.hook('context', onContext);
+      await ctx.session.hook('prompt', onPrompt);
       await ctx.tool.hook('execute.before', onBefore);
       await ctx.tool.hook('execute.after', onAfter);
       const abort = new AbortController();

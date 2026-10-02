@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { SterlingStore } from '@sterling/store';
 import { initialUi } from '@sterling/tui/dist/state.js';
-import { SIDEBAR_WIDTH, disabledEffectsFor, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readFlags, readSidebarSummary, sidebarLines, type SidebarSummary } from '../view.ts';
+import * as view from '../view.ts';
+import { SIDEBAR_WIDTH, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, sidebarLines, type SidebarSummary } from '../view.ts';
 
 const ID = '0123abcd-0000-4000-8000-000000000000';
 
@@ -91,15 +92,9 @@ test('escapeLeavesView: Esc leaves only when no edit, picker or search is open',
   assert.equal(escapeLeavesView({ ...initialUi, tab: 3, selector: { key: 'k', stage: 'model', highlight: 0 } }), false);
 });
 
-test('flags: both pending-ruling functions default OFF and map to disabled effects', () => {
-  const off = readFlags({});
-  assert.deepEqual(off, { modelSwap: false, recordHandoff: false });
-  const d = disabledEffectsFor(off);
-  assert.equal(d.select, null, 'the record handoff drops silently (the view labels it instead)');
-  assert.match(d.model_swap ?? '', /pending a ruling/);
-  assert.deepEqual(readFlags({ STERLING_OC_MODEL_SWAP: '1', STERLING_OC_RECORD_HANDOFF: '1' }), { modelSwap: true, recordHandoff: true });
-  assert.deepEqual(disabledEffectsFor({ modelSwap: true, recordHandoff: true }), {});
-  assert.deepEqual(readFlags({ STERLING_OC_MODEL_SWAP: 'yes' }), { modelSwap: false, recordHandoff: false }, 'only 1 turns a flag on');
+test('both dashboard functions are on in OpenCode: no flag gate is left (decision 48903a6f, DASHBOARD FUNCTIONS)', () => {
+  assert.equal('readFlags' in view, false);
+  assert.equal('disabledEffectsFor' in view, false);
 });
 
 test('findStorePath: STERLING_STORE wins; otherwise the nearest .sterling/sterling.db walking up', () => {

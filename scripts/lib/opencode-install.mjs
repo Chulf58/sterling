@@ -37,6 +37,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
 import { sha256, loadRegistry } from './agent-distribution.mjs';
@@ -321,57 +322,98 @@ const CONDUCTOR_OPENCODE_NOTE = `
 On OpenCode this roster is installed as sterling/implementor, sterling/researcher and sterling/scout; dispatch those names. In a work project the bare-named implementor, researcher and scout are the portable copies committed for colleagues without Sterling, so do not dispatch them.
 `;
 
-/** The Sterling-full render: Claude body (Sterling lines kept), OpenCode frontmatter. */
-export function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false } = {}) {
+/**
+ * The OpenCode model for a config.models Claude model id: OpenCode names a model
+ * provider/model, and Claude models come from its `anthropic` provider.
+ */
+export function opencodeModelRef(model) {
+  if (typeof model !== 'string' || !model) throw new TypeError(`opencodeModelRef: model must be a non-empty string, got ${JSON.stringify(model)}`);
+  return `anthropic/${model}`;
+}
+
+/** The Sterling plugin root above a module: the nearest directory holding agent-templates/registry.json. */
+export function sterlingRootFrom(moduleUrl = import.meta.url) {
+  const start = dirname(fileURLToPath(moduleUrl));
+  for (let dir = start; ; dir = dirname(dir)) {
+    if (existsSync(join(dir, 'agent-templates', 'registry.json'))) return dir;
+    if (dirname(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
+  }
+}
+
+/** The Sterling-full render: Claude body (Sterling lines kept), OpenCode frontmatter, and the OpenCode model when one is pinned. */
+export function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, model } = {}) {
   const claudeText = renderClaudeText(templateContent, label);
   const out = renderOpenCodeAgent(claudeText, label, { permission: entry.opencode?.permission });
   const header = parseOpenCodeHeader(out.content);
   let content = normalize(out.content).replace(`${header.headerLine}\n`, '');
   if (primary) content = content.replace(/^mode: subagent$/m, 'mode: primary') + CONDUCTOR_OPENCODE_NOTE;
+  if (model) content = content.replace(/^(mode: \w+)$/m, `$1\nmodel: ${model}`);
   const fmEnd = content.indexOf('\n---\n', 4) + 5;
   const fullHeader = `<!-- sterling-full renderer=opencode-full/1 template=${out.name} template_hash=${sha256(templateContent)} content_hash=${sha256(content)} -->`;
   return { name: out.name, content: `${content.slice(0, fmEnd)}${fullHeader}\n${content.slice(fmEnd)}` };
 }
 
-export function ensureFullAgents({ projectDir, pluginRoot, tracked }) {
+/** The `model:` line of a Sterling-full file's frontmatter, or undefined. */
+function frontmatterModel(content) {
+  const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
+  return fm?.[1].match(/^model: (\S+)$/m)?.[1];
+}
+
+/**
+ * Render and write the Sterling-full conductor and roster. `models` maps a roster
+ * name to the OpenCode model to pin (the System-tab swap); an agent not in it keeps
+ * the model its installed, unedited file already pins, so a sync never reverts a swap.
+ */
+export function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   const registry = loadRegistry(join(pluginRoot, 'agent-templates', 'registry.json'));
   const rows = [];
-  const rendered = ROSTER.map((name) => {
+  for (const name of ROSTER) {
     const entry = registry.agents.find((a) => a.name === name);
     if (!entry) throw new Error(`opencode roster: '${name}' is not in agent-templates/registry.json (P5)`);
-    return renderFullOpenCodeAgent(readFileSync(join(pluginRoot, 'agent-templates', entry.file), 'utf8'), entry.file, entry, { primary: name === 'conductor' });
-  });
-  for (const agent of rendered) {
-    const rel = `${STERLING_AGENTS_SUBDIR}/${agent.name}.md`;
+    const rel = `${STERLING_AGENTS_SUBDIR}/${name}.md`;
     const path = join(projectDir, rel);
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    if (!existsSync(path)) {
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, agent.content);
-      rows.push({ item: rel, status: 'created' });
-      continue;
+    const disk = existsSync(path) ? normalize(readFileSync(path, 'utf8')) : null;
+    if (disk !== null) {
+      const m = disk.match(FULL_HEADER_RE);
+      if (!m || m[1] !== name) {
+        rows.push(refusal(rel, `${rel} carries no Sterling header (a file Sterling did not write)`, `rename or remove it, then rerun /sterling:update`));
+        continue;
+      }
+      if (sha256(disk.replace(`${m[0]}\n`, '')) !== m[3]) {
+        rows.push(refusal(rel, `${rel} was edited after Sterling wrote it`, `move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update`));
+        continue;
+      }
     }
-    const disk = normalize(readFileSync(path, 'utf8'));
+    const model = models[name] ?? (disk === null ? undefined : frontmatterModel(disk));
+    const agent = renderFullOpenCodeAgent(readFileSync(join(pluginRoot, 'agent-templates', entry.file), 'utf8'), entry.file, entry, { primary: name === 'conductor', model });
+    if (agent.name !== name) throw new Error(`opencode roster: '${entry.file}' renders as '${agent.name}', not '${name}' (P5)`);
     if (disk === agent.content) {
       rows.push({ item: rel, status: 'matches' });
       continue;
     }
-    const m = disk.match(FULL_HEADER_RE);
-    if (!m || m[1] !== agent.name) {
-      rows.push(refusal(rel, `${rel} carries no Sterling header (a file Sterling did not write)`, `rename or remove it, then rerun /sterling:update`));
-      continue;
-    }
-    if (sha256(disk.replace(`${m[0]}\n`, '')) !== m[3]) {
-      rows.push(refusal(rel, `${rel} was edited after Sterling wrote it`, `move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update`));
-      continue;
-    }
+    mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, agent.content);
-    rows.push({ item: rel, status: 'refreshed' });
+    rows.push({ item: rel, status: disk === null ? 'created' : 'refreshed' });
   }
   return rows;
+}
+
+/**
+ * The System-tab model swap on OpenCode: re-render the project's Sterling-full set,
+ * pinning the OpenCode model for `model` on every swapped roster agent. A project
+ * whose Sterling-full set was never installed is skipped; nothing is created.
+ */
+export function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
+  if (!existsSync(join(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  const ref = opencodeModelRef(model);
+  const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
+  const ls = git(projectDir, ['ls-files', '--', '.opencode']);
+  const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
+  return { rows: ensureFullAgents({ projectDir, pluginRoot, tracked, models }) };
 }
 
 /**

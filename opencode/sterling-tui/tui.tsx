@@ -17,7 +17,7 @@ import { createSignal, For, Show } from 'solid-js';
 import { useKeyboard, useTerminalDimensions } from '@opentui/solid';
 import { openDashboard, type DashboardController } from '@sterling/tui/dist/controller.js';
 import type { DashboardState } from '@sterling/tui/dist/state.js';
-import { SIDEBAR_WIDTH, disabledEffectsFor, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readFlags, readSidebarSummary, sidebarLines, type Guarded, type KeyLike } from './view.ts';
+import { SIDEBAR_WIDTH, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, sidebarLines, type Guarded, type KeyLike } from './view.ts';
 
 const ROUTE = 'sterling';
 const COMMAND = 'sterling.open';
@@ -39,7 +39,6 @@ interface Api {
   };
 }
 
-const flags = readFlags(process.env);
 const [tick, setTick] = createSignal(0);
 let dashboard: Guarded<DashboardController> | undefined;
 
@@ -49,7 +48,7 @@ function controller(): Guarded<DashboardController> {
   if (dashboard?.ok) return dashboard;
   const storePath = findStorePath(process.cwd(), process.env);
   dashboard = storePath
-    ? guarded('Sterling store', () => openDashboard(storePath, { disabledEffects: disabledEffectsFor(flags) }))
+    ? guarded('Sterling store', () => openDashboard(storePath))
     : { ok: false, error: `no .sterling/sterling.db at or above ${process.cwd()}` };
   return dashboard;
 }
@@ -126,7 +125,7 @@ function FullView(props: { api: Api; close: () => void }) {
   const [failure, setFailure] = createSignal<string | undefined>();
   const muted = () => props.api.theme?.text?.muted;
   const highlight = () => props.api.theme?.background?.raised?.high;
-  // header, tab bar, spacer, then the body; three lines below it: blank, footer, flags line
+  // header, tab bar, spacer, then the body; three lines below it: blank, footer, Esc hint
   const viewport = () => ({ width: Math.max(20, dims().width - 2), maxBodyLines: Math.max(3, dims().height - 8), showBanner: false });
   const view = () => {
     tick();
@@ -136,10 +135,7 @@ function FullView(props: { api: Api; close: () => void }) {
     const st = guarded('dashboard', () => c.value.state(viewport()));
     return st.ok ? { ok: true as const, ...paint(st.value, viewport().maxBodyLines) } : { ok: false as const, error: st.error };
   };
-  const offLine = () => {
-    const off = [!flags.modelSwap && 'model swap', !flags.recordHandoff && 'record handoff to Claude'].filter(Boolean);
-    return off.length ? `Off in OpenCode, pending a ruling: ${off.join(', ')}. Esc: back` : 'Esc: back';
-  };
+
   useKeyboard((key: KeyLike & { eventType?: string; defaultPrevented?: boolean; preventDefault?: () => void }) => {
     // a dialog or the command palette owns the keys while it is open
     if (props.api.keymap.mode.current() !== 'base') return;
@@ -184,7 +180,7 @@ function FullView(props: { api: Api; close: () => void }) {
       <Show when={failure()}>
         <text>{failure()}</text>
       </Show>
-      <text fg={muted()}>{offLine()}</text>
+      <text fg={muted()}>Esc: back</text>
     </box>
   );
 }

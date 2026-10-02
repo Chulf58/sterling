@@ -401,13 +401,57 @@ test('in-process store opens use the short busy timeout', () => {
   }
 });
 
-test('the permission config denies edit and write of the store file', () => {
-  const cfg = server.sterlingPermissionConfig();
-  for (const action of ['edit', 'write']) {
-    assert.ok(
-      cfg.permissions.some((r) => r.action === action && r.effect === 'deny' && /\.sterling\/sterling\.db/.test(r.resource)),
-      `${action} of .sterling/sterling.db is denied`
-    );
+test('the store guard has one source: the installer writes it, the server plugin exports no permission config', async () => {
+  assert.equal(server.sterlingPermissionConfig, undefined);
+  const { STORE_GUARD_PATTERNS } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'opencode-install.mjs')).href);
+  assert.ok(STORE_GUARD_PATTERNS.includes('.sterling/sterling.db*'));
+});
+
+const promptInput = (text) => ({ sessionID: 'ses_1', messageID: 'msg_1', prompt: { text }, delivery: 'immediate' });
+
+test('prompt hook: a pending TUI selection is taken once and appended to the next prompt', async () => {
+  const p = makeProject();
+  try {
+    const s = new SterlingStore(join(p.dir, '.sterling', 'sterling.db'));
+    s.writeSelection('feature_article', p.article.id, NOW);
+    s.close();
+    const { ctx, cleanup } = await setupPlugin(p.dir);
+    assert.equal(typeof ctx.hooks.session.prompt, 'function', 'the prompt hook is registered');
+    const first = promptInput('what does this do?');
+    await ctx.hooks.session.prompt(first);
+    assert.match(first.prompt.text, /^what does this do\?\n\n/);
+    assert.match(first.prompt.text, new RegExp(`TUI selection \\(one-shot\\): the user has selected feature_article '${p.article.id}'\\. Resolve the selected record via knowledge_get before answering\\.`));
+    const second = promptInput('and now?');
+    await ctx.hooks.session.prompt(second);
+    assert.equal(second.prompt.text, 'and now?', 'one-shot: the selection row was consumed');
+    const s2 = new SterlingStore(join(p.dir, '.sterling', 'sterling.db'));
+    try {
+      assert.equal(s2.takeSelection(), undefined);
+    } finally {
+      s2.close();
+    }
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('prompt hook: no selection leaves the prompt untouched; a store failure becomes a notice, never a throw', async () => {
+  const p = makeProject();
+  try {
+    const { ctx, cleanup } = await setupPlugin(p.dir);
+    const plain = promptInput('hello');
+    await ctx.hooks.session.prompt(plain);
+    assert.equal(plain.prompt.text, 'hello');
+    await cleanup?.();
+    const broken = await setupPlugin(p.dir, { openStore: () => { throw new Error('PROMPT-STORE-DOWN'); } });
+    const pi = promptInput('hi');
+    await broken.ctx.hooks.session.prompt(pi);
+    assert.equal(pi.prompt.text, 'hi');
+    assert.match(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8'), /prompt failed \(PROMPT-STORE-DOWN\)/);
+    await broken.cleanup?.();
+  } finally {
+    p.cleanup();
   }
 });
 

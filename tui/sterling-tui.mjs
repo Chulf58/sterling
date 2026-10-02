@@ -4380,23 +4380,23 @@ var require_core = __commonJS({
       return this;
     };
     Promise2.callback = function(fn) {
-      return new Promise2((resolve, reject) => {
+      return new Promise2((resolve2, reject) => {
         fn((error, arg) => {
           if (error) {
             reject(error);
           } else {
-            resolve(arg);
+            resolve2(arg);
           }
         });
       });
     };
     Promise2.callbackAll = function(fn) {
-      return new Promise2((resolve, reject) => {
+      return new Promise2((resolve2, reject) => {
         fn((error, ...args2) => {
           if (error) {
             reject(error);
           } else {
-            resolve(args2);
+            resolve2(args2);
           }
         });
       });
@@ -4449,19 +4449,19 @@ var require_core = __commonJS({
       setTimeout(() => this.resolve(value), timeout);
     };
     Promise2.resolveTimeout = Promise2.fulfillTimeout = function(timeout, value) {
-      return new Promise2((resolve) => setTimeout(() => resolve(value), timeout));
+      return new Promise2((resolve2) => setTimeout(() => resolve2(value), timeout));
     };
     Promise2.prototype.rejectTimeout = function(timeout, error) {
       setTimeout(() => this.reject(error), timeout);
     };
     Promise2.rejectTimeout = function(timeout, error) {
-      return new Promise2((resolve, reject) => setTimeout(() => reject(error), timeout));
+      return new Promise2((resolve2, reject) => setTimeout(() => reject(error), timeout));
     };
     Promise2.resolveNextTick = Promise2.fulfillNextTick = function(value) {
-      return new Promise2((resolve) => nextTick(() => resolve(value)));
+      return new Promise2((resolve2) => nextTick(() => resolve2(value)));
     };
     Promise2.rejectNextTick = function(error) {
-      return new Promise2((resolve, reject) => nextTick(() => reject(error)));
+      return new Promise2((resolve2, reject) => nextTick(() => reject(error)));
     };
     Promise2.dormant = function(fn) {
       var promise = new Promise2();
@@ -4482,10 +4482,10 @@ var require_core = __commonJS({
       if (thenable instanceof Promise2) {
         return thenable;
       }
-      return new Promise2((resolve, reject) => {
+      return new Promise2((resolve2, reject) => {
         thenable.then(
           (value) => {
-            resolve(value);
+            resolve2(value);
           },
           (error) => {
             reject(error);
@@ -4580,10 +4580,10 @@ var require_core = __commonJS({
         window.requestAnimationFrame(() => this.reject(error));
       };
       Promise2.resolveAtAnimationFrame = function(value) {
-        return new Promise2((resolve) => window.requestAnimationFrame(() => resolve(value)));
+        return new Promise2((resolve2) => window.requestAnimationFrame(() => resolve2(value)));
       };
       Promise2.rejectAtAnimationFrame = function(error) {
-        return new Promise2((resolve, reject) => window.requestAnimationFrame(() => reject(error)));
+        return new Promise2((resolve2, reject) => window.requestAnimationFrame(() => reject(error)));
       };
     }
   }
@@ -5039,11 +5039,11 @@ var require_wrapper = __commonJS({
     "use strict";
     var Promise2 = require_seventh();
     Promise2.timeLimit = (timeout, asyncFnOrPromise) => {
-      return new Promise2((resolve, reject) => {
+      return new Promise2((resolve2, reject) => {
         if (typeof asyncFnOrPromise === "function") {
           asyncFnOrPromise = asyncFnOrPromise();
         }
-        Promise2.resolve(asyncFnOrPromise).then(resolve, reject);
+        Promise2.resolve(asyncFnOrPromise).then(resolve2, reject);
         setTimeout(() => reject(new Error("Timeout")), timeout);
       });
     };
@@ -5065,13 +5065,13 @@ var require_wrapper = __commonJS({
       return oneTry();
     };
     Promise2.onceEvent = (emitter, eventName) => {
-      return new Promise2((resolve) => emitter.once(eventName, resolve));
+      return new Promise2((resolve2) => emitter.once(eventName, resolve2));
     };
     Promise2.onceEventAll = (emitter, eventName) => {
-      return new Promise2((resolve) => emitter.once(eventName, (...args2) => resolve(args2)));
+      return new Promise2((resolve2) => emitter.once(eventName, (...args2) => resolve2(args2)));
     };
     Promise2.onceEventOrError = (emitter, eventName, excludeEvents, _internalAllArgs = false) => {
-      return new Promise2((resolve, reject) => {
+      return new Promise2((resolve2, reject) => {
         var altRejects;
         var resolve_ = (...args2) => {
           emitter.removeListener("error", reject_);
@@ -5080,7 +5080,7 @@ var require_wrapper = __commonJS({
               emitter.removeListener(event2, altRejects[event2]);
             }
           }
-          resolve(_internalAllArgs ? args2 : args2[0]);
+          resolve2(_internalAllArgs ? args2 : args2[0]);
         };
         var reject_ = (arg) => {
           emitter.removeListener(eventName, resolve_);
@@ -5128,7 +5128,7 @@ var require_decorators = __commonJS({
     Promise2.promisifyAll = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
         return (...args2) => {
-          return new Promise2((resolve, reject) => {
+          return new Promise2((resolve2, reject) => {
             nodeAsyncFn.call(thisBinding, ...args2, (error, ...cbArgs) => {
               if (error) {
                 if (cbArgs.length && error instanceof Error) {
@@ -5136,14 +5136,14 @@ var require_decorators = __commonJS({
                 }
                 reject(error);
               } else {
-                resolve(cbArgs);
+                resolve2(cbArgs);
               }
             });
           });
         };
       }
       return function(...args2) {
-        return new Promise2((resolve, reject) => {
+        return new Promise2((resolve2, reject) => {
           nodeAsyncFn.call(this, ...args2, (error, ...cbArgs) => {
             if (error) {
               if (cbArgs.length && error instanceof Error) {
@@ -5151,7 +5151,7 @@ var require_decorators = __commonJS({
               }
               reject(error);
             } else {
-              resolve(cbArgs);
+              resolve2(cbArgs);
             }
           });
         });
@@ -5160,7 +5160,7 @@ var require_decorators = __commonJS({
     Promise2.promisify = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
         return (...args2) => {
-          return new Promise2((resolve, reject) => {
+          return new Promise2((resolve2, reject) => {
             nodeAsyncFn.call(thisBinding, ...args2, (error, cbArg) => {
               if (error) {
                 if (cbArg !== void 0 && error instanceof Error) {
@@ -5168,14 +5168,14 @@ var require_decorators = __commonJS({
                 }
                 reject(error);
               } else {
-                resolve(cbArg);
+                resolve2(cbArg);
               }
             });
           });
         };
       }
       return function(...args2) {
-        return new Promise2((resolve, reject) => {
+        return new Promise2((resolve2, reject) => {
           nodeAsyncFn.call(this, ...args2, (error, cbArg) => {
             if (error) {
               if (cbArg !== void 0 && error instanceof Error) {
@@ -5183,7 +5183,7 @@ var require_decorators = __commonJS({
               }
               reject(error);
             } else {
-              resolve(cbArg);
+              resolve2(cbArg);
             }
           });
         });
@@ -5876,9 +5876,9 @@ var require_misc3 = __commonJS({
           listener(exitCode, timeout);
           return Promise2.dummy;
         }
-        return new Promise2((resolve) => {
+        return new Promise2((resolve2) => {
           listener(exitCode, timeout, () => {
-            resolve();
+            resolve2();
           });
         });
       };
@@ -5886,11 +5886,11 @@ var require_misc3 = __commonJS({
       setTimeout(() => process.exit(exitCode), timeout);
     };
     Promise2.resolveSafeTimeout = function(timeout, value) {
-      return new Promise2((resolve) => {
+      return new Promise2((resolve2) => {
         setTimeout(() => {
           setTimeout(() => {
             setTimeout(() => {
-              setTimeout(() => resolve(value), 0);
+              setTimeout(() => resolve2(value), 0);
             }, timeout / 2);
           }, timeout / 2);
         }, 0);
@@ -6065,7 +6065,7 @@ var require_detectTerminal = __commonJS({
     };
     function getParentProcess(pid) {
       var parentPid, appName;
-      return new Promise2((resolve, reject) => {
+      return new Promise2((resolve2, reject) => {
         exec("ps -h -o ppid -p " + pid, (error, stdout) => {
           if (error) {
             reject(error);
@@ -6082,7 +6082,7 @@ var require_detectTerminal = __commonJS({
               return;
             }
             appName = stdout_.trim();
-            resolve({ pid: parentPid, appName });
+            resolve2({ pid: parentPid, appName });
           });
         });
       });
@@ -9601,13 +9601,13 @@ var require_NextGenEvents = __commonJS({
       return this.addListener(eventName, fn, options);
     };
     NextGenEvents.prototype.waitFor = function(eventName) {
-      return new Promise((resolve) => {
-        this.addListener(eventName, (firstArg) => resolve(firstArg), { once: true });
+      return new Promise((resolve2) => {
+        this.addListener(eventName, (firstArg) => resolve2(firstArg), { once: true });
       });
     };
     NextGenEvents.prototype.waitForAll = function(eventName) {
-      return new Promise((resolve) => {
-        this.addListener(eventName, (...args2) => resolve(args2), { once: true });
+      return new Promise((resolve2) => {
+        this.addListener(eventName, (...args2) => resolve2(args2), { once: true });
       });
     };
     NextGenEvents.prototype.removeListener = function(eventName, id) {
@@ -9751,8 +9751,8 @@ var require_NextGenEvents = __commonJS({
       return NextGenEvents.emitEvent(event2);
     };
     NextGenEvents.prototype.waitForEmit = function(...args2) {
-      return new Promise((resolve) => {
-        this.emit(...args2, (interrupt) => resolve(interrupt));
+      return new Promise((resolve2) => {
+        this.emit(...args2, (interrupt) => resolve2(interrupt));
       });
     };
     NextGenEvents.createEvent = function(emitter, ...args2) {
@@ -10119,13 +10119,13 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForFirst = function(emitters, eventName) {
-      return new Promise((resolve) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (firstArg) => resolve(firstArg));
+      return new Promise((resolve2) => {
+        NextGenEvents.groupOnceFirst(emitters, eventName, (firstArg) => resolve2(firstArg));
       });
     };
     NextGenEvents.groupWaitForFirstAll = function(emitters, eventName) {
-      return new Promise((resolve) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (...args2) => resolve(args2));
+      return new Promise((resolve2) => {
+        NextGenEvents.groupOnceFirst(emitters, eventName, (...args2) => resolve2(args2));
       });
     };
     NextGenEvents.groupOnceLast = function(emitters, eventName, fn, options) {
@@ -10155,13 +10155,13 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForLast = function(emitters, eventName) {
-      return new Promise((resolve) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (firstArg) => resolve(firstArg));
+      return new Promise((resolve2) => {
+        NextGenEvents.groupOnceLast(emitters, eventName, (firstArg) => resolve2(firstArg));
       });
     };
     NextGenEvents.groupWaitForLastAll = function(emitters, eventName) {
-      return new Promise((resolve) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (...args2) => resolve(args2));
+      return new Promise((resolve2) => {
+        NextGenEvents.groupOnceLast(emitters, eventName, (...args2) => resolve2(args2));
       });
     };
     NextGenEvents.groupRemoveListener = function(emitters, eventName, id) {
@@ -10210,8 +10210,8 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForEmit = function(emitters, ...args2) {
-      return new Promise((resolve) => {
-        NextGenEvents.groupEmit(emitters, ...args2, (interrupt) => resolve(interrupt));
+      return new Promise((resolve2) => {
+        NextGenEvents.groupEmit(emitters, ...args2, (interrupt) => resolve2(interrupt));
       });
     };
     NextGenEvents.groupDefineStates = function(emitters, ...args2) {
@@ -17327,7 +17327,7 @@ var require_crc = __commonJS({
 var require_parser = __commonJS({
   "node_modules/pngjs/lib/parser.js"(exports, module) {
     "use strict";
-    var constants = require_constants();
+    var constants2 = require_constants();
     var CrcCalculator = require_crc();
     var Parser = module.exports = function(options, dependencies) {
       this._options = options;
@@ -17338,12 +17338,12 @@ var require_parser = __commonJS({
       this._palette = [];
       this._colorType = 0;
       this._chunks = {};
-      this._chunks[constants.TYPE_IHDR] = this._handleIHDR.bind(this);
-      this._chunks[constants.TYPE_IEND] = this._handleIEND.bind(this);
-      this._chunks[constants.TYPE_IDAT] = this._handleIDAT.bind(this);
-      this._chunks[constants.TYPE_PLTE] = this._handlePLTE.bind(this);
-      this._chunks[constants.TYPE_tRNS] = this._handleTRNS.bind(this);
-      this._chunks[constants.TYPE_gAMA] = this._handleGAMA.bind(this);
+      this._chunks[constants2.TYPE_IHDR] = this._handleIHDR.bind(this);
+      this._chunks[constants2.TYPE_IEND] = this._handleIEND.bind(this);
+      this._chunks[constants2.TYPE_IDAT] = this._handleIDAT.bind(this);
+      this._chunks[constants2.TYPE_PLTE] = this._handlePLTE.bind(this);
+      this._chunks[constants2.TYPE_tRNS] = this._handleTRNS.bind(this);
+      this._chunks[constants2.TYPE_gAMA] = this._handleGAMA.bind(this);
       this.read = dependencies.read;
       this.error = dependencies.error;
       this.metadata = dependencies.metadata;
@@ -17358,10 +17358,10 @@ var require_parser = __commonJS({
       };
     };
     Parser.prototype.start = function() {
-      this.read(constants.PNG_SIGNATURE.length, this._parseSignature.bind(this));
+      this.read(constants2.PNG_SIGNATURE.length, this._parseSignature.bind(this));
     };
     Parser.prototype._parseSignature = function(data) {
-      let signature = constants.PNG_SIGNATURE;
+      let signature = constants2.PNG_SIGNATURE;
       for (let i = 0; i < signature.length; i++) {
         if (data[i] !== signature[i]) {
           this.error(new Error("Invalid file signature"));
@@ -17378,7 +17378,7 @@ var require_parser = __commonJS({
         name += String.fromCharCode(data[i]);
       }
       let ancillary = Boolean(data[4] & 32);
-      if (!this._hasIHDR && type !== constants.TYPE_IHDR) {
+      if (!this._hasIHDR && type !== constants2.TYPE_IHDR) {
         this.error(new Error("Expected IHDR on beggining"));
         return;
       }
@@ -17426,7 +17426,7 @@ var require_parser = __commonJS({
         this.error(new Error("Unsupported bit depth " + depth));
         return;
       }
-      if (!(colorType in constants.COLORTYPE_TO_BPP_MAP)) {
+      if (!(colorType in constants2.COLORTYPE_TO_BPP_MAP)) {
         this.error(new Error("Unsupported color type"));
         return;
       }
@@ -17443,16 +17443,16 @@ var require_parser = __commonJS({
         return;
       }
       this._colorType = colorType;
-      let bpp = constants.COLORTYPE_TO_BPP_MAP[this._colorType];
+      let bpp = constants2.COLORTYPE_TO_BPP_MAP[this._colorType];
       this._hasIHDR = true;
       this.metadata({
         width,
         height,
         depth,
         interlace: Boolean(interlace),
-        palette: Boolean(colorType & constants.COLORTYPE_PALETTE),
-        color: Boolean(colorType & constants.COLORTYPE_COLOR),
-        alpha: Boolean(colorType & constants.COLORTYPE_ALPHA),
+        palette: Boolean(colorType & constants2.COLORTYPE_PALETTE),
+        color: Boolean(colorType & constants2.COLORTYPE_COLOR),
+        alpha: Boolean(colorType & constants2.COLORTYPE_ALPHA),
         bpp,
         colorType
       });
@@ -17476,7 +17476,7 @@ var require_parser = __commonJS({
     };
     Parser.prototype._parseTRNS = function(data) {
       this._crc.write(data);
-      if (this._colorType === constants.COLORTYPE_PALETTE_COLOR) {
+      if (this._colorType === constants2.COLORTYPE_PALETTE_COLOR) {
         if (this._palette.length === 0) {
           this.error(new Error("Transparency chunk must be after palette"));
           return;
@@ -17490,10 +17490,10 @@ var require_parser = __commonJS({
         }
         this.palette(this._palette);
       }
-      if (this._colorType === constants.COLORTYPE_GRAYSCALE) {
+      if (this._colorType === constants2.COLORTYPE_GRAYSCALE) {
         this.transColor([data.readUInt16BE(0)]);
       }
-      if (this._colorType === constants.COLORTYPE_COLOR) {
+      if (this._colorType === constants2.COLORTYPE_COLOR) {
         this.transColor([
           data.readUInt16BE(0),
           data.readUInt16BE(2),
@@ -17507,7 +17507,7 @@ var require_parser = __commonJS({
     };
     Parser.prototype._parseGAMA = function(data) {
       this._crc.write(data);
-      this.gamma(data.readUInt32BE(0) / constants.GAMMA_DIVISION);
+      this.gamma(data.readUInt32BE(0) / constants2.GAMMA_DIVISION);
       this._handleChunkEnd();
     };
     Parser.prototype._handleIDAT = function(length) {
@@ -17519,7 +17519,7 @@ var require_parser = __commonJS({
     };
     Parser.prototype._parseIDAT = function(length, data) {
       this._crc.write(data);
-      if (this._colorType === constants.COLORTYPE_PALETTE_COLOR && this._palette.length === 0) {
+      if (this._colorType === constants2.COLORTYPE_PALETTE_COLOR && this._palette.length === 0) {
         throw new Error("Expected palette not found");
       }
       this.inflateData(data);
@@ -18007,9 +18007,9 @@ var require_parser_async = __commonJS({
 var require_bitpacker = __commonJS({
   "node_modules/pngjs/lib/bitpacker.js"(exports, module) {
     "use strict";
-    var constants = require_constants();
+    var constants2 = require_constants();
     module.exports = function(dataIn, width, height, options) {
-      let outHasAlpha = [constants.COLORTYPE_COLOR_ALPHA, constants.COLORTYPE_ALPHA].indexOf(
+      let outHasAlpha = [constants2.COLORTYPE_COLOR_ALPHA, constants2.COLORTYPE_ALPHA].indexOf(
         options.colorType
       ) !== -1;
       if (options.colorType === options.inputColorType) {
@@ -18029,11 +18029,11 @@ var require_bitpacker = __commonJS({
       }
       let data = options.bitDepth !== 16 ? dataIn : new Uint16Array(dataIn.buffer);
       let maxValue = 255;
-      let inBpp = constants.COLORTYPE_TO_BPP_MAP[options.inputColorType];
+      let inBpp = constants2.COLORTYPE_TO_BPP_MAP[options.inputColorType];
       if (inBpp === 4 && !options.inputHasAlpha) {
         inBpp = 3;
       }
-      let outBpp = constants.COLORTYPE_TO_BPP_MAP[options.colorType];
+      let outBpp = constants2.COLORTYPE_TO_BPP_MAP[options.colorType];
       if (options.bitDepth === 16) {
         maxValue = 65535;
         outBpp *= 2;
@@ -18057,24 +18057,24 @@ var require_bitpacker = __commonJS({
         let blue;
         let alpha = maxValue;
         switch (options.inputColorType) {
-          case constants.COLORTYPE_COLOR_ALPHA:
+          case constants2.COLORTYPE_COLOR_ALPHA:
             alpha = data[inIndex + 3];
             red = data[inIndex];
             green = data[inIndex + 1];
             blue = data[inIndex + 2];
             break;
-          case constants.COLORTYPE_COLOR:
+          case constants2.COLORTYPE_COLOR:
             red = data[inIndex];
             green = data[inIndex + 1];
             blue = data[inIndex + 2];
             break;
-          case constants.COLORTYPE_ALPHA:
+          case constants2.COLORTYPE_ALPHA:
             alpha = data[inIndex + 1];
             red = data[inIndex];
             green = red;
             blue = red;
             break;
-          case constants.COLORTYPE_GRAYSCALE:
+          case constants2.COLORTYPE_GRAYSCALE:
             red = data[inIndex];
             green = red;
             blue = red;
@@ -18107,8 +18107,8 @@ var require_bitpacker = __commonJS({
         for (let x = 0; x < width; x++) {
           let rgba = getRGBA(data, inIndex);
           switch (options.colorType) {
-            case constants.COLORTYPE_COLOR_ALPHA:
-            case constants.COLORTYPE_COLOR:
+            case constants2.COLORTYPE_COLOR_ALPHA:
+            case constants2.COLORTYPE_COLOR:
               if (options.bitDepth === 8) {
                 outData[outIndex] = rgba.red;
                 outData[outIndex + 1] = rgba.green;
@@ -18125,8 +18125,8 @@ var require_bitpacker = __commonJS({
                 }
               }
               break;
-            case constants.COLORTYPE_ALPHA:
-            case constants.COLORTYPE_GRAYSCALE: {
+            case constants2.COLORTYPE_ALPHA:
+            case constants2.COLORTYPE_GRAYSCALE: {
               let grayscale = (rgba.red + rgba.green + rgba.blue) / 3;
               if (options.bitDepth === 8) {
                 outData[outIndex] = grayscale;
@@ -18299,7 +18299,7 @@ var require_filter_pack = __commonJS({
 var require_packer = __commonJS({
   "node_modules/pngjs/lib/packer.js"(exports, module) {
     "use strict";
-    var constants = require_constants();
+    var constants2 = require_constants();
     var CrcStream = require_crc();
     var bitPacker = require_bitpacker();
     var filter = require_filter_pack();
@@ -18312,23 +18312,23 @@ var require_packer = __commonJS({
       options.inputHasAlpha = options.inputHasAlpha != null ? options.inputHasAlpha : true;
       options.deflateFactory = options.deflateFactory || zlib.createDeflate;
       options.bitDepth = options.bitDepth || 8;
-      options.colorType = typeof options.colorType === "number" ? options.colorType : constants.COLORTYPE_COLOR_ALPHA;
-      options.inputColorType = typeof options.inputColorType === "number" ? options.inputColorType : constants.COLORTYPE_COLOR_ALPHA;
+      options.colorType = typeof options.colorType === "number" ? options.colorType : constants2.COLORTYPE_COLOR_ALPHA;
+      options.inputColorType = typeof options.inputColorType === "number" ? options.inputColorType : constants2.COLORTYPE_COLOR_ALPHA;
       if ([
-        constants.COLORTYPE_GRAYSCALE,
-        constants.COLORTYPE_COLOR,
-        constants.COLORTYPE_COLOR_ALPHA,
-        constants.COLORTYPE_ALPHA
+        constants2.COLORTYPE_GRAYSCALE,
+        constants2.COLORTYPE_COLOR,
+        constants2.COLORTYPE_COLOR_ALPHA,
+        constants2.COLORTYPE_ALPHA
       ].indexOf(options.colorType) === -1) {
         throw new Error(
           "option color type:" + options.colorType + " is not supported at present"
         );
       }
       if ([
-        constants.COLORTYPE_GRAYSCALE,
-        constants.COLORTYPE_COLOR,
-        constants.COLORTYPE_COLOR_ALPHA,
-        constants.COLORTYPE_ALPHA
+        constants2.COLORTYPE_GRAYSCALE,
+        constants2.COLORTYPE_COLOR,
+        constants2.COLORTYPE_COLOR_ALPHA,
+        constants2.COLORTYPE_ALPHA
       ].indexOf(options.inputColorType) === -1) {
         throw new Error(
           "option input color type:" + options.inputColorType + " is not supported at present"
@@ -18352,7 +18352,7 @@ var require_packer = __commonJS({
     };
     Packer.prototype.filterData = function(data, width, height) {
       let packedData = bitPacker(data, width, height, this._options);
-      let bpp = constants.COLORTYPE_TO_BPP_MAP[this._options.colorType];
+      let bpp = constants2.COLORTYPE_TO_BPP_MAP[this._options.colorType];
       let filteredData = filter(packedData, width, height, this._options, bpp);
       return filteredData;
     };
@@ -18372,8 +18372,8 @@ var require_packer = __commonJS({
     };
     Packer.prototype.packGAMA = function(gamma) {
       let buf = Buffer.alloc(4);
-      buf.writeUInt32BE(Math.floor(gamma * constants.GAMMA_DIVISION), 0);
-      return this._packChunk(constants.TYPE_gAMA, buf);
+      buf.writeUInt32BE(Math.floor(gamma * constants2.GAMMA_DIVISION), 0);
+      return this._packChunk(constants2.TYPE_gAMA, buf);
     };
     Packer.prototype.packIHDR = function(width, height) {
       let buf = Buffer.alloc(13);
@@ -18384,13 +18384,13 @@ var require_packer = __commonJS({
       buf[10] = 0;
       buf[11] = 0;
       buf[12] = 0;
-      return this._packChunk(constants.TYPE_IHDR, buf);
+      return this._packChunk(constants2.TYPE_IHDR, buf);
     };
     Packer.prototype.packIDAT = function(data) {
-      return this._packChunk(constants.TYPE_IDAT, data);
+      return this._packChunk(constants2.TYPE_IDAT, data);
     };
     Packer.prototype.packIEND = function() {
-      return this._packChunk(constants.TYPE_IEND, null);
+      return this._packChunk(constants2.TYPE_IEND, null);
     };
   }
 });
@@ -18401,7 +18401,7 @@ var require_packer_async = __commonJS({
     "use strict";
     var util2 = __require("util");
     var Stream = __require("stream");
-    var constants = require_constants();
+    var constants2 = require_constants();
     var Packer = require_packer();
     var PackerAsync = module.exports = function(opt) {
       Stream.call(this);
@@ -18412,7 +18412,7 @@ var require_packer_async = __commonJS({
     };
     util2.inherits(PackerAsync, Stream);
     PackerAsync.prototype.pack = function(data, width, height, gamma) {
-      this.emit("data", Buffer.from(constants.PNG_SIGNATURE));
+      this.emit("data", Buffer.from(constants2.PNG_SIGNATURE));
       this.emit("data", this._packer.packIHDR(width, height));
       if (gamma) {
         this.emit("data", this._packer.packGAMA(gamma));
@@ -18740,7 +18740,7 @@ var require_packer_sync = __commonJS({
     if (!zlib.deflateSync) {
       hasSyncZlib = false;
     }
-    var constants = require_constants();
+    var constants2 = require_constants();
     var Packer = require_packer();
     module.exports = function(metaData, opt) {
       if (!hasSyncZlib) {
@@ -18751,7 +18751,7 @@ var require_packer_sync = __commonJS({
       let options = opt || {};
       let packer = new Packer(options);
       let chunks = [];
-      chunks.push(Buffer.from(constants.PNG_SIGNATURE));
+      chunks.push(Buffer.from(constants2.PNG_SIGNATURE));
       chunks.push(packer.packIHDR(metaData.width, metaData.height));
       if (metaData.gamma) {
         chunks.push(packer.packGAMA(metaData.gamma));
@@ -29561,11 +29561,11 @@ var require_Element = __commonJS({
     Element.prototype.getKeyBindings = function(key) {
       return Object.assign({}, this.keyBindings);
     };
-    Element.prototype.getActionBinding = function(action, ui2 = false) {
+    Element.prototype.getActionBinding = function(action, ui = false) {
       var keys = [];
       for (let key in this.keyBindings) {
         if (this.keyBindings[key] === action) {
-          keys.push(ui2 ? misc.keyToUserInterfaceName(key) : key);
+          keys.push(ui ? misc.keyToUserInterfaceName(key) : key);
         }
       }
       return keys;
@@ -39067,8 +39067,11 @@ var require_termkit_no_lazy_require = __commonJS({
 });
 
 // packages/tui/dist/main.js
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, existsSync as existsSync3 } from "node:fs";
-import { basename as basename2, dirname as dirname4, join as join5 } from "node:path";
+import { dirname as dirname6, join as join7 } from "node:path";
+
+// packages/tui/dist/controller.js
+import { readFileSync as readFileSync6, writeFileSync as writeFileSync4, existsSync as existsSync5 } from "node:fs";
+import { basename as basename2, dirname as dirname4, join as join6 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
@@ -43121,15 +43124,15 @@ var NEVER = INVALID;
 
 // packages/schemas/dist/paths.js
 function normalizeRepoPath(input) {
-  const fwd = input.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(fwd)) {
+  const fwd2 = input.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(fwd2)) {
     throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
   }
-  if (fwd.startsWith("/")) {
+  if (fwd2.startsWith("/")) {
     throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
   }
   const parts = [];
-  for (const seg of fwd.split("/")) {
+  for (const seg of fwd2.split("/")) {
     if (seg === "" || seg === ".")
       continue;
     if (seg === "..") {
@@ -44401,9 +44404,9 @@ var MountedStores = class {
    *  already exist on disk are SKIPPED — never created. Existing siblings that
    *  DO exist are still mounted. The default (no options / skipMissing false)
    *  always lazily creates missing stores (§2.3 backward-compatible default). */
-  constructor(projectDbPath, mounts2 = [], options) {
+  constructor(projectDbPath, mounts = [], options) {
     this.project = open(projectDbPath);
-    for (const m of mounts2) {
+    for (const m of mounts) {
       if (options?.skipMissing && !existsSync(m.dbPath))
         continue;
       this.domains.set(m.name, open(m.dbPath));
@@ -44443,10 +44446,10 @@ var MountedStores = class {
       return this.project;
     const m = /^domain:(.+)$/.exec(scope);
     if (m) {
-      const store2 = this.domains.get(m[1]);
-      if (!store2)
+      const store = this.domains.get(m[1]);
+      if (!store)
         throw new Error(`scope '${scope}' targets an unmounted domain \u2014 not in the project's domains manifest`);
-      return store2;
+      return store;
     }
     throw new Error(`unroutable scope '${scope}'`);
   }
@@ -44481,8 +44484,8 @@ var MountedStores = class {
   bySource(opts) {
     const result = [];
     result.push({ source: "project", records: this.project.query(opts) });
-    for (const [name, store2] of this.domains) {
-      result.push({ source: name, records: store2.query(opts) });
+    for (const [name, store] of this.domains) {
+      result.push({ source: name, records: store.query(opts) });
     }
     return result;
   }
@@ -44492,8 +44495,8 @@ var MountedStores = class {
    *  view does not fetch + parse every source's record bodies each frame. */
   countBySource(opts) {
     const result = [{ source: "project", count: this.project.count(opts) }];
-    for (const [name, store2] of this.domains) {
-      result.push({ source: name, count: store2.count(opts) });
+    for (const [name, store] of this.domains) {
+      result.push({ source: name, count: store.count(opts) });
     }
     return result;
   }
@@ -44501,8 +44504,8 @@ var MountedStores = class {
    *  full §3.4 query against that single store. The TUI fetches bodies only for
    *  the source the user actually expanded; an unknown source yields []. */
   querySource(source, opts = {}) {
-    const store2 = source === "project" ? this.project : this.domains.get(source);
-    return store2 ? store2.query(opts) : [];
+    const store = source === "project" ? this.project : this.domains.get(source);
+    return store ? store.query(opts) : [];
   }
   /** Cross-store fetch by id: project first, then domains. */
   get(id) {
@@ -44635,8 +44638,8 @@ var MountedStores = class {
    *  caller supplies is deliberately ignored for the same reason: an
    *  authoritative scope is not something a caller can be trusted to know. */
   supersede(...args2) {
-    const store2 = this.mutatingStoreHolding("supersede", args2[0]);
-    return store2.supersede(args2[0], args2[1], this.mountNameOf(store2));
+    const store = this.mutatingStoreHolding("supersede", args2[0]);
+    return store.supersede(args2[0], args2[1], this.mountNameOf(store));
   }
   /** Promotion tombstone: retire the original in its (project) store, pointing at
    *  the cross-store replacement. The replacement already lives in another store
@@ -44724,9 +44727,9 @@ var MountedStores = class {
    *  active transaction's mount (the C2 backstop). Reads keep using
    *  storeHolding/all() directly — a cross-store READ is legitimate. */
   mutatingStoreHolding(op, id) {
-    const store2 = this.storeHolding(id);
-    this.assertMountAffinity(op, store2, `record '${id}'`);
-    return store2;
+    const store = this.storeHolding(id);
+    this.assertMountAffinity(op, store, `record '${id}'`);
+    return store;
   }
   /** The project store for a PROJECT-LOCAL write (the board/maintenance
    *  queue, the drain log — the run/handoff protocol this comment used to
@@ -44742,11 +44745,11 @@ var MountedStores = class {
   /** The mount name for a physical store — 'project', or the domain's manifest
    *  name. Used only in refusal text: the point of the guard is that a MOUNT is
    *  a physical thing, so it is named by where it actually is. */
-  mountNameOf(store2) {
-    if (store2 === this.project)
+  mountNameOf(store) {
+    if (store === this.project)
       return "project";
     for (const [name, s2] of this.domains)
-      if (s2 === store2)
+      if (s2 === store)
         return `domain:${name}`;
     return "unknown mount";
   }
@@ -44829,15 +44832,15 @@ var MountedStores = class {
    *  atomicity. A nested call to the SAME mount still joins cleanly, because it
    *  reaches that store's reentrant `tx()` (txDepth). */
   activeTransactionStore;
-  runScopedTransaction(store2, fn) {
-    if (this.activeTransactionStore !== void 0 && this.activeTransactionStore !== store2) {
-      throw new Error(`nested transaction: cannot open a transaction on the '${this.mountNameOf(store2)}' mount while a transaction on the '${this.mountNameOf(this.activeTransactionStore)}' mount is still open on this MountedStores \u2014 cross-mount transaction nesting is not supported (each mount is a separate SQLite connection; an inner commit could survive an outer rollback).`);
+  runScopedTransaction(store, fn) {
+    if (this.activeTransactionStore !== void 0 && this.activeTransactionStore !== store) {
+      throw new Error(`nested transaction: cannot open a transaction on the '${this.mountNameOf(store)}' mount while a transaction on the '${this.mountNameOf(this.activeTransactionStore)}' mount is still open on this MountedStores \u2014 cross-mount transaction nesting is not supported (each mount is a separate SQLite connection; an inner commit could survive an outer rollback).`);
     }
     const isOutermost = this.activeTransactionStore === void 0;
     if (isOutermost)
-      this.activeTransactionStore = store2;
+      this.activeTransactionStore = store;
     try {
-      return store2.withTransaction(fn);
+      return store.withTransaction(fn);
     } finally {
       if (isOutermost)
         this.activeTransactionStore = void 0;
@@ -44847,8 +44850,8 @@ var MountedStores = class {
    *  supplies a path per store name ('project' or 'domain-<name>'). */
   snapshotAll(pathFor) {
     this.project.snapshot(pathFor("project"));
-    for (const [name, store2] of this.domains)
-      store2.snapshot(pathFor(`domain-${name}`));
+    for (const [name, store] of this.domains)
+      store.snapshot(pathFor(`domain-${name}`));
   }
   /** Mounted domain names, in manifest order. */
   domainNames() {
@@ -47122,85 +47125,6 @@ var SterlingStore = class _SterlingStore {
   }
 };
 
-// packages/tui/dist/lock.js
-import { mkdirSync as mkdirSync3, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname as dirname3 } from "node:path";
-function pidIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0)
-    return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code === "EPERM";
-  }
-}
-function procStartTime(pid) {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
-    return fields[19] ?? null;
-  } catch {
-    return null;
-  }
-}
-function ownerStillHolds(storedToken, currentToken) {
-  if (!storedToken || currentToken === null)
-    return true;
-  return storedToken === currentToken;
-}
-function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = procStartTime) {
-  mkdirSync3(dirname3(lockPath2), { recursive: true });
-  const token = startTimeOf(pid);
-  const content = token ? `${pid} ${token}` : String(pid);
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      writeFileSync(lockPath2, content, { flag: "wx" });
-      return null;
-    } catch (e) {
-      if (e.code !== "EEXIST")
-        throw e;
-    }
-    let parts;
-    try {
-      parts = readFileSync(lockPath2, "utf8").trim().split(/\s+/);
-    } catch {
-      continue;
-    }
-    const ownerRaw = parts[0];
-    const owner2 = Number(ownerRaw);
-    if (owner2 === pid)
-      return null;
-    if (isAlive(owner2) && ownerStillHolds(parts[1], startTimeOf(owner2)))
-      return owner2;
-    try {
-      const cur = readFileSync(lockPath2, "utf8").trim().split(/\s+/)[0];
-      if (cur === ownerRaw)
-        rmSync(lockPath2, { force: true });
-    } catch {
-    }
-  }
-  try {
-    const owner2 = Number(readFileSync(lockPath2, "utf8").trim().split(/\s+/)[0]);
-    if (owner2 !== pid && isAlive(owner2))
-      return owner2;
-  } catch {
-    try {
-      writeFileSync(lockPath2, content, { flag: "wx" });
-    } catch {
-    }
-  }
-  return null;
-}
-function releaseTuiLock(lockPath2, pid) {
-  try {
-    const owner2 = Number(readFileSync(lockPath2, "utf8").trim().split(/\s+/)[0]);
-    if (owner2 === pid)
-      rmSync(lockPath2, { force: true });
-  } catch {
-  }
-}
-
 // packages/tui/dist/state.js
 import { execFileSync } from "node:child_process";
 
@@ -47352,14 +47276,14 @@ ${rm.location}`,
       };
   }
 }
-function knowledgeCountBySource(stores2, type) {
-  return stores2.countBySource({ types: [type] }).filter((g) => g.count > 0);
+function knowledgeCountBySource(stores, type) {
+  return stores.countBySource({ types: [type] }).filter((g) => g.count > 0);
 }
-function knowledgeSearch(stores2, rankTerms2) {
+function knowledgeSearch(stores, rankTerms2) {
   const types = KNOWLEDGE_CATEGORIES.map((c) => c.type);
   const cap = 500;
   const cards = [];
-  for (const g of stores2.bySource({ types, rank_terms: rankTerms2, match_all: true, cap })) {
+  for (const g of stores.bySource({ types, rank_terms: rankTerms2, match_all: true, cap })) {
     for (const r of g.records) {
       cards.push({ ...toCard(r), source: g.source });
     }
@@ -47434,10 +47358,10 @@ function knowledgeSubgroups(records) {
 function blockedByLine(openSlugs) {
   return openSlugs.length ? `blocked by: ${openSlugs.join(", ")}` : void 0;
 }
-function todoCards(store2, expanded = []) {
+function todoCards(store, expanded = []) {
   const groups = /* @__PURE__ */ new Map();
   const flat = [];
-  for (const t of store2.query({ types: ["todo"], source: "user", cap: 500 })) {
+  for (const t of store.query({ types: ["todo"], source: "user", cap: 500 })) {
     const todo = t;
     const label = boardDisplayLabel(todo.text, todo.slug);
     const card = {
@@ -47449,7 +47373,7 @@ function todoCards(store2, expanded = []) {
       body: todo.text,
       detail: [todo.priority && `priority: ${todo.priority}`, todo.file_keys?.length && `files: ${todo.file_keys.join(", ")}`].filter(Boolean).join(" \xB7 ")
     };
-    const blocked = blockedByLine((todo.blocked_by ?? []).filter((slug) => store2.recordsBySlug(slug).some((r) => r.type === "todo")));
+    const blocked = blockedByLine((todo.blocked_by ?? []).filter((slug) => store.recordsBySlug(slug).some((r) => r.type === "todo")));
     if (blocked)
       card.blocked = blocked;
     if (todo.objective) {
@@ -47477,8 +47401,8 @@ function todoCards(store2, expanded = []) {
   out.push(...flat);
   return out;
 }
-function queueCards(store2) {
-  return store2.query({ types: ["todo"], source: "system", cap: 200 }).map((t) => {
+function queueCards(store) {
+  return store.query({ types: ["todo"], source: "system", cap: 200 }).map((t) => {
     const item = t;
     const label = boardDisplayLabel(item.text, item.slug);
     return {
@@ -47490,10 +47414,10 @@ function queueCards(store2) {
     };
   });
 }
-function completedQueueLines(store2, now = () => /* @__PURE__ */ new Date()) {
+function completedQueueLines(store, now = () => /* @__PURE__ */ new Date()) {
   const pad = (n) => String(n).padStart(2, "0");
   const today = now();
-  return store2.listQueueDrain(15).map((e) => {
+  return store.listQueueDrain(15).map((e) => {
     const at = new Date(e.drained_at);
     const sameDay = at.getFullYear() === today.getFullYear() && at.getMonth() === today.getMonth() && at.getDate() === today.getDate();
     const stamp = `${sameDay ? "" : `${pad(at.getMonth() + 1)}-${pad(at.getDate())} `}${pad(at.getHours())}:${pad(at.getMinutes())}`;
@@ -47503,10 +47427,10 @@ function completedQueueLines(store2, now = () => /* @__PURE__ */ new Date()) {
     return `${stamp} ${verb} \xB7 ${target}`;
   });
 }
-function activityLines(store2, now = () => /* @__PURE__ */ new Date()) {
+function activityLines(store, now = () => /* @__PURE__ */ new Date()) {
   const pad = (n) => String(n).padStart(2, "0");
   const today = now();
-  return store2.listActivityLog(15).map((e) => {
+  return store.listActivityLog(15).map((e) => {
     const at = new Date(e.at);
     const sameDay = at.getFullYear() === today.getFullYear() && at.getMonth() === today.getMonth() && at.getDate() === today.getDate();
     const stamp = `${sameDay ? "" : `${pad(at.getMonth() + 1)}-${pad(at.getDate())} `}${pad(at.getHours())}:${pad(at.getMinutes())}`;
@@ -47576,9 +47500,9 @@ function effortOptions(key) {
   return ["low", "medium", "high"];
 }
 var MODEL_VALUE_RE = /^claude-/;
-function cardsFor(store2, tab, expanded = []) {
+function cardsFor(store, tab, expanded = []) {
   if (tab === 0)
-    return todoCards(store2, expanded);
+    return todoCards(store, expanded);
   return [];
 }
 var catId = (type) => `cat:${type}`;
@@ -47597,57 +47521,57 @@ function rankTermsOf(query) {
   }
   return deduped.slice(0, MAX_RANK_TERMS);
 }
-function hydrateInbound(card, ui2, reader) {
-  if (!ui2.expanded.includes(card.id))
+function hydrateInbound(card, ui, reader) {
+  if (!ui.expanded.includes(card.id))
     return card;
   const inbound = reader.inboundSupersedes(card.id);
   return inbound.length ? withInboundSupersedes(card, toInboundSupersedesEntries(inbound)) : card;
 }
-function nodesFor(store2, ui2, knowledge) {
-  if (ui2.tab === QUEUE_TAB)
-    return queueCards(store2).map((card) => ({ kind: "card", card, depth: 0, knowledge: false }));
-  if (ui2.tab !== KNOWLEDGE_TAB)
-    return cardsFor(store2, ui2.tab, ui2.expanded).map((card) => ({ kind: "card", card, depth: card.depth ?? 0, knowledge: false }));
+function nodesFor(store, ui, knowledge) {
+  if (ui.tab === QUEUE_TAB)
+    return queueCards(store).map((card) => ({ kind: "card", card, depth: 0, knowledge: false }));
+  if (ui.tab !== KNOWLEDGE_TAB)
+    return cardsFor(store, ui.tab, ui.expanded).map((card) => ({ kind: "card", card, depth: card.depth ?? 0, knowledge: false }));
   const cap = 500;
-  const query = ui2.searchQuery.trim();
+  const query = ui.searchQuery.trim();
   if (query) {
     const terms = rankTermsOf(query);
     if (terms.length) {
       if (knowledge) {
-        return knowledgeSearch(knowledge, terms).map((card) => ({ kind: "card", card: hydrateInbound(card, ui2, knowledge), depth: 0, knowledge: true }));
+        return knowledgeSearch(knowledge, terms).map((card) => ({ kind: "card", card: hydrateInbound(card, ui, knowledge), depth: 0, knowledge: true }));
       }
       const types = KNOWLEDGE_CATEGORIES.map((c) => c.type);
-      return store2.query({ types, rank_terms: terms, match_all: true, cap }).map((r) => ({ kind: "card", card: hydrateInbound({ ...toCard(r), source: "project" }, ui2, store2), depth: 0, knowledge: true }));
+      return store.query({ types, rank_terms: terms, match_all: true, cap }).map((r) => ({ kind: "card", card: hydrateInbound({ ...toCard(r), source: "project" }, ui, store), depth: 0, knowledge: true }));
     }
   }
   const nodes = [];
   for (const cat of KNOWLEDGE_CATEGORIES) {
-    const sources = knowledge ? knowledgeCountBySource(knowledge, cat.type) : [{ source: "project", count: store2.count({ types: [cat.type] }) }].filter((s2) => s2.count > 0);
+    const sources = knowledge ? knowledgeCountBySource(knowledge, cat.type) : [{ source: "project", count: store.count({ types: [cat.type] }) }].filter((s2) => s2.count > 0);
     const total = sources.reduce((n, s2) => n + s2.count, 0);
     if (total === 0)
       continue;
     nodes.push({ kind: "category", type: cat.type, label: cat.label, count: total });
-    if (!ui2.expanded.includes(catId(cat.type)))
+    if (!ui.expanded.includes(catId(cat.type)))
       continue;
     for (const sc of sources) {
       nodes.push({ kind: "source", catType: cat.type, source: sc.source, count: sc.count });
-      if (!ui2.expanded.includes(srcId(cat.type, sc.source)))
+      if (!ui.expanded.includes(srcId(cat.type, sc.source)))
         continue;
-      const records = knowledge ? knowledge.querySource(sc.source, { types: [cat.type], cap }) : store2.query({ types: [cat.type], cap });
+      const records = knowledge ? knowledge.querySource(sc.source, { types: [cat.type], cap }) : store.query({ types: [cat.type], cap });
       const groups = knowledgeSubgroups(records);
-      const reader = knowledge ?? store2;
+      const reader = knowledge ?? store;
       if (groups.length <= 1) {
         for (const card of groups[0]?.cards ?? []) {
-          nodes.push({ kind: "card", card: hydrateInbound({ ...card, source: sc.source }, ui2, reader), depth: 2, knowledge: true });
+          nodes.push({ kind: "card", card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 2, knowledge: true });
         }
         continue;
       }
       for (const g of groups) {
         nodes.push({ kind: "subcategory", catType: cat.type, source: sc.source, key: g.key, label: g.label, count: g.cards.length });
-        if (!ui2.expanded.includes(subId(cat.type, sc.source, g.key)))
+        if (!ui.expanded.includes(subId(cat.type, sc.source, g.key)))
           continue;
         for (const card of g.cards) {
-          nodes.push({ kind: "card", card: hydrateInbound({ ...card, source: sc.source }, ui2, reader), depth: 3, knowledge: true });
+          nodes.push({ kind: "card", card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 3, knowledge: true });
         }
       }
     }
@@ -47687,10 +47611,10 @@ function wrapText(text, width) {
   return out;
 }
 var clipEllipsis = (s2, width) => Number.isFinite(width) && s2.length > width ? `${s2.slice(0, Math.max(1, width) - 1)}\u2026` : s2;
-function buildSystemTab(snapshot, ui2, width = Infinity) {
+function buildSystemTab(snapshot, ui, width = Infinity) {
   const snap = snapshot ?? EMPTY_ROSTER;
   const keys = Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
-  const selector = ui2.selector;
+  const selector = ui.selector;
   const clip = (s2) => clipEllipsis(s2, width);
   const rows = keys.map((key, i) => {
     const config = snap.configModels[key];
@@ -47699,7 +47623,7 @@ function buildSystemTab(snapshot, ui2, width = Infinity) {
     const shownModel = governed.length ? governed[0].installedModel : config.model;
     const shownEffort = governed.length ? governed[0].installedEffort : config.effort;
     const drift = governed.some((a) => driftOf(a.installedModel, config.model) || driftOf(a.installedEffort, config.effort));
-    const selected = i === ui2.cursor;
+    const selected = i === ui.cursor;
     const marker = selected ? "\u203A " : "  ";
     const label = key.charAt(0).toUpperCase() + key.slice(1);
     const lines = [
@@ -47724,10 +47648,10 @@ function buildSystemTab(snapshot, ui2, width = Infinity) {
   });
   const shown = selector ? rows.filter((r) => r.key === selector.key) : rows;
   const catBanner = catalogBanner(snap.catalog, width);
-  const banner = ui2.notice ? [clip(`\u26A0 ${ui2.notice}`), ...catBanner] : catBanner;
-  const sparringRows = selector ? [] : sparringPartnerRows(snap, ui2, width, keys.length);
-  const tddRows = selector ? [] : [tddToggleRow(snap, ui2, width, keys.length + 2)];
-  const modeRows = selector ? [] : [modeToggleRow(snap, ui2, width, keys.length + 3)];
+  const banner = ui.notice ? [clip(`\u26A0 ${ui.notice}`), ...catBanner] : catBanner;
+  const sparringRows = selector ? [] : sparringPartnerRows(snap, ui, width, keys.length);
+  const tddRows = selector ? [] : [tddToggleRow(snap, ui, width, keys.length + 2)];
+  const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
   return { rows: shown, banner, sparringRows, tddRows, modeRows };
 }
 function catalogBanner(catalog, width) {
@@ -47738,12 +47662,12 @@ function catalogBanner(catalog, width) {
     return [clip(`catalog stale (as of ${catalog.staleDate ?? "?"})`)];
   return [clip("catalog: current")];
 }
-function sparringPartnerRows(snap, ui2, width, cursorBase) {
+function sparringPartnerRows(snap, ui, width, cursorBase) {
   const clip = (s2) => clipEllipsis(s2, width);
   const sparringPartner = snap.sparringPartner ?? { enabled: true };
   const codexWired = snap.codexWired ?? false;
-  const toggleSelected = ui2.cursor === cursorBase;
-  const modelSelected = ui2.cursor === cursorBase + 1;
+  const toggleSelected = ui.cursor === cursorBase;
+  const modelSelected = ui.cursor === cursorBase + 1;
   const toggleMarker = toggleSelected ? "\u203A " : "  ";
   const modelMarker = modelSelected ? "\u203A " : "  ";
   const onOff = sparringPartner.enabled ? "ON" : "OFF";
@@ -47752,34 +47676,34 @@ function sparringPartnerRows(snap, ui2, width, cursorBase) {
     id: "sys:sparring_enabled",
     lines: [{ text: clip(`${toggleMarker}Sparring partner: ${onOff}${wiredSuffix}`), kind: "title", selected: toggleSelected }]
   };
-  const editing = ui2.sparringModelEdit !== void 0 && modelSelected;
-  const modelText = editing ? `${ui2.sparringModelEdit}\u258C` : sparringPartner.model && sparringPartner.model.length ? sparringPartner.model : "(CLI default)";
+  const editing = ui.sparringModelEdit !== void 0 && modelSelected;
+  const modelText = editing ? `${ui.sparringModelEdit}\u258C` : sparringPartner.model && sparringPartner.model.length ? sparringPartner.model : "(CLI default)";
   const modelRow = {
     id: "sys:sparring_model",
     lines: [{ text: clip(`${modelMarker}Default Codex model: ${modelText}`), kind: "title", selected: modelSelected }]
   };
   return [toggleRow, modelRow];
 }
-function tddToggleRow(snap, ui2, width, cursorIndex) {
+function tddToggleRow(snap, ui, width, cursorIndex) {
   const clip = (s2) => clipEllipsis(s2, width);
   const tdd = snap.tdd ?? { enabled: true };
-  const selected = ui2.cursor === cursorIndex;
+  const selected = ui.cursor === cursorIndex;
   const marker = selected ? "\u203A " : "  ";
   const onOff = tdd.enabled ? "ON" : "OFF";
   return { id: "sys:tdd_enabled", lines: [{ text: clip(`${marker}TDD: ${onOff}`), kind: "title", selected }] };
 }
-function modeToggleRow(snap, ui2, width, cursorIndex) {
+function modeToggleRow(snap, ui, width, cursorIndex) {
   const clip = (s2) => clipEllipsis(s2, width);
   const mode = snap.mode === void 0 ? "hobby" : snap.mode;
-  const selected = ui2.cursor === cursorIndex;
+  const selected = ui.cursor === cursorIndex;
   const marker = selected ? "\u203A " : "  ";
   const shown = mode === null ? "UNKNOWN (config unreadable)" : mode === "hobby" || mode === "work" ? mode.toUpperCase() : `INVALID ('${mode}')`;
   return { id: "sys:project_mode", lines: [{ text: clip(`${marker}Project mode: ${shown}`), kind: "title", selected }] };
 }
-function tabsFor(store2, activeTab) {
+function tabsFor(store, activeTab) {
   let taskCount = null;
   try {
-    taskCount = store2.count({ types: ["todo"], source: "user" });
+    taskCount = store.count({ types: ["todo"], source: "user" });
   } catch {
     taskCount = null;
   }
@@ -47788,8 +47712,8 @@ function tabsFor(store2, activeTab) {
     active: i === activeTab
   }));
 }
-function systemDashboardState(ui2, width, banner, projectName2, bodyTop, tabs, maxBodyLines, roster2) {
-  const view = buildSystemTab(roster2 ?? EMPTY_ROSTER, ui2, width);
+function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster) {
+  const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows = [];
   let screenRow = 0;
   for (const text of view.banner) {
@@ -47822,26 +47746,26 @@ function systemDashboardState(ui2, width, banner, projectName2, bodyTop, tabs, m
   }
   const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
   const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
-  const scroll = Math.max(0, Math.min(ui2.scroll ?? 0, maxScroll));
+  const scroll = Math.max(0, Math.min(ui.scroll ?? 0, maxScroll));
   return {
     tabs,
     rows,
     emptyMessage: view.rows.length ? void 0 : "(no configured models)",
     footer: `\u2190/\u2192 or 1-${TABS.length} tabs \xB7 \u2191/\u2193 rows \xB7 enter change model/effort \xB7 esc cancel \xB7 q quit`,
     banner,
-    projectName: projectName2,
+    projectName,
     bodyTop,
     scroll
   };
 }
-function buildDashboardState(store2, ui2, width = Infinity, maxBodyLines = Infinity, projectName2 = "", showBanner2 = false, knowledge, roster2) {
+function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster) {
   const banner = bannerLines(width, showBanner2);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
-  const tabs = tabsFor(store2, ui2.tab);
-  if (ui2.tab === SYSTEM_TAB)
-    return systemDashboardState(ui2, width, banner, projectName2, bodyTop, tabs, maxBodyLines, roster2);
-  const nodes = nodesFor(store2, ui2, knowledge);
-  const cursor = Math.min(ui2.cursor, Math.max(0, nodes.length - 1));
+  const tabs = tabsFor(store, ui.tab);
+  if (ui.tab === SYSTEM_TAB)
+    return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster);
+  const nodes = nodesFor(store, ui, knowledge);
+  const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
   let rows = [];
   let screenRow = 0;
   for (let i = 0; i < nodes.length; i++) {
@@ -47855,30 +47779,30 @@ function buildDashboardState(store2, ui2, width = Infinity, maxBodyLines = Infin
     if (node.kind === "category") {
       id = catId(node.type);
       type = "category";
-      expanded = ui2.expanded.includes(id);
+      expanded = ui.expanded.includes(id);
       lines = [{ text: clipEllipsis(`${marker}${expanded ? "\u25BE" : "\u25B8"} ${node.label} (${node.count})`, width), kind: "title" }];
     } else if (node.kind === "source") {
       id = srcId(node.catType, node.source);
       type = "source";
-      expanded = ui2.expanded.includes(id);
+      expanded = ui.expanded.includes(id);
       const pad = "  ";
       lines = [{ text: clipEllipsis(`${marker}${pad}${expanded ? "\u25BE" : "\u25B8"} ${node.source} (${node.count})`, width), kind: "title" }];
     } else if (node.kind === "subcategory") {
       id = subId(node.catType, node.source, node.key);
       type = "subcategory";
-      expanded = ui2.expanded.includes(id);
+      expanded = ui.expanded.includes(id);
       const pad = "    ";
       lines = [{ text: clipEllipsis(`${marker}${pad}${expanded ? "\u25BE" : "\u25B8"} ${node.label} (${node.count})`, width), kind: "title" }];
     } else {
       const { card, depth, knowledge: knowledge2 } = node;
       id = card.id;
       type = card.type;
-      expanded = ui2.expanded.includes(card.id);
+      expanded = ui.expanded.includes(card.id);
       const pad = "  ".repeat(depth);
-      if (ui2.boardEdit && ui2.boardEdit.id === card.id) {
+      if (ui.boardEdit && ui.boardEdit.id === card.id) {
         const prefix = 2 + pad.length;
         const wrapWidth = Number.isFinite(width) ? Math.max(1, width - prefix) : width;
-        lines = wrapText(`${ui2.boardEdit.text}\u258C`, wrapWidth).map((text, j) => ({
+        lines = wrapText(`${ui.boardEdit.text}\u258C`, wrapWidth).map((text, j) => ({
           text: (j === 0 ? marker + pad : " ".repeat(prefix)) + text,
           kind: j === 0 ? "title" : "body"
         }));
@@ -47909,7 +47833,7 @@ function buildDashboardState(store2, ui2, width = Infinity, maxBodyLines = Infin
   }
   let queueCompleted;
   let queueActivity;
-  if (ui2.tab === QUEUE_TAB) {
+  if (ui.tab === QUEUE_TAB) {
     const totalLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
     const startRow = Number.isFinite(maxBodyLines) ? Math.max(1, Math.floor(maxBodyLines / 2)) : totalLines;
     let overflow;
@@ -47924,28 +47848,28 @@ function buildDashboardState(store2, ui2, width = Infinity, maxBodyLines = Infin
       overflow = `\u2026 ${rows.length - keep.length} more pending`;
       rows = keep;
     }
-    const completed = completedQueueLines(store2);
+    const completed = completedQueueLines(store);
     queueCompleted = {
       startRow,
       header: "\u2014 completed \u2014",
       lines: completed.length ? completed : ["(nothing completed yet)"],
       ...overflow ? { overflow } : {}
     };
-    const activity = activityLines(store2);
+    const activity = activityLines(store);
     queueActivity = {
       header: "\u2014 activity \u2014",
       lines: activity.length ? activity : ["(no activity yet)"]
     };
   }
-  const scrollable = ui2.tab !== QUEUE_TAB;
+  const scrollable = ui.tab !== QUEUE_TAB;
   const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
   const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
-  const scroll = scrollable ? Math.max(0, Math.min(ui2.scroll ?? 0, maxScroll)) : 0;
-  const searchActive = ui2.tab === KNOWLEDGE_TAB;
+  const scroll = scrollable ? Math.max(0, Math.min(ui.scroll ?? 0, maxScroll)) : 0;
+  const searchActive = ui.tab === KNOWLEDGE_TAB;
   return {
     tabs,
     rows,
-    emptyMessage: nodes.length === 0 ? ui2.tab === KNOWLEDGE_TAB && ui2.searchQuery ? "(no matches)" : ui2.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
+    emptyMessage: nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
     footer: (
       // Fix round (Opus review of 71c1f41): a Tasks-tab board_edit notice
       // (lost-update refusal, vanished item, failed HEAD resolve) must be
@@ -47953,13 +47877,13 @@ function buildDashboardState(store2, ui2, width = Infinity, maxBodyLines = Infin
       // state.footer unconditionally, so this is the one line available to
       // this scope's two files without touching render.ts. Mirrors the
       // System tab's own '⚠ ' convention (buildSystemTab's banner).
-      ui2.tab === TASKS_TAB && ui2.notice ? `\u26A0 ${ui2.notice}` : `\u2190/\u2192 or 1-${TABS.length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui2.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears" : "") + (ui2.tab === TASKS_TAB ? ui2.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
+      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : `\u2190/\u2192 or 1-${TABS.length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
     ),
-    searchLine: searchActive ? `search: ${ui2.searchQuery}` : void 0,
+    searchLine: searchActive ? `search: ${ui.searchQuery}` : void 0,
     queueCompleted,
     queueActivity,
     banner,
-    projectName: projectName2,
+    projectName,
     bodyTop,
     scroll
   };
@@ -47976,22 +47900,22 @@ function screenLineToRow(state, line1, maxBodyLines = Infinity) {
   }
   return -1;
 }
-function reduce(store2, ui2, event2, viewport2 = {}, knowledge, roster2, resolveHeadSha = defaultResolveHeadSha) {
+function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHeadSha = defaultResolveHeadSha) {
   const maxBodyLines = viewport2.maxBodyLines ?? Infinity;
-  const nodes = nodesFor(store2, ui2, knowledge);
+  const nodes = nodesFor(store, ui, knowledge);
   const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects = [];
-  const switchTab = (index) => ({ ...ui2, tab: index, cursor: 0, scroll: 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
-  const scrollable = ui2.tab !== QUEUE_TAB;
-  const buildSelf = (uiNext) => buildDashboardState(store2, uiNext, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster2);
+  const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
+  const scrollable = ui.tab !== QUEUE_TAB;
+  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster);
   const revealAt = (cursor) => {
     if (!scrollable || !Number.isFinite(maxBodyLines))
-      return { ...ui2, cursor };
-    const st = buildSelf({ ...ui2, cursor });
+      return { ...ui, cursor };
+    const st = buildSelf({ ...ui, cursor });
     const total = st.rows.length ? st.rows[st.rows.length - 1].screenRow + st.rows[st.rows.length - 1].lines.length : 0;
     const max = Math.max(0, total - maxBodyLines);
-    let scroll = ui2.scroll ?? 0;
-    const bannerOffset = ui2.tab === SYSTEM_TAB ? st.rows.filter((r) => r.type === "system-banner").length : 0;
+    let scroll = ui.scroll ?? 0;
+    const bannerOffset = ui.tab === SYSTEM_TAB ? st.rows.filter((r) => r.type === "system-banner").length : 0;
     const row = st.rows[cursor + bannerOffset];
     if (row) {
       const top = row.screenRow;
@@ -48001,54 +47925,54 @@ function reduce(store2, ui2, event2, viewport2 = {}, knowledge, roster2, resolve
       else if (bottom > scroll + maxBodyLines)
         scroll = Math.min(top, bottom - maxBodyLines);
     }
-    return { ...ui2, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
+    return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
   };
-  const moveCursor = (delta) => revealAt(clamp(ui2.cursor + delta));
-  const toggle = (id) => ui2.expanded.includes(id) ? ui2.expanded.filter((x) => x !== id) : [...ui2.expanded, id];
+  const moveCursor = (delta) => revealAt(clamp(ui.cursor + delta));
+  const toggle = (id) => ui.expanded.includes(id) ? ui.expanded.filter((x) => x !== id) : [...ui.expanded, id];
   const activate = (index) => {
     const node = nodes[index];
     if (!node)
-      return ui2;
+      return ui;
     if (node.kind === "category") {
-      return { ...ui2, cursor: index, expanded: toggle(catId(node.type)) };
+      return { ...ui, cursor: index, expanded: toggle(catId(node.type)) };
     }
     if (node.kind === "source") {
-      return { ...ui2, cursor: index, expanded: toggle(srcId(node.catType, node.source)) };
+      return { ...ui, cursor: index, expanded: toggle(srcId(node.catType, node.source)) };
     }
     if (node.kind === "subcategory") {
-      return { ...ui2, cursor: index, expanded: toggle(subId(node.catType, node.source, node.key)) };
+      return { ...ui, cursor: index, expanded: toggle(subId(node.catType, node.source, node.key)) };
     }
     const card = node.card;
     if (card.type === "objective") {
-      return { ...ui2, cursor: index, expanded: toggle(card.id) };
+      return { ...ui, cursor: index, expanded: toggle(card.id) };
     }
     effects.push({ type: "select", recordType: card.type, id: card.id });
-    return { ...ui2, cursor: index, expanded: toggle(card.id) };
+    return { ...ui, cursor: index, expanded: toggle(card.id) };
   };
   switch (event2.kind) {
     case "key":
-      if (ui2.tab === TASKS_TAB && ui2.boardEdit) {
-        const be = ui2.boardEdit;
+      if (ui.tab === TASKS_TAB && ui.boardEdit) {
+        const be = ui.boardEdit;
         switch (event2.name) {
           case "ESCAPE":
-            return { ui: { ...ui2, boardEdit: void 0, notice: void 0 }, effects };
+            return { ui: { ...ui, boardEdit: void 0, notice: void 0 }, effects };
           case "BACKSPACE":
-            return { ui: { ...ui2, boardEdit: { ...be, text: be.text.slice(0, -1) } }, effects };
+            return { ui: { ...ui, boardEdit: { ...be, text: be.text.slice(0, -1) } }, effects };
           case "ENTER": {
             const trimmed = be.text.trim();
             if (!trimmed)
-              return { ui: { ...ui2, boardEdit: void 0, notice: void 0 }, effects };
-            const current = store2.get(be.id);
+              return { ui: { ...ui, boardEdit: void 0, notice: void 0 }, effects };
+            const current = store.get(be.id);
             if (!current || current.type !== "todo" || current.status === "superseded" || typeof current.version !== "number") {
               return {
-                ui: { ...ui2, boardEdit: void 0, notice: `board item no longer exists \u2014 the edit was discarded` },
+                ui: { ...ui, boardEdit: void 0, notice: `board item no longer exists \u2014 the edit was discarded` },
                 effects
               };
             }
             if (current.version !== be.version) {
               return {
                 ui: {
-                  ...ui2,
+                  ...ui,
                   boardEdit: { ...be, version: current.version },
                   notice: `board item changed since it was opened \u2014 press ENTER again to overwrite it, ESC to cancel`
                 },
@@ -48070,7 +47994,7 @@ function reduce(store2, ui2, event2, viewport2 = {}, knowledge, roster2, resolve
             });
             return {
               ui: {
-                ...ui2,
+                ...ui,
                 boardEdit: void 0,
                 notice: head ? void 0 : `could not read the current git HEAD \u2014 measured_at_head was not refreshed (the text edit was still saved)`
               },
@@ -48078,82 +48002,82 @@ function reduce(store2, ui2, event2, viewport2 = {}, knowledge, roster2, resolve
             };
           }
         }
-        return { ui: ui2, effects };
+        return { ui, effects };
       }
-      if (ui2.tab === SYSTEM_TAB && roster2) {
-        const sysKeys = Object.keys(roster2.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
+      if (ui.tab === SYSTEM_TAB && roster) {
+        const sysKeys = Object.keys(roster.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
         const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 4 - 1)));
-        const sel = ui2.selector;
-        const editing = ui2.sparringModelEdit !== void 0;
+        const sel = ui.selector;
+        const editing = ui.sparringModelEdit !== void 0;
         switch (event2.name) {
           case "UP":
             if (sel)
-              return { ui: { ...ui2, selector: { ...sel, highlight: Math.max(0, sel.highlight - 1) } }, effects };
+              return { ui: { ...ui, selector: { ...sel, highlight: Math.max(0, sel.highlight - 1) } }, effects };
             if (editing)
-              return { ui: ui2, effects };
-            return { ui: revealAt(sysClamp(ui2.cursor - 1)), effects };
+              return { ui, effects };
+            return { ui: revealAt(sysClamp(ui.cursor - 1)), effects };
           case "DOWN": {
             if (sel) {
-              const n = sel.stage === "model" ? roster2.catalog.entries.length : effortOptions(sel.key).length;
-              return { ui: { ...ui2, selector: { ...sel, highlight: Math.min(Math.max(0, n - 1), sel.highlight + 1) } }, effects };
+              const n = sel.stage === "model" ? roster.catalog.entries.length : effortOptions(sel.key).length;
+              return { ui: { ...ui, selector: { ...sel, highlight: Math.min(Math.max(0, n - 1), sel.highlight + 1) } }, effects };
             }
             if (editing)
-              return { ui: ui2, effects };
-            return { ui: revealAt(sysClamp(ui2.cursor + 1)), effects };
+              return { ui, effects };
+            return { ui: revealAt(sysClamp(ui.cursor + 1)), effects };
           }
           case "ESCAPE":
             if (sel)
-              return { ui: { ...ui2, selector: void 0 }, effects };
+              return { ui: { ...ui, selector: void 0 }, effects };
             if (editing)
-              return { ui: { ...ui2, sparringModelEdit: void 0 }, effects };
-            return { ui: ui2, effects };
+              return { ui: { ...ui, sparringModelEdit: void 0 }, effects };
+            return { ui, effects };
           case "BACKSPACE":
             if (editing)
-              return { ui: { ...ui2, sparringModelEdit: (ui2.sparringModelEdit ?? "").slice(0, -1) }, effects };
-            return { ui: ui2, effects };
+              return { ui: { ...ui, sparringModelEdit: (ui.sparringModelEdit ?? "").slice(0, -1) }, effects };
+            return { ui, effects };
           case "ENTER":
           case "SPACE": {
-            const cursor = sysClamp(ui2.cursor);
+            const cursor = sysClamp(ui.cursor);
             if (editing) {
-              const committedModel = (ui2.sparringModelEdit ?? "").trim();
+              const committedModel = (ui.sparringModelEdit ?? "").trim();
               effects.push({ type: "sparring_model", model: committedModel });
               const sparringNotice = committedModel ? `Default Codex model set to '${committedModel}' \u2014 a model named on the call itself overrides it, and existing Codex threads keep their opener's model until a new consult starts.` : `Default Codex model cleared \u2014 consults now take the Codex CLI default. A model named on the call itself still overrides it, and existing Codex threads keep their opener's model.`;
-              return { ui: { ...ui2, sparringModelEdit: void 0, notice: sparringNotice }, effects };
+              return { ui: { ...ui, sparringModelEdit: void 0, notice: sparringNotice }, effects };
             }
             if (cursor === sysKeys.length) {
-              effects.push({ type: "sparring_toggle", enabled: !(roster2.sparringPartner?.enabled ?? true) });
-              return { ui: { ...ui2, cursor, notice: void 0 }, effects };
+              effects.push({ type: "sparring_toggle", enabled: !(roster.sparringPartner?.enabled ?? true) });
+              return { ui: { ...ui, cursor, notice: void 0 }, effects };
             }
             if (cursor === sysKeys.length + 1) {
-              return { ui: { ...ui2, cursor, sparringModelEdit: roster2.sparringPartner?.model ?? "", notice: void 0 }, effects };
+              return { ui: { ...ui, cursor, sparringModelEdit: roster.sparringPartner?.model ?? "", notice: void 0 }, effects };
             }
             if (cursor === sysKeys.length + 2) {
-              effects.push({ type: "tdd_toggle", enabled: !(roster2.tdd?.enabled ?? true) });
-              return { ui: { ...ui2, cursor, notice: void 0 }, effects };
+              effects.push({ type: "tdd_toggle", enabled: !(roster.tdd?.enabled ?? true) });
+              return { ui: { ...ui, cursor, notice: void 0 }, effects };
             }
             if (cursor === sysKeys.length + 3) {
-              effects.push({ type: "mode_toggle", mode: (roster2.mode ?? "hobby") === "hobby" ? "work" : "hobby" });
-              return { ui: { ...ui2, cursor, notice: void 0 }, effects };
+              effects.push({ type: "mode_toggle", mode: (roster.mode ?? "hobby") === "hobby" ? "work" : "hobby" });
+              return { ui: { ...ui, cursor, notice: void 0 }, effects };
             }
             const key = sysKeys[cursor];
             if (!key)
-              return { ui: ui2, effects };
+              return { ui, effects };
             if (!sel) {
-              if (roster2.catalog.entries.length === 0) {
-                return { ui: { ...ui2, cursor, notice: "model catalog empty or invalid \u2014 nothing to pick; refresh the catalog first" }, effects };
+              if (roster.catalog.entries.length === 0) {
+                return { ui: { ...ui, cursor, notice: "model catalog empty or invalid \u2014 nothing to pick; refresh the catalog first" }, effects };
               }
-              return { ui: { ...ui2, cursor, selector: { key, stage: "model", highlight: 0 }, notice: void 0 }, effects };
+              return { ui: { ...ui, cursor, selector: { key, stage: "model", highlight: 0 }, notice: void 0 }, effects };
             }
             if (sel.stage === "model") {
-              const entry = roster2.catalog.entries[sel.highlight];
-              return { ui: { ...ui2, selector: { key: sel.key, stage: "effort", highlight: 0, model: entry ? entry.id : "" } }, effects };
+              const entry = roster.catalog.entries[sel.highlight];
+              return { ui: { ...ui, selector: { key: sel.key, stage: "effort", highlight: 0, model: entry ? entry.id : "" } }, effects };
             }
             const efforts = effortOptions(sel.key);
             const effort = efforts[sel.highlight] ?? efforts[0];
             const model = sel.model ?? "";
-            const config = roster2.configModels[sel.key];
+            const config = roster.configModels[sel.key];
             if (config && MODEL_VALUE_RE.test(model)) {
-              const agents = roster2.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
+              const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
               effects.push({
                 type: "model_swap",
                 key: sel.key,
@@ -48162,10 +48086,10 @@ function reduce(store2, ui2, event2, viewport2 = {}, knowledge, roster2, resolve
                 agents,
                 decisionTitle: `Model swap: ${sel.key} ${config.model}\u2192${model} (System tab)`
               });
-              return { ui: { ...ui2, selector: void 0, notice: void 0 }, effects };
+              return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
             }
             return {
-              ui: { ...ui2, selector: void 0, notice: `model swap refused: '${model || "(none)"}' is not a valid claude-* model id` },
+              ui: { ...ui, selector: void 0, notice: `model swap refused: '${model || "(none)"}' is not a valid claude-* model id` },
               effects
             };
           }
@@ -48174,83 +48098,83 @@ function reduce(store2, ui2, event2, viewport2 = {}, knowledge, roster2, resolve
       switch (event2.name) {
         case "QUIT":
           effects.push({ type: "quit" });
-          return { ui: ui2, effects };
+          return { ui, effects };
         case "ESCAPE":
-          if (ui2.tab === KNOWLEDGE_TAB) {
-            return { ui: { ...ui2, searchQuery: "", cursor: 0, scroll: 0 }, effects };
+          if (ui.tab === KNOWLEDGE_TAB) {
+            return { ui: { ...ui, searchQuery: "", cursor: 0, scroll: 0 }, effects };
           }
-          return { ui: ui2, effects };
+          return { ui, effects };
         case "BACKSPACE":
-          if (ui2.tab === KNOWLEDGE_TAB) {
-            return { ui: { ...ui2, searchQuery: ui2.searchQuery.slice(0, -1), cursor: 0, scroll: 0 }, effects };
+          if (ui.tab === KNOWLEDGE_TAB) {
+            return { ui: { ...ui, searchQuery: ui.searchQuery.slice(0, -1), cursor: 0, scroll: 0 }, effects };
           }
-          return { ui: ui2, effects };
+          return { ui, effects };
         case "LEFT":
-          return { ui: switchTab((ui2.tab + TABS.length - 1) % TABS.length), effects };
+          return { ui: switchTab((ui.tab + TABS.length - 1) % TABS.length), effects };
         case "RIGHT":
         case "TAB":
-          return { ui: switchTab((ui2.tab + 1) % TABS.length), effects };
+          return { ui: switchTab((ui.tab + 1) % TABS.length), effects };
         case "UP":
           return { ui: moveCursor(-1), effects };
         case "DOWN":
           return { ui: moveCursor(1), effects };
         case "ENTER":
-          return { ui: activate(clamp(ui2.cursor)), effects };
+          return { ui: activate(clamp(ui.cursor)), effects };
         case "SPACE":
-          return { ui: activate(clamp(ui2.cursor)), effects };
+          return { ui: activate(clamp(ui.cursor)), effects };
       }
       break;
     case "char": {
       const ch = event2.ch;
       if (ch.length !== 1)
-        return { ui: ui2, effects };
-      if (ui2.tab === SYSTEM_TAB && ui2.sparringModelEdit !== void 0) {
-        return { ui: { ...ui2, sparringModelEdit: ui2.sparringModelEdit + ch }, effects };
+        return { ui, effects };
+      if (ui.tab === SYSTEM_TAB && ui.sparringModelEdit !== void 0) {
+        return { ui: { ...ui, sparringModelEdit: ui.sparringModelEdit + ch }, effects };
       }
-      if (ui2.tab === TASKS_TAB && ui2.boardEdit) {
-        return { ui: { ...ui2, boardEdit: { ...ui2.boardEdit, text: ui2.boardEdit.text + ch } }, effects };
+      if (ui.tab === TASKS_TAB && ui.boardEdit) {
+        return { ui: { ...ui, boardEdit: { ...ui.boardEdit, text: ui.boardEdit.text + ch } }, effects };
       }
-      if (ui2.tab === KNOWLEDGE_TAB) {
-        return { ui: { ...ui2, searchQuery: ui2.searchQuery + ch, cursor: 0, scroll: 0 }, effects };
+      if (ui.tab === KNOWLEDGE_TAB) {
+        return { ui: { ...ui, searchQuery: ui.searchQuery + ch, cursor: 0, scroll: 0 }, effects };
       }
       if (ch === "q") {
         effects.push({ type: "quit" });
-        return { ui: ui2, effects };
+        return { ui, effects };
       }
-      if (ch === " " && ui2.tab === SYSTEM_TAB) {
-        return reduce(store2, ui2, { kind: "key", name: "ENTER" }, viewport2, knowledge, roster2, resolveHeadSha);
+      if (ch === " " && ui.tab === SYSTEM_TAB) {
+        return reduce(store, ui, { kind: "key", name: "ENTER" }, viewport2, knowledge, roster, resolveHeadSha);
       }
       if (ch === " ")
-        return { ui: activate(clamp(ui2.cursor)), effects };
-      if (ch === "e" && ui2.tab === TASKS_TAB) {
-        const node = nodes[clamp(ui2.cursor)];
+        return { ui: activate(clamp(ui.cursor)), effects };
+      if (ch === "e" && ui.tab === TASKS_TAB) {
+        const node = nodes[clamp(ui.cursor)];
         if (node && node.kind === "card" && node.card.type !== "objective") {
-          const rec = store2.get(node.card.id);
+          const rec = store.get(node.card.id);
           const version = rec && typeof rec.version === "number" ? rec.version : 0;
-          return { ui: { ...ui2, boardEdit: { id: node.card.id, text: node.card.body, version }, notice: void 0 }, effects };
+          return { ui: { ...ui, boardEdit: { id: node.card.id, text: node.card.body, version }, notice: void 0 }, effects };
         }
-        return { ui: ui2, effects };
+        return { ui, effects };
       }
       if (/^[1-9]$/.test(ch)) {
         const index = Number(ch) - 1;
         if (index < TABS.length)
           return { ui: switchTab(index), effects };
       }
-      return { ui: ui2, effects };
+      return { ui, effects };
     }
     case "tab":
       if (event2.index < 0 || event2.index >= TABS.length)
-        return { ui: ui2, effects };
+        return { ui, effects };
       return { ui: switchTab(event2.index), effects };
     case "wheel": {
       if (!scrollable)
-        return { ui: { ...ui2, cursor: clamp(ui2.cursor + (event2.dy > 0 ? 1 : -1)) }, effects };
-      const desired = (ui2.scroll ?? 0) + (event2.dy > 0 ? 3 : -3);
-      const st = buildSelf({ ...ui2, scroll: desired });
-      return { ui: { ...ui2, scroll: st.scroll }, effects };
+        return { ui: { ...ui, cursor: clamp(ui.cursor + (event2.dy > 0 ? 1 : -1)) }, effects };
+      const desired = (ui.scroll ?? 0) + (event2.dy > 0 ? 3 : -3);
+      const st = buildSelf({ ...ui, scroll: desired });
+      return { ui: { ...ui, scroll: st.scroll }, effects };
     }
     case "click": {
-      const state = buildDashboardState(store2, ui2, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster2);
+      const state = buildDashboardState(store, ui, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster);
       if (event2.y === state.bodyTop - 1) {
         let x = 1;
         for (let i = 0; i < state.tabs.length; i++) {
@@ -48259,38 +48183,38 @@ function reduce(store2, ui2, event2, viewport2 = {}, knowledge, roster2, resolve
             return { ui: switchTab(i), effects };
           x += width;
         }
-        return { ui: ui2, effects };
+        return { ui, effects };
       }
       const row = screenLineToRow(state, event2.y, maxBodyLines);
       if (row !== -1)
         return { ui: activate(row), effects };
-      return { ui: ui2, effects };
+      return { ui, effects };
     }
     case "rightclick":
-      return { ui: { ...ui2, expanded: [], scroll: 0 }, effects };
+      return { ui: { ...ui, expanded: [], scroll: 0 }, effects };
   }
-  return { ui: ui2, effects };
+  return { ui, effects };
 }
-function runEffects(store2, effects, now = () => (/* @__PURE__ */ new Date()).toISOString()) {
+function runEffects(store, effects, now = () => (/* @__PURE__ */ new Date()).toISOString()) {
   let quit = false;
   for (const e of effects) {
     if (e.type === "select")
-      store2.writeSelection(e.recordType, e.id, now());
+      store.writeSelection(e.recordType, e.id, now());
     if (e.type === "quit")
       quit = true;
     if (e.type === "board_edit") {
-      const old = store2.get(e.id);
+      const old = store.get(e.id);
       const candidate = { ...old, text: e.text, updated_at: now() };
       if (e.measuredAtHead)
         candidate.measured_at_head = e.measuredAtHead;
-      store2.updateTodo(e.id, candidate, { expected_version: e.version });
+      store.updateTodo(e.id, candidate, { expected_version: e.version });
     }
   }
   return quit;
 }
 
 // packages/tui/dist/config-writeback.js
-import { readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join as join3 } from "node:path";
 function configPath(explicit) {
   return explicit ?? join3(process.cwd(), ".sterling", "config.json");
@@ -48298,9 +48222,9 @@ function configPath(explicit) {
 function applySparringToggle(e, onError, path) {
   try {
     const target = configPath(path);
-    const raw = JSON.parse(readFileSync2(target, "utf8"));
+    const raw = JSON.parse(readFileSync(target, "utf8"));
     raw.sparring_partner = { ...raw.sparring_partner, enabled: e.enabled };
-    writeFileSync2(target, JSON.stringify(raw, null, 2) + "\n");
+    writeFileSync(target, JSON.stringify(raw, null, 2) + "\n");
     return true;
   } catch (err) {
     onError?.(`sparring partner toggle failed \u2014 ${err.message}`);
@@ -48310,9 +48234,9 @@ function applySparringToggle(e, onError, path) {
 function applyTddToggle(e, onError, path) {
   try {
     const target = configPath(path);
-    const raw = JSON.parse(readFileSync2(target, "utf8"));
+    const raw = JSON.parse(readFileSync(target, "utf8"));
     raw.tdd = { ...raw.tdd, enabled: e.enabled };
-    writeFileSync2(target, JSON.stringify(raw, null, 2) + "\n");
+    writeFileSync(target, JSON.stringify(raw, null, 2) + "\n");
     return true;
   } catch (err) {
     onError?.(`tdd toggle failed \u2014 ${err.message}`);
@@ -48322,14 +48246,602 @@ function applyTddToggle(e, onError, path) {
 function applyModeToggle(e, onError, path) {
   try {
     const target = configPath(path);
-    const raw = JSON.parse(readFileSync2(target, "utf8"));
+    const raw = JSON.parse(readFileSync(target, "utf8"));
     raw.mode = e.mode;
-    writeFileSync2(target, JSON.stringify(raw, null, 2) + "\n");
+    writeFileSync(target, JSON.stringify(raw, null, 2) + "\n");
     return true;
   } catch (err) {
     onError?.(`mode toggle failed \u2014 ${err.message}`);
     return false;
   }
+}
+
+// scripts/lib/agent-distribution.mjs
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { readFileSync as readFileSync2, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync3, mkdirSync as mkdirSync3, statSync as statSync2, lstatSync, unlinkSync, renameSync, linkSync } from "node:fs";
+
+// scripts/lib/agent-fences.mjs
+var FENCE_KINDS = {
+  "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
+  "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" }
+};
+var FENCE_WORD_RE = /(?:sterling|portable)[\s_-]*only/i;
+var COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
+var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open: open2, close }) => [open2, close]));
+function classify(line) {
+  for (const [kind, { open: open2, close }] of Object.entries(FENCE_KINDS)) {
+    if (line === open2) return { kind, role: "open" };
+    if (line === close) return { kind, role: "close" };
+  }
+  return null;
+}
+function malformedMarkers(text, label) {
+  const lines = text.split("\n");
+  const out = [];
+  for (const m of text.matchAll(COMMENT_RE)) {
+    if (!FENCE_WORD_RE.test(m[0])) continue;
+    const lineIndex = text.slice(0, m.index).split("\n").length - 1;
+    if (EXACT_MARKERS.has(m[0]) && lines[lineIndex] === m[0]) continue;
+    out.push({
+      kind: "fence_malformed",
+      detail: `${label}:${lineIndex + 1}: ${JSON.stringify(m[0].slice(0, 80))} names a fence but is not exactly a marker line (${Object.values(FENCE_KINDS).map((f) => `'${f.open}'/'${f.close}'`).join(", ")}) \u2014 case, spacing and line breaks must match`
+    });
+  }
+  return out;
+}
+var splitLines = (text) => text.replace(/\r\n/g, "\n").split("\n");
+function validateFences(text, label) {
+  const violations = malformedMarkers(text.replace(/\r\n/g, "\n"), label);
+  let openFence = null;
+  splitLines(text).forEach((line, index) => {
+    const at = `${label}:${index + 1}`;
+    const marker = classify(line);
+    if (!marker) return;
+    if (marker.role === "open") {
+      if (openFence) {
+        violations.push({ kind: "fence_nested", detail: `${at}: '${line}' opens inside the ${openFence.kind} fence opened at line ${openFence.line} \u2014 fences never nest` });
+      } else {
+        openFence = { kind: marker.kind, line: index + 1 };
+      }
+    } else if (!openFence) {
+      violations.push({ kind: "fence_unopened", detail: `${at}: '${line}' closes a fence that was never opened` });
+    } else if (openFence.kind !== marker.kind) {
+      violations.push({ kind: "fence_mismatched", detail: `${at}: '${line}' closes a ${marker.kind} fence, but the open one is ${openFence.kind} (line ${openFence.line})` });
+    } else {
+      openFence = null;
+    }
+  });
+  if (openFence) {
+    violations.push({ kind: "fence_unclosed", detail: `${label}:${openFence.line}: the ${openFence.kind} fence is never closed` });
+  }
+  return violations;
+}
+function render(text, label, keepKind) {
+  const violations = validateFences(text, label);
+  if (violations.length) {
+    throw new Error(`agent fences invalid in ${label} \u2014 refusing to render (P5):
+  ${violations.map((v) => `[${v.kind}] ${v.detail}`).join("\n  ")}`);
+  }
+  const out = [];
+  let inside = null;
+  for (const line of splitLines(text)) {
+    const marker = classify(line);
+    if (marker) {
+      inside = marker.role === "open" ? marker.kind : null;
+      continue;
+    }
+    if (inside && inside !== keepKind) continue;
+    out.push(line);
+  }
+  return out.join("\n");
+}
+function renderClaudeText(text, label) {
+  return render(text, label, "sterling-only");
+}
+function renderPortableText(text, label) {
+  return render(text, label, "portable-only");
+}
+
+// scripts/lib/agent-distribution.mjs
+var normalize = (s2) => s2.replace(/\r\n/g, "\n");
+function sha256(text) {
+  return createHash("sha256").update(normalize(text), "utf8").digest("hex");
+}
+var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=((?:(?!-->)[^\n])+) -->$/m;
+function parseInstalledHeader(content) {
+  const m = normalize(content).match(HEADER_RE);
+  if (!m) return null;
+  const [line, pluginVersion, template, templateHash, contentHash, installedAt] = m;
+  return { headerLine: line, pluginVersion, template, templateHash, contentHash, installedAt };
+}
+function setInstalledModelEffort(installedContent, { model, effort, pluginVersion, now }) {
+  const normalized = normalize(installedContent);
+  const header = parseInstalledHeader(normalized);
+  if (!header) {
+    throw new Error("setInstalledModelEffort: no sterling-generated header \u2014 refusing to swap a file this module did not generate");
+  }
+  const m = normalized.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!m) throw new Error("setInstalledModelEffort: missing frontmatter block");
+  const frontmatter = m[1].split("\n").map((line) => {
+    if (/^model:\s/.test(line)) return `model: ${model}`;
+    if (/^effort:\s/.test(line)) return `effort: ${effort}`;
+    return line;
+  }).join("\n");
+  const body = m[2].replace(header.headerLine + "\n", "");
+  const withoutHeader = `---
+${frontmatter}
+---
+${body}`;
+  const newHeader = `<!-- sterling-generated v=${pluginVersion} template=${header.template} template_hash=${header.templateHash} content_hash=${sha256(withoutHeader)} installed_at=${now} -->`;
+  return `---
+${frontmatter}
+---
+${newHeader}
+${body}`;
+}
+var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
+var OPENCODE_PERMISSION_VALUES = ["allow", "ask", "deny"];
+function validateOpenCodeEntry(entry, where) {
+  const block = entry.opencode;
+  if (!block || typeof block !== "object" || Array.isArray(block)) throw new Error(`${where} must be an object`);
+  const unknown = Object.keys(block).find((key) => key !== "permission" && key !== "description");
+  if (unknown !== void 0) throw new Error(`${where}: unknown key '${unknown}' \u2014 the keys are permission and description`);
+  if (block.description !== void 0 && (typeof block.description !== "string" || !block.description.trim() || /[\r\n]/.test(block.description))) {
+    throw new Error(`${where}.description must be one non-empty line of text`);
+  }
+  if (block.permission === void 0) return;
+  if (!block.permission || typeof block.permission !== "object" || Array.isArray(block.permission)) throw new Error(`${where}.permission must be an object`);
+  for (const [key, value] of Object.entries(block.permission)) {
+    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw new Error(`${where}.permission: unknown key '${key}' (known: ${OPENCODE_PERMISSION_KEYS.join(", ")})`);
+    if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw new Error(`${where}.permission.${key}: '${value}' is not one of ${OPENCODE_PERMISSION_VALUES.join(", ")}`);
+  }
+}
+function loadRegistry(registryPath2) {
+  const registry = JSON.parse(readFileSync2(registryPath2, "utf8"));
+  if (registry.version !== 1 || !Array.isArray(registry.agents)) {
+    throw new Error(`agent registry ${registryPath2}: unsupported shape (expected {version: 1, agents: []})`);
+  }
+  const names = /* @__PURE__ */ new Set();
+  const files = /* @__PURE__ */ new Set();
+  for (const [index, entry] of registry.agents.entries()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`agent registry ${registryPath2}: agents[${index}] must be an object`);
+    }
+    if (typeof entry.name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.name)) {
+      throw new Error(`agent registry ${registryPath2}: agents[${index}].name must be a safe agent name`);
+    }
+    if (typeof entry.file !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$/.test(entry.file)) {
+      throw new Error(`agent registry ${registryPath2}: agents[${index}].file must be a template filename ending in .md`);
+    }
+    if (entry.opencode !== void 0) validateOpenCodeEntry(entry, `agent registry ${registryPath2}: agents[${index}].opencode`);
+    if (names.has(entry.name) || files.has(entry.file)) {
+      throw new Error(`agent registry ${registryPath2}: duplicate agent name or template file at agents[${index}]`);
+    }
+    names.add(entry.name);
+    files.add(entry.file);
+  }
+  return registry;
+}
+var RESTART_INSTRUCTION = [
+  "================================================================",
+  "RESTART REQUIRED \u2014 project subagents load at session start.",
+  "Agents installed into .claude/agents/ are NOT visible to a",
+  "session that was already running. Restart Claude Code in this",
+  "project before dispatching any of the agents above.",
+  "================================================================"
+].join("\n");
+
+// scripts/lib/codex-mcp.mjs
+import { readFileSync as readFileSync3 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join4 } from "node:path";
+function userScopeCodexServer({ env = process.env, home = homedir2(), readFile = readFileSync3 } = {}) {
+  const path = join4(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+  let raw;
+  try {
+    raw = readFile(path, "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT") return { found: false, path };
+    return { found: false, path, unreadable: err?.code ?? err?.message ?? String(err) };
+  }
+  try {
+    const servers = JSON.parse(raw)?.mcpServers;
+    const found = Boolean(servers && typeof servers === "object" && Object.prototype.hasOwnProperty.call(servers, "codex"));
+    return { found, path };
+  } catch (err) {
+    return { found: false, path, unreadable: `not valid JSON (${err?.message ?? err})` };
+  }
+}
+
+// scripts/lib/opencode-install.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync5, readdirSync as readdirSync3, statSync as statSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname3, isAbsolute, join as join5, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// scripts/lib/contained-fs.mjs
+import { lstatSync as lstatSync2, readFileSync as readFileSync4, readdirSync as readdirSync2, mkdirSync as mkdirSync4, openSync, writeSync, closeSync, unlinkSync as unlinkSync2, constants } from "node:fs";
+var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+// scripts/lib/opencode-agents.mjs
+var OPENCODE_RENDERER = "opencode/1";
+var OPENCODE_HEADER_RE = /^<!-- sterling-portable renderer=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
+var normalize2 = (s2) => s2.replace(/\r\n/g, "\n");
+function permissionLines(permission, label) {
+  if (permission === void 0) return [];
+  const lines = ["permission:"];
+  for (const [key, value] of Object.entries(permission)) {
+    if (!OPENCODE_PERMISSION_KEYS.includes(key) || !OPENCODE_PERMISSION_VALUES.includes(value)) {
+      throw new Error(`opencode permission for ${label}: '${key}: ${value}' \u2014 keys are ${OPENCODE_PERMISSION_KEYS.join("/")}, values ${OPENCODE_PERMISSION_VALUES.join("/")} (P5)`);
+    }
+    lines.push(`  ${key}: ${value}`);
+  }
+  return lines;
+}
+function renderOpenCodeAgent(templateContent, label, { permission, description: portableDescription } = {}, renderer = OPENCODE_RENDERER) {
+  const m = normalize2(templateContent).match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!m) throw new Error(`template ${label}: missing frontmatter block`);
+  const [, templateFrontmatter, templateBody] = m;
+  const name = templateFrontmatter.match(/^name:\s*(\S+)\s*$/m)?.[1];
+  const description = templateFrontmatter.match(/^description:\s*(.+)$/m)?.[1];
+  if (!name || !description) throw new Error(`template ${label}: a portable agent needs name and description in its frontmatter`);
+  const descriptionLine = portableDescription !== void 0 ? `description: ${JSON.stringify(portableDescription)}` : `description: ${description}`;
+  const frontmatter = ["---", descriptionLine, "mode: subagent", ...permissionLines(permission, label), "---"].join("\n");
+  const body = renderPortableText(templateBody, label);
+  const unsubstituted = body.match(/\{\{[A-Z_]+\}\}/);
+  if (unsubstituted) {
+    throw new Error(`portable render of ${label}: '${unsubstituted[0]}' is a machine token and cannot ship in a committed file \u2014 fence it sterling-only (P5)`);
+  }
+  const withoutHeader = `${frontmatter}
+${body}`;
+  const contentHash = sha256(withoutHeader);
+  const header = `<!-- sterling-portable renderer=${renderer} template=${name} template_hash=${sha256(templateContent)} content_hash=${contentHash} -->`;
+  return { name, content: `${frontmatter}
+${header}
+${body}`, contentHash };
+}
+function parseOpenCodeHeader(content) {
+  const m = normalize2(content).match(OPENCODE_HEADER_RE);
+  if (!m) return null;
+  const [headerLine, renderer, template, templateHash, contentHash] = m;
+  return { headerLine, renderer, template, templateHash, contentHash };
+}
+
+// scripts/lib/handoff-projection.mjs
+var HANDOFF_DOCS_DIR = "docs/sterling";
+var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
+var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
+     Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
+     your commit message rather than editing it. -->`;
+var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
+var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
+
+// scripts/lib/opencode-install.mjs
+var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
+var ROSTER = ["conductor", "implementor", "researcher", "scout"];
+var FULL_HEADER_RE = /^<!-- sterling-full renderer=opencode-full\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
+var fwd = (p) => p.replace(/\\/g, "/");
+var normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
+var IMPORTS = [
+  "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
+  "import { homedir } from 'node:os';",
+  "import { join } from 'node:path';",
+  "import { pathToFileURL } from 'node:url';"
+].join("\n");
+function refusal(item, what, remedy) {
+  return { item, status: "refused", refused: true, detail: what, instruction: `REFUSED: ${what}. Sterling will not overwrite it. Remedy: ${remedy}.` };
+}
+function git(projectDir, args2) {
+  const r = spawnSync("git", args2, { cwd: projectDir, encoding: "utf8" });
+  if (r.error) throw new Error(`git ${args2.join(" ")} could not run in ${fwd(projectDir)}: ${r.error.message}`);
+  return r;
+}
+var CONDUCTOR_OPENCODE_NOTE = `
+## On OpenCode
+
+On OpenCode this roster is installed as sterling/implementor, sterling/researcher and sterling/scout; dispatch those names. In a work project the bare-named implementor, researcher and scout are the portable copies committed for colleagues without Sterling, so do not dispatch them.
+`;
+function opencodeModelRef(model) {
+  if (typeof model !== "string" || !model) throw new TypeError(`opencodeModelRef: model must be a non-empty string, got ${JSON.stringify(model)}`);
+  return `anthropic/${model}`;
+}
+function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
+  const start = dirname3(fileURLToPath(moduleUrl));
+  for (let dir = start; ; dir = dirname3(dir)) {
+    if (existsSync4(join5(dir, "agent-templates", "registry.json"))) return dir;
+    if (dirname3(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
+  }
+}
+function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, model } = {}) {
+  const claudeText = renderClaudeText(templateContent, label);
+  const out = renderOpenCodeAgent(claudeText, label, { permission: entry.opencode?.permission });
+  const header = parseOpenCodeHeader(out.content);
+  let content = normalize3(out.content).replace(`${header.headerLine}
+`, "");
+  if (primary) content = content.replace(/^mode: subagent$/m, "mode: primary") + CONDUCTOR_OPENCODE_NOTE;
+  if (model) content = content.replace(/^(mode: \w+)$/m, `$1
+model: ${model}`);
+  const fmEnd = content.indexOf("\n---\n", 4) + 5;
+  const fullHeader = `<!-- sterling-full renderer=opencode-full/1 template=${out.name} template_hash=${sha256(templateContent)} content_hash=${sha256(content)} -->`;
+  return { name: out.name, content: `${content.slice(0, fmEnd)}${fullHeader}
+${content.slice(fmEnd)}` };
+}
+function frontmatterModel(content) {
+  const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
+  return fm?.[1].match(/^model: (\S+)$/m)?.[1];
+}
+function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
+  const registry = loadRegistry(join5(pluginRoot, "agent-templates", "registry.json"));
+  const rows = [];
+  for (const name of ROSTER) {
+    const entry = registry.agents.find((a) => a.name === name);
+    if (!entry) throw new Error(`opencode roster: '${name}' is not in agent-templates/registry.json (P5)`);
+    const rel = `${STERLING_AGENTS_SUBDIR}/${name}.md`;
+    const path = join5(projectDir, rel);
+    if (tracked.includes(rel)) {
+      rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
+      continue;
+    }
+    const disk = existsSync4(path) ? normalize3(readFileSync5(path, "utf8")) : null;
+    if (disk !== null) {
+      const m = disk.match(FULL_HEADER_RE);
+      if (!m || m[1] !== name) {
+        rows.push(refusal(rel, `${rel} carries no Sterling header (a file Sterling did not write)`, `rename or remove it, then rerun /sterling:update`));
+        continue;
+      }
+      if (sha256(disk.replace(`${m[0]}
+`, "")) !== m[3]) {
+        rows.push(refusal(rel, `${rel} was edited after Sterling wrote it`, `move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update`));
+        continue;
+      }
+    }
+    const model = models[name] ?? (disk === null ? void 0 : frontmatterModel(disk));
+    const agent = renderFullOpenCodeAgent(readFileSync5(join5(pluginRoot, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name === "conductor", model });
+    if (agent.name !== name) throw new Error(`opencode roster: '${entry.file}' renders as '${agent.name}', not '${name}' (P5)`);
+    if (disk === agent.content) {
+      rows.push({ item: rel, status: "matches" });
+      continue;
+    }
+    mkdirSync5(dirname3(path), { recursive: true });
+    writeFileSync3(path, agent.content);
+    rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
+  }
+  return rows;
+}
+function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
+  if (!existsSync4(join5(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  const ref = opencodeModelRef(model);
+  const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
+  const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
+  const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
+  return { rows: ensureFullAgents({ projectDir, pluginRoot, tracked, models }) };
+}
+
+// packages/tui/dist/controller.js
+function openDashboard(storePath2, options = {}) {
+  const disabled = options.disabledEffects ?? {};
+  const configPath2 = join6(dirname4(storePath2), "config.json");
+  const projectRoot = dirname4(dirname4(storePath2));
+  const agentsDir = join6(projectRoot, ".claude", "agents");
+  function resolveProjectHeadSha() {
+    try {
+      const sha = execFileSync2("git", ["rev-parse", "HEAD"], {
+        cwd: projectRoot,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"]
+      }).trim();
+      return /^[0-9a-f]{40}$/.test(sha) ? sha : void 0;
+    } catch {
+      return void 0;
+    }
+  }
+  let mounts = [];
+  let domainsAvailable = true;
+  try {
+    const config = parseConfig(JSON.parse(readFileSync6(configPath2, "utf8")));
+    mounts = resolveDomainMounts(config);
+  } catch {
+    mounts = [];
+    domainsAvailable = false;
+  }
+  const stores = new MountedStores(storePath2, mounts, { skipMissing: true });
+  const store = stores.project;
+  const projectName = basename2(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
+  let ui = initialUi;
+  let roster;
+  function readInstalledModelEffort(name) {
+    try {
+      const content = readFileSync6(join6(agentsDir, `${name}.md`), "utf8");
+      const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
+      const block = fm ? fm[1] : "";
+      return {
+        model: block.match(/^model:\s*(\S+)/m)?.[1] ?? "",
+        effort: block.match(/^effort:\s*(\S+)/m)?.[1] ?? ""
+      };
+    } catch {
+      return { model: "", effort: "" };
+    }
+  }
+  function probeCodexWired() {
+    return userScopeCodexServer().found;
+  }
+  function readRawMode() {
+    try {
+      const raw = JSON.parse(readFileSync6(configPath2, "utf8"));
+      return raw.mode === void 0 ? void 0 : typeof raw.mode === "string" ? raw.mode : JSON.stringify(raw.mode);
+    } catch (err) {
+      ui = { ...ui, notice: `project mode unknown \u2014 config unreadable: ${err.message}` };
+      return null;
+    }
+  }
+  function loadRoster() {
+    const nowISO = (/* @__PURE__ */ new Date()).toISOString();
+    let config;
+    try {
+      config = parseConfig(JSON.parse(readFileSync6(configPath2, "utf8")));
+    } catch {
+      config = { models: {}, models_catalog: { staleness_days: 45 } };
+    }
+    const cfg = config;
+    const configModels = cfg.models ?? {};
+    const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.model };
+    const tdd = { enabled: cfg.tdd?.enabled ?? true };
+    const mode = readRawMode();
+    const codexWired = probeCodexWired();
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync5(join6(agentsDir, `${name}.md`))).map((name) => {
+      const v = readInstalledModelEffort(name);
+      return { name, installedModel: v.model, installedEffort: v.effort };
+    });
+    let catalog = { present: false, stale: false, staleDate: null, entries: [] };
+    try {
+      store.bootstrapCatalogIfAbsent(config, nowISO);
+      const rec = store.query({ types: ["reference_material"], cap: 200 }).find((r) => r.catalog);
+      const days = cfg.models_catalog?.staleness_days ?? 45;
+      const status = catalogStatus(rec ?? null, nowISO, days);
+      if (status.stale)
+        store.enqueueRefreshReferenceOnce(nowISO);
+      catalog = {
+        present: status.present,
+        stale: status.stale,
+        staleDate: status.staleDate ? status.staleDate.slice(0, 10) : null,
+        entries: rec?.catalog?.entries ?? []
+      };
+    } catch (err) {
+      ui = { ...ui, notice: `catalog unavailable \u2014 ${err.message}` };
+    }
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode };
+  }
+  function applySparringModel(e) {
+    try {
+      const raw = JSON.parse(readFileSync6(configPath2, "utf8"));
+      const sp = { ...raw.sparring_partner };
+      if (e.model)
+        sp.model = e.model;
+      else
+        delete sp.model;
+      raw.sparring_partner = sp;
+      writeFileSync4(configPath2, JSON.stringify(raw, null, 2) + "\n");
+    } catch (err) {
+      ui = { ...ui, notice: `sparring partner model update failed \u2014 ${err.message}` };
+    }
+  }
+  async function applySwap(e) {
+    const nowISO = (/* @__PURE__ */ new Date()).toISOString();
+    try {
+      const raw = JSON.parse(readFileSync6(configPath2, "utf8"));
+      raw.models = raw.models ?? {};
+      raw.models[e.key] = { model: e.to.model, effort: e.to.effort };
+      writeFileSync4(configPath2, JSON.stringify(raw, null, 2) + "\n");
+      for (const name of e.agents) {
+        const p = join6(agentsDir, `${name}.md`);
+        if (!existsSync5(p))
+          continue;
+        const content = readFileSync6(p, "utf8");
+        const hdr = parseInstalledHeader(content);
+        writeFileSync4(p, setInstalledModelEffort(content, {
+          model: e.to.model,
+          effort: e.to.effort,
+          pluginVersion: hdr?.pluginVersion ?? "0.0.0",
+          now: nowISO
+        }));
+      }
+      const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model });
+      const refused = (oc.rows ?? []).filter((r) => r.status === "refused");
+      if (refused.length)
+        ui = { ...ui, notice: `model swap for '${e.key}': OpenCode agent file(s) not updated \u2014 ${refused.map((r) => r.detail).join("; ")}` };
+      store.create({
+        id: randomUUID3(),
+        type: "decision",
+        created_at: nowISO,
+        updated_at: nowISO,
+        author: "conductor",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        title: e.decisionTitle,
+        statement: `config.models['${e.key}'] set to ${e.to.model} / ${e.to.effort} (was ${e.from.model} / ${e.from.effort}); ${e.agents.length} installed agent file(s) re-stamped via the System tab.`,
+        rationale: "Model/effort pin changed from the TUI System tab (config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL\u2194Windows machine boundary, d53dc92c).",
+        alternatives_rejected: []
+      });
+    } catch (err) {
+      ui = { ...ui, notice: `model swap for '${e.key}' failed partway \u2014 ${err.message}` };
+    }
+  }
+  async function applyEffects(all) {
+    const effects = all.filter((e) => {
+      if (e.type !== "model_swap" && e.type !== "select")
+        return true;
+      const off = disabled[e.type];
+      if (off === void 0)
+        return true;
+      if (off !== null)
+        ui = { ...ui, notice: off };
+      return false;
+    });
+    const swaps = effects.filter((e) => e.type === "model_swap");
+    for (const e of swaps)
+      await applySwap(e);
+    const notice = (msg) => {
+      ui = { ...ui, notice: msg };
+    };
+    const sparringModels = effects.filter((e) => e.type === "sparring_model");
+    for (const e of sparringModels)
+      applySparringModel(e);
+    const sparringToggles = effects.filter((e) => e.type === "sparring_toggle");
+    const tddToggles = effects.filter((e) => e.type === "tdd_toggle");
+    const modeToggles = effects.filter((e) => e.type === "mode_toggle");
+    let toggleWrote = false;
+    let toggleFailure;
+    const collectFailure = (msg) => {
+      toggleFailure = msg;
+    };
+    for (const e of sparringToggles) {
+      if (applySparringToggle(e, collectFailure, configPath2))
+        toggleWrote = true;
+    }
+    for (const e of tddToggles) {
+      if (applyTddToggle(e, collectFailure, configPath2))
+        toggleWrote = true;
+    }
+    let modeWritten;
+    for (const e of modeToggles) {
+      if (applyModeToggle(e, collectFailure, configPath2)) {
+        toggleWrote = true;
+        modeWritten = e.mode;
+      }
+    }
+    if (toggleFailure !== void 0) {
+      notice(toggleFailure);
+    } else if (modeWritten !== void 0) {
+      notice(modeWritten === "work" ? "project mode set to work \u2014 run /sterling:update (or init) to write the OpenCode agents and handoff files; sync-agents refreshes only the OpenCode agents." : "project mode set to hobby \u2014 OpenCode agents and handoff files are no longer maintained; existing files were NOT deleted.");
+    } else if (toggleWrote) {
+      notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session to reload the MCP server.");
+    }
+    if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length)
+      roster = loadRoster();
+    return runEffects(store, effects);
+  }
+  return {
+    stores,
+    store,
+    projectName,
+    configPath: configPath2,
+    ui: () => ui,
+    roster: () => roster,
+    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster),
+    async handle(event2, vp) {
+      const prevTab = ui.tab;
+      const result = reduce(store, ui, event2, vp, stores, roster, resolveProjectHeadSha);
+      ui = result.ui;
+      if (ui.tab === SYSTEM_TAB && (prevTab !== SYSTEM_TAB || !roster))
+        roster = loadRoster();
+      return applyEffects(result.effects);
+    },
+    applyEffects,
+    close: () => stores.close()
+  };
 }
 
 // packages/tui/dist/render.js
@@ -48449,81 +48961,82 @@ function mouseToEvent(name, data) {
   }
 }
 
-// scripts/lib/agent-distribution.mjs
-import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-
-// scripts/lib/agent-fences.mjs
-var FENCE_KINDS = {
-  "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
-  "portable-only": { open: "<!-- portable-only -->", close: "<!-- /portable-only -->" }
-};
-var EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open: open2, close }) => [open2, close]));
-
-// scripts/lib/agent-distribution.mjs
-var normalize = (s2) => s2.replace(/\r\n/g, "\n");
-function sha256(text) {
-  return createHash("sha256").update(normalize(text), "utf8").digest("hex");
-}
-var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=((?:(?!-->)[^\n])+) -->$/m;
-function parseInstalledHeader(content) {
-  const m = normalize(content).match(HEADER_RE);
-  if (!m) return null;
-  const [line, pluginVersion, template, templateHash, contentHash, installedAt] = m;
-  return { headerLine: line, pluginVersion, template, templateHash, contentHash, installedAt };
-}
-function setInstalledModelEffort(installedContent, { model, effort, pluginVersion, now }) {
-  const normalized = normalize(installedContent);
-  const header = parseInstalledHeader(normalized);
-  if (!header) {
-    throw new Error("setInstalledModelEffort: no sterling-generated header \u2014 refusing to swap a file this module did not generate");
-  }
-  const m = normalized.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-  if (!m) throw new Error("setInstalledModelEffort: missing frontmatter block");
-  const frontmatter = m[1].split("\n").map((line) => {
-    if (/^model:\s/.test(line)) return `model: ${model}`;
-    if (/^effort:\s/.test(line)) return `effort: ${effort}`;
-    return line;
-  }).join("\n");
-  const body = m[2].replace(header.headerLine + "\n", "");
-  const withoutHeader = `---
-${frontmatter}
----
-${body}`;
-  const newHeader = `<!-- sterling-generated v=${pluginVersion} template=${header.template} template_hash=${header.templateHash} content_hash=${sha256(withoutHeader)} installed_at=${now} -->`;
-  return `---
-${frontmatter}
----
-${newHeader}
-${body}`;
-}
-var RESTART_INSTRUCTION = [
-  "================================================================",
-  "RESTART REQUIRED \u2014 project subagents load at session start.",
-  "Agents installed into .claude/agents/ are NOT visible to a",
-  "session that was already running. Restart Claude Code in this",
-  "project before dispatching any of the agents above.",
-  "================================================================"
-].join("\n");
-
-// scripts/lib/codex-mcp.mjs
-import { readFileSync as readFileSync3 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join4 } from "node:path";
-function userScopeCodexServer({ env = process.env, home = homedir2(), readFile = readFileSync3 } = {}) {
-  const path = join4(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
-  let raw;
+// packages/tui/dist/lock.js
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync7, rmSync, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname5 } from "node:path";
+function pidIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0)
+    return false;
   try {
-    raw = readFile(path, "utf8");
-  } catch (err) {
-    if (err?.code === "ENOENT") return { found: false, path };
-    return { found: false, path, unreadable: err?.code ?? err?.message ?? String(err) };
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function procStartTime(pid) {
+  try {
+    const stat = readFileSync7(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+    return fields[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+function ownerStillHolds(storedToken, currentToken) {
+  if (!storedToken || currentToken === null)
+    return true;
+  return storedToken === currentToken;
+}
+function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = procStartTime) {
+  mkdirSync6(dirname5(lockPath2), { recursive: true });
+  const token = startTimeOf(pid);
+  const content = token ? `${pid} ${token}` : String(pid);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      writeFileSync5(lockPath2, content, { flag: "wx" });
+      return null;
+    } catch (e) {
+      if (e.code !== "EEXIST")
+        throw e;
+    }
+    let parts;
+    try {
+      parts = readFileSync7(lockPath2, "utf8").trim().split(/\s+/);
+    } catch {
+      continue;
+    }
+    const ownerRaw = parts[0];
+    const owner2 = Number(ownerRaw);
+    if (owner2 === pid)
+      return null;
+    if (isAlive(owner2) && ownerStillHolds(parts[1], startTimeOf(owner2)))
+      return owner2;
+    try {
+      const cur = readFileSync7(lockPath2, "utf8").trim().split(/\s+/)[0];
+      if (cur === ownerRaw)
+        rmSync(lockPath2, { force: true });
+    } catch {
+    }
   }
   try {
-    const servers = JSON.parse(raw)?.mcpServers;
-    const found = Boolean(servers && typeof servers === "object" && Object.prototype.hasOwnProperty.call(servers, "codex"));
-    return { found, path };
-  } catch (err) {
-    return { found: false, path, unreadable: `not valid JSON (${err?.message ?? err})` };
+    const owner2 = Number(readFileSync7(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    if (owner2 !== pid && isAlive(owner2))
+      return owner2;
+  } catch {
+    try {
+      writeFileSync5(lockPath2, content, { flag: "wx" });
+    } catch {
+    }
+  }
+  return null;
+}
+function releaseTuiLock(lockPath2, pid) {
+  try {
+    const owner2 = Number(readFileSync7(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    if (owner2 === pid)
+      rmSync(lockPath2, { force: true });
+  } catch {
   }
 }
 
@@ -48540,223 +49053,32 @@ if (storeIdx === -1 || !args[storeIdx + 1]) {
   process.exit(2);
 }
 var storePath = args[storeIdx + 1];
-var configPath2 = join5(dirname4(storePath), "config.json");
-var projectRoot = dirname4(dirname4(storePath));
-var agentsDir = join5(projectRoot, ".claude", "agents");
-function resolveProjectHeadSha() {
-  try {
-    const sha = execFileSync2("git", ["rev-parse", "HEAD"], {
-      cwd: projectRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    }).trim();
-    return /^[0-9a-f]{40}$/.test(sha) ? sha : void 0;
-  } catch {
-    return void 0;
-  }
-}
 var termkit = await Promise.resolve().then(() => __toESM(require_termkit_no_lazy_require(), 1));
 var term = termkit.default.terminal;
 if (smoke) {
   console.error(`sterling-tui smoke: terminal stack loaded (${term.width}x${term.height})`);
   process.exit(0);
 }
-var lockPath = join5(dirname4(storePath), "transient", "tui.lock");
+var lockPath = join7(dirname6(storePath), "transient", "tui.lock");
 var owner = acquireTuiLock(lockPath, process.pid);
 if (owner !== null) {
   console.error(`sterling-tui: already running (pid ${owner}) for this store \u2014 exiting politely (\xA711)`);
   process.exit(0);
 }
-var mounts = [];
-var domainsAvailable = true;
-try {
-  const config = parseConfig(JSON.parse(readFileSync4(configPath2, "utf8")));
-  mounts = resolveDomainMounts(config);
-} catch {
-  mounts = [];
-  domainsAvailable = false;
-}
-var stores = new MountedStores(storePath, mounts, { skipMissing: true });
-var store = stores.project;
-var projectName = basename2(dirname4(dirname4(storePath))) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
+var ctl = openDashboard(storePath);
 var showBanner = process.env.STERLING_NO_BANNER !== "1";
-var ui = initialUi;
-var roster;
-function readInstalledModelEffort(name) {
-  try {
-    const content = readFileSync4(join5(agentsDir, `${name}.md`), "utf8");
-    const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
-    const block = fm ? fm[1] : "";
-    return {
-      model: block.match(/^model:\s*(\S+)/m)?.[1] ?? "",
-      effort: block.match(/^effort:\s*(\S+)/m)?.[1] ?? ""
-    };
-  } catch {
-    return { model: "", effort: "" };
-  }
-}
-function probeCodexWired() {
-  return userScopeCodexServer().found;
-}
-function loadRoster() {
-  const nowISO = (/* @__PURE__ */ new Date()).toISOString();
-  let config;
-  try {
-    config = parseConfig(JSON.parse(readFileSync4(configPath2, "utf8")));
-  } catch {
-    config = { models: {}, models_catalog: { staleness_days: 45 } };
-  }
-  const cfg = config;
-  const configModels = cfg.models ?? {};
-  const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.model };
-  const tdd = { enabled: cfg.tdd?.enabled ?? true };
-  const mode = readRawMode();
-  const codexWired = probeCodexWired();
-  const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync3(join5(agentsDir, `${name}.md`))).map((name) => {
-    const v = readInstalledModelEffort(name);
-    return { name, installedModel: v.model, installedEffort: v.effort };
-  });
-  let catalog = { present: false, stale: false, staleDate: null, entries: [] };
-  try {
-    store.bootstrapCatalogIfAbsent(config, nowISO);
-    const rec = store.query({ types: ["reference_material"], cap: 200 }).find((r) => r.catalog);
-    const days = cfg.models_catalog?.staleness_days ?? 45;
-    const status = catalogStatus(rec ?? null, nowISO, days);
-    if (status.stale)
-      store.enqueueRefreshReferenceOnce(nowISO);
-    catalog = {
-      present: status.present,
-      stale: status.stale,
-      staleDate: status.staleDate ? status.staleDate.slice(0, 10) : null,
-      entries: rec?.catalog?.entries ?? []
-    };
-  } catch (err) {
-    ui = { ...ui, notice: `catalog unavailable \u2014 ${err.message}` };
-  }
-  return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode };
-}
-function readRawMode() {
-  try {
-    const raw = JSON.parse(readFileSync4(configPath2, "utf8"));
-    return raw.mode === void 0 ? void 0 : typeof raw.mode === "string" ? raw.mode : JSON.stringify(raw.mode);
-  } catch (err) {
-    ui = { ...ui, notice: `project mode unknown \u2014 config unreadable: ${err.message}` };
-    return null;
-  }
-}
-function applySparringModel(e) {
-  try {
-    const raw = JSON.parse(readFileSync4(configPath2, "utf8"));
-    const sp = { ...raw.sparring_partner };
-    if (e.model)
-      sp.model = e.model;
-    else
-      delete sp.model;
-    raw.sparring_partner = sp;
-    writeFileSync3(configPath2, JSON.stringify(raw, null, 2) + "\n");
-  } catch (err) {
-    ui = { ...ui, notice: `sparring partner model update failed \u2014 ${err.message}` };
-  }
-}
-async function applySwap(e) {
-  const nowISO = (/* @__PURE__ */ new Date()).toISOString();
-  try {
-    const raw = JSON.parse(readFileSync4(configPath2, "utf8"));
-    raw.models = raw.models ?? {};
-    raw.models[e.key] = { model: e.to.model, effort: e.to.effort };
-    writeFileSync3(configPath2, JSON.stringify(raw, null, 2) + "\n");
-    for (const name of e.agents) {
-      const p = join5(agentsDir, `${name}.md`);
-      if (!existsSync3(p))
-        continue;
-      const content = readFileSync4(p, "utf8");
-      const hdr = parseInstalledHeader(content);
-      writeFileSync3(p, setInstalledModelEffort(content, {
-        model: e.to.model,
-        effort: e.to.effort,
-        pluginVersion: hdr?.pluginVersion ?? "0.0.0",
-        now: nowISO
-      }));
-    }
-    store.create({
-      id: randomUUID3(),
-      type: "decision",
-      created_at: nowISO,
-      updated_at: nowISO,
-      author: "conductor",
-      status: "active",
-      superseded_by: null,
-      links: [],
-      scope: "project",
-      stack_tags: [],
-      title: e.decisionTitle,
-      statement: `config.models['${e.key}'] set to ${e.to.model} / ${e.to.effort} (was ${e.from.model} / ${e.from.effort}); ${e.agents.length} installed agent file(s) re-stamped via the System tab.`,
-      rationale: "Model/effort pin changed from the TUI System tab (config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL\u2194Windows machine boundary, d53dc92c).",
-      alternatives_rejected: []
-    });
-  } catch (err) {
-    ui = { ...ui, notice: `model swap for '${e.key}' failed partway \u2014 ${err.message}` };
-  }
-}
 var screen = new termkit.default.ScreenBuffer({ dst: term });
 function viewport() {
   const bannerHeight = bannerLines(term.width, showBanner).length;
   return { width: term.width, maxBodyLines: visibleBodyLines(term.height, bannerHeight), showBanner };
 }
 function redraw() {
-  const vp = viewport();
-  draw(screen, buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster));
+  draw(screen, ctl.state(viewport()));
 }
 async function handle(event2) {
   if (!event2)
     return;
-  const prevTab = ui.tab;
-  const result = reduce(store, ui, event2, viewport(), stores, roster, resolveProjectHeadSha);
-  ui = result.ui;
-  if (ui.tab === SYSTEM_TAB && (prevTab !== SYSTEM_TAB || !roster))
-    roster = loadRoster();
-  const swaps = result.effects.filter((e) => e.type === "model_swap");
-  for (const e of swaps)
-    await applySwap(e);
-  const notice = (msg) => {
-    ui = { ...ui, notice: msg };
-  };
-  const sparringModels = result.effects.filter((e) => e.type === "sparring_model");
-  for (const e of sparringModels)
-    applySparringModel(e);
-  const sparringToggles = result.effects.filter((e) => e.type === "sparring_toggle");
-  const tddToggles = result.effects.filter((e) => e.type === "tdd_toggle");
-  const modeToggles = result.effects.filter((e) => e.type === "mode_toggle");
-  let toggleWrote = false;
-  let toggleFailure;
-  const collectFailure = (msg) => {
-    toggleFailure = msg;
-  };
-  for (const e of sparringToggles) {
-    if (applySparringToggle(e, collectFailure, configPath2))
-      toggleWrote = true;
-  }
-  for (const e of tddToggles) {
-    if (applyTddToggle(e, collectFailure, configPath2))
-      toggleWrote = true;
-  }
-  let modeWritten;
-  for (const e of modeToggles) {
-    if (applyModeToggle(e, collectFailure, configPath2)) {
-      toggleWrote = true;
-      modeWritten = e.mode;
-    }
-  }
-  if (toggleFailure !== void 0) {
-    notice(toggleFailure);
-  } else if (modeWritten !== void 0) {
-    notice(modeWritten === "work" ? "project mode set to work \u2014 run /sterling:update (or init) to write the OpenCode agents and handoff files; sync-agents refreshes only the OpenCode agents." : "project mode set to hobby \u2014 OpenCode agents and handoff files are no longer maintained; existing files were NOT deleted.");
-  } else if (toggleWrote) {
-    notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session to reload the MCP server.");
-  }
-  if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length)
-    roster = loadRoster();
-  if (runEffects(store, result.effects)) {
+  if (await ctl.handle(event2, viewport())) {
     restoreTerminal();
     process.exit(0);
   }
@@ -48780,7 +49102,7 @@ function restoreTerminal() {
   } catch {
   }
   try {
-    stores.close();
+    ctl.close();
   } catch {
   }
   try {

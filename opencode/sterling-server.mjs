@@ -9223,7 +9223,7 @@ function probeSchemaVersion(dbPath) {
 // packages/opencode-plugin/src/server.mjs
 var PLUGIN_ID = "sterling.server";
 var BUSY_TIMEOUT_MS = 1e3;
-var BUDGET_MS = { context: 4e3, delivery: 4e3, settle: 3e4 };
+var BUDGET_MS = { context: 4e3, delivery: 4e3, settle: 3e4, prompt: 4e3 };
 var NOTICES_REL = ".sterling/transient/opencode-notices.json";
 var LOG_REL = ".sterling/transient/opencode-plugin.log";
 var DELIVERY_TOOLS = /* @__PURE__ */ new Set(["read", "edit", "write"]);
@@ -9240,12 +9240,6 @@ var OPENCODE_HOST_TAIL = [
   "- **The conductor role** (agent-templates/conductor.md) is yours in the main session. Dispatch subagents with the `subagent` tool.",
   "- **The codex MCP tool** is available only if it is configured in OpenCode's MCP settings; otherwise skip the Codex lanes and say so."
 ].join("\n");
-function sterlingPermissionConfig() {
-  const resources = [".sterling/sterling.db", "**/.sterling/sterling.db"];
-  return {
-    permissions: ["edit", "write"].flatMap((action) => resources.map((resource) => ({ action, resource, effect: "deny" })))
-  };
-}
 function openProjectStore(dbPath) {
   const store = new SterlingStore(dbPath);
   const db = store["db"];
@@ -9533,6 +9527,24 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
       workerStore?.close();
     }
   }
+  async function onPrompt(input) {
+    const root = rootOf();
+    if (!root) return;
+    await fenced("prompt", root, () => {
+      if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
+      const store = openStore(join8(root, ".sterling", "sterling.db"));
+      let selection;
+      try {
+        selection = store.takeSelection();
+      } finally {
+        store.close();
+      }
+      if (!selection) return;
+      input.prompt.text = `${input.prompt.text}
+
+TUI selection (one-shot): the user has selected ${selection.type} '${selection.record_id}'. Resolve the selected record via knowledge_get before answering.`;
+    });
+  }
   async function onEvent(ev) {
     if (ev?.type !== "session.execution.succeeded") return;
     const root = rootOf();
@@ -9540,7 +9552,7 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
     statusCache.delete(root);
     await fenced("settle", root, () => settle(root));
   }
-  const handlers = { context: onContext, before: onBefore, after: onAfter, event: onEvent };
+  const handlers = { context: onContext, prompt: onPrompt, before: onBefore, after: onAfter, event: onEvent };
   return {
     id: PLUGIN_ID,
     handlers,
@@ -9553,6 +9565,7 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
     async setup(ctx) {
       directory = ctx?.location?.directory ?? process.cwd();
       await ctx.session.hook("context", onContext);
+      await ctx.session.hook("prompt", onPrompt);
       await ctx.tool.hook("execute.before", onBefore);
       await ctx.tool.hook("execute.after", onAfter);
       const abort = new AbortController();
@@ -9593,6 +9606,5 @@ export {
   defaultTemplatePath,
   liveDispatch,
   openProjectStore,
-  renderSterlingLayer,
-  sterlingPermissionConfig
+  renderSterlingLayer
 };

@@ -10816,56 +10816,59 @@ var CONDUCTOR_OPENCODE_NOTE = `
 
 On OpenCode this roster is installed as sterling/implementor, sterling/researcher and sterling/scout; dispatch those names. In a work project the bare-named implementor, researcher and scout are the portable copies committed for colleagues without Sterling, so do not dispatch them.
 `;
-function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false } = {}) {
+function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, model } = {}) {
   const claudeText = renderClaudeText(templateContent, label);
   const out = renderOpenCodeAgent(claudeText, label, { permission: entry.opencode?.permission });
   const header = parseOpenCodeHeader(out.content);
   let content = normalize5(out.content).replace(`${header.headerLine}
 `, "");
   if (primary) content = content.replace(/^mode: subagent$/m, "mode: primary") + CONDUCTOR_OPENCODE_NOTE;
+  if (model) content = content.replace(/^(mode: \w+)$/m, `$1
+model: ${model}`);
   const fmEnd = content.indexOf("\n---\n", 4) + 5;
   const fullHeader = `<!-- sterling-full renderer=opencode-full/1 template=${out.name} template_hash=${sha256(templateContent)} content_hash=${sha256(content)} -->`;
   return { name: out.name, content: `${content.slice(0, fmEnd)}${fullHeader}
 ${content.slice(fmEnd)}` };
 }
-function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked }) {
+function frontmatterModel(content) {
+  const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
+  return fm?.[1].match(/^model: (\S+)$/m)?.[1];
+}
+function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
   const registry2 = loadRegistry(join18(pluginRoot2, "agent-templates", "registry.json"));
   const rows = [];
-  const rendered = ROSTER.map((name4) => {
+  for (const name4 of ROSTER) {
     const entry = registry2.agents.find((a) => a.name === name4);
     if (!entry) throw new Error(`opencode roster: '${name4}' is not in agent-templates/registry.json (P5)`);
-    return renderFullOpenCodeAgent(readFileSync11(join18(pluginRoot2, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name4 === "conductor" });
-  });
-  for (const agent of rendered) {
-    const rel = `${STERLING_AGENTS_SUBDIR}/${agent.name}.md`;
+    const rel = `${STERLING_AGENTS_SUBDIR}/${name4}.md`;
     const path = join18(projectDir, rel);
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    if (!existsSync9(path)) {
-      mkdirSync6(dirname7(path), { recursive: true });
-      writeFileSync4(path, agent.content);
-      rows.push({ item: rel, status: "created" });
-      continue;
+    const disk = existsSync9(path) ? normalize5(readFileSync11(path, "utf8")) : null;
+    if (disk !== null) {
+      const m = disk.match(FULL_HEADER_RE);
+      if (!m || m[1] !== name4) {
+        rows.push(refusal(rel, `${rel} carries no Sterling header (a file Sterling did not write)`, `rename or remove it, then rerun /sterling:update`));
+        continue;
+      }
+      if (sha256(disk.replace(`${m[0]}
+`, "")) !== m[3]) {
+        rows.push(refusal(rel, `${rel} was edited after Sterling wrote it`, `move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update`));
+        continue;
+      }
     }
-    const disk = normalize5(readFileSync11(path, "utf8"));
+    const model = models[name4] ?? (disk === null ? void 0 : frontmatterModel(disk));
+    const agent = renderFullOpenCodeAgent(readFileSync11(join18(pluginRoot2, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name4 === "conductor", model });
+    if (agent.name !== name4) throw new Error(`opencode roster: '${entry.file}' renders as '${agent.name}', not '${name4}' (P5)`);
     if (disk === agent.content) {
       rows.push({ item: rel, status: "matches" });
       continue;
     }
-    const m = disk.match(FULL_HEADER_RE);
-    if (!m || m[1] !== agent.name) {
-      rows.push(refusal(rel, `${rel} carries no Sterling header (a file Sterling did not write)`, `rename or remove it, then rerun /sterling:update`));
-      continue;
-    }
-    if (sha256(disk.replace(`${m[0]}
-`, "")) !== m[3]) {
-      rows.push(refusal(rel, `${rel} was edited after Sterling wrote it`, `move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update`));
-      continue;
-    }
+    mkdirSync6(dirname7(path), { recursive: true });
     writeFileSync4(path, agent.content);
-    rows.push({ item: rel, status: "refreshed" });
+    rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
   }
   return rows;
 }

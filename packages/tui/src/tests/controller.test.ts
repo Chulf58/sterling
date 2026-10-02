@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -88,6 +88,39 @@ test('controller: a disabled model_swap surfaces its notice and leaves config.mo
     ]);
     assert.equal(ctl.ui().notice, 'model swap is off here');
     assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).models.implementor.model, 'claude-a');
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('controller: a model swap also re-renders the Sterling-full OpenCode agents with the matching OpenCode model', async () => {
+  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
+  const ocDir = join(f.dir, '.opencode', 'agents', 'sterling');
+  mkdirSync(ocDir, { recursive: true });
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.applyEffects([
+      { type: 'model_swap', key: 'implementor', from: { model: 'claude-a', effort: 'high' }, to: { model: 'claude-b', effort: 'low' }, agents: ['implementor'], decisionTitle: 't' },
+    ]);
+    assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).models.implementor.model, 'claude-b');
+    assert.match(readFileSync(join(ocDir, 'implementor.md'), 'utf8'), /^model: anthropic\/claude-b$/m);
+    assert.doesNotMatch(readFileSync(join(ocDir, 'conductor.md'), 'utf8'), /^model:/m);
+    assert.equal(ctl.ui().notice, undefined, ctl.ui().notice);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('controller: a model swap in a project without OpenCode agents writes no .opencode files', async () => {
+  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.applyEffects([
+      { type: 'model_swap', key: 'implementor', from: { model: 'claude-a', effort: 'high' }, to: { model: 'claude-b', effort: 'low' }, agents: ['implementor'], decisionTitle: 't' },
+    ]);
+    assert.equal(existsSync(join(f.dir, '.opencode')), false);
   } finally {
     ctl.close();
     rmSync(f.dir, { recursive: true, force: true });

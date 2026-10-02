@@ -1,13 +1,11 @@
 // Pure pieces of the OpenCode dashboard: the sidebar summary, the key
-// translation into the terminal TUI's UiEvent vocabulary, the two
-// pending-ruling flags, and store discovery. tui.tsx draws them; nothing here
+// translation into the terminal TUI's UiEvent vocabulary, and store discovery. tui.tsx draws them; nothing here
 // touches OpenCode or the screen, so node --test covers it.
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { boardDisplayLabel } from '@sterling/schemas';
 import type { SterlingStore } from '@sterling/store';
 import { KNOWLEDGE_TAB, type UiEvent, type UiState } from '@sterling/tui/dist/state.js';
-import type { DisableableEffect } from '@sterling/tui/dist/controller.js';
 
 /** OpenCode 2.0.21's sidebar content width, measured: a session title wraps at 34 columns. */
 export const SIDEBAR_WIDTH = 34;
@@ -112,27 +110,6 @@ export function escapeLeavesView(ui: UiState): boolean {
   if (ui.boardEdit || ui.selector || ui.sparringModelEdit !== undefined) return false;
   if (ui.tab === KNOWLEDGE_TAB && ui.searchQuery) return false;
   return true;
-}
-
-/** The two dashboard functions pending a user ruling, each behind a flag that
- *  defaults OFF: the model/effort swap (writes config.models, which only
- *  Claude Code dispatch reads) and the record-selection handoff (the selection
- *  row is consumed by Claude Code's H2 hook, a Claude-only path under decision
- *  sterling-on-opencode-2-is-the-knowledge-loop-in-one-small-plugin). */
-export interface PendingRulingFlags {
-  modelSwap: boolean;
-  recordHandoff: boolean;
-}
-
-export function readFlags(env: Record<string, string | undefined>): PendingRulingFlags {
-  return { modelSwap: env.STERLING_OC_MODEL_SWAP === '1', recordHandoff: env.STERLING_OC_RECORD_HANDOFF === '1' };
-}
-
-export function disabledEffectsFor(flags: PendingRulingFlags): Partial<Record<DisableableEffect, string | null>> {
-  const out: Partial<Record<DisableableEffect, string | null>> = {};
-  if (!flags.modelSwap) out.model_swap = 'model/effort swap is off in OpenCode (pending a ruling; STERLING_OC_MODEL_SWAP=1 turns it on)';
-  if (!flags.recordHandoff) out.select = null;
-  return out;
 }
 
 /** STERLING_STORE when set; otherwise the nearest <dir>/.sterling/sterling.db

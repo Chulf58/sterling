@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   setupOpenCode, formatOpenCodeRows, opencodeConfigDir, mcpLauncherPath, STERLING_AGENTS_SUBDIR, CONDUCTOR_AGENT,
+  swapFullAgentModel, opencodeModelRef, sterlingRootFrom,
 } from '../lib/opencode-install.mjs';
 import { renderPortableText } from '../lib/agent-fences.mjs';
 
@@ -256,6 +257,51 @@ test('Sterling-full roster: a local edit or a foreign file is refused, never ove
   assert.equal(statusOf(r, '/conductor.md'), 'refused');
   assert.equal(statusOf(r, '/scout.md'), 'refused');
   assert.equal(readFileSync(join(dir, STERLING_AGENTS_SUBDIR, 'scout.md'), 'utf8'), 'my scout\n');
+});
+
+test('model swap: the swapped roster agent is re-rendered with the matching OpenCode model; the rest carry none', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
+  assert.doesNotMatch(read('implementor'), /^model:/m, 'a fresh install pins no model');
+  const r = swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor', 'librarian'], model: 'claude-opus-5-5' });
+  assert.equal(statusOf(r, '/implementor.md'), 'refreshed');
+  assert.equal(statusOf(r, '/conductor.md'), 'matches');
+  assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\nmodel: anthropic\/claude-opus-5-5\n/);
+  for (const n of ['conductor', 'researcher', 'scout']) assert.doesNotMatch(read(n), /^model:/m, n);
+  // A later sync keeps the pin: the installed file is valid Sterling output, so it is matched, not reverted.
+  assert.equal(statusOf(run(dir, home), '/implementor.md'), 'matches');
+  assert.match(read('implementor'), /^model: anthropic\/claude-opus-5-5$/m);
+  // Swapping again replaces the pin rather than adding a second line.
+  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5' });
+  assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5']);
+});
+
+test('model swap: a hand-edited Sterling-full file is refused and left byte-identical', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const p = join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md');
+  writeFileSync(p, readFileSync(p, 'utf8') + '\nmine\n');
+  const before = readFileSync(p, 'utf8');
+  const r = swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-opus-5-5' });
+  assert.equal(statusOf(r, '/implementor.md'), 'refused');
+  assert.equal(readFileSync(p, 'utf8'), before);
+});
+
+test('model swap: a project without the Sterling-full OpenCode set is skipped and nothing is created', () => {
+  const dir = project('hobby');
+  const r = swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-opus-5-5' });
+  assert.match(r.skipped, /no Sterling-full OpenCode agents/);
+  assert.equal(existsSync(join(dir, '.opencode')), false);
+});
+
+test('opencodeModelRef maps a Claude model id to the anthropic provider; sterlingRootFrom finds the plugin root', () => {
+  assert.equal(opencodeModelRef('claude-sonnet-5-5'), 'anthropic/claude-sonnet-5-5');
+  assert.throws(() => opencodeModelRef(''), /model/);
+  assert.equal(sterlingRootFrom(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'opencode-install.mjs')).href), repoRoot);
+  assert.equal(sterlingRootFrom(pathToFileURL(join(repoRoot, 'tui', 'x.mjs')).href), repoRoot);
 });
 
 // ---------- the generated shims, run for real against stub Sterling roots -----------

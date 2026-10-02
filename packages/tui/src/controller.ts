@@ -16,6 +16,7 @@ import { applyModeToggle, applySparringToggle, applyTddToggle } from './config-w
 // SOURCE (which imports @sterling/schemas) cannot load there.
 import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/lib/agent-distribution.mjs';
 import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
+import { sterlingRootFrom, swapFullAgentModel } from '../../../scripts/lib/opencode-install.mjs';
 
 /** Effect types a host may decline to execute. A string value is the notice
  *  shown when the effect is dropped; null drops it without a notice (for an
@@ -229,6 +230,13 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
           })
         );
       }
+
+      // 2b. the Sterling-full OpenCode conductor and roster, re-rendered with the
+      // matching OpenCode model (decision 48903a6f, DASHBOARD FUNCTIONS (a)). A
+      // project that never installed them is skipped; a refused file is said.
+      const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model });
+      const refused = (oc.rows ?? []).filter((r) => r.status === 'refused');
+      if (refused.length) ui = { ...ui, notice: `model swap for '${e.key}': OpenCode agent file(s) not updated — ${refused.map((r) => r.detail).join('; ')}` };
 
       // 3. durable swap decision (AC5) — reuse the decision type (decision foreign_98064d77)
       store.create({
