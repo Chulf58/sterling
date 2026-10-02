@@ -41,7 +41,7 @@ import {
   unmetConceptFamilies,
 } from '../../../scripts/hooks/lib/session-duties.mjs';
 import { gitTouches, loadGeneratedProjections, mintSettlementReconcile, writeGitSettled, writeInitialGitSettled } from '../../../scripts/hooks/lib/settlement.mjs';
-import { readRegister } from '../../../scripts/lib/dispatch-register.mjs';
+import { dispatchState, readDispatchState, readRegister } from '../../../scripts/lib/dispatch-register.mjs';
 import { errText, logLine } from './log.mjs';
 import { addNotice, pruneShownNotices } from './notices.mjs';
 
@@ -177,7 +177,9 @@ export function settleDuties(store, root, git, at) {
   const families = conceptFamiliesFrom(fresh);
   for (const family of unmetConceptFamilies(store, families, earliestSessionAt)) owed.push({ duty: 'concept', family, since: families.get(family), window_start: earliestSessionAt });
   const researchAgents = new Set(config.session_events.research_agents);
-  const research = fresh.filter((e) => (e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && researchAgents.has(e.detail))) && !dischargedByCutoff(e.at, cutoffs.research));
+  // OpenCode names the installed roles sterling/<role>; the role is what research_agents lists.
+  const isResearchAgent = (d) => researchAgents.has(d) || researchAgents.has(String(d ?? '').replace(/^sterling\//, ''));
+  const research = fresh.filter((e) => (e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && isResearchAgent(e.detail))) && !dischargedByCutoff(e.at, cutoffs.research));
   if (research.length) {
     const ats = research.map((e) => e.at).filter(isValidAt).sort();
     const since = ats[0] ?? at;
@@ -205,16 +207,29 @@ function writeJsonAtomic(path, value) {
 }
 
 /**
- * A live Claude Code dispatch means H10 is holding paths it will settle
- * itself, so the snapshot must not advance past them. Any row without
- * `ended` counts; a register that cannot be read counts as live (fail closed).
+ * A live dispatch means paths are still being changed under it, so the snapshot
+ * must not advance past them. Two sources: the Claude Code register (any row
+ * without `ended`; H10 settles those paths itself) and the dispatch state, where
+ * an OpenCode subagent is bound to its child session until it ends (dispatch.mjs).
+ * A pending record (no binding yet) does not count: its call has not returned, so
+ * the root execution has not ended either, and an orphan left by a denied call
+ * must not hold the snapshot forever. Anything that cannot be read counts as
+ * live (fail closed).
  */
 export function liveDispatch(root) {
   const reg = readRegister(root);
-  if (reg.availability === 'absent') return { live: false };
-  if (reg.availability !== 'ok') return { live: true, why: `the dispatch register is ${reg.availability}` };
-  const rows = reg.entries.filter((e) => !e.ended);
-  return rows.length ? { live: true, why: `${rows.length} Claude dispatch(es) still registered (${rows.map((r) => r.agent_id).join(', ')})` } : { live: false };
+  if (reg.availability !== 'absent' && reg.availability !== 'ok') return { live: true, why: `the dispatch register is ${reg.availability}` };
+  const rows = reg.availability === 'ok' ? reg.entries.filter((e) => !e.ended) : [];
+  if (rows.length) return { live: true, why: `${rows.length} Claude dispatch(es) still registered (${rows.map((r) => r.agent_id).join(', ')})` };
+  const state = readDispatchState(root);
+  if (state.availability !== 'absent' && state.availability !== 'ok') return { live: true, why: `the dispatch state is ${state.availability}${state.reason ? ` (${state.reason})` : ''}` };
+  if (state.poisoned.length) return { live: true, why: `the dispatch state holds ${state.poisoned.length} unreadable record(s) (${state.poisoned.map((p) => p.file).join(', ')})` };
+  const bound = state.records.map((r) => r.record).filter((r) => ['bound', 'started'].includes(dispatchState(r)));
+  if (bound.length) {
+    const child = (r) => r.post_binding?.agent_id ?? r.derived_binding?.agent_id ?? r.started?.agent_id;
+    return { live: true, why: `${bound.length} subagent dispatch(es) still running (${bound.map((r) => `${r.subagent_type ?? 'agent'} in child session ${child(r)}`).join(', ')})` };
+  }
+  return { live: false };
 }
 
 /** The settle step for one execution; `launchWorkerFor(root, at)` runs after a settlement that did not fail. */
@@ -247,7 +262,7 @@ export function createSettle({ openStore, now, launchWorkerFor }) {
       }
       for (const text of duties.notices) addNotice(root, text, at);
       if (git.base_lost) addNotice(root, `Sterling settlement: the settled commit ${git.settled.sha} is no longer reachable from HEAD ${git.next.sha}; duties for the commits between them were not derived. Reconcile them by hand from git log.`, at);
-      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; Claude Code settles those paths when the dispatch ends.`, at);
+      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; the first settlement after the dispatch ends advances it.`, at);
     } catch (e) {
       logLine(root, `settle failed: ${errText(e)}`);
       addNotice(root, `Sterling settlement failed (${errText(e)}); the settled snapshot was not advanced, so the next turn retries the same range.`, at);

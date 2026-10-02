@@ -11,10 +11,15 @@
 //   2. execute.before/after on read, edit, write and patch: H19-style knowledge
 //      delivery appended to the tool result; on shell, H19's Bash pointers for
 //      the paths the command names; after a completed webfetch or websearch, a
-//      research_tool event in the session-event register, as H16 records;
-//   3. session.execution.succeeded: settlement (mint reconcile duties, then
-//      advance the settled snapshot), the maintenance worker, and a notice the
-//      model sees at the next turn;
+//      research_tool event in the session-event register, as H16 records; on
+//      the subagent, question and codex tools, H20's mechanism-axis delivery
+//      (and the codex model pin); on the subagent tool, H22's dispatch register
+//      arms and H16's agent_dispatch event; after read and shell, H23's
+//      output-axis pointer;
+//   3. session.execution.succeeded of a ROOT session: settlement (mint
+//      reconcile duties, then advance the settled snapshot), the maintenance
+//      worker, and a notice the model sees at the next turn. A child session's
+//      event settles nothing; it ends a background subagent's dispatch;
 //   4. the prompt hook: a record selected in the dashboard is taken once from
 //      the store and appended to the next prompt, as H2 does on Claude Code;
 //   5. the compaction hook: the session's delivery receipts are removed, so
@@ -30,13 +35,16 @@
 //   context.mjs (the context handler)         delivery.mjs (tool delivery)
 //   settle.mjs (settlement)                   worker.mjs (maintenance worker)
 //   selection.mjs (prompt hook)               compaction.mjs (receipt reset)
-//   research.mjs (research_tool events)       pr-loop.mjs (the PR review loop owed notice)
+//   research.mjs (research_tool and agent_dispatch events)  pr-loop.mjs (the PR review loop owed notice)
+//   axis.mjs (H20 and H23)                    dispatch.mjs (H22 and the root-session gate)
 //   config.mjs (registration), sync.mjs (post-update sync)
 //   notices.mjs, log.mjs, store.mjs (shared plumbing)
+import { createAxisHandlers } from './axis.mjs';
 import { createCompactionHandler } from './compaction.mjs';
 import { createConfigHandler } from './config.mjs';
 import { createContextHandler } from './context.mjs';
 import { createDeliveryHandlers } from './delivery.mjs';
+import { createDispatchHandlers, rootSessionGate } from './dispatch.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { NOTICES_REL, addNotice } from './notices.mjs';
 import { createPrLoopNotice } from './pr-loop.mjs';
@@ -57,7 +65,7 @@ export const PLUGIN_ID = 'sterling.server';
 
 // Per-handler budgets. The store calls are synchronous and cannot be cut off
 // mid-call; the budget bounds the awaited part and logs any overrun.
-export const BUDGET_MS = { context: 4000, delivery: 4000, research: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000 };
+export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 10000, research: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000 };
 
 /**
  * The plugin factory. `deps` exists for tests: openStore(dbPath), now(),
@@ -71,6 +79,7 @@ export function createSterlingServer(deps = {}) {
   let session = null;
   let directory = process.cwd();
   let chain = Promise.resolve();
+  const parents = new Map();
 
   const rootOf = () => projectRoot(directory);
 
@@ -101,13 +110,25 @@ export function createSterlingServer(deps = {}) {
   }
 
   const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore });
-  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
+  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
   const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
+  const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
+  const dispatch = createDispatchHandlers({ rootOf, fenced });
   const recordResearch = createResearchRecorder({ rootOf, fenced, now });
-  const onBefore = delivery.onBefore;
-  // One execute.after handler: delivery appends to the result, then a web research call is recorded.
+  // Every handler is fenced, so none of them throws: Sterling never denies a tool call.
+  async function onBefore(input) {
+    await delivery.onBefore(input);
+    await axis.onBefore(input);
+    await dispatch.onBefore(input);
+  }
+  // H23 matches only the tool's own output, taken before anything is appended,
+  // and runs after the file delivery has written the session guard.
   async function onAfter(input) {
+    const output = axis.outputOf(input);
     await delivery.onAfter(input);
+    await axis.onOutput(input, output);
+    await axis.onAfter(input);
+    await dispatch.onAfter(input);
     await recordResearch(input);
   }
   const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker });
@@ -125,6 +146,17 @@ export function createSterlingServer(deps = {}) {
     if ((deps.env ?? process.env)[WORKER_ENV_FLAG] === '1') return;
     const root = rootOf();
     if (!root) return;
+    // Settle only on the root session (dispatch.mjs rootSessionGate): a child's
+    // execution end is not the end of the user's turn.
+    let gate = { settle: false };
+    await fenced('settle', root, async () => {
+      gate = await rootSessionGate(root, { session, sessionID: ev.data?.sessionID, parents });
+    });
+    if (gate.why) {
+      logLine(root, `settle skipped: could not check whether session ${ev.data?.sessionID} is a child (${gate.why})`);
+      addNotice(root, `Sterling settlement skipped: could not check whether session ${ev.data?.sessionID} is a child session (${gate.why}); only a root session settles, and the next root settlement covers this range.`, now());
+    }
+    if (!gate.settle) return;
     resetStatus(root);
     await fenced('settle', root, () => settle(root));
     await fenced('settle', root, () => prLoopNotice(root));
