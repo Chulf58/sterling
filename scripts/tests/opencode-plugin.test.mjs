@@ -976,7 +976,7 @@ test('with no claude on PATH the worker skip is loud: one notice per process and
     const skip = noticeTexts(p.dir).filter((t) => /maintenance worker/i.test(t));
     assert.equal(skip.length, 1);
     assert.match(skip[0], /no maintenance runner/i);
-    assert.match(skip[0], /Parity P8/);
+    assert.match(skip[0], /neither `claude` nor an OpenCode binary/);
     const log = readFileSync(join(p.dir, server.LOG_REL), 'utf8');
     assert.match(log, /no maintenance runner/i);
     await ctx.hooks.session.context(contextInput());
