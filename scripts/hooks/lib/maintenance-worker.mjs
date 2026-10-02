@@ -872,7 +872,15 @@ export async function runWorker(opts) {
     return { host, bin, args: buildWorkerArgs({ prompt, mcpConfig, budgetUsd: budgetOk ? budgetUsd : rawBudget }), env: {} };
   };
   if (opts.dryRun) {
-    const run = buildRun(opts.token ? readEligible() : null);
+    let run;
+    try {
+      run = buildRun(opts.token ? readEligible() : null);
+    } catch (e) {
+      // An unknown host, a missing binary or model, or a broken plugin tree: the
+      // dry run prints what the real run would refuse with, and fails.
+      (opts.out ?? console.log)(JSON.stringify({ dry_run: true, cwd: opts.root, refused: e?.message ?? String(e) }, null, 2));
+      return 1;
+    }
     (opts.out ?? console.log)(JSON.stringify({ dry_run: true, cwd: opts.root, host: run.host, command: run.bin, argv: run.args, ...(run.host === 'opencode' ? { env: run.env } : {}) }, null, 2));
     return 0;
   }

@@ -48,6 +48,7 @@ import { BUSY_TIMEOUT_MS, openProjectStore } from './store.mjs';
 import { createSessionSync } from './sync.mjs';
 import { createWorkerLaunch } from './worker.mjs';
 import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
+import { WORKER_ENV_FLAG } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
 
 export { BUSY_TIMEOUT_MS, LOG_REL, NOTICES_REL, addNotice, liveDispatch, openProjectStore };
 export { defaultTemplatePath, hostBlockPairs, opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
@@ -61,7 +62,8 @@ export const BUDGET_MS = { context: 4000, delivery: 4000, research: 4000, settle
 /**
  * The plugin factory. `deps` exists for tests: openStore(dbPath), now(),
  * claudeOnPath(), launchWorker(opts), sterlingRoot (a path), renderRestore(note, opts),
- * configure(ctx) and syncSession(root, sessionID) (replace the config.mjs and sync.mjs handlers).
+ * configure(ctx) and syncSession(root, sessionID) (replace the config.mjs and sync.mjs handlers),
+ * and env (process.env for the worker-child check and sync.mjs).
  */
 export function createSterlingServer(deps = {}) {
   const openStore = deps.openStore ?? openProjectStore;
@@ -117,6 +119,10 @@ export function createSterlingServer(deps = {}) {
 
   async function onEvent(ev) {
     if (ev?.type !== 'session.execution.succeeded') return;
+    // Inside the maintenance worker's own `opencode run` child (the runner sets
+    // the flag), this globally installed plugin must not settle or launch a
+    // worker: it would race the parent's settlement on the same store.
+    if ((deps.env ?? process.env)[WORKER_ENV_FLAG] === '1') return;
     const root = rootOf();
     if (!root) return;
     resetStatus(root);

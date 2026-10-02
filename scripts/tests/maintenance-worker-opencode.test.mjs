@@ -362,3 +362,54 @@ test('[decision opencode-maintenance-worker-refuses-without-a-configured-model] 
     fx.cleanup();
   }
 });
+
+// ------------------------------------------------------------ review fixes (task-end review)
+
+/** An execute whose OUTER status is 'error' (the code threw after the inner call returned). */
+const failedExecute = (name, input, innerStatus = 'completed', error = 'TypeError: cannot read properties of undefined') =>
+  part('execute', { status: 'error', input: { code: `await tools.sterling.${name}(...); boom()` }, error, metadata: { metadata: { toolCalls: [{ tool: `sterling.${name}`, status: innerStatus, input }], truncated: false } } });
+
+test('[gate] an execute that FAILED is never evidence even when its inner call completed: the model saw the error, not the tool output; a remove inside it still closed server-side and is journalled as such', () => {
+  const observed = [];
+  const journal = [];
+  const stream = opencodeStreamJournal((e) => journal.push(e), (name, input) => observed.push([name, input]));
+  stream.feed([failedExecute('knowledge_get', { id: ARTICLE }), failedExecute('maintenance_remove', { id: 'item-a' }), failedExecute('maintenance_remove', { id: 'item-b' }, 'error')].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const out = stream.end();
+  assert.deepEqual(observed, [], 'no evidence from a failed execute');
+  assert.equal(out.sterlingOk, 1, 'only the completed remove is a successful sterling call');
+  assert.deepEqual(journal.map((j) => [j.item_id, j.is_error, j.execute_failed ?? null]), [['item-a', false, true], ['item-b', true, true]]);
+  assert.match(journal[0].result, /^the execute failed after this call completed: TypeError/);
+  assert.equal(out.removes, 2);
+  assert.equal(out.closedOk, 1, 'the server-side remove did happen, so it counts as a close');
+});
+
+test('[gate] runWorker: an owes_prose verdict resting on a knowledge_get inside a failed execute is unjudged', async () => {
+  const fx = fixture();
+  try {
+    const child = fakeOpencode([failedExecute('knowledge_get', { id: ARTICLE }), read('src/a.mjs'), text(owes())]);
+    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 0);
+    const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
+    assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict, v.reason]), [['item-a', 'unjudged', 'no evidence']]);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('--dry-run with an unknown host or no recorded opencode binary prints a refusal and returns 1, never throws', async () => {
+  const fx = fixture();
+  try {
+    for (const [eligible, re] of [
+      [{ host: 'gemini' }, /unknown runner host 'gemini'/],
+      [{ host: 'opencode', opencode_model: 'openai/gpt-5.6-terra' }, /no opencode binary was recorded/],
+    ]) {
+      writeFileSync(fx.paths.eligible, JSON.stringify({ token: 'tok', head: HEAD, items: [ITEM], ...eligible }));
+      const printed = [];
+      assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, token: 'tok', dryRun: true, spawn: () => assert.fail('dry run must not spawn'), out: (s) => printed.push(s) }), 1);
+      const dry = JSON.parse(printed[0]);
+      assert.equal(dry.dry_run, true);
+      assert.match(dry.refused, re);
+    }
+  } finally {
+    fx.cleanup();
+  }
+});

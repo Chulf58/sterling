@@ -34,7 +34,12 @@
 const SERVER = 'sterling';
 
 /** Built-in OpenCode tools the worker must not use. execute (the MCP code-mode
- *  tool), read, grep and glob stay allowed. */
+ *  tool), read, grep and glob stay allowed. The names come from ctx.tool.list
+ *  on 2.0.21 (domain finding opencode-2-0-21-plugin-hook-capabilities-spike,
+ *  knowledge_get 4ec729f4, item f): subagent, websearch, skill and question
+ *  were measured only that way; shell, edit, write and patch were also seen
+ *  denied or called in live runs (finding
+ *  opencode-2-0-21-tool-shapes-execpath-and-shell-store-guard-october-2026). */
 export const OPENCODE_DENIED_BUILTINS = ['shell', 'edit', 'write', 'patch', 'subagent', 'webfetch', 'websearch', 'skill', 'question'];
 /** The sterling write tools the claude runner denies, under OpenCode's
  *  permission key for an MCP tool (<server>_<tool>). knowledge_line_ref_fix and
@@ -68,10 +73,16 @@ export function buildOpencodeArgs({ prompt, model = null }) {
   return ['run', '--standalone', '--format', 'json', '--auto', ...(model ? ['--model', model] : []), prompt];
 }
 
-/** The child's environment additions: PWD picks the session directory
- *  (measured), and OPENCODE_DISABLE_PROJECT_CONFIG keeps the project's own
- *  OpenCode config (its Sterling plugin and default agent) out of the child,
- *  as the claude runner keeps Sterling's hooks out with no --plugin-dir. */
+/** The child's environment additions. PWD picks the session directory
+ *  (measured). OPENCODE_DISABLE_PROJECT_CONFIG is meant to keep the project's
+ *  own OpenCode config out of the child; its effect on project config is NOT
+ *  measured (the name is in the 2.0.21 binary). It does NOT keep out a global
+ *  plugin: measured 2026-10-02, a plugin in the global config dir's plugins/
+ *  loaded in `opencode run --standalone` with this flag set, and saw
+ *  STERLING_MAINTENANCE_WORKER=1 in its process.env. The Sterling plugin is
+ *  installed globally (scripts/lib/opencode-install.mjs), so it loads in the
+ *  child and no-ops its settlement and worker launch on that flag, which
+ *  runWorker sets in the child's environment. */
 export function opencodeEnv({ root, config }) {
   return { PWD: root, OPENCODE_CONFIG_CONTENT: JSON.stringify(config), OPENCODE_DISABLE_PROJECT_CONFIG: '1' };
 }
@@ -82,7 +93,7 @@ const fixEntry = (input, is_error, result) => ({ kind: 'tool_call', tool: 'knowl
  * The OpenCode counterpart of streamJournal: same feed()/end() interface and
  * the same `out` shape, so runWorker's gate, journal and run summary are
  * shared. `observe(name, input)` fires only for a call whose OWN status is
- * 'completed', with the claude tool names the gate already knows
+ * 'completed' and, for a sterling call, whose execute also completed, with the claude tool names the gate already knows
  * (mcp__sterling__<name>, Read {file_path}, Grep {path}). `result` is
  * synthesized from the final message's text, the summed step cost and any
  * error event; it stays null when the stream held no text and no error.
@@ -96,13 +107,20 @@ export function opencodeStreamJournal(journal, observe = () => {}, launchKeys = 
   let cost = 0;
   let costSeen = false;
   let error = null;
-  const sterlingCall = (name, input, ok, is_error, text) => {
+  // `executeFailed`: the OUTER execute ended in error, so the model got the
+  // execute's error text and never saw this call's output. A write it made
+  // (a remove, a line-ref fix) still happened server-side and counts; a read
+  // is never evidence (task-end review 2026-10-02).
+  const sterlingCall = (name, input, is_error, text, executeFailed) => {
+    const ok = is_error === false;
+    const resultText = executeFailed && ok ? `the execute failed after this call completed: ${text}` : text;
+    const marked = executeFailed ? { execute_failed: true } : {};
     if (name === 'maintenance_remove') {
       if (is_error === null) {
         journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error: null, result: 'no result before the run ended' });
         return;
       }
-      journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error, result: text.slice(0, 400) });
+      journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error, result: resultText.slice(0, 400), ...marked });
       out.removes++;
       if (ok) {
         out.closedOk++;
@@ -111,7 +129,7 @@ export function opencodeStreamJournal(journal, observe = () => {}, launchKeys = 
       return;
     }
     if (name === 'knowledge_line_ref_fix') {
-      journal(fixEntry(input, is_error, is_error === null ? 'no result before the run ended' : text.slice(0, 400)));
+      journal({ ...fixEntry(input, is_error, is_error === null ? 'no result before the run ended' : resultText.slice(0, 400)), ...marked });
       if (is_error === null) return;
       out.lineRefFixes++;
       if (ok) {
@@ -120,7 +138,7 @@ export function opencodeStreamJournal(journal, observe = () => {}, launchKeys = 
       }
       return;
     }
-    if (ok) {
+    if (ok && !executeFailed) {
       out.sterlingOk++;
       observe(`mcp__${SERVER}__${name}`, input);
     }
@@ -144,7 +162,7 @@ export function opencodeStreamJournal(journal, observe = () => {}, launchKeys = 
           const name = String(c.tool).slice(SERVER.length + 1);
           const innerFinished = c.status === 'completed' || c.status === 'error';
           const is_error = finished && innerFinished ? c.status === 'error' : null;
-          sterlingCall(name, c.input ?? {}, is_error === false, is_error, text);
+          sterlingCall(name, c.input ?? {}, is_error, text, status === 'error');
         }
         return;
       }
