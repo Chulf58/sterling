@@ -39,6 +39,8 @@ const HOST_MAP = [
   [/\(AskUserQuestion\)/g, '(the `question` tool)'],
   [/`AskUserQuestion`/g, 'the `question` tool'],
   [/READY TO CLEAR/g, 'READY FOR NEW SESSION'],
+  // Sterling installs the roster under .opencode/agents/sterling/ on OpenCode (STERLING_AGENTS_SUBDIR).
+  [/\.claude\/agents\//g, '.opencode/agents/sterling/'],
 ];
 
 // Left in a body after mapping, any of these is a Claude Code instruction the
