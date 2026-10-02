@@ -7862,6 +7862,7 @@ var WORKER_DISALLOWED_TOOLS = [
   ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
   ...["add", "remove", "update", "edit"].map((v) => mcp(`board_${v}`)),
   mcp("config_set"),
+  mcp("domain_describe"),
   "Write",
   "Edit",
   "Bash"

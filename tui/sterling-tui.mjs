@@ -44351,7 +44351,7 @@ var runtimeMarkerSchema = external_exports.object({
 }).strict();
 
 // packages/store/dist/mounted.js
-import { mkdirSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, existsSync, rmSync, openSync, closeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -48772,7 +48772,7 @@ var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync2, readFileSync as readFileSync5, readdirSync as readdirSync3, mkdirSync as mkdirSync4, openSync, writeSync, closeSync, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { lstatSync as lstatSync2, readFileSync as readFileSync5, readdirSync as readdirSync3, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/opencode-agents.mjs
@@ -49429,7 +49429,7 @@ function dispatchStateKey(toolUseId) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync2, readSync, closeSync as closeSync2, fstatSync, existsSync as existsSync8, statSync as statSync4, readdirSync as readdirSync6 } from "node:fs";
+import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync8, statSync as statSync4, readdirSync as readdirSync6 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
@@ -49447,7 +49447,7 @@ function deriveAgentTranscript(parentTranscriptPath, agentId) {
 }
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync8(path)) return null;
-  const fd = openSync2(path, "r");
+  const fd = openSync3(path, "r");
   try {
     const size = fstatSync(fd).size;
     const len = Math.min(size, bytes);
@@ -49455,7 +49455,7 @@ function readTail(path, bytes = TAIL_BYTES) {
     readSync(fd, buf, 0, len, size - len);
     return buf.toString("utf8");
   } finally {
-    closeSync2(fd);
+    closeSync3(fd);
   }
 }
 function latestUsage(path) {

@@ -5497,7 +5497,7 @@ var init_shares = __esm({
 });
 
 // packages/store/dist/mounted.js
-import { mkdirSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, existsSync, rmSync, openSync, closeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 function resolveDomainMounts(config) {
@@ -5519,14 +5519,21 @@ function createDomain(name4, description, dbPath2) {
   if (typeof description !== "string" || description.trim().length === 0) {
     throw new Error(`createDomain: domain '${name4}' needs a description saying which knowledge belongs in it; none was given, so nothing was created`);
   }
-  if (existsSync(dbPath2)) {
-    throw new Error(`createDomain: a store for domain '${name4}' already exists at '${dbPath2}'; set its description on that store instead of re-creating it`);
-  }
-  const store = open(dbPath2);
+  mkdirSync(dirname(dbPath2), { recursive: true });
   try {
+    closeSync(openSync(dbPath2, "wx"));
+  } catch (e) {
+    if (e?.code === "EEXIST") {
+      throw new Error(`createDomain: a store for domain '${name4}' already exists at '${dbPath2}'; set its description on that store instead of re-creating it`);
+    }
+    throw e;
+  }
+  let store;
+  try {
+    store = new SterlingStore(dbPath2);
     store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
   } catch (e) {
-    store.close();
+    store?.close();
     for (const suffix of ["", "-wal", "-shm", "-journal"])
       rmSync(dbPath2 + suffix, { force: true });
     throw e;
@@ -9441,6 +9448,11 @@ function backupPathForRuntime(p) {
   return process.platform === "win32" ? p : toWslPath(p);
 }
 
+// scripts/lib/domain-defaults.mjs
+var DEFAULT_DOMAIN_DESCRIPTIONS = {
+  sterling: "Knowledge about Sterling itself: how the plugin behaves, facts about the Claude Code and OpenCode hosts, and workflow knowledge that applies to every project that uses Sterling."
+};
+
 // scripts/init-impl.mjs
 init_resolve();
 
@@ -10040,7 +10052,7 @@ function ensureConductorActivation(targetDir, agentResults) {
 import { readFileSync as readFileSync5 } from "node:fs";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync3, readFileSync as readFileSync4, readdirSync as readdirSync3, mkdirSync as mkdirSync5, openSync, writeSync, closeSync, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { lstatSync as lstatSync3, readFileSync as readFileSync4, readdirSync as readdirSync3, mkdirSync as mkdirSync5, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
 import { join as join9, resolve as resolve2 } from "node:path";
 var ContainmentError = class extends Error {
   constructor(message) {
@@ -10096,11 +10108,11 @@ function writeContained(root, rel, content) {
   const parent = rel.split("/").slice(0, -1).join("/");
   if (parent) mkdirContained(root, parent);
   const abs = containedPath(root, rel, "file");
-  const fd = openSync(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | NOFOLLOW, 420);
+  const fd = openSync2(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | NOFOLLOW, 420);
   try {
     writeSync(fd, content);
   } finally {
-    closeSync(fd);
+    closeSync2(fd);
   }
 }
 
@@ -11771,6 +11783,22 @@ var declaredToolchains = argAll("--toolchain").map((spec) => {
   const [adapter, globs] = spec.split(":");
   return { adapter, path_globs: (globs ?? "").split(",").filter(Boolean) };
 });
+var DOMAIN_DESCRIPTION_FLAG = "--domain-description";
+var domainDescriptionFlags = argAll(DOMAIN_DESCRIPTION_FLAG);
+if (process.argv.filter((a) => a === DOMAIN_DESCRIPTION_FLAG).length !== domainDescriptionFlags.length) {
+  fail(`init REFUSED: ${DOMAIN_DESCRIPTION_FLAG} needs a value of the form <domain>=<description>`, 2);
+}
+var domainDescriptions = /* @__PURE__ */ new Map();
+for (const spec of domainDescriptionFlags) {
+  const eq = spec.indexOf("=");
+  const name4 = eq === -1 ? "" : spec.slice(0, eq).trim();
+  const text = eq === -1 ? "" : spec.slice(eq + 1).trim();
+  if (!name4 || !text) {
+    fail(`init REFUSED: ${DOMAIN_DESCRIPTION_FLAG} ${JSON.stringify(spec)} must be <domain>=<description> with a non-blank description`, 2);
+  }
+  if (domainDescriptions.has(name4)) fail(`init REFUSED: ${DOMAIN_DESCRIPTION_FLAG} was given twice for domain '${name4}'`, 2);
+  domainDescriptions.set(name4, text);
+}
 var fwd6 = (p) => p.replace(/\\/g, "/");
 var normalize6 = (s2) => s2.replace(/\r\n/g, "\n");
 var withoutHandoffEntries = (c) => ({ ...c, generated_projections: (c.generated_projections ?? []).filter((p) => !isOwnedExport(target, p)) });
@@ -11854,6 +11882,38 @@ var expectedConfig = parseConfig({
   mode: recorded ? recorded.mode : modeFlag ?? "hobby"
 });
 if (eff.splitRatio === void 0) eff.splitRatio = expectedConfig.tui_split_ratio;
+var domainMounts = resolveDomainMounts({ stack_tags: eff.stackTags, domain_paths: eff.domainPaths });
+var domainsToCreate = [];
+var domainsExisting = [];
+for (const m of domainMounts) {
+  if (existsSync11(m.dbPath)) domainsExisting.push(m);
+  else domainsToCreate.push({ ...m, description: domainDescriptions.get(m.name) ?? DEFAULT_DOMAIN_DESCRIPTIONS[m.name] });
+}
+for (const name4 of domainDescriptions.keys()) {
+  if (!domainMounts.some((m) => m.name === name4)) {
+    fail(`init REFUSED: ${DOMAIN_DESCRIPTION_FLAG} names '${name4}', which is not a declared domain (declared: ${domainMounts.map((m) => m.name).join(", ")})`, 2);
+  }
+}
+var undescribed = domainsToCreate.filter((d) => !d.description);
+var skippedDomains = [];
+if (hasFlag("--update-ensure") && recorded) {
+  for (const d of undescribed) {
+    if (!recorded.stack_tags.includes(d.name)) continue;
+    skippedDomains.push(d);
+    process.stderr.write(
+      `init: domain '${d.name}' is recorded but has no store at '${d.dbPath}' and no description; SKIPPED on the update ensure pass (not created, not mounted). Run /sterling:init with ${DOMAIN_DESCRIPTION_FLAG} ${d.name}=<description> to create it.
+`
+    );
+  }
+  undescribed = undescribed.filter((d) => !skippedDomains.includes(d));
+  domainsToCreate.splice(0, domainsToCreate.length, ...domainsToCreate.filter((d) => !skippedDomains.includes(d)));
+}
+if (undescribed.length) {
+  fail(
+    `init REFUSED: ${undescribed.length === 1 ? "domain" : "domains"} ${undescribed.map((d) => `'${d.name}'`).join(", ")} ${undescribed.length === 1 ? "has" : "have"} no store yet and no description. A new domain is created with a description of which knowledge belongs in it; pass ` + undescribed.map((d) => `${DOMAIN_DESCRIPTION_FLAG} ${d.name}=<description>`).join(" ") + ". Nothing was written.",
+    2
+  );
+}
 var notes = [];
 if (recorded) {
   const flagDiffs = [];
@@ -11889,6 +11949,16 @@ for (const [label, leaf] of [[".sterling/ (+runs/)", ".sterling/runs"], ["docs/b
   const existed = existsSync11(join20(target, leaf));
   mkdirSync7(join20(target, leaf), { recursive: true });
   items.push({ item: label, status: existed ? "exists" : "created", detail: "" });
+}
+for (const d of domainsToCreate) {
+  createDomain(d.name, d.description, d.dbPath);
+  items.push({ item: `domain '${d.name}'`, status: "created", detail: `${d.dbPath} \u2014 ${d.description}` });
+}
+for (const d of skippedDomains) {
+  items.push({ item: `domain '${d.name}'`, status: "skipped", detail: `${d.dbPath} \u2014 no store and no description; not created on the update ensure pass` });
+}
+for (const m of domainsExisting) {
+  items.push({ item: `domain '${m.name}'`, status: "exists", detail: `${m.dbPath} \u2014 already has a store; its description is untouched${domainDescriptions.has(m.name) ? ` (the --domain-description given for it was NOT applied)` : ""}` });
 }
 var backupDetail = eff.backupPath ? eff.backupPath : "OPTED OUT (recorded; snapshots will skip loudly)";
 if (!recorded) {
@@ -11929,7 +11999,7 @@ var assertNoDeadTerms = (label, content) => {
   if (hits.length) fail(`init dead-term check FAILED in generated ${label}: ${hits.map((h) => h.match).join(", ")}`, 1);
   return content;
 };
-var agentsMdTemplateRaw = readFileSync13(join20(pluginRoot, "templates", "target-agents-md.md"), "utf8").replaceAll("{{PROJECT_NAME}}", eff.projectName).replaceAll("{{STACK_TAGS}}", eff.stackTags.join(", ")).replaceAll("{{TOOLCHAINS}}", baked.map((t) => `${t.adapter} (${t.path_globs.join(", ")})`).join("; ")).replaceAll("{{DOMAINS}}", eff.stackTags.length ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(", ") + " \u2014 created lazily on first need (\xA72.3)" : "(none \u2014 declare stack tags to mount domain stores)").replaceAll("{{BACKUP_PATH}}", eff.backupPath ? "configured \u2014 see `.sterling/config.json` \u2192 `backup_path` (machine-local, deliberately not restated here)" : "(opted out \u2014 recorded)");
+var agentsMdTemplateRaw = readFileSync13(join20(pluginRoot, "templates", "target-agents-md.md"), "utf8").replaceAll("{{PROJECT_NAME}}", eff.projectName).replaceAll("{{STACK_TAGS}}", eff.stackTags.join(", ")).replaceAll("{{TOOLCHAINS}}", baked.map((t) => `${t.adapter} (${t.path_globs.join(", ")})`).join("; ")).replaceAll("{{DOMAINS}}", eff.stackTags.length ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(", ") + " \u2014 each created by init with a description of what belongs in it (\xA72.3)" : "(none \u2014 declare stack tags to mount domain stores)").replaceAll("{{BACKUP_PATH}}", eff.backupPath ? "configured \u2014 see `.sterling/config.json` \u2192 `backup_path` (machine-local, deliberately not restated here)" : "(opted out \u2014 recorded)");
 var CONVENTIONS_TOKEN = "{{CONVENTIONS_SECTION}}";
 var agentsMdConventionsIdx = agentsMdTemplateRaw.indexOf(CONVENTIONS_TOKEN);
 if (agentsMdConventionsIdx === -1) fail("templates/target-agents-md.md lost its {{CONVENTIONS_SECTION}} placeholder \u2014 refusing (P5)", 1);

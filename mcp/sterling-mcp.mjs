@@ -22818,7 +22818,7 @@ import { dirname as dirname3, basename, join as join3, resolve as resolvePath } 
 import { randomUUID } from "node:crypto";
 
 // packages/store/dist/mounted.js
-import { mkdirSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, existsSync, rmSync, openSync, closeSync } from "node:fs";
 import { dirname as dirname2, join as join2 } from "node:path";
 import { homedir } from "node:os";
 
@@ -26064,7 +26064,7 @@ import { isDeepStrictEqual } from "node:util";
 // packages/mcp-server/dist/attestation-proof.js
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
+import { closeSync as closeSync2, constants as fsConstants, fstatSync, lstatSync, openSync as openSync2, readSync } from "node:fs";
 import { resolve } from "node:path";
 var AttestationRefusal = class extends Error {
   path;
@@ -26184,7 +26184,7 @@ function readOwnedFile(root, key, remainingBytes, maxTotalBytes) {
   if (!pre.isFile())
     throw new AttestationRefusal("the worktree path is not a regular file", key);
   const noFollow = fsConstants.O_NOFOLLOW ?? 0;
-  const fd = fsStep(key, "open", () => openSync(abs, fsConstants.O_RDONLY | noFollow));
+  const fd = fsStep(key, "open", () => openSync2(abs, fsConstants.O_RDONLY | noFollow));
   try {
     const st = fsStep(key, "fstat", () => fstatSync(fd));
     if (!st.isFile())
@@ -26203,7 +26203,7 @@ function readOwnedFile(root, key, remainingBytes, maxTotalBytes) {
     }
     return bytes;
   } finally {
-    closeSync(fd);
+    closeSync2(fd);
   }
 }
 function hashObjectOf(root, key, bytes) {
@@ -26568,9 +26568,17 @@ var SterlingTools = class _SterlingTools {
     this.domains = deps.domains ?? (deps.store instanceof MountedStores ? mountedDomainSurface(deps.store) : void 0);
   }
   /** Every mounted domain with its description (null when its store has none),
-   *  in manifest order. */
+   *  in manifest order. A description that cannot be read (a pre-v2 domain
+   *  store, or any other read failure) reads 'description unreadable: <reason>'
+   *  with `unreadable: true`, so a create receipt still goes out and says so. */
   mountedDomainList() {
-    return (this.domains?.names() ?? []).map((name) => ({ name, description: this.domains.description(name) ?? null }));
+    return (this.domains?.names() ?? []).map((name) => {
+      try {
+        return { name, description: this.domains.description(name) ?? null };
+      } catch (e) {
+        return { name, description: `description unreadable: ${e?.message ?? String(e)}`, unreadable: true };
+      }
+    });
   }
   /** `{ missing_domains }` when a configured domain was skipped for having no
    *  store, else nothing: a read over fewer stores than configured says so. */
@@ -28264,9 +28272,12 @@ var SterlingTools = class _SterlingTools {
    * the description of at least one mounted NON-sterling domain surfaces one
    * promotion_review item naming the suggested domain(s), the description and
    * the matched terms. Exactly one fit is drainable by the agent; several fits
-   * go to the user. The 'sterling' domain is excluded because it is mounted by
-   * every project and would otherwise claim every record about Sterling work.
-   * No mounted domain with a description, or no fit, surfaces nothing. Returns
+   * go to the user. The 'sterling' domain COUNTS toward that decision but is
+   * never suggested (conductor decision 2026-10-03): a record that also fits
+   * sterling is ambiguous, so it goes to the user. Sterling is never named
+   * because it is mounted by every project and would otherwise claim every
+   * record about Sterling work. No mounted domain with a description, or no
+   * fit other than sterling, surfaces nothing. Returns
    * the receipt warning for knowledge_create, or undefined when nothing was
    * surfaced.
    */
@@ -28281,19 +28292,21 @@ var SterlingTools = class _SterlingTools {
     const registered = RECORD_TYPES[type];
     if (!registered)
       return void 0;
-    const candidates = this.mountedDomainList().filter((d) => d.name !== "sterling" && d.description);
-    if (!candidates.length)
+    const described = this.mountedDomainList().filter((d) => d.description && !d.unreadable);
+    if (!described.some((d) => d.name !== "sterling"))
       return void 0;
-    const fits = fitDomains(registered.fts(body), candidates, { exclude: ["sterling"] });
+    const allFits = fitDomains(registered.fts(body), described);
+    const fits = allFits.filter((f) => f.name !== "sterling");
     if (!fits.length)
       return void 0;
-    const descriptionOf = new Map(candidates.map((d) => [d.name, d.description]));
+    const descriptionOf = new Map(described.map((d) => [d.name, d.description]));
     const named = fits.map((f) => `domain:${f.name} ("${descriptionOf.get(f.name)}"; matched: ${f.matched.join(", ")})`).join("; ");
-    const verdict = fits.length === 1 ? "exactly one fit: drainable" : "several fit: ask the user";
+    const alsoSterling = allFits.length > fits.length ? " It also fits the sterling domain, which is never a promotion target." : "";
+    const verdict = allFits.length === 1 ? "exactly one fit: drainable" : "several fit: ask the user";
     const label = _SterlingTools.mintHeadlineOf(type, body) || type;
     this.maintenanceEnqueue({
       reason: "promotion_review",
-      text: `review '${label}' for promotion: project-scoped ${type} with no file_keys fits ${named}. ${verdict}`,
+      text: `review '${label}' for promotion: project-scoped ${type} with no file_keys fits ${named}.${alsoSterling} ${verdict}`,
       feature_link: record2.id
     });
     return `promotion candidate: this project-scoped ${type} fits ${named}, so a promotion_review item was queued (${verdict}). A record about that subject belongs in scope domain:${fits[0].name} at creation; one about this repo stays project.`;
@@ -30891,6 +30904,15 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         next.history = [...hist.slice(0, genesis), ...hist.slice(hist.length - recentKeep)];
       }
     }
+    const holderScope = this.store.scopeOfHolder(old.id);
+    if (holderScope.startsWith("domain:")) {
+      const had = new Set(declaredRepoPaths(old.type, old));
+      const added = declaredRepoPaths(old.type, next).filter((p) => !had.has(p));
+      if (added.length) {
+        const field = old.type === "feature_article" ? "files" : "file_keys";
+        throw new Error(`${toolName}: ${old.id} is held by the shared domain store '${holderScope}', and this write adds repo paths to its ${field} (${added.slice(0, 5).join(", ")}${added.length > 5 ? ", \u2026" : ""}). Repo paths stay in project-scoped records; put them on a project record that links to this one. Nothing was written.`);
+      }
+    }
     const claimsCheck = this.assertClaimedPaths(toolName, next);
     const advance = (liveClaims) => {
       if (next.type !== "feature_article" && next.type !== "reference_material")
@@ -33212,6 +33234,14 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         throw this.renderValidationFailure(err, type, "knowledge_supersede");
       throw err;
     }
+    const supersedeHolder = this.store.scopeOfHolder(old.id);
+    if (supersedeHolder.startsWith("domain:")) {
+      const had = new Set(declaredRepoPaths(type, old));
+      const added = declaredRepoPaths(type, parsed).filter((p) => !had.has(p));
+      if (added.length) {
+        throw new Error(`knowledge_supersede: ${old.id} is held by the shared domain store '${supersedeHolder}', and its replacement adds repo paths (${added.slice(0, 5).join(", ")}${added.length > 5 ? ", \u2026" : ""}). Repo paths stay in project-scoped records. Nothing was written.`);
+      }
+    }
     const citationWarnings = registered ? this.citedIdWarnings(registered.fts(parsed)) : [];
     const units = _SterlingTools.rulingSourceFields(old).flatMap((f) => _SterlingTools.segmentRulingUnits(f));
     let orphanCandidates = [];
@@ -33344,7 +33374,12 @@ function createSterlingServer(storePath2) {
     process.stderr.write(missingDomainWarning(m) + "\n");
   const tools = new SterlingTools({ store, config: config2, repoRoot: dirname5(dirname5(storePath2)), domains: mountedDomainSurface(store) });
   const bootDomains = store.domainNames().map((name) => {
-    const description = store.domainDescription(name);
+    let description;
+    try {
+      description = store.domainDescription(name);
+    } catch (e) {
+      return `${name} (description unreadable: ${e?.message ?? String(e)})`;
+    }
     return description ? `${name} ("${description}")` : `${name} (no description)`;
   });
   const createDomainsNote = bootDomains.length ? ` Mounted domains: ${bootDomains.join("; ")}. A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.` : "";

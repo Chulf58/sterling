@@ -6,12 +6,12 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h20-mechanism-axis.mjs
-import { existsSync as existsSync6 } from "node:fs";
-import { join as join6 } from "node:path";
+import { existsSync as existsSync7 } from "node:fs";
+import { join as join8 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { dirname as dirname2, join as join2, resolve } from "node:path";
+import { dirname as dirname3, join as join3, resolve } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5231,6 +5231,9 @@ var configSchema = external_exports.object({
   // (config.test.ts pins that they agree).
   pr_review: external_exports.unknown().default({ copilot_logins: [] })
 });
+function parseConfig(raw) {
+  return configSchema.parse(raw);
+}
 
 // packages/schemas/dist/registry.js
 var projectRegistrationSchema = external_exports.object({
@@ -5263,8 +5266,59 @@ var runtimeMarkerSchema = external_exports.object({
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { mkdirSync, existsSync, realpathSync, statSync } from "node:fs";
-import { dirname, basename, join, resolve as resolvePath } from "node:path";
+import { dirname as dirname2, basename, join as join2, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
+
+// packages/store/dist/mounted.js
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+
+// packages/store/dist/shares.js
+var DEFAULT_PROJECT_SHARE = 0.6;
+function allocateShares(perSourceCounts, cap, projectShare = DEFAULT_PROJECT_SHARE) {
+  if (!Array.isArray(perSourceCounts) || perSourceCounts.length === 0) {
+    throw new Error("allocateShares: perSourceCounts must contain at least the project count (index 0)");
+  }
+  if (!Number.isInteger(cap) || cap < 1)
+    throw new Error(`allocateShares: cap must be a positive integer, got ${cap}`);
+  for (const c of perSourceCounts) {
+    if (!Number.isInteger(c) || c < 0)
+      throw new Error(`allocateShares: every count must be a non-negative integer, got ${c}`);
+  }
+  if (typeof projectShare !== "number" || !(projectShare >= 0 && projectShare <= 1)) {
+    throw new Error(`allocateShares: projectShare must be between 0 and 1, got ${projectShare}`);
+  }
+  const domainCount = perSourceCounts.length - 1;
+  const projectQuota = domainCount === 0 ? cap : Math.min(cap, Math.ceil(projectShare * cap - 1e-9));
+  const quotas = [projectQuota];
+  const rest = cap - projectQuota;
+  for (let i = 0; i < domainCount; i++) {
+    quotas.push(Math.floor(rest / domainCount) + (i < rest % domainCount ? 1 : 0));
+  }
+  const alloc = perSourceCounts.map((count, i) => Math.min(count, quotas[i]));
+  let left = cap - alloc.reduce((a, b) => a + b, 0);
+  while (left > 0) {
+    let gave = false;
+    for (let i = 0; i < alloc.length && left > 0; i++) {
+      if (alloc[i] < perSourceCounts[i]) {
+        alloc[i]++;
+        left--;
+        gave = true;
+      }
+    }
+    if (!gave)
+      break;
+  }
+  return alloc;
+}
+
+// packages/store/dist/mounted.js
+function resolveDomainMounts(config) {
+  return config.stack_tags.map((name) => ({
+    name,
+    dbPath: config.domain_paths[name] ?? join(homedir(), ".sterling", "domains", name, "sterling.db")
+  }));
+}
 
 // packages/store/dist/axis.js
 var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
@@ -5963,7 +6017,7 @@ var SterlingStore = class _SterlingStore {
     this.db = new DatabaseSync2(path);
     let classifiedPath = this.dbPath;
     try {
-      classifiedPath = join(realpathSync(dirname(this.dbPath)), basename(this.dbPath));
+      classifiedPath = join2(realpathSync(dirname2(this.dbPath)), basename(this.dbPath));
     } catch {
     }
     this.db.exec("PRAGMA busy_timeout=5000");
@@ -6607,8 +6661,8 @@ var SterlingStore = class _SterlingStore {
         throw new Error(`${op}: record '${id}' was concurrently written (it is no longer at version ${identity.version}) \u2014 re-read and retry`);
       }
       this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
-      for (const tag of new Set(validated.stack_tags)) {
-        this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(id, tag);
+      for (const tag2 of new Set(validated.stack_tags)) {
+        this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(id, tag2);
       }
       const beforeFileKeys = new Set(entry.fileKeys(current));
       const afterFileKeys = new Set(entry.fileKeys(stored));
@@ -7493,7 +7547,7 @@ var SterlingStore = class _SterlingStore {
     if (existsSync(target)) {
       throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
     }
-    mkdirSync(dirname(target), { recursive: true });
+    mkdirSync(dirname2(target), { recursive: true });
     this.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
   }
   close() {
@@ -7739,8 +7793,8 @@ var SterlingStore = class _SterlingStore {
     const stored = _SterlingStore.storableBody(record);
     this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version, record.scope, record.created_at, record.updated_at, record.author, JSON.stringify(stored));
-    for (const tag of new Set(record.stack_tags)) {
-      this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(record.id, tag);
+    for (const tag2 of new Set(record.stack_tags)) {
+      this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(record.id, tag2);
     }
     for (const path of new Set(entry.fileKeys(stored))) {
       this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(record.id, path);
@@ -7831,8 +7885,8 @@ function projectRoot(from) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (; ; ) {
-    if (existsSync2(join2(dir, ".sterling", "sterling.db"))) return dir;
-    const parent = dirname2(dir);
+    if (existsSync2(join3(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname3(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -7950,12 +8004,8 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   exit: (code) => process.exit(code)
 });
 function loadConfig(cwd) {
-  const p = join2(cwd, ".sterling", "config.json");
+  const p = join3(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
-}
-function openStore(cwd) {
-  const p = join2(cwd, ".sterling", "sterling.db");
-  return existsSync2(p) ? new SterlingStore(p) : null;
 }
 function repoRel(toolPath, cwd) {
   if (!toolPath) return null;
@@ -7968,25 +8018,142 @@ function repoRel(toolPath, cwd) {
   }
 }
 
+// scripts/hooks/lib/subject-fan.mjs
+import { existsSync as existsSync3 } from "node:fs";
+import { join as join4 } from "node:path";
+var defaultOpener = (dbPath) => new SterlingStore(dbPath);
+function domainMountsFromConfig(config) {
+  if (config === null || config === void 0) return [];
+  return resolveDomainMounts(parseConfig({ stack_tags: config.stack_tags, domain_paths: config.domain_paths }));
+}
+var tag = (records, source) => records.map((r) => ({ ...r, source_store: source }));
+var errorText = (e) => String(e && e.message || e);
+function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
+  const projectPath = join4(cwd, ".sterling", "sterling.db");
+  if (!existsSync3(projectPath)) return null;
+  let mounts = [];
+  let configError = null;
+  try {
+    mounts = domainMountsFromConfig(loadConfig(cwd));
+  } catch (e) {
+    configError = errorText(e);
+  }
+  const project = opener(projectPath);
+  let domains = [];
+  const missingDomains = [];
+  const unreadableDomains = [];
+  const drop = (d, e) => {
+    unreadableDomains.push({ name: d.name, dbPath: d.dbPath, error: errorText(e) });
+    domains = domains.filter((x) => x !== d);
+    try {
+      d.store.close();
+    } catch {
+    }
+  };
+  for (const m of mounts) {
+    if (!existsSync3(m.dbPath)) {
+      missingDomains.push({ name: m.name, dbPath: m.dbPath });
+      continue;
+    }
+    try {
+      domains.push({ name: m.name, dbPath: m.dbPath, store: opener(m.dbPath) });
+    } catch (e) {
+      unreadableDomains.push({ name: m.name, dbPath: m.dbPath, error: errorText(e) });
+    }
+  }
+  const eachDomain = (fn) => {
+    const out = [];
+    for (const d of [...domains]) {
+      try {
+        out.push([d, fn(d.store)]);
+      } catch (e) {
+        drop(d, e);
+      }
+    }
+    return out;
+  };
+  return {
+    project,
+    get domainNames() {
+      return domains.map((d) => d.name);
+    },
+    missingDomains,
+    unreadableDomains,
+    configError,
+    query(opts = {}) {
+      if (opts.file_keys !== void 0 || !domains.length) return tag(project.query(opts), "project");
+      const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+      const perStore = [["project", project.query({ ...opts, cap })], ...eachDomain((s2) => s2.query({ ...opts, cap })).map(([d, r]) => [d.name, r])];
+      const shares = allocateShares(perStore.map(([, r]) => r.length), cap);
+      return perStore.flatMap(([name, records], i) => tag(records.slice(0, shares[i]), name));
+    },
+    /** Supersedes edges live with their SOURCE record, so every mount is read; first seen wins. */
+    inboundSupersedes(id) {
+      const seen = /* @__PURE__ */ new Set();
+      const out = [];
+      const lists = [["project", project.inboundSupersedes(id)], ...eachDomain((s2) => s2.inboundSupersedes(id)).map(([d, r]) => [d.name, r])];
+      for (const [name, records] of lists) {
+        for (const r of records) {
+          if (seen.has(r.id)) continue;
+          seen.add(r.id);
+          out.push({ ...r, source_store: name });
+        }
+      }
+      return out;
+    },
+    articlesBySlug(slug) {
+      return project.articlesBySlug(slug);
+    },
+    close() {
+      let first;
+      for (const s2 of [project, ...domains.map((d) => d.store)]) {
+        try {
+          s2.close();
+        } catch (e) {
+          first ??= e;
+        }
+      }
+      if (first) throw first;
+    }
+  };
+}
+function fanDegradedLine(fan, who) {
+  if (!fan) return null;
+  const parts = [];
+  if (fan.configError) parts.push(`config.json unreadable, no domains mounted (${fan.configError})`);
+  for (const d of fan.unreadableDomains) parts.push(`domain '${d.name}' unreadable at ${d.dbPath} (${d.error})`);
+  if (!parts.length) return null;
+  return `${who}: DEGRADED subject fan: ${parts.join("; ")}. Delivering from the project store only.`;
+}
+function warnFanDegraded(fan, who) {
+  const line = fanDegradedLine(fan, who);
+  if (!line) return;
+  try {
+    process.stderr.write(`${line}
+`);
+  } catch {
+  }
+}
+
 // scripts/hooks/lib/advisory-counter.mjs
-import { appendFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "node:fs";
-import { join as join3 } from "node:path";
+import { appendFileSync, existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "node:fs";
+import { join as join5 } from "node:path";
 function recordAdvisoryFire(root, hook, sessionId) {
   try {
     if (!root || !hook) return;
-    if (!existsSync3(join3(root, ".sterling"))) return;
-    const dir = join3(root, ".sterling", "transient");
+    if (!existsSync4(join5(root, ".sterling"))) return;
+    const dir = join5(root, ".sterling", "transient");
     mkdirSync2(dir, { recursive: true });
     let session = typeof sessionId === "string" && sessionId ? sessionId : null;
     if (!session) {
       try {
-        const parsed = JSON.parse(readFileSync2(join3(dir, "session.json"), "utf8"));
+        const parsed = JSON.parse(readFileSync2(join5(dir, "session.json"), "utf8"));
         session = typeof parsed?.session_id === "string" ? parsed.session_id : null;
       } catch {
       }
     }
     appendFileSync(
-      join3(dir, "advisory-fires.ndjson"),
+      join5(dir, "advisory-fires.ndjson"),
       JSON.stringify({ hook, session, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n"
     );
   } catch {
@@ -7994,10 +8161,10 @@ function recordAdvisoryFire(root, hook, sessionId) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, renameSync, openSync, closeSync } from "node:fs";
-import { join as join4, dirname as dirname3 } from "node:path";
+import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync5, renameSync, openSync, closeSync } from "node:fs";
+import { join as join6, dirname as dirname4 } from "node:path";
 function deliveryDir(cwd) {
-  return join4(cwd, ".sterling", "transient", "delivery");
+  return join6(cwd, ".sterling", "transient", "delivery");
 }
 var HEADER_TERM_CAP = 6;
 function boundedTermClause(terms, cap = HEADER_TERM_CAP) {
@@ -8041,11 +8208,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join4(deliveryDir(cwd), component);
+  return join6(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join4(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join6(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -8084,7 +8251,7 @@ function markDiscoveryDelivered(guard, emittedDiscovery) {
 function readGuard(path) {
   if (!path) return emptyDeliveryGuard();
   try {
-    if (!existsSync4(path)) return emptyDeliveryGuard();
+    if (!existsSync5(path)) return emptyDeliveryGuard();
     const parsed = JSON.parse(readFileSync3(path, "utf8"));
     if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
     return { ...emptyDeliveryGuard(), ...parsed };
@@ -8096,7 +8263,7 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync3(dirname3(path), { recursive: true });
+  mkdirSync3(dirname4(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
@@ -8812,8 +8979,8 @@ function isReviewerClass(type) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync2, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync5, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { join as join5, resolve as resolve2, dirname as dirname4, isAbsolute } from "node:path";
+import { mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync2, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync6, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join7, resolve as resolve2, dirname as dirname5, isAbsolute } from "node:path";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash } from "node:crypto";
 
@@ -8926,10 +9093,10 @@ function render(x) {
 
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
-  return join5(root, ".sterling", "transient", "dispatch-register.json");
+  return join7(root, ".sterling", "transient", "dispatch-register.json");
 }
 function configPath(root) {
-  return join5(root, ".sterling", "config.json");
+  return join7(root, ".sterling", "config.json");
 }
 function readStaleMinutesDefault(root) {
   try {
@@ -8960,7 +9127,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync5(p)) return { availability: "absent", arr: [] };
+  if (!existsSync6(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync4(p, "utf8");
@@ -9028,7 +9195,7 @@ var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
 var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 function dispatchStateDir(root) {
-  return join5(root, ".sterling", "transient", "dispatch-state");
+  return join7(root, ".sterling", "transient", "dispatch-state");
 }
 var LIVE_PREFIX = "live-";
 var DONE_PREFIX = "done-";
@@ -9073,9 +9240,9 @@ function parseStateFileName(name) {
 }
 var warnedStateFiles = /* @__PURE__ */ new Set();
 function warnStateFile(file, text) {
-  const tag = `${file}\0${text}`;
-  if (warnedStateFiles.has(tag)) return;
-  warnedStateFiles.add(tag);
+  const tag2 = `${file}\0${text}`;
+  if (warnedStateFiles.has(tag2)) return;
+  warnedStateFiles.add(tag2);
   process.stderr.write(`${render(disclosure("dispatch_state_poisoned", { file }, text))}
 `);
 }
@@ -9171,7 +9338,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync(join5(dir, to));
+    lstatSync(join7(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -9181,7 +9348,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync2(join5(dir, from), join5(dir, to));
+    renameSync2(join7(dir, from), join7(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -9231,7 +9398,7 @@ function scanLiveState(root, { repair }) {
       done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
       continue;
     }
-    const classified = classifyRecordFile(join5(dir, name));
+    const classified = classifyRecordFile(join7(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
@@ -9721,8 +9888,8 @@ var input = readStdin();
 function buildModelPin(inp) {
   if (typeof inp.tool_name !== "string" || !inp.tool_name.startsWith("mcp__codex__")) return null;
   const root = inp.cwd ? String(inp.cwd) : "";
-  const sterling = join6(root, ".sterling");
-  if (!existsSync6(join6(sterling, "sterling.db")) && !existsSync6(join6(sterling, "config.json"))) return null;
+  const sterling = join8(root, ".sterling");
+  if (!existsSync7(join8(sterling, "sterling.db")) && !existsSync7(join8(sterling, "config.json"))) return null;
   const pin = codexModelPin(root, { opener: inp.tool_name === "mcp__codex__codex", toolInput: inp.tool_input });
   if (!pin.model) return { line: pin.line };
   return { line: pin.line, updatedInput: { ...inp.tool_input && typeof inp.tool_input === "object" ? inp.tool_input : {}, model: pin.model } };
@@ -9765,7 +9932,7 @@ function main(input2) {
   try {
     const outgoing = outgoingProposalText(input2.tool_input);
     if (!outgoing) return finish();
-    const store = openStore(input2.cwd);
+    const store = openSubjectFan(input2.cwd);
     if (!store) return finish();
     const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
     const composed = composeMechanismAxis(store, {
@@ -9779,6 +9946,7 @@ function main(input2) {
       overlap: overlapNotice(),
       host: "claude"
     });
+    warnFanDegraded(store, "H20");
     if (!composed) return finish();
     const { assembled, guard } = composed;
     const pin = modelPin();

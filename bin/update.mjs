@@ -6083,7 +6083,7 @@ var init_shares = __esm({
 });
 
 // packages/store/dist/mounted.js
-import { mkdirSync as mkdirSync2, existsSync as existsSync5, rmSync } from "node:fs";
+import { mkdirSync as mkdirSync2, existsSync as existsSync5, rmSync, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
 import { dirname as dirname2, join as join9 } from "node:path";
 import { homedir as homedir3 } from "node:os";
 function resolveDomainMounts(config) {
@@ -6105,14 +6105,21 @@ function createDomain(name, description, dbPath) {
   if (typeof description !== "string" || description.trim().length === 0) {
     throw new Error(`createDomain: domain '${name}' needs a description saying which knowledge belongs in it; none was given, so nothing was created`);
   }
-  if (existsSync5(dbPath)) {
-    throw new Error(`createDomain: a store for domain '${name}' already exists at '${dbPath}'; set its description on that store instead of re-creating it`);
-  }
-  const store = open(dbPath);
+  mkdirSync2(dirname2(dbPath), { recursive: true });
   try {
+    closeSync2(openSync2(dbPath, "wx"));
+  } catch (e) {
+    if (e?.code === "EEXIST") {
+      throw new Error(`createDomain: a store for domain '${name}' already exists at '${dbPath}'; set its description on that store instead of re-creating it`);
+    }
+    throw e;
+  }
+  let store;
+  try {
+    store = new SterlingStore(dbPath);
     store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
   } catch (e) {
-    store.close();
+    store?.close();
     for (const suffix of ["", "-wal", "-shm", "-journal"])
       rmSync(dbPath + suffix, { force: true });
     throw e;
@@ -9634,7 +9641,7 @@ import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/lib/update.mjs
 import { spawnSync } from "node:child_process";
-import { closeSync as closeSync2, existsSync as existsSync7, mkdirSync as mkdirSync5, openSync as openSync2, readFileSync as readFileSync6, readdirSync as readdirSync4, readSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync7, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, readSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname5, join as join13 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10470,13 +10477,13 @@ function walUserVersion(dbPath) {
   return committed;
 }
 function probeSchemaVersion(dbPath) {
-  const fd = openSync2(dbPath, "r");
+  const fd = openSync3(dbPath, "r");
   const header = Buffer.alloc(100);
   let bytesRead;
   try {
     bytesRead = readSync(fd, header, 0, header.length, 0);
   } finally {
-    closeSync2(fd);
+    closeSync3(fd);
   }
   if (bytesRead < header.length || header.subarray(0, 16).toString("latin1") !== "SQLite format 3\0") {
     throw new Error(`'${dbPath}' is not a valid SQLite database file`);
@@ -10912,7 +10919,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
     log("\n\u25B8 store migration (this clone) \u2014 SKIPPED (red test battery)");
   }
   if (existsSync7(join13(cwd, ".sterling", "config.json"))) {
-    step("re-bake machine artifacts (init ensure pass)", nodeBin, [join13(cwd, "scripts", "init.mjs"), "--target", cwd], { show: true, tolerate: true });
+    step("re-bake machine artifacts (init ensure pass)", nodeBin, [join13(cwd, "scripts", "init.mjs"), "--target", cwd, "--update-ensure"], { show: true, tolerate: true });
   } else {
     log(
       "\n\u25B8 re-bake machine artifacts \u2014 SKIPPED: no .sterling/config.json in the Sterling clone. That is the NORMAL consumer shape and nothing is missing: the clone-as-project artifacts (its own launchers/CLAUDE.md/agents) are what this step bakes, and the plugin MCP config plugin.json points at is committed and arrived with the fast-forward. Run /sterling:init in a project \u2014 not here \u2014 if this machine has never done so."

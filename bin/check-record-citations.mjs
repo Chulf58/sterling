@@ -5259,7 +5259,7 @@ import { dirname as dirname2, basename, join as join2, resolve as resolvePath } 
 import { randomUUID } from "node:crypto";
 
 // packages/store/dist/mounted.js
-import { mkdirSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, existsSync, rmSync, openSync, closeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
