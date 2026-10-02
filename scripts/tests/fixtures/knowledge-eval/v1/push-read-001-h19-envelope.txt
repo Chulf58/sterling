@@ -1,0 +1,9 @@
+STERLING KNOWLEDGE DELIVERY (H19) — owning knowledge for 'scripts/hooks/h15-store-guard.mjs'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.
+
+▸ article 'store-database-seal-h15' (6976b7c5, active) — knowledge_get 6976b7c5-3ac9-4267-92df-d5a31e6c8724
+  H15 is a PreToolUse hook registered (hooks/hooks.json) on Bash|PowerShell and on Edit|Write|MultiEdit|NotebookEdit. It enforces ONE rule: nothing but the Sterling MCP server touches the store DATABASE — `.sterling/sterling.db` and its siblings (`sterling.db-wal`, `-shm`, `-journal`, `sterling.db.*` backup/migration files). Every other file under `.sterling/` (config.json, transient/*, delivery-audit/*, review-ledger.json) is ordinary project state that any tool may read or write. Structured channel: the destination path (tool_input.file_path, or notebook_path for NotebookEdit) is resolved against cwd; denied (exit 2) when it carries a `.sterling` directory component AND its basename matches the database-file pattern.
+
+▸ PORCH END (1800 bytes) — followed by 1 article body(ies); path channel: 2 decision pointer(s); subject staging: none.
+
+▸ article 'store-database-seal-h15' (6976b7c5) (active)
+▸ FULL RECORD (clipped at the delivery cap): knowledge_get 6976b7c5-3ac9-4267-92df-d5a31e6c8724

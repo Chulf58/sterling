@@ -1,0 +1,11 @@
+{
+  "name": "sterling-tui",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./tui": "./sterling-tui.bundle.tsx"
+  },
+  "scripts": {
+    "test": "node --test \"tests/*.test.ts\""
+  }
+}

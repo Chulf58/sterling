@@ -1,0 +1,3935 @@
+// @sterling/store — the SQLite access layer (spec §3.1, §16.1 Slice 2): the one
+// write code path, imported by mcp-server AND tui; zod validation (shared
+// @sterling/schemas) guards every write including the TUI's.
+//
+// Substrate (verified at build against §3.1 criteria): SQLite via node:sqlite
+// (Node ≥24, bundled SQLite 3.51.x — WAL, FTS5/bm25, VACUUM INTO; zero native
+// dependencies). node:sqlite is API-experimental, so all driver contact stays
+// inside this module; swapping drivers is a one-file change.
+
+import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync, existsSync, realpathSync, statSync } from 'node:fs';
+import { dirname, basename, join, resolve as resolvePath } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
+import {
+  RECORD_TYPES,
+  validateRecord,
+  normalizeRepoPath,
+  linkSchema,
+  LIFECYCLE_VALUES,
+  FRESHNESS_VALUES,
+  type DurableRecord,
+  type Lifecycle,
+  type Freshness,
+} from '@sterling/schemas';
+
+export { MountedStores, type DomainMount, resolveDomainMounts } from './mounted.js';
+export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
+export * from './axis.js';
+import { AXIS_MAX_TERM_LEN } from './axis.js';
+
+/** The verdict on ONE claimed repo-relative path (decision
+ *  [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]). */
+export type ClaimPathVerdict = 'leaf' | 'absent' | 'real_directory' | { kind: 'unverifiable'; errno: string };
+
+/**
+ * THE ONE CLASSIFIER for a path a knowledge record CLAIMS — shared by the MCP
+ * tool layer's write boundary and scripts/delivery-oracle.mjs's census, so the
+ * gate and the census can never disagree about what a directory claim is
+ * (decision [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]).
+ *
+ * It CLASSIFIES ONLY; the tool layer decides that 'real_directory' refuses a
+ * write. `statSync` FOLLOWS symlinks deliberately: the contract is "a
+ * non-directory LEAF, or a symlink whose target is not a directory", so a
+ * symlink to a file is a leaf and a symlink to a directory is refused-shaped —
+ * lstat would report both as the link itself and lose that distinction.
+ *
+ * ENOENT is 'absent', a legitimate forward-looking claim. Every OTHER errno is
+ * 'unverifiable' NAMING the errno rather than being collapsed into 'absent':
+ * an unclassifiable claim is not admitted either way (P5).
+ */
+export function classifyClaimPath(repoRoot: string, path: string): ClaimPathVerdict {
+  try {
+    return statSync(join(repoRoot, path)).isDirectory() ? 'real_directory' : 'leaf';
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === 'ENOENT') return 'absent';
+    return { kind: 'unverifiable', errno: code ?? String(err) };
+  }
+}
+
+/**
+ * THE COLUMN-AUTHORITATIVE LIVE-RECORD DECODER, as a standalone export — the
+ * body of SterlingStore.decodeLiveRecord (see its full contract there), lifted
+ * so a reader OUTSIDE this class that materialises a live DurableRecord from a
+ * `records` row (scripts/delivery-oracle.mjs's read-only fallback reader) can
+ * decode IDENTICALLY instead of parsing `body` alone and inheriting whatever
+ * scope the body happens to carry.
+ */
+export function decodeLiveRecordRow(op: string, row: { body: string; scope: string }): DurableRecord {
+  const record = JSON.parse(row.body) as DurableRecord;
+  if (typeof row.scope !== 'string' || row.scope.length === 0) {
+    throw new Error(
+      `${op}: record '${(record as { id?: string }).id ?? 'unknown'}' was read with an EMPTY records.scope column. ` +
+        `That column is NOT NULL, so this row cannot exist in a well-formed store — refusing rather than defaulting to ` +
+        `'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent ` +
+        `(decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`
+    );
+  }
+  record.scope = row.scope;
+  return record;
+}
+
+const DDL = `
+CREATE TABLE IF NOT EXISTS records (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  superseded_by TEXT,
+  lifecycle TEXT NOT NULL DEFAULT 'live',
+  freshness TEXT NOT NULL DEFAULT 'fresh',
+  version INTEGER NOT NULL DEFAULT 1,
+  scope TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  author TEXT NOT NULL,
+  derived_unconfirmed INTEGER NOT NULL DEFAULT 0,
+  body TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_records_type_status ON records(type, status);
+-- Schema v2 identity tables [stable-identity-design-v2].
+-- record_versions: FULL-RECORD JSON snapshots, one per (record_id, version).
+-- Append-only and permanent — NEVER indexed into records_fts, so an archived
+-- version's text can never rank in query() (the whole point of contract 1).
+CREATE TABLE IF NOT EXISTS record_versions (
+  record_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  archived_at TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (record_id, version)
+);
+-- record_aliases: dead-id lookup (historical_id -> canonical_id + the version
+-- archived under that historical id). NOTHING writes it in S2 — the S4
+-- migration runner populates it once; it is an index, not a namespace.
+CREATE TABLE IF NOT EXISTS record_aliases (
+  historical_id TEXT PRIMARY KEY,
+  canonical_id TEXT NOT NULL,
+  archived_version INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+-- remove() deletes aliases by canonical_id.
+CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON record_aliases(canonical_id);
+-- record_relations: the AUTHORITATIVE home of typed edges (supersedes,
+-- cites, ...). Replaces record_links: served links[] materializes from here,
+-- and supersession is a relation rather than a column value a caller sets.
+CREATE TABLE IF NOT EXISTS record_relations (
+  source_id TEXT NOT NULL,
+  rel TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (source_id, rel, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_relations_target ON record_relations(target_id);
+CREATE INDEX IF NOT EXISTS idx_relations_rel_target ON record_relations(rel, target_id);
+CREATE TABLE IF NOT EXISTS record_stack_tags (
+  record_id TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  PRIMARY KEY (record_id, tag)
+);
+CREATE TABLE IF NOT EXISTS record_file_keys (
+  record_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  PRIMARY KEY (record_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_file_keys_path ON record_file_keys(path);
+CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(record_id UNINDEXED, text);
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  machine_state TEXT NOT NULL,
+  pending_exit TEXT,
+  body TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS handoffs (
+  run_id TEXT NOT NULL,
+  phase_id TEXT NOT NULL,
+  agent_role TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_run_phase ON handoffs(run_id, phase_id);
+CREATE TABLE IF NOT EXISTS check_skipped (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT,
+  check_name TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS selection (
+  slot INTEGER PRIMARY KEY CHECK (slot = 1),
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS queue_drain_log (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  drained_at TEXT NOT NULL,
+  system_reason TEXT NOT NULL,
+  text TEXT NOT NULL,
+  file_keys TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS activity_log (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  verb TEXT NOT NULL,
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  title TEXT NOT NULL
+);
+`;
+
+// ---------------------------------------------------------------------------
+// Schema-version guard (stable-identity S1, extended by S2; decision
+// [stable-identity-design-v2] / 2176748e): refuse-until-migrated. PRAGMA
+// user_version (research_finding foreign_5555895c: a 32-bit application-owned integer
+// at header offset 60 — NEVER SQLite's own PRAGMA schema_version) is checked at
+// the very top of open, before the DDL or any other write lands, so a store
+// from a NEWER, unsupported schema is refused with nothing touched.
+//
+// S2 SEMANTICS (the S1 blanket auto-stamp-forward is GONE):
+//   * a FRESH store file (sqlite_master empty at open, before DDL) is built as
+//     v2 and stamped user_version = 2;
+//   * an EXISTING, non-empty store below the supported version is NOT stamped
+//     forward — stamping it would claim a data migration that never ran. It
+//     opens READ-ONLY: reads work, every write refuses loudly naming the
+//     stable-identity migration;
+//   * a too-new store still refuses via UnsupportedSchemaVersionError with
+//     nothing written (the user_version read stays BEFORE journal_mode/DDL).
+// ---------------------------------------------------------------------------
+export const SUPPORTED_SCHEMA_VERSION = 2;
+
+export class UnsupportedSchemaVersionError extends Error {
+  readonly found: number;
+  readonly supported: number;
+  constructor(found: number, supported: number) {
+    super(
+      `Unsupported schema version: this store's user_version (${found}) is newer than the schema version this build supports (${supported}). ` +
+        `This store was likely migrated by a newer build of Sterling. Do not open it with an older/downgraded build — writing with a downgraded ` +
+        `build over a newer schema risks corrupting the store. Upgrade this build (or restore from a backup taken before the migration) before continuing.`
+    );
+    this.name = 'UnsupportedSchemaVersionError';
+    this.found = found;
+    this.supported = supported;
+  }
+}
+
+/**
+ * Every WRITE against a store that predates the stable-identity schema
+ * ([stable-identity-design-v2]). The store opened fine — reads are deliberately
+ * allowed pre-migration (AC3) — but no write may land: v2 shapes written into a
+ * v1 schema would corrupt it, and stamping the marker forward without moving
+ * the data would silently claim a migration that never ran (exactly what the S1
+ * 0→1 auto-stamp did, which is why it was removed here).
+ */
+/**
+ * POSIX single-quoted shell argument (Codex MEDIUM, 2026-08-26): a
+ * double-quoted path still lets $/backticks expand and breaks on an embedded
+ * double quote — single quotes suppress ALL expansion, which is what
+ * "copy-paste safe" actually requires. Standard close-quote/escaped-quote/
+ * reopen-quote form for a path that itself contains a single quote.
+ */
+function shellQuoteSingle(value: string): string {
+  return `'${value.split("'").join(`'\\''`)}'`;
+}
+
+export class SchemaMigrationRequiredError extends Error {
+  readonly found: number;
+  readonly supported: number;
+  /**
+   * The absolute path of the store file that needs migrating (measured
+   * defect, Salesforce consumer 2026-08-26): without this a hook surfacing
+   * the error showed only a bare bundle line number, and the user could not
+   * tell WHICH of several candidate stores on the machine to migrate.
+   */
+  readonly db_path: string;
+  constructor(found: number, supported: number, operation: string, dbPath: string) {
+    super(
+      `Schema migration required: the store at '${dbPath}' is at schema version ${found}, but this build requires version ${supported}. ` +
+        `The store is open READ-ONLY — '${operation}' and every other write refuses until the stable-identity migration has run. ` +
+        `Run from the Sterling clone: node scripts/migrate-stores.mjs --db ${shellQuoteSingle(dbPath)} (decision stable-identity-design-v2; the runner ` +
+        `takes a VACUUM INTO backup first, and bumps user_version last). Nothing was written.`
+    );
+    this.name = 'SchemaMigrationRequiredError';
+    this.found = found;
+    this.supported = supported;
+    this.db_path = dbPath;
+  }
+}
+
+// RecordedExit / ACTIVE_STATES (the staged pipeline's run-protocol exit shape
+// and active-state list) were removed with the run/handoff protocol above
+// (decision sterling-claude-code-scale-down-boundary, 2ad87dd1).
+
+// ---------------------------------------------------------------------------
+// AC8: catalog status + bootstrap + dedup enqueue (run r-ea9e, phase 3)
+// ---------------------------------------------------------------------------
+
+const CATALOG_DAY_MS = 86_400_000;
+
+/**
+ * Pure function: reports whether a models-catalog reference_material record is
+ * present and/or stale against the tunable threshold.
+ *
+ * Staleness is STRICT GREATER (age > threshold), mirroring the existing
+ * §3.2.5 refresh_reference lane convention in tools.ts (sourceAge > threshold).
+ * At EXACTLY thresholdDays elapsed the catalog is FRESH; one day past → STALE.
+ *
+ * @param record  the catalog reference_material record, or null when absent.
+ * @param nowISO  ISO timestamp for "now" (injectable for testing).
+ * @param thresholdDays  models_catalog.staleness_days from config.
+ */
+export function catalogStatus(
+  record: unknown,
+  nowISO: string,
+  thresholdDays: number
+): { present: boolean; stale: boolean; staleDate: string | null } {
+  if (!record) return { present: false, stale: false, staleDate: null };
+  const anchor = (record as { updated_at: string }).updated_at;
+  const age = Math.floor((Date.parse(nowISO) - Date.parse(anchor)) / CATALOG_DAY_MS);
+  const staleDate = new Date(Date.parse(anchor) + thresholdDays * CATALOG_DAY_MS).toISOString();
+  return { present: true, stale: age > thresholdDays, staleDate };
+}
+
+/**
+ * The concrete delta a refresh_reference item on the models catalog appends
+ * to its text, so a drain has something to act on instead of a bare "refresh
+ * the catalog" (Dome Farmer friction 2026-09-17, `sterling-issues.md`
+ * 2026-09-17 entry): every current entry's id/tier/status, with any entry
+ * whose tier is still 'unknown' called out by name as the thing to look up.
+ * No catalog record → no delta to append (bootstrap has not run yet).
+ */
+function refreshReferenceDeltaSuffix(catalogRecord: Record<string, unknown> | undefined): string {
+  const entries = (catalogRecord?.catalog as { entries?: { id: string; label: string; tier: string; status: string }[] } | undefined)
+    ?.entries ?? [];
+  if (entries.length === 0) return '';
+  const snapshot = entries.map((e) => `${e.id} (tier: ${e.tier}, status: ${e.status})`).join(', ');
+  const unknownTier = entries.filter((e) => e.tier === 'unknown').map((e) => e.id);
+  const lookup =
+    unknownTier.length > 0
+      ? `tier is still 'unknown' for: ${unknownTier.join(', ')} — look these up and `
+      : 're-verify these against current provider info and ';
+  return ` — current entries: ${snapshot}. ${lookup}update catalog.entries[] on the linked record via knowledge_edit/knowledge_update, then bump its source_date and cite this item's id in resolves.`;
+}
+
+/**
+ * Board 39d6462d activity feed: the "title-or-slug clipped" the record is
+ * shown under on the Queue tab's activity section. Most types carry `title`;
+ * feature_article also carries `slug` but title wins when both exist; todo
+ * carries no title and falls back to its first text line. Clipped to 80
+ * chars — the same clip the card titles use (viewmodel.ts).
+ *
+ * TEXT BEATS SLUG (S1, decision human-readable-ids-for-board-items): since
+ * `todo` gained an auto-minted slug, a slug-first order would have quietly
+ * replaced the feed's readable headline ("EXPORT THE BOARD AS CSV.") with its
+ * kebab handle ("export-the-board-as-csv") — a downgrade for the one surface
+ * whose whole job is readability. Types that carry a title are unaffected
+ * (title still wins), and slug stays ahead of the raw id for anything carrying
+ * neither.
+ */
+function activityTitleOf(record: DurableRecord): string {
+  const r = record as unknown as { title?: string; slug?: string; text?: string; id: string };
+  const raw = r.title ?? r.text?.split('\n')[0] ?? r.slug ?? r.id;
+  return raw.slice(0, 80);
+}
+
+function deepReplaceString(value: unknown, from: string, to: string): unknown {
+  if (typeof value === 'string') return value === from ? to : value;
+  if (Array.isArray(value)) return value.map((v) => deepReplaceString(v, from, to));
+  if (value && typeof value === 'object') {
+    // Remap object KEYS as well as values (audit finding 11/43): path-keyed maps
+    // like feature_article.file_baselines are keyed by repo-relative path, so a
+    // rename that only rewrote values left the baseline keyed by the OLD path —
+    // the read-time drift check then abstained forever. Exact-match, mirroring
+    // the string-value branch.
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)])
+    );
+  }
+  return value;
+}
+
+// §3.4: rank_terms are plain keywords — an array of single terms with a
+// per-term length cap; a keyword array cannot smuggle in a freeform question.
+// One definition of the rank-terms cap (invariant 1): the query schema enforces
+// it, and callers building rank_terms (the TUI search) clamp to it so they never
+// hand the store an over-long list that throws at parse (audit finding 9/43).
+export const MAX_RANK_TERMS = 16;
+
+/**
+ * The dedupe KEY for one rank term: lowercased, with runs of Unicode
+ * punctuation (\p{P}) and separators (\p{Z}) folded to one space — the
+ * characters FTS5's default unicode61 tokenizer treats as token separators.
+ * Symbols, marks, letters and digits are left alone, and there is no NFKD or
+ * mark stripping: merging two terms FTS treats as different queries ("C++"
+ * onto "C", two emoji onto one empty key) silently DROPS a caller's term,
+ * which is worse than the double count this exists to fix. So the key
+ * under-dedupes by design. A term that folds to nothing keys on itself. A
+ * trailing '*' is set aside before the fold and re-appended, using
+ * ftsMatchExpr's own prefix test, so "mech*" stays distinct from "mech".
+ * NOT guaranteed: diacritic variants ("café"/"cafe") and locale case-folding
+ * (Turkish dotted/dotless I) may still double-count; and JS's current Unicode
+ * tables are newer than unicode61's 6.1, so a rare newer-script case pair or
+ * punctuation mark could still be merged here while FTS keeps it apart.
+ * Exported so the TUI's rank-term builder uses this same key.
+ */
+export function rankTermDedupeKey(term: string): string {
+  const isPrefix = term.endsWith('*') && term.length > 1;
+  const base = isPrefix ? term.slice(0, -1) : term;
+  const folded = base
+    .toLowerCase()
+    .replace(/[\p{P}\p{Z}]+/gu, ' ')
+    .trim();
+  const key = folded.length > 0 ? folded : base;
+  return isPrefix ? `${key}*` : key;
+}
+
+export const rankTerms = z
+  .array(
+    z
+      .string()
+      .regex(new RegExp(`^\\S{1,${AXIS_MAX_TERM_LEN}}$`), `rank_terms must be single keywords (no whitespace, ≤${AXIS_MAX_TERM_LEN} chars)`),
+  )
+  // Dedupe BEFORE the cap, on rankTermDedupeKey, first occurrence wins,
+  // original order otherwise preserved — the ORIGINAL term text is what is
+  // kept and sent to FTS, only the comparison is folded. This is the ONE
+  // place rank_terms are normalized — every caller (query(), countAboveScore())
+  // reaches the FTS match expression only through rankTerms.parse(), so a
+  // duplicate can never reach ftsMatchExpr and double a record's bm25
+  // contribution.
+  .transform((terms) => {
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+    for (const term of terms) {
+      const key = rankTermDedupeKey(term);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(term);
+    }
+    return deduped;
+  })
+  .pipe(z.array(z.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
+
+// One definition of the §3.4 default cap (invariant 1), for the same reason as
+// MAX_RANK_TERMS: it was written literally in BOTH query() here and
+// MountedStores.query, and the tool layer now has to report the cap it actually
+// applied (knowledgeQueryResult) — a third literal would have been a third place
+// to drift. A caller that omits cap gets this many records and, at the tool
+// boundary, is TOLD so.
+export const DEFAULT_QUERY_CAP = 20;
+
+/**
+ * Options every in-place write shares ([stable-identity-design-v2]).
+ *
+ * `expected_version` is the CAS token that replaces the accidental
+ * UUID-as-token of the supersede era: UPDATE ... WHERE id = ? AND version = ?.
+ * It provides NO accidental idempotency — a replay on an already-consumed
+ * version is a stale caller and is refused.
+ *
+ * `resolves` names the maintenance items this write CLAIMS to close; they are
+ * drained inside the write's own transaction, and a refused claim rolls the
+ * whole write back.
+ */
+export interface RecordWriteOptions {
+  expected_version?: number;
+  resolves?: string[];
+  /**
+   * An explicit removal from the authoritative relation graph. This is kept
+   * separate from the record body because links[] updates are deliberately
+   * additive: a normal content write must never silently drop an edge.
+   * Supersedes is excluded in applyInPlace; lifecycle transitions remain owned
+   * by supersede()/retireInFavorOf().
+   */
+  remove_relation?: { rel: string; target_id: string };
+  /**
+   * OUT PARAMETER (board b0bb9d96 fix-round HIGH): when supplied, drainResolves
+   * pushes one snapshot per claimed item onto this array, read INSIDE the
+   * write's own transaction, immediately before that item's removal — the
+   * COMMITTED state at close time, never a pre-transaction validation read.
+   * Without this, a caller that built its own "what did resolves close"
+   * disclosure from an earlier read could describe an item's file_keys as they
+   * were when validated rather than as they were the instant they were
+   * deleted — and this lane's own fold can widen an item's file_keys between
+   * those two moments. The caller supplies an empty array and reads it back
+   * after the call returns.
+   */
+  resolvedReceipt?: { id: string; system_reason?: string; file_keys?: string[]; text?: string }[];
+  /**
+   * OUT PARAMETER (board 7e779e1f): when supplied, a same-store versioned
+   * in-place write that makes THIS record stop claiming a path prunes that
+   * path from the record's own open reconcile_needed item(s) — see
+   * pruneReconcileNeeded — and pushes one entry per item actually touched.
+   * Empty when the write claims no fewer paths than before, or claims fewer
+   * but no open item names any of them.
+   */
+  prunedReceipt?: { id: string; system_reason?: string; removed: boolean; pruned_paths: string[]; remaining_file_keys: string[] }[];
+}
+
+export interface QueryOptions {
+  types?: string[];
+  stack_tags?: string[];
+  file_keys?: string[];
+  rank_terms?: string[];
+  cap?: number;
+  match_all?: boolean;
+  /** Filter by todo body source ('user' | 'system') BEFORE the cap (finding 38/43). */
+  source?: string;
+  /** ABSENCE QUERY floor (board a577a69d) — see SterlingStore.countAboveScore for the scale (`-bm25`, higher is more relevant). Not itself a query() filter: query()'s returned window is unaffected by it. */
+  min_score?: number;
+}
+
+// The store surface the §10 tool layer drives — exactly the methods SterlingTools
+// calls, no more. Both SterlingStore (single project store) and MountedStores
+// (project + mounted domains) satisfy it, so the tools are agnostic to whether
+// domain stores are mounted. Derived via Pick so the signatures never drift.
+export type ToolStore = Pick<
+  SterlingStore,
+  | 'create'
+  // The atomic, single-definition dedup path every maintenance item now takes
+  // (board 2ded3b4b). boardAdd routes system-source todos through it.
+  | 'enqueueSystemTodo'
+  | 'query'
+  | 'count'
+  // knowledge_query's min_score ABSENCE QUERY (board a577a69d) — the
+  // uncapped, full-match-set threshold count beside query()'s own window.
+  | 'countAboveScore'
+  | 'get'
+  // PHYSICAL mount membership — the append-join discharge's project-local owner
+  // lookup and its target refusal (packages/mcp-server/src/tools.ts) both need
+  // to know whether a record actually lives in the project database, which is
+  // the one mount their transaction can commit on and the one file H10 reads.
+  // A record's body `scope` cannot answer that (anti_pattern
+  // [record-body-scope-is-not-physical-store-identity]), so the surface exposes
+  // the question instead of letting the tool layer infer it.
+  | 'projectStoreHolds'
+  // The NAMING companion of projectStoreHolds (decision
+  // [scope-drift-closed-by-column-authoritative-reads-not-format-change]): a
+  // tool that must SUPPLY a scope — knowledge_supersede's replacement,
+  // knowledge_extract's new record — asks the storage layer which mount holds
+  // the source instead of copying the source's caller-writable body label.
+  | 'scopeOfHolder'
+  // knowledge_get resolves 8-char id PREFIXES through this index (decision
+  // 27f148c2) — the citation format the whole repo writes, which get() alone
+  // cannot serve because it matches a full id only.
+  | 'recordIdIndex'
+  // knowledge_create resolves an exact slug through this to REFUSE a second
+  // feature_article under a slug that already exists (decision foreign_3db7095f built it
+  // for H19's one-hop pointers and noted "a second consumer does not exist yet"
+  // — this is that second consumer). Deterministic, so the refusal can never be
+  // a ranking artefact.
+  | 'articlesBySlug'
+  // knowledge_create's cross-type slug uniqueness + knowledge_get's slug
+  // resolution (board 1e639f32) — the type-agnostic sibling of articlesBySlug.
+  | 'recordsBySlug'
+  // knowledge_get's dead-slug fallthrough ONLY (decision foreign_df361a0f) — the
+  // superseded-only counterpart of recordsBySlug, consulted after both
+  // live-slug and id-prefix resolution fail.
+  | 'supersededRecordsBySlug'
+  // knowledge_get's terminus disclosure (decision foreign_de1a7329) — the pinned
+  // record stays version-pinned; this is the only way the tool layer learns
+  // where a superseded record's chain currently ends.
+  | 'resolveTerminus'
+  // knowledge_get's INBOUND supersedes disclosure (board c6e3561f part (a)) —
+  // the additive/advisory counterpart of resolveTerminus for the partial/
+  // clause-supersession case; never drives status or terminus.
+  | 'inboundSupersedes'
+  | 'supersede'
+  // The generalized in-place write triad + its version reader (stable-identity
+  // S3, the call sites promised by S2's note): knowledge_update/edit/append all
+  // land through updateRecord, and knowledge_get's `version` parameter reads
+  // archived snapshots through getRecordVersion.
+  | 'updateRecord'
+  // The NARROW server-owned metadata write (board 8c8b6d78 / R9): the baseline
+  // attestation stamps drift metadata and PRESERVES updated_at, which no other
+  // write path can do — advancing the clock would make the read-time mtime
+  // prefilter suppress unrelated, already-standing drift on the article's other
+  // owned files.
+  | 'updateRecordMetadata'
+  | 'editRecordField'
+  | 'appendRecordField'
+  | 'getRecordVersion'
+  // knowledge_get's legacy_resolution + the write tools' historical-id refusal
+  // (stable-identity S3) resolve dead ids through this index.
+  | 'recordAliases'
+  | 'updateTodo'
+  | 'retireInFavorOf'
+  | 'remove'
+  // board_remove/maintenance_remove distinguish 'already removed' from 'never
+  // existed' through the drain-log trace (board 97d773ef).
+  | 'drainLogEntry'
+  | 'addLink'
+  | 'recordCheckSkipped'
+  // knowledge_split's multi-record write (children + parent supersession)
+  // needs one atomic boundary spanning several store calls (decision
+  // compaction-tooling-windowed-read-plus-split) — see withTransaction above.
+  | 'withTransaction'
+  // TRANSACTION-TO-HOLDER AFFINITY (decision
+  // [scope-drift-closed-by-column-authoritative-reads-not-format-change]): the
+  // record-routed form of the above, for a tool-layer operation whose owning
+  // mount must be decided by PHYSICAL identity rather than by a body label.
+  | 'withTransactionForRecord'
+>;
+
+/** Depth bound for the create-time field-loss walk below. The `before` side is a
+ *  CALLER-supplied body that nothing upstream has capped, so an unbounded
+ *  recursion would turn a pathological (or corrupt) input into a RangeError +
+ *  stack trace instead of the promised refusal. Exceeding the bound THROWS a
+ *  plain message — the bound is far past any legal record shape, so hitting it
+ *  is itself the finding. This is the ONLY definition used by THIS LOSS WALK
+ *  (droppedKeyPaths/walkDropped/emitTotalLoss) — scripts/domain-doctor.mjs
+ *  imports droppedKeyPaths from this module rather than carrying its own copy
+ *  of the walk (decision droppedkeypaths-arms-kept-budgeted-one-shared-walker),
+ *  but it KEEPS its own independent `MAX_BODY_COMPARE_DEPTH` for its unrelated
+ *  `deepEqual` structural-equality check (scripts/domain-doctor.mjs:~464) —
+ *  same value, same reasoning, deliberately a separate constant because
+ *  deepEqual is a different algorithm this module does not own. */
+const MAX_BODY_COMPARE_DEPTH = 64;
+
+/** WORK/EDGE budget (decision droppedkeypaths-arms-kept-budgeted-one-shared-walker):
+ *  charged once per node/edge visited by EITHER walk below — the structural
+ *  compare walk and the total-loss emit walk — even when nothing is emitted.
+ *  Deliberately NO visited/memoized set (a shared subtree legitimately owns
+ *  multiple key paths that must all be reported), so a structure built by
+ *  reference-sharing re-walks its shared nodes once per path — exponential in
+ *  the sharing depth. This is what catches the case where two DIFFERENT
+ *  reference graphs are structurally IDENTICAL (near-zero output, so the
+ *  output budget below never fires): comparing two independently-built
+ *  depth-22 binary-sharing trees walks ~12.6M edges with zero drops. Measured
+ *  (probe, 2026-08-31): that comparison alone, uncapped, takes ~300-400ms for
+ *  the full walk, so 10,000,000 trips well before completion (guaranteeing the
+ *  `assert.throws`) while finishing in well under half a second — and a
+ *  realistic record body (hundreds of fields, depth <= 8) needs on the order
+ *  of a few thousand edges, thousands of times under this budget. */
+const COMPARE_WORK_BUDGET = 10_000_000;
+
+/** OUTPUT-PATH budget: charged once per lost path actually pushed onto the
+ *  result array, shared with the work budget above across one droppedKeyPaths
+ *  call. This is the budget that fires FIRST and fast on a genuinely
+ *  pathological total-loss enumeration (structure-sharing or wide fan-out),
+ *  because emitting a lost path is far more expensive than a bare comparison —
+ *  it builds and retains a string and grows the result array — and a realistic
+ *  loss report never legitimately needs anywhere near this many entries.
+ *  Measured (probe, 2026-08-31): 50,000 emitted paths costs single-digit
+ *  milliseconds; without this check the work budget alone still catches a
+ *  pathological emit (it is charged there too), but only after actually
+ *  building on the order of 10,000,000 output strings, which measured
+ *  ~2.1-2.9s — over the 2-second promptness bar this slice pins. */
+const COMPARE_OUTPUT_BUDGET = 50_000;
+
+/** PATH-LENGTH budget (Codex review, S2d fix round, HIGH — adopted): the
+ *  work/edge and output-path budgets above both count NODES, and neither
+ *  bounds the SIZE of an individual path STRING. A record whose keys are
+ *  themselves multi-hundred-KB strings, nested only a few levels deep, visits
+ *  very few nodes (well under either budget above) while the ACCUMULATED path
+ *  string built by repeated appendPathSegment concatenation grows without
+ *  bound — a failure class the node/edge-counting budgets cannot see at all,
+ *  because it is a property of one string, not a count of anything. Left
+ *  unchecked this either throws a raw V8 `RangeError: Invalid string length`
+ *  (a failure class outside this function's documented contract — it always
+ *  throws ComparisonBudgetExceededError, never a driver-level exception) or,
+ *  for sizes below V8's ceiling, succeeds slowly while retaining multi-MB
+ *  strings in the result array.
+ *
+ *  1,000,000 characters (~1MB) is the bound: far above any legitimate record
+ *  address (a real key path is at most a few hundred characters even at this
+ *  module's own MAX_BODY_COMPARE_DEPTH), and far below V8's actual string
+ *  ceiling (on the order of 2^29-1 characters, ~536M).
+ *
+ *  CHECKED BEFORE THE FIRST CONCATENATION, NOT AFTER (Codex delta verdict,
+ *  S2d micro-round — this is now genuinely unconditional, not merely "fires
+ *  first in practice"): every appendPathSegment call — including the very
+ *  first, at the root frame, where `path` is still `''` — computes the
+ *  PROSPECTIVE combined length from `.length` on the existing path and the
+ *  incoming segment ALONE, and charges/throws on that arithmetic before any
+ *  template-literal concatenation runs. No string longer than this budget is
+ *  ever built, not even transiently, so a single ~535M-character key cannot
+ *  RangeError inside that first concatenation the way it could when the
+ *  charge only ran on the already-built result — there is no window left in
+ *  which an oversized string could exist for the raw V8 ceiling to reject. */
+const COMPARE_PATH_LENGTH_BUDGET = 1_000_000;
+
+/** Thrown when any budget above is exhausted. Deliberately its own class
+ *  (not a plain Error, and never reusing the depth-bound message) so a caller
+ *  can tell "the comparison itself is unaffordable" apart from "the input
+ *  cycles" (MAX_BODY_COMPARE_DEPTH) — every message contains "budget",
+ *  the depth-bound message never does. FAILS CLOSED: this is always thrown,
+ *  never a partial loss list returned. */
+class ComparisonBudgetExceededError extends Error {}
+
+/** Shared, per-call counters for the three budgets above. Recreated once per
+ *  public droppedKeyPaths(before, after) call and threaded through every
+ *  recursive step of both walks — this is the "shared across one
+ *  droppedKeyPaths call" half of the ruling. */
+interface ComparisonBudget {
+  chargeWork(): void;
+  chargeOutput(): void;
+  /** `prospectiveLength` is a LENGTH, not a path — callers pass the length the
+   *  path WOULD have (or already has, for the entry-point backstop charge)
+   *  computed from `.length` alone, never a freshly concatenated string. */
+  chargePathLength(prospectiveLength: number): void;
+}
+
+function newComparisonBudget(): ComparisonBudget {
+  let work = 0;
+  let output = 0;
+  return {
+    chargeWork() {
+      work += 1;
+      if (work > COMPARE_WORK_BUDGET) {
+        throw new ComparisonBudgetExceededError(
+          `droppedKeyPaths exceeded its comparison work budget (${COMPARE_WORK_BUDGET} nodes/edges visited) — refusing ` +
+            `rather than continuing an unaffordable comparison. This usually means the record body shares structure by ` +
+            `reference in a way that re-walks the same subtree many times over; there is no partial result to return. ` +
+            `Nothing was written — this throw always precedes the write transaction.`
+        );
+      }
+    },
+    chargeOutput() {
+      output += 1;
+      if (output > COMPARE_OUTPUT_BUDGET) {
+        throw new ComparisonBudgetExceededError(
+          `droppedKeyPaths exceeded its output-path budget (${COMPARE_OUTPUT_BUDGET} lost paths) — refusing rather than ` +
+            `returning a partial loss list. A legitimate loss report never needs this many entries; this means the ` +
+            `comparison is enumerating a pathologically large or heavily-shared subtree. ` +
+            `Nothing was written — this throw always precedes the write transaction.`
+        );
+      }
+    },
+    chargePathLength(prospectiveLength: number) {
+      if (prospectiveLength > COMPARE_PATH_LENGTH_BUDGET) {
+        throw new ComparisonBudgetExceededError(
+          `droppedKeyPaths exceeded its path-length budget (${COMPARE_PATH_LENGTH_BUDGET} characters in one accumulated ` +
+            `key path) — refusing rather than building or returning an oversized path string. This means the record ` +
+            `body's own keys are themselves very large strings, nested deep enough that concatenating them into one ` +
+            `addressable path has grown past what any legitimate record address needs. ` +
+            `Nothing was written — this throw always precedes the write transaction.`
+        );
+      }
+    },
+  };
+}
+
+/** The depth-bound failure, kept distinct from ComparisonBudgetExceededError
+ *  (see above) — its message never contains "budget". */
+function depthBoundError(): Error {
+  return new Error(
+    `record body nesting exceeds the depth bound of ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`
+  );
+}
+
+/** THE ONE DEFINITION OF THE KEY-PATH NOTATION every refusal in this file
+ *  reports: an array index appends '[i]', an object key appends '.key', and the
+ *  ROOT arm emits a bare field name because a divergence in the record body
+ *  itself has no parent to dot onto ('slug', not '.slug').
+ *
+ *  Single-sourced ON PURPOSE. Three producers render these addresses —
+ *  droppedKeyPaths (post-parse loss), emitTotalLoss (a whole subtree made
+ *  unaddressable — by a type change, or by the containing key vanishing
+ *  outright) and unrecognizedKeyPaths (a STRICT object that refused the key
+ *  outright) — and an operator reading any of the three gets an address they
+ *  can paste back into the record. Two hand-rolled renderings of one notation
+ *  drift the moment either is touched, and the drift is invisible until a
+ *  caller cannot find the field it was told about. */
+/** `budget` is OPTIONAL and threaded only by the droppedKeyPaths walkers below
+ *  (walkDropped/emitTotalLoss) — the two callers whose `path`/`segment` values
+ *  are built from a CALLER-supplied record body nothing upstream has capped.
+ *  unrecognizedKeyPaths's calls (zod issue paths/keys) carry no budget and are
+ *  unaffected — those segments come from the schema's own shape, not an
+ *  arbitrarily large caller string, so that hazard does not apply there.
+ *
+ *  PRE-CONCATENATION CHECK (Codex delta verdict, S2d micro-round): computed
+ *  and charged from `.length` alone, on BOTH inputs, BEFORE the template
+ *  literal below ever concatenates them. Checking only the RESULT (as the
+ *  prior round did, via a charge on function entry to walkDropped/
+ *  emitTotalLoss) still lets one call build the oversized string first — a
+ *  single segment near V8's own string-length ceiling, appended to any
+ *  nonempty `path`, can throw a raw `RangeError: Invalid string length`
+ *  *inside this concatenation* before that entry charge is ever reached. No
+ *  string longer than the budget is ever constructed now — not even
+ *  transiently. */
+function appendPathSegment(path: string, segment: string | number, budget?: ComparisonBudget): string {
+  if (typeof segment === 'number') {
+    // '[' + digits + ']' — a safe-integer index is at most ~10 digits, so this
+    // branch never itself carries the multi-MB payload; `path` is what might be.
+    if (budget) budget.chargePathLength(path.length + 2 + String(segment).length);
+    return `${path}[${segment}]`;
+  }
+  const prospectiveLength = path ? path.length + 1 + segment.length : segment.length;
+  if (budget) budget.chargePathLength(prospectiveLength);
+  return path ? `${path}.${segment}` : segment;
+}
+
+/** A key path (or its container) plus every path beneath it, in the same
+ *  dotted/indexed notation droppedKeyPaths reports — 'files[0]',
+ *  'files[0].note'. Charges the shared budget on every node visited AND every
+ *  path pushed (decision droppedkeypaths-arms-kept-budgeted-one-shared-walker)
+ *  — this is the "emit walk" half of that budget, deliberately charged even
+ *  though every call here also emits, so removing the output check alone still
+ *  leaves the work check as a (slower) backstop.
+ *
+ *  Used for TWO cases, both meaning "nothing under `path` is addressable in
+ *  `after` any more": (1) `before` is a container and `after` is not the same
+ *  kind of container (a type change is total loss of everything beneath it,
+ *  board 9f8d4c03), and (2) the key naming `path` is entirely ABSENT from
+ *  `after` — walkDropped used to report only the bare absent key and stop,
+ *  which under-reported: 'field150' being gone means 'field150.nested.deep'
+ *  is exactly as unreachable as 'field150' itself, so both must be named.
+ *
+ *  `path` itself is pushed (unless it is the empty root path, which has no
+ *  addressable identity of its own) — this is what makes the container's OWN
+ *  address appear alongside its children, not just the children.
+ *
+ *  Carries the SAME depth bound as droppedKeyPaths, and for the same reason:
+ *  the input is a caller-supplied body nothing upstream has capped, so the walk
+ *  that reports the loss must not itself blow the stack on a pathological
+ *  shape — checked FIRST, before any charge, so a cyclic `before` throws the
+ *  depth-bound error rather than a budget error (kept distinguishable on
+ *  purpose). */
+function emitTotalLoss(value: unknown, path: string, depth: number, out: string[], budget: ComparisonBudget): void {
+  if (depth > MAX_BODY_COMPARE_DEPTH) throw depthBoundError();
+  // Entry-point backstop charge on the ALREADY-BUILT `path` — defense in
+  // depth alongside the pre-concatenation check inside appendPathSegment
+  // below, which is what actually prevents an oversized string from ever
+  // being built in the first place (see COMPARE_PATH_LENGTH_BUDGET).
+  budget.chargePathLength(path.length);
+  budget.chargeWork();
+  if (path !== '') {
+    // FAIL-CLOSED ORDER (roster review, S2d fix round, LOW): charge BEFORE
+    // pushing, never after — a throw here must mean `path` never entered
+    // `out`, not merely that the budget's own counter is now technically
+    // over. Pushing first and charging second would let one oversize/over-
+    // count entry land in the result the instant before the throw.
+    budget.chargeOutput();
+    out.push(path);
+  }
+  if (value === null || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      emitTotalLoss(value[i], appendPathSegment(path, i, budget), depth + 1, out, budget);
+    }
+    return;
+  }
+  // for-in + own-property guard, not Object.keys (Codex delta verdict, S2d
+  // micro-round): identical own-enumerable-string-key semantics and order for
+  // a JSON-shaped object, but no full key-array materialization ahead of the
+  // pre-concatenation charge in appendPathSegment above — closes the
+  // allocation question structurally rather than by argument.
+  for (const key in value as Record<string, unknown>) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    emitTotalLoss((value as Record<string, unknown>)[key], appendPathSegment(path, key, budget), depth + 1, out, budget);
+  }
+}
+
+/** The structural compare walk: every key path present in `before` that is
+ *  reachable in `before` and NOT reachable the same way in `after`. Module-
+ *  internal since decision droppedkeypaths-arms-kept-budgeted-one-shared-walker
+ *  narrowed the public surface to droppedKeyPaths(before, after) — the
+ *  depth/budget plumbing below is not part of that surface.
+ *
+ *  ORIGIN: lifted from scripts/domain-doctor.mjs's droppedKeyPaths (board
+ *  bd3f0acf) — the first version of that guard used top-level
+ *  `unknownFieldsIn()` and review caught that `files: [{path, role, note}]`
+ *  sails straight through it while still losing `note`. zod strips at EVERY
+ *  nesting level, so the detector must walk to every level too.
+ *  scripts/domain-doctor.mjs no longer carries its own copy — it imports
+ *  droppedKeyPaths from this module, so this is the ONE walker both call
+ *  sites share.
+ *
+ *  PRESENCE, NEVER VALUE: a key whose VALUE changed is a normalization the
+ *  schema boundary performs on purpose (normalizeRepoPath canonicalizes
+ *  file_keys and files[].path), not damage; flagging it would refuse good
+ *  records. A key that is GONE is unrecoverable. One-directional containment is
+ *  also why schema DEFAULTS — which ADD keys the caller never sent — do not
+ *  false-positive here.
+ *
+ *  A source array LONGER than its parsed counterpart counts as loss too, so a
+ *  dropped element cannot hide behind index-wise walking.
+ *
+ *  A TYPE CHANGE IS TOTAL LOSS OF EVERYTHING BENEATH IT (board 9f8d4c03), and
+ *  an ENTIRELY ABSENT KEY is no different — both hand off to emitTotalLoss so
+ *  the full subtree is named, not just the top address. Reporting stays
+ *  reporting: this function never throws on loss (only on exhausting the
+ *  shared depth/work/output budgets); assertNoFieldLoss decides what a loss
+ *  means. */
+function walkDropped(before: unknown, after: unknown, path: string, depth: number, out: string[], budget: ComparisonBudget): void {
+  if (depth > MAX_BODY_COMPARE_DEPTH) throw depthBoundError();
+  // Entry-point backstop charge on the ALREADY-BUILT `path` — the
+  // pre-concatenation check inside appendPathSegment (below, at each call
+  // site) is what actually prevents an oversized string from ever being
+  // built.
+  budget.chargePathLength(path.length);
+  budget.chargeWork();
+  // THE REVERSE DIRECTIONS (scalar→array, scalar→object) ARE DELIBERATELY NOT
+  // SYMMETRIC, and this line is where they land. A scalar `before` has no key
+  // paths beneath it, so a scalar that becomes a container LOSES NOTHING — it
+  // only gains addresses. Emitting anything here would be symmetry for its own
+  // sake, and it would contradict the one-directional containment above that
+  // keeps schema DEFAULTS (which likewise only ADD keys) from false-positiving.
+  // The two directions differ because the question is not "did the shape
+  // change?" but "is a path that existed before now unreachable?" — and a
+  // widening change leaves the answer no. A scalar whose VALUE became a
+  // container is still a value change, which this function never reports.
+  if (before === null || typeof before !== 'object') return;
+  if (Array.isArray(before)) {
+    // Array → anything-not-an-array (scalar, null, or a plain object): no index
+    // of `before` survives, so every path under it is dropped.
+    if (!Array.isArray(after)) {
+      emitTotalLoss(before, path, depth, out, budget);
+      return;
+    }
+    for (let i = 0; i < before.length; i++) {
+      const here = appendPathSegment(path, i, budget);
+      if (i >= after.length) emitTotalLoss(before[i], here, depth + 1, out, budget);
+      else walkDropped(before[i], after[i], here, depth + 1, out, budget);
+    }
+    return;
+  }
+  // Object → scalar, null, or ARRAY: object keys are not array indices, so an
+  // object that became an array loses its whole key set just as one that became
+  // a scalar does.
+  if (after === null || typeof after !== 'object' || Array.isArray(after)) {
+    emitTotalLoss(before, path, depth, out, budget);
+    return;
+  }
+  const parsed = after as Record<string, unknown>;
+  // for-in + own-property guard, not Object.keys (Codex delta verdict, S2d
+  // micro-round): identical own-enumerable-string-key semantics and order for
+  // a JSON-shaped object, but no full key-array materialization ahead of the
+  // pre-concatenation charge in appendPathSegment above — closes the
+  // allocation question structurally rather than by argument. The membership
+  // test against `parsed` (a DIFFERENT object) stays a `hasOwnProperty` call,
+  // unchanged — that check is not what for-in replaces.
+  for (const key in before as Record<string, unknown>) {
+    if (!Object.prototype.hasOwnProperty.call(before, key)) continue;
+    const here = appendPathSegment(path, key, budget);
+    if (!Object.prototype.hasOwnProperty.call(parsed, key)) emitTotalLoss((before as Record<string, unknown>)[key], here, depth + 1, out, budget);
+    else walkDropped((before as Record<string, unknown>)[key], parsed[key], here, depth + 1, out, budget);
+  }
+}
+
+/** Every key path present in `before` that is ABSENT (or unreachable through a
+ *  type change) from `after` — the LOSS half of a round-trip comparison, and
+ *  deliberately only that half. PUBLIC SURFACE IS NARROW ON PURPOSE (decision
+ *  droppedkeypaths-arms-kept-budgeted-one-shared-walker): exactly these two
+ *  parameters — the path/depth/output/budget plumbing above is module-internal,
+ *  recreated fresh on every call so the budgets below are shared across the
+ *  WHOLE comparison and never leak between calls. FAILS CLOSED: on exhausting
+ *  either budget this throws ComparisonBudgetExceededError — it never returns
+ *  a partial loss list. */
+export function droppedKeyPaths(before: unknown, after: unknown): string[] {
+  const out: string[] = [];
+  const budget = newComparisonBudget();
+  walkDropped(before, after, '', 0, out, budget);
+  return out;
+}
+
+/** Renders a droppedKeyPaths() result for an ERROR MESSAGE, capped at 20
+ *  entries with a "… and N more lost paths" tail (correctly singular at
+ *  N===1: "1 more lost path"). EXPORTED so every consumer of droppedKeyPaths
+ *  that renders its result into a thrown message shares this ONE capped
+ *  rendering — scripts/domain-doctor.mjs's migrate() refusal is the other
+ *  caller (roster review, S2d micro-round, MED): droppedKeyPaths can now
+ *  legitimately return up to COMPARE_OUTPUT_BUDGET (50,000) paths, each up to
+ *  COMPARE_PATH_LENGTH_BUDGET (~1MB) long, for one absent/type-changed
+ *  container's full subtree — joining ALL of them into one message would
+ *  itself build the unbounded string this module's own budgets exist to
+ *  refuse, so the refusal path could crash (or balloon) worse than the
+ *  hazard it guards. DETECTION is never affected by this — callers still see
+ *  the true, uncapped `dropped.length` for their own singular/plural wording
+ *  and handling; only the LIST TEXT here is capped. */
+export function renderCappedPathList(dropped: string[], cap = 20): string {
+  if (dropped.length <= cap) return dropped.join(', ');
+  const remaining = dropped.length - cap;
+  return `${dropped.slice(0, cap).join(', ')}, … and ${remaining} more lost ${remaining === 1 ? 'path' : 'paths'}`;
+}
+
+/** CREATE-TIME FIELD-LOSS REFUSAL (board bd3f0acf, narrowly amending decision
+ *  44e45931). `validateRecord` ends in `entry.schema.parse(input)` and zod
+ *  STRIPS unknown keys silently at every depth, so before this guard every
+ *  create caller other than the MCP tool surface (tools.ts, which has its own
+ *  `unknownFieldsIn` check) could hand over a body carrying a legacy or
+ *  hand-added field, get SUCCESS back, and read it back missing that field —
+ *  silent, permanent knowledge loss in the system whose charter is not losing
+ *  knowledge.
+ *
+ *  44e45931 REJECTED making every record schema `.strict()` because "strictness
+ *  would land on every write path including internal ones and legacy
+ *  round-trips". This is deliberately NARROWER than that: it is create-only and
+ *  does NOT touch applyInPlace, enqueueSystemTodo or supersede, so the legacy
+ *  round-trips that argument protects are untouched.
+ *
+ *  NO EXEMPTION FOR INTERNAL MINTS. An unknown field on an internally-minted
+ *  record is a bug in this repo — a schema or a mint that have drifted apart —
+ *  and it must throw here rather than be quietly excused.
+ *
+ *  Throws BEFORE any transaction opens: nothing is written, and the message says
+ *  so, naming EVERY dropped path (not just the first) so one refusal is enough
+ *  to fix the caller. */
+export function assertNoFieldLoss(op: string, before: Record<string, unknown>, after: unknown): void {
+  const dropped = droppedKeyPaths(before, after);
+  if (dropped.length === 0) return;
+  const type = typeof before.type === 'string' ? before.type : 'unknown';
+  // TWO DISTINCT LOSS CLASSES SHARE THIS ONE MESSAGE, and droppedKeyPaths'
+  // return value (a flat path list) does not carry which one applies to a
+  // given path: a field the schema never defines at all, and a field the
+  // schema DOES define but whose VALUE changed container type (a retyped
+  // container is total loss of everything beneath it — droppedKeyPaths'
+  // type-change arms, decision droppedkeypaths-arms-kept-budgeted-one-shared-walker).
+  // The old wording ("does not define this field") is only true of the first
+  // class — for the second, the field IS defined, its shape just does not
+  // match. Naming both possibilities is the truthful minimum without adding
+  // per-path classification nothing here needs yet.
+  //
+  // REPORTED LIST IS CAPPED via renderCappedPathList (see its doc) — DETECTION
+  // above (`dropped.length`) stays uncapped for this function's own
+  // singular/plural wording; only the rendered LIST TEXT is capped.
+  const pathList = renderCappedPathList(dropped);
+  throw new Error(
+    `${op}: record type '${type}' would DROP ${dropped.length === 1 ? 'this field' : 'these fields'} on the way in ` +
+      `— either the field is not defined by the schema, or its value's shape no longer matches the schema's ` +
+      `definition (e.g. an object/array in place of the other) — and the ` +
+      `schema parse would DROP ${dropped.length === 1 ? 'it' : 'them'} silently: ${pathList}. ` +
+      `Refused before the write — NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid ` +
+      `set) or add the field to the registered schema; a write must never report success for what it discarded.`
+  );
+}
+
+/** The unknown keys a STRICT sub-schema REFUSED, rendered in the same
+ *  dotted/indexed notation droppedKeyPaths reports — 'current_ac[0].untestable_because.deeper'.
+ *
+ *  WHY THIS EXISTS BESIDE assertNoFieldLoss. The loss walk only ever sees keys
+ *  zod STRIPPED, because it compares the body against the parse RESULT. A
+ *  `.strict()` sub-schema (current_ac[].untestable_because, board 6a8507f8)
+ *  never produces a result to compare: the parse THROWS, and the walk at the
+ *  create call site never runs. The refusal was therefore already correct — the
+ *  key WAS identified — but zod's ZodError carries the address in two
+ *  fragments, `path: ['current_ac', 0, 'untestable_because']` and
+ *  `keys: ['deeper']`, and it renders as raw issue JSON. An operator needs ONE
+ *  address to open, not two fragments to join by hand, so the two fragments are
+ *  joined HERE, through the same appendPathSegment every other refusal in this
+ *  file uses.
+ *
+ *  DUCK-TYPED, not `instanceof z.ZodError`: a monorepo can resolve more than one
+ *  physical zod copy, and an instanceof that silently misses would degrade the
+ *  message back to raw JSON without any signal. Anything that is not a
+ *  recognizable issue list yields [] and the original error is rethrown
+ *  untouched — this function narrows a MESSAGE, it never decides a refusal.
+ *
+ *  Reports the refused key ITSELF and not the subtree beneath it, matching what
+ *  droppedKeyPaths does for a stripped key: one address names the thing to
+ *  remove or register. */
+export function unrecognizedKeyPaths(error: unknown): string[] {
+  const issues = (error as { issues?: unknown } | null | undefined)?.issues;
+  if (!Array.isArray(issues)) return [];
+  const out: string[] = [];
+  for (const raw of issues) {
+    const issue = raw as { code?: unknown; keys?: unknown; path?: unknown };
+    if (issue.code !== 'unrecognized_keys' || !Array.isArray(issue.keys)) continue;
+    const segments = Array.isArray(issue.path) ? (issue.path as Array<string | number>) : [];
+    const base = segments.reduce<string>(
+      (acc, segment) => appendPathSegment(acc, typeof segment === 'number' ? segment : String(segment)),
+      ''
+    );
+    for (const key of issue.keys) out.push(appendPathSegment(base, String(key)));
+  }
+  return out;
+}
+
+/**
+ * Journal-mode policy (decision store-journal-policy-delete-on-9p): SQLite WAL
+ * needs coherent shared memory (-shm) across every process that opens the
+ * database, and the 9p/drvfs mount WSL uses for Windows drives does not
+ * provide it — measured twice on that topology as intermittent
+ * SQLITE_IOERR_SHORT_READ / 'database is locked' incident families. A store
+ * reached over such a mount is demoted to journal_mode=DELETE (no -shm at
+ * all), and the demotion is STICKY: a non-9p open of an EXISTING store
+ * already in DELETE leaves it alone rather than flipping it back, so a
+ * native-Windows open never fights a WSL demotion. Fresh stores are
+ * classified explicitly because a brand-new SQLite file is born in DELETE
+ * mode — without the freshness arm a fresh single-context store would never
+ * enter WAL at all.
+ */
+export function journalDemotionRequired(
+  absPath: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (platform !== 'linux') return false;
+  return /^\/mnt\/[a-zA-Z]\//.test(absPath.replace(/\\/g, '/'));
+}
+
+/**
+ * A required 9p demotion did not land — refusing the open (P5): proceeding in
+ * WAL would keep the exact unsafe topology the policy exists to remove.
+ *
+ * fixer-mode F1: `options.cause` carries the original thrown error when the
+ * refusal came from a PRAGMA that threw (e.g. SQLITE_BUSY under a live
+ * holder) rather than one that merely returned an unexpected mode; readers
+ * needing the raw driver error read `.cause`. `options.message` lets a caller
+ * override the default 9p-demotion wording entirely for a refusal that is NOT
+ * a demotion-under-contention case (fixer-mode F2's legacy-schema arm has its
+ * own remedy — migrate the store — and must not tell the reader to close
+ * connections and retry, which would not help there).
+ */
+export class JournalDemotionRefusedError extends Error {
+  constructor(
+    readonly dbPath: string,
+    readonly returnedMode: string,
+    options?: { cause?: unknown; message?: string },
+  ) {
+    super(
+      options?.message ??
+        `journal_mode=DELETE demotion refused for '${dbPath}' (PRAGMA returned '${returnedMode}') — ` +
+          `this store is reached over a 9p mount where WAL is unsupported (decision ` +
+          `store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`,
+      options?.cause !== undefined ? { cause: options.cause } : undefined,
+    );
+    this.name = 'JournalDemotionRefusedError';
+  }
+}
+
+/**
+ * THE ONE reconcile_needed text builder (board b0bb9d96 / I-29), used by every
+ * minter — settlement.mjs's grouped mint AND enqueueSystemTodo's own
+ * fold-to-union below — so a surviving item's prose always names the FULL set
+ * of files it now covers, never just the first one a caller happened to pass.
+ * A pure function of its inputs: no store read, no clock, so it stays
+ * testable in isolation and safe to call from a standalone .mjs hook bundle
+ * (invariant 4 — hooks are dependency-light, bundled at build time). `owner`
+ * carries only what the two mintable record types expose for this purpose;
+ * an unresolvable owner (deleted concurrently) is the caller's problem to
+ * degrade, not this function's — it renders whatever it is given.
+ */
+/**
+ * DECLARED-TARGET IDENTITY FOR capture_owed (decision
+ * capture-pending-grace-per-declaration-held-while-any-dispatch-live, fix
+ * rounds): H10 converts a lapsed capture_pending declaration into a capture_owed
+ * item whose text opens with `capture owed: declared pending (` and ends with
+ * the trailer ` [target <JSON string>]`, the JSON string being the declared
+ * target, trimmed: the event's own `target` field, or for a legacy event
+ * without one its whole joined detail (board f003082d). That string is the item's identity,
+ * compared byte-exact (no case folding, no split on ' — ', which may occur
+ * inside a target); its file_keys are context only. Keyed on file_keys, two
+ * targets over one file collapsed and one target over two file sets
+ * duplicated. The todo schema has no target field, so the trailer is the
+ * carrier and this is its one parser. The LAST ` [target "` is the trailer's:
+ * inside a JSON literal every quote is escaped, so that sequence cannot occur
+ * there. Returns null for any other capture_owed text (undeclared debt, H1's
+ * residue, and items minted without the trailer keep the ordinary key).
+ */
+export const DECLARED_CAPTURE_OWED_PREFIX = 'capture owed: declared pending (';
+const DECLARED_CAPTURE_TARGET_TRAILER = ' [target ';
+export function declaredCaptureTarget(text: string | undefined): string | null {
+  if (typeof text !== 'string' || !text.startsWith(DECLARED_CAPTURE_OWED_PREFIX) || !text.endsWith('"]')) return null;
+  const at = text.lastIndexOf(`${DECLARED_CAPTURE_TARGET_TRAILER}"`);
+  if (at < 0) return null;
+  let target: unknown;
+  try {
+    target = JSON.parse(text.slice(at + DECLARED_CAPTURE_TARGET_TRAILER.length, -1));
+  } catch {
+    return null; // not the H10 trailer: this item keeps the ordinary key
+  }
+  return typeof target === 'string' && target.length > 0 ? target : null;
+}
+
+export function buildReconcileText(owner: { type: 'feature_article' | 'reference_material'; slug?: string; title?: string }, fileKeys: string[]): string {
+  const files = [...fileKeys].sort();
+  return owner.type === 'reference_material'
+    ? `reconcile reference '${owner.title ?? ''}' — its document changed content in direct mode (settled): ${files.join(', ')}; refresh summary + source_date (§3.2.5)`
+    : `reconcile article '${owner.slug ?? ''}' — owned file(s) changed content in direct mode (settled): ${files.join(', ')}`;
+}
+
+export class SterlingStore {
+  private db: DatabaseSync;
+
+  /**
+   * Set ONLY when an existing, non-empty store below SUPPORTED_SCHEMA_VERSION
+   * was opened ([stable-identity-design-v2]): the connection is read-only and
+   * assertWritable() refuses every write naming the required migration.
+   * undefined = a normal, writable store at the supported version.
+   */
+  private legacySchemaVersion: number | undefined;
+
+  /**
+   * PRAGMA user_version as of the moment this handle finished opening (board
+   * d5942fa0 gap (b) — the LIVE write guard, extending the open-time guard
+   * above to a store that stays open across a migration). undefined ONLY
+   * during the brief window inside the constructor itself: assertLiveSchemaVersion
+   * no-ops then, because the open-time guard already owns that window and the
+   * fresh-store stamp-forward transaction below would otherwise be comparing
+   * against a baseline it hasn't captured yet. Every public write re-reads
+   * PRAGMA user_version against this captured baseline immediately before
+   * mutating; a mismatch means a SECOND process (MCP server or TUI) migrated
+   * the file while this handle stayed open, and the write is refused with
+   * nothing written — matching the open-time guard's loud-failure style.
+   */
+  private openedSchemaVersion: number | undefined;
+
+  /**
+   * The absolute path of this store's database file, retained for
+   * SchemaMigrationRequiredError (measured defect, Salesforce consumer
+   * 2026-08-26): the constructor received the path but never kept it, so a
+   * migration refusal named only found/supported versions — a hook surfacing
+   * the error showed a bare bundle line number and the user could not tell
+   * WHICH store to migrate.
+   */
+  private readonly dbPath: string;
+
+  constructor(path: string) {
+    this.dbPath = resolvePath(path);
+    this.db = new DatabaseSync(path);
+
+    // fixer-mode F4 (Codex MEDIUM): classify the REAL path, not the lexical
+    // one — a symlinked project dir (e.g. /home/x/proj -> /mnt/c/...) dodges
+    // journalDemotionRequired's lexical /mnt/<drive>/ match on this.dbPath.
+    // realpathSync resolves the CONTAINING DIRECTORY (the db file itself may
+    // not exist yet on a fresh store, so resolving dirname alone survives
+    // that case) and the file's basename is rejoined onto it. Any realpath
+    // error (permission, exotic FS, race) falls back to the lexical dbPath —
+    // that is this code's pre-existing behavior, not a new gap. The exported
+    // journalDemotionRequired itself stays lexical-only and keeps its
+    // existing unit pins; only the CALL SITE below is fed the resolved path.
+    let classifiedPath = this.dbPath;
+    try {
+      classifiedPath = join(realpathSync(dirname(this.dbPath)), basename(this.dbPath));
+    } catch {
+      /* fall back to the lexical path */
+    }
+
+    // Schema-version guard — checked BEFORE journal_mode/foreign_keys/DDL land
+    // (stable-identity design-v2 / 2176748e; fixer-mode F1): this ordering
+    // guarantees that a too-new store is refused with NOTHING touched — not
+    // even a WAL journal-mode header rewrite or the -wal/-shm sidecar files a
+    // refusal AFTER `PRAGMA journal_mode=WAL` would have persistently
+    // materialized on a non-WAL too-new db. `busy_timeout` is connection-local
+    // and writes nothing to the db file, so it is safe to set first for
+    // contention safety on the read below without weakening that guarantee.
+    this.db.exec('PRAGMA busy_timeout=5000');
+    const foundSchemaVersion = (this.db.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version;
+    if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
+      this.db.close();
+      throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
+    }
+
+    // S2 [stable-identity-design-v2]: distinguish a FRESH file (build it as v2)
+    // from an EXISTING pre-v2 store (open READ-ONLY, refuse every write). The
+    // probe is sqlite_master BEFORE the DDL runs — the only moment at which
+    // "this file has no schema yet" is still observable — and it is a read, so
+    // the refusal path still writes nothing.
+    let isFresh = false;
+    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
+      const objects = (
+        this.db.prepare('SELECT COUNT(*) AS n FROM sqlite_master').get() as { n: number }
+      ).n;
+      if (objects > 0) {
+        // fixer-mode F2 (Codex HIGH): a legacy store reached over 9p must not
+        // stay in WAL — this read-only branch RETURNS before the journal-mode
+        // PRAGMA below ever runs, so without this check a pre-migration store
+        // opened from WSL would keep an -shm-coordinated WAL handle open on
+        // the exact 9p topology [store-journal-policy-delete-on-9p] exists to
+        // remove. This is a REFUSAL, not a demotion: PRAGMA journal_mode=DELETE
+        // WRITES to the file even when it "succeeds", and a legacy connection
+        // is read-only by contract (assertV2Surface/assertWritable refuse
+        // every write), so it can never legitimately perform the demotion
+        // itself — the remedy is migrating the store, never "close other
+        // connections and retry" (there is no live holder here for that
+        // remedy to help with). Already-DELETE (or any non-WAL) legacy stores
+        // are untouched, matching the sticky/read-only behavior above.
+        if (journalDemotionRequired(classifiedPath)) {
+          let legacyMode: string;
+          try {
+            legacyMode = (
+              this.db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }
+            ).journal_mode;
+          } catch (e) {
+            // The mode probe itself failing must not leak the constructor's
+            // handle — close, then propagate the driver error unchanged (this
+            // is a probe failure, not a refused demotion).
+            this.db.close();
+            throw e;
+          }
+          if (legacyMode === 'wal') {
+            this.db.close();
+            throw new JournalDemotionRefusedError(this.dbPath, legacyMode, {
+              message:
+                `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, ` +
+                `PRAGMA journal_mode='${legacyMode}') — this store is reached over a 9p mount where WAL is ` +
+                `unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema ` +
+                `version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. ` +
+                `Migrate the store first (\`node scripts/migrate-stores.mjs\`) or open it from a non-9p context — ` +
+                `closing other connections will not help here.`,
+            });
+          }
+        }
+        this.legacySchemaVersion = foundSchemaVersion;
+        this.openedSchemaVersion = foundSchemaVersion;
+        return; // read-only: no journal_mode, no DDL, no stamp — nothing written
+      }
+      isFresh = true; // no schema objects yet: this very open created the file
+    }
+
+    // Journal-mode policy [store-journal-policy-delete-on-9p]: over 9p, demote
+    // to DELETE and REFUSE the open when the demotion does not land; elsewhere
+    // assert WAL — except on an existing store already demoted to DELETE,
+    // which stays demoted (sticky; see journalDemotionRequired's doc block).
+    if (journalDemotionRequired(classifiedPath)) {
+      let returnedMode: string;
+      try {
+        returnedMode = (
+          this.db.prepare('PRAGMA journal_mode=DELETE').get() as { journal_mode: string }
+        ).journal_mode;
+      } catch (e) {
+        // fixer-mode F1 (joint finding): a PRAGMA that THROWS (SQLITE_BUSY
+        // under a live holder) used to close and rethrow the raw driver
+        // error, so callers got a generic SQLite error instead of the typed
+        // refusal every other demotion-failure path promises. Wrap it the
+        // same way the returned-mode arm below does, carrying the original
+        // error as `cause` so nothing about the underlying failure is lost.
+        this.db.close();
+        const detail = e instanceof Error ? e.message : String(e);
+        throw new JournalDemotionRefusedError(this.dbPath, detail, {
+          cause: e,
+          message:
+            `journal_mode=DELETE demotion refused for '${this.dbPath}' (PRAGMA threw: ${detail}) — ` +
+            `this store is reached over a 9p mount where WAL is unsupported (decision ` +
+            `store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`,
+        });
+      }
+      if (returnedMode !== 'delete') {
+        this.db.close();
+        throw new JournalDemotionRefusedError(this.dbPath, returnedMode);
+      }
+    } else {
+      const currentMode = (
+        this.db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }
+      ).journal_mode;
+      if (currentMode !== 'delete') {
+        this.db.exec('PRAGMA journal_mode=WAL');
+      } else if (isFresh) {
+        // fixer-mode F3 (Codex HIGH): `isFresh` was captured from the
+        // pre-DDL sqlite_master probe above, before any of this open's own
+        // work ran. A concurrent opener of the SAME file can initialize
+        // (and even 9p-demote) the store in the gap between that probe and
+        // this decision, leaving `isFresh` stale — execing WAL here on the
+        // stale flag would flip a store the other opener just observed and
+        // left in `delete` back to WAL. Re-probe AT DECISION TIME instead of
+        // trusting the flag: only treat the store as still-fresh if
+        // sqlite_master is STILL empty right now. This closes the
+        // cross-context fresh-open race described above; it does NOT close
+        // the (much smaller) window still remaining between THIS COUNT(*)
+        // read and the WAL exec immediately below — that residual race is
+        // accepted, not closed. PREDICTED to close the race described above;
+        // the guard expected to carry the verdict is this `stillFresh`
+        // re-probe. Not executed — no multi-process test exists for this
+        // fix (review-verified, not pinned, per the fixer-mode brief).
+        const stillFresh = (
+          this.db.prepare('SELECT COUNT(*) AS n FROM sqlite_master').get() as { n: number }
+        ).n === 0;
+        if (stillFresh) {
+          this.db.exec('PRAGMA journal_mode=WAL');
+        }
+      }
+    }
+    this.db.exec('PRAGMA foreign_keys=ON');
+    this.db.exec(DDL);
+    // Additive migration (board 97d773ef): queue_drain_log gains record_id so a
+    // remove on an already-drained id can answer "already removed <when>"
+    // instead of a bare "no record". CREATE IF NOT EXISTS never alters an
+    // existing table, so the column is added here; the duplicate-column throw
+    // on an already-migrated store is the expected no-op path.
+    try {
+      this.db.exec('ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT');
+    } catch {
+      /* column already exists */
+    }
+
+    // Stamp the supported version onto a FRESH file (S2 [stable-identity-
+    // design-v2]: an existing pre-v2 store returned read-only above and never
+    // reaches here), RE-READING user_version inside the same BEGIN IMMEDIATE
+    // transaction that writes it (fixer-mode F2 —
+    // closes a TOCTOU: the fast check above only skips work for a store
+    // already known too new at open time; without a re-read here, a
+    // concurrent migrator committing a newer version between that check and
+    // this write would be silently overwritten back down to 1, turning the
+    // guard's loud refusal into silent corruption). A re-read that is now
+    // too-new throws from inside the transaction (rolling back any stamp
+    // in progress); the catch below closes the connection before propagating,
+    // matching the fast-path refusal's write-nothing/close-cleanly contract.
+    //
+    // ONLY WHEN A STAMP IS ACTUALLY OWED (board 362205a6). This transaction used
+    // to run on EVERY open, so opening an already-stamped store was itself a
+    // WRITE: `tx()` takes BEGIN IMMEDIATE, which busy-fails against any held
+    // write lock. That made a healthy read of a healthy store fail whenever
+    // another process (MCP server, TUI, a sibling hook) held the lock longer
+    // than busy_timeout — and for the hooks that is a FAIL-OPEN, because a
+    // hook's uncaught throw exits 1, the runner reads any non-2 exit as
+    // NON-BLOCKING, and openStore sits outside several hooks' fail-closed try
+    // (anti-pattern foreign_e13f0fb5). Fixing it here rather than in one hook is
+    // deliberate: every openStore caller inherits it.
+    //
+    // The condition is exact, not a heuristic. Control reaches this point only
+    // with foundSchemaVersion <= SUPPORTED (the too-new fast path above closed
+    // the connection and threw), and a foundSchemaVersion BELOW supported can
+    // only get here via `isFresh` (an existing sub-version store returned
+    // read-only). So `!==` means "this open must stamp", and equality means the
+    // transaction body would read the version, match on both comparisons and
+    // write nothing — a write lock taken purely to perform a read.
+    //
+    // What the skip gives up, stated plainly: on an already-stamped store the
+    // re-read inside the lock no longer runs, so a migrator committing a NEWER
+    // version between the fast read above and here is no longer caught by THIS
+    // transaction. Nothing is silently overwritten by that (the skipped body
+    // writes only when current < SUPPORTED, which cannot be true of a newer
+    // store). It is not left unguarded either — but the guard is the explicit
+    // too-new check on the captured baseline below, NOT assertLiveSchemaVersion:
+    // that one compares live-vs-baseline only, so a baseline captured AT the
+    // newer version compares equal forever and would allow every subsequent
+    // write against an unsupported schema (review finding, MEDIUM). The skipped
+    // body's `current > SUPPORTED → throw` is therefore restored below, outside
+    // the transaction, where it costs no write lock.
+    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+      try {
+        this.tx(() => {
+          const current = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+          if (current > SUPPORTED_SCHEMA_VERSION) {
+            throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
+          }
+          if (current < SUPPORTED_SCHEMA_VERSION) {
+            this.db.exec(`PRAGMA user_version = ${SUPPORTED_SCHEMA_VERSION}`);
+          }
+        });
+      } catch (e) {
+        this.db.close();
+        throw e;
+      }
+    }
+
+    // Capture the LIVE write guard's baseline now that the stamp-forward (if
+    // any) has committed — reading fresh rather than assuming
+    // SUPPORTED_SCHEMA_VERSION so this stays correct even if a future change
+    // stamps something else.
+    this.openedSchemaVersion = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+
+    // TOO-NEW RE-CHECK ON THE CAPTURED BASELINE (review finding, MEDIUM). The
+    // conditional stamp above skips a body that also held the only re-read of
+    // `current > SUPPORTED → throw`, so with foundSchemaVersion === SUPPORTED a
+    // migrator committing a newer version between the open-time read and the
+    // capture on the line above lands that NEWER version in
+    // openedSchemaVersion. assertLiveSchemaVersion cannot catch it — it only
+    // asks live !== baseline, and here they are equal — so every subsequent
+    // write would proceed against an unsupported-newer schema, where this open
+    // previously threw. Re-assert it against SUPPORTED explicitly, closing the
+    // connection first exactly as the open-time fast path does.
+    if (this.openedSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
+      this.db.close();
+      throw new UnsupportedSchemaVersionError(this.openedSchemaVersion, SUPPORTED_SCHEMA_VERSION);
+    }
+  }
+
+  journalMode(): string {
+    return (this.db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode;
+  }
+
+  // -------------------------------------------------------------------------
+  // Schema v2 identity core [stable-identity-design-v2]
+  // -------------------------------------------------------------------------
+
+  /**
+   * The ONE refusal for anything a pre-migration store cannot answer — one
+   * definition, two callers below (writes, and the v2-only read surfaces).
+   */
+  private assertV2Surface(operation: string): void {
+    if (this.legacySchemaVersion !== undefined) {
+      throw new SchemaMigrationRequiredError(this.legacySchemaVersion, SUPPORTED_SCHEMA_VERSION, operation, this.dbPath);
+    }
+  }
+
+  /**
+   * The LIVE write guard (board d5942fa0 gap (b), pin group B): re-reads
+   * PRAGMA user_version fresh and compares it against the baseline captured
+   * at open. A process that ALREADY HOLDS the store open when another process
+   * (MCP server or TUI) migrates the file underneath it would otherwise keep
+   * serving writes on a stale in-memory handle with no re-check until a full
+   * restart — this closes that gap. Reads are deliberately NOT re-checked
+   * (spec: read exemption) — only assertWritable's write callers reach this.
+   *
+   * No-ops while `openedSchemaVersion` is still undefined (mid-constructor):
+   * the open-time guard above already owns that narrow window, and the
+   * fresh-store stamp-forward transaction is itself a write that runs before
+   * the baseline can be captured.
+   */
+  private assertLiveSchemaVersion(operation: string): void {
+    if (this.openedSchemaVersion === undefined) return;
+    const current = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+    if (current !== this.openedSchemaVersion) {
+      throw new Error(
+        `Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ` +
+          `${current} — another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every ` +
+          `other write are refused until this session is closed. EXIT AND RELAUNCH this session to reopen against the current schema. Nothing was written.`
+      );
+    }
+  }
+
+  /**
+   * The refusal seam for a pre-migration store, extended to the live write
+   * guard above. Called at the top of every public write and, as a backstop,
+   * from tx() — reads stay allowed on purpose (AC3: read-only pre-migration;
+   * live re-check exemption: pin group B).
+   */
+  private assertWritable(operation: string): void {
+    this.assertV2Surface(operation);
+    this.assertLiveSchemaVersion(operation);
+  }
+
+  /**
+   * The DERIVED served status: the whole API-compatibility hinge of the v2
+   * model. Nothing stores this — it is computed from (lifecycle, freshness) on
+   * every read, so a caller that has always read `status` keeps working while
+   * the store stops holding two versions of the same truth.
+   */
+  private static derivedStatus(lifecycle: Lifecycle, freshness: Freshness): string {
+    if (lifecycle === 'retired') return 'superseded';
+    return freshness === 'flagged_stale' ? 'flagged_stale' : 'active';
+  }
+
+  /**
+   * Resolves the v2 identity trio from a caller's input, accepting BOTH
+   * envelope shapes (write-side compatibility, pin S2-5b):
+   *   * lifecycle/freshness given directly → used as given;
+   *   * only the legacy `status` given → 'active' → live+fresh,
+   *     'superseded' → retired+fresh, 'flagged_stale' → live+flagged_stale.
+   * An out-of-enum lifecycle/freshness is refused loudly rather than coerced.
+   *
+   * It then writes the DERIVED status/superseded_by back onto the candidate,
+   * because the schemas registry still declares those two envelope fields (see
+   * envelope.ts) — a new-shape record must satisfy the same validator every
+   * legacy caller does, and the stored body drops them again afterwards.
+   */
+  private static resolveIdentity(
+    raw: Record<string, unknown>,
+    defaults: { lifecycle: Lifecycle; freshness: Freshness; version: number }
+  ): { input: Record<string, unknown>; lifecycle: Lifecycle; freshness: Freshness; version: number } {
+    const input = { ...raw };
+    const readEnum = <T extends string>(field: string, allowed: readonly T[]): T | undefined => {
+      const value = input[field];
+      if (value === undefined || value === null) return undefined;
+      if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
+        throw new Error(`invalid ${field} '${String(value)}' — expected one of ${allowed.join(' | ')} (stable-identity-design-v2)`);
+      }
+      return value as T;
+    };
+    let lifecycle = readEnum<Lifecycle>('lifecycle', LIFECYCLE_VALUES);
+    let freshness = readEnum<Freshness>('freshness', FRESHNESS_VALUES);
+    if (lifecycle === undefined || freshness === undefined) {
+      const status = typeof input.status === 'string' ? input.status : undefined;
+      if (status === 'superseded') {
+        lifecycle ??= 'retired';
+        freshness ??= 'fresh';
+      } else if (status === 'flagged_stale') {
+        lifecycle ??= 'live';
+        freshness ??= 'flagged_stale';
+      } else if (status === 'active') {
+        lifecycle ??= 'live';
+        freshness ??= 'fresh';
+      } else {
+        lifecycle ??= defaults.lifecycle;
+        freshness ??= defaults.freshness;
+      }
+    }
+    const rawVersion = input.version;
+    let version = defaults.version;
+    if (typeof rawVersion === 'number') {
+      if (!Number.isInteger(rawVersion) || rawVersion < 1) {
+        throw new Error(`invalid version ${rawVersion} — version is a positive integer (stable-identity-design-v2)`);
+      }
+      version = rawVersion;
+    }
+    input.lifecycle = lifecycle;
+    input.freshness = freshness;
+    input.version = version;
+    input.status = SterlingStore.derivedStatus(lifecycle, freshness);
+    if (input.superseded_by === undefined) input.superseded_by = null;
+    return { input, lifecycle, freshness, version };
+  }
+
+  /**
+   * The identity normalization every write-side caller shares, exposed for the
+   * ONE consumer that validates BEFORE it reaches a store: MountedStores, which
+   * routes on the validated record's `scope` and so must run validateRecord
+   * itself (invariant 1 — this is the single definition, never a second copy of
+   * the lifecycle→status derivation). Without it a lifecycle-only envelope that
+   * SterlingStore.create accepts was rejected through the mounted surface,
+   * because the schemas registry still declares status/superseded_by.
+   * Idempotent: normalizing an already-normalized envelope changes nothing, so
+   * the store's own resolveIdentity re-run downstream is a no-op.
+   */
+  static normalizeIdentityEnvelope(raw: unknown): Record<string, unknown> {
+    return SterlingStore.resolveIdentity(raw as Record<string, unknown>, {
+      lifecycle: 'live',
+      freshness: 'fresh',
+      version: 1,
+    }).input;
+  }
+
+  /**
+   * The body actually persisted: lifecycle/freshness/version are the stored
+   * truth, status/superseded_by are dropped because they are derived at read.
+   * A pre-v2 body (no lifecycle) passes through untouched, so a legacy store
+   * read through this code path is never rewritten in shape.
+   */
+  private static storableBody(record: Record<string, unknown>): Record<string, unknown> {
+    if (typeof record.lifecycle !== 'string') return record;
+    const body: Record<string, unknown> = { ...record };
+    delete body.status;
+    delete body.superseded_by;
+    return body;
+  }
+
+  /**
+   * Re-attaches everything derived at read: the SERVED status/superseded_by,
+   * and links[] MATERIALIZED from record_relations (the authoritative edge
+   * home). Batched — one relations query for a whole result set, plus one more
+   * for the successor of any retired record in it — so a capped query() costs
+   * two extra reads rather than 2N.
+   *
+   * A pre-v2 body carries no `lifecycle` and is passed through verbatim: that
+   * is what keeps a pre-migration store READABLE (AC3) with no branch at every
+   * call site.
+   */
+  private hydrateAll(records: DurableRecord[]): DurableRecord[] {
+    const v2 = records.filter((r) => typeof (r as unknown as { lifecycle?: unknown }).lifecycle === 'string');
+    if (!v2.length) return records;
+
+    const ids = [...new Set(v2.map((r) => r.id))];
+    const linkRows = this.db
+      .prepare(
+        `SELECT source_id, rel, target_id FROM record_relations WHERE source_id IN (${ids.map(() => '?').join(',')}) ORDER BY rowid`
+      )
+      .all(...ids) as { source_id: string; rel: string; target_id: string }[];
+    const bySource = new Map<string, { rel: string; target_id: string }[]>();
+    for (const row of linkRows) {
+      const list = bySource.get(row.source_id) ?? [];
+      list.push({ rel: row.rel, target_id: row.target_id });
+      bySource.set(row.source_id, list);
+    }
+
+    const retiredIds = v2
+      .filter((r) => (r as unknown as { lifecycle?: string }).lifecycle === 'retired')
+      .map((r) => r.id);
+    const successor = new Map<string, string>();
+    if (retiredIds.length) {
+      const rows = this.db
+        .prepare(
+          `SELECT source_id, target_id FROM record_relations
+            WHERE rel = 'supersedes' AND target_id IN (${retiredIds.map(() => '?').join(',')}) ORDER BY rowid`
+        )
+        .all(...retiredIds) as { source_id: string; target_id: string }[];
+      for (const row of rows) {
+        if (!successor.has(row.target_id)) successor.set(row.target_id, row.source_id);
+      }
+    }
+
+    return records.map((record) => {
+      const meta = record as unknown as { lifecycle?: string; freshness?: string };
+      if (typeof meta.lifecycle !== 'string') return record;
+      const lifecycle = meta.lifecycle as Lifecycle;
+      const freshness = (meta.freshness === 'flagged_stale' ? 'flagged_stale' : 'fresh') as Freshness;
+      return {
+        ...record,
+        links: bySource.get(record.id) ?? [],
+        status: SterlingStore.derivedStatus(lifecycle, freshness),
+        superseded_by: lifecycle === 'retired' ? successor.get(record.id) ?? null : null,
+      } as DurableRecord;
+    });
+  }
+
+  /** The server-owned identity columns of a live row — the CAS + lifecycle source.
+   *
+   *  `scope` joins them (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 3):
+   *  the records.scope COLUMN is NOT NULL and is written once, at insert, from the
+   *  routing decision that chose this physical store — while the JSON body's own
+   *  `scope` is caller-writable and can drift away from it (anti_pattern
+   *  [record-body-scope-is-not-physical-store-identity]). Every in-place write and
+   *  supersession below pins the candidate's scope FROM HERE, so the field is
+   *  CREATION-ONLY input and immutable afterwards. Column authoritative on disk. */
+  private identityOf(id: string): { version: number; lifecycle: Lifecycle; freshness: Freshness; scope: string; body: string } | undefined {
+    const row = this.db.prepare('SELECT version, lifecycle, freshness, scope, body FROM records WHERE id = ?').get(id) as
+      | { version: number; lifecycle: string; freshness: string; scope: string; body: string }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      version: row.version,
+      lifecycle: row.lifecycle === 'retired' ? 'retired' : 'live',
+      freshness: row.freshness === 'flagged_stale' ? 'flagged_stale' : 'fresh',
+      scope: row.scope,
+      body: row.body,
+    };
+  }
+
+  /**
+   * THE COLUMN-AUTHORITATIVE LIVE-RECORD DECODER — the ONE place a stored
+   * `records` row becomes a DurableRecord (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 4).
+   *
+   * Every live materializing read selects `body, scope` and comes through here,
+   * so the parsed body's `scope` is OVERWRITTEN by the row's NOT NULL column
+   * before any caller sees it. Body/column disagreement is therefore
+   * unrepresentable on read: column authoritative on disk, and now on read too
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]). A sixth
+   * read path added later is hard to write wrongly because there is no other
+   * body→record parse to copy.
+   *
+   * TOTAL by construction — both drifted shapes normalize to the column with no
+   * branch: a legacy body that OMITS `scope` entirely (reachable and real) gets
+   * it, and a body that CONTRADICTS the column loses. Both are silent by design;
+   * `domain-doctor.mjs scope-audit` (part 1) is the surface that makes them
+   * visible, and it read zero of either across all four stores before this
+   * activated.
+   *
+   * FAILS CLOSED on the impossible case. WHAT ACTUALLY MAKES IT IMPOSSIBLE is
+   * the anchored SCOPE_RE (`^(project|domain:[a-z0-9_-]+)$`, envelope.ts) that
+   * every write funnels through via validateRecord, together with insertRecord
+   * writing the column from that validated record.scope: no store write can
+   * produce an empty or whitespace column. `records.scope` being NOT NULL is
+   * NOT the guarantee on its own — NOT NULL does not exclude '' — and this
+   * comment previously said it was (corrected 2026-09-06 on independent
+   * review; a comment that misattributes its own guarantee is how the real one
+   * gets removed later by someone who reads only the comment). If an empty or
+   * non-string column is nonetheless read, refuse loudly naming the row rather
+   * than inventing 'project' — a default here would re-create exactly the
+   * guess this decoder exists to delete.
+   *
+   * READ-SIDE ONLY: it never changes what is WRITTEN. The write side pins scope
+   * from identityOf's column in applyInPlace/supersede (part 3) — except that
+   * supersede takes an optional `authoritativeScope` from the layer that knows
+   * about MOUNTS (MountedStores), because the column is authoritative over the
+   * BODY while the MOUNT is authoritative over the COLUMN, and a replacement row
+   * must be labelled for the mount it is physically inserted into.
+   *
+   * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
+   *
+   * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
+   * above, so an out-of-class reader (the delivery oracle's read-only fallback)
+   * decodes through the same function rather than re-parsing `body` alone.
+   */
+  private static decodeLiveRecord(op: string, row: { body: string; scope: string }): DurableRecord {
+    return decodeLiveRecordRow(op, row);
+  }
+
+  /** Plural form of decodeLiveRecord — every row-set read funnels through it. */
+  private static decodeLiveRecords(op: string, rows: { body: string; scope: string }[]): DurableRecord[] {
+    return rows.map((r) => SterlingStore.decodeLiveRecord(op, r));
+  }
+
+  /** Typed edge write — record_relations is the authoritative home (contract 6). */
+  private insertRelation(sourceId: string, rel: string, targetId: string, at: string): void {
+    if (sourceId === targetId) {
+      throw new Error(
+        `relation '${rel}' from '${sourceId}' to itself is a self-cycle in the relation graph — refused (stable-identity-design-v2)`
+      );
+    }
+    this.db
+      .prepare('INSERT OR IGNORE INTO record_relations (source_id, rel, target_id, created_at) VALUES (?, ?, ?, ?)')
+      .run(sourceId, rel, targetId, at);
+  }
+
+  /** The one validated write path. Unregistered type or malformed record throws; nothing is written.
+   *
+   *  NOTE (S3 boundary): a caller-supplied `version` is still honored here (the
+   *  legacy feature_article field, and the pin fixtures that pass version: 1).
+   *  S3 STRIPS it — version becomes server-owned at every surface — so nothing
+   *  new should start relying on setting it. */
+  create(input: unknown): DurableRecord {
+    this.assertWritable('create');
+    const prepared = SterlingStore.resolveIdentity(input as Record<string, unknown>, {
+      lifecycle: 'live',
+      freshness: 'fresh',
+      version: 1,
+    });
+    // A record cannot be BORN RETIRED. lifecycle 'retired' with no successor is
+    // a record that default queries hide, in-place writes refuse ("goes to the
+    // live successor"), and supersede/retire refuse ("one successor maximum") —
+    // unreachable by every path that could revive it. Retirement is a lifecycle
+    // TRANSITION, owned by supersede/retireInFavorOf (contract 5).
+    // The legacy insert shape stays open: a pre-v2 body carrying
+    // status:'superseded' + superseded_by (fixtures, imports, and the S4
+    // migration's re-inserts) names its successor, so it is retired WITH a
+    // forward pointer and insertRecord materializes the supersedes relation.
+    if (prepared.lifecycle === 'retired' && !prepared.input.superseded_by) {
+      throw new Error(
+        `create: lifecycle 'retired' cannot be requested at creation without a successor — such a record is born dead ` +
+          `(hidden from queries, refused by in-place writes, and unsupersedable: one successor maximum is already spent). ` +
+          `Retirement happens ONLY through supersede/retireInFavorOf. Nothing was written.`
+      );
+    }
+    // A `.strict()` sub-schema REFUSES an unknown key instead of stripping it,
+    // so the parse throws and the loss walk below never runs. The refusal is
+    // right; only its RENDERING was not — zod splits the address into
+    // `path: [...]` + `keys: [...]` and prints raw issue JSON. Rethrow it as
+    // the same one-address refusal a stripped key gets, keeping the ZodError as
+    // `cause` so nothing about the original diagnosis is lost. Any other parse
+    // failure (invalid_type, missing required field) is rethrown UNTOUCHED —
+    // this narrows a message, it never changes what is refused.
+    let record: DurableRecord;
+    try {
+      record = validateRecord(prepared.input);
+    } catch (err) {
+      const refused = unrecognizedKeyPaths(err);
+      if (refused.length === 0) throw err;
+      const type = typeof prepared.input.type === 'string' ? prepared.input.type : 'unknown';
+      throw new Error(
+        `create: record type '${type}' does not define ${refused.length === 1 ? 'this field' : 'these fields'}, and the ` +
+          `schema REFUSED the write rather than storing ${refused.length === 1 ? 'it' : 'them'}: ${refused.join(', ')}. ` +
+          `Refused before the write — NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid ` +
+          `set) or add the field to the registered schema; a write must never report success for what it discarded.`,
+        { cause: err }
+      );
+    }
+    // Board bd3f0acf: the parse above STRIPS unknown keys at every depth. Compare
+    // key-path presence pre- vs post-parse and refuse if anything was lost —
+    // BEFORE tx() opens, so a refusal leaves no row and no activity entry. The
+    // comparison runs on prepared.input (post identity normalization) so the
+    // envelope fields resolveIdentity itself writes back — status/superseded_by —
+    // are on both sides and never read as loss.
+    assertNoFieldLoss('create', prepared.input, record);
+    this.tx(() => {
+      this.insertRecord(record);
+      this.logActivity('created', record, record.created_at);
+    });
+    // The echo goes through the SAME derivation get() serves (hydrate +
+    // derived relied_by), so a caller can never see a write echo that differs
+    // from the record it is about to read back.
+    return this.withDerivedReliedBy(
+      this.hydrateAll([SterlingStore.storableBody(record as unknown as Record<string, unknown>) as DurableRecord])[0]
+    );
+  }
+
+  /**
+   * The full record archived at (id, version) — a permanent, append-only
+   * snapshot from record_versions, returned exactly as it was stored (no
+   * derivation), so repeated reads of one version are byte-identical forever
+   * (pin S2-2c). A version that was never archived resolves to undefined —
+   * never fabricated.
+   *
+   * A V2-ONLY SURFACE: record_versions does not exist on a pre-migration store,
+   * so this refuses loudly naming the migration (P5) instead of letting a raw
+   * SQLite "no such table: record_versions" escape. Reads that a pre-v2 store
+   * CAN answer stay allowed (AC3) — version history simply is not one of them.
+   */
+  getRecordVersion(id: string, version: number): Record<string, unknown> | undefined {
+    this.assertV2Surface('getRecordVersion');
+    const row = this.db
+      .prepare('SELECT body FROM record_versions WHERE record_id = ? AND version = ?')
+      .get(id, version) as { body: string } | undefined;
+    // THE COLUMN-AUTHORITATIVE DECODER DELIBERATELY STOPS HERE (decision
+    // [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 4,
+    // which excludes historical snapshots by name). record_versions stores the
+    // body JSON and nothing else — there is no scope column to be authoritative
+    // — and the contract above is byte-exactness, so a version read keeps
+    // whatever it archived, INCLUDING an absent or historically wrong `scope`.
+    // Projecting the live row's scope onto a snapshot was considered and
+    // rejected: it contradicts that promise. No write or routing decision may
+    // operate on a snapshot, and if a scope guard is ever applied to one it must
+    // REFUSE on undefined rather than default to 'project'.
+    return row ? (JSON.parse(row.body) as Record<string, unknown>) : undefined;
+  }
+
+  /**
+   * The dead-id INDEX, whole ([stable-identity-design-v2] contract 3): every
+   * record_aliases row as (historical_id, canonical_id, archived_version). The
+   * shape mirrors recordIdIndex — no body fetch, the full set, so the id
+   * resolution ladder above the store can match an exact historical id AND a
+   * citation PREFIX of one in the same pass it already makes over live ids.
+   *
+   * READ-ONLY and empty-tolerant by design: nothing writes to this table after
+   * the migration, and a PRE-MIGRATION store (where the table does not exist)
+   * returns [] rather than refusing — a legacy store is readable (AC3), and it
+   * has no historical ids to resolve because nothing has been collapsed yet.
+   */
+  recordAliases(): { historical_id: string; canonical_id: string; archived_version: number }[] {
+    if (this.legacySchemaVersion !== undefined) return [];
+    return this.db
+      .prepare('SELECT historical_id, canonical_id, archived_version FROM record_aliases ORDER BY rowid')
+      .all() as { historical_id: string; canonical_id: string; archived_version: number }[];
+  }
+
+  /**
+   * knowledge_update-shaped IN-PLACE write, generalized from updateTodo to
+   * EVERY record type (contract 2). `patch` is the FULL merged candidate (old
+   * record + the caller's changes), mirroring supersede/updateTodo's existing
+   * convention: this method validates and persists, the layer above decides
+   * which fields may change.
+   *
+   * The id, type and created_at are pinned to the stored record — an in-place
+   * write can never re-mint identity, which is the entire point of stable
+   * identity. lifecycle is likewise preserved: retirement happens ONLY through
+   * supersede/retireInFavorOf.
+   */
+  updateRecord(id: string, patch: unknown, opts: RecordWriteOptions = {}): DurableRecord {
+    return this.applyInPlace('updateRecord', id, () => ({ ...(patch as Record<string, unknown>) }), opts);
+  }
+
+  /**
+   * knowledge_edit-shaped write: replace ONE passage inside a long string
+   * field without retransmitting it. `find` must match EXACTLY ONCE — zero and
+   * multiple matches are both refused NAMING THE COUNT, with nothing written,
+   * because a blind replace inside a field too large to read is an
+   * unreviewable write.
+   */
+  editRecordField(id: string, field: string, find: string, replace: string, opts: RecordWriteOptions = {}): DurableRecord {
+    if (find === '') throw new Error(`editRecordField: 'find' is empty — an empty find matches everywhere and nowhere; nothing was written`);
+    return this.applyInPlace('editRecordField', id, (current) => {
+      const value = (current as unknown as Record<string, unknown>)[field];
+      if (typeof value !== 'string') {
+        throw new Error(
+          `editRecordField: field '${field}' on ${current.type} '${id}' is ${value === undefined ? 'not set' : `a ${Array.isArray(value) ? 'array' : typeof value}`}, not a string — ` +
+            `an in-place passage replace applies to string fields only (use appendRecordField for arrays). Nothing was written.`
+        );
+      }
+      const matches = value.split(find).length - 1;
+      if (matches !== 1) {
+        throw new Error(
+          `editRecordField: 'find' matched ${matches} time(s) in field '${field}' of record '${id}' — exactly one match is required ` +
+            `(${matches === 0 ? 'no match: check whitespace and the exact passage' : `${matches} matches: extend 'find' until it is unique`}). Nothing was written.`
+        );
+      }
+      return { ...(current as unknown as Record<string, unknown>), [field]: value.split(find).join(replace) };
+    }, opts);
+  }
+
+  /**
+   * The SERVER-OWNED metadata fields updateRecordMetadata may write. A short,
+   * closed list is what makes that method NARROW rather than a second content
+   * write path that happens to skip the clock: anything outside it is refused by
+   * name. Both entries are already in the tool layer's WRITE_REFUSED_FIELDS, so
+   * neither is ever caller-supplied.
+   */
+  private static readonly METADATA_WRITE_FIELDS: readonly string[] = ['file_baselines', 'baseline_attestations', 'absence_attestations'];
+
+  /**
+   * NARROW VERSIONED METADATA WRITE (board 8c8b6d78 / R9) — a full in-place
+   * write of server-owned drift metadata that DELIBERATELY PRESERVES the
+   * record's `updated_at`.
+   *
+   * It bumps `version`, archives the prior body and honours `expected_version`
+   * exactly like every other in-place write: the baselines live in the record
+   * BODY and the body is authoritative, so a same-version body mutation would
+   * evade the CAS and version signal entirely. (addLink's precedent does NOT
+   * apply — its body copy of links[] is non-authoritative and re-hydrated from
+   * record_relations.)
+   *
+   * WHY THE CLOCK IS PRESERVED. `updated_at` is not a "last written" stamp here:
+   * the read-time drift check treats it as THE INSTANT THE BASELINES WERE TAKEN
+   * and uses it as a cheap mtime prefilter — a file whose mtime is no newer than
+   * `updated_at` is reported clean WITHOUT hashing. Advancing the clock while
+   * re-stamping only SOME owned paths therefore masks real, already-standing
+   * drift on the OTHERS: article baselined at T0 for `a` and `b`; `b` drifts at
+   * T1; a metadata write for `a` alone advances the clock to T2; a later read
+   * stats `b`, sees mtime(b) = T1 <= T2 and returns clean without ever comparing
+   * `b` to its stale hash. Preserving the clock keeps every un-restamped path
+   * judged against exactly the instant its own baseline was taken.
+   *
+   * `activity_at` is the REAL time, recorded on the activity row (and used for
+   * any `resolves` drain) so the chronology stays true — see applyInPlace's
+   * `internal.activityAt`. It is required in practice for every caller; it
+   * defaults to now rather than to the preserved clock, because silently
+   * back-dating an activity row is the failure this parameter exists to prevent.
+   */
+  updateRecordMetadata(
+    id: string,
+    fields: Record<string, unknown>,
+    opts: RecordWriteOptions & { activity_at?: string } = {}
+  ): DurableRecord {
+    const refused = Object.keys(fields).filter((k) => !SterlingStore.METADATA_WRITE_FIELDS.includes(k));
+    if (refused.length) {
+      throw new Error(
+        `updateRecordMetadata: ${refused.map((k) => `'${k}'`).join(', ')} ${refused.length === 1 ? 'is' : 'are'} not a server-owned metadata field — ` +
+          `this write PRESERVES updated_at, so it must never carry content. The writable set is ` +
+          `${SterlingStore.METADATA_WRITE_FIELDS.join(', ')}; use updateRecord for anything else. Nothing was written.`
+      );
+    }
+    return this.applyInPlace(
+      'updateRecordMetadata',
+      id,
+      (current) => ({
+        ...(current as unknown as Record<string, unknown>),
+        ...fields,
+        // From the IN-TRANSACTION read, never a caller's copy: the whole point is
+        // that the stored clock does not move.
+        updated_at: current.updated_at,
+      }),
+      opts,
+      { activityAt: opts.activity_at ?? new Date().toISOString() }
+    );
+  }
+
+  /**
+   * knowledge_append-shaped write: grow an ARRAY field in place (history,
+   * files, current_ac, …) without retransmitting the existing entries. One
+   * transaction, one version bump, prior array archived.
+   */
+  appendRecordField(id: string, field: string, entry: unknown, opts: RecordWriteOptions = {}): DurableRecord {
+    return this.applyInPlace('appendRecordField', id, (current) => {
+      const value = (current as unknown as Record<string, unknown>)[field];
+      if (value !== undefined && value !== null && !Array.isArray(value)) {
+        throw new Error(
+          `appendRecordField: field '${field}' on ${current.type} '${id}' is a ${typeof value}, not an array — ` +
+            `append grows array fields only (use editRecordField for a string passage). Nothing was written.`
+        );
+      }
+      const existing = Array.isArray(value) ? value : [];
+      return { ...(current as unknown as Record<string, unknown>), [field]: [...existing, entry] };
+    }, opts);
+  }
+
+  /**
+   * THE in-place write core shared by updateRecord / editRecordField /
+   * appendRecordField / updateTodo / renameFileKey / the enqueueSystemTodo
+   * text-update branch (contracts 2-4, 7):
+   *
+   *  1. resolve the live record + its server-owned identity columns;
+   *  2. CAS on expected_version when supplied — a stale token refuses naming
+   *     BOTH versions and writes nothing, not even a snapshot row;
+   *  3. archive the FULL prior body into record_versions (append-only);
+   *  4. UPDATE ... WHERE id = ? AND version = ? — the real CAS, kept as a
+   *     backstop now that step 1 reads under the write lock;
+   *  5. rebuild the join indexes and REPLACE the single records_fts row, so an
+   *     archived version's text can never rank (contract 1/7);
+   *  6. drain any claimed `resolves` items INSIDE the same transaction — a
+   *     refused claim rolls the whole write back (contract 4).
+   *
+   * EVERY step, step 1 included, runs inside ONE transaction. BEGIN IMMEDIATE
+   * takes the write lock before the identity read, so no committed concurrent
+   * write can land between the CAS check and the snapshot INSERT. Reading
+   * outside the transaction cost two things: a CAS loser died on the
+   * record_versions (record_id, version) primary key with a raw constraint
+   * error instead of the pinned refusal naming both versions, and the body it
+   * archived could be a stale generation of the record.
+   *
+   * `internal.allowRetired` is for the ONE path that legitimately rewrites a
+   * tombstone: renameFileKey, whose contract is that a move orphans no owning
+   * record's paths, retired ones included. It is deliberately not reachable
+   * from the public triad — a content write still goes to the live successor.
+   *
+   * `internal.suppressReconcilePrune` is the OTHER renameFileKey-only flag
+   * (board 7e779e1f): a rename's before/after file-key diff LOOKS like a
+   * shrink (the old path leaves, the new one arrives) but is not one — the
+   * debt must FOLLOW the renamed path, never be pruned, and renameFileKey's
+   * own deepReplaceString already rewrites any queue item naming the old path
+   * (it is itself one of the rows `record_file_keys` matches). Set ONLY by
+   * renameFileKey's own call and by pruneReconcileNeeded's own nested rewrite
+   * of the queue item it is shrinking (which can never legitimately own a
+   * reconcile_needed item pinned to ITSELF, so the flag there is pure
+   * belt-and-braces against a wasted scan, not a correctness requirement).
+   *
+   * `internal.activityAt` SEPARATES TWO CLOCKS THAT ARE OTHERWISE ONE (board
+   * 8c8b6d78 / R9). The row's `updated_at` comes from the CANDIDATE BODY, so a
+   * caller that deliberately preserves the stored `updated_at` — see
+   * updateRecordMetadata — writes a new version WITHOUT advancing the record's
+   * content clock. The activity row must NOT inherit that preserved value: the
+   * activity log is a chronology of when things actually happened, and
+   * back-dating an entry to the previous write's timestamp makes it false. So
+   * the metadata write passes the REAL time here while the body keeps the old
+   * one. Absent (every ordinary write), behaviour is exactly as before: the
+   * activity row is stamped from the body's own updated_at.
+   */
+  private applyInPlace(
+    op: string,
+    id: string,
+    buildPatch: (current: DurableRecord) => Record<string, unknown>,
+    opts: RecordWriteOptions,
+    internal: { allowRetired?: boolean; activityAt?: string; suppressReconcilePrune?: boolean } = {}
+  ): DurableRecord {
+    this.assertWritable(op);
+    let served!: DurableRecord;
+    this.tx(() => {
+      const current = this.get(id);
+      if (!current) throw new Error(`${op}: no record '${id}'`);
+      const identity = this.identityOf(id);
+      if (!identity) throw new Error(`${op}: no record '${id}'`);
+      if (identity.lifecycle === 'retired' && !internal.allowRetired) {
+        throw new Error(
+          `${op}: record '${id}' is retired (served status 'superseded') — an in-place write goes to the live successor, never to a retired record`
+        );
+      }
+      if (opts.expected_version !== undefined && opts.expected_version !== identity.version) {
+        throw new Error(
+          `${op}: stale expected_version — the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ` +
+            `${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`
+        );
+      }
+
+      // An edge removal is an explicit operation, not an implication of the
+      // candidate's links[] body. Parse it here (inside the write transaction)
+      // and reserve lifecycle edges for their specialized transitions.
+      const removedRelation = opts.remove_relation === undefined ? undefined : linkSchema.parse(opts.remove_relation);
+      if (removedRelation?.rel === 'supersedes') {
+        throw new Error(
+          `${op}: rel 'supersedes' cannot be removed as a raw edge — it is the authoritative carrier of a lifecycle transition. ` +
+            `Use knowledge_supersede / knowledge_retire for lifecycle changes; nothing was written.`
+        );
+      }
+      if (removedRelation) {
+        const exists = this.db
+          .prepare('SELECT 1 FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?')
+          .get(id, removedRelation.rel, removedRelation.target_id);
+        if (!exists) {
+          throw new Error(
+            `${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' no longer exists — ` +
+              `nothing was written; re-read the record and retry.`
+          );
+        }
+      }
+
+      const candidate = buildPatch(current);
+      // Identity is server-owned: pin it to the stored record rather than
+      // trusting a caller's (possibly stale) copy.
+      candidate.id = id;
+      candidate.type = current.type;
+      candidate.created_at = current.created_at;
+      // SCOPE IS CREATION-ONLY, AND ITS AUTHORITY IS THE COLUMN, NOT THE BODY
+      // (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]
+      // part 3). `current` is parsed from the stored JSON body, which is exactly
+      // the value that may be lying: `scope` routed this record at CREATE time
+      // (MountedStores.storeFor) while every later write routes by the store
+      // PHYSICALLY HOLDING the id, and nothing kept the two coupled. Pinning from
+      // identity.scope — the NOT NULL column of the row this write is about to
+      // update — means an in-place write can neither move the label nor preserve
+      // a drifted one, and a legacy body that omits `scope` entirely is repaired
+      // by the next write instead of failing the envelope's required field.
+      candidate.scope = identity.scope;
+      // lifecycle never moves through this path. freshness may: an explicit
+      // freshness wins, a legacy status:'flagged_stale' is honored, and anything
+      // else PRESERVES the stored value — so a routine content update carrying a
+      // legacy status:'active' can never silently un-flag a stale record.
+      const freshness: Freshness =
+        candidate.freshness === 'fresh' || candidate.freshness === 'flagged_stale'
+          ? candidate.freshness
+          : candidate.status === 'flagged_stale'
+            ? 'flagged_stale'
+            : identity.freshness;
+      // A live record has no successor. A retired one (allowRetired path) KEEPS
+      // the one it has: the served superseded_by is derived from the inbound
+      // supersedes relation, and the schema refines status 'superseded' to
+      // require it, so nulling it here would both lie and fail validation.
+      const supersededBy = identity.lifecycle === 'retired' ? current.superseded_by ?? null : null;
+      const nextVersion = identity.version + 1;
+      const prepared = SterlingStore.resolveIdentity(candidate, {
+        lifecycle: identity.lifecycle,
+        freshness,
+        version: nextVersion,
+      });
+      prepared.input.lifecycle = identity.lifecycle;
+      prepared.input.freshness = freshness;
+      prepared.input.version = nextVersion;
+      prepared.input.status = SterlingStore.derivedStatus(identity.lifecycle, freshness);
+      prepared.input.superseded_by = supersededBy;
+
+      const validated = validateRecord(prepared.input) as DurableRecord;
+      if (validated.type !== current.type) {
+        throw new Error(`${op}: type mismatch ('${validated.type}' cannot replace '${current.type}' in place)`);
+      }
+      const entry = RECORD_TYPES[validated.type];
+      const stored = SterlingStore.storableBody(validated as unknown as Record<string, unknown>);
+      const now = new Date().toISOString();
+
+      // The archived snapshot is the CURRENT stored body, verbatim — a full
+      // record, never a diff. The (record_id, version) primary key makes a
+      // double-archive of one version a loud constraint failure.
+      this.db
+        .prepare('INSERT INTO record_versions (record_id, version, archived_at, body) VALUES (?, ?, ?, ?)')
+        .run(id, identity.version, now, identity.body);
+      const res = this.db
+        .prepare(
+          `UPDATE records SET version = ?, status = ?, lifecycle = ?, freshness = ?, superseded_by = ?,
+             updated_at = ?, body = ? WHERE id = ? AND version = ?`
+        )
+        .run(
+          nextVersion,
+          SterlingStore.derivedStatus(identity.lifecycle, freshness),
+          identity.lifecycle,
+          freshness,
+          supersededBy,
+          (stored.updated_at as string) ?? now,
+          JSON.stringify(stored),
+          id,
+          identity.version
+        );
+      if (res.changes === 0) {
+        throw new Error(
+          `${op}: record '${id}' was concurrently written (it is no longer at version ${identity.version}) — re-read and retry`
+        );
+      }
+      // stack_tags / file_keys may have changed: rebuild rather than diff.
+      this.db.prepare('DELETE FROM record_stack_tags WHERE record_id = ?').run(id);
+      for (const tag of new Set(validated.stack_tags)) {
+        this.db.prepare('INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)').run(id, tag);
+      }
+      // BEFORE/AFTER, computed with the SAME registered per-type extractor
+      // (never a hand-listed field) — the path-set diff pruneReconcileNeeded
+      // acts on below (board 7e779e1f). `current` is the pre-write read at the
+      // top of this call; `stored` is what is about to be persisted.
+      const beforeFileKeys = new Set(entry.fileKeys(current as unknown as Record<string, unknown>));
+      const afterFileKeys = new Set(entry.fileKeys(stored));
+      this.db.prepare('DELETE FROM record_file_keys WHERE record_id = ?').run(id);
+      for (const path of afterFileKeys) {
+        this.db.prepare('INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)').run(id, path);
+      }
+      // Additive on relations: an edge named in a content patch is ensured,
+      // never silently dropped. Only opts.remove_relation, supplied by the
+      // explicit knowledge_array_remove path, may delete one.
+      for (const link of validated.links) this.insertRelation(id, link.rel, link.target_id, now);
+      if (removedRelation) {
+        // Exact source + relation type + target identity: target alone can name
+        // several semantically distinct edges. This runs in the same transaction
+        // as the snapshot, version bump and activity row above.
+        const deleted = this.db
+          .prepare('DELETE FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?')
+          .run(id, removedRelation.rel, removedRelation.target_id);
+        if (deleted.changes !== 1) {
+          throw new Error(
+            `${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal — ` +
+              `the transaction was rolled back; re-read and retry.`
+          );
+        }
+      }
+      // EXACTLY ONE records_fts row per id, current version only (contract 7):
+      // the row is replaced, so the prior generation's text stops ranking.
+      this.db.prepare('UPDATE records_fts SET text = ? WHERE record_id = ?').run(entry.fts(stored), id);
+      // THE ACTIVITY CLOCK IS SEPARABLE FROM THE BODY CLOCK (see internal.activityAt
+      // above): a metadata write preserves the body's updated_at, and stamping the
+      // activity row from it would place a write that happened NOW at the previous
+      // write's instant.
+      this.logActivity('updated', validated, internal.activityAt ?? (stored.updated_at as string) ?? now);
+      // ORDER WITH resolves (board 7e779e1f): drain explicit claims FIRST —
+      // an item this SAME write already closed by name is gone from `records`
+      // before the prune scan below ever runs, so it can never be double-
+      // reported as both drained and pruned, and a prune can never make a
+      // just-claimed id vanish out from under drainResolves.
+      if (opts.resolves?.length) this.drainResolves(op, opts.resolves, now, opts.resolvedReceipt);
+      if (!internal.suppressReconcilePrune) {
+        const droppedPaths = new Set<string>();
+        for (const path of beforeFileKeys) if (!afterFileKeys.has(path)) droppedPaths.add(path);
+        if (droppedPaths.size > 0) this.pruneReconcileNeeded(id, droppedPaths, now, opts.prunedReceipt);
+      }
+      // The echo goes through the SAME derivation get() serves, so a write
+      // echo can never disagree with the next read of the same record.
+      served = this.withDerivedReliedBy(this.hydrateAll([stored as DurableRecord])[0]);
+    });
+    return served;
+  }
+
+  /**
+   * The `resolves` drain (contract 4): the maintenance items a write CLAIMS to
+   * close, closed inside the write's own transaction. An unresolvable or
+   * already-closed claim throws, which rolls the ENTIRE write back — an
+   * unclaimed write must never appear to succeed against a dead reference, and
+   * a partial drain is worse than none.
+   *
+   * `receipt`, when supplied, is filled with ONE COMMITTED SNAPSHOT per claimed
+   * item — read here, inside this same transaction, in the instant before that
+   * item's own `remove` call (board b0bb9d96 fix-round HIGH). This is
+   * deliberately NOT the caller's earlier pre-transaction validation read: this
+   * lane's own fold can widen an item's file_keys between an outer caller
+   * validating a claim and this drain actually removing it, and a receipt
+   * built from the stale read would describe a narrower close than the one
+   * that actually happened. Reading `item` (below) IS that snapshot — nothing
+   * else touches this id between the read and the remove.
+   */
+  private drainResolves(op: string, ids: string[], at: string, receipt?: { id: string; system_reason?: string; file_keys?: string[]; text?: string }[]): void {
+    for (const claimed of new Set(ids)) {
+      const item = this.get(claimed) as (DurableRecord & { system_reason?: string; file_keys?: string[]; text?: string }) | undefined;
+      if (!item) {
+        throw new Error(
+          `${op}: resolves claim '${claimed}' names no open item — it was never created, or it is already closed. ` +
+            `The whole write rolled back (no version bump, no snapshot, no other item drained); re-read the queue and claim only open ids.`
+        );
+      }
+      if (item.type !== 'todo') {
+        throw new Error(
+          `${op}: resolves claim '${claimed}' is a ${item.type}, not a maintenance item (todo) — the whole write rolled back`
+        );
+      }
+      if (receipt) receipt.push({ id: item.id, system_reason: item.system_reason, file_keys: item.file_keys ?? [], text: item.text });
+      this.remove(claimed, at);
+    }
+  }
+
+  /**
+   * PATH PRUNING FOR reconcile_needed (board 7e779e1f). Called from
+   * applyInPlace, strictly AFTER drainResolves, with the set of paths the
+   * record just stopped claiming: for every open reconcile_needed item pinned
+   * to `ownerId` (feature_link match) that names one of those paths, the path
+   * is removed from that item's file_keys IN THIS SAME TRANSACTION — never a
+   * second write, and never through the caller's own resolves claim.
+   *
+   * This undoes exactly what enqueueSystemTodo's fold committed to, one path
+   * at a time: a shrinking item's text is regenerated through the SAME
+   * `buildReconcileText` builder the fold uses, and an item pruned to zero
+   * paths is removed through the SAME `remove()` normal-removal path every
+   * other closed system todo takes — so the drain log and the FTS row stay
+   * honest either way. `decision reconcile-needed-identity-is-reason-plus-
+   * owner-file-keys-unioned` means there is at most one such item per owner in
+   * practice, but this loops over every match rather than assuming it, so a
+   * legacy duplicate is not silently skipped.
+   *
+   * PRUNING IS BOOKKEEPING, NOT EVIDENCE ANYONE RECONCILED ANYTHING — it only
+   * says the debt's OWNER changed, never that the new bytes were checked. The
+   * caller-facing drift disclosure this feeds lives in tools.ts (`prunedReceipt`
+   * carries id/removed/pruned_paths/remaining_file_keys; the filesystem-facing
+   * "was the pruned path actually drifted against the OLD baseline" verdict is
+   * computed there, from that disclosure, because this layer touches no
+   * filesystem and no git tree).
+   *
+   * SAME-DB BY CONSTRUCTION: this scans `this.db` alone — the exact database
+   * the triggering write is landing in. A queue item pinned to `ownerId` but
+   * living in a DIFFERENT physical store (a different SterlingStore instance,
+   * e.g. under MountedStores when scope and physical holder have drifted)
+   * simply never appears in this query, so nothing is pruned and nothing is
+   * falsely disclosed as pruned — there is no cross-db case to detect.
+   *
+   * A RENAME IS NOT A SHRINK — callers gate this whole method out via
+   * `internal.suppressReconcilePrune` rather than this method trying to tell a
+   * rename from a genuine drop (see applyInPlace's doc comment).
+   */
+  private pruneReconcileNeeded(
+    ownerId: string,
+    droppedPaths: Set<string>,
+    at: string,
+    receipt?: { id: string; system_reason?: string; removed: boolean; pruned_paths: string[]; remaining_file_keys: string[] }[]
+  ): void {
+    const rows = this.db
+      .prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'")
+      .all() as { body: string; scope: string }[];
+    for (const r of rows) {
+      const t = SterlingStore.decodeLiveRecord('pruneReconcileNeeded', r) as DurableRecord & {
+        source?: string;
+        system_reason?: string;
+        feature_link?: string;
+        file_keys?: string[];
+        text?: string;
+      };
+      if (t.source !== 'system' || t.system_reason !== 'reconcile_needed' || t.feature_link !== ownerId) continue;
+      const currentFiles = t.file_keys ?? [];
+      const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
+      if (prunedPaths.length === 0) continue;
+      const keptFiles = currentFiles.filter((f) => !droppedPaths.has(f));
+      if (receipt) {
+        receipt.push({
+          id: t.id,
+          system_reason: t.system_reason,
+          removed: keptFiles.length === 0,
+          pruned_paths: prunedPaths,
+          remaining_file_keys: keptFiles,
+        });
+      }
+      if (keptFiles.length === 0) {
+        this.remove(t.id, at);
+        continue;
+      }
+      // Regenerated through the SAME builder the fold uses — the owner's
+      // current slug/title (this write's own UPDATE already committed above,
+      // so this read sees the post-write body), never a hand-rendered string.
+      const owner = this.get(ownerId) as (DurableRecord & { slug?: string; title?: string }) | undefined;
+      const text = buildReconcileText(
+        owner
+          ? { type: owner.type as 'feature_article' | 'reference_material', slug: owner.slug, title: owner.title }
+          : { type: 'feature_article', slug: ownerId },
+        keptFiles
+      );
+      this.applyInPlace(
+        'pruneReconcileNeeded',
+        t.id,
+        (cur) => ({ ...(cur as unknown as Record<string, unknown>), file_keys: keptFiles, text }),
+        {},
+        { suppressReconcilePrune: true }
+      );
+    }
+  }
+
+  /**
+   * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
+   * definition, replacing four hand-rolled copies (board 2ded3b4b).
+   *
+   * THE BUG THIS CLOSES IS TWO BUGS. Four producers minted maintenance items
+   * (h7-file-touch, the read-time drift check in tools.ts, fs-remove, fs-move),
+   * each with its own copy-pasted "does an open item already exist?" query
+   * followed by a separate insert, and no uniqueness constraint anywhere:
+   *
+   *  (1) DUPLICATES. Two producers both read "no open item" before either insert
+   *      committed, and both inserted — classic TOCTOU. A consuming project
+   *      measured SEVEN byte-identical pairs created 2-3 MILLISECONDS apart, 52%
+   *      of a 27-item queue. The cost was judgement rather than writes: the
+   *      deep-queue threshold trips early, and anyone sizing a drain from the raw
+   *      count sees double the work that exists.
+   *  (2) SILENT LOSS — the worse half, and not in the report. All four checks
+   *      keyed on (feature_link, system_reason) and OMITTED the file, so a second
+   *      drifting file on the same article was suppressed. And because
+   *      knowledge_update re-baselines EVERY owned file, reconciling the first
+   *      file absorbed the second file's drift into a fresh baseline: the finding
+   *      neither queued nor survived.
+   *
+   * The key is therefore (system_reason, feature_link, file_keys SET) for
+   * every lane EXCEPT reconcile_needed with a feature_link (board b0bb9d96 /
+   * I-29, "the mint storm"): THAT one lane's identity is (system_reason,
+   * feature_link) ALONE — the file_keys SET is deliberately excluded from the
+   * match, and instead gets UNIONED into the surviving (oldest) open item
+   * rather than distinguishing a second one. The exact-SET reading above
+   * fixed the silent-loss bug (2) by making the file part of the key; the
+   * reconcile_needed exception keeps that same guarantee (no file is ever
+   * dropped — see the union below) while also closing bug (1)'s SIBLING for
+   * this lane: two DIFFERENT keys (a singleton [a], then [a,b]) used to
+   * coexist as two legitimate-looking open items for one article, which is
+   * exactly what a reader saw as duplicates even though neither was a
+   * byte-identical TOCTOU race. See the isReconcileFold branch below. The
+   * check still runs inside the same BEGIN IMMEDIATE transaction as the
+   * insert/fold, so a concurrent caller blocks on the write lock and then
+   * SEES the committed row instead of racing it.
+   *
+   * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
+   * severity — edited today, deleted tomorrow, both reconcile_needed, the first
+   * not yet drained — would otherwise be swallowed as a duplicate, losing the more
+   * urgent fact. Since S2 that update goes through the versioned in-place core
+   * like every other write ([stable-identity-design-v2]): todos DO carry the
+   * universal version counter now, so the escalation bumps the version and
+   * archives the prior text instead of overwriting the body invisibly (a bare
+   * body UPDATE was invisible to expected_version, so a concurrent in-place
+   * write could silently revert it, and the FTS row kept the old text).
+   */
+  enqueueSystemTodo(input: unknown): { record: DurableRecord; deduped: boolean; text_updated: boolean } {
+    this.assertWritable('enqueueSystemTodo');
+    const prepared = SterlingStore.resolveIdentity(input as Record<string, unknown>, {
+      lifecycle: 'live',
+      freshness: 'fresh',
+      version: 1,
+    });
+    const candidate = validateRecord(prepared.input) as DurableRecord & {
+      source?: string;
+      system_reason?: string;
+      file_keys?: string[];
+      text?: string;
+      feature_link?: string;
+    };
+    if (candidate.type !== 'todo' || candidate.source !== 'system') {
+      throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? 'no source'}`);
+    }
+    // A LINKLESS state_review HAS NO IDENTITY (board e939fd21, fixer round 2,
+    // finding 6): the lane exception below keys it on {system_reason,
+    // feature_link} ALONE — file_keys is deliberately excluded — so without a
+    // feature_link the key degenerates to system_reason alone (files is always
+    // []), and two DIFFERENT linkless mints sharing boilerplate text would
+    // silently collapse, the second one's file_keys lost. Every real caller
+    // (the feature-article state-honesty check) always supplies feature_link —
+    // it IS the article being reviewed — so refusing here costs nothing today
+    // and fails loud rather than silently merging two unrelated obligations.
+    if (candidate.system_reason === 'state_review' && !candidate.feature_link) {
+      throw new Error(
+        `enqueueSystemTodo: a state_review item requires feature_link — this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`
+      );
+    }
+    // AN ITEM WITH NEITHER A feature_link NOR file_keys HAS NO IDENTITY BEYOND
+    // ITS TEXT, so the text joins the key for exactly those. Without this, two
+    // unrelated obligations in a file-less lane (capture_owed, research_owed)
+    // would collapse into one on their reason alone — trading the duplicate bug
+    // for a worse one. With it, an exact duplicate still collapses while distinct
+    // items stay distinct. A consequence worth naming: for those lanes the
+    // text-differs-so-update branch can never fire, because a different text is
+    // by definition a different item.
+    // STATE_REVIEW LANE EXCEPTION (board e939fd21, per-file refinement 194f43e4
+    // still stands for every OTHER lane): the call site chooses this lane's
+    // file_keys as unverifiedPaths-else-first-3-owned, which SHIFTS from read to
+    // read as the unverified set or the owned-files order changes, while the
+    // semantic cause — "review this article's state honesty" — has not. Keying
+    // on the moving file set re-mints a duplicate on every shift (four minted in
+    // one measured session). state_review's identity is the article itself, so
+    // this lane is keyed on {system_reason, feature_link} alone; it is a
+    // lane-specific exception at this one choke point, not a universal key
+    // change.
+    const keyOf = (t: { system_reason?: string; feature_link?: string; file_keys?: string[]; text?: string }) => {
+      // capture_owed minted from a capture_pending declaration: the declared
+      // target is the identity, file_keys are context (declaredCaptureTarget).
+      const declaredTarget = t.system_reason === 'capture_owed' ? declaredCaptureTarget(t.text) : null;
+      if (declaredTarget !== null) return JSON.stringify(['capture_owed', t.feature_link ?? '', [], `declared-target:${declaredTarget}`]);
+      const files = t.system_reason === 'state_review' ? [] : [...(t.file_keys ?? [])].sort();
+      const identified = !!t.feature_link || files.length > 0;
+      return JSON.stringify([t.system_reason ?? '', t.feature_link ?? '', files, identified ? '' : (t.text ?? '')]);
+    };
+    const wantKey = keyOf(candidate as unknown as { system_reason?: string; feature_link?: string; file_keys?: string[]; text?: string });
+
+    // TEXT EQUIVALENCE FOR THE ESCALATION CHECK, state_review NORMALIZED (board
+    // e939fd21, fixer round 3, finding 3): this lane's text embeds the exact
+    // live-byte count ("... hold NNN bytes of code on disk"), a number that
+    // shifts on every read whenever ANY file the article owns changes size for
+    // a reason unrelated to the state-honesty verdict itself (an unrelated
+    // sibling file mid-edit, say) — under plain string equality that re-fires
+    // the escalation branch below on nearly every read, an unbounded
+    // version-bump/snapshot/FTS-refresh churn (the same no-op-remint pathology
+    // the stable-key fix above closed, moved from item COUNT to item VERSION).
+    // NORMALIZE ONLY THAT ONE VOLATILE TOKEN, never every digit run (round-3
+    // correction: a blanket \d+ strip also normalized digits INSIDE PATHS —
+    // scripts/hooks/h10-*.mjs and h19-*.mjs collapsed to the same string, so a
+    // genuine unverified-file-set move from h10 to h19 was wrongly read as "no
+    // change" and silently swallowed). A GENUINE change — the state is fixed, a
+    // different file's role goes unverified, the wording itself changes — still
+    // differs after normalizing this one token and still escalates exactly as
+    // before. Every OTHER lane keeps EXACT text equality (decision foreign_194f43e4's
+    // escalating-severity behavior, e.g. edited→deleted, is unaffected).
+    const textsEquivalent = (a: string, b: string): boolean => {
+      if (candidate.system_reason !== 'state_review') return a === b;
+      const strip = (s: string) => s.replace(/\d+(?= bytes of code on disk)/g, '#');
+      return strip(a) === strip(b);
+    };
+
+    // ONE OPEN reconcile_needed ITEM PER feature_link (board b0bb9d96 / I-29):
+    // unlike every other lane, this identity is NOT the exact file_keys set —
+    // it is (system_reason, feature_link) alone, exactly like the state_review
+    // lane exception above but for a different reason (state_review has no
+    // meaningful file_keys at all; reconcile_needed's file_keys is real data
+    // that must be UNIONED, never discarded). Two un-coordinated minters
+    // (read-time per-file, settlement grouped-per-article) used to coexist as
+    // duplicates because the universal key included the exact file set; this
+    // relaxes the match for this lane only and folds the result below.
+    const isReconcileFold = candidate.system_reason === 'reconcile_needed' && !!candidate.feature_link;
+
+    let existing: (DurableRecord & { text?: string; file_keys?: string[] }) | undefined;
+    let textUpdated = false;
+    // Set ONLY by the zero-match multi-file canonicalization below (board
+    // b0bb9d96 fix-round MEDIUM) — the text this call ACTUALLY inserted, so
+    // the echo built after the transaction can agree with the row rather than
+    // silently reporting the caller's pre-canonicalization `candidate.text`.
+    let insertedText: string | undefined;
+    this.tx(() => {
+      // The read happens INSIDE the write transaction — that is the whole point.
+      // Scanning open todos is cheap: the queue is small by design, and a queue
+      // large enough for this scan to matter is itself the finding.
+      const rows = this.db
+        .prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'")
+        .all() as { body: string; scope: string }[];
+
+      if (isReconcileFold) {
+        const matches: (DurableRecord & { text?: string; file_keys?: string[] })[] = [];
+        for (const r of rows) {
+          const t = SterlingStore.decodeLiveRecord('enqueueSystemTodo', r) as DurableRecord & {
+            source?: string;
+            system_reason?: string;
+            feature_link?: string;
+            file_keys?: string[];
+            text?: string;
+          };
+          if (t.source !== 'system') continue;
+          if (t.system_reason !== 'reconcile_needed' || t.feature_link !== candidate.feature_link) continue;
+          matches.push(t);
+        }
+        if (matches.length === 0) {
+          // CANONICALIZE A MULTI-FILE FIRST INSERT THROUGH buildReconcileText
+          // TOO (board b0bb9d96 fix-round MEDIUM): a caller can mint the FIRST
+          // item for an article already carrying more than one file in
+          // file_keys (settlement's grouped mint is exactly this shape) while
+          // its own caller-authored `text` names only one of them — nothing
+          // downstream widens this item to correct that, since there is no
+          // existing item to fold against. A SINGLE-file first insert keeps
+          // today's caller-authored text unchanged: that per-file wording
+          // (e.g. "no longer exists" vs "changed on disk", state_review's
+          // escalating phrasing) is real information a generic union
+          // rendering would flatten, and with exactly one file there is
+          // nothing for a union to be MORE truthful about.
+          const fileKeys = candidate.file_keys ?? [];
+          if (fileKeys.length > 1) {
+            const owner = this.get(candidate.feature_link as string) as (DurableRecord & { slug?: string; title?: string }) | undefined;
+            const canonicalText = buildReconcileText(
+              owner
+                ? { type: owner.type as 'feature_article' | 'reference_material', slug: owner.slug, title: owner.title }
+                : { type: 'feature_article', slug: candidate.feature_link },
+              fileKeys
+            );
+            this.insertRecord({ ...candidate, text: canonicalText } as DurableRecord);
+            insertedText = canonicalText;
+          } else {
+            this.insertRecord(candidate);
+          }
+          return;
+        }
+        // OLDEST open item keeps its id — anything already pointing at it
+        // (a citation, a prior resolves: claim in flight) must not break.
+        // created_at is a string ISO timestamp; a tie (same millisecond) is
+        // broken by id so the sort is total and deterministic either way.
+        matches.sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+        const [survivor, ...folded] = matches;
+        const unionSet = new Set<string>(survivor.file_keys ?? []);
+        for (const f of folded) for (const k of f.file_keys ?? []) unionSet.add(k);
+        for (const k of candidate.file_keys ?? []) unionSet.add(k);
+        const unionFiles = [...unionSet].sort();
+        const priorFiles = [...(survivor.file_keys ?? [])].sort();
+        const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(unionFiles);
+        // WIDENING (a real union — more than the survivor's own single file,
+        // or a legacy duplicate being folded in) demands the shared builder's
+        // truthful union text; it may not go on naming only the first file.
+        // A same-file re-report with NO folding keeps this lane's ordinary
+        // escalating-severity behaviour (decision foreign_194f43e4) — same file,
+        // worse news, plain text equality decides whether it updates.
+        const widening = folded.length > 0 || unionFiles.length > 1;
+        let nextText = candidate.text ?? '';
+        if (widening) {
+          const owner = this.get(candidate.feature_link as string) as (DurableRecord & { slug?: string; title?: string }) | undefined;
+          nextText = buildReconcileText(
+            owner
+              ? { type: owner.type as 'feature_article' | 'reference_material', slug: owner.slug, title: owner.title }
+              : { type: 'feature_article', slug: candidate.feature_link },
+            unionFiles
+          );
+        }
+        const textChanged = !textsEquivalent(survivor.text ?? '', nextText);
+        if (textChanged || filesChanged) {
+          // The versioned core, joining THIS transaction (tx is reentrant): version
+          // bump + prior snapshot + FTS refresh, none of which a bare body UPDATE did.
+          existing = this.applyInPlace(
+            'enqueueSystemTodo',
+            survivor.id,
+            (cur) => ({
+              ...(cur as unknown as Record<string, unknown>),
+              updated_at: candidate.updated_at,
+              ...(textChanged ? { text: nextText } : {}),
+              ...(filesChanged ? { file_keys: unionFiles } : {}),
+            }),
+            {}
+          ) as DurableRecord & { text?: string; file_keys?: string[] };
+          textUpdated = textChanged;
+        } else {
+          existing = survivor;
+        }
+        // Fold every OTHER open reconcile_needed item for this feature_link
+        // through the store's OWN removal path (never a bare DELETE), so the
+        // audit trail (queue_drain_log) is kept exactly as it is for any
+        // other closed system todo — union-then-remove, same transaction.
+        for (const f of folded) this.remove(f.id, candidate.updated_at);
+        return;
+      }
+
+      for (const r of rows) {
+        // Through the decoder like every other live materializing read: a match
+        // here is RETURNED to the caller as the deduped record, so a drifted
+        // body would otherwise escape with a scope no other read path serves.
+        const t = SterlingStore.decodeLiveRecord('enqueueSystemTodo', r) as DurableRecord & {
+          source?: string;
+          system_reason?: string;
+          file_keys?: string[];
+          text?: string;
+        };
+        if (t.source !== 'system') continue;
+        if (keyOf(t as unknown as { system_reason?: string; feature_link?: string; file_keys?: string[]; text?: string }) !== wantKey) continue;
+        existing = t;
+        break;
+      }
+      if (!existing) {
+        this.insertRecord(candidate);
+        return;
+      }
+      // FILE_KEYS REFRESH IS INDEPENDENT OF THE TEXT-EQUALITY BRANCH (board
+      // e939fd21, fixer round 3, finding 3b — hoisted OUT of the
+      // textsEquivalent branch it used to live inside): a file_keys-only change
+      // — the unverified set moves from one path to another while the rest of
+      // the wording is untouched — must still refresh file_keys even when text
+      // is (correctly) read as unchanged; gating the refresh on textChanged
+      // meant a text-suppressed escalation ALSO suppressed the file_keys
+      // refresh, so the surviving item could name a path forever after the
+      // real debt had moved elsewhere. Compared as a SET: every other lane's
+      // file_keys is already part of the match key, so a match there always
+      // already carries the same set and this is a no-op — never a spurious
+      // extra reindex.
+      const priorFiles = [...((existing as unknown as { file_keys?: string[] }).file_keys ?? [])].sort();
+      const nextFiles = [...(candidate.file_keys ?? [])].sort();
+      const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(nextFiles);
+      const textChanged = !textsEquivalent(existing.text ?? '', candidate.text ?? '');
+      if (textChanged || filesChanged) {
+        // The versioned core, joining THIS transaction (tx is reentrant): version
+        // bump + prior snapshot + FTS refresh, none of which a bare body UPDATE did.
+        existing = this.applyInPlace(
+          'enqueueSystemTodo',
+          existing.id,
+          (cur) => ({
+            ...(cur as unknown as Record<string, unknown>),
+            updated_at: candidate.updated_at,
+            ...(textChanged ? { text: candidate.text } : {}),
+            ...(filesChanged ? { file_keys: candidate.file_keys } : {}),
+          }),
+          {}
+        ) as DurableRecord & { text?: string; file_keys?: string[] };
+        textUpdated = textChanged;
+      }
+    });
+    // The stored bodies scanned above carry no status/superseded_by (they are
+    // derived), so both return paths go through hydration before the caller
+    // sees them ([stable-identity-design-v2]).
+    return existing
+      ? { record: this.hydrateAll([existing as DurableRecord])[0], deduped: true, text_updated: textUpdated }
+      : {
+          // The echo must agree with the ROW this call actually inserted, not
+          // with the caller's pre-canonicalization `candidate` — see
+          // `insertedText`'s own doc comment (board b0bb9d96 fix-round MEDIUM).
+          record: this.hydrateAll([
+            SterlingStore.storableBody({
+              ...(candidate as unknown as Record<string, unknown>),
+              ...(insertedText !== undefined ? { text: insertedText } : {}),
+            }) as DurableRecord,
+          ])[0],
+          deduped: false,
+          text_updated: false,
+        };
+  }
+
+  get(id: string): DurableRecord | undefined {
+    const row = this.db.prepare('SELECT body, scope FROM records WHERE id = ?').get(id) as
+      | { body: string; scope: string }
+      | undefined;
+    if (!row) return undefined;
+    // hydrateAll re-attaches the DERIVED status/superseded_by and materializes
+    // links[] from record_relations ([stable-identity-design-v2]); the decoder
+    // makes the row's scope COLUMN authoritative over the parsed body.
+    return this.withDerivedReliedBy(this.hydrateAll([SterlingStore.decodeLiveRecord('get', row)])[0]);
+  }
+
+  /**
+   * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]).
+   *
+   * The record's body `scope` does NOT answer this and must never be used to:
+   * `scope` routes a record at CREATE time (MountedStores.storeFor) while every
+   * later write routes by the store PHYSICALLY HOLDING the id
+   * (MountedStores.storeHolding); `scope` is caller-writable through
+   * knowledge_update (it is not a refused server-owned field); and the in-place
+   * update path above pins id/type/created_at but never re-derives or validates
+   * the row's mount. So a domain-held record can carry scope 'project' and a
+   * project-held one can carry 'domain:x'. Only the storage layer can answer the
+   * question, so it answers it here rather than leaving callers to guess.
+   *
+   * On a bare SterlingStore this is plain existence — the tool layer's ONE store
+   * is then the project store (server.ts mounts MountedStores; the tests wrap
+   * either). MountedStores overrides it to ask its project mount ALONE, never
+   * the fan. Existence only: a tombstoned/retired row still counts as held.
+   */
+  projectStoreHolds(id: string): boolean {
+    return this.db.prepare('SELECT 1 FROM records WHERE id = ?').get(id) !== undefined;
+  }
+
+  /**
+   * THE SCOPE OF THE STORE THAT PHYSICALLY HOLDS `id` — the naming companion of
+   * projectStoreHolds (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *
+   * projectStoreHolds answers a YES/NO ("is this the project mount?"), which is
+   * all an atomicity or an H10-parity question needs. A caller that has to
+   * SUPPLY a scope — the replacement minted by a supersession, the new record an
+   * extraction creates — needs the mount NAMED, and until this existed there was
+   * no way to get one: both call sites reconstructed it as
+   * `heldByProject ? 'project' : record.scope`, which is physically derived for
+   * the project case and straight back to the body for every DOMAIN case. In a
+   * design whose whole thesis is that the body is not the routing key, that is
+   * the trap itself (anti_pattern
+   * [record-body-scope-is-not-physical-store-identity]).
+   *
+   * CONTRACT (both implementations):
+   *  - returns 'project' or 'domain:<name>' — never undefined, never a default;
+   *  - an id NO store holds THROWS, naming the id. It never falls back to
+   *    'project': "probably project" is exactly the fail-open the anti-pattern
+   *    forbids, and a caller that cannot locate its own record must not go on to
+   *    label a new one;
+   *  - an id MULTIPLE stores hold throws too (MountedStores only — see
+   *    storeHolding there): one id names one row, and every routing guarantee in
+   *    this design assumes a single holder.
+   *
+   * ON A BARE SterlingStore there are no mounts, so the physical answer is this
+   * row's own `scope` COLUMN — NOT NULL, written once at insert from the routing
+   * decision that chose this store, and never touched by an in-place update
+   * (see identityOf). It is the same value column-authoritative reads already
+   * serve, so a bare-store caller sees no behaviour change; what changes is that
+   * the value now arrives from the column BY CONSTRUCTION rather than by a body
+   * parse that happens to have been corrected. MountedStores overrides this with
+   * the MOUNT the record actually lives in, which is strictly stronger: the
+   * column can still contradict the mount (the third drift class
+   * `domain-doctor.mjs scope-audit` reports), and where they disagree the mount
+   * is the physical fact and the column is a label.
+   */
+  scopeOfHolder(id: string): string {
+    const identity = this.identityOf(id);
+    if (!identity) {
+      throw new Error(
+        `scopeOfHolder: no record '${id}' in this store — the scope of a record's holder cannot be derived from a record that is not held. ` +
+          `Refusing rather than defaulting to 'project' (anti_pattern [record-body-scope-is-not-physical-store-identity]: a guard on scope fails closed on undefined).`
+      );
+    }
+    return identity.scope;
+  }
+
+  /**
+   * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
+   * 9641e01b, the conductor's option (b)) from the union of every OTHER active
+   * feature_article's relies_on naming this article's slug — not the stored
+   * field. relies_on stays author-written; relied_by cannot drift because it is
+   * no longer authored at all past this read. PROJECT-STORE SCOPE ONLY:
+   * domain-mounted articles are out of scope for this derivation (each mounted
+   * store derives its own; MountedStores does not cross-join relies_on across
+   * stores) — the same store-locality choice articlesBySlug/knowledge_create's
+   * slug-collision check already make.
+   *
+   * Never a hidden lie (constraint 2 of the board item): when the stored
+   * relied_by differs from the derived set (as a sorted-deduped set — order and
+   * duplicates in the stored array don't count as drift), the returned record
+   * carries dependencies.relied_by_stored_stale: true alongside the derived
+   * value actually served. The stored field is left untouched in the DB — this
+   * derivation never writes.
+   */
+  private withDerivedReliedBy(record: DurableRecord, relations?: { slug: string; reliesOn: string[] }[]): DurableRecord {
+    if (record.type !== 'feature_article') return record;
+    const article = record as DurableRecord & {
+      slug: string;
+      dependencies: { relies_on: string[]; relied_by: string[] };
+    };
+    const derived = this.deriveReliedBy(article.slug, relations);
+    const storedSorted = [...new Set(article.dependencies?.relied_by ?? [])].sort();
+    const stale = JSON.stringify(storedSorted) !== JSON.stringify(derived);
+    return {
+      ...record,
+      dependencies: {
+        relies_on: article.dependencies?.relies_on ?? [],
+        relied_by: derived,
+        ...(stale ? { relied_by_stored_stale: true } : {}),
+      },
+    } as DurableRecord;
+  }
+
+  /**
+   * Every active feature_article's slug + relies_on, in ONE scan — shared by
+   * withDerivedReliedBy across a whole query() result so a capped list of N
+   * articles costs one table scan, not N.
+   *
+   * NOT a materializing read, so it does not go through decodeLiveRecord: it
+   * projects two fields out of each body and never yields a DurableRecord to a
+   * caller. Nothing here reads or reports `scope`.
+   */
+  private activeArticleRelations(): { slug: string; reliesOn: string[] }[] {
+    const rows = this.db
+      .prepare(`SELECT body FROM records WHERE type = 'feature_article' AND status != 'superseded'`)
+      .all() as { body: string }[];
+    return rows.map((r) => {
+      const rec = JSON.parse(r.body) as { slug?: string; dependencies?: { relies_on?: string[] } };
+      return { slug: rec.slug ?? '', reliesOn: rec.dependencies?.relies_on ?? [] };
+    });
+  }
+
+  /** Sorted, deduped slugs of every active article whose relies_on names `slug`. */
+  private deriveReliedBy(slug: string, relations?: { slug: string; reliesOn: string[] }[]): string[] {
+    const rels = relations ?? this.activeArticleRelations();
+    const set = new Set<string>();
+    for (const r of rels) {
+      if (r.slug === slug) continue;
+      if (r.reliesOn.includes(slug)) set.add(r.slug);
+    }
+    return [...set].sort();
+  }
+
+  /**
+   * Every record id in this store at ANY status, tombstones included, with its
+   * type — the resolution surface for id CITATIONS in tracked source
+   * (check-record-citations). It exists because neither existing read serves
+   * that need: query() deliberately excludes superseded records (AC4), yet
+   * citing a superseded record is legitimate and common — a comment names the
+   * decision that ORIGINALLY justified a design, and history is exactly what it
+   * should cite — while get() resolves any status but only from a FULL id, and
+   * citations in prose are 8-char prefixes. No body fetch, no JSON.parse: ids
+   * and types only, so scanning the whole tree stays cheap.
+   */
+  recordIdIndex(): { id: string; type: string; status: string }[] {
+    return this.db.prepare('SELECT id, type, status FROM records').all() as {
+      id: string;
+      type: string;
+      status: string;
+    }[];
+  }
+
+  /**
+   * Every non-superseded feature_article carrying this EXACT slug, newest first.
+   * A deterministic identity lookup, deliberately NOT a search (decision
+   * 3db7095f). H19's one-hop pointerLine used to resolve sibling slugs through
+   * query({rank_terms:[slug], cap:5}) and then look for an exact match among
+   * those five, which reported LIVE articles as '(not in store)': bm25 ranks by
+   * term frequency over the FTS blob, so a popular slug is cited more often in
+   * OTHER articles' prose than in the article that owns it, and the owner falls
+   * outside its own top-5 — measured against 'hooks-suite' at v46. Raising the
+   * cap was rejected because the cause is the RANKING, not the number 5, and the
+   * miss gets likelier as the store grows.
+   *
+   * Returns an ARRAY so the caller keeps applying its own working_tree exclusion.
+   * More than one active record per slug is a store-integrity fault rather than a
+   * normal state; it resolves newest-first here instead of arbitrarily, and is
+   * not raised on this path because delivery must never fail (AC7) — an opaque
+   * '(lookup failed)' would trade one false payload for another.
+   */
+  articlesBySlug(slug: string): DurableRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT body, scope FROM records
+          WHERE type = 'feature_article' AND status != 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC`
+      )
+      .all(slug) as { body: string; scope: string }[];
+    const records = this.hydrateAll(SterlingStore.decodeLiveRecords('articlesBySlug', rows));
+    if (!records.length) return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
+  }
+
+  /**
+   * Every non-superseded record of ANY type carrying this exact slug, newest
+   * first (board 1e639f32 — decision/anti_pattern/research_finding gained the
+   * stable handle feature_article and brief already had). The type-agnostic
+   * sibling of articlesBySlug: it backs knowledge_create's cross-type slug
+   * uniqueness and knowledge_get's slug resolution, both of which must see
+   * EVERY slug-bearing record or a clash slips through. Excluding superseded
+   * rows is the point — a slug names the CONCEPT, so resolving it serves the
+   * live head while a version-pinned citation keeps using the id.
+   */
+  recordsBySlug(slug: string): DurableRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT body, scope FROM records
+          WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC`
+      )
+      .all(slug) as { body: string; scope: string }[];
+    return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('recordsBySlug', rows));
+  }
+
+  /**
+   * Every SUPERSEDED record carrying this exact slug, newest first — the
+   * dead-slug counterpart of recordsBySlug (decision foreign_df361a0f, board 2b9f2f1a
+   * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
+   * uses this ONLY after live-slug and id-prefix resolution both fail, so it
+   * can never shadow a live record: a slug still carried by a non-superseded
+   * row belongs to recordsBySlug, not here. The write surface never calls
+   * this — a dead slug addresses no write handle, fix-forward goes to the
+   * live head via recordsBySlug's own resolution.
+   */
+  supersededRecordsBySlug(slug: string): DurableRecord[] {
+    // rowid DESC breaks ties within one supersede lineage: a chain built under a
+    // fixed test clock (or any updates landing in the same instant) shares one
+    // updated_at across every carrier, so updated_at alone cannot tell the
+    // newest tombstone from the oldest — insertion order (rowid, monotonic and
+    // never reused) can.
+    const rows = this.db
+      .prepare(
+        `SELECT body, scope FROM records
+          WHERE status = 'superseded' AND json_extract(body, '$.slug') = ?
+          ORDER BY updated_at DESC, rowid DESC`
+      )
+      .all(slug) as { body: string; scope: string }[];
+    return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('supersededRecordsBySlug', rows));
+  }
+
+  /**
+   * Follows superseded_by from `id` to the chain end (decision foreign_de1a7329: ids
+   * stay version-pinned — this DISCLOSES where the chain currently ends, it
+   * never redirects the pinned record itself). A live (non-superseded)
+   * record resolves to itself at hops:0. Unknown id -> null. Never throws
+   * and never hangs on a malformed chain: a cycle or a chain deeper than the
+   * 32-hop cap stops traversal and reports the LAST record reached (before
+   * the revisit, or at the cap) with truncated:true — it never claims to be
+   * the true, unreached terminus.
+   */
+  resolveTerminus(id: string): { id: string; status: string; hops: number; truncated?: boolean } | null {
+    const MAX_HOPS = 32;
+    const stmt = this.db.prepare('SELECT id, status, superseded_by FROM records WHERE id = ?');
+    const row = stmt.get(id) as { id: string; status: string; superseded_by: string | null } | undefined;
+    if (!row) return null;
+
+    const visited = new Set<string>([row.id]);
+    let current = row;
+    let hops = 0;
+    while (current.status === 'superseded' && current.superseded_by) {
+      const next = stmt.get(current.superseded_by) as
+        | { id: string; status: string; superseded_by: string | null }
+        | undefined;
+      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+        return { id: current.id, status: current.status, hops, truncated: true };
+      }
+      visited.add(next.id);
+      current = next;
+      hops += 1;
+    }
+    return { id: current.id, status: current.status, hops };
+  }
+
+  /**
+   * INBOUND rel:'supersedes' edges — every record elsewhere holding a
+   * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
+   * above is the OUTBOUND, whole-record-supersession walk (decision foreign_de1a7329):
+   * it only ever has something to say about a record that was itself retired
+   * via supersede(). A record can also be named the target of a rel:'supersedes'
+   * link WITHOUT ever being retired — a clause-level or partial override
+   * recorded via knowledge_link — and that leaves no trace on the target's own
+   * status/terminus. This is the read-time counterpart that makes such edges
+   * visible from the target side. Purely additive/advisory: never mutates
+   * status, never feeds resolveTerminus, never touches the terminus block.
+   * LOCAL to this store only — MountedStores.inboundSupersedes fans every
+   * mount, because an edge lives with its SOURCE record (addLink routes by
+   * source), which may sit in a different store than the target.
+   */
+  inboundSupersedes(id: string): DurableRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY rowid`
+      )
+      .all(id) as { source_id: string }[];
+    return rows.map((r) => this.get(r.source_id)).filter((r): r is DurableRecord => r !== undefined);
+  }
+
+  /**
+   * The §3.4 base filter (status + type + stack-tag + file-key join) shared
+   * by query() and count() — everything EXCEPT the rank (FTS), ordering, and
+   * cap. One definition so count() can never drift from what query() would
+   * actually return.
+   */
+  private baseFilter(opts: QueryOptions): { where: string[]; params: (string | number)[]; fileKeys: string[] } {
+    const params: (string | number)[] = [];
+    // != superseded, not = active: flagged_stale research findings are still
+    // served — only as "stale — re-verify" (§3.2.4); the tool layer attaches the flag.
+    const where: string[] = ["r.status != 'superseded'"];
+    if (opts.types?.length) {
+      where.push(`r.type IN (${opts.types.map(() => '?').join(',')})`);
+      params.push(...opts.types);
+    }
+    if (opts.stack_tags?.length) {
+      where.push(
+        `EXISTS (SELECT 1 FROM record_stack_tags t WHERE t.record_id = r.id AND t.tag IN (${opts.stack_tags.map(() => '?').join(',')}))`
+      );
+      params.push(...opts.stack_tags);
+    }
+    const fileKeys = (opts.file_keys ?? []).map(normalizeRepoPath);
+    if (fileKeys.length) {
+      where.push(
+        `EXISTS (SELECT 1 FROM record_file_keys k WHERE k.record_id = r.id AND k.path IN (${fileKeys.map(() => '?').join(',')}))`
+      );
+      params.push(...fileKeys);
+    }
+    // Source filter applied in the base filter (before cap/order) so a capped
+    // query never drops matching items of the wanted source (audit finding 38/43).
+    if (opts.source) {
+      where.push("json_extract(r.body, '$.source') = ?");
+      params.push(opts.source);
+    }
+    return { where, params, fileKeys };
+  }
+
+  /**
+   * COUNT(*) over the §3.4 base filter — the number of records query() WOULD
+   * return ignoring rank/cap (rank_terms is a no-op here). No body fetch, no
+   * JSON.parse: the TUI Knowledge tree's collapsed category/source badges call
+   * this every 1 Hz frame instead of fetching + parsing hundreds of bodies.
+   */
+  count(opts: QueryOptions = {}): number {
+    const { where, params } = this.baseFilter(opts);
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(' AND ')}`).get(...params) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
+   * usable "nothing", and a capped/ranked window can never establish one —
+   * this counts over the FULL rank_terms match set (uncapped, never the
+   * window query() returns) how many score at least `minScore`, using the
+   * SAME base filter and match expression query() ranks by, so this can never
+   * disagree with what a caller would see if it raised cap far enough.
+   *
+   * SCALE: SQLite FTS5's bm25() returns a value where LOWER (more negative) is
+   * MORE relevant, and it is otherwise unbounded — the opposite of what a
+   * caller reading "min_score" would expect. The score this thresholds is
+   * `-bm25(records_fts)`: HIGHER is more relevant, a bare keyword match sits
+   * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
+   * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
+   * itself — knowledge_query's tool description names this scale so a caller
+   * never has to reverse-engineer bm25's own sign convention.
+   *
+   * Requires rank_terms — a threshold on a filter with no ranking has nothing
+   * to threshold, so this refuses loudly rather than silently answering 0
+   * (P5): a caller reading above_threshold:0 must be able to trust it means
+   * "nothing scored that high", not "nothing was rankable in the first place".
+   */
+  countAboveScore(opts: QueryOptions, minScore: number): number {
+    const terms = rankTerms.parse(opts.rank_terms ?? []);
+    if (!terms.length) {
+      throw new Error('min_score requires rank_terms — there is no ranked score to threshold without them.');
+    }
+    const { where, params } = this.baseFilter(opts);
+    const match = this.ftsMatchExpr(terms, opts.match_all);
+    const sql = `SELECT COUNT(*) AS n FROM records r JOIN records_fts f ON f.record_id = r.id
+      WHERE ${where.join(' AND ')} AND records_fts MATCH ? AND (-bm25(records_fts)) >= ?`;
+    const row = this.db.prepare(sql).get(...params, match, minScore) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * The FTS5 MATCH expression rank_terms compiles to — shared by query() and
+   * countAboveScore() so the two can never rank two different match sets. A
+   * trailing '*' marks an FTS5 prefix query ("stor*" matches "store") — the
+   * star must sit OUTSIDE the quoted token to act as the prefix operator.
+   */
+  private ftsMatchExpr(terms: string[], matchAll: boolean | undefined): string {
+    const joiner = matchAll ? ' AND ' : ' OR ';
+    return terms.map((t) => (t.endsWith('*') && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`)).join(joiner);
+  }
+
+  /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
+  query(opts: QueryOptions = {}): DurableRecord[] {
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+    const { where, params, fileKeys } = this.baseFilter(opts);
+
+    if (opts.rank_terms !== undefined) {
+      const terms = rankTerms.parse(opts.rank_terms);
+      if (terms.length) {
+        const match = this.ftsMatchExpr(terms, opts.match_all);
+        const sql = `SELECT r.body, r.scope FROM records r JOIN records_fts f ON f.record_id = r.id
+          WHERE ${where.join(' AND ')} AND records_fts MATCH ?
+          ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
+        const rows = this.db.prepare(sql).all(...params, match, cap) as { body: string; scope: string }[];
+        return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('query', rows));
+      }
+    }
+    // Mechanical fallback rank (§3.4): file-key overlap count, then updated_at
+    // desc, then id desc as the FINAL tiebreaker (board abafbd48, Codex-
+    // adjudicated) — `updated_at DESC` alone is not a total order (two rows
+    // can share one updated_at), and board_query's keyset cursor paging
+    // (packages/mcp-server/src/tools.ts) needs a total, deterministic order to
+    // name an unambiguous resume point. Applies to BOTH the plain variant and
+    // the file_keys-overlap variant below, since both funnel through this same
+    // `orderBy` array and its shared trailing clauses.
+    const orderBy: string[] = [];
+    const overlapParams: string[] = [];
+    if (fileKeys.length) {
+      orderBy.push(
+        `(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => '?').join(',')})) DESC`
+      );
+      overlapParams.push(...fileKeys);
+    }
+    orderBy.push('r.updated_at DESC', 'r.id DESC');
+    const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(' AND ')}
+      ORDER BY ${orderBy.join(', ')} LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap) as { body: string; scope: string }[];
+    return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('query', rows));
+  }
+
+  /** query()'s two return paths share this: one relations scan for the whole
+   *  result set (not one per feature_article row) before applying the derived
+   *  relied_by to each. */
+  private withDerivedReliedByAll(input: DurableRecord[]): DurableRecord[] {
+    // v2 hydration first (derived status/superseded_by + materialized links) —
+    // it applies to every type, where relied_by derivation is article-only.
+    const records = this.hydrateAll(input);
+    if (!records.some((r) => r.type === 'feature_article')) return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
+  }
+
+  /**
+   * Versioned change (§3.2.3, §3.1 criterion 3): the new record supersedes the
+   * old; the old is retained with status 'superseded' + superseded_by set.
+   * This is the ONLY change path for immutable types (decision, §3.2.1).
+   */
+  supersede(oldId: string, newInput: unknown, authoritativeScope?: string): DurableRecord {
+    this.assertWritable('supersede');
+    const oldRecord = this.get(oldId);
+    if (!oldRecord) throw new Error(`supersede: no record '${oldId}'`);
+    const oldIdentity = this.identityOf(oldId);
+    if (!oldIdentity) throw new Error(`supersede: no record '${oldId}'`);
+    // A flagged_stale research finding is superseded by re-verification — that is
+    // the ADVERTISED remedy (retrieval tells the reader "re-verification supersedes
+    // this finding"); only a terminal (already-retired) record is refused
+    // (audit finding 13/43). The in-tx guard below closes the check-then-act race.
+    // ONE SUCCESSOR MAX, across both paths ([stable-identity-design-v2]): the
+    // lifecycle IS the single source of that constraint, so retireInFavorOf and
+    // supersede can no longer each add a successor to the same record.
+    if (oldIdentity.lifecycle === 'retired' || oldRecord.status === 'superseded') {
+      throw new Error(`supersede: record '${oldId}' is already superseded (retired) — one successor maximum`);
+    }
+    const candidate = { ...(newInput as Record<string, unknown>) };
+    // A "new" record carrying the OLD id would be an edge from a node to
+    // itself — a self-cycle in the relation graph, and (worse) an in-place
+    // overwrite masquerading as supersession. Refused before anything is
+    // validated or written ([stable-identity-design-v2] contract 5).
+    if (candidate.id === oldId) {
+      throw new Error(
+        `supersede: the replacement carries the SAME id as '${oldId}' — that is a self-cycle in the relation graph, not a supersession. ` +
+          `Use updateRecord for an in-place change, or mint a genuinely new id for a concept replacement.`
+      );
+    }
+    const links = Array.isArray(candidate.links) ? [...(candidate.links as { rel: string; target_id: string }[])] : [];
+    if (!links.some((l) => l.rel === 'supersedes' && l.target_id === oldId)) {
+      links.push({ rel: 'supersedes', target_id: oldId });
+    }
+    candidate.links = links;
+    // THE REPLACEMENT INHERITS THE OLD ROW'S AUTHORITATIVE SCOPE — never the
+    // caller's body value and never the old body's (decision
+    // [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 3).
+    // supersede always inserts into the SAME physical store as the record it
+    // retires (MountedStores.supersede routes by storeHolding), so a
+    // body-chosen scope could only ever mislabel the new row for the mount it
+    // actually lands in — which is precisely how a domain-held record acquires a
+    // 'project' label. Pinned HERE and not only at the tool layer, because a
+    // tool-layer refusal does not bind direct or internal callers.
+    //
+    // WHICH FACT IS AUTHORITATIVE DEPENDS ON THE LAYER, and this method is the
+    // BARE store: it has no mounts, so there is nothing the row's `scope`
+    // COLUMN could contradict, and the column is the strongest fact available
+    // here. `authoritativeScope` is how the layer that DOES know about mounts
+    // states a stronger one: MountedStores resolves the physical holder to route
+    // this very write, and passes that mount's name (see MountedStores.supersede)
+    // — because in the one drift class a column-authoritative read cannot see,
+    // COLUMN-CONTRADICTS-MOUNT, the column is exactly the thing that is wrong,
+    // and inheriting it would copy the lie into a brand-new row. Absent the
+    // parameter (every direct bare-store caller) the column stays authoritative,
+    // unchanged.
+    candidate.scope = authoritativeScope ?? oldIdentity.scope;
+    const prepared = SterlingStore.resolveIdentity(candidate, { lifecycle: 'live', freshness: 'fresh', version: 1 });
+    const newRecord = validateRecord(prepared.input);
+    if (newRecord.type !== oldRecord.type) {
+      throw new Error(`supersede: type mismatch ('${newRecord.type}' cannot supersede '${oldRecord.type}')`);
+    }
+    if (newRecord.type === 'feature_article' && oldRecord.type === 'feature_article' && newRecord.version <= oldRecord.version) {
+      throw new Error(
+        `supersede: feature_article version must increase (old v${oldRecord.version}, new v${newRecord.version})`
+      );
+    }
+    const storedOld = SterlingStore.storableBody({
+      ...(oldRecord as unknown as Record<string, unknown>),
+      lifecycle: 'retired',
+      updated_at: newRecord.updated_at,
+    });
+    this.tx(() => {
+      // insertRecord writes the candidate's links into record_relations, so the
+      // authoritative (new -> supersedes -> old) edge lands here (contract 6);
+      // the served superseded_by on the old record materializes from it.
+      this.insertRecord(newRecord);
+      // Guard the UPDATE on the observed lifecycle INSIDE the BEGIN IMMEDIATE tx
+      // (audit finding 29/43): the pre-tx read is check-then-act, so a
+      // concurrent supersede (server + TUI on the shared WAL file) could
+      // otherwise leave two successors. changes===0 → the row moved out from
+      // under us → roll back loud (the inserted newRecord is undone).
+      const res = this.db
+        .prepare(
+          `UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
+             WHERE id = ? AND lifecycle != 'retired'`
+        )
+        .run('superseded', newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
+      if (res.changes === 0) {
+        throw new Error(`supersede: record '${oldId}' was concurrently superseded — retry against the current version`);
+      }
+      this.logActivity('updated', newRecord, newRecord.updated_at);
+    });
+    return this.hydrateAll([SterlingStore.storableBody(newRecord as unknown as Record<string, unknown>) as DurableRecord])[0];
+  }
+
+  /**
+   * IN-PLACE todo mutation (§3.2.7 board_update, work order 9a06b6aa) — the one
+   * exception to "every change is a supersession". todo is deliberately NOT in
+   * the immutable set (only decision is), and every board item is a DURABLE
+   * record in the same store as knowledge, so the established change primitive
+   * (supersede: mint a new id, retain the old) would rot every reference keyed
+   * on the item's id (feature_link, H7/H10 maintenance items) on every edit. The
+   * id, created_at, status and superseded_by stay exactly as they were; only the
+   * caller's patched fields and updated_at change — same row, same identity.
+   *
+   * `newInput` is the FULL merged candidate (old record + patch), mirroring
+   * supersede's own calling convention: this method validates and persists, the
+   * tool layer decides which fields may be patched and builds the merge. A
+   * terminal (superseded) record is refused, same as supersede/retireInFavorOf,
+   * and the UPDATE is guarded on that status inside the transaction to close the
+   * same concurrent-supersede race.
+   */
+  updateTodo(id: string, newInput: unknown, opts: RecordWriteOptions = {}): DurableRecord {
+    const old = this.get(id);
+    if (!old) throw new Error(`updateTodo: no record '${id}'`);
+    if (old.type !== 'todo') throw new Error(`updateTodo: '${id}' is a ${old.type}, not a todo — board_update only mutates todos`);
+    const candidate = { ...(newInput as Record<string, unknown>) };
+    if (typeof candidate.type === 'string' && candidate.type !== 'todo') {
+      throw new Error(`updateTodo: type mismatch ('${candidate.type}' is not 'todo')`);
+    }
+    // Since S2 this is the generalized in-place triad's todo entry point
+    // ([stable-identity-design-v2]): same id, same lifecycle, but the universal
+    // server-owned version counter now bumps and the prior body is archived,
+    // exactly as it is for every other type. A todo's SLUG is likewise left
+    // exactly as it was — but note WHY, because the reason changed on
+    // 2026-08-29 and the old wording ("todos still get no slug") is now false:
+    // since readable-ids S1 ([human-readable-ids-for-board-items]) todos DO
+    // carry an optional slug (todoSchema), minted once at CREATE and only for
+    // source:'user' board items — system maintenance-queue items mint none
+    // (mintHeadlineOf returns '' for them; they read back a display name
+    // through board_get instead). `slug` is not in BOARD_UPDATABLE_FIELDS, so
+    // this method never mints, re-mints or clears one: it persists whatever
+    // slug the caller's merged candidate already carried.
+    return this.applyInPlace('updateTodo', id, () => candidate, opts);
+  }
+
+  /**
+   * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
+   * replacement that lives in ANOTHER store (the promoted copy in a domain
+   * store). supersede can't cross stores and always inserts a same-store
+   * replacement; this sets the existing record to superseded + superseded_by =
+   * the cross-store id with NO new row. Provenance and inbound links survive;
+   * default queries already hide superseded records, so it never double-serves.
+   */
+  /**
+   * `verb` names what this retirement IS for the activity feed (board
+   * 39d6462d): 'retired' for the genuine-duplicate path (knowledge_retire) and
+   * 'promoted' for the project→domain copy's tombstone (knowledgePromote) — the
+   * two existing callers, distinguished so a promotion reads as "promoted",
+   * not as an unrelated-looking "retired". Defaults to 'retired' so the
+   * pre-promotion caller (and any future one) keeps that meaning without
+   * having to know the parameter exists.
+   */
+  retireInFavorOf(id: string, replacementId: string, at: string, verb: string = 'retired'): DurableRecord {
+    this.assertWritable('retireInFavorOf');
+    const record = this.get(id);
+    if (!record) throw new Error(`retireInFavorOf: no record '${id}'`);
+    const identity = this.identityOf(id);
+    // Same relaxation + in-tx guard as supersede (audit findings 13/43 + 29/43):
+    // only a terminal (already-retired) record is refused; the lifecycle guard
+    // on the UPDATE closes the check-then-act race. ONE SUCCESSOR MAX holds
+    // ACROSS BOTH PATHS — a record already superseded cannot also be retired in
+    // favour of a second survivor ([stable-identity-design-v2]).
+    if (identity?.lifecycle === 'retired' || record.status === 'superseded') {
+      throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) — one successor maximum`);
+    }
+    // THE REPLACEMENT MUST BE ALIVE. Retiring A in favour of B and then B in
+    // favour of A left both records retired, each forwarding to a dead one — a
+    // supersession cycle where the reader is sent nowhere, which is exactly
+    // what `in_favor_of` is required for in the first place (decision foreign_9948475b).
+    // A replacement this store cannot see is the PROMOTION shape (the survivor
+    // is the copy in a domain store) and stays allowed: relations carry no
+    // foreign key by design, and MountedStores has already resolved it.
+    const replacement = this.identityOf(replacementId);
+    if (replacement?.lifecycle === 'retired') {
+      throw new Error(
+        `retireInFavorOf: replacement '${replacementId}' is itself retired — retiring '${id}' in favour of it would leave both records ` +
+          `dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`
+      );
+    }
+    const retired = { ...record, status: 'superseded' as const, superseded_by: replacementId, lifecycle: 'retired', updated_at: at };
+    const stored = SterlingStore.storableBody(retired as unknown as Record<string, unknown>);
+    this.tx(() => {
+      const res = this.db
+        .prepare(
+          `UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
+             WHERE id = ? AND lifecycle != 'retired'`
+        )
+        .run('superseded', replacementId, at, JSON.stringify(stored), id);
+      if (res.changes === 0) {
+        throw new Error(`retireInFavorOf: record '${id}' was concurrently superseded — retry`);
+      }
+      // The relation is what makes the served superseded_by derivable, and it
+      // is written by BOTH retirement paths — that is why retirement can only
+      // happen here or in supersede (contract 5/6). The survivor may live in
+      // another store (promotion), so no local existence check: relations carry
+      // no foreign key by design.
+      this.insertRelation(replacementId, 'supersedes', id, at);
+      this.logActivity(verb, retired as unknown as DurableRecord, at);
+    });
+    return this.hydrateAll([stored as DurableRecord])[0];
+  }
+
+  /**
+   * Hard removal — the P4 path for todos (done = removed by the artifact-write
+   * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
+   * Removing a SYSTEM-source todo appends to the capped queue drain log
+   * (§3.2.7 audit projection — "was X handled?"); user todos are never logged.
+   */
+  remove(id: string, drainedAt?: string): void {
+    this.assertWritable('remove');
+    this.tx(() => {
+      const record = this.get(id) as (DurableRecord & { source?: string; system_reason?: string; text?: string; file_keys?: string[] }) | undefined;
+      const isSystemDrain = record && record.type === 'todo' && record.source === 'system';
+      if (isSystemDrain && record) {
+        this.db
+          .prepare('INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)')
+          .run(drainedAt ?? new Date().toISOString(), record.system_reason ?? '', record.text ?? '', JSON.stringify(record.file_keys ?? []), record.id);
+        // cap: completed items must never build up (adjudicated 2026-06-12)
+        this.db
+          .prepare('DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)')
+          .run();
+      }
+      // A system-todo removal is already visible via queue_drain_log above — the
+      // activity log covers what THAT log does not (board 39d6462d), so it is
+      // deliberately skipped here to avoid double-logging the same removal.
+      if (record && !isSystemDrain) {
+        this.logActivity('removed', record, drainedAt ?? new Date().toISOString());
+      }
+      this.db.prepare('DELETE FROM records WHERE id = ?').run(id);
+      this.db.prepare('DELETE FROM record_stack_tags WHERE record_id = ?').run(id);
+      this.db.prepare('DELETE FROM record_file_keys WHERE record_id = ?').run(id);
+      this.db.prepare('DELETE FROM record_relations WHERE source_id = ?').run(id);
+      // ALSO delete inbound edges (audit finding 31/43): a record that linked TO
+      // the removed one kept a relation row pointing at a nonexistent id, so
+      // the reverse-traversal surface accrued dangling edges.
+      this.db.prepare('DELETE FROM record_relations WHERE target_id = ?').run(id);
+      // Version snapshots are permanent for a LIVING record; a hard removal is
+      // that record's death (P4 — the artifact-write event ends its life), so
+      // its history goes with it rather than becoming orphan rows keyed on an
+      // id nothing resolves ([stable-identity-design-v2]).
+      this.db.prepare('DELETE FROM record_versions WHERE record_id = ?').run(id);
+      // The alias index follows its canonical record for the same reason: an
+      // alias whose canonical_id no longer exists resolves a dead citation to
+      // NOTHING AT ALL, which is worse than an unresolved id — an unresolved id
+      // says so, a dangling alias just fails. Todos leave the store by removal
+      // (P4), and nothing else is hard-removed outside gated cleanup, so the
+      // rows deleted here are the aliases of a record that is genuinely gone.
+      this.db.prepare('DELETE FROM record_aliases WHERE canonical_id = ?').run(id);
+      this.db.prepare('DELETE FROM records_fts WHERE record_id = ?').run(id);
+    });
+  }
+
+  /** Newest-first drained queue items (§3.2.7 drain log) — the TUI's completed section. */
+  listQueueDrain(limit = 15): { drained_at: string; system_reason: string; text: string; file_keys: string[] }[] {
+    const rows = this.db
+      .prepare('SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?')
+      .all(limit) as { drained_at: string; system_reason: string; text: string; file_keys: string }[];
+    return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) as string[] }));
+  }
+
+  /**
+   * The drain-log trace for ONE removed item id, newest first (board 97d773ef):
+   * lets a remove on a gone id say "already removed <when>" instead of a bare
+   * "no record". Returns undefined when no trace remains — which, because the
+   * log keeps only the newest 50 rows, means "no RECENT trace", never proof the
+   * id never existed.
+   */
+  drainLogEntry(id: string): { drained_at: string; system_reason: string } | undefined {
+    try {
+      return this.db
+        .prepare('SELECT drained_at, system_reason FROM queue_drain_log WHERE record_id = ? ORDER BY seq DESC LIMIT 1')
+        .get(id) as { drained_at: string; system_reason: string } | undefined;
+    } catch (e) {
+      // A pre-v2 store may predate the additive record_id column, and the ALTER
+      // that adds it now runs only on the writable path — so on a legacy store
+      // the column can be absent. "No recent trace" is the honest answer here
+      // (this is a read, and reads stay allowed pre-migration, AC3); anything
+      // else — including the same failure on a v2 store, which would be a real
+      // defect — still propagates.
+      if (this.legacySchemaVersion !== undefined && /record_id/.test(String((e as Error).message))) return undefined;
+      throw e;
+    }
+  }
+
+  /**
+   * Board 39d6462d activity feed — the ONE seam every knowledge write lands
+   * through, so the Queue tab's activity section shows "what has been done"
+   * without a second, separate write path (§3.1 invariant: one write path).
+   * Called directly by create/supersede/addLink/remove/retireInFavorOf with the
+   * verb that primitive actually performed; NOT called from insertRecord
+   * itself, because supersede/enqueueSystemTodo also insert rows and each needs
+   * its own verb (or, for enqueueSystemTodo, no activity-log entry at all — see
+   * remove()'s system-todo branch, which already has a completed-section home
+   * in queue_drain_log and would otherwise double-log). Same capped-at-50,
+   * pruned-in-tx retention policy as queue_drain_log (§3.2.7), so completed
+   * items never build up here either.
+   */
+  private logActivity(verb: string, record: DurableRecord, at: string): void {
+    this.db
+      .prepare('INSERT INTO activity_log (at, verb, type, record_id, title) VALUES (?, ?, ?, ?, ?)')
+      .run(at, verb, record.type, record.id, activityTitleOf(record));
+    this.db.prepare('DELETE FROM activity_log WHERE seq NOT IN (SELECT seq FROM activity_log ORDER BY seq DESC LIMIT 50)').run();
+  }
+
+  /** Newest-first activity rows (board 39d6462d) — the TUI Queue tab's activity section. */
+  listActivityLog(limit = 15): { at: string; verb: string; type: string; id: string; title: string }[] {
+    return this.db
+      .prepare('SELECT at, verb, type, record_id AS id, title FROM activity_log ORDER BY seq DESC LIMIT ?')
+      .all(limit) as { at: string; verb: string; type: string; id: string; title: string }[];
+  }
+
+  /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */
+  snapshot(targetPath: string): void {
+    const target = targetPath.replace(/\\/g, '/');
+    if (existsSync(target)) {
+      throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
+    }
+    mkdirSync(dirname(target), { recursive: true });
+    this.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  // -------------------------------------------------------------------------
+  // The staged-pipeline run/handoff protocol (spec §3.2.9, §5.2 — createRun,
+  // getRun, casTransition, casTransitionMerge, recordPendingExit/
+  // getPendingExit, writeHandoff/readHandoffs, updateRunOptimistic and its
+  // dependents appendRunEscalation/appendRunReconcileNeeded/
+  // appendRunScopeAmendment/setRunReviewMandatory/incrementDispatchCount) was
+  // removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1).
+  // The `runs`/`handoffs` SQLite tables are left in place, unused — no FK
+  // references them and no startup validation scans them, so leaving them is
+  // safe; a DROP TABLE migration is optional cleanup, not a correctness
+  // requirement (see the migration list at the bottom of this file).
+  // -------------------------------------------------------------------------
+
+  /**
+   * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
+   * transactionally — read + delete in one transaction, never a signal file (P4).
+   */
+  writeSelection(type: string, recordId: string, at: string): void {
+    this.assertWritable('writeSelection');
+    // Wrapped in tx() (board d5942fa0 pin group B / TOCTOU fix) so the write
+    // inherits the live schema-version recheck INSIDE the lock — the pre-lock
+    // assertWritable() above stays as a fast fail, tx() is the guarantee.
+    this.tx(() => {
+      this.db
+        .prepare('INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at')
+        .run(type, recordId, at);
+    });
+  }
+
+  takeSelection(): { type: string; record_id: string; at: string } | undefined {
+    let row: { type: string; record_id: string; at: string } | undefined;
+    this.tx(() => {
+      row = this.db.prepare('SELECT type, record_id, at FROM selection WHERE slot = 1').get() as typeof row;
+      if (row) this.db.prepare('DELETE FROM selection WHERE slot = 1').run();
+    });
+    return row;
+  }
+
+  /**
+   * fs-move support (§7.1): renames inside the machinery never orphan
+   * knowledge — every owning record's stored paths are rewritten as part of
+   * the move (exact normalized-path matches only), revalidated, and the
+   * file-key index updated, in one transaction.
+   *
+   * It goes through the VERSIONED in-place core ([stable-identity-design-v2]):
+   * a rename is a real change to the record's content, so it bumps the version,
+   * archives the prior body, rebuilds record_file_keys and refreshes the FTS
+   * row like every other write. As a bare body UPDATE it was invisible to
+   * expected_version — a concurrent updateRecord holding a pre-rename read
+   * silently reverted the rename with no CAS conflict — and left the old path
+   * ranking in records_fts. allowRetired keeps the contract intact for
+   * tombstones: a move must orphan NO owning record's paths.
+   */
+  renameFileKey(oldPath: string, newPath: string): number {
+    this.assertWritable('renameFileKey');
+    const from = normalizeRepoPath(oldPath);
+    const to = normalizeRepoPath(newPath);
+    let count = 0;
+    this.tx(() => {
+      // QUERIED UNDER THE LOCK (board 7e779e1f review round, HIGH). Reading
+      // record_file_keys BEFORE BEGIN IMMEDIATE left a window where a
+      // concurrent enqueue for `from` could commit between this read and the
+      // rewrite below: the rename would then move the owner to `to` while the
+      // just-minted item kept naming `from` — unowned by anyone — reproducing
+      // the exact unclosable state this whole change exists to fix. BEGIN
+      // IMMEDIATE (inside this.tx(), above) takes the write lock BEFORE this
+      // SELECT runs, so no committed concurrent insert can land between the
+      // read and the rewrite: the window is closed by construction, not by a
+      // test-only seam.
+      const rows = this.db.prepare('SELECT record_id FROM record_file_keys WHERE path = ?').all(from) as { record_id: string }[];
+      count = rows.length;
+      for (const { record_id } of rows) {
+        if (!this.get(record_id)) continue;
+        this.applyInPlace(
+          'renameFileKey',
+          record_id,
+          (current) => {
+            const patched = deepReplaceString(current as unknown, from, to) as Record<string, unknown>;
+            // A reconcile_needed system todo's file_keys/text are DERIVED
+            // state, not raw ownership (board 7e779e1f review round, MEDIUM):
+            // deepReplaceString's plain element-wise map can COLLIDE two
+            // entries into one path (an item already naming both `from` and
+            // `to`) with no dedupe, and it never touches `text` at all, so the
+            // canonical wording keeps naming the path that no longer exists
+            // whether or not a collision happened. Regenerated through the
+            // SAME buildReconcileText every other mutator of this lane uses —
+            // deepReplaceString itself is UNCHANGED, so every OTHER record
+            // type and every OTHER lane (a plain decision's file_keys, a
+            // feature_article's files[]/file_baselines) keeps its exact
+            // pre-existing map-only behaviour.
+            const c = current as unknown as { type?: string; source?: string; system_reason?: string };
+            if (c.type === 'todo' && c.source === 'system' && c.system_reason === 'reconcile_needed') {
+              const fileKeys = [...new Set((patched.file_keys as string[] | undefined) ?? [])].sort();
+              const featureLink = patched.feature_link as string | undefined;
+              const owner = featureLink
+                ? (this.get(featureLink) as (DurableRecord & { slug?: string; title?: string }) | undefined)
+                : undefined;
+              const text = buildReconcileText(
+                owner
+                  ? { type: owner.type as 'feature_article' | 'reference_material', slug: owner.slug, title: owner.title }
+                  : { type: 'feature_article', slug: featureLink },
+                fileKeys
+              );
+              return { ...patched, file_keys: fileKeys, text };
+            }
+            return patched;
+          },
+          {},
+          { allowRetired: true, suppressReconcilePrune: true }
+        );
+      }
+    });
+    return count;
+  }
+
+  /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4).
+   *  targetValidated is set ONLY by MountedStores.addLink, which has already resolved
+   *  the target across every mounted store — cross-store edges are a legitimate shape
+   *  (promotion itself writes them: supersedes / informed_by across project↔domain)
+   *  that a store-local get cannot see. Standalone usage keeps the local check. */
+  addLink(sourceId: string, rel: string, targetId: string, targetValidated = false): DurableRecord {
+    this.assertWritable('addLink');
+    const source = this.get(sourceId);
+    if (!source) throw new Error(`addLink: no record '${sourceId}'`);
+    if (!targetValidated && !this.get(targetId)) throw new Error(`addLink: no target record '${targetId}'`);
+    const parsedRel = linkSchema.shape.rel.parse(rel);
+    // 'supersedes' is NOT a plain edge: it is the authoritative carrier of a
+    // LIFECYCLE change (the target must become retired, the served status /
+    // superseded_by of both records derive from it, and at most one may exist).
+    // Written raw here it would desync the records.lifecycle/superseded_by
+    // cache columns from the relation graph and slip past the one-successor
+    // invariant, so the two sanctioned paths own it exclusively.
+    if (parsedRel === 'supersedes') {
+      throw new Error(
+        `addLink: rel 'supersedes' cannot be written as a raw edge — supersession is a lifecycle transition, not a link. ` +
+          `Use supersede(oldId, newRecord) for concept replacement, or retireInFavorOf(id, survivor) for duplicate consolidation. Nothing was written.`
+      );
+    }
+    if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) return source;
+    const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] } as DurableRecord;
+    const at = new Date().toISOString();
+    const stored = SterlingStore.storableBody(updated as unknown as Record<string, unknown>);
+    this.tx(() => {
+      this.db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify(stored), sourceId);
+      // record_relations is the authoritative edge home (contract 6); the body
+      // copy is a convenience the read materialization overwrites anyway.
+      this.insertRelation(sourceId, parsedRel, targetId, at);
+      // addLink does not bump updated_at (the edge is metadata, not content) —
+      // the activity row still needs a real timestamp, so it stamps "now".
+      this.logActivity('linked', updated, at);
+    });
+    return this.hydrateAll([stored as DurableRecord])[0];
+  }
+
+  // disposeRunRows / purgeRunRows (the staged-pipeline run-row disposal pair)
+  // were removed alongside the run/handoff protocol above (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — their sole callers
+  // (dispose-run.mjs, merge-gate.mjs) are pipeline apparatus. check_skipped
+  // rows now accumulate under the NULL-run cap below only; a run-scoped row
+  // is unreachable once nothing calls createRun.
+
+  /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
+  recordCheckSkipped(check: string, reason: string, runId: string | undefined, at: string): void {
+    this.assertWritable('recordCheckSkipped');
+    // Wrapped in tx() (board d5942fa0 pin group B / TOCTOU fix) so the write
+    // inherits the live schema-version recheck INSIDE the lock — the pre-lock
+    // assertWritable() above stays as a fast fail, tx() is the guarantee. This
+    // also makes the insert + audit-cap prune below atomic, which they were not
+    // before (a small incidental improvement, not the reason for the change).
+    this.tx(() => {
+      this.db
+        .prepare('INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)')
+        .run(runId ?? null, check, reason, at);
+      // A runId is always undefined now — the run/handoff protocol (and its
+      // disposeRunRows disposal event) was removed per decision
+      // sterling-claude-code-scale-down-boundary (2ad87dd1), so every row is
+      // this NULL-run "direct-mode" shape (knowledge_create/board_remove
+      // callers). These rows have no disposal event, so cap them like
+      // queue_drain_log — else they accrete unbounded (audit finding 30/43,
+      // P4). Keep the 50 newest NULL-run rows as the audit tail.
+      if (!runId) {
+        this.db
+          .prepare(
+            'DELETE FROM check_skipped WHERE run_id IS NULL AND seq NOT IN (SELECT seq FROM check_skipped WHERE run_id IS NULL ORDER BY seq DESC LIMIT 50)'
+          )
+          .run();
+      }
+    });
+  }
+
+  listCheckSkipped(runId?: string): { run_id: string | null; check_name: string; reason: string; at: string }[] {
+    return (
+      runId
+        ? this.db.prepare('SELECT run_id, check_name, reason, at FROM check_skipped WHERE run_id = ? ORDER BY seq').all(runId)
+        : this.db.prepare('SELECT run_id, check_name, reason, at FROM check_skipped ORDER BY seq').all()
+    ) as { run_id: string | null; check_name: string; reason: string; at: string }[];
+  }
+
+  // -------------------------------------------------------------------------
+  // AC8: catalog bootstrap + maintenance enqueue (run r-ea9e, phase 3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Idempotent bootstrap: if no project-scoped reference_material carrying a
+   * `catalog` payload exists, create one seeded from config.models' DISTINCT
+   * pinned model IDs. No network; no fabrication — day-one entries are the IDs
+   * already in use by the installed agents.
+   */
+  bootstrapCatalogIfAbsent(config: unknown, nowISO: string): void {
+    const existing = this.query({ types: ['reference_material'], cap: 200 }).filter(
+      (r) => (r as Record<string, unknown>).catalog
+    );
+    if (existing.length > 0) return; // catalog already present — idempotent
+
+    const cfg = config as { models?: Record<string, { model?: string } | null | undefined> };
+    const models = cfg.models ?? {};
+    const ids = new Set<string>();
+    for (const v of Object.values(models)) {
+      if (v?.model) ids.add(v.model);
+    }
+
+    const dateStr = nowISO.slice(0, 10); // YYYY-MM-DD for source_date / capture_date
+    this.create({
+      id: randomUUID(),
+      type: 'reference_material',
+      created_at: nowISO,
+      updated_at: nowISO,
+      author: 'system',
+      status: 'active',
+      superseded_by: null,
+      links: [],
+      scope: 'project',
+      stack_tags: [],
+      title: 'Models catalog',
+      kind: 'doc',
+      location: '.sterling/models-catalog',
+      summary: 'KB-maintained model catalog for the TUI System tab.',
+      source_date: dateStr,
+      capture_date: dateStr,
+      catalog: {
+        entries: [...ids].map((id) => ({ id, label: id, tier: 'unknown', status: 'active' })),
+      },
+    });
+  }
+
+  /**
+   * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
+   * Dedup: if a pending item with system_reason='refresh_reference' already exists,
+   * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
+   * must NOT suppress the enqueue (§3.2.5, decision foreign_98064d77).
+   *
+   * The item's `text` names a real delta (Dome Farmer friction 2026-09-17: a bare
+   * "Refresh the KB models catalog" with no file_keys and a project-local catalog
+   * gave a drain nothing to act on): every current entry's id/tier/status, with
+   * any 'unknown' tier called out as the concrete thing to look up. A drain closes
+   * it by writing the looked-up values into catalog.entries[] on the linked
+   * record (feature_link) and citing this item's id in `resolves`.
+   */
+  enqueueRefreshReferenceOnce(nowISO: string): void {
+    const pending = this.query({ types: ['todo'], cap: 200 }).filter(
+      (r) => (r as Record<string, unknown>).system_reason === 'refresh_reference'
+    );
+    if (pending.length > 0) return; // already pending — no duplicate
+
+    const catalogs = this.query({ types: ['reference_material'], cap: 200 }).filter(
+      (r) => (r as Record<string, unknown>).catalog
+    );
+
+    const todo: Record<string, unknown> = {
+      id: randomUUID(),
+      type: 'todo',
+      created_at: nowISO,
+      updated_at: nowISO,
+      author: 'system',
+      status: 'active',
+      superseded_by: null,
+      links: [],
+      scope: 'project',
+      stack_tags: [],
+      text: 'Refresh the KB models catalog' + refreshReferenceDeltaSuffix(catalogs[0] as Record<string, unknown> | undefined),
+      source: 'system',
+      system_reason: 'refresh_reference',
+    };
+
+    if (catalogs.length > 0) {
+      todo.feature_link = (catalogs[0] as Record<string, unknown>).id;
+    }
+
+    this.create(todo);
+  }
+
+  /**
+   * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
+   * carries lifecycle/freshness/version and NOT status/superseded_by — those two
+   * are derived at read. They survive as records COLUMNS because they are the
+   * §3.4 filter surface every read SQL already joins on (and the shape a
+   * pre-migration store still has): written here from the derived values in the
+   * same statement, never read back as the served truth.
+   */
+  private insertRecord(record: DurableRecord): void {
+    const entry = RECORD_TYPES[record.type];
+    const meta = record as unknown as { lifecycle?: string; freshness?: string; version?: number; superseded_by?: string | null };
+    const lifecycle: Lifecycle = meta.lifecycle === 'retired' ? 'retired' : 'live';
+    const freshness: Freshness = meta.freshness === 'flagged_stale' ? 'flagged_stale' : 'fresh';
+    const version = typeof meta.version === 'number' ? meta.version : 1;
+    const stored = SterlingStore.storableBody(record as unknown as Record<string, unknown>);
+    this.db
+      .prepare(
+        `INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        record.id,
+        record.type,
+        SterlingStore.derivedStatus(lifecycle, freshness),
+        meta.superseded_by ?? null,
+        lifecycle,
+        freshness,
+        version,
+        record.scope,
+        record.created_at,
+        record.updated_at,
+        record.author,
+        JSON.stringify(stored)
+      );
+    for (const tag of new Set(record.stack_tags)) {
+      this.db.prepare('INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)').run(record.id, tag);
+    }
+    for (const path of new Set(entry.fileKeys(stored))) {
+      this.db.prepare('INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)').run(record.id, path);
+    }
+    for (const link of record.links) {
+      // A links[] entry pointing at its OWN record is malformed data that
+      // already exists in the wild (same shape as the self-referential
+      // superseded_by handled below — resolveTerminus's self-loop boundary is
+      // pinned against it). The relation GRAPH must not hold the self-edge, but
+      // refusing the insert would make such a record UNSTORABLE, which would
+      // abort S4's migration re-insert of exactly that legacy row. So the edge
+      // is skipped while the row lands; the loud self-cycle refusal stays on
+      // the paths that MINT an edge (addLink / supersede / retireInFavorOf),
+      // where a caller is actually asking for it.
+      if (link.target_id === record.id) continue;
+      this.insertRelation(record.id, link.rel, link.target_id, record.updated_at);
+    }
+    // A record created in the legacy retired shape (status 'superseded' +
+    // superseded_by, as pre-v2 fixtures and imports write it) gets the same
+    // authoritative relation the supersede path writes, so its served
+    // superseded_by materializes from the graph like everyone else's.
+    //
+    // A record pointing at ITSELF is malformed data that already exists in the
+    // wild (resolveTerminus's self-loop boundary is pinned against exactly that
+    // shape): the relation GRAPH must not hold the self-edge, but refusing the
+    // insert would make such a record unstorable and unreadable. So the edge is
+    // skipped while the row lands — the loud self-cycle refusal stays on the
+    // paths that MINT supersession (supersede / retireInFavorOf / addLink),
+    // where a caller is actually asking for it.
+    if (lifecycle === 'retired' && meta.superseded_by && meta.superseded_by !== record.id) {
+      this.insertRelation(meta.superseded_by, 'supersedes', record.id, record.updated_at);
+    }
+    this.db.prepare('INSERT INTO records_fts (record_id, text) VALUES (?, ?)').run(record.id, entry.fts(stored));
+  }
+
+  /**
+   * REENTRANT — every other write primitive (create, supersede, …) already
+   * calls this internally, so a multi-record tool-layer write (knowledge_split:
+   * N child creates + one parent supersession, decision
+   * compaction-tooling-windowed-read-plus-split) that must land atomically
+   * cannot simply wrap several such calls in a second BEGIN — SQLite does not
+   * nest transactions. `txDepth` makes a NESTED call join the already-open
+   * transaction instead of attempting a second one: only the outermost call
+   * issues BEGIN/COMMIT/ROLLBACK, so a failure anywhere inside unwinds the
+   * whole thing exactly once.
+   */
+  private txDepth = 0;
+
+  private tx(fn: () => void): void {
+    // Backstop for the pre-migration read-only mode: every public write names
+    // itself through assertWritable, and this catches anything that forgets to
+    // ([stable-identity-design-v2]). Reads never open a transaction.
+    //
+    // Split deliberately (reviewer TOCTOU finding on the live schema-version
+    // guard, board d5942fa0 pin group B): assertV2Surface is a property of the
+    // OPEN handle (legacySchemaVersion is captured once at construction and
+    // never changes for the life of a handle), so checking it here, before the
+    // lock, changes nothing. assertLiveSchemaVersion is NOT safe to check only
+    // here — re-reading PRAGMA user_version before BEGIN IMMEDIATE leaves a
+    // window where a migration can commit between this read and lock
+    // acquisition and be silently admitted. That check runs again inside the
+    // lock below, following the same re-read-inside-BEGIN-IMMEDIATE pattern the
+    // constructor's stamp-forward transaction already uses (~line 480) to close
+    // the identical race at open time.
+    this.assertV2Surface('transaction');
+    if (this.txDepth > 0) {
+      fn();
+      return;
+    }
+    // BEGIN FIRST, then count. A failing BEGIN (SQLITE_BUSY on a contended
+    // file) previously left txDepth stuck at 1 forever, because the increment
+    // happened before the statement that threw and the `finally` was never
+    // entered: every later tx() on that connection then took the "join the open
+    // transaction" branch with NO transaction open, so each statement
+    // autocommitted individually and atomicity silently disappeared for the
+    // life of the connection.
+    this.db.exec('BEGIN IMMEDIATE');
+    this.txDepth++;
+    try {
+      // Live-version recheck INSIDE the write lock (closes the TOCTOU above):
+      // a migration that committed between a public write method's pre-lock
+      // assertWritable() call and this BEGIN IMMEDIATE would otherwise be
+      // silently admitted. Re-reading here, while the write lock is held,
+      // guarantees the version cannot move again before fn() writes.
+      this.assertLiveSchemaVersion('transaction');
+      fn();
+      this.db.exec('COMMIT');
+    } catch (e) {
+      // A ROLLBACK that itself throws must never REPLACE the original failure —
+      // the caller would be told about the cleanup and never about the cause.
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        /* the original error below is the one that matters */
+      }
+      throw e;
+    } finally {
+      this.txDepth--;
+    }
+  }
+
+  /**
+   * PUBLIC transaction boundary for the tool layer (decision
+   * compaction-tooling-windowed-read-plus-split): the store is the one write
+   * path (invariant 3 / CLAUDE.md §"Store writes"), so a tool-layer operation
+   * that must write several records atomically — knowledge_split's N children
+   * plus one parent supersession — gets the transaction FROM the store rather
+   * than reimplementing BEGIN/COMMIT/ROLLACK above it. Reentrant via `tx`:
+   * every store write primitive called from `fn` joins this same transaction.
+   */
+  withTransaction<T>(fn: () => T): T {
+    let result!: T;
+    this.tx(() => {
+      result = fn();
+    });
+    return result;
+  }
+
+  /**
+   * PER-RECORD transaction boundary — the ToolStore sibling that routes by
+   * PHYSICAL IDENTITY rather than by a label (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]). A
+   * label-routed transaction opens on the store the label NAMES while every
+   * record mutation independently opens on the store that HOLDS the id, so a
+   * drifted label put the transaction on the wrong database; routing by the
+   * holder makes the two agree by construction. On a plain SterlingStore there
+   * is only ONE physical store, so this is a straight alias for withTransaction
+   * — MountedStores overrides it to resolve the holding mount.
+   *
+   * ITS LABEL-ROUTED SIBLING (`withTransactionForScope`) IS RETIRED (decision
+   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]):
+   * it had zero production callers once knowledge_extract moved here, and its
+   * shape was exactly the defect this method closed.
+   */
+  withTransactionForRecord<T>(_id: string, fn: () => T): T {
+    return this.withTransaction(fn);
+  }
+}

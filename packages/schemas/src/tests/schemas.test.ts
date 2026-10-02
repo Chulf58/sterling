@@ -1,0 +1,870 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  normalizeRepoPath,
+  toRepoRelative,
+  matchesGlob,
+  decisionSchema,
+  featureArticleSchema,
+  todoSchema,
+  briefSchema,
+  RECORD_TYPES,
+  validateRecord,
+  knownFieldsFor,
+  digestRecord,
+  DIGEST_CLIP,
+  SYSTEM_REASONS,
+  DRAIN_VERBS,
+} from '../index.js';
+import { parseConfig } from '../config.js';
+
+const NOW = '2026-06-10T12:00:00.000Z';
+
+export function envelope(type: string) {
+  return {
+    id: randomUUID(),
+    type,
+    created_at: NOW,
+    updated_at: NOW,
+    author: 'conductor',
+    status: 'active',
+    superseded_by: null,
+    links: [],
+    scope: 'project',
+    stack_tags: ['node'],
+  };
+}
+
+export function validDecision() {
+  return {
+    ...envelope('decision'),
+    title: 'Use SQLite',
+    statement: 'SQLite via node:sqlite is the storage substrate.',
+    alternatives_rejected: [{ option: 'JSON files', reason: 'no file-key joins, no FTS rank' }],
+    rationale: 'Satisfies all six §3.1 criteria with zero native dependencies.',
+    file_keys: ['packages/store/src/index.ts'],
+  };
+}
+
+test('path invariant: normalization and rejections (§3.2)', () => {
+  assert.equal(normalizeRepoPath('src\\auth\\login.ts'), 'src/auth/login.ts');
+  assert.equal(normalizeRepoPath('./src//x/./y.ts'), 'src/x/y.ts');
+  assert.equal(normalizeRepoPath('a/b/'), 'a/b');
+  assert.throws(() => normalizeRepoPath('C:\\repo\\src\\a.ts'), /drive-prefixed/);
+  assert.throws(() => normalizeRepoPath('/abs/path.ts'), /absolute/);
+  assert.throws(() => normalizeRepoPath('../escape.ts'), /parent-escaping/);
+  assert.throws(() => normalizeRepoPath(''), /empty/);
+  assert.throws(() => normalizeRepoPath('./.'), /empty/);
+});
+
+test('matchesGlob: ** crosses segments, * stays within, ? single char', () => {
+  assert.equal(matchesGlob('tests/a/b.test.ts', 'tests/**'), true);
+  assert.equal(matchesGlob('src/x.test.ts', '**/*.test.ts'), true);
+  assert.equal(matchesGlob('x.test.ts', '**/*.test.ts'), true);
+  assert.equal(matchesGlob('src/x.ts', '**/*.test.ts'), false);
+  assert.equal(matchesGlob('src/a/b.ts', 'src/*.ts'), false);
+  assert.equal(matchesGlob('src/b.ts', 'src/*.ts'), true);
+  assert.equal(matchesGlob('src\\b.ts', 'src/*.ts'), true, 'backslash input normalized');
+  assert.equal(matchesGlob('axts', 'a?ts'), true);
+  assert.equal(matchesGlob('a/ts', 'a?ts'), false, '? never matches a separator');
+  // audit finding 10/43: '**/' must match COMPLETE segments, never inside one
+  assert.equal(matchesGlob('barfoo.ts', '**/foo.ts'), false, "'**/' does not match inside a segment");
+  assert.equal(matchesGlob('foo.ts', '**/foo.ts'), true, "'**/' matches zero segments");
+  assert.equal(matchesGlob('a/foo.ts', '**/foo.ts'), true);
+  assert.equal(matchesGlob('a/b/foo.ts', '**/foo.ts'), true);
+  assert.equal(matchesGlob('a/xb', 'a/**/b'), false, "mid-path '**' respects segment boundaries");
+  assert.equal(matchesGlob('a/b', 'a/**/b'), true, "'**' matches zero segments between");
+  assert.equal(matchesGlob('a/x/b', 'a/**/b'), true);
+  assert.equal(matchesGlob('hooks/lib/x.mjs', 'hooks/**'), true, "trailing '**' still matches deeply");
+});
+
+test('toRepoRelative relativizes against repo root', () => {
+  assert.equal(toRepoRelative('C:\\repo\\src\\a.ts', 'C:\\repo'), 'src/a.ts');
+  assert.equal(toRepoRelative('C:/repo/src/a.ts', 'C:/repo/'), 'src/a.ts');
+  assert.throws(() => toRepoRelative('C:/elsewhere/a.ts', 'C:/repo'), /not under repo root/);
+  // drive-prefixed (NTFS) stays case-insensitive
+  assert.equal(toRepoRelative('C:/Repo/src/a.ts', 'c:/repo'), 'src/a.ts', 'Windows drive paths fold case');
+  // audit finding 32/43: on a case-sensitive FS (POSIX / WSL ext4) a differently
+  // cased sibling directory must NOT be relativized as if under the root
+  assert.throws(
+    () => toRepoRelative('/home/u/Sterling/x.ts', '/home/u/sterling'),
+    /not under repo root/,
+    'case-sensitive containment rejects a differently-cased sibling'
+  );
+  assert.equal(toRepoRelative('/home/u/sterling/x.ts', '/home/u/sterling'), 'x.ts', 'exact-case POSIX still relativizes');
+});
+
+test('reference_material kind:doc normalizes its location in the body (it doubles as a file_key) — audit finding 12/43', () => {
+  const referenceMaterialSchema = RECORD_TYPES.reference_material.schema;
+  const base = {
+    ...envelope('reference_material'),
+    title: 't', summary: 's', source_date: '2026-01-01', capture_date: '2026-01-01', basis: 'codebase',
+  };
+  const doc = referenceMaterialSchema.parse({ ...base, kind: 'doc', location: 'docs\\spec.md' }) as { location: string };
+  assert.equal(doc.location, 'docs/spec.md', 'doc location normalized in the body, matching its index key');
+  const dotted = referenceMaterialSchema.parse({ ...base, kind: 'doc', location: './docs/spec.md' }) as { location: string };
+  assert.equal(dotted.location, 'docs/spec.md', "'./'-prefix stripped");
+  // a URL location (kind:url) is NOT a repo path and must be left verbatim
+  const url = referenceMaterialSchema.parse({ ...base, kind: 'url', location: 'https://x/y' }) as { location: string };
+  assert.equal(url.location, 'https://x/y', 'url location untouched');
+});
+
+test('record schemas normalize file paths at the boundary', () => {
+  const d = decisionSchema.parse({ ...validDecision(), file_keys: ['src\\store\\db.ts'] });
+  assert.deepEqual(d.file_keys, ['src/store/db.ts']);
+});
+
+test('supersession field pairing is enforced both ways (§3.2)', () => {
+  assert.throws(() => decisionSchema.parse({ ...validDecision(), status: 'superseded' }), /requires superseded_by/);
+  assert.throws(
+    () => decisionSchema.parse({ ...validDecision(), superseded_by: randomUUID() }),
+    /forbids superseded_by/
+  );
+  const ok = decisionSchema.parse({ ...validDecision(), status: 'superseded', superseded_by: randomUUID() });
+  assert.equal(ok.status, 'superseded');
+});
+
+test('todo: system source requires system_reason; no done status exists (§3.2.7)', () => {
+  const base = { ...envelope('todo'), text: 'reconcile auth article', source: 'system' };
+  assert.throws(() => todoSchema.parse(base), /requires system_reason/);
+  const ok = todoSchema.parse({ ...base, system_reason: 'reconcile_needed' });
+  assert.equal(ok.system_reason, 'reconcile_needed');
+  assert.ok(!('done' in ok));
+  todoSchema.parse({ ...envelope('todo'), text: 'user item', source: 'user' });
+  const prio = todoSchema.parse({ ...envelope('todo'), text: 'user item', source: 'user', priority: 'high' });
+  assert.equal(prio.priority, 'high');
+  assert.throws(() => todoSchema.parse({ ...envelope('todo'), text: 'x', source: 'user', priority: 'urgent' }), /invalid/i);
+});
+
+test('feature_article: dormant requires state_reason + wiring_todo_id (§3.2.3)', () => {
+  const art = {
+    ...envelope('feature_article'),
+    slug: 'csv-export',
+    title: 'CSV export',
+    what_it_does: 'Exports the board as CSV.',
+    intended_behavior: 'User clicks Export and receives a CSV file.',
+    files: [{ path: 'src\\export\\csv.ts', role: 'serializer' }],
+    current_ac: [{ ac_id: 'AC1', text: 'export downloads a file', verifiable_at: 'final' }],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'dormant',
+    version: 1,
+    history: [{ date: NOW, event: 'originating brief' }],
+    live_test_refs: [{ ac_id: 'AC1', test_paths: ['tests\\export.test.ts'] }],
+  };
+  assert.throws(() => featureArticleSchema.parse(art), /dormant/);
+  const ok = featureArticleSchema.parse({ ...art, state_reason: 'wired in next phase', wiring_todo_id: randomUUID() });
+  assert.equal(ok.files[0].path, 'src/export/csv.ts');
+  assert.equal(ok.live_test_refs[0].test_paths[0], 'tests/export.test.ts');
+  assert.throws(() => featureArticleSchema.parse({ ...art, state: 'built', version: 0 }), /version/i);
+});
+
+test('brief: attribution sections and verifiable_at syntax (§4)', () => {
+  const brief = {
+    ...envelope('brief'),
+    slug: 'csv-export',
+    title: 'CSV export',
+    problem: 'No way to get data out.',
+    feature: 'Export the board as CSV.',
+    user_stated: { criteria: ['user said: must be Excel-openable'], constraints: [] },
+    conductor_proposals: [{ text: 'stream rather than buffer', status: 'unconfirmed' }],
+    acceptance_criteria: [
+      { ac_id: 'AC1', text: 'user clicks Export and gets a file', verifiable_at: 'final' },
+      { ac_id: 'AC2', text: 'header row present', verifiable_at: 'phase:1' },
+    ],
+    technical_design: { approach: 'serializer module', interfaces: [], shared_structures: [] },
+    blast_radius: { files: [{ path: 'src\\export\\csv.ts', owning_articles: [] }], reconcile_list: [] },
+    incidental_scope: ['src/board/types.ts'],
+    out_of_scope: ['changing board storage'],
+    phases: [
+      {
+        phase_id: 'p1',
+        goal: 'serializer',
+        subtasks: ['write serializer'],
+        ac_ids: ['AC2'],
+        difficulty: { level: 'normal', reasons: [] },
+        model_hint: 'sonnet',
+      },
+    ],
+    decisions_made: [],
+  };
+  const ok = briefSchema.parse(brief);
+  assert.equal(ok.blast_radius.files[0].path, 'src/export/csv.ts');
+  assert.throws(
+    () => briefSchema.parse({ ...brief, acceptance_criteria: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'phase1' }] }),
+    /invalid/i
+  );
+
+  // §7.1/§7.6 risk flags: closed set, frozen into data before the run
+  const flagged = briefSchema.parse({ ...brief, risk_flags: ['security_relevant'] });
+  assert.deepEqual(flagged.risk_flags, ['security_relevant']);
+  assert.throws(() => briefSchema.parse({ ...brief, risk_flags: ['urgent'] }), /invalid/i);
+
+  // §8.1 per-phase interface slice: names must exist in technical_design.interfaces
+  const withInterfaces = {
+    ...brief,
+    technical_design: { approach: 'a', interfaces: [{ name: 'exportBoard', contract: '(todos) -> csv' }], shared_structures: [] },
+    phases: [{ ...brief.phases[0], interfaces: ['exportBoard'] }],
+  };
+  briefSchema.parse(withInterfaces);
+  assert.throws(
+    () => briefSchema.parse({ ...withInterfaces, phases: [{ ...brief.phases[0], interfaces: ['ghostInterface'] }] }),
+    /undeclared interface 'ghostInterface'/
+  );
+});
+
+test('full §3.2 record set: anti_pattern, research_finding, reference_material, disconfirmed_hypothesis', () => {
+  const ap = validateRecord({
+    ...envelope('anti_pattern'),
+    title: 'No raw SQL concat',
+    trigger: 'when building queries from user input',
+    guidance: 'use parameterized queries, not string concat',
+    wrong_way: '"SELECT * FROM x WHERE id=" + id',
+    right_way: 'db.prepare("... WHERE id = ?").get(id)',
+    source_evidence: 'run r-0042, src/db.ts:88',
+    file_keys: ['src\\db.ts'],
+    severity: 'block',
+  });
+  assert.equal((ap as { basis: string }).basis, 'codebase', 'basis defaults to codebase');
+  assert.deepEqual((ap as { file_keys: string[] }).file_keys, ['src/db.ts']);
+
+  const rf = validateRecord({
+    ...envelope('research_finding'),
+    question: 'genesys rate limit scope?',
+    answer: 'per-org, not per-token',
+    source_urls: ['https://developer.genesys.cloud/x'],
+    source_date: '2026-01-15',
+    capture_date: '2026-06-01',
+    volatility_hint: 'medium',
+  });
+  assert.equal(rf.type, 'research_finding');
+  // research adds flagged_stale to the status enum (§3.2.4)
+  validateRecord({ ...(rf as unknown as Record<string, unknown>), id: randomUUID(), status: 'flagged_stale' });
+  assert.throws(() => validateRecord({ ...(envelope('decision') as object), status: 'flagged_stale', title: 't', statement: 's', alternatives_rejected: [], rationale: 'r' }), /invalid/i);
+
+  validateRecord({
+    ...envelope('reference_material'),
+    title: 'Genesys API guide',
+    kind: 'url',
+    location: 'https://developer.genesys.cloud',
+    summary: 'platform API reference',
+    source_date: '2025-11-01',
+    capture_date: '2026-06-01',
+    basis: 'platform',
+  });
+
+  validateRecord({
+    ...envelope('disconfirmed_hypothesis'),
+    question: 'is the cache stale?',
+    rejected_answer: 'no — TTL was correct; root cause was clock skew',
+    evidence: 'debug run r-0099, traces at src/cache.ts:40',
+    file_keys: ['src/cache.ts'],
+  });
+});
+
+test('research_finding: file_keys is OPTIONAL and normalizes at the boundary like every other path field (§3.2, decision foreign_8dbbc85d)', () => {
+  const base = {
+    ...envelope('research_finding'),
+    question: 'does the platform rate-limit per org or per token?',
+    answer: 'per-org',
+    source_urls: ['https://developer.genesys.cloud/x'],
+    source_date: '2026-01-15',
+    capture_date: '2026-06-01',
+    volatility_hint: 'medium',
+  };
+
+  // (3) omitted entirely — still a valid record; no migration for every
+  // research_finding written before this change.
+  const withoutKeys = validateRecord({ ...base }) as unknown as { file_keys?: string[] };
+  assert.ok(!('file_keys' in withoutKeys), 'file_keys absent stays absent — no default, no null placeholder');
+
+  // (2) present, with a Windows-separator path — normalized exactly like
+  // decision/anti_pattern/disconfirmed_hypothesis file_keys above.
+  const withKeys = validateRecord({ ...base, id: randomUUID(), file_keys: ['scripts\\hooks\\x.mjs'] }) as unknown as { file_keys: string[] };
+  assert.deepEqual(withKeys.file_keys, ['scripts/hooks/x.mjs'], 'backslash path normalizes to repo-relative POSIX, the same invariant every other file_keys field gets');
+});
+
+test("registry: research_finding.fileKeys reads its own file_keys field — the decision/anti_pattern/disconfirmed_hypothesis pattern, not reference_material's location-derived one", () => {
+  const fk = RECORD_TYPES.research_finding.fileKeys;
+  assert.deepEqual(fk({ file_keys: ['a.ts', 'b.ts'] }), ['a.ts', 'b.ts'], 'the extractor reads file_keys directly, like decision/anti_pattern/disconfirmed_hypothesis');
+  assert.deepEqual(fk({}), [], 'no file_keys present yields an empty join set, never a throw');
+});
+
+test('knownFieldsFor: research_finding gains file_keys; reference_material still does not (decision foreign_b47889b7 unchanged, board b1de6fab)', () => {
+  const rf = knownFieldsFor('research_finding');
+  assert.ok(rf, 'research_finding must resolve its known field set');
+  assert.ok(rf!.has('file_keys'), 'file_keys is now a real field of research_finding');
+
+  const ref = knownFieldsFor('reference_material');
+  assert.ok(ref, 'reference_material must resolve its known field set');
+  assert.ok(!ref!.has('file_keys'), 'reference_material carries its path via `location`, not file_keys — unaffected by this addition (decision b47889b7)'); // not-a-citation: fixture id
+});
+
+test('evidence_basis + measured_by: optional on the three ruling types, enum closed, distinct from anti_pattern.basis (board 1d02b6b4)', () => {
+  const dec = validateRecord({
+    ...envelope('decision'),
+    title: 't',
+    statement: 's',
+    alternatives_rejected: [],
+    rationale: 'r',
+    evidence_basis: 'measured',
+    measured_by: 'grep -c "registerTool" packages/mcp-server/src/server.ts',
+  }) as unknown as { evidence_basis: string; measured_by: string };
+  assert.equal(dec.evidence_basis, 'measured');
+  assert.match(dec.measured_by, /grep -c/);
+  const ap = validateRecord({
+    ...envelope('anti_pattern'),
+    title: 't',
+    trigger: 'tr',
+    guidance: 'g',
+    wrong_way: 'w',
+    right_way: 'ri',
+    source_evidence: 'e',
+    evidence_basis: 'inferred',
+  }) as unknown as { evidence_basis: string; basis: string };
+  assert.equal(ap.evidence_basis, 'inferred');
+  assert.equal(ap.basis, 'codebase', 'the pre-existing basis enum (where knowledge came from) is untouched and defaults as before');
+  validateRecord({
+    ...envelope('research_finding'),
+    question: 'q',
+    answer: 'a',
+    source_urls: [],
+    source_date: '2026-08-21',
+    capture_date: '2026-08-21',
+    evidence_basis: 'measured',
+    measured_by: 'claude -p probe session',
+  });
+  assert.throws(
+    () => validateRecord({ ...envelope('decision'), title: 't', statement: 's', alternatives_rejected: [], rationale: 'r', evidence_basis: 'guessed' }),
+    /invalid/i,
+    'the enum is closed — measured|inferred only'
+  );
+});
+
+test('attestation: human-inspection ruling round-trips; verdict enum closed; immutable like a decision; file_keys joins the path economy (board 259a455f)', () => {
+  const rec = validateRecord({
+    ...envelope('attestation'),
+    artifact_key: 'part-0042 rear bracket',
+    verdict: 'approved',
+    inspector: 'cuj',
+    inspected_at: '2026-08-21',
+    instrument: 'render v3 @ commit abc1234',
+    notes: 'weld seam acceptable',
+    file_keys: ['parts\\rear-bracket.step'],
+  }) as unknown as { file_keys: string[] };
+  assert.deepEqual(rec.file_keys, ['parts/rear-bracket.step'], 'paths normalize at the boundary like every path field');
+  assert.throws(
+    () => validateRecord({ ...envelope('attestation'), artifact_key: 'p', verdict: 'looks-fine', inspector: 'cuj', inspected_at: '2026-08-21' }),
+    /invalid/i,
+    'the verdict enum is closed — free-text verdicts are refused'
+  );
+  assert.equal(RECORD_TYPES.attestation.immutable, true, 'supersession is the only change path (decision analog)');
+  assert.deepEqual(RECORD_TYPES.attestation.fileKeys({ file_keys: ['a.ts'] }), ['a.ts']);
+  assert.deepEqual(RECORD_TYPES.attestation.fileKeys({}), [], 'fileless attestation never throws');
+});
+
+test('open_question: an OPEN question needs no closed_into; a CLOSED one without closed_into is refused; the resolution_status enum is closed (decision open-question-record-type-authorized)', () => {
+  // WHY THIS EXISTS. The type's whole reason to exist is holding a question
+  // with evidence and NO answer, and its one refinement is that closure must
+  // name where the answer went — `closed_into`, a SEPARATE field, never an id
+  // smuggled into a status string. The caller-set lifecycle field is
+  // `resolution_status` (open|closed) precisely so it cannot collide with the
+  // server-owned envelope `status` (user ruling, 2026-08-31).
+  const base = {
+    ...envelope('open_question'),
+    question: 'does the dome geometry derive from the three measured spans?',
+    hypotheses: ['the spans are chord lengths', 'the spans are arc lengths'],
+    evidence: 'three measurements + a derived geometry, 2026-08-29 dome-farmer lane',
+  };
+
+  // CONTROL ARM, FIRST: an OPEN question with no answer, no closed_into, is
+  // ACCEPTED. Without this, the refusal below is satisfied just as well by a
+  // schema that refuses every open_question — the verdict would have two
+  // possible causes and could not tell them apart.
+  const open = validateRecord({ ...base, resolution_status: 'open' }) as unknown as {
+    resolution_status: string;
+    closed_into?: string | null;
+  };
+  assert.equal(open.resolution_status, 'open');
+  assert.ok(!open.closed_into, 'an open question carries no closure target — that is the state this type exists to hold');
+
+  // THE REFINEMENT: closed without closed_into is refused.
+  assert.throws(
+    () => validateRecord({ ...base, id: randomUUID(), resolution_status: 'closed' }),
+    /closed_into/,
+    'closing an open_question must name the research_finding it closed into — the refusal names the missing field'
+  );
+
+  // SECOND CONTROL: closed WITH closed_into is accepted, so the refusal above
+  // is caused by the missing field and not by 'closed' being unwritable.
+  const closed = validateRecord({
+    ...base,
+    id: randomUUID(),
+    resolution_status: 'closed',
+    closed_into: randomUUID(),
+  }) as unknown as { resolution_status: string; closed_into: string };
+  assert.equal(closed.resolution_status, 'closed');
+  assert.equal(typeof closed.closed_into, 'string');
+
+  // The lifecycle enum is CLOSED — free text is not a third state.
+  assert.throws(
+    () => validateRecord({ ...base, id: randomUUID(), resolution_status: 'parked' }),
+    /invalid/i,
+    'resolution_status is open|closed only'
+  );
+});
+
+test('registry: full record set registered 1:1, unregistered type rejected loudly (invariant 3)', () => {
+  assert.deepEqual(Object.keys(RECORD_TYPES).sort(), [
+    'anti_pattern',
+    'attestation', // human-inspection ruling (board 259a455f, user-approved 2026-08-21)
+    'brief',
+    'decision',
+    'disconfirmed_hypothesis',
+    'feature_article',
+    'open_question', // evidenced question, live hypotheses, no answer (decision open-question-record-type-authorized, user-ruled 2026-08-31)
+    'reference_material',
+    'research_finding',
+    'todo',
+  ]);
+  for (const [name, entry] of Object.entries(RECORD_TYPES)) {
+    assert.equal(typeof entry.fts, 'function', `${name} needs an fts extractor`);
+    assert.equal(typeof entry.fileKeys, 'function', `${name} needs a fileKeys extractor`);
+    assert.ok(Object.keys(entry.digest).length > 0, `${name} needs at least one headline field for projection:'digest'`);
+  }
+  assert.equal(RECORD_TYPES.decision.immutable, true);
+  const validated = validateRecord(validDecision());
+  assert.equal(validated.type, 'decision');
+  assert.throws(() => validateRecord({ ...envelope('escalation_log'), title: 'x' }), /unregistered record type 'escalation_log'/);
+  assert.throws(() => validateRecord({ no_type: true }), /no record type/);
+});
+
+test("registry: every projection:'digest' headline field is a REAL field of its own schema (invariant 3 check)", () => {
+  // WHY THIS EXISTS. knownFieldsFor derives a type's valid fields from its
+  // schema so no second list can drift (decision foreign_44e45931). The digest map is
+  // the one thing that CANNOT be derived — which field is a record's headline
+  // is an editorial call — so it is the one place a hand-maintained list of
+  // field names survives, and this is its consistency check.
+  //
+  // The failure it prevents is SILENT: rename anti_pattern.trigger and the
+  // digest simply stops emitting a trigger. Nothing throws, every test stays
+  // green, and the read side quietly degrades to a title-only listing — the
+  // exact "a summary of a source is not the source" rot the store exists to
+  // resist. Here it fails loudly, naming the field.
+  for (const [type, entry] of Object.entries(RECORD_TYPES)) {
+    const known = knownFieldsFor(type);
+    assert.ok(known, `${type} must resolve its known field set`);
+    for (const [field, mode] of Object.entries(entry.digest)) {
+      assert.ok(
+        known.has(field),
+        `${type}.digest names '${field}', which its schema does not define — the field was renamed or removed and the digest was not updated with it`
+      );
+      assert.ok(mode === 'plain' || mode === 'clip', `${type}.digest['${field}'] must be 'plain' or 'clip', got '${mode}'`);
+    }
+  }
+});
+
+test("digestRecord: headline only, absent fields omitted, long text clipped — the 'landscape not bodies' read", () => {
+  const antiPattern = {
+    ...envelope('anti_pattern'),
+    title: 'Path-based delivery is blind to the mechanism axis',
+    trigger: 'x'.repeat(DIGEST_CLIP + 50),
+    guidance: 'a very long body that must not reach the caller',
+    wrong_way: 'also long',
+    right_way: 'also long',
+    file_keys: ['a.ts'],
+  };
+  const d = digestRecord(antiPattern);
+
+  assert.equal(d.title, antiPattern.title, 'the headline survives whole');
+  assert.equal((d.trigger as string).length, DIGEST_CLIP + 1, 'trigger is clipped to DIGEST_CLIP plus the ellipsis');
+  assert.match(d.trigger as string, /…$/, 'a clip is marked, never silently truncated');
+  assert.ok(!('guidance' in d), 'bodies do not cross into a digest');
+  assert.ok(!('wrong_way' in d) && !('right_way' in d), 'nor do the remaining body fields');
+  assert.ok(!('file_keys' in d), 'a field the digest does not name is absent even though the record carries it');
+  assert.ok(!('severity' in d), 'an ABSENT optional headline field costs nothing — no null placeholder');
+
+  // The id stays a FULL uuid: the digest's job is to make the NEXT call cheap,
+  // so the handle it hands back has to be the one every tool accepts.
+  assert.equal(d.id, antiPattern.id);
+  assert.equal((d.id as string).length, 36, 'never a truncated citation prefix');
+  assert.equal(d.type, 'anti_pattern');
+
+  // Short text is passed through untouched — clipping is not reformatting.
+  const short = digestRecord({ ...envelope('anti_pattern'), title: 'T', trigger: 'when X happens', severity: 'block' });
+  assert.equal(short.trigger, 'when X happens');
+  assert.equal(short.severity, 'block', 'a PRESENT optional headline field is carried');
+
+  // An unregistered type degrades to the envelope instead of throwing: a
+  // projection is a read convenience and must never be why a read fails.
+  const unknown = digestRecord({ id: 'x', type: 'escalation_log', status: 'active', updated_at: NOW });
+  assert.deepEqual(unknown, { id: 'x', type: 'escalation_log', status: 'active', updated_at: NOW });
+});
+
+test('§3.2.5: reference_material fileKeys — repo-located docs only', () => {
+  const fk = RECORD_TYPES.reference_material.fileKeys;
+  assert.deepEqual(fk({ kind: 'doc', location: 'docs\\spec.md' }), ['docs/spec.md'], 'doc location normalizes and doubles as a file_key');
+  assert.deepEqual(fk({ kind: 'url', location: 'https://example.com/x' }), [], 'external locations carry no file_keys');
+  assert.deepEqual(fk({ kind: 'pdf', location: 'C:/refs/spec.pdf' }), []);
+  assert.deepEqual(fk({ kind: 'doc', location: 'C:/abs/spec.md' }), [], 'absolute doc location is not repo-located');
+});
+
+test('§11 drain verbs: every maintenance lane has its completed-section verb (totality)', () => {
+  for (const reason of SYSTEM_REASONS) {
+    const verb = DRAIN_VERBS[reason];
+    assert.equal(typeof verb, 'string', `SYSTEM_REASON '${reason}' is missing a DRAIN_VERBS entry`);
+    assert.ok(verb.length > 0, `verb for '${reason}' must not be blank`);
+  }
+  assert.deepEqual(Object.keys(DRAIN_VERBS).sort(), [...SYSTEM_REASONS].sort(), 'no orphan verbs for unregistered reasons');
+});
+
+// ------------------- session-event register (run r-0501: session-event-register) -------------------
+
+test('sessionEventSchema: the six register kinds parse; unknown kind + missing fields rejected (interface slice 1; no_capture board 7bbec3bd; capture_pending board 1af5d630)', async () => {
+  // dynamic import + cast: sessionEventSchema does not exist until this phase ships, so a
+  // missing export must fail an ASSERTION below — never a compile-time reference to a
+  // not-yet-declared symbol (that would break the package build; a crash-red proves nothing).
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const s = mod.sessionEventSchema as { parse: (v: unknown) => { kind: string; detail: string; at: string } } | undefined;
+  assert.ok(s, 'sessionEventSchema must be exported from the schemas index (defined once in transient.ts)');
+
+  const research = s.parse({ kind: 'research_tool', detail: 'WebSearch: genesys rate limit scope', at: NOW });
+  assert.equal(research.kind, 'research_tool');
+  assert.equal(research.detail, 'WebSearch: genesys rate limit scope');
+  assert.equal(research.at, NOW);
+
+  assert.equal(s.parse({ kind: 'agent_dispatch', detail: 'researcher', at: NOW }).kind, 'agent_dispatch');
+  assert.equal(s.parse({ kind: 'debug_scope', detail: 'src/a.mjs', at: NOW }).kind, 'debug_scope');
+  // concept_designed (decision foreign_7208729b): detail carries the concept FAMILY slug
+  assert.equal(s.parse({ kind: 'concept_designed', detail: 'weapons', at: NOW }).kind, 'concept_designed');
+  // no_capture (board 7bbec3bd): detail carries the REASON for the declaration
+  assert.equal(s.parse({ kind: 'no_capture', detail: 'read-only investigation, nothing durable', at: NOW }).kind, 'no_capture');
+  // capture_pending (board 1af5d630): detail carries "<target> — <reason>" — the
+  // truthful middle state between captured and nothing-durable
+  assert.equal(s.parse({ kind: 'capture_pending', detail: 'commit wave-3 — decisions drafted, riding the gated commit', at: NOW }).kind, 'capture_pending');
+  // capture_pending `target` (board f003082d): the declared target rides as its
+  // own field, and survives parsing; a blank target is refused. Optional, so a
+  // legacy event with only the joined detail still parses.
+  const withTarget = s.parse({ kind: 'capture_pending', detail: 'commit wave-3 — decisions drafted', target: 'commit wave-3', at: NOW }) as { target?: string };
+  assert.equal(withTarget.target, 'commit wave-3', 'target is kept, not stripped as an unknown key');
+  assert.throws(() => s.parse({ kind: 'capture_pending', detail: 'x — y', target: '', at: NOW }), 'an empty target is rejected');
+  assert.throws(() => s.parse({ kind: 'capture_pending', detail: 'x — y', target: '   ', at: NOW }), 'a whitespace-only target is rejected');
+
+  // kind is a closed enum of exactly the six register writers
+  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the six writers is rejected');
+  // detail is a required string; at is required
+  assert.throws(() => s.parse({ kind: 'research_tool', at: NOW }), 'detail is required');
+  assert.throws(() => s.parse({ kind: 'research_tool', detail: 42, at: NOW }), 'detail must be a string');
+  assert.throws(() => s.parse({ kind: 'research_tool', detail: 'x' }), 'at is required');
+});
+
+// ---- test_repair kind (decision frozen-test-repair-signatures-plus-visible-repair
+// 7a4c3fb6-dc23-4c2f-9369-d2592132f408; board a06e4a1c): the visible-repair half —
+// a conductor hand-repair of a frozen test raises a capture duty, and the repair
+// event itself is a sixth session-event kind. Mirrors the no_capture precedent
+// (board 7bbec3bd) directly above: same schema, same round-trip shape, new kind.
+test('sessionEventSchema: test_repair joins the register as the SIXTH kind — detail carries the repaired path + evidence summary', async () => {
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const s = mod.sessionEventSchema as { parse: (v: unknown) => { kind: string; detail: string; at: string } } | undefined;
+  assert.ok(s, 'sessionEventSchema must be exported from the schemas index (defined once in transient.ts)');
+
+  // detail carries BOTH the repaired test path and the evidence for why the
+  // test (not the code) was wrong — same free-text-with-required-substance
+  // shape as capture_pending's "<target> — <reason>" convention.
+  const detail = 'tests/feature.spec.ts — assertion pinned the OLD (pre-rename) export name, not the code under test';
+  const repaired = s.parse({ kind: 'test_repair', detail, at: NOW });
+  assert.equal(repaired.kind, 'test_repair');
+  assert.equal(repaired.detail, detail);
+  assert.equal(repaired.at, NOW);
+
+  // kind is now a closed enum of exactly SIX register writers — the five
+  // pre-existing kinds still parse (totality holds after the addition)...
+  assert.equal(s.parse({ kind: 'research_tool', detail: 'x', at: NOW }).kind, 'research_tool');
+  assert.equal(s.parse({ kind: 'agent_dispatch', detail: 'x', at: NOW }).kind, 'agent_dispatch');
+  assert.equal(s.parse({ kind: 'debug_scope', detail: 'x', at: NOW }).kind, 'debug_scope');
+  assert.equal(s.parse({ kind: 'concept_designed', detail: 'x', at: NOW }).kind, 'concept_designed');
+  assert.equal(s.parse({ kind: 'no_capture', detail: 'x', at: NOW }).kind, 'no_capture');
+  // ...and a kind outside the six is still rejected — the totality boundary moved
+  // from five to six, it did not open.
+  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the six writers is rejected');
+  assert.throws(() => s.parse({ kind: 'test_repair', at: NOW }), 'detail is required for test_repair too');
+  assert.throws(() => s.parse({ kind: 'test_repair', detail: 42, at: NOW }), 'detail must be a string');
+  assert.throws(() => s.parse({ kind: 'test_repair', detail }), 'at is required for test_repair too');
+});
+
+// ---- test_append kind (board 17204d1e review MEDIUM: the shipped --append
+// CLI mode and its enum member had zero schema coverage — a mutation
+// survivor by construction). Mirrors the test_repair pin immediately above:
+// same schema, same round-trip shape, one more kind. The pre-existing "six
+// kinds" pin further above is left AS-IS per the coordinator's instruction —
+// its own enum-rejection assertion already uses 'file_touch' as the
+// always-invalid probe, which stays invalid at seven kinds too, so nothing
+// there needed to change.
+test('sessionEventSchema: test_append joins the register as the EIGHTH kind — detail carries the path + additive-evidence summary', async () => {
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const s = mod.sessionEventSchema as { parse: (v: unknown) => { kind: string; detail: string; at: string } } | undefined;
+  assert.ok(s, 'sessionEventSchema must be exported from the schemas index (defined once in transient.ts)');
+
+  // detail carries BOTH the appended-to test path and the additive-evidence
+  // statement (what NEW behavior the case pins, and why it is additive) —
+  // same free-text-with-required-substance shape as test_repair's detail.
+  const detail = 'tests/feature.spec.ts — pins a new additive case for empty-input handling, not a repair of an existing assertion';
+  const appended = s.parse({ kind: 'test_append', detail, at: NOW });
+  assert.equal(appended.kind, 'test_append');
+  assert.equal(appended.detail, detail);
+  assert.equal(appended.at, NOW);
+
+  // totality holds after the addition — the seven pre-existing kinds still
+  // parse...
+  assert.equal(s.parse({ kind: 'research_tool', detail: 'x', at: NOW }).kind, 'research_tool');
+  assert.equal(s.parse({ kind: 'agent_dispatch', detail: 'x', at: NOW }).kind, 'agent_dispatch');
+  assert.equal(s.parse({ kind: 'debug_scope', detail: 'x', at: NOW }).kind, 'debug_scope');
+  assert.equal(s.parse({ kind: 'concept_designed', detail: 'x', at: NOW }).kind, 'concept_designed');
+  assert.equal(s.parse({ kind: 'no_capture', detail: 'x', at: NOW }).kind, 'no_capture');
+  assert.equal(s.parse({ kind: 'capture_pending', detail: 'x', at: NOW }).kind, 'capture_pending');
+  assert.equal(s.parse({ kind: 'test_repair', detail: 'x', at: NOW }).kind, 'test_repair');
+  // ...and a kind outside the eight is still rejected — the totality
+  // boundary moved from seven to eight, it did not open. This is the SAME
+  // rejection pin (unchanged) as the closed-enum test above, re-asserted here
+  // against the new eight-kind enum so a landed implementation that widened
+  // the enum to accept an arbitrary string is caught at this test too.
+  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the eight writers is rejected');
+  assert.throws(() => s.parse({ kind: 'test_append', at: NOW }), 'detail is required for test_append too');
+  assert.throws(() => s.parse({ kind: 'test_append', detail: 42, at: NOW }), 'detail must be a string');
+  assert.throws(() => s.parse({ kind: 'test_append', detail }), 'at is required for test_append too');
+});
+
+test('research_owed is a registered SYSTEM_REASONS member draining under "captured"; 1:1 totality holds (AC7, interface slice 4)', () => {
+  const reasons = SYSTEM_REASONS as readonly string[];
+  const verbs = DRAIN_VERBS as Record<string, string>;
+  assert.ok(reasons.includes('research_owed'), 'research_owed must join SYSTEM_REASONS');
+  assert.equal(verbs['research_owed'], 'captured', 'research_owed drains under the "captured" verb (interface slice 4)');
+  for (const reason of reasons) {
+    assert.equal(typeof verbs[reason], 'string', `SYSTEM_REASON '${reason}' is missing a DRAIN_VERBS entry`);
+    assert.ok(verbs[reason].length > 0, `verb for '${reason}' must not be blank`);
+  }
+  assert.deepEqual(Object.keys(DRAIN_VERBS).sort(), [...reasons].sort(), 'DRAIN_VERBS and SYSTEM_REASONS stay 1:1');
+});
+
+// ---- concept-article layer (decision foreign_7208729b, brief concept-article-layer-wiring) ----
+
+test('feature_article.concept_family: optional marker round-trips; legacy articles omit it; it joins the FTS text; concept_article_missing drains under "created"', async () => {
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const fa = (RECORD_TYPES as Record<string, { schema: { parse: (v: unknown) => Record<string, unknown> }; fts: (r: Record<string, unknown>) => string }>)['feature_article'];
+  const bodyBase = {
+    ...envelope('feature_article'),
+    slug: 'weapons-concept',
+    title: 'weapons (concept)',
+    what_it_does: 'what weapons ARE + members',
+    intended_behavior: 'INTENT + INTERACTIONS',
+    files: [],
+    current_ac: [],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active' as const,
+    version: 1,
+    history: [],
+    live_test_refs: [],
+  };
+  // marker round-trips
+  const marked = fa.schema.parse({ ...bodyBase, concept_family: 'weapons' });
+  assert.equal(marked.concept_family, 'weapons', 'concept_family survives parse');
+  // legacy articles (no marker) round-trip unchanged
+  const legacy = fa.schema.parse(bodyBase);
+  assert.equal(legacy.concept_family, undefined, 'omitted marker stays omitted');
+  // empty-string marker is rejected (min 1)
+  assert.throws(() => fa.schema.parse({ ...bodyBase, concept_family: '' }), 'empty concept_family rejected');
+  // the family joins the FTS text so a family rank-term surfaces the article
+  assert.match(fa.fts({ ...bodyBase, concept_family: 'weapons' }), /weapons/, 'concept_family is FTS-indexed');
+  // the durable lane is registered with its drain verb
+  const reasons = SYSTEM_REASONS as readonly string[];
+  assert.ok(reasons.includes('concept_article_missing'), 'concept_article_missing must join SYSTEM_REASONS');
+  assert.equal((DRAIN_VERBS as Record<string, string>)['concept_article_missing'], 'created', 'a concept demand drains by CREATING the family article');
+  assert.ok(mod, 'schemas index loads');
+});
+
+// ------------------- mid-run scope amendment (run r-1417) -------------------
+
+// ------------------- TUI System tab: AGENT_MODEL_KEY + models catalog (run r-ea9e, AC7) -------------------
+
+// packages/schemas/src/tests -> src -> schemas -> packages -> repo root
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
+
+test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DISPATCHED registered agent (registry minus the declared main-session set) is tokenized and maps to a config.models key (AC7, interface slice 2)', async () => {
+  // dynamic import + cast: AGENT_MODEL_KEY does not exist until this phase ships, so a missing
+  // export must fail an ASSERTION below — never a compile-time reference (a crash-red proves nothing).
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const map = mod.AGENT_MODEL_KEY as Record<string, string> | undefined;
+  assert.ok(map, 'AGENT_MODEL_KEY must be exported from the schemas index (defined once, invariant 1)');
+
+  // the totality oracle: read the registry the map must be total over
+  const registry = JSON.parse(readFileSync(join(REPO_ROOT, 'agent-templates', 'registry.json'), 'utf8')) as {
+    agents: { name: string; file: string }[];
+  };
+
+  // EXEMPTION IS THE DECLARED SET, NOT A TOKEN SNIFF (Sol review LOW finding): the
+  // blanket "no {{MODEL}}/{{EFFORT}} in the body => exempt" reading would silently
+  // pass a DISPATCHED agent that simply forgot its tokens — a real defect, not a
+  // main-session agent. The declared exemption set lives in
+  // scripts/lib/checks.mjs's `MAIN_SESSION_AGENTS` (guarding the §7.3/§7.4/
+  // tool-grant linters there); mirrored here by FILE
+  // NAME rather than cross-imported (packages/schemas is a separate TS project from
+  // scripts/, a plain-.mjs tree — invariant 4) — keep this list in sync with that one.
+  const MAIN_SESSION_AGENT_FILES = ['conductor.md'];
+
+  const exemptNames = registry.agents.filter((a) => MAIN_SESSION_AGENT_FILES.includes(a.file)).map((a) => a.name);
+  const dispatchedAgents = registry.agents.filter((a) => !MAIN_SESSION_AGENT_FILES.includes(a.file));
+
+  // Every DISPATCHED (non-exempt) registered agent must be BOTH tokenized (its
+  // template resolves {{MODEL}}/{{EFFORT}} at install time) AND mapped — a
+  // dispatched agent that lost either one is a real defect, never silently exempt.
+  const dispatchedNames = dispatchedAgents.map((a) => a.name).sort();
+  for (const a of dispatchedAgents) {
+    const content = readFileSync(join(REPO_ROOT, 'agent-templates', a.file), 'utf8');
+    assert.match(
+      content,
+      /\{\{MODEL\}\}|\{\{EFFORT\}\}/,
+      `dispatched agent '${a.name}' carries no {{MODEL}}/{{EFFORT}} token — either it is a main-session agent missing from MAIN_SESSION_AGENT_FILES, or its template lost the token`
+    );
+    assert.equal(typeof map![a.name], 'string', `dispatched agent '${a.name}' has no AGENT_MODEL_KEY entry`);
+    assert.ok(map![a.name].length > 0, `AGENT_MODEL_KEY['${a.name}'] must not be blank`);
+  }
+  // ...and there are no orphan keys: the map's keys are EXACTLY the dispatched registered agents.
+  assert.deepEqual(
+    Object.keys(map!).sort(),
+    dispatchedNames,
+    'AGENT_MODEL_KEY keys are exactly the DISPATCHED registered agents (registry minus MAIN_SESSION_AGENT_FILES) — none missing, none orphaned'
+  );
+
+  // A declared main-session agent (conductor) must NOT carry an AGENT_MODEL_KEY
+  // entry — its frontmatter has no model:/effort: line for one to resolve, by design
+  // (decision conductor-instructions-via-main-session-agent-route-a): a model: line
+  // there would override the model the user launched the session with.
+  for (const name of exemptNames) {
+    assert.ok(!(name in map!), `'${name}' is a declared main-session agent — must not appear in AGENT_MODEL_KEY`);
+  }
+
+  // the exact expected mapping — Slice 5/8 (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1, change 3): the roster
+  // is now implementor/researcher/scout/librarian (explorer -> scout, a
+  // coder-class agent -> implementor). config.models was renamed to match
+  // directly (coder -> implementor, explorer -> scout), so the map is now a
+  // straight identity.
+  assert.deepEqual(map, {
+    implementor: 'implementor',
+    researcher: 'researcher',
+    scout: 'scout',
+    librarian: 'librarian',
+    reviewer: 'reviewer',
+  });
+
+  const lookup = map as Record<string, string>;
+
+  // config-only keys have NO installed/registered agent, so they are NOT keys of AGENT_MODEL_KEY.
+  assert.ok(!('coder_hard' in lookup), 'coder_hard is a config-only key — never a registered-agent key');
+  assert.ok(!('classifiers' in lookup), 'classifiers is a config-only key — never a registered-agent key');
+  assert.ok(!('debugger' in lookup), 'debugger is retired (decision agent-roster-is-classless-four-agents) — neither a registered agent nor a config key');
+
+  // every VALUE the map yields must be a real config.models key (cross-check against parseConfig defaults).
+  const cfg = parseConfig({}) as unknown as { models: Record<string, unknown> };
+  const configKeys = Object.keys(cfg.models);
+  for (const value of Object.values(lookup)) {
+    assert.ok(configKeys.includes(value), `AGENT_MODEL_KEY value '${value}' must be an actual config.models key`);
+  }
+});
+
+// AGENT_CLASS / PIPELINE_AGENT_TYPES totality test deleted along with the
+// exports themselves (scale-down decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — H8, their sole
+// consumer, is gone, and agent-templates/registry.json no longer declares a
+// `class` field.
+
+test('modelsCatalogSchema: {entries:[{id,label,tier,status}]} round-trips; malformed entries fail loud (AC7, interface slice 3)', async () => {
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const schema = mod.modelsCatalogSchema as
+    | { parse: (v: unknown) => { entries: { id: string; label: string; tier: string; status: string }[] } }
+    | undefined;
+  assert.ok(schema, 'modelsCatalogSchema must be exported from the schemas index (defined once, invariant 1)');
+
+  const valid = {
+    entries: [
+      { id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' },
+      { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', tier: 'sonnet', status: 'active' },
+    ],
+  };
+  const parsed = schema!.parse(valid);
+  assert.deepEqual(parsed.entries, valid.entries, 'catalog entries round-trip unchanged (id, label, tier, status all preserved)');
+
+  // boundary: an empty catalog (zero entries) is a well-formed shape.
+  assert.deepEqual(schema!.parse({ entries: [] }).entries, [], 'a catalog with no entries still parses');
+
+  // entries is required and must be an array.
+  assert.throws(() => schema!.parse({}), 'entries is a required field');
+  assert.throws(() => schema!.parse({ entries: 'claude-opus-4-8' }), 'entries must be an array, not a string');
+  assert.throws(() => schema!.parse({ entries: {} }), 'entries must be an array, not an object');
+
+  // every entry requires id, label, tier, status — each present and a string.
+  const good = { id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' };
+  for (const field of ['id', 'label', 'tier', 'status'] as const) {
+    const { [field]: _omitted, ...missing } = good;
+    assert.throws(() => schema!.parse({ entries: [missing] }), `entry field '${field}' is required`);
+    assert.throws(() => schema!.parse({ entries: [{ ...good, [field]: 42 }] }), `entry field '${field}' must be a string`);
+  }
+});
+
+test('referenceMaterialSchema: optional typed catalog field — legacy round-trips; catalog persists; malformed catalog fails loud (AC7, file_baselines precedent 57d9a52d)', () => {
+  // a LEGACY reference_material WITHOUT a catalog must round-trip untouched — the field is never
+  // invented (same optional-field precedent as file_baselines / scope_amendments).
+  const legacy = validateRecord({
+    ...envelope('reference_material'),
+    title: 'Genesys API guide',
+    kind: 'url',
+    location: 'https://developer.genesys.cloud',
+    summary: 'platform API reference',
+    source_date: '2025-11-01',
+    capture_date: '2026-06-01',
+    basis: 'platform',
+  }) as { catalog?: unknown };
+  assert.ok(
+    !('catalog' in legacy) || legacy.catalog === undefined,
+    'a legacy reference_material without catalog round-trips with no invented catalog field'
+  );
+
+  // a reference_material CARRYING a catalog must parse and preserve the typed entries.
+  const withCatalog = validateRecord({
+    ...envelope('reference_material'),
+    title: 'Sterling models catalog',
+    kind: 'url',
+    location: 'https://docs.anthropic.com/models',
+    summary: 'KB-maintained model choices for the System tab',
+    source_date: '2026-07-01',
+    capture_date: '2026-07-01',
+    basis: 'platform',
+    catalog: {
+      entries: [{ id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' }],
+    },
+  }) as { catalog?: { entries: { id: string; label: string; tier: string; status: string }[] } };
+  assert.ok(withCatalog.catalog, 'the catalog field survives parsing on a reference_material record');
+  assert.equal(withCatalog.catalog!.entries.length, 1);
+  assert.deepEqual(withCatalog.catalog!.entries[0], { id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' });
+
+  // the catalog field is TYPED, not free-form: a malformed catalog entry is rejected loud.
+  assert.throws(
+    () =>
+      validateRecord({
+        ...envelope('reference_material'),
+        title: 'bad catalog',
+        kind: 'url',
+        location: 'https://example.com/bad',
+        summary: 's',
+        source_date: '2026-07-01',
+        capture_date: '2026-07-01',
+        basis: 'platform',
+        catalog: { entries: [{ id: 'claude-opus-4-8' }] },
+      }),
+    /invalid|required/i,
+    'a catalog entry missing label/tier/status is rejected'
+  );
+});

@@ -1,0 +1,29 @@
+// Bundles the Sterling OpenCode 2 dashboard plugin (opencode/sterling-tui/tui.tsx)
+// into the committed single file opencode/sterling-tui/sterling-tui.bundle.tsx. Registered in
+// scripts/lib/bundled-artifacts.mjs, so check-bundles-fresh gates it.
+import { mkdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join, resolve, relative } from 'node:path';
+import { buildOpencodeTui } from './lib/bundled-artifacts.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = join(here, '..');
+
+const args = process.argv.slice(2);
+let outFile = join(root, 'opencode', 'sterling-tui', 'sterling-tui.bundle.tsx');
+for (let i = 0; i < args.length; i++) {
+  if (args[i] !== '--out-file') {
+    console.error(`build-opencode-tui: unrecognized argument '${args[i]}' — usage: build-opencode-tui.mjs [--out-file <path>]`);
+    process.exit(1);
+  }
+  const value = args[++i];
+  if (!value || value.startsWith('--')) {
+    console.error('build-opencode-tui: --out-file requires a path argument');
+    process.exit(1);
+  }
+  outFile = resolve(value);
+}
+
+mkdirSync(dirname(outFile), { recursive: true });
+await buildOpencodeTui({ root, outFile });
+console.log(`bundled: ${relative(root, outFile).split('\\').join('/')}`);

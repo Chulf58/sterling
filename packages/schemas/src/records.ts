@@ -1,0 +1,1681 @@
+import { z } from 'zod';
+import { envelopeFields, refineSupersession } from './envelope.js';
+import { normalizeRepoPath, repoPath } from './paths.js';
+
+// Durable record schemas — MVP-spine set (spec §16.1 item 2): decision,
+// feature_article, todo, brief. Remaining §3.2 types arrive at full-build
+// step 2 by adding registry members (the registry + checks already guard them).
+
+// 'final' | 'phase:<n>' — §4 brief AC syntax; §3.2.3 article current_ac uses the
+// same value space (article ACs originate from briefs).
+export const verifiableAt = z.union([z.literal('final'), z.string().regex(/^phase:\d+$/)]);
+
+const base = z.object(envelopeFields);
+
+// §3.2.1 — immutable; revisiting one creates a new decision that supersedes.
+export const decisionSchema = base
+  .extend({
+    type: z.literal('decision'),
+    // Stable handle (board 1e639f32): survives supersession the way an id does
+    // not — auto-minted from the title at create when absent; optional so
+    // legacy records round-trip unchanged. Uniqueness is enforced at the write
+    // (knowledgeCreate), spanning every slug-bearing type.
+    slug: z.string().min(1).optional(),
+    title: z.string().min(1),
+    statement: z.string().min(1),
+    alternatives_rejected: z.array(z.object({ option: z.string(), reason: z.string() })),
+    rationale: z.string().min(1),
+    file_keys: z.array(repoPath).optional(),
+    // MEASURED-VS-INFERRED marker + number→command binding (board 1d02b6b4,
+    // lightweight half, user-approved 2026-08-21): evidence_basis says whether
+    // the record's load-bearing claims were measured or inferred (a false
+    // anti-pattern once lived 8 minutes because nothing marked it inferred);
+    // measured_by names the command/instrument that produced a measured claim,
+    // so a quoted number can be re-derived instead of trusted. Named
+    // evidence_basis because anti_pattern already carries an unrelated `basis`
+    // enum (codebase|platform|external). Instrument-staleness re-test machinery
+    // is DEFERRED — see the decision's rejected alternatives.
+    evidence_basis: z.enum(['measured', 'inferred']).optional(),
+    measured_by: z.string().min(1).optional(),
+    // Board 055cfb6a: whether this ruling is standing policy, scoped to one
+    // session, or a one-off instruction — a capture agent that must choose
+    // asks, one that need not can leave it unstated. Optional, no default: a
+    // one-off instruction was once captured as standing policy and rewrote
+    // the governing file three times; absent means unstated, and existing
+    // records round-trip unchanged.
+    authority: z.enum(['standing', 'session_scoped', 'one_off']).optional(),
+  })
+  .superRefine(refineSupersession);
+
+// Board a9280db7; decision article-kind-marker-gates-structured-na-exemption
+// (c48380bf): the structured not_applicable exemption parallel to
+// current_ac[].untestable_because — same {reason, optional ruling pointer}
+// shape, but at the WHOLE-FIELD level (replaces the array outright, never a
+// per-item marker). Deliberately a different key/field name
+// (`not_applicable`/`ruling_record_id`, not `untestable_because`/
+// `blocking_record_id`) so the two mechanisms are never confused.
+const notApplicableExemptionSchema = z
+  .object({
+    not_applicable: z
+      .object({
+        reason: z.string().min(1),
+        ruling_record_id: z.string().optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
+const currentAcItemSchema = z.object({
+  ac_id: z.string().min(1),
+  text: z.string().min(1),
+  verifiable_at: verifiableAt,
+  // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no test
+  // CAN cover this, because <ruling>" — strict (extra members refused) so a
+  // stray field cannot smuggle unreviewed prose past the one place a reader
+  // checks for a real blocking ruling. Optional: absent means the AC is
+  // ordinarily testable; when present both members are required, since a
+  // reason with no ruling to point at is just an excuse.
+  untestable_because: z
+    .object({
+      reason: z.string().min(1),
+      blocking_record_id: z.string().uuid(),
+    })
+    .strict()
+    .optional(),
+});
+
+const liveTestRefItemSchema = z.object({ ac_id: z.string().min(1), test_paths: z.array(repoPath) });
+
+// current_ac/live_test_refs are validated at RUNTIME as a union (array of real
+// content OR the structured not_applicable exemption, gated by article_kind
+// below) but kept STATICALLY typed as their pre-existing array shape: every
+// pre-existing consumer (frozen tests included, e.g. schemas.test.ts's
+// `ok.live_test_refs[0].test_paths[0]`) indexes these fields as plain arrays,
+// and TypeScript cannot narrow a union by the sibling `article_kind` field
+// anyway. This is why every consumer needs EXPLICIT Array.isArray guards
+// (board a9280db7) — the compiler will not catch a missing one, and each
+// unguarded site fails as a raw TypeError, not a legible refusal.
+//
+// FULL VERIFIED CONSUMER LIST (re-check every one of these before widening
+// this union further — review round 2026-09-01 found three the first pass
+// missed):
+//   - packages/mcp-server/src/tools.ts: knowledgeSplit (reads current_ac for
+//     ownership/move bookkeeping, normalized; PRESERVES the exemption object
+//     verbatim on the parent update rather than flattening it to []) and
+//     suspiciousLocalLabelWarnings (knowledge_promote's prose scan — already
+//     Array.isArray-guarded)
+//   - packages/tui/src/viewmodel.ts: toCard's feature_article branch
+//     (marked-AC section — `.filter` over current_ac)
+//   - scripts/lib/promotion.mjs: the AC-traced-tests dispose-run/H9 gate
+//     (`for...of` over live_test_refs)
+//   - scripts/cleanup-plan.mjs: the deletion-plan evidence builder
+//     (`.flatMap` over live_test_refs)
+//   - scripts/hooks/lib/delivery.mjs: the article-header AC count
+//     (`current_ac?.length` — degrades to omitting the AC section, by design)
+type CurrentAcArray = Array<z.infer<typeof currentAcItemSchema>>;
+type LiveTestRefsArray = Array<z.infer<typeof liveTestRefItemSchema>>;
+
+/**
+ * R9 ATTESTATION PROVENANCE (board 8c8b6d78) — the sibling map to
+ * `file_baselines`, defined ONCE and carried by BOTH baseline-bearing types
+ * (feature_article and repo-located reference_material), because settlement
+ * mints `reconcile_needed` items against either owner and an attested close
+ * stamps whichever one the item names.
+ *
+ * IT IS ON reference_material FOR A MEASURED REASON. It was on the article
+ * alone, and a reference_material-owned item was therefore unclosable in a way
+ * NOTHING reported: the attested close wrote both maps, the reference_material
+ * parse silently DROPPED the unknown `baseline_attestations` key, and the item
+ * was removed having stamped a naked baseline — exactly the "three readers read
+ * 'content-reconciled' from a stamp no content reconcile produced" failure this
+ * map exists to prevent. A missing optional field degrades to silent loss here,
+ * not to a refusal, so the field's ABSENCE was the defect.
+ *
+ * Closing a `reconcile_needed` item as ALREADY-PAID re-stamps `file_baselines`
+ * for exactly that item's file_keys — otherwise H7's settlement predicate, which
+ * compares live bytes against the UNCHANGED baseline, re-mints the item on the
+ * next touch of the same bytes (consumer-measured 2026-09-05: 90 items drained,
+ * five re-minted by the next commit that touched none of their files). A NAKED
+ * baseline write was rejected because three readers would then read "last
+ * reconciled against exactly this content" from a stamp that no content
+ * reconcile produced. This map is what keeps the two claims distinguishable: a
+ * baseline entry WITHOUT an attestation entry means content-reconciled; WITH one
+ * it means "the close of item <item_id> attested that the prose already
+ * describes these bytes, observed against commit <head_commit>".
+ *
+ * `sha256` IS DUPLICATED HERE DELIBERATELY — it is the hash that was attested,
+ * and a reader must not have to join to the sibling `file_baselines` map (which
+ * any later content reconcile overwrites wholesale) to learn what this
+ * attestation covered. `head_commit` is NAMED for what it is: a baseline is
+ * sha256 of the file's BYTES while HEAD is a COMMIT identity, and one name for
+ * both invites comparing a content hash against a git object id (which hashes an
+ * object header too, and may be SHA-1).
+ *
+ * SERVER-OWNED, exactly like file_baselines: it is in WRITE_REFUSED_FIELDS
+ * (packages/mcp-server/src/tools.ts), so a caller cannot forge provenance
+ * through knowledge_update. An ordinary knowledge_update CLEARS THE WHOLE MAP
+ * beside recomputing file_baselines — for BOTH types — so every resulting
+ * baseline belongs to that content generation even where a hash coincidentally
+ * matched.
+ */
+const baselineAttestationsSchema = z
+  .record(
+    z.string(),
+    z.object({
+      attested_at: z.string().min(1),
+      item_id: z.string().min(1),
+      head_commit: z.string().min(1),
+      sha256: z.string().min(1),
+    })
+  )
+  .optional();
+
+/**
+ * ABSENCE ATTESTATION PROVENANCE — deliberately separate from the byte
+ * attestation map. A tree miss proves no bytes, blob, or content hash; this
+ * shape therefore cannot be mistaken for an attestation of file content.
+ */
+const absenceAttestationsSchema = z
+  .record(
+    z.string(),
+    z
+      .object({
+        attested_at: z.string().min(1),
+        item_id: z.string().min(1),
+        head_commit: z.string().min(1),
+      })
+      .strict()
+  )
+  .optional();
+
+// §3.2.3 — versioned body + append-only history.
+export const featureArticleSchema = base
+  .extend({
+    type: z.literal('feature_article'),
+    slug: z.string().min(1),
+    title: z.string().min(1),
+    what_it_does: z.string().min(1),
+    intended_behavior: z.string().min(1),
+    // `unverified` marks a files[] entry whose ROLE has not yet been written from
+    // the actual source — an honest "I do not know this yet" (board db7cd16c).
+    // A consuming project had been expressing exactly this in prose ("⚠⚠ ROLE NOT
+    // YET WRITTEN FROM THE FILE"), which is the right instinct and the wrong
+    // mechanism: a marker buried in a role string only helps if somebody reads it,
+    // while a flag is QUERYABLE and the read-time state check can surface it. Set
+    // it when creating an article ahead of the code; clear it by rewriting the
+    // role from the file.
+    files: z.array(z.object({ path: repoPath, role: z.string().min(1), unverified: z.boolean().optional() })),
+    // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
+    // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
+    // drift check confirms a content change against this before flagging, so a
+    // git merge/checkout that only resets mtimes no longer raises false
+    // reconcile_needed items (decision foreign_65222971 → its baseline successor).
+    file_baselines: z.record(z.string(), z.string()).optional(),
+    // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
+    // above, which reference_material shares so the shape is defined once.
+    baseline_attestations: baselineAttestationsSchema,
+    absence_attestations: absenceAttestationsSchema,
+    // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
+    // axis, subsuming concept_family's role there — concept_family itself is
+    // untouched, kept for compatibility (see below).
+    article_kind: z.enum(['feature', 'probe', 'tool', 'concept']).default('feature'),
+    // Union with the structured not_applicable exemption (see
+    // notApplicableExemptionSchema above) — acceptance of the exemption
+    // branch, and rejection of an empty array, are both gated BY KIND in the
+    // superRefine below, since "which kind" is a whole-record fact a single
+    // field's shape cannot express alone.
+    current_ac: z.union([z.array(currentAcItemSchema), notApplicableExemptionSchema]) as unknown as z.ZodType<CurrentAcArray>,
+    // Concept-article marker (domain decision foreign_7208729b, concept-article-layer
+    // standard): set ONLY on concept articles — one per recurring domain concept
+    // FAMILY (items, weapons, …). Enables class/family enumeration without
+    // overloading stack_tags (the domain-mount manifest) and lets prep reserve
+    // the concept slice. Optional — owning articles and legacy records omit it.
+    concept_family: z.string().min(1).optional(),
+    // Detached-working-tree resolution (comsoft-juiced incident 2026-07-17):
+    // the SYMBOLIC name of the working tree this record's file paths resolve
+    // against — a key into config.working_trees (name → tree path). Unset =
+    // the project root. Machine-specific paths live in config, never in the
+    // record (invariant 2); consumers (read-time drift, baselines, H7/H10
+    // ownership) resolve per record or abstain LOUD on an unmapped name.
+    working_tree: z.string().min(1).optional(),
+    // relies_on/relied_by name other articles by SLUG — slugs survive version
+    // supersession, record ids do not (decision foreign_474b1c71).
+    dependencies: z.object({ relies_on: z.array(z.string()), relied_by: z.array(z.string()) }),
+    steps_runbook: z.string().optional(),
+    state: z.enum(['planned', 'built', 'wired_in', 'active', 'dormant', 'deprecated']),
+    state_reason: z.string().optional(),
+    wiring_todo_id: z.string().uuid().optional(),
+    known_gaps: z
+      .array(
+        z.object({
+          site: z.string().min(1),
+          kind: z.enum(['mutation_survivor', 'other']),
+          evidence: z.string().min(1),
+          recorded_run: z.string().min(1),
+        })
+      )
+      .optional(),
+    version: z.number().int().positive(),
+    history: z.array(z.object({ date: z.string().datetime(), event: z.string().min(1), target_id: z.string().uuid().optional() })),
+    live_test_refs: z.union([z.array(liveTestRefItemSchema), notApplicableExemptionSchema]) as unknown as z.ZodType<LiveTestRefsArray>,
+    // Board 6a8507f8: when an instrument-describing article's probe script was
+    // last actually RUN — distinct from updated_at (when the record was
+    // edited). Optional: most articles describe no probe at all.
+    last_executed: z.string().datetime().optional(),
+  })
+  .superRefine((rec, ctx) => {
+    refineSupersession(rec, ctx);
+    if (rec.state === 'dormant' && (!rec.state_reason || !rec.wiring_todo_id)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (§3.2.3)" });
+    }
+    // Board a9280db7 (decision foreign_c48380bf): the not_applicable exemption on
+    // live_test_refs/current_ac is gated by article_kind — accepted ONLY on
+    // probe|tool, and on probe|tool an empty array is rejected outright (both
+    // are honest-ceremony rules a single field's shape cannot express alone).
+    const exemptKind = rec.article_kind === 'probe' || rec.article_kind === 'tool';
+    const isExempt = (v: unknown): boolean => typeof v === 'object' && v !== null && !Array.isArray(v) && 'not_applicable' in (v as Record<string, unknown>);
+    const gated: Array<[('live_test_refs' | 'current_ac'), unknown, string]> = [
+      ['live_test_refs', rec.live_test_refs, 'real content (ac_id/test_paths)'],
+      ['current_ac', rec.current_ac, 'real content (ac_id/text)'],
+    ];
+    for (const [field, value, contentHint] of gated) {
+      const exempt = isExempt(value);
+      if (exempt && !exemptKind) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} — only kind probe/tool may; other kinds must supply real content`,
+        });
+      }
+      if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: `${field} must not be empty on article_kind '${rec.article_kind}' — write ${contentHint}, or the structured not_applicable exemption`,
+        });
+      }
+    }
+  });
+
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}/, 'ISO date required');
+
+// §3.2.2 — trigger and provenance are top-level, never buried in prose.
+export const antiPatternSchema = base
+  .extend({
+    type: z.literal('anti_pattern'),
+    // Stable handle (board 1e639f32) — see decisionSchema.slug.
+    slug: z.string().min(1).optional(),
+    title: z.string().min(1),
+    trigger: z.string().min(1),
+    guidance: z.string().min(1),
+    wrong_way: z.string().min(1),
+    right_way: z.string().min(1),
+    source_evidence: z.string().min(1),
+    file_keys: z.array(repoPath).optional(),
+    severity: z.enum(['info', 'warn', 'block']).optional(),
+    basis: z.enum(['codebase', 'platform', 'external']).default('codebase'),
+    // See decisionSchema.evidence_basis (board 1d02b6b4) — evidence_basis is
+    // measured|inferred, distinct from this type's pre-existing `basis`
+    // (where the knowledge CAME FROM, not how it was established).
+    evidence_basis: z.enum(['measured', 'inferred']).optional(),
+    measured_by: z.string().min(1).optional(),
+  })
+  .superRefine(refineSupersession);
+
+// §3.2.4 — the decaying type: two clocks, freshness computed at read (lazy).
+// Status adds flagged_stale; retrieval serves it only as "stale — re-verify".
+export const researchFindingSchema = base
+  .extend({
+    type: z.literal('research_finding'),
+    status: z.enum(['active', 'superseded', 'flagged_stale']),
+    // Stable handle (board 1e639f32) — derived from the question; see decisionSchema.slug.
+    slug: z.string().min(1).optional(),
+    question: z.string().min(1),
+    answer: z.string().min(1),
+    source_urls: z.array(z.string()).default([]),
+    source_date: isoDate,
+    capture_date: isoDate,
+    volatility_hint: z.enum(['fast', 'medium', 'stable']).optional(),
+    // Optional (decision foreign_8dbbc85d): findings about specific files (a probe of a
+    // seam, a library's behavior in one adapter) join the file-key economy the
+    // same way decision/anti_pattern/todo do; many findings are fileless
+    // (platform behavior, pricing) so this stays optional, never required.
+    file_keys: z.array(repoPath).optional(),
+    // See decisionSchema.evidence_basis (board 1d02b6b4): a live-probed finding
+    // is measured (measured_by = the probe), a docs-read finding is inferred.
+    evidence_basis: z.enum(['measured', 'inferred']).optional(),
+    measured_by: z.string().min(1).optional(),
+  })
+  .superRefine(refineSupersession);
+
+// §3.2.5 models catalog: typed shape for KB-maintained model lists (run r-ea9e, AC7).
+// Free strings at schema level (tier/status enums and id-regex are phase-2/4 territory
+// per decision foreign_98064d77 — do NOT add enum/regex constraints here).
+export const modelsCatalogSchema = z.object({
+  entries: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      tier: z.string(),
+      status: z.string(),
+    })
+  ),
+});
+
+// §3.2.5 — large, stable, loaded on demand; never bulk-injected.
+export const referenceMaterialSchema = base
+  .extend({
+    type: z.literal('reference_material'),
+    title: z.string().min(1),
+    kind: z.enum(['pdf', 'url', 'doc']),
+    location: z.string().min(1),
+    summary: z.string().min(1),
+    source_date: isoDate,
+    capture_date: isoDate,
+    basis: z.enum(['codebase', 'platform', 'external']).default('codebase'),
+    // §3.2.5 drift baseline for a repo-located kind:doc (normalized location →
+    // sha256 of its bytes), computed server-side at create/refresh. Same role as
+    // feature_article.file_baselines: the read-time check confirms a real content
+    // change before raising refresh_reference, so an mtime-only bump (a merge) is
+    // not mistaken for an out-of-band edit. url/pdf locations carry none.
+    file_baselines: z.record(z.string(), z.string()).optional(),
+    // R9 ATTESTATION PROVENANCE, on the SAME footing as the article's (board
+    // 8c8b6d78; owner-type parity, review finding 2026-09-06). A repo-located
+    // kind:doc joins the reconcile economy through its `location`, so settlement
+    // mints reconcile_needed items against it and an attested close stamps it —
+    // without this field that stamp was silently dropped by the parse, leaving a
+    // naked baseline whose provenance lied about which write produced it. Shape
+    // shared with featureArticleSchema, never re-declared.
+    baseline_attestations: baselineAttestationsSchema,
+    absence_attestations: absenceAttestationsSchema,
+    // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
+    // unchanged (field_baselines optional-field precedent); a catalog-bearing record
+    // carries a validated modelsCatalogSchema payload.
+    catalog: modelsCatalogSchema.optional(),
+    // Detached-working-tree resolution for a repo-located kind:doc — same
+    // semantics as featureArticleSchema.working_tree (comsoft-juiced 2026-07-17).
+    working_tree: z.string().min(1).optional(),
+  })
+  .superRefine(refineSupersession)
+  // §3.2 path invariant at the boundary: a kind:doc location doubles as a
+  // file_key, so normalize it in the BODY too (audit finding 12/43) — otherwise a
+  // 'docs\spec.md' / './docs/spec.md' body diverges from the normalized index key
+  // and renameFileKey's exact-match rewrite misses it. Mirrors the fileKeys
+  // extractor: only kind:doc, and an absolute/escaping location keeps its raw
+  // value (pdf/url/external docs are never repo-relative).
+  .transform((rec) => {
+    if (rec.kind !== 'doc') return rec;
+    try {
+      return { ...rec, location: normalizeRepoPath(rec.location) };
+    } catch {
+      return rec;
+    }
+  });
+
+// §3.2.8 — refuted trails live here instead of dying; debug runs must not
+// re-litigate false trails already disproved.
+export const disconfirmedHypothesisSchema = base
+  .extend({
+    type: z.literal('disconfirmed_hypothesis'),
+    question: z.string().min(1),
+    rejected_answer: z.string().min(1),
+    evidence: z.string().min(1),
+    file_keys: z.array(repoPath).optional(),
+  })
+  .superRefine(refineSupersession);
+
+// open_question — an EVIDENCED question with live hypotheses and NO answer
+// (decision open-question-record-type-authorized, foreign_0857d3bb; board 4ffb95be, from
+// the 2026-08-29 dome-farmer docs). research_finding's contract is question +
+// ANSWER, so a lane holding "three measurements, a derived geometry, two live
+// hypotheses, and no answer" had nowhere durable to put the most perishable
+// output of an engineering session; two independent consumer lanes parked it on
+// board todos instead — correct capture, wrong surface, since the board is
+// near-term WORK and this is durable KNOWLEDGE. Relaxing research_finding was
+// rejected: its two-clocks/staleness contract assumes an answer exists to go
+// stale, so an optional answer would weaken every existing consumer.
+//
+// WHY THE LIFECYCLE FIELD IS NAMED resolution_status AND NOT `status`
+// (user-ruled 2026-08-31, correcting the decision's literal field name): `status`
+// is already the ENVELOPE's server-owned lifecycle axis. It is refused by name on
+// every write (WRITE_REFUSED_FIELDS) and deleted from the persisted body by the
+// store (storableBody), which derives the served value from lifecycle/freshness.
+// A type-local `status` would therefore be both unsettable by a caller and
+// silently destroyed on write — the misleading-success shape the refusal guard
+// exists to eliminate. research_finding is not a counter-example: its extra
+// 'flagged_stale' value is still the ENVELOPE axis, derived at read. The two
+// axes are genuinely different questions — whether the RECORD still serves
+// (envelope) versus whether the QUESTION is still open (this field) — so they
+// get different names rather than one overloaded one.
+export const openQuestionSchema = base
+  .extend({
+    type: z.literal('open_question'),
+    // Stable handle, minted from the question — see decisionSchema.slug.
+    slug: z.string().min(1).optional(),
+    // The question IS the identity, exactly as on research_finding and
+    // disconfirmed_hypothesis (which is why axisNarrowText treats all three the
+    // same way and why the digest leads with it).
+    question: z.string().min(1),
+    // The LIVE candidates. Plural and ordered by the author; a question with no
+    // hypothesis yet is legitimate, so this defaults to [] rather than being
+    // required — what makes the record worth keeping is the EVIDENCE.
+    hypotheses: z.array(z.string().min(1)).default([]),
+    // What is already known: the measurements, the derived geometry, the probe
+    // output. Required — an unevidenced question is a board todo, not durable
+    // knowledge, and that boundary is the whole point of the type.
+    evidence: z.string().min(1),
+    resolution_status: z.enum(['open', 'closed']).default('open'),
+    // The TERMINAL home: closure means the question was answered, and an
+    // answered question is a research_finding. Its own field, never an id
+    // embedded in a status string (Codex refinement, thread 01a05710), so it is
+    // queryable and cannot rot inside prose.
+    closed_into: z.string().min(1).optional(),
+    file_keys: z.array(repoPath).optional(),
+  })
+  .superRefine((rec, ctx) => {
+    refineSupersession(rec, ctx);
+    // The one invariant the type carries beyond its shape: a closed question
+    // must NAME where its answer went. Without this, closing is indistinguishable
+    // from abandoning, and the answered-question type stops being the terminus.
+    if (rec.resolution_status === 'closed' && !rec.closed_into) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "resolution_status 'closed' requires closed_into (the research_finding the answer landed in)",
+      });
+    }
+    // The mirror, so 'open' cannot carry a phantom terminus: an open question
+    // pointing at a finding is a record that contradicts itself, and a reader
+    // would have no way to tell which half is true.
+    if (rec.resolution_status !== 'closed' && rec.closed_into) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "closed_into is set but resolution_status is 'open' — close the question or drop the terminus",
+      });
+    }
+  });
+
+// Attestation — a HUMAN inspected an artifact and ruled on it (board 259a455f,
+// user-approved 2026-08-21). The durable per-item progress surface consuming
+// projects were hand-building as markdown ledgers (2,268 lines for 392 parts,
+// repeatedly stale). A point-in-time fact: immutable like a decision — a
+// re-inspection or changed verdict is a NEW attestation superseding the old,
+// never an edit of history.
+export const attestationSchema = base
+  .extend({
+    type: z.literal('attestation'),
+    // Optional explicit handle. NEVER auto-minted (no title/question headline
+    // to mint from); an explicit one passes the cross-type collision refusal
+    // like every slug-bearing type (review finding 3, 2026-08-21).
+    slug: z.string().min(1).optional(),
+    // What was inspected — a free-form artifact identity (a part number, a
+    // render name, a document version). Repo files it corresponds to belong in
+    // file_keys, which joins the retrieval economy; artifact_key does not need
+    // to be a path and often is not.
+    artifact_key: z.string().min(1),
+    verdict: z.enum(['approved', 'rejected', 'needs_rework']),
+    // Who ruled — a human identity. An agent's judgment is a review finding or
+    // a decision, never an attestation; the type exists precisely to mark the
+    // human-eyes event.
+    inspector: z.string().min(1),
+    // When the inspection HAPPENED — created_at is merely when the record was
+    // written, and ledger entries are routinely written after the fact.
+    inspected_at: isoDate,
+    // Instrument provenance: what the inspection looked at/through (a render
+    // at a commit, a physical sample batch) — the hook for later instrument-
+    // staleness work (board 1d02b6b4's deferred half).
+    instrument: z.string().min(1).optional(),
+    notes: z.string().optional(),
+    file_keys: z.array(repoPath).optional(),
+  })
+  .superRefine(refineSupersession);
+
+export const SYSTEM_REASONS = [
+  'reconcile_needed',
+  'stale_research',
+  'deletion_candidate',
+  'capture_owed',
+  'promotion_review',
+  'wire_in_dormant',
+  'refresh_reference', // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
+  'article_missing', // §6 H10: direct-mode work in unowned territory ended without its owning article
+  'research_owed', // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
+  'concept_article_missing', // §6 H10: a concept_designed session event ended the session without its concept article (decision foreign_7208729b)
+  // An owned file is absent from the working tree but ALIVE on another git ref
+  // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
+  // reconcile, because no write can change the fact and the article is already
+  // correct (the path becomes valid again on merge). It exists so the absence
+  // arm stops minting an unclosable reconcile_needed that re-fires on every
+  // read, and so the drain has somewhere honest to put the finding.
+  'file_parked',
+  // An article's METADATA contradicts reality: it claims `planned` while the code
+  // it owns is demonstrably written, or it carries files[] roles still marked
+  // unverified. Nothing watched the state field before — the hooks watch content
+  // hashes — so an article sat at `planned` over a shipped, wired, probe-verified
+  // feature, and anyone querying it would have concluded the feature did not
+  // exist. The PROSE was right; the metadata was the lie, and metadata is what a
+  // reader trusts first.
+  'state_review',
+  // A feature_article's NON-HISTORY serialized size crossed
+  // config.article_oversize_chars on a knowledge_update/append/edit — the
+  // registry-style-article round-trip ceiling (board 8390f8fa), hit twice
+  // before anything checked it mechanically. History is excluded from the
+  // measure (board 0697c6bd): the lane's remedy is a split, a split only
+  // redistributes prose, and history weight is bounded separately by write-time
+  // rotation (article_history_max_entries). Minted at the WRITE, since that is
+  // the only moment anyone is looking; deduped per article via file_keys (a
+  // feature_article's id changes on every version, so id-keyed dedup would not
+  // survive the next reconcile — the article's owned files do).
+  'article_oversize',
+  // H17 (FIX-B, decision h17-stamp-honor-loud-restore) actually restored a
+  // tracked path to HEAD during an in-window Bash sweep, with no fresh stamp
+  // attesting the current bytes — so the restore, previously invisible past
+  // the agent's own stderr, gets a durable trace. Deduped per restored path
+  // (file_keys): a repeat restore of the same path refreshes the open item
+  // rather than minting a second one — the obligation is "this path keeps
+  // getting reverted", not "an event happened".
+  'restore_performed',
+] as const;
+
+// §11 queue drain verbs: draining means the fulfilling artifact was written,
+// so the reason implies the deed. `satisfies` keeps this total — a new
+// maintenance lane cannot ship without its completed-section verb.
+export const DRAIN_VERBS = {
+  reconcile_needed: 'updated',
+  stale_research: 're-verified',
+  deletion_candidate: 'deleted',
+  capture_owed: 'captured',
+  promotion_review: 'reviewed',
+  wire_in_dormant: 'wired',
+  refresh_reference: 'refreshed',
+  article_missing: 'created',
+  research_owed: 'captured',
+  concept_article_missing: 'created',
+  // 'merged', not 'updated': the item closes when the branch holding the file
+  // lands, which is an event rather than a write. Naming it after a write would
+  // invite exactly the no-op version bump the closing rule forbids.
+  file_parked: 'merged',
+  // The deed is fixing the metadata to match the code (or confirming it already
+  // does) — not reconciling the prose, which may well be correct already.
+  state_review: 'corrected',
+  // The deed is splitting the article (concept-article granularity rubric) —
+  // or, if a re-measure shows it back under threshold, confirming that.
+  article_oversize: 'split',
+  // The deed is closing the loop with the conductor on why the path keeps
+  // getting reverted — a stamp attesting it up front, or the change dropped.
+  restore_performed: 'resolved',
+} as const satisfies Record<(typeof SYSTEM_REASONS)[number], string>;
+
+// §3.2.7 — the board and the maintenance queue. There is no 'done' status:
+// done = removed by the artifact-writing event (P4).
+export const todoSchema = base
+  .extend({
+    type: z.literal('todo'),
+    // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
+    // the same stable handle decision/anti_pattern/research_finding gained in
+    // de1a7329, extended to `todo` because a board item otherwise has only a
+    // uuid and a multi-KB text blob, and a user asked to rule on "board
+    // 17204d1e" cannot tell what they are ruling on. Auto-minted at the write
+    // (knowledgeCreate) from the item's opening headline LINE for source:'user'
+    // items; optional so legacy rows round-trip unchanged, exactly as de1a7329
+    // needed no migration. Uniqueness spans EVERY slug-bearing type — one
+    // namespace, because that is what knowledge_get/board_get resolve.
+    //
+    // A SLUG IS A FORGIVING ADDRESS FORM: it is accepted by board_get and
+    // board_update and REFUSED by board_remove/maintenance_remove, which keep
+    // demanding the exact full uuid (anti-pattern
+    // no-bounded-trail-guard-for-destructive-addressing, severity block).
+    slug: z.string().min(1).optional(),
+    text: z.string().min(1),
+    source: z.enum(['user', 'system']),
+    file_keys: z.array(repoPath).optional(),
+    feature_link: z.string().uuid().optional(),
+    priority: z.enum(['low', 'normal', 'high']).optional(),
+    system_reason: z.enum(SYSTEM_REASONS).optional(),
+    // Board grouping key (decision foreign_a8d2ce6c): slices of one larger objective
+    // share this label and the TUI groups them under it. A grouping FIELD, not
+    // a parent record — absent means standalone. The 'standalone' sentinel is
+    // normalized to absent at the TOOL layer; the schema stores what it gets.
+    objective: z.string().min(1).optional(),
+    // §3.2.7 provenance (decision board-provenance-measured-at-head): the
+    // commit this item's evidence was read at. Server-stamped on board_add and
+    // re-stamped on a board_update that changes text/file_keys; a caller MAY
+    // supply it, and the tool layer refuses an unresolvable sha by name rather
+    // than silently replacing it with HEAD (P5).
+    measured_at_head: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/, '40-hex commit sha required')
+      .optional(),
+    // Semantic order between user asks (decision
+    // every-user-ask-is-boarded-at-intake-with-slim-blocked-by, rule 6): the
+    // SLUGS of the board items this one waits on. Slugs, never ids, because a
+    // slug is the immutable address (decision board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address). Lives in the JSON body
+    // like every other todo field, so it needs no migration. Existence of each
+    // blocker is checked at the tool layer when written; a blocker removed later
+    // reads as closed, it is never rewritten out of this list.
+    blocked_by: z.array(z.string().min(1)).optional(),
+  })
+  .superRefine((rec, ctx) => {
+    refineSupersession(rec, ctx);
+    if (rec.source === 'system' && !rec.system_reason) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "source 'system' requires system_reason (§3.2.7)" });
+    }
+    if (rec.blocked_by !== undefined && rec.source === 'system') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['blocked_by'],
+        message: "blocked_by orders source:'user' board tasks only — maintenance-queue items never carry it",
+      });
+    }
+    if (rec.slug !== undefined && rec.blocked_by?.includes(rec.slug)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['blocked_by'], message: `blocked_by lists '${rec.slug}', the item itself — an item cannot block itself` });
+    }
+  });
+
+// §4 — the brief-as-contract; the single authoritative copy lives in the store.
+export const briefSchema = base
+  .extend({
+    type: z.literal('brief'),
+    slug: z.string().min(1),
+    title: z.string().min(1),
+    problem: z.string().min(1),
+    feature: z.string().min(1),
+    user_stated: z.object({
+      criteria: z.array(z.string()),
+      constraints: z.array(z.string()),
+    }),
+    conductor_proposals: z.array(z.object({ text: z.string().min(1), status: z.enum(['confirmed', 'unconfirmed']) })),
+    acceptance_criteria: z.array(z.object({ ac_id: z.string().min(1), text: z.string().min(1), verifiable_at: verifiableAt })),
+    technical_design: z.object({
+      approach: z.string(),
+      interfaces: z.array(z.object({ name: z.string(), contract: z.string() })),
+      shared_structures: z.array(z.string()),
+    }),
+    // §7.1/§7.6: proposed at planning, human-confirmed at the gate, frozen into
+    // data before the run — reviewer-selection's first signal source.
+    risk_flags: z.array(z.enum(['security_relevant', 'perf_sensitive'])).optional(),
+    blast_radius: z.object({
+      files: z.array(z.object({ path: repoPath, owning_articles: z.array(z.string().uuid()) })),
+      reconcile_list: z.array(z.string().uuid()),
+    }),
+    incidental_scope: z.array(repoPath),
+    out_of_scope: z.array(z.string()),
+    phases: z.array(
+      z.object({
+        phase_id: z.string().min(1),
+        goal: z.string().min(1),
+        subtasks: z.array(z.string()),
+        ac_ids: z.array(z.string()),
+        difficulty: z.object({ level: z.enum(['normal', 'hard']), reasons: z.array(z.string()) }),
+        model_hint: z.string(),
+        // prep's staging inputs are planning outputs (§7.1/§7.6): the phase
+        // declares its file list + rank_terms. Optional pending §4 alignment
+        // (raised as a spec gap); prep falls back to blast_radius files.
+        files: z.array(repoPath).optional(),
+        rank_terms: z.array(z.string().regex(/^\S{1,64}$/)).optional(),
+        // §8.1: the phase's interface slice (names into technical_design.
+        // interfaces) — the test-writer's REQUIRED input; a phase without
+        // declared interfaces gives it nothing to write against (spawn check).
+        interfaces: z.array(z.string().min(1)).optional(),
+      })
+    ),
+    decisions_made: z.array(z.string().uuid()),
+  })
+  .superRefine((rec, ctx) => {
+    refineSupersession(rec, ctx);
+    // a phase's interface slice must reference declared design interfaces —
+    // a dangling name would hand the test-writer a contract that doesn't exist
+    const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
+    for (const phase of rec.phases) {
+      for (const name of phase.interfaces ?? []) {
+        if (!declared.has(name)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `phase '${phase.phase_id}' references undeclared interface '${name}' (§8.1 interface slice must come from technical_design.interfaces)`,
+          });
+        }
+      }
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// AGENT_MODEL_KEY — run r-ea9e, AC7 (TUI System tab).
+// Plain record: every registered agent name (agent-templates/registry.json)
+// → the config.models key that governs its model+effort. Totality-tested in
+// schemas.test.ts; coder_hard/classifiers are config-only keys (no installed
+// agent) and are NOT map keys.
+// ---------------------------------------------------------------------------
+// Slice 5/8 roster (decision sterling-claude-code-scale-down-boundary,
+// 2ad87dd1 change 3; "Roster shape and review pairing"): explorer -> scout,
+// coder -> implementor. config.models was renamed to match directly (coder ->
+// implementor, explorer -> scout — see packages/schemas/src/config.ts), so
+// this map is now a straight identity for every registered agent rather than
+// an indirection layer.
+export const AGENT_MODEL_KEY = {
+  implementor: 'implementor',
+  researcher: 'researcher',
+  scout: 'scout',
+  librarian: 'librarian',
+  reviewer: 'reviewer',
+} as Record<string, string>;
+
+// REVIEWER_ROLES (decision foreign_628c4b7f, run r-d630, phase 1 — AC1): derived from
+// AGENT_MODEL_KEY — exactly the keys that map to 'reviewers'. Single source of
+// truth; a hardcoded list was explicitly rejected (second source of truth would
+// drift from the roster). Totality-tested in schemas.test.ts vs registry.json.
+export const REVIEWER_ROLES: Set<string> = new Set(
+  Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === 'reviewers')
+);
+
+// AGENT_CLASS / PIPELINE_AGENT_TYPES deleted (scale-down decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1): the pipeline/
+// conductor_direct class distinction they encoded, and H8 (their sole
+// consumer), are both gone — direct mode is the only mode now, so no agent
+// needs a class marking.
+
+// ---------------------------------------------------------------------------
+// Record-type registry (invariant 3, spec §15): the single source of truth for
+// durable types. The store consults it on every write — an unregistered type
+// is rejected loudly. fts/fileKeys extractors keep the store generic; rank
+// indexes title + body-equivalents per type (§3.4).
+// ---------------------------------------------------------------------------
+
+export interface RecordTypeEntry {
+  schema: z.ZodTypeAny;
+  /** decision records are immutable (§3.2.1): supersession is the only change path */
+  immutable: boolean;
+  fts: (record: Record<string, unknown>) => string;
+  fileKeys: (record: Record<string, unknown>) => string[];
+  /**
+   * The type's HEADLINE fields — what identifies a record when the caller wants
+   * the landscape rather than the bodies (knowledge_query projection:'digest').
+   * Field name → whether it is emitted whole or clipped to DIGEST_CLIP.
+   *
+   * Unlike knownFieldsFor this CANNOT be derived from the schema: WHICH field is
+   * the headline is an editorial judgement (anti_pattern leads with `trigger`,
+   * research_finding with its two clocks), and no shape encodes that. So it is a
+   * hand-maintained list of field names — the exact thing decision foreign_44e45931
+   * warns about — and it is DECLARATIVE rather than a closure for that reason:
+   * a map of names can be checked against knownFieldsFor(type), so renaming a
+   * schema field fails the registry test loudly instead of silently emptying
+   * the digest. A closure reading r.trigger would just stop finding anything
+   * (invariant 3: the registry's consistency check exists before its members).
+   */
+  digest: Record<string, 'plain' | 'clip'>;
+}
+
+const s = (v: unknown): string => (typeof v === 'string' ? v : '');
+
+/**
+ * Headline clip (projection:'digest'). Long enough for an anti_pattern trigger
+ * to be actionable without opening the record, short enough that a 100-record
+ * digest stays an order of magnitude under one full-body window.
+ */
+export const DIGEST_CLIP = 160;
+
+const clipped = (v: unknown, n: number = DIGEST_CLIP): string | undefined => {
+  const text = s(v).replace(/\s+/g, ' ').trim();
+  if (!text) return undefined;
+  return text.length <= n ? text : `${text.slice(0, n)}…`;
+};
+
+export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
+  decision: {
+    schema: decisionSchema,
+    immutable: true,
+    fts: (r) => [s(r.slug), s(r.title), s(r.statement), s(r.rationale)].join('\n'),
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // slug leads for the same reason it does on feature_article: it is the
+    // handle that survives supersession (board 1e639f32); the title states the ruling.
+    // authority (board 055cfb6a): surfaced on the digest line so a capped scan
+    // shows scope alongside the ruling, not only on knowledge_get.
+    digest: { slug: 'plain', title: 'plain', authority: 'plain' },
+  },
+  anti_pattern: {
+    schema: antiPatternSchema,
+    immutable: false,
+    fts: (r) => [s(r.slug), s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join('\n'),
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // trigger is the field that tells a reader whether the hazard applies to
+    // what they are about to do — the whole point of scanning hazards — and
+    // severity is the order H19 already renders them in.
+    digest: { slug: 'plain', title: 'plain', trigger: 'clip', severity: 'plain' },
+  },
+  research_finding: {
+    schema: researchFindingSchema,
+    immutable: false,
+    fts: (r) => [s(r.slug), s(r.question), s(r.answer)].join('\n'),
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // No title on this type — the question IS the identity. Both clocks ride
+    // along because a finding's currency decides whether it may be used at all.
+    digest: { slug: 'plain', question: 'clip', source_date: 'plain', capture_date: 'plain' },
+  },
+  reference_material: {
+    schema: referenceMaterialSchema,
+    immutable: false,
+    fts: (r) => [s(r.title), s(r.summary)].join('\n'),
+    // §3.2.5: repo-located docs join the reconcile economy — for kind:doc a
+    // repo-relative location doubles as a file_key (H7 pressure applies);
+    // pdf/url locations are external and carry none.
+    fileKeys: (r) => {
+      if (r.kind !== 'doc') return [];
+      try {
+        return [normalizeRepoPath(r.location as string)];
+      } catch {
+        return []; // absolute/escaping location: not repo-located
+      }
+    },
+    // location is this type's path-bearing field (§3.2.5), so it is what a
+    // reader needs to go open the thing.
+    digest: { title: 'plain', kind: 'plain', location: 'plain' },
+  },
+  disconfirmed_hypothesis: {
+    schema: disconfirmedHypothesisSchema,
+    immutable: false,
+    fts: (r) => [s(r.question), s(r.rejected_answer), s(r.evidence)].join('\n'),
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // The rejected answer is the reusable half — it stops the question being
+    // re-asked and re-answered the same wrong way.
+    digest: { question: 'clip', rejected_answer: 'clip' },
+  },
+  open_question: {
+    schema: openQuestionSchema,
+    // MUTABLE, unlike decision/attestation: an open question is a LIVE working
+    // record — hypotheses get added and struck, evidence accumulates, and it
+    // eventually flips to closed. Supersession would mint a new record per
+    // measurement, which is exactly the churn the type exists to absorb.
+    immutable: false,
+    fts: (r) => [s(r.slug), s(r.question), (r.hypotheses as string[] | undefined)?.join('\n') ?? '', s(r.evidence)].join('\n'),
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // The question is the identity (research_finding's rule); resolution_status
+    // rides along because whether a question is still OPEN decides whether it is
+    // worth reading at all — the same role research_finding's clocks play.
+    digest: { slug: 'plain', question: 'clip', resolution_status: 'plain' },
+  },
+  attestation: {
+    schema: attestationSchema,
+    // Point-in-time human ruling: supersession is the only change path, exactly
+    // the decision contract (§3.2.1 analog; board 259a455f).
+    immutable: true,
+    fts: (r) => [s(r.slug), s(r.artifact_key), s(r.verdict), s(r.inspector), s(r.notes)].join('\n'),
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // The progress-surface read: artifact + verdict + who + when answer the
+    // ledger question without opening the record.
+    digest: { artifact_key: 'plain', verdict: 'plain', inspector: 'plain', inspected_at: 'plain' },
+  },
+  feature_article: {
+    schema: featureArticleSchema,
+    immutable: false,
+    // concept_family joins the FTS text so a family query ranks its concept
+    // article (class enumeration stays a consumer-side filter on the field).
+    fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join('\n'),
+    fileKeys: (r) => ((r.files as { path: string }[] | undefined) ?? []).map((f) => f.path),
+    // slug leads: it is the STABLE handle across versions (decision foreign_474b1c71),
+    // and the id in the envelope beside it is not. version + state say whether
+    // this is a moving target and whether it is wired yet.
+    digest: { slug: 'plain', title: 'plain', state: 'plain', version: 'plain', concept_family: 'plain' },
+  },
+  todo: {
+    schema: todoSchema,
+    immutable: false,
+    fts: (r) => s(r.text),
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // The measured worst case for full bodies: board items run to ~8 KB each,
+    // so a whole-board read spilled 478 KB. system_reason is what sorts the
+    // maintenance queue into lanes; priority/source sort the board.
+    //
+    // slug LEADS, exactly as it does on decision/feature_article, and is
+    // 'plain' rather than 'clip' (decision human-readable-ids-for-board-items,
+    // 2e8c30e4): it is the ADDRESSABLE handle a reader cites, and a clipped
+    // address does not resolve. Names clip only in the composed `name (id8)`
+    // DISPLAY form (headlineRecord / TUI card titles) — never in the field.
+    // Absent for a legacy slugless item: digestRecord omits empty headline
+    // fields, and an absent name is safer than a fabricated one (df361a0f).
+    digest: { slug: 'plain', text: 'clip', source: 'plain', priority: 'plain', system_reason: 'plain', objective: 'plain' },
+  },
+  brief: {
+    schema: briefSchema,
+    immutable: false,
+    fts: (r) => [s(r.slug), s(r.title), s(r.problem), s(r.feature)].join('\n'),
+    fileKeys: (r) => {
+      const br = r.blast_radius as { files?: { path: string }[] } | undefined;
+      return (br?.files ?? []).map((f) => f.path);
+    },
+    digest: { slug: 'plain', title: 'plain', problem: 'clip' },
+  },
+};
+
+/**
+ * The shared digest envelope + the type's headline fields (§3.4 read side).
+ *
+ * `id` stays a FULL uuid deliberately: an 8-char prefix resolves through
+ * knowledge_get since decision foreign_27f148c2, but handing back a truncated id is how
+ * a caller ends up pasting one into a tool that wants the whole thing. The
+ * point of the digest is to make the NEXT call cheap, so the handle it returns
+ * has to be the one that works everywhere.
+ *
+ * An unregistered type yields the envelope alone rather than throwing — a
+ * projection is a read convenience and must never be the thing that makes a
+ * read fail.
+ */
+/**
+ * Size decomposition every size consumer shares (board a382af6b): the oversize
+ * lane, the digest size column, and knowledge_stats all measure the SAME two
+ * numbers or they drift — body_chars is the record WITHOUT history (the number
+ * a split can fix, the number the article_oversize threshold judges), and
+ * history_chars is the rotated-bounded rest.
+ */
+export function recordSizes(record: Record<string, unknown>): { body_chars: number; history_chars: number } {
+  const { history, ...body } = record;
+  return {
+    body_chars: JSON.stringify(body).length,
+    history_chars: Array.isArray(history) && history.length ? JSON.stringify(history).length : 0,
+  };
+}
+
+export function digestRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    id: record.id,
+    type: record.type,
+    status: record.status,
+    updated_at: record.updated_at,
+  };
+  const entry = RECORD_TYPES[s(record.type)];
+  if (!entry) return out;
+  for (const [field, mode] of Object.entries(entry.digest)) {
+    // Absent/empty headline fields are OMITTED rather than emitted as null: an
+    // optional field then costs nothing, which is the entire point of a digest.
+    const value = mode === 'clip' ? clipped(record[field]) : record[field];
+    if (value !== undefined && value !== null && value !== '') out[field] = value;
+  }
+  // Size rides every REGISTERED-type digest line (board a382af6b; the
+  // unregistered-type early return above keeps its minimal shape): a reader
+  // scanning the landscape sees WHICH records are bloating before a
+  // knowledge_get ever chokes on one. body_chars only — history is
+  // rotation-bounded elsewhere.
+  out.size_chars = recordSizes(record).body_chars;
+  return out;
+}
+
+/**
+ * projection:'headline' (board b786a84f) — board_query/maintenance_query
+ * ONLY, and smaller than 'digest': id, priority, objective (user items),
+ * system_reason (maintenance items), and the first HEADLINE_CLIP chars of
+ * text. Measured need: projection:'digest' on a 289-item board ran 108KB in
+ * one call — digest still carries source/status/type/updated_at/size_chars
+ * per item, which a scale audit pays for and rarely reads. Todo-only by
+ * construction (board/maintenance items are always type:'todo') rather than
+ * a per-type registry entry like `digest`, because no other record type is
+ * read through board_query.
+ *
+ * `priority` is emitted UNCONDITIONALLY (even when the item never set one) —
+ * unlike `objective`/`system_reason`, which are omitted when absent — because
+ * priority is a board-wide sort axis every item carries a slot for, while
+ * objective/system_reason are properties of ONE lane (user vs. system) a
+ * record from the other lane never has at all.
+ */
+export const HEADLINE_CLIP = 80;
+
+/**
+ * THE COMPOSED DISPLAY HANDLE — `name (id8)`, name FIRST, id retained
+ * (decision human-readable-ids-for-board-items, 2e8c30e4). Defined ONCE here
+ * (invariant 1) because three surfaces render it: the headline projection
+ * below, the TUI board/queue card titles, and any other human-facing listing.
+ *
+ * NAME_CLIP = 48, ellipsis INCLUDED. Derivation rather than a number from the
+ * air: the mint already clamps a slug at 60 characters (decision foreign_de1a7329);
+ * the ` (id8)` half costs exactly 11 — one space, two parentheses, eight hex —
+ * so 60 − 11 = 49, rounded DOWN to 48 so the constant survives the id form
+ * gaining a character. The composed handle then lands at 59, inside the same
+ * 60-character budget the mint uses.
+ *
+ * NAMES CLIP, IDS NEVER DO: "a truncated id is unresolvable while a truncated
+ * name is still recognisable" (2e8c30e4). The clip therefore applies to the
+ * composed DISPLAY string only — never to the digest's `slug` FIELD, which is
+ * the address a reader cites, and never to the `id` field, which is the only
+ * form board_remove / maintenance_remove accept (AC23 of mcp-tool-surface;
+ * anti-pattern no-bounded-trail-guard-for-destructive-addressing). The display
+ * form ADDS; it never REPLACES.
+ */
+export const NAME_CLIP = 48;
+
+/** Leading-edge clip: the head of a name is what makes it recognisable. */
+export const clipName = (name: string): string =>
+  name.length <= NAME_CLIP ? name : `${name.slice(0, NAME_CLIP - 1)}…`;
+
+/** `name (id8)` — call ONLY where a name exists; nothing is composed from an
+ *  absent one (an id printed twice is not a name — df361a0f). */
+export const displayHandle = (name: string, id: string): string => `${clipName(name)} (${id.slice(0, 8)})`;
+
+/**
+ * A board item's DISPLAY LABEL — the first non-blank line of its CURRENT
+ * `text`, never its (immutable) `slug` (board 081508d0: `updateTodo` never
+ * re-mints a slug after text changes, so a slug-derived name goes stale the
+ * moment an item is renamed or renumbered — "Slice 7" showed as
+ * "slice-6-..." because the slug predated the renumbering). Defined ONCE
+ * here (invariant 1) so every display site — this headline projection,
+ * board_get's `label`, the TUI card titles, lane-collision names — reads one
+ * function and cannot disagree about what a reader is shown.
+ *
+ * FIRST NON-BLANK LINE, WHITESPACE NORMALIZED, PARENTHETICALS KEPT.
+ * Deliberately NOT `todoHeadline` (tools.ts): that extractor MINTS a slug
+ * base and drops a parenthetical aside so it never eats the 60-char kebab
+ * budget. A display label has no such budget to protect, and dropping the
+ * aside would throw away meaningful text the reader is actually shown.
+ *
+ * FALLS BACK TO `slug` only when `text` yields nothing at all (blank or
+ * whitespace-only) — never the reverse. Returns '' when both are empty; a
+ * caller decides its own placeholder (e.g. boardItemName's
+ * '(unnamed board item)') rather than this shared helper inventing one.
+ */
+export function boardDisplayLabel(text: unknown, slug?: unknown): string {
+  const line = s(text)
+    .split('\n')
+    .find((l) => l.trim().length > 0);
+  const normalized = line ? line.trim().replace(/\s+/g, ' ') : '';
+  return normalized || s(slug).trim();
+}
+
+export function headlineRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { id: record.id, priority: record.priority };
+  // The human half of the line, beside — never instead of — the full id above.
+  //
+  // TODO RECORDS (board_query/maintenance_query, the only callers —
+  // headlineRecord is todo-only by construction): the label is derived from
+  // the item's CURRENT text UNCONDITIONALLY (board 081508d0, review round 2,
+  // HIGH finding). A maintenance-queue item NEVER mints a slug at all (S1
+  // design call, mintHeadlineOf) — gating composition on slug presence left
+  // every ordinary maintenance_query headline row permanently nameless, which
+  // is worse than the original defect: not stale, simply ABSENT. `id8` is a
+  // uuid-prefix address, safe to show regardless of whether a slug was ever
+  // minted, so "no slug" is no longer a reason to omit the name. Composition
+  // is gated on the LABEL alone (non-empty) — falling back to the stored slug
+  // only when text itself yields nothing (boardDisplayLabel's own contract),
+  // and omitted only when NEITHER yields anything: absent name over wrong
+  // name (df361a0f) still holds for that one genuinely-nameless case.
+  //
+  // EVERY OTHER REGISTERED TYPE keeps its PRE-FIX behaviour byte for byte:
+  // name is the stored slug, full stop — headlineRecord has no other actual
+  // caller today, but its signature is general and this keeps it honest.
+  const slug = s(record.slug);
+  const name = record.type === 'todo' ? boardDisplayLabel(record.text, slug) : slug;
+  if (name) out.name = displayHandle(name, s(record.id));
+  if (record.objective !== undefined && record.objective !== null && record.objective !== '') out.objective = record.objective;
+  if (record.system_reason !== undefined && record.system_reason !== null && record.system_reason !== '') out.system_reason = record.system_reason;
+  const text = clipped(record.text, HEADLINE_CLIP);
+  if (text !== undefined) out.text = text;
+  return out;
+}
+
+export type RecordType = keyof typeof RECORD_TYPES;
+
+export type DurableRecord =
+  | z.infer<typeof decisionSchema>
+  | z.infer<typeof antiPatternSchema>
+  | z.infer<typeof researchFindingSchema>
+  | z.infer<typeof referenceMaterialSchema>
+  | z.infer<typeof disconfirmedHypothesisSchema>
+  | z.infer<typeof attestationSchema>
+  | z.infer<typeof featureArticleSchema>
+  | z.infer<typeof todoSchema>
+  | z.infer<typeof briefSchema>;
+
+/**
+ * The field names a registered type actually accepts, derived from its own
+ * schema so nothing is listed twice (invariant 1). Each record schema is
+ * base.extend({...}).superRefine(...), i.e. a ZodEffects wrapping the object, so
+ * the shape has to be unwrapped rather than read off the top — and reference_
+ * material chains two refinements, hence the loop rather than one step.
+ */
+export function objectShapeFor(type: string): Record<string, unknown> | undefined {
+  const entry = RECORD_TYPES[type];
+  if (!entry) return undefined;
+  let schema: unknown = entry.schema;
+  // unwrap ZodEffects/ZodDefault layers until the ZodObject with .shape surfaces
+  for (let i = 0; i < 10 && schema && typeof schema === 'object'; i++) {
+    const shape = (schema as { shape?: Record<string, unknown> }).shape;
+    if (shape) return shape;
+    const inner = (schema as { _def?: { schema?: unknown; innerType?: unknown } })._def;
+    schema = inner?.schema ?? inner?.innerType;
+  }
+  return undefined;
+}
+
+export function knownFieldsFor(type: string): Set<string> | undefined {
+  const shape = objectShapeFor(type);
+  return shape ? new Set(Object.keys(shape)) : undefined;
+}
+
+/** One field's shape, as knowledge_schema reports it. */
+export interface FieldShape {
+  name: string;
+  required: boolean;
+  /** A readable rendering of the zod type: 'string', 'string[]', '{option, reason}[]', 'enum', … */
+  type: string;
+  /** Present only for closed sets — the whole point of asking. */
+  enum_values?: string[];
+  /**
+   * Present only when this field's top-level type is an array-of-objects
+   * (e.g. files[]'s `{path, role}[]`, current_ac[]'s `{ac_id, text,
+   * verifiable_at}[]`) — the element object's OWN sub-fields, one level deep,
+   * with their own type + enum_values (board db0e2799). Without this, a
+   * nested enum (e.g. current_ac[].verifiable_at) was invisible in
+   * knowledge_schema and only discoverable by having a write on that
+   * sub-field rejected.
+   */
+  element_fields?: FieldShape[];
+  /**
+   * A concrete, correctly-SHAPED value for this field, DERIVED from the field's
+   * own zod node and then PROVEN by it (board 89672420, extending be5e1d04's
+   * scalar examples to every field kind). Scalars render bare ('fast',
+   * '2026-08-24T00:00:00.000Z'); composites render as JSON text, so
+   * `alternatives_rejected` answers with `[{"option":"<option>","reason":
+   * "<reason>"}]` instead of leaving a writer to discover by rejection that it
+   * is not string[] — the single most-reported schema failure from consuming
+   * projects, and the reason CLAUDE.md carried that fact in prose.
+   *
+   * DERIVED, NEVER HAND-WRITTEN: there is no per-type example table anywhere —
+   * exampleFor walks the same registered schema knownFieldsFor/schemaFor walk,
+   * so a new field is exemplified the moment it is defined and there is no
+   * second registry to drift (invariant 1). Every candidate is run through the
+   * node's OWN safeParse before it is reported, so an example is never a guess:
+   * be5e1d04's rule ('a wrong example is worse than none') is kept by PROOF
+   * rather than by abstention. Absent when nothing derivable validates — an
+   * unsamplable pattern gets no example, never a wrong one.
+   */
+  example?: string;
+}
+
+/**
+ * Render a zod type as a short readable string, plus its enum values when it is
+ * a closed set. Bounded recursion: a malformed or exotically-nested schema
+ * degrades to 'unknown' rather than throwing, because a SCHEMA READ must never
+ * be why a call fails.
+ *
+ * Internal — carries the full descriptor (enum_values/element_fields) that
+ * schemaFor/describeElementFields need. The exported `describeZod` below is
+ * the thin public projection (just the type string) board be5e1d04 pins
+ * directly. EXAMPLE VALUES ARE NOT COMPUTED HERE: they come from the one
+ * derivation `exampleFor` owns (board 89672420), so the type projection and
+ * the value projection cannot answer differently about the same node.
+ */
+function describeZodDetailed(node: unknown, depth = 0): { type: string; enum_values?: string[]; element_fields?: FieldShape[] } {
+  if (!node || typeof node !== 'object' || depth > 6) return { type: 'unknown' };
+  const def = (node as { _def?: Record<string, unknown> })._def;
+  const name = def?.typeName as string | undefined;
+  switch (name) {
+    case 'ZodString': {
+      // board be5e1d04: a .regex()/.datetime() constraint was invisible here —
+      // describeZod reported bare 'string' for both a regex-pinned union
+      // member and history[].date's ISO-instant requirement, so a reader had
+      // no way to tell "accepts any string" from "must match this pattern"
+      // short of a rejected write. Surface the constraint IN the type string;
+      // a stated pattern beats a silent one.
+      // Codex review fix: a schema can carry MORE THAN ONE of these checks at
+      // once (z.string().datetime().regex(/Z$/) stores both in _def.checks),
+      // and the earlier version returned at the first match — silently
+      // dropping the others. Compose every present constraint into one
+      // description instead of picking one.
+      const checks = (def?.checks as Array<{ kind?: string; regex?: RegExp }> | undefined) ?? [];
+      const regexCheck = checks.find((c) => c.kind === 'regex' && c.regex);
+      const datetimeCheck = checks.find((c) => c.kind === 'datetime');
+      const uuidCheck = checks.find((c) => c.kind === 'uuid');
+      if (!regexCheck && !datetimeCheck && !uuidCheck) return { type: 'string' };
+      const annotations: string[] = [];
+      if (datetimeCheck) annotations.push('ISO datetime');
+      if (uuidCheck) annotations.push('uuid');
+      const base = annotations.length ? `string (${annotations.join(', ')})` : 'string';
+      return { type: regexCheck?.regex ? `${base} matching ${regexCheck.regex}` : base };
+    }
+    case 'ZodNumber':
+      return { type: 'number' };
+    case 'ZodBoolean':
+      return { type: 'boolean' };
+    case 'ZodNull':
+      return { type: 'null' };
+    case 'ZodAny':
+    case 'ZodUnknown':
+      return { type: 'any' };
+    case 'ZodEnum': {
+      const values = (def?.values as string[] | undefined) ?? [];
+      return { type: 'enum', enum_values: values };
+    }
+    case 'ZodNativeEnum':
+      return { type: 'enum' };
+    case 'ZodLiteral':
+      return { type: `literal ${JSON.stringify(def?.value)}` };
+    case 'ZodArray': {
+      const inner = describeZodDetailed(def?.type, depth + 1);
+      const elementFields = describeElementFields(def?.type, depth + 1);
+      return {
+        type: `${inner.type}[]`,
+        ...(inner.enum_values ? { enum_values: inner.enum_values } : {}),
+        ...(elementFields ? { element_fields: elementFields } : {}),
+      };
+    }
+    case 'ZodObject': {
+      const shape = (node as { shape?: Record<string, unknown> }).shape ?? {};
+      return { type: `{${Object.keys(shape).join(', ')}}` };
+    }
+    case 'ZodRecord':
+      return { type: 'record<string, string>' };
+    case 'ZodUnion': {
+      const rawOptions = (def?.options as unknown[]) ?? [];
+      const opts = rawOptions.map((o) => describeZodDetailed(o, depth + 1));
+      // A union of literals IS a closed set, so report it as one — that is what
+      // verifiable_at ('final' | 'phase:<n>') and similar fields actually are.
+      const literals = opts.filter((o) => o.type.startsWith('literal '));
+      if (literals.length === opts.length && opts.length) {
+        return { type: opts.map((o) => o.type.replace('literal ', '')).join(' | ') };
+      }
+      // Board a9280db7 (decision foreign_c48380bf): current_ac/live_test_refs are now
+      // a union of their real array shape with the structured not_applicable
+      // exemption — surface the ARRAY branch's element_fields here too (one
+      // level down, matching every other array-of-objects field), rather than
+      // silently losing the nested shape because the top-level node is now a
+      // union and not a bare ZodArray.
+      const arrayElementFields = opts.find((o) => o.element_fields && o.type.endsWith('[]'))?.element_fields;
+      return {
+        type: opts.map((o) => o.type).join(' | '),
+        ...(arrayElementFields ? { element_fields: arrayElementFields } : {}),
+      };
+    }
+    // Wrappers: describe what they wrap. optionality is reported separately, so
+    // it is deliberately NOT folded into the type string.
+    case 'ZodOptional':
+    case 'ZodNullable':
+    case 'ZodDefault':
+      return describeZodDetailed(def?.innerType, depth + 1);
+    case 'ZodEffects':
+      return describeZodDetailed(def?.schema, depth + 1);
+    default:
+      return { type: name ? name.replace(/^Zod/, '').toLowerCase() : 'unknown' };
+  }
+}
+
+/**
+ * Public projection: JUST the readable type string, no enum/example/element
+ * metadata attached — the surface board be5e1d04's frozen pins exercise
+ * directly (describe-zod-projection.test.ts). schemaFor/knowledge_schema
+ * consume the richer describeZodDetailed internally; this wrapper exists so a
+ * caller who only wants "what does this render as" is not made to reach into
+ * an object for the one field it cares about, and so the fix is testable
+ * without pinning the internal descriptor shape.
+ */
+export function describeZod(node: unknown): string {
+  return describeZodDetailed(node).type;
+}
+
+/** Hard ceilings for the example walk — a schema READ must never hang or explode. */
+const EXAMPLE_MAX_DEPTH = 6;
+const EXAMPLE_MAX_CHARS = 256;
+
+/**
+ * The smallest string matching a regex SOURCE, or undefined when the pattern
+ * uses a construct this cannot sample honestly (lookaround, backreference,
+ * negated class). Supported: anchors, literals, escapes, `.`, `\d`/`\w`/`\s`,
+ * character classes and ranges, groups, alternation (first branch), and the
+ * `* + ? {n} {n,m} {n,}` quantifiers.
+ *
+ * This is NOT a guess: whatever it returns is handed to the node's own
+ * safeParse before it can be reported (deriveExampleValue), so an unsupported
+ * or wrongly-sampled pattern yields NO example rather than a wrong one. It
+ * exists because the alternative for regex-constrained fields — author
+ * (`user|conductor|system|agent:<role>`), scope, measured_at_head's 40-hex sha
+ * — is a hand-written per-field table, i.e. a second registry that would rot.
+ */
+function sampleFromRegex(source: string): string | undefined {
+  if (/\(\?[=!<]/.test(source)) return undefined; // lookaround
+  if (/\\[1-9]/.test(source)) return undefined; // backreference
+  let i = 0;
+  let failed = false;
+
+  const classChar = (): string | undefined => {
+    // at '[': take the first concrete member (a range contributes its start)
+    i++; // consume '['
+    if (source[i] === '^') return undefined; // negated: no honest first member
+    let first: string | undefined;
+    while (i < source.length && source[i] !== ']') {
+      const c = source[i];
+      if (c === '\\') {
+        const esc = source[i + 1];
+        i += 2;
+        if (first === undefined) first = escapeChar(esc);
+      } else {
+        i++;
+        if (first === undefined) first = c;
+      }
+    }
+    if (source[i] !== ']') return undefined;
+    i++; // consume ']'
+    return first;
+  };
+
+  const escapeChar = (c: string | undefined): string | undefined => {
+    if (c === undefined) return undefined;
+    if (c === 'd') return '0';
+    if (c === 'w') return 'a';
+    if (c === 's') return ' ';
+    if ('DWSbB'.includes(c)) return undefined; // negated/boundary classes: not sampled
+    if (c === 'n') return '\n';
+    if (c === 't') return '\t';
+    return c;
+  };
+
+  const quantifier = (): number => {
+    const c = source[i];
+    if (c === '*' || c === '?') {
+      i++;
+      if (source[i] === '?') i++; // lazy marker
+      return 0;
+    }
+    if (c === '+') {
+      i++;
+      if (source[i] === '?') i++;
+      return 1;
+    }
+    if (c === '{') {
+      const close = source.indexOf('}', i);
+      if (close === -1) return 1;
+      const body = source.slice(i + 1, close);
+      const m = /^(\d+)(,(\d+)?)?$/.exec(body);
+      if (!m) return 1; // not a quantifier, a literal '{' handled as an atom
+      i = close + 1;
+      if (source[i] === '?') i++;
+      return Number(m[1]);
+    }
+    return 1;
+  };
+
+  const sequence = (): string => {
+    let out = '';
+    while (i < source.length && source[i] !== '|' && source[i] !== ')' && !failed) {
+      const c = source[i];
+      let atom: string | undefined;
+      if (c === '^' || c === '$') {
+        i++;
+        continue;
+      } else if (c === '(') {
+        i++;
+        if (source.startsWith('?:', i)) i += 2;
+        atom = alternation();
+        if (source[i] !== ')') {
+          failed = true;
+          return out;
+        }
+        i++; // consume ')'
+      } else if (c === '[') {
+        atom = classChar();
+        if (atom === undefined) {
+          failed = true;
+          return out;
+        }
+      } else if (c === '\\') {
+        atom = escapeChar(source[i + 1]);
+        i += 2;
+        if (atom === undefined) {
+          failed = true;
+          return out;
+        }
+      } else if (c === '.') {
+        i++;
+        atom = 'x';
+      } else {
+        i++;
+        atom = c;
+      }
+      const times = quantifier();
+      if (atom.length * times > EXAMPLE_MAX_CHARS) {
+        failed = true;
+        return out;
+      }
+      out += atom.repeat(times);
+      if (out.length > EXAMPLE_MAX_CHARS) {
+        failed = true;
+        return out;
+      }
+    }
+    return out;
+  };
+
+  // First branch only — one worked value is what a writer copies, and the
+  // remaining branches are still visible in the projected type string.
+  const alternation = (): string => {
+    const first = sequence();
+    while (i < source.length && source[i] === '|' && !failed) {
+      i++;
+      sequence(); // consume, discard
+    }
+    return first;
+  };
+
+  const sampled = alternation();
+  return failed || i < source.length ? undefined : sampled;
+}
+
+/** Does `value` actually satisfy `node`? The proof step — never skipped. */
+function satisfies(node: unknown, value: unknown): boolean {
+  const parse = (node as { safeParse?: (v: unknown) => { success: boolean } })?.safeParse;
+  if (typeof parse !== 'function') return false;
+  try {
+    return parse.call(node, value).success === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ordered candidate values for a zod node, most informative first, derived from
+ * the node's own structure and its sub-fields' own NAMES (a plain string
+ * becomes `<name>`, so `{option, reason}[]` exemplifies as
+ * `[{"option":"<option>","reason":"<reason>"}]`). Composites are built from
+ * their REQUIRED members only — the minimum valid shape, since every member,
+ * optional included, is already enumerated in element_fields.
+ */
+function exampleCandidates(node: unknown, name: string | undefined, depth: number): unknown[] {
+  if (!node || typeof node !== 'object' || depth > EXAMPLE_MAX_DEPTH) return [];
+  const def = (node as { _def?: Record<string, unknown> })._def;
+  const placeholder = `<${name ?? 'string'}>`;
+  switch (def?.typeName as string | undefined) {
+    case 'ZodString': {
+      const checks = (def?.checks as Array<{ kind?: string; regex?: RegExp }> | undefined) ?? [];
+      const out: unknown[] = [];
+      if (checks.some((c) => c.kind === 'datetime')) out.push('2026-08-24T00:00:00.000Z');
+      if (checks.some((c) => c.kind === 'uuid')) out.push('00000000-0000-0000-0000-000000000000');
+      for (const c of checks) {
+        if (c.kind === 'regex' && c.regex) {
+          const sampled = sampleFromRegex(c.regex.source);
+          if (sampled !== undefined) out.push(sampled);
+        }
+      }
+      out.push(placeholder);
+      return out;
+    }
+    case 'ZodNumber':
+      return [1, 0];
+    case 'ZodBoolean':
+      return [true];
+    case 'ZodNull':
+      return [null];
+    case 'ZodAny':
+    case 'ZodUnknown':
+      return [placeholder];
+    case 'ZodEnum':
+      return ((def?.values as unknown[] | undefined) ?? []).slice();
+    case 'ZodNativeEnum':
+      return Object.values((def?.values as Record<string, unknown> | undefined) ?? {});
+    case 'ZodLiteral':
+      return [def?.value];
+    case 'ZodArray': {
+      const element = deriveExampleValue(def?.type, name, depth + 1);
+      return element ? [[element.value], []] : [[]];
+    }
+    case 'ZodObject': {
+      const shape = (node as { shape?: Record<string, unknown> }).shape ?? {};
+      const built: Record<string, unknown> = {};
+      for (const [key, sub] of Object.entries(shape)) {
+        if ((sub as { isOptional?: () => boolean }).isOptional?.() === true) continue;
+        const subExample = deriveExampleValue(sub, key, depth + 1);
+        if (!subExample) return []; // a required member we cannot fill honestly
+        built[key] = subExample.value;
+      }
+      return [built];
+    }
+    case 'ZodRecord': {
+      const value = deriveExampleValue(def?.valueType, 'value', depth + 1);
+      return value ? [{ '<key>': value.value }, {}] : [{}];
+    }
+    case 'ZodUnion':
+      return ((def?.options as unknown[] | undefined) ?? []).flatMap((o) => exampleCandidates(o, name, depth + 1));
+    // Wrappers contribute their inner candidates, but the PROOF still runs
+    // against the outer node, so a refinement the wrapper adds still rules.
+    case 'ZodOptional':
+    case 'ZodNullable':
+    case 'ZodDefault':
+      return exampleCandidates(def?.innerType, name, depth + 1);
+    case 'ZodEffects':
+      return exampleCandidates(def?.schema, name, depth + 1);
+    default:
+      return [];
+  }
+}
+
+/** The first candidate the node itself accepts, or nothing. */
+function deriveExampleValue(node: unknown, name: string | undefined, depth: number): { value: unknown } | undefined {
+  for (const candidate of exampleCandidates(node, name, depth)) {
+    if (satisfies(node, candidate)) return { value: candidate };
+  }
+  return undefined;
+}
+
+/**
+ * Public projection: a worked example VALUE for a zod node, as a string — the
+ * value-shaped sibling of describeZod (board 89672420). Scalars render bare
+ * (so an enum's example is literally one of its enum_values, and a datetime's
+ * is a pasteable instant); arrays/objects/records render as JSON text, which is
+ * the form a caller pastes into a write.
+ *
+ * `name` only decorates placeholders for otherwise-unconstrained values; it
+ * never changes whether an example exists.
+ */
+export function exampleFor(node: unknown, name?: string): string | undefined {
+  const derived = deriveExampleValue(node, name, 0);
+  if (!derived) return undefined;
+  const rendered = typeof derived.value === 'string' ? derived.value : JSON.stringify(derived.value);
+  return rendered === undefined || rendered.length === 0 ? undefined : rendered;
+}
+
+/**
+ * An array field's ELEMENT sub-fields, one level deep, when the element is an
+ * object (board db0e2799) — e.g. files[]'s {path, role}, current_ac[]'s
+ * {ac_id, text, verifiable_at}. Only unwraps the same optional/nullable/
+ * default/effects wrappers describeZod already unwraps (never recurses INTO
+ * a nested array-of-objects-within-an-object — one level is what the reported
+ * gap needed). Returns undefined for a non-object array element (e.g.
+ * string[]), so `element_fields` is omitted entirely rather than reported
+ * empty.
+ */
+function describeElementFields(node: unknown, depth = 0): FieldShape[] | undefined {
+  if (!node || typeof node !== 'object' || depth > 6) return undefined;
+  const def = (node as { _def?: Record<string, unknown> })._def;
+  const name = def?.typeName as string | undefined;
+  switch (name) {
+    case 'ZodObject': {
+      const shape = (node as { shape?: Record<string, unknown> }).shape ?? {};
+      return Object.entries(shape).map(([fieldName, fieldNode]) => {
+        const described = describeZodDetailed(fieldNode, depth + 1);
+        const required = !(fieldNode as { isOptional?: () => boolean }).isOptional?.();
+        const example = exampleFor(fieldNode, fieldName);
+        return {
+          name: fieldName,
+          required,
+          type: described.type,
+          ...(described.enum_values ? { enum_values: described.enum_values } : {}),
+          ...(example ? { example } : {}),
+        };
+      });
+    }
+    case 'ZodOptional':
+    case 'ZodNullable':
+    case 'ZodDefault':
+      return describeElementFields(def?.innerType, depth + 1);
+    case 'ZodEffects':
+      return describeElementFields(def?.schema, depth + 1);
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The shape of a registered record type, DERIVED from its own zod schema
+ * (board 7acfbe48 / feedback §2.7).
+ *
+ * Field shapes were learnable only by having a write REJECTED. Five documented
+ * rejections across five different fields in one consuming project, three more
+ * in the session that built this — `title` required on anti_pattern then on
+ * decision then on feature_article, `version`/`history`/`live_test_refs`
+ * required, `concept_family` documented as a "mark" but actually a string,
+ * `alternatives_rejected` an array of OBJECTS not strings, `volatility_hint` a
+ * closed enum refusing the entirely plausible 'low'. The refusals are GOOD —
+ * they name the field and beat silently dropping data — but guess-and-fail is a
+ * poor way to learn a shape, and the standing workaround (query an existing
+ * record of that type and reverse-engineer it) is a workaround for a missing
+ * read.
+ *
+ * Derived, never listed: exactly like knownFieldsFor, this reads the registered
+ * schema, so a field becomes discoverable the moment it is defined and invariant
+ * 1 still holds. There is no second list to drift.
+ */
+export function schemaFor(type: string): { type: string; fields: FieldShape[] } | undefined {
+  const shape = objectShapeFor(type);
+  if (!shape) return undefined;
+  const fields: FieldShape[] = Object.entries(shape).map(([name, node]) => {
+    const described = describeZodDetailed(node);
+    const required = !(node as { isOptional?: () => boolean }).isOptional?.();
+    // One worked value per field, derived and proven by the field's own node —
+    // the SHAPE half of the answer (board 89672420). Four of six schema
+    // rejections a consuming project hit were shape errors, not missing-field
+    // errors: {option, reason}[] written as string[] is the canonical one.
+    const example = exampleFor(node, name);
+    return {
+      name,
+      required,
+      type: described.type,
+      ...(described.enum_values ? { enum_values: described.enum_values } : {}),
+      ...(described.element_fields ? { element_fields: described.element_fields } : {}),
+      ...(example ? { example } : {}),
+    };
+  });
+  return { type, fields };
+}
+
+/**
+ * Keys in `candidate` that the type does not define — the input half of the
+ * fail-loud rule (P5). zod objects STRIP unknown keys, so without this a
+ * misfiled field (reference_material has no `files`/`file_keys`; its paths come
+ * from `location`) was accepted, silently dropped, and the write returned
+ * SUCCESS — caught only by later querying for the thing the write was supposed
+ * to have done. Reported to a sibling project 2026-07-29, and the same defect
+ * class as the tool-parameter strip closed by decision foreign_b47889b7: a write surface
+ * must not claim to have stored what it discarded.
+ *
+ * Returns [] for an unregistered type — that is validateRecord's louder error to
+ * raise, not this one's to pre-empt.
+ */
+export function unknownFieldsIn(type: string, candidate: Record<string, unknown>): string[] {
+  const known = knownFieldsFor(type);
+  if (!known) return [];
+  return Object.keys(candidate).filter((k) => !known.has(k));
+}
+
+/** The one validation gate for durable writes: unregistered type = loud rejection. */
+export function validateRecord(input: unknown): DurableRecord {
+  if (typeof input !== 'object' || input === null || typeof (input as { type?: unknown }).type !== 'string') {
+    throw new Error('validateRecord: input has no record type');
+  }
+  const type = (input as { type: string }).type;
+  const entry = RECORD_TYPES[type];
+  if (!entry) {
+    throw new Error(`validateRecord: unregistered record type '${type}' — register it in RECORD_TYPES (spec §15) before writing`);
+  }
+  return entry.schema.parse(input) as DurableRecord;
+}

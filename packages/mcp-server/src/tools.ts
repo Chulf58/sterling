@@ -1,0 +1,11579 @@
+// Tool surface core (spec §10, spine subset §16.1 item 3) — plain functions so
+// the logic is unit-testable; server.ts wires them to MCP. Coarse tools are
+// safe because schemas are exact: every write revalidates at the store.
+
+import { spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { ZodError, type ZodIssue } from 'zod';
+import { clipName, boardDisplayLabel, normalizeRepoPath, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
+import {
+  DEFAULT_QUERY_CAP,
+  MAX_RANK_TERMS,
+  extractAxisTerms,
+  axisHits,
+  AXIS_MIN_HITS,
+  hasDiscriminatingHit,
+  hasRecordCentralityHit,
+  recordCentralityHits,
+  classifyClaimPath,
+  type QueryOptions,
+  type ToolStore,
+} from '@sterling/store';
+import { AttestationRefusal, collectAttestationEvidence, readHeadFile, type AttestationEvidence } from './attestation-proof.js';
+
+export interface SkippedCheck {
+  check: string;
+  reason: string;
+}
+
+/**
+ * knowledge_create's result. `deduped`/`text_updated` appear only for a SYSTEM
+ * maintenance item that hit the atomic dedup path (board 2ded3b4b) — they are
+ * DECLARED rather than spread-in-silently, because a caller that cannot see
+ * "this returned the existing item" in the type is a caller that will treat a
+ * dedup as a fresh insert.
+ */
+export interface CreateResult {
+  record: DurableRecord;
+  check_skipped: SkippedCheck[];
+  /** The item already existed; `record` is that existing item, not a new row. */
+  deduped?: boolean;
+  /** The existing item's text was refreshed because this attempt said something different. */
+  text_updated?: boolean;
+  /**
+   * Cited-id resolution warnings (board fc053051): one entry per id-shaped
+   * citation in the written text that resolves to NO record in the mounted
+   * fan, at any status. Always present — `[]` when every citation resolved
+   * or none were found. Never gates the write (AC5): the record still lands.
+   */
+  warnings: string[];
+  /**
+   * SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): present only for ruling-type
+   * creates (decision / anti_pattern / research_finding) — other types'
+   * responses stay byte-identical. Advisory only, never gates the write.
+   */
+  same_subject?: SameSubjectEntry[];
+  /**
+   * THE CLAIM-CHECK DISCLOSURE (decision
+   * [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]).
+   * Present ONLY as 'unavailable:no_repo_root': without a repo root there is
+   * nothing to classify a claimed path against, so the write is ADMITTED and
+   * the ABSENT CAPABILITY is disclosed — the same shape the drift provenance
+   * uses. When the capability exists the write either passed the check or was
+   * refused, so silence here means "checked".
+   */
+  claims_check?: string;
+}
+
+/**
+ * The receipt an ALREADY-PAID close returns (board 8c8b6d78 / R9) — proof of
+ * exactly what was attested, so the operator can see that a durable claim about
+ * live bytes was minted rather than a bare removal.
+ *
+ * `head_commit` is a COMMIT identity; present paths are verified byte-identical
+ * between that commit's blobs and the working tree, and their sha256 is now the
+ * article's baseline. `absence_paths`, when present, instead have a literal
+ * tree miss proven at that commit and carry no bytes or baseline. `attested_at`
+ * is the real close time — NOT the article's `updated_at`, which this write
+ * deliberately leaves where it was.
+ */
+export interface BaselineAttestationReceipt {
+  article_id: string;
+  article_slug?: string;
+  article_version: number;
+  head_commit: string;
+  attested_at: string;
+  paths: string[];
+  /** Present only when one or more paths were proven absent from HEAD's tree. */
+  absence_paths?: string[];
+  note: string;
+}
+
+/**
+ * The git evidence for one attested close, gathered BEFORE the store transaction
+ * opens (a `--path=` hash-object runs the repository's configured clean filter,
+ * which is an arbitrary program and must not run under the writer lock), and
+ * bound to the exact tree and key set it answers for — the transaction refuses if
+ * either has moved rather than re-reading anything itself.
+ */
+interface PreparedAttestation {
+  root: string;
+  keys: string[];
+  evidence: AttestationEvidence;
+}
+
+export interface BoardFilter {
+  source?: 'user' | 'system';
+  system_reason?: string;
+  file_keys?: string[];
+  /**
+   * Narrow to items whose text contains this substring (work order d9960c98) —
+   * a genuine WHERE, not a rank: it REMOVES non-matching items from the counted
+   * set rather than merely reordering it, the distinction rank_terms already
+   * has to honour on the knowledge side (rank_terms order a set, they never
+   * narrow it). Case-insensitive plain substring match, applied in JS inside
+   * boardFiltered — never routed through records_fts MATCH — so a caller's
+   * string can never be interpreted as FTS5 query syntax (no quoting/escaping
+   * to get wrong) and always matches literally, metacharacters included. Cheap
+   * here specifically because boardFiltered already scans the bounded
+   * (BOARD_SCAN_CAP) todo set into JS for the source/system_reason filters —
+   * this adds one more JS predicate to that same pass, not a second table scan.
+   */
+  contains?: string;
+  /**
+   * Narrow to items owned by ONE feature_article, resolved from its slug
+   * (board e725979c — maintenance_query's feature_slug gap). Resolution is
+   * CHAIN-AWARE: it matches the live article's id AND every ancestor id in
+   * its supersede chain (the same rel:'supersedes' links join knowledgeUpdate's
+   * drift-item auto-drain already walks, decision foreign_8ecd435f) — an item raised
+   * against an earlier version of the article still matches after a later
+   * reconcile superseded it. An unresolvable slug narrows to NOTHING rather
+   * than erroring (no article to own anything), and combines with every other
+   * filter as a genuine AND, applied in the same JS pass as system_reason/contains.
+   */
+  feature_slug?: string;
+  /**
+   * Narrow to the slices of ONE objective — the grouping key board_add requires
+   * and decision foreign_a8d2ce6c made the axis the TUI groups by and H1 counts by. The
+   * data was always stored and the filter was simply missing: a consuming
+   * project paged 306 items across two lanes to find one objective's slices.
+   *
+   * Exact match on the stored value, in the same JS pass as source/system_reason
+   * — a genuine WHERE, like every sibling clause here. THE WRITE SIDE'S
+   * NORMALIZATION IS MIRRORED: board_add/board_update normalize the declared
+   * value 'standalone' to field-absent (ungrouped), so objective:'standalone'
+   * here selects the UNGROUPED items rather than matching a literal group of
+   * that name — reading the write surface's own vocabulary as a group name
+   * would return nothing, silently, for the one value the tool description
+   * teaches. An objective no item carries narrows to nothing rather than
+   * erroring (feature_slug's boundary), and a system-source item can never
+   * match: maintenance items are lane-keyed by system_reason and board_add
+   * refuses an objective on them.
+   */
+  objective?: string;
+  cap?: number;
+  projection?: BoardProjection;
+  /**
+   * PAGING (board b786a84f) — a 186-item lane audit died at item 1 because
+   * board_query/maintenance_query had no way to see past one capped window.
+   * Applied AFTER the same filter+sort boardFiltered already uses and BEFORE
+   * the cap slice, over the same DETERMINISTIC ordering (updated_at DESC,
+   * id DESC — query()'s own §3.4 mechanical fallback rank, made explicit and
+   * total in boardFiltered) so paging through offset 0, cap, 2*cap, … visits
+   * every matching item exactly once IF THE BOARD IS UNCHANGED between calls
+   * — under concurrent writes an item bumped toward the head between page
+   * fetches can be SKIPPED (never scanned again by a later offset, because
+   * offset is a POSITION, blind to what moved across it) — see `cursor` for
+   * the continuation that does not have this hazard. Defaults to 0.
+   */
+  offset?: number;
+  /**
+   * KEYSET CONTINUATION (board abafbd48, upgrading b786a84f's offset paging;
+   * versioned + identity-bound per the abafbd48 re-review): an opaque
+   * next_cursor a prior boardQueryResult call returned — the page starts
+   * strictly AFTER that (updated_at, id) tuple in the same total order
+   * (updated_at DESC, id DESC) offset uses, computed over a FRESH scan each
+   * call. Unlike offset (a POSITION, blind to items that moved across it
+   * between calls), a cursor is an IDENTITY: it can never OMIT an item that
+   * was behind it, though it still cannot surface one that jumps AHEAD of it
+   * after the cursor was minted — finish a churn-exposed walk with a head
+   * re-query. The cursor also carries the FILTERS it was minted under
+   * (source/system_reason/objective/file_keys/contains/feature_slug); a
+   * continuation under DIFFERENT filters is refused, naming the mismatch,
+   * rather than silently omitting whatever the changed filter excludes. Not
+   * an alternate history: cap/projection may still vary freely page to page.
+   * Mutually exclusive with `offset`: passing both is refused loudly, and a
+   * cursor that fails to decode is refused loudly naming `cursor`, never
+   * silently ignored.
+   */
+  cursor?: string;
+}
+
+/**
+ * How much of each record crosses the MCP boundary (§3.4 read side).
+ *
+ * 'full'   — today's behaviour, unchanged: every content field, minus the
+ *            supersedes chain and server-owned baselines (see projectForQuery).
+ * 'digest' — the shared envelope plus the type's HEADLINE fields only
+ *            (digestRecord). Roughly 25x smaller per record, measured against
+ *            this store's own articles.
+ *
+ * Reported by a consuming project across two retrospectives as the single
+ * highest-value read-side change: full-body windows routinely blew the token
+ * cap and spilled to disk (measured there: 478 KB for one board read, 86 KB and
+ * 100 KB for two knowledge reads), and the recovery every time was to shell out
+ * and hand-write a JSON parser to recover ids and titles — "that is not using a
+ * knowledge base, that is defeating one". 'full' stays the DEFAULT so no
+ * existing caller changes behaviour; the cheap read is opt-in, and the capped
+ * note advertises it so it is discoverable at the moment it is needed.
+ *
+ * 'count'  — knowledge_query only (board fa19524d). A capped window can never
+ *            establish absence — "does the store hold X?" is unanswerable once
+ *            more records match than the cap shows. 'count' answers that
+ *            question directly: the TRUE total for the filter (reusing the
+ *            store's uncapped, rank-blind count()), no record bodies, and
+ *            capped:false always — a count is defined as never-capped, it does
+ *            not enumerate. When multiple types are queried, a per-type
+ *            breakdown rides alongside the total (see by_type on
+ *            KnowledgeQueryResult).
+ */
+export type Projection = 'full' | 'digest' | 'count';
+
+/**
+ * board_query/maintenance_query's own projection axis (board b786a84f):
+ * every `Projection` value PLUS 'headline', which is board/maintenance-only
+ * (there is no headlineRecord for the other record types knowledge_query
+ * reads) — kept as its own type rather than widening `Projection` itself so
+ * knowledge_query's tool schema (full/digest/count) cannot silently start
+ * accepting a value it has no handling for.
+ */
+export type BoardProjection = Projection | 'headline' | 'text';
+
+/**
+ * projection:'text' — board_query/maintenance_query's DEFAULT row shape.
+ * Scalar fields only (id, slug, objective, source, system_reason, status,
+ * priority, feature_link, updated_at), `text` clipped to BOARD_TEXT_CLIP
+ * characters, and the per-item artifact_evidence reduced to its count. The
+ * heavy per-row payloads (artifact_evidence records, full annotation prose,
+ * file_keys, provenance detail) ride projection:'full' only, because full
+ * rows on a large board overflowed the caller's tool-result budget.
+ */
+export const BOARD_TEXT_CLIP = 240;
+
+const BOARD_TEXT_FIELDS = ['id', 'slug', 'objective', 'source', 'system_reason', 'status', 'priority', 'feature_link', 'blocked_by', 'updated_at'] as const;
+
+function textRowRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const f of BOARD_TEXT_FIELDS) {
+    const v = record[f];
+    if (v !== undefined && v !== null && v !== '') out[f] = v;
+  }
+  if (typeof record.text === 'string') {
+    out.text = record.text.length <= BOARD_TEXT_CLIP ? record.text : `${record.text.slice(0, BOARD_TEXT_CLIP - 1)}…`;
+  }
+  return out;
+}
+
+/**
+ * PARALLEL-LANE SEED — one collision group in board_query's `lane_advisory`:
+ * the user-source items that declare a write path in common, and the path(s)
+ * they share.
+ */
+export interface LaneCollision {
+  /** the shared file_keys entries, sorted — every item below declares ALL of them */
+  paths: string[];
+  /**
+   * the colliding items, newest-updated first. `name` is the item's slug or,
+   * for a legacy slugless item, its clipped headline — because a bare id in
+   * front of a human is unanswerable (CLAUDE.md, decision
+   * `human-readable-ids-for-board-items`). The full id rides alongside it.
+   */
+  items: { id: string; name: string }[];
+}
+
+/**
+ * PARALLEL-LANE SEED — the derived, ADVISORY reading of a board page's shared
+ * write paths. Present only when two or more USER-source items in the matched
+ * set declare a path in common; absent (not empty) otherwise, so its mere
+ * presence is the signal.
+ *
+ * WHAT IT IS FOR: a slice decomposes into lanes — read-only scoping (write-set
+ * empty), test authoring (write-set inside the test-path globs, where H5's
+ * frozen-tests wall keeps it) and implementation (everything else) — and a
+ * shared write path collides the IMPLEMENTATION lane ONLY. Measured 2026-08-29:
+ * five slices of one objective all wrote a single hook file, the conductor
+ * serialized the SLICES, and every scoping and test-authoring lane sat idle
+ * although none of them ever collided. This block states which lane the
+ * collision actually constrains, so that reasoning does not have to be
+ * re-derived by hand at each dispatch moment.
+ *
+ * WHAT IT IS NOT: it never denies, filters, reorders or refuses anything —
+ * `records` comes back exactly as it would without it — and it never counts
+ * agents toward a target. Under-delegation and over-dispatch are the same
+ * defect (delegation contract), so a mechanism that pushes toward a NUMBER
+ * reintroduces the quota pathology it exists to cure. A parallel-safe lane is
+ * not thereby a lane worth dispatching.
+ *
+ * SYSTEM-SOURCE ITEMS NEVER JOIN A GROUP: the maintenance queue is
+ * mechanism-detected debt drained by an artifact-write, not parallel work, so
+ * a queue item sharing a path with a board slice is not a lane collision.
+ * maintenance_query therefore never carries this key at all.
+ */
+export interface LaneAdvisory {
+  /** the ONE lane a shared write path constrains */
+  serialized_lane: 'implementation';
+  /** the lanes of a file-colliding slice that stay dispatchable */
+  parallel_safe_lanes: ('read_only_scoping' | 'test_authoring')[];
+  /** one entry per set of items colliding on the same path(s); never empty when present */
+  collisions: LaneCollision[];
+}
+
+/**
+ * ONE record named by a board/queue item's derived `artifact_evidence` — compact
+ * by design (three short fields), because this block rides EVERY item on a page
+ * and a full digest per match would dwarf the item it annotates. `name` is what
+ * lets a human recognise the record; `id8` is the citation prefix to open it
+ * with (knowledge_get resolves an unambiguous 8-char prefix) — name first, id
+ * retained, per the never-a-bare-id-in-front-of-a-human rule.
+ */
+export interface ArtifactEvidenceRecord {
+  /** the record's 8-char citation prefix — enough for knowledge_get, never a claim of uniqueness */
+  id8: string;
+  type: string;
+  /** slug → title → question → location, first present: the type-appropriate human name, clipped */
+  name: string;
+}
+
+/**
+ * The DERIVED, per-item reading of "has anything durable been written near this
+ * item since it was created" (board 00fa8adb) — board_remove's removal receipt
+ * brought forward to QUERY time, so a reader auditing the board sees the same
+ * evidence before deciding what to act on rather than only at the moment of
+ * removal. Advisory in exactly the sense `lane_advisory` is: computed after the
+ * page is already fixed, never filtering, reordering or refusing anything.
+ *
+ * NEVER A COMPLETION VERDICT: a record touching an item's files or citing its id
+ * means POSSIBLY ADDRESSED — the envelope's `artifact_evidence_note` says so in
+ * words, once per call.
+ */
+export interface ArtifactEvidence {
+  /** the FULL dedup'd match count across both arms — may exceed `records`.length */
+  count: number;
+  /**
+   * up to three of the matching records, file-key matches first. ABSENT (never
+   * an empty array) when count is 0, mirroring lane_advisory's own
+   * "presence is the signal" convention.
+   */
+  records?: ArtifactEvidenceRecord[];
+  /**
+   * whether the file_keys arm could run at all: 'skipped:no_file_keys' on an
+   * item declaring no paths (concept_article_missing / research_owed / plain
+   * tasks routinely declare none); 'unavailable:budget' when the page's
+   * distinct-key-set query budget (ARTIFACT_EVIDENCE_KEY_SET_QUERY_CAP) was
+   * already spent by earlier items. The CITATION arm still ran in every case —
+   * its scan is shared and already paid — so `count` on such an item is a
+   * citation-only floor, and a skipped or truncated check is stated rather than
+   * silently read as a negative result (P5).
+   */
+  file_key_check: 'checked' | 'skipped:no_file_keys' | 'unavailable:budget';
+}
+
+/**
+ * board_get's actual return shape (board 081508d0, review round 2, MEDIUM
+ * finding): every field of the resolved `DurableRecord`, plus an OPTIONAL
+ * `label` — the CURRENT-TEXT-derived display name (boardDisplayLabel),
+ * present whenever text or slug yields one, absent only when neither does.
+ * `slug`, if present on the record, is untouched — this type adds a field,
+ * it never widens or reshapes an existing one.
+ */
+export type BoardGetResult = DurableRecord & { label?: string; blocked_by_state?: BlockerState[] };
+
+/**
+ * One `blocked_by` entry as a reader sees it (decision
+ * every-user-ask-is-boarded-at-intake-with-slim-blocked-by, rule 6): the stored
+ * slug and whether that board item is still open. A blocker that has been
+ * removed reads as closed; the stored list itself is never rewritten.
+ */
+export interface BlockerState {
+  slug: string;
+  state: 'open' | 'closed';
+}
+
+/** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
+export interface BoardQueryResult {
+  /** items matching the filter — EXACT here, unlike knowledge_query's rank-blind count */
+  matched_filter: number;
+  returned: number;
+  cap: number;
+  /** exact: more matched than were returned (i.e. offset + returned < matched_filter) */
+  capped: boolean;
+  /**
+   * PAGING (board b786a84f): the offset this page was READ AT when paging by
+   * offset — 0 when omitted, and the next OFFSET page starts at
+   * offset + returned. Round-3 re-review LOW: that arithmetic is ONLY valid
+   * for offset-mode paging — a page read by `cursor` always reports 0 here
+   * (no position was ever asked for), so "offset + returned" does NOT name
+   * the next page in cursor mode; use `next_cursor` there instead.
+   */
+  offset: number;
+  /**
+   * KEYSET CONTINUATION (board abafbd48): an opaque cursor naming the last
+   * item returned on this page — present only when `capped` (more items
+   * remain past this page), absent otherwise. Pass it back as `cursor` on the
+   * next call to resume by IDENTITY rather than position: unlike `offset`, it
+   * can never re-skip an item that was behind it even if the board changed
+   * between calls, though a later page still cannot surface an item that
+   * jumped AHEAD of the cursor after it was minted.
+   */
+  next_cursor?: string;
+  note?: string;
+  /**
+   * board-provenance-measured-at-head: whether the one-shot git walk backing
+   * the per-item '⚠ file_keys changed…' annotation ran. 'checked' means it ran
+   * (items with nothing to warn about are silently fine); 'unavailable:<reason>'
+   * — no_repo_root | no_git | detached_head | no_file_keys | walk_cap — states
+   * WHY, because an absent warning must never be mistaken for a checked-fresh
+   * one (P5).
+   */
+  provenance: string;
+  /**
+   * TRUTH AT READ (decision queue-truth-at-read-annotation-design): whether the
+   * reconcile_needed DRIFT RE-CHECK ran over this page — a DIFFERENT check from
+   * `provenance` above, which describes the measured_at_head git walk, so the two
+   * statuses are reported separately rather than one standing in for the other.
+   * 'checked' means every returned reconcile_needed row got a verdict (a row with
+   * no annotation genuinely still reproduces); 'checked:budget_truncated' means
+   * the page's cost allowance ran out and the items past it say so themselves;
+   * 'unavailable:<reason>' — no_reconcile_items | no_repo_root | no_git — states
+   * why nothing was compared, because an absent annotation must never read as a
+   * positive freshness claim (P5).
+   */
+  reconcile_provenance: string;
+  /**
+   * PARALLEL-LANE SEED: present ONLY when two or more user-source items in the
+   * matched set share a file_keys path — see LaneAdvisory. Absent, never empty.
+   */
+  lane_advisory?: LaneAdvisory;
+  /**
+   * Non-full projections only: the number of lane_advisory collision groups,
+   * present only when lane_advisory would be. projection:'full' carries the
+   * lane_advisory block itself instead.
+   */
+  lane_advisory_count?: number;
+  /**
+   * board 00fa8adb: whether the per-item `artifact_evidence` derivation ran over
+   * this page — 'checked'; 'checked:budget_truncated' when the file-key arm's
+   * per-call query budget ran out and the items past it say 'unavailable:budget'
+   * themselves (their citation-arm evidence still computed); or
+   * 'unavailable:store_query_failed' when the evidence scan threw. It FAILS
+   * OPEN: the items are returned either way (a board read
+   * is not worth losing to an advisory annotation), so this status is the only
+   * thing that distinguishes "nothing was written near these items" from "we
+   * never looked" — an absent per-item block is never a negative result (P5).
+   */
+  artifact_evidence_provenance: string;
+  /**
+   * The one-time reading instruction for `artifact_evidence`, stated once per
+   * envelope rather than per item. Unconditional: it is what makes a ZERO count
+   * readable too, and a note that appeared only when evidence exists would be
+   * missing from exactly the pages most likely to be misread.
+   */
+  artifact_evidence_note: string;
+  /** text rows (default), full records (projection:'full'), headline digests (projection:'digest'), or minimal headlines (projection:'headline') */
+  records: DurableRecord[] | Record<string, unknown>[];
+}
+
+/**
+ * knowledge_query's per-record staleness verdict (see computeBaselineDrift):
+ * the DERIVED reading of the server-owned `file_baselines` the query projection
+ * strips — which owned paths' bytes have moved since the record was written
+ * against them, and which could not be checked at all. Never the hashes
+ * themselves: knowledge_get stays the full-fidelity read, deliberately.
+ *
+ * OMITTED ENTIRELY when a record's owned files are all unmoved — so the
+ * envelope's `provenance` is what makes an absence readable (a record owning no
+ * files can never be annotated, and that is not a freshness claim).
+ */
+export interface BaselineDrift {
+  /** owned paths whose CURRENT bytes differ from the recorded baseline */
+  changed: string[];
+  /**
+   * owned paths carrying a baseline that could not be re-read at all (absent
+   * from the tree, unreadable, or a working_tree name this config does not map).
+   * A NON-verdict, reported rather than folded into `changed` or into silence:
+   * abstention presented as "unchanged" is the exact P5 inversion board_query's
+   * own F3 fix exists to prevent.
+   */
+  unverifiable?: string[];
+  /**
+   * The SAME paths as `unverifiable`, each with a TYPED reason (decision
+   * [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]).
+   * A parallel array rather than a change to `unverifiable`'s shape, so existing
+   * consumers of the string list keep working: 'directory' is the claim that can
+   * never deliver anything (every delivery join is exact), 'absent' is gone from
+   * this tree, 'no_baseline' is present and readable but was never baselined
+   * (nothing to compare — not a defect in the file), and 'unreadable' is
+   * everything else this read could not settle.
+   */
+  unverifiable_detail?: { path: string; reason: 'directory' | 'absent' | 'unreadable' | 'no_baseline' }[];
+  /** what the verdict means, in one sentence per arm */
+  note: string;
+}
+
+/** knowledge_query's disclosed result envelope (see knowledgeQueryResult). */
+export interface KnowledgeQueryResult {
+  /** records matching the FILTER (types/stack_tags/file_keys), rank- and cap-blind */
+  matched_filter: number;
+  returned: number;
+  /** the cap actually applied — the caller's, or DEFAULT_QUERY_CAP */
+  cap: number;
+  /** the cap was reached, so more may exist past it; false GUARANTEES nothing was dropped */
+  capped: boolean;
+  /** present only when the window is partial — states how to widen it */
+  note?: string;
+  /**
+   * H19/H20 relevance slice 4b: the window's own basis to answer from —
+   * 'verify_targets' when capped (more matched than was returned: a window,
+   * never an inventory), 'insufficient' when nothing came back at all, else
+   * 'ready' (a complete, non-empty window).
+   */
+  answerability: 'ready' | 'verify_targets' | 'insufficient';
+  /**
+   * Whether the per-record `baseline_drift` check RAN over this window — the
+   * same honesty contract board_query's `provenance` carries, for the same
+   * reason: an ABSENT annotation must never be readable as a positive freshness
+   * claim (P5). 'checked' means every baselined record in this window was
+   * compared against its recorded baseline, so a record with no annotation is
+   * genuinely unmoved. 'unavailable:<reason>' — no_repo_root | no_baselines |
+   * count_projection — states WHY no comparison happened, which is the case a
+   * silent field would misrepresent: a decision, a todo, or any record owning
+   * no files can never be annotated at all.
+   */
+  provenance: string;
+  records: Record<string, unknown>[];
+  /** projection:'count' only, and only when multiple `types` were queried: the
+   *  same uncapped, rank-blind count() split per queried type, alongside the
+   *  combined `matched_filter` total (board fa19524d, AC2). */
+  by_type?: Record<string, number>;
+  /**
+   * ABSENCE QUERY (board a577a69d): present only when `min_score` was passed.
+   * The count of records scoring >= min_score on the `-bm25(records_fts)`
+   * scale (higher is more relevant — see countAboveScore), computed over the
+   * FULL rank_terms match set, never the capped `records` window — so
+   * above_threshold:0 is a usable "nothing scored that high", the thing a
+   * capped/ranked window alone can never establish. matched_filter/returned/
+   * cap/capped are untouched by this — it is a THRESHOLDED SURFACE beside the
+   * capped-window disclosure, never a replacement for it.
+   */
+  above_threshold?: number;
+}
+
+/** knowledge_preflight's disclosed result (H20/H19 relevance slice 4b; scope
+ *  widened + verdict renamed by board 39c3d762): "does the store govern this
+ *  subject?", asked BEFORE dispatching. Reuses the same axis-extraction +
+ *  stage-2 centrality floors H20 applies at delivery time, over anti_pattern +
+ *  decision + feature_article + research_finding records. */
+export interface KnowledgePreflightResult {
+  /** 'insufficient' — too little extractable vocabulary to judge at all;
+   *  'verify_targets' — the store governs this subject, verify the brief
+   *  against the named matches before dispatching; 'ungoverned' — nothing in
+   *  the store governs this subject. Renamed from 'ready' (board 39c3d762):
+   *  the query envelope's 'ready' means a COMPLETE NON-EMPTY window — the same
+   *  word carried the OPPOSITE reading here, and a false 'nothing governs'
+   *  dressed as 'ready' is exactly the settled-question-presented-as-open
+   *  failure the conduct rules name. */
+  answerability: 'ungoverned' | 'verify_targets' | 'insufficient';
+  reason?: 'too_little_vocabulary';
+  terms: string[];
+  /** Count of qualifying records BEFORE the PREFLIGHT_MATCH_CAP window,
+   *  among the candidates actually evaluated — always present, window
+   *  semantics matching knowledge_query's matched_filter (a capped `matches`
+   *  array is a WINDOW, never an inventory). NOT a true/exact/full count: the
+   *  matcher evaluates at most 40 FTS candidates per record type, so a
+   *  qualifying record beyond a type's first 40 is never seen and this
+   *  figure can undercount. */
+  matched_total: number;
+  /** Present (true) only when matched_total exceeds the cap and `matches`
+   *  was truncated to it — omitted, never `false`, when the window is
+   *  already complete. */
+  capped?: true;
+  matches: {
+    id: string;
+    type: string;
+    title: string;
+    matched_on: string[];
+    central: string[];
+    /** board c6e3561f disclosure-carry: records elsewhere holding a
+     *  rel:'supersedes' edge onto this match — same shape knowledge_get and
+     *  knowledge_query-full surface, OMITTED when there are none. */
+    inbound_supersedes?: InboundSupersedesEntry[];
+  }[];
+}
+
+/** One entry of the additive `inbound_supersedes` disclosure — {id} always,
+ *  slug/title when cheaply available, `status` pinned, and `superseded_by`
+ *  present only when the holder is itself not active (board c6e3561f). Shared
+ *  by knowledge_get, knowledge_query-full and knowledge_preflight so the shape
+ *  is declared once (see SterlingTools.inboundSupersedesEntry). */
+export interface InboundSupersedesEntry {
+  id: string;
+  slug?: string;
+  title?: string;
+  status: string;
+  superseded_by?: string;
+}
+
+/**
+ * SAME-SUBJECT SURFACING ON WRITE (decision foreign_7e3c66c5): one digest entry per
+ * OTHER active record the preflight axis engine judges to govern the same
+ * subject as a record just written. Mirrors knowledgePreflight's own
+ * per-candidate shape (id/type/title/matched_on) plus `slug`, since a ruling
+ * record (unlike an arbitrary preflight candidate) always carries one.
+ */
+export interface SameSubjectEntry {
+  id: string;
+  slug?: string;
+  type: string;
+  title: string;
+  matched_on: string[];
+  /** N25: the served/derived status of the matched record. A same_subject
+   *  candidate is drawn from axisCandidateMatches -> store.query over the
+   *  six governing types, which never serves a 'superseded' row (AC5,
+   *  same-subject-surfacing.test.ts: a just-superseded record must NEVER be
+   *  named) — a retired record simply never reaches this entry at all, so
+   *  `status` cannot disclose retirement. What it DOES disclose: among the
+   *  live candidates that DO surface, 'active' vs 'flagged_stale' (a
+   *  research_finding whose currency has lapsed) — a caller can see that a
+   *  same-subject match is stale before deciding whether to link to it. */
+  status: string;
+}
+
+export interface ToolDeps {
+  store: ToolStore;
+  config?: SterlingConfig;
+  now?: () => string;
+  newId?: () => string;
+  /** project root for §3.2.5 repo-located doc mtime checks; absent → check inert */
+  repoRoot?: string;
+}
+
+const DAY_MS = 86_400_000;
+
+// Board/queue read defaults, named rather than inlined for the DEFAULT_QUERY_CAP
+// reason (decision foreign_b47889b7): the tool layer now REPORTS the cap it applied, so
+// the value has two readers and a literal would be a second place to drift.
+const DEFAULT_BOARD_CAP = 50;
+// The bounded todo scan the filter runs over. A full scan means the reported
+// count is a floor; boardQueryResult says so rather than under-reporting.
+const BOARD_SCAN_CAP = 1000;
+
+/**
+ * The durable record types that can count as a board/queue item's fulfilling
+ * ARTIFACT — ONE list, shared by board_remove's receipt (removalArtifactEvidence)
+ * and the query-time derivation (pageArtifactEvidence). Extracted from the
+ * removal path when the second reader appeared, for the DEFAULT_BOARD_CAP reason:
+ * two copies of "what counts as evidence" would let the receipt and the query
+ * disagree about the same item, which is exactly the drift the derived field
+ * exists to surface.
+ *
+ * open_question is in the set (board a9be48f2): a board item can legitimately be
+ * answered by being CONVERTED into an evidenced open question — the investigation
+ * is now durable and tracked as a record — and without this type the evidence
+ * would read empty for exactly the outcome that produced the most durable artifact.
+ */
+const ARTIFACT_EVIDENCE_TYPES = [
+  'decision',
+  'anti_pattern',
+  'feature_article',
+  'research_finding',
+  'disconfirmed_hypothesis',
+  'open_question',
+  'reference_material',
+];
+
+/**
+ * The bounded scan BOTH evidence arms run under — the same 200-record window
+ * board_remove's receipt uses, deliberately: a derived count that scanned deeper
+ * than the receipt would disagree with the receipt on the very item it is meant
+ * to prepare the reader for.
+ */
+const ARTIFACT_EVIDENCE_SCAN_CAP = 200;
+
+/** How many matching records the per-item field NAMES (the count stays full). */
+const ARTIFACT_EVIDENCE_RECORD_CAP = 3;
+
+/**
+ * PER-CALL BUDGET for the file-key arm — the number of DISTINCT normalized
+ * key-set queries one board_query/maintenance_query page may issue. `cap` is
+ * caller-controlled and the arm cannot be unioned across items (see
+ * pageArtifactEvidence), so without this a board_query({cap:1000}) over items
+ * with distinct file_keys would fan out to ~1000 store queries on a single read.
+ *
+ * SAME SHAPE AS THE NEIGHBOURING BUDGET (RECONCILE_RECHECK_FILE_ATTEMPT_CAP):
+ * shared by the WHOLE page, memo hits cost nothing, and once it is spent the
+ * remaining items get a per-item 'unavailable:budget' while the envelope
+ * discloses the truncation — never a silent partial evaluation read as
+ * "checked" (P5).
+ *
+ * MAGNITUDE: deliberately LOWER than that neighbour's 120, because the unit is
+ * not the same — an attempt there is one stat/hash of a file, whereas one unit
+ * here is a whole indexed store query. 60 still covers an ordinary full page
+ * (DEFAULT_BOARD_CAP = 50 items, every one of them declaring a DIFFERENT key
+ * set — already the worst realistic shape, since sibling slices of an objective
+ * share paths and share a query) with headroom, so the axis binds only on an
+ * explicitly raised cap, which is exactly the shape it exists for.
+ */
+const ARTIFACT_EVIDENCE_KEY_SET_QUERY_CAP = 60;
+
+/**
+ * The one-time, envelope-level reading instruction for the per-item
+ * `artifact_evidence` block. Stated ONCE per call rather than per item (it is
+ * the same sentence for every row), and worded as a LOOKUP, never a verdict:
+ * the field can say that something was written near an item, and nothing more.
+ * An index or summary is a lookup, never a source (CLAUDE.md) — a count that
+ * reads as a completion verdict would let a reader retire work on a coincidence.
+ */
+const ARTIFACT_EVIDENCE_NOTE =
+  `artifact_evidence is a LOOKUP, never a verdict: per item it counts durable knowledge records ` +
+  `(${ARTIFACT_EVIDENCE_TYPES.join(', ')}) written or updated since that item was created which either touch its ` +
+  `file_keys or cite its id — within a bounded ${ARTIFACT_EVIDENCE_SCAN_CAP}-record scan per arm. A non-zero count means POSSIBLY ADDRESSED and ` +
+  `nothing stronger: VERIFY against HEAD before acting on it. A zero count is equally weak evidence the other way — ` +
+  `it checks the knowledge store only, never git, so work that was never captured leaves no trace here.`;
+
+/** The same reading instruction, compact, for the non-full projections. */
+const ARTIFACT_EVIDENCE_NOTE_SHORT =
+  `artifact_evidence is a LOOKUP, never a verdict: a non-zero count means POSSIBLY ADDRESSED (verify against HEAD); a zero count checks the knowledge store only, never git.`;
+
+/**
+ * Total order for board/queue paging (board abafbd48 — Codex-adjudicated,
+ * thread 01a05bc3): `updated_at DESC` alone is not a total order — two items
+ * sharing one updated_at (minted in the same write, or the same test tick)
+ * used to resolve to whatever order the underlying scan happened to produce,
+ * and a keyset cursor built on a non-total order cannot name an unambiguous
+ * resume point. `id DESC` breaks every remaining tie, deterministically, in
+ * BOTH the JS sort (boardFiltered) and — for the same reason — the SQL
+ * ORDER BY paths this same order must agree with (packages/store/src/index.ts).
+ * Returns <0 when `a` sorts BEFORE `b` in that order, >0 when after, 0 only
+ * when the two tuples are identical (which never happens for two distinct
+ * records, since id is unique).
+ */
+function compareBoardOrder(aUpdatedAt: string, aId: string, bUpdatedAt: string, bId: string): number {
+  if (aUpdatedAt !== bUpdatedAt) return aUpdatedAt < bUpdatedAt ? 1 : -1;
+  if (aId !== bId) return aId < bId ? 1 : -1;
+  return 0;
+}
+
+/** board_query and maintenance_query are two DIFFERENT MCP tools sharing one
+ *  paging implementation (pageBoard) — this names which one a call/cursor/
+ *  refusal belongs to, so a refusal message is never a lie about which tool
+ *  the caller actually invoked (board abafbd48 re-review, HIGH). */
+type BoardSurface = 'board_query' | 'maintenance_query';
+
+/**
+ * The FILTERS a cursor is bound to — everything that decides WHICH rows can
+ * match and where they sort, but never cap/projection/offset (which may
+ * legitimately vary page to page). `objective` is an EXPLICIT DISCRIMINANT
+ * object ({mode:'any'} omitted / {mode:'ungrouped'} 'standalone' / {mode:
+ * 'exact', value} everything else) — never a bare sentinel value, because a
+ * bare-value + `?? null`-style comparison cannot tell "no objective filter"
+ * apart from "filtered to the absence sentinel" (round-3 re-review HIGH: they
+ * collapsed to the identical `null`, so a standalone cursor continued without
+ * the filter silently omitted every record the wider query would have
+ * included). `file_keys` deduped and sorted (order never changes what
+ * matches), `contains` lowercased (the match is already case-insensitive) —
+ * so two calls that MEAN the same filter always produce byte-identical
+ * identity JSON, and two calls that mean something different never
+ * accidentally collide (board abafbd48 re-review, MEDIUM-HIGH: an unbound
+ * cursor silently omitted everything ahead of the tuple whenever a caller
+ * changed filters mid-walk).
+ */
+function boardCursorIdentity(surface: BoardSurface, filter: BoardFilter): Record<string, unknown> {
+  const identity: Record<string, unknown> = { surface };
+  if (filter.source !== undefined) identity.source = filter.source;
+  // CANONICALIZATION (round-3 re-review LOW): `system_reason`/`contains` mirror
+  // the TRUTHY test boardFiltered's own `if (filter.x)` guards apply to them
+  // (an explicit '' behaves exactly like omitted — neither narrows anything),
+  // so both compare IDENTICAL in identity too; a bare `!== undefined` would
+  // fail-safe (refuse a continuation that would have behaved identically) but
+  // misstate the semantic contract these two fields actually have.
+  if (filter.system_reason) identity.system_reason = filter.system_reason;
+  // EXPLICIT DISCRIMINANTS (board abafbd48 re-review round 3, HIGH): a bare
+  // string sentinel plus describeIdentityMismatch's `value ?? null` fallback
+  // made 'standalone' (identity.objective === null, explicitly) and OMITTED
+  // (identity.objective absent -> undefined -> also collapsed to null by the
+  // ?? in the comparator) compare EQUAL — a standalone cursor continued
+  // without the filter silently omitted every record the wider query would
+  // have included. `identity.objective` is now ALWAYS present, one of three
+  // mutually distinguishable shapes, so no key-absence/`?? null` collapse
+  // can ever equate two different filter states again.
+  identity.objective =
+    filter.objective === undefined
+      ? { mode: 'any' }
+      : filter.objective === 'standalone'
+        ? { mode: 'ungrouped' }
+        : { mode: 'exact', value: filter.objective };
+  // (a sentinel comment used to stand here — round-3 re-review MEDIUM: it had
+  // accumulated literal NUL bytes, which made `file`(1) classify this whole
+  // source file as binary and broke plain-text search tools like rg/grep
+  // against it. Deleted outright rather than re-typed, since the discriminant
+  // object above no longer needs a sentinel at all.)
+  // file_keys: an EMPTY array is the same "no narrowing" as omitted (only a
+  // non-empty list ever reaches boardFiltered's overlap ranking), so both
+  // compare identical below. Each entry is run through normalizeRepoPath —
+  // the SAME normalization query execution itself applies (store/index.ts
+  // baseFilter) — so two spellings of one path (backslash vs forward slash,
+  // a leading './') that resolve to the SAME repo-relative key never read as
+  // a changed filter. Safe to call unconditionally: boardFiltered already
+  // routed these same values through store.query() -> normalizeRepoPath
+  // before this function is ever reached, so a value that would throw here
+  // already threw there, upstream of any cursor logic.
+  if (filter.file_keys && filter.file_keys.length > 0) {
+    identity.file_keys = [...new Set(filter.file_keys.map(normalizeRepoPath))].sort();
+  }
+  if (filter.contains) identity.contains = filter.contains.toLowerCase();
+  if (filter.feature_slug !== undefined) identity.feature_slug = filter.feature_slug;
+  return identity;
+}
+
+/** Key-by-key diff between a minted cursor's identity and the current call's
+ *  — null when they match, else a human-readable list of what changed, so the
+ *  refusal names the mismatch instead of just saying "no". */
+function describeIdentityMismatch(minted: Record<string, unknown>, current: Record<string, unknown>): string | null {
+  const keys = new Set([...Object.keys(minted), ...Object.keys(current)]);
+  const diffs: string[] = [];
+  for (const key of keys) {
+    const a = JSON.stringify(minted[key] ?? null);
+    const b = JSON.stringify(current[key] ?? null);
+    if (a !== b) diffs.push(`${key}: ${a} -> ${b}`);
+  }
+  return diffs.length ? diffs.join(', ') : null;
+}
+
+/**
+ * KEYSET CONTINUATION (board abafbd48; versioned + identity-bound per the
+ * abafbd48 re-review, MEDIUM-HIGH): a next_cursor is an opaque, base64-
+ * encoded {v, updated_at, id, identity} token naming the LAST item returned
+ * on a page AND the exact filters that produced it — the boundary
+ * boardQueryResult resumes strictly after, computed fresh each call (never a
+ * stored offset/snapshot), so an item that REMAINS BEHIND the cursor between
+ * calls can never be skipped by a later page (round-3 re-review LOW: an item
+ * bumped AHEAD of the cursor — toward the head — is the one case this cannot
+ * see; that limitation is real, not fixed by the fresh-scan design) WITHIN
+ * THE SAME QUERY. `identity` exists because a cursor is a
+ * position in ONE specific query's total order — resuming it under DIFFERENT
+ * filters (a different objective, a narrowed file_keys, …) is not "the next
+ * page of the same walk", it is a different walk that happens to reuse a
+ * tuple, and would silently omit everything the new filter excludes but the
+ * old one didn't (or vice versa). `v` lets the decode shape change later
+ * without a stale cursor from an old build being misread as a valid one from
+ * a new one. Not a security boundary — only round-trip-stable — so a plain
+ * base64(JSON) is sufficient; the decode failure path is what has to be loud
+ * (P5), not the encoding's obscurity.
+ */
+function encodeBoardCursor(surface: BoardSurface, filter: BoardFilter, updatedAt: string, id: string): string {
+  const payload = { v: 2, updated_at: updatedAt, id, identity: boardCursorIdentity(surface, filter) };
+  return Buffer.from(JSON.stringify(payload)).toString('base64');
+}
+
+function decodeBoardCursor(surface: BoardSurface, cursor: string): { updated_at: string; id: string; identity: Record<string, unknown> } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
+  } catch {
+    throw new Error(
+      `${surface}: 'cursor' is malformed — could not decode it as a base64-encoded continuation token; page from a next_cursor this same tool returned, never a hand-built value.`
+    );
+  }
+  const rec = parsed as { v?: unknown; updated_at?: unknown; id?: unknown; identity?: unknown } | null;
+  if (
+    rec === null ||
+    typeof rec !== 'object' ||
+    rec.v !== 2 ||
+    typeof rec.updated_at !== 'string' ||
+    rec.updated_at.length === 0 ||
+    typeof rec.id !== 'string' ||
+    rec.id.length === 0 ||
+    typeof rec.identity !== 'object' ||
+    rec.identity === null
+  ) {
+    throw new Error(
+      `${surface}: 'cursor' is malformed — decoded value is not a valid {v:2, updated_at, id, identity} continuation token (wrong version, empty tuple field, or missing identity); page from a next_cursor this same tool returned, never a hand-built value.`
+    );
+  }
+  return { updated_at: rec.updated_at, id: rec.id, identity: rec.identity as Record<string, unknown> };
+}
+// How many local branches the parked-file probe will interrogate for ONE absent
+// file (board 1d6a721a). Bounded because the probe shells out per ref: a repo
+// with a long tail of stale branches must not turn one missing file into
+// hundreds of subprocesses. Overrunning it degrades to today's behaviour — the
+// deletion item — which is the safe direction, since that lane demands work and
+// the parked lane does not.
+const PARKED_REF_PROBE_CAP = 40;
+// The three-way verdict parkedOnRef reaches for a file absent from the working
+// tree (board e939fd21): 'parked' names the ref still holding it; 'never_tracked'
+// means every reachable ref was checked and NONE ever held the blob — the
+// deletion_candidate lane; 'confirmed_absent' means some ref held it once but
+// only as a fully-merged ancestor of base — real git history, so the classic
+// reconcile_needed reading stands; 'probe_failed' means git itself could not be
+// consulted (no repo, no git, a corrupt ref) and MUST NOT be read as a
+// confirmation of anything — it degrades to the same reconcile_needed reading
+// as 'confirmed_absent', never to the new, more assertive deletion_candidate
+// lane, because a failed probe proves nothing.
+type MissingFileProbe = { status: 'parked'; ref: string } | { status: 'never_tracked' | 'confirmed_absent' | 'probe_failed' };
+// board-provenance-measured-at-head: the ONE git log --name-only walk
+// board_query runs per call (never per item) is bounded by this many commits
+// back from HEAD, so a repo with a long history cannot turn one query into an
+// unbounded subprocess. An eligible item whose measured_at_head sha does not
+// appear inside this window is left unannotated and the envelope discloses
+// 'unavailable:walk_cap' rather than reporting a possibly-wrong count.
+// Measured against this repo's own board (~50 items, deep history): see the
+// coder report for the ms figure.
+const PROVENANCE_WALK_COMMIT_CAP = 2000;
+// Per-file drift items one read may mint for ONE article (board 2ded3b4b). One
+// item per FILE is the point — an item that names the changed file is actionable
+// where an article-level one is not, and the old article-level dedup is what
+// suppressed a second file's finding entirely. But an article owning twenty files
+// through a whole-area refactor should not become twenty items, so the remainder
+// is folded into ONE summary item that NAMES the paths it covers: a cap that
+// truncates silently would read as "everything is accounted for" (P5).
+const DRIFT_ITEMS_PER_READ = 3;
+// Bytes of owned code past which `state: 'planned'` stops being credible (board
+// db7cd16c). Deliberately generous: the point is to catch an article sitting at
+// 'planned' over a SHIPPED feature (the measured case was 674 lines), not to
+// nag about a stub someone scaffolded five minutes ago. A whole file under this
+// is plausibly still a placeholder; several hundred lines is not.
+const PLANNED_CREDIBLE_BYTES = 2000;
+
+// TRUTH AT READ (decision queue-truth-at-read-annotation-design): the PER-CALL
+// budget the reconcile_needed re-check may spend on a board_query/
+// maintenance_query page. THREE AXES, not one N-files cap — that cap was
+// explicitly REJECTED because "fifty files can be gigabytes and missing paths
+// spawn git subprocesses", so a single number cannot bound the cost honestly:
+//  - ATTEMPTS bounds the stat() fan-out (one attempt = one owned path looked at);
+//  - BYTES bounds the sha256 work, which is what a big file actually costs;
+//  - GIT PROBES bounds parkedOnRef, the only arm that shells out per path.
+// Every axis is shared by the WHOLE page and, once any is hit, remaining items
+// get a per-item `unavailable:budget` and the envelope discloses the truncation
+// — never a silent partial evaluation read as "checked" (P5).
+//
+// MAGNITUDES: a page is capped at DEFAULT_BOARD_CAP (50) items and a minted
+// reconcile item names ONE file (DRIFT_ITEMS_PER_READ splits per file), so 120
+// attempts covers an ordinary full page more than twice over; the axis only
+// binds on the pathological shape this budget exists for — one item naming an
+// article's whole (possibly hundreds-strong) files[] set through the overflow
+// summary arm.
+const RECONCILE_RECHECK_FILE_ATTEMPT_CAP = 120;
+const RECONCILE_RECHECK_HASH_BYTE_CAP = 8 * 1024 * 1024;
+const RECONCILE_RECHECK_GIT_PROBE_CAP = 8;
+// How far liveArticleFor will follow a supersede chain before abstaining
+// (review FIX 3, 2026-08-31). Real chains are a handful of hops; the cap is the
+// shape-independent backstop beside the cycle guard, so a torn or pathological
+// chain costs a bounded number of store reads and then discloses, never a
+// verdict built on whatever node the walk happened to stop on.
+const LIVE_ARTICLE_CHAIN_HOP_CAP = 32;
+
+// BASELINE-ATTESTATION CAPS (board 8c8b6d78 / R9). The attestation branch spends,
+// per file_key, ONE read of the worktree file and ONE `git hash-object` — no more
+// (the earlier three-hash shape died with the rebuild, decision
+// [attested-close-proves-buffer-equality-through-git-not-path-resolution]).
+// ALL of that evidence is collected BEFORE the transaction opens, so no clean-filter
+// program — an arbitrary configured executable, reached through `hash-object
+// --path=` — ever runs under the store's single writer; inside `BEGIN IMMEDIATE`
+// only the CAS metadata write and the item removal remain. The caps therefore bound
+// the EVIDENCE PASS, not the lock: `todo.file_keys` carries NO cardinality limit in
+// the schema and files carry no size limit, so an item naming thousands of paths, or
+// one enormous path, would otherwise spend unbounded reads and subprocesses on one
+// call. Both caps are checked BEFORE any mutation and refuse the WHOLE close (P5) —
+// never a partial attestation, which would stamp provenance for some paths while
+// leaving the item open for the rest.
+//
+// MAGNITUDES: a settlement-minted reconcile item groups one ARTICLE's drifting
+// paths, which is single digits in practice; 64 leaves an order of magnitude of
+// headroom. 16 MiB is twice the per-page recheck byte budget above, because this
+// is one deliberate operator action rather than an incidental read-path cost.
+const ATTESTATION_MAX_PATHS = 64;
+const ATTESTATION_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+/**
+ * THE OWNER TYPES AN ATTESTED CLOSE CAN STAMP — both of the types that carry
+ * server-computed `file_baselines`, because settlement mints reconcile_needed
+ * items for both (scripts/hooks/lib/settlement.mjs queries
+ * types:['feature_article','reference_material'] and sets `feature_link` to
+ * whichever owner it found).
+ *
+ * WHY IT IS NOT ARTICLE-ONLY (review finding 1). It was, and a
+ * reference_material-owned item was therefore UNCLOSABLE: the attestation
+ * refused it as "not an article", and decision
+ * [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]
+ * forbids falling through to ordinary removal, because such an item sits
+ * squarely inside the re-mint predicate and the next settlement pass would
+ * simply mint it again. Nothing about the proof is type-specific: both types
+ * carry baselines (computeBaselines admits exactly these two), and both get
+ * their owned paths from the SAME registered extractor,
+ * RECORD_TYPES[type].fileKeys — so the scope, evidence and CAS path are shared
+ * verbatim rather than forked.
+ */
+const ATTESTABLE_OWNER_TYPES: readonly string[] = ['feature_article', 'reference_material'];
+/** How an attested close NAMES its target where both owner types are admitted. */
+const ATTESTABLE_OWNER_NOUN = 'owning article or reference document';
+// The tree-entry mode set, the no-follow read and the byte budget's enforcement
+// all live in ./attestation-proof.ts now — the evidence collector owns the whole
+// git/filesystem side of the proof (decision
+// [attested-close-proves-buffer-equality-through-git-not-path-resolution]).
+
+/**
+ * A git object id as `rev-parse` prints it: 40 lowercase hex (SHA-1, the default
+ * object format) or 64 (SHA-256 repositories, `git init --object-format=sha256`,
+ * git 2.29+). ACCEPTING BOTH is what keeps a SHA-256 repository able to attest at
+ * all — a 40-only shape check read a perfectly valid HEAD as "git is unavailable"
+ * and refused EVERY attested close there (review finding 4, 2026-09-06).
+ *
+ * NOT the same shape as `todo.measured_at_head`, which the record schema pins to
+ * 40 hex; the two stamping sites therefore narrow this result themselves rather
+ * than widen the schema — see boardAdd/boardUpdate.
+ */
+const GIT_OBJECT_ID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** The shape `todo.measured_at_head` accepts (packages/schemas records.ts) — SHA-1 only. */
+const MEASURED_AT_HEAD_RE = /^[0-9a-f]{40}$/;
+
+/**
+ * The verdict of the ONE per-owned-file drift classifier
+ * (classifyOwnedFileDrift) that the read-time MINT and the queue's
+ * TRUTH-AT-READ annotation both consume — decision
+ * queue-truth-at-read-annotation-design, predicate half: "never a second copy,
+ * and abstention is never collapsed to false".
+ *
+ * `unavailable` is a FIRST-CLASS verdict, not a hole. contentChanged() collapses
+ * "no baseline" and "cannot read the file" into `false` because its callers
+ * RAISE FLAGS and must abstain rather than fabricate one; that collapse is the
+ * anti-model here, because the annotation site has to say WHY it could not
+ * answer. The mint's abstain-as-no-drift behaviour is preserved by its CALL
+ * SITE reading `unavailable` exactly as it reads `clean` — a caller policy,
+ * never a property of the shared predicate.
+ */
+type DriftVerdict =
+  | { kind: 'reconcile'; missing: boolean }
+  | { kind: 'deletion_candidate' }
+  | { kind: 'parked'; ref: string }
+  | { kind: 'clean' }
+  | { kind: 'unavailable'; reason: string };
+
+/**
+ * classifyOwnedFileDrift's result: the verdict, plus the file's size when it
+ * EXISTS on disk (the mint's state-honesty check counts owned live bytes, and
+ * the stat is already taken — returning it keeps the mint from taking a second).
+ */
+type OwnedFileDrift = { verdict: DriftVerdict; size?: number };
+
+/**
+ * The two questions classifyOwnedFileDrift is asked, which differ in exactly
+ * TWO documented places (see the method body). Both modes run the same seven
+ * checks in the same order.
+ *
+ *  - 'mint' (knowledgeQuery's read-time drift wire): "is the article's account
+ *    of this file still true?" — the historical behaviour, unchanged.
+ *  - 'recheck' (the queue annotation): "does the drift an OPEN item already
+ *    recorded still reproduce?" — a different question about the same bytes.
+ */
+type DriftCheckMode = 'mint' | 'recheck';
+
+interface DriftCheckContext {
+  mode: DriftCheckMode;
+  /** the working tree the article's paths live in (treeRootFor, already resolved) */
+  treeRoot: string;
+  /** the live article's server-computed baselines — the bytes it was last
+   *  CONTENT-RECONCILED against, OR (per path) the bytes an already-paid close
+   *  explicitly ATTESTED it already describes (board 8c8b6d78 / R9; which of the
+   *  two is queryable per path via baseline_attestations) */
+  baselines: Record<string, string> | undefined;
+  /** the instant those baselines were taken: the article's updated_at */
+  baselinedAt: string;
+  /**
+   * Whether the cheap stat-first mtime prefilter may TERMINATE with `clean`
+   * (no hash). TRUE at the mint (its historical behaviour, decision foreign_57d9a52d);
+   * ALWAYS FALSE at the recheck (review FIX 1, 2026-08-31) — there a
+   * timestamp-only `clean` becomes the affirmative "no longer reproduces"
+   * claim, and an mtime-preserved edit after an unrelated re-baseline would make
+   * that claim false. See the prefilter arm in classifyOwnedFileDrift.
+   */
+  honorMtimePrefilter: boolean;
+  /**
+   * Paths carrying an ACTIVE `baseline_attestations` entry (board 8c8b6d78 / R9)
+   * — for these the mtime prefilter NEVER terminates, whatever
+   * honorMtimePrefilter says, and the content hash always decides.
+   *
+   * WHY, in one sentence: an attestation write deliberately PRESERVES the
+   * article's `updated_at` while re-stamping that path's baseline, so the
+   * prefilter's inference — "mtime no newer than updated_at means the file
+   * cannot have moved since its baseline was taken" — is exactly what stops
+   * holding for an attested path. The attested bytes were baselined at close
+   * time, which is LATER than `updated_at`, so a post-attestation edit whose
+   * mtime is preserved or backdated (an mtime-preserving copy, a restore from
+   * backup, clock skew) would sit at-or-below the old clock and short-circuit to
+   * `clean` against a baseline it no longer matches. Same reasoning, and same
+   * remedy, as the recheck's unconditional always-hash below — this is the
+   * per-path form of it, and it is the recovery backstop for everything the
+   * attestation's HEAD observation could not freeze.
+   *
+   * THE STANDING COST, STATED (review finding 7). This bypass has NO budget at
+   * the MINT: knowledgeQuery's drift wire calls classifyOwnedFileDrift with no
+   * DriftBudget (the attempt/byte/probe caps exist only on the recheck path), so
+   * after an attestation EVERY knowledge_query that returns the article re-reads
+   * and sha256s each attested path — up to ATTESTATION_MAX_PATHS paths and
+   * ATTESTATION_MAX_TOTAL_BYTES per close, and more if several closes attested
+   * different paths of one article. The cost stands until a CONTENT reconcile
+   * re-stamps that path (a write whose `resolves` names it, or one that stops
+   * claiming it) and so drops its `baseline_attestations` entry — an unrelated
+   * write keeps it (advanceBaselines).
+   *
+   * A MINT-SIDE BYTE BUDGET IS DELIBERATELY NOT ADDED, and this is a soundness
+   * argument rather than a cost one: at the mint an `unavailable` verdict is read
+   * by the CALL SITE exactly as `clean` (see the classifier's own note), so a
+   * budget could only express itself as "stop hashing and report nothing" — i.e.
+   * it would silently restore the very short-circuit this bypass exists to
+   * remove, on precisely the paths whose mtime cannot be trusted. A cap that can
+   * suppress the recovery backstop is worse than a re-read: the re-read is
+   * bounded and visible, the suppression is unbounded and invisible. If the cost
+   * ever needs bounding, it must be bounded by something that still reaches a
+   * VERDICT (fewer attested paths, or an eviction policy on the map), never by
+   * skipping the hash.
+   */
+  attestedPaths?: ReadonlySet<string>;
+  /** Paths whose close proved an exact-name MISS in the close-time HEAD tree.
+   * They remain clean only while absent and drift again as soon as a path
+   * appears; absence has no content hash or fabricated baseline. */
+  absenceAttestedPaths?: ReadonlySet<string>;
+}
+
+/**
+ * The per-CALL budget + memo the recheck threads through the classifier.
+ * Absent at the mint, which is a per-record wire with its own DRIFT_ITEMS_PER_READ
+ * bound and must keep spending exactly what it spends today.
+ */
+interface DriftBudget {
+  attempts: number;
+  bytesHashed: number;
+  gitProbes: number;
+  /** any axis was hit at least once — the envelope's truncation disclosure */
+  truncated: boolean;
+  /** (resolved tree, article version, path, prefilter policy) -> verdict */
+  memo: Map<string, DriftVerdict>;
+}
+
+/**
+ * Tags resolveRecordId's two genuine MISS throws — too-short-to-resolve and
+ * no-prefix-match — where nothing at all matched the caller's identifier.
+ * knowledge_get's dead-slug fallthrough gates on this tag so it only ever
+ * fires for a true miss; every other resolveRecordId refusal (a slug
+ * collision, an ambiguous prefix, or a torn-store inconsistency) names
+ * records that DID match and must reach the caller unchanged, never be
+ * swallowed in favour of a superseded body (review finding, 2026-08-20).
+ */
+export class UnresolvedIdentifierError extends Error {}
+
+/**
+ * Thrown by the id-resolution ladder when an identifier resolves through
+ * record_aliases — a HISTORICAL (pre-migration) id whose record was collapsed
+ * into a canonical one ([stable-identity-design-v2] contract 3).
+ *
+ * It is one throw with two receivers, deliberately: every WRITE tool inherits
+ * the refusal (naming the canonical id and its current version — a write must
+ * address the live record, never a version-pinned dead id), while knowledge_get
+ * CATCHES it and serves the archived snapshot plus a legacy_resolution block.
+ * Putting the alias hit on the error keeps the ladder single-exit — the
+ * alternative, a second resolution function for reads, is exactly the fork the
+ * one-ladder decision (foreign_2debab53) exists to prevent.
+ */
+export class HistoricalIdError extends Error {
+  constructor(
+    message: string,
+    readonly alias: { historical_id: string; canonical_id: string; archived_version: number }
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * knowledgeSplit's input shape, extracted so knowledgeSplitResult (the
+ * MCP-facing wrapper, mirroring knowledgeUpdateResult) can share it without
+ * a second hand-copied literal.
+ */
+export interface KnowledgeSplitInput {
+  id: string;
+  children: {
+    slug: string;
+    title: string;
+    what_it_does: string;
+    intended_behavior: string;
+    move_files: string[];
+    move_ac_ids: string[];
+    dependencies?: { relies_on: string[]; relied_by: string[] };
+  }[];
+  parent_what_it_does: string;
+  parent_intended_behavior?: string;
+  reason?: string;
+  resolves?: string[];
+}
+
+/**
+ * The unforgeable envelope: every write REFUSES these by name (board 617e97d4
+ * hoisted this out of refuseServerOwnedFields so knowledge_schema's
+ * server_owned mask derives from the SAME list this refusal guard consumes).
+ * Exported at MODULE scope (invariant 1 — one definition) so server.ts's typed
+ * knowledge_create input schema (decision foreign_7c7f6db1) strips exactly this set
+ * from every per-type variant instead of re-deriving or copying it.
+ */
+export const WRITE_REFUSED_FIELDS: readonly string[] = [
+  'id',
+  'created_at',
+  'updated_at',
+  'status',
+  'superseded_by',
+  'type',
+  'lifecycle',
+  'freshness',
+  'file_baselines',
+  // R9 (board 8c8b6d78): the attestation map is drift PROVENANCE — "the close of
+  // maintenance item X attested that this article's prose already describes these
+  // bytes, observed against commit Y". It is minted only by the attestation branch
+  // of board_remove / maintenance_remove, from a hash the server took itself, so it
+  // joins file_baselines here rather than becoming a field a caller can fabricate a
+  // human's attestation into.
+  'baseline_attestations',
+  // A separate, byte-free proof that HEAD had no exact tree entry for the path.
+  'absence_attestations',
+];
+
+/**
+ * knowledge_schema's server-owned mask, widened from WRITE_REFUSED_FIELDS by
+ * `version` — the counter this surface owns and always overwrites at create.
+ * Exported alongside WRITE_REFUSED_FIELDS for the same reason: server.ts's
+ * typed create variants must drop `version` too, not just the refused set.
+ */
+export const SERVER_OWNED_FIELDS: readonly string[] = [...WRITE_REFUSED_FIELDS, 'version'];
+
+/**
+ * Envelope fields knowledge_create DEFAULTS when absent (author 'conductor',
+ * links [], scope 'project', stack_tags []) — caller-SUPPLIABLE but never
+ * caller-REQUIRED. Exported so the typed create variants mark these
+ * `.optional()` exactly like knowledge_schema already reports them, keeping
+ * the two surfaces in lockstep (decision foreign_7c7f6db1).
+ */
+export const CREATE_DEFAULTED_FIELDS: readonly string[] = ['author', 'links', 'scope', 'stack_tags'];
+
+/**
+ * Fields refused on a MUTATION but legitimate at CREATE — deliberately a
+ * SECOND list rather than an addition to WRITE_REFUSED_FIELDS above (decision
+ * [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 3,
+ * which names that merge as a rejected alternative). WRITE_REFUSED_FIELDS is
+ * consumed by knowledge_create — both through refuseServerOwnedFields and
+ * through server.ts's typed create variants, which STRIP exactly that set from
+ * every per-type input schema — and `scope` is legitimate CREATION routing
+ * input there (it is in CREATE_DEFAULTED_FIELDS immediately above). So the
+ * refusal is operation-aware: creation-only input, immutable afterwards.
+ */
+const MUTATION_REFUSED_FIELDS: readonly string[] = ['scope'];
+
+/**
+ * elementOwnsScalar — the ONE ownership predicate shared by every
+ * `arr[key=value]` selector match: knowledge_edit's array-element addressing
+ * AND knowledge_array_remove's element selection (board c61c9a3a). Both used
+ * to carry their own hand-copied `String(el[key]) === value` comparison,
+ * which reads an ABSENT key as the string 'undefined' — so a selector like
+ * `[anykey=undefined]` matched every element LACKING that key. Fixed first on
+ * knowledge_array_remove (board 39673f6a, defect B) because there the false
+ * match DESTROYED the element; knowledge_edit carried the identical defect
+ * (silently misdirecting an edit to the wrong element) and is fixed here by
+ * sharing this one predicate rather than reproducing a second copy that would
+ * only re-diverge later.
+ *
+ * OWNERSHIP FIRST, then the caller does its own stringified-value comparison.
+ * This helper answers only "does this element carry `key` with a defined
+ * value" — never "does it equal `value`". A missing key, or a key explicitly
+ * set to `undefined`, both read as non-ownership; an element whose value IS
+ * the literal string "undefined" still owns the key and is unaffected.
+ *
+ * Deliberately NOT shared: the scalar-discriminator check (object/array
+ * values are unsound to address by) and every refusal policy — zero/multi
+ * match handling, floors, versioning. Those are per-operation and differ on
+ * purpose (array_remove destroys and floors; edit does not).
+ */
+function elementOwnsScalar(el: unknown, key: string): el is Record<string, unknown> {
+  if (!el || typeof el !== 'object') return false;
+  return Object.prototype.hasOwnProperty.call(el, key) && (el as Record<string, unknown>)[key] !== undefined;
+}
+
+// -----------------------------------------------------------------------
+// config_set (decision scale-down-enforcement-rules-and-locks-are-friction,
+// user-stated 2026-09-19). The positive key allowlist that used to gate this
+// tool was REMOVED 2026-09-19 under the scale-down ruling — config_set now
+// accepts ANY dotted config.json key path; the schema validation of the
+// resulting whole document (below) is what still refuses a value that would
+// break config.json, not a fixed key list.
+//
+// CONDUCTOR-RUN, UNCHANGED: no agent-templates/*.md grants this tool. This
+// server authenticates no caller, so keeping config_set off every roster
+// grant is what keeps every config.json key out of a subagent's reach even
+// though nothing in the wire protocol itself would stop a caller that HELD
+// the tool from flipping one.
+// -----------------------------------------------------------------------
+
+// Prototype-pollution guard (review fix, item 2): `categoryObj[key] = value`
+// further down uses bracket assignment on a PLAIN object built by spreading
+// the parsed JSON — assigning to `__proto__` there does not create an own
+// enumerable property (so it never round-trips through JSON.stringify and
+// the caller gets a "successful" receipt for a write that silently vanished
+// from the file — a false action claim) while still mutating the live
+// object's prototype chain in-process. `constructor`/`prototype` are refused
+// for the same class of reason. Checked against EVERY dotted segment of the
+// caller's raw path before any write is attempted.
+const CONFIG_SET_FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * The implementation behind SterlingTools.configSet, kept as a standalone
+ * function (rather than inline in the class method) so the prototype-
+ * pollution guard above stays the only module-level thing it touches — no
+ * dependency on `this`, beyond the repoRoot the caller already resolved.
+ *
+ * THE WHOLE DOCUMENT IS ROUND-TRIPPED AS A PLAIN JS OBJECT, never through
+ * parseConfig's own `.parse()` output: configSchema is a non-strict
+ * `z.object`, so `.parse()` SILENTLY STRIPS any top-level key it does not
+ * model (e.g. `review_ledger.code_globs`) — writing that stripped shape back
+ * would delete an unrelated consumer's data on every unrelated config_set
+ * call. safeParse is used PURELY AS A VALIDATOR; the bytes written are the
+ * caller's own merged raw object, so every unrelated top-level and sibling
+ * key survives byte-for-byte (a pin).
+ *
+ * DISCLOSURE (review item 8, belongs beside the tool's served description
+ * too): the file is always RE-SERIALIZED as 2-space, LF-terminated JSON — a
+ * CRLF or 4-space source file is reformatted WHOLE, not edited in place. A
+ * leading UTF-8 BOM is stripped on read rather than reported as a corrupt
+ * file. Every write here is CAS-checked against the bytes this call itself
+ * observed, but a caller that skips `expected_digest` still risks a
+ * last-rename-wins loss against a genuinely concurrent writer (the TUI's own
+ * config-writeback) between ITS read and THIS call's write — passing
+ * `expected_digest` is how a caller detects that instead of silently losing
+ * it.
+ */
+/**
+ * decision config-set-warns-on-keys-sterling-does-not-read (77ff9aa8,
+ * user-ruled 2026-09-28): names each unread key the WRITTEN path is or sits
+ * under, reusing the schemas package's own dead-key walk (never a
+ * locally-duplicated key list) — "X is not read by Sterling" plus its
+ * rename target when one is known.
+ */
+function unreadKeyWarnings(path: string, keys: readonly UnreadConfigKey[]): string[] {
+  return keys
+    .filter((k) => k.path === path || path.startsWith(`${k.path}.`))
+    .map((k) => (k.renamed_to ? `${k.path} is not read by Sterling (renamed to ${k.renamed_to})` : `${k.path} is not read by Sterling`));
+}
+
+function configSetImpl(
+  repoRoot: string | undefined,
+  path: string,
+  value: unknown,
+  expectedDigest: string | undefined
+): { path: string; previous_value: unknown; value: unknown; digest: string; warnings?: string[] } {
+  if (!repoRoot) {
+    throw new Error(`config_set: no project root is known to this server, so .sterling/config.json cannot be resolved.`);
+  }
+  if (typeof path !== 'string' || !path.trim()) {
+    throw new Error(`config_set: 'path' is required — a dotted key path (e.g. 'tdd.enabled').`);
+  }
+  // P5: an omitted `value` is refused BEFORE anything else (review item 3) —
+  // JSON.stringify drops an object property whose value is `undefined`, so
+  // letting this through would silently DELETE the addressed leaf while the
+  // receipt still reports {value: undefined} as if something had been set.
+  // The MCP wire also refuses this at the schema layer (server.ts); this is
+  // the second, class-level layer for any direct (non-wire) caller.
+  if (value === undefined) {
+    throw new Error(
+      `config_set: 'value' is required — an omitted value would silently DELETE '${path}' via JSON.stringify while still reporting success. Pass an explicit value (null is fine) to set exactly what you intend. Nothing was written.`
+    );
+  }
+  // Prototype-pollution guard (review item 2), checked against EVERY dotted
+  // segment. This is the only path-shape refusal left — the positive key
+  // allowlist was removed 2026-09-19 (decision
+  // scale-down-enforcement-rules-and-locks-are-friction); any other dotted
+  // path is accepted here and lives or dies on the schema validation below.
+  if (path.split('.').some((seg) => CONFIG_SET_FORBIDDEN_SEGMENTS.has(seg))) {
+    throw new Error(
+      `config_set: '${path}' contains a forbidden path segment — __proto__ / constructor / prototype are refused anywhere in a dotted path (prototype-pollution guard). Nothing was written.`
+    );
+  }
+
+  const configDir = join(repoRoot, '.sterling');
+  const configPath = join(configDir, 'config.json');
+
+  // Symlink/escape hardening (review item 6). existsSync FOLLOWS symlinks —
+  // it reads FALSE for a DANGLING link, which used to fall straight into the
+  // "absent" branch below and let a planted dangling symlink at config.json
+  // slip past the isSymbolicLink() check entirely (renameSync then replaces
+  // the LINK ITSELF with a fresh file, silently destroying it). lstatSync in
+  // a try/catch tells absence (ENOENT) apart from every other on-disk shape
+  // without ever following a link.
+  let dirLst: ReturnType<typeof lstatSync> | null;
+  try {
+    dirLst = lstatSync(configDir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new Error(`config_set: could not stat .sterling at the project root (${(e as Error).message}). Nothing was written.`);
+    }
+    dirLst = null;
+  }
+  if (!dirLst) {
+    throw new Error(`config_set: no .sterling directory at the project root — this is not an initialized Sterling project. Nothing was written.`);
+  }
+  if (dirLst.isSymbolicLink()) {
+    throw new Error(`config_set: .sterling is a symlink at the project root — refusing a structured write beneath a linked directory. Nothing was written.`);
+  }
+  const realDir = realpathSync(configDir);
+  const realRoot = realpathSync(repoRoot);
+  const relDir = relative(realRoot, realDir);
+  if (relDir === '..' || relDir.startsWith(`..${sep}`) || isAbsolute(relDir)) {
+    throw new Error(`config_set: .sterling resolves outside the project root (${realDir}) — refusing. Nothing was written.`);
+  }
+
+  let fileLst: ReturnType<typeof lstatSync> | null;
+  try {
+    fileLst = lstatSync(configPath);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new Error(`config_set: could not stat .sterling/config.json (${(e as Error).message}). Nothing was written.`);
+    }
+    fileLst = null;
+  }
+
+  let currentBytes: Buffer;
+  if (fileLst) {
+    if (fileLst.isSymbolicLink()) {
+      throw new Error(`config_set: .sterling/config.json is a symlink — refusing a structured write through a link, including a dangling one. Nothing was written.`);
+    }
+    if (!fileLst.isFile()) {
+      throw new Error(`config_set: .sterling/config.json is not a regular file — refusing. Nothing was written.`);
+    }
+    currentBytes = readFileSync(configPath);
+  } else {
+    currentBytes = Buffer.alloc(0);
+  }
+
+  const currentDigest = createHash('sha256').update(currentBytes).digest('hex');
+  if (expectedDigest !== undefined && expectedDigest !== currentDigest) {
+    throw new Error(
+      `config_set: expected_digest ${expectedDigest} does not match the current config.json digest ${currentDigest} — it changed since you read it. Nothing was written; re-read and retry.`
+    );
+  }
+
+  let raw: Record<string, unknown>;
+  if (currentBytes.length === 0) {
+    raw = {};
+  } else {
+    // BOM stripping (review item 8): a leading UTF-8 BOM is a legitimate
+    // artifact of some Windows editors/tools, not corruption — strip it
+    // before JSON.parse rather than refusing a well-formed document over one
+    // invisible leading character.
+    let text = currentBytes.toString('utf8');
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`config_set: .sterling/config.json is not valid JSON (${(e as Error).message}) — refusing a blind merge onto a corrupt file. Nothing was written.`);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`config_set: .sterling/config.json does not contain a JSON object at its root — refusing. Nothing was written.`);
+    }
+    raw = parsed as Record<string, unknown>;
+  }
+
+  // The path can be ANY depth now the allowlist is gone — a bare root key
+  // (`machine_role`, 0 dots) or a path several segments deep
+  // (`context_watch.windows.claude-fable-5-1`, 2 dots) alike. Walk the
+  // segments, shallow-cloning each existing object level so unrelated
+  // siblings at every depth survive byte-for-byte, and create a plain
+  // object for any intermediate segment that is ABSENT. An intermediate
+  // that exists but is not a plain object (a scalar, an array) is REFUSED:
+  // walking into it would silently replace forward-compatible data the
+  // schema does not model (Terra review 2026-09-19, MEDIUM).
+  const segments = path.split('.');
+  const mutated: Record<string, unknown> = { ...raw };
+  let cursor: Record<string, unknown> = mutated;
+  let previousValue: unknown;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (i === segments.length - 1) {
+      previousValue = cursor[seg];
+      cursor[seg] = value;
+    } else {
+      const existing = cursor[seg];
+      if (existing === undefined) {
+        const next: Record<string, unknown> = {};
+        cursor[seg] = next;
+        cursor = next;
+      } else if (existing !== null && typeof existing === 'object' && !Array.isArray(existing)) {
+        const next: Record<string, unknown> = { ...(existing as Record<string, unknown>) };
+        cursor[seg] = next;
+        cursor = next;
+      } else {
+        const walked = segments.slice(0, i + 1).join('.');
+        throw new Error(
+          `config_set: '${path}' walks into '${walked}', which exists and is ${Array.isArray(existing) ? 'an array' : `a ${typeof existing}`}, not an object — refusing to replace it. Set '${walked}' itself if that is what you intend. Nothing was written.`
+        );
+      }
+    }
+  }
+
+  const validation = configSchema.safeParse(mutated);
+  if (!validation.success) {
+    const issues = validation.error.issues.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+    throw new Error(`config_set: the resulting config.json would fail schema validation — ${issues}. Nothing was written.`);
+  }
+
+  const serialized = JSON.stringify(mutated, null, 2) + '\n';
+  const tmpPath = join(configDir, `config.json.tmp-${randomUUID()}`);
+  writeFileSync(tmpPath, serialized);
+
+  let renamed = false;
+  try {
+    // Preserve the existing file's mode on the replacement (review item 7) —
+    // best-effort only, never blocks the write: a chmod failure here is
+    // cosmetic (permission bits), while the write itself already validated
+    // and is ready to land.
+    if (fileLst) {
+      try {
+        chmodSync(tmpPath, fileLst.mode & 0o777);
+      } catch {
+        /* best-effort mode preservation only */
+      }
+    }
+    // CAS RE-CHECK IMMEDIATELY BEFORE THE RENAME (review item 9, Codex
+    // round): the read+hash above and the rename below straddle a window in
+    // which another writer (the TUI's config-writeback, a second concurrent
+    // config_set call) can replace the file — a naive tmp+rename would
+    // silently clobber that write with a stale snapshot, regardless of
+    // whether the CALLER passed expected_digest. Re-read and re-hash the
+    // ACTUAL on-disk bytes one more time and refuse if they moved.
+    // ACCEPTED RESIDUAL (disclosed, not silently claimed away): the window
+    // BETWEEN this re-check and the rename itself remains — rename() is
+    // atomic for VISIBILITY (a reader never sees a half-written file), not
+    // for COMPARISON, and closing that last sliver needs a filesystem lock
+    // this tool does not take.
+    let raceBytes: Buffer;
+    try {
+      raceBytes = readFileSync(configPath);
+    } catch {
+      raceBytes = Buffer.alloc(0);
+    }
+    const raceDigest = createHash('sha256').update(raceBytes).digest('hex');
+    if (raceDigest !== currentDigest) {
+      throw new Error(
+        `config_set: config.json changed on disk while this write was in flight (a concurrent writer) — read digest ${currentDigest}, now ${raceDigest}. Nothing was written; re-read and retry.`
+      );
+    }
+    renameSync(tmpPath, configPath);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        /* best-effort cleanup of the temp file only */
+      }
+    }
+  }
+
+  const digest = createHash('sha256').update(serialized).digest('hex');
+  const warnings = unreadKeyWarnings(path, unreadConfigKeys(mutated));
+  return warnings.length > 0
+    ? { path, previous_value: previousValue, value, digest, warnings }
+    : { path, previous_value: previousValue, value, digest };
+}
+
+export class SterlingTools {
+  private store: ToolStore;
+  private config: SterlingConfig;
+  private now: () => string;
+  private newId: () => string;
+  private repoRoot?: string;
+
+  constructor(deps: ToolDeps) {
+    this.store = deps.store;
+    this.config = deps.config ?? parseConfig({});
+    this.now = deps.now ?? (() => new Date().toISOString());
+    this.newId = deps.newId ?? randomUUID;
+    this.repoRoot = deps.repoRoot;
+  }
+
+  /**
+   * §16.1.9: unbuilt checks emit check_skipped where they would have run — never
+   * silent success. `persist` (default true) writes the audit row immediately;
+   * pass false to DEFER persistence — the caller then gets the SkippedCheck back
+   * (via the result's check_skipped) and is responsible for recording the audit
+   * row itself. The only deferring caller is knowledge_extract on a domain-scoped
+   * source: its txn opens on the DOMAIN mount, but recordCheckSkipped always
+   * routes to the PROJECT mount (MountedStores.recordCheckSkipped), so an
+   * in-transaction audit write would commit independently of the domain BEGIN and
+   * survive a rolled-back extract. Deferring lets extract persist the audit rows
+   * only AFTER the mount transaction commits, keeping a rollback trace-free while
+   * staying never-silent on success.
+   */
+  private skip(check: string, runId: string | undefined, persist = true): SkippedCheck {
+    const skipped = { check, reason: 'not_built' };
+    if (persist) this.store.recordCheckSkipped(check, skipped.reason, runId, this.now());
+    return skipped;
+  }
+
+  /**
+   * The staged pipeline (and its notion of an "active run") was removed per
+   * decision sterling-claude-code-scale-down-boundary (2ad87dd1) — every
+   * check_skipped row is now a direct-mode NULL-run row (capped by the
+   * store's own NULL-run retention, not by run disposal).
+   */
+  private activeRunId(): string | undefined {
+    return undefined;
+  }
+
+  /**
+   * §3.2.3/§3.2.5 drift baseline: sha256 of each owned file currently on disk,
+   * keyed by the registry's file-key extractor (feature_article files[].path;
+   * reference_material kind:doc location). Computed at create/reconcile so the
+   * read-time drift check can distinguish a real content change from a mere
+   * mtime reset (a git merge/checkout touches every file's mtime without
+   * changing content). No repoRoot, or a file absent at write time, → no entry
+   * (the read-time deletion check still covers a vanished owned file).
+   * `only`, when given, restricts the hashing to those owned paths — the
+   * versioned write's evidence-gated advance (advanceBaselines) hashes nothing
+   * it is not about to stamp.
+   *
+   * A NON-REGULAR owned path (symlink, directory, device) also gets NO entry, on
+   * exactly the same footing as an absent file. hashFile FOLLOWS symlinks — it
+   * must, for its drift callers — so an article owning a symlinked path used to
+   * record the LINK TARGET's bytes as that path's baseline, importing content
+   * from outside the tree into a durable record at create/reconcile time. Both
+   * baseline consumers ABSTAIN on a missing baseline (contentChanged here, and
+   * contentChangedAgainstBaseline in scripts/hooks/lib/settlement.mjs), so
+   * omitting it is the existing absent-file behaviour and not a new rule. The
+   * attested close refuses such a path outright (pin R9-14a); this closes the
+   * upstream route by which those bytes reached file_baselines anyway.
+   */
+  private computeBaselines(record: Record<string, unknown>, only?: ReadonlySet<string>): Record<string, string> | undefined {
+    if (!this.repoRoot) return undefined;
+    const type = record.type as string;
+    if (type !== 'feature_article' && type !== 'reference_material') return undefined;
+    // Detached-working-tree resolution (comsoft-juiced 2026-07-17): a record
+    // declaring working_tree hashes against ITS tree, never the project root —
+    // the root's same-named files previously leaked into copy-article baselines.
+    // Unmapped tree name → NO baselines (abstain; the read path flags loud).
+    const { root, unresolved } = this.treeRootFor(record);
+    if (unresolved || !root) return undefined;
+    const baselines: Record<string, string> = {};
+    // ONE definition of "which paths can be baselined", shared with the
+    // read-time drift check (baselineablePaths) so the writer of these hashes
+    // and the reader that re-checks them cannot drift apart.
+    for (const rel of SterlingTools.baselineablePaths(record)) {
+      if (only && !only.has(rel)) continue;
+      // lstat, not stat: the question is what the PATH ITSELF is, and a symlink
+      // to a regular file passes `stat`. Absent → skip, same as before.
+      const shape = lstatSync(join(root, rel), { throwIfNoEntry: false });
+      if (!shape || !shape.isFile()) continue;
+      const hash = this.hashFile(rel, root);
+      if (hash !== undefined) baselines[rel] = hash;
+    }
+    return Object.keys(baselines).length ? baselines : undefined;
+  }
+
+  /**
+   * THE EVIDENCE-GATED BASELINE ADVANCE of a versioned write (decision
+   * [baseline-advance-is-evidence-gated-ordinary-writes-preserve-baselines]),
+   * computed per path over the record's owned set AFTER the merge:
+   *   - a path in `resolvedKeys` (the file_keys of the items this write
+   *     resolves) is RE-STAMPED to its current bytes — the resolves claim is
+   *     the evidence that the article now describes them;
+   *   - an owned path with NO baseline yet (newly claimed, or absent when last
+   *     stamped) is STAMPED — there is no drift to lose on a path nothing
+   *     compares against, and this is the "established on the next write"
+   *     contract contentChanged documents;
+   *   - every other still-owned path keeps its baseline byte-for-byte, so an
+   *     unrelated write can never erase un-reconciled drift;
+   *   - a path the record stops claiming drops its baseline (decision f841392b's
+   *     prune is the queue half of the same departure).
+   * Attestation PROVENANCE follows the stamp, per path (board 8c8b6d78 / R9):
+   * a path this write stamps loses its baseline_attestations and
+   * absence_attestations entries, because its baseline now belongs to this
+   * content write, not to the close that attested it; an untouched path keeps
+   * its entry, because its baseline is still the attested one; a departed path
+   * loses both with its baseline. A resolved path whose file cannot be hashed
+   * (absent, non-regular, unmapped tree) is left with NO baseline and no
+   * markers, exactly as computeBaselines leaves it; an unbaselined path that
+   * still cannot be hashed was not stamped, so its absence attestation stands.
+   *
+   * `resolvedKeys` must be read in the SAME transaction that drains the items
+   * (knowledgeUpdate's `advance`), so an item widened or re-keyed by another
+   * writer is re-stamped exactly as it is drained. WHAT THIS DOES NOT
+   * GUARANTEE: that the article's prose describes the re-stamped bytes — a
+   * resolves claim is the caller's assertion, and the receipt's resolved_items
+   * discloses every path it actually closed.
+   */
+  /** A per-path map re-keyed by the normalized repo path. A record written
+   *  before baselineablePaths normalized can carry a raw './x' key beside (or
+   *  instead of) 'x'; the normalized spelling wins when both are present, and
+   *  a key that cannot be normalized matches no owned path and is dropped. */
+  private static normalizedKeys<T>(map: Record<string, T>): Record<string, T> {
+    const out: Record<string, T> = {};
+    for (const [key, value] of Object.entries(map)) {
+      let rel: string;
+      try {
+        rel = normalizeRepoPath(key);
+      } catch {
+        continue;
+      }
+      if (!(rel in out) || key === rel) out[rel] = value;
+    }
+    return out;
+  }
+
+  /** The union of the claimed items' file_keys, normalized — the re-stamp set
+   *  a resolves-bearing write earns (advanceBaselines). */
+  private static claimedFileKeys(items: readonly unknown[]): Set<string> {
+    const keys = new Set<string>();
+    for (const item of items) {
+      const fileKeys = (item as { file_keys?: unknown }).file_keys;
+      if (!Array.isArray(fileKeys)) continue;
+      for (const key of fileKeys) {
+        if (typeof key !== 'string') continue;
+        try {
+          keys.add(normalizeRepoPath(key));
+        } catch {
+          continue;
+        }
+      }
+    }
+    return keys;
+  }
+
+  private advanceBaselines(
+    old: Record<string, unknown>,
+    next: Record<string, unknown>,
+    resolvedKeys: ReadonlySet<string>
+  ): {
+    file_baselines: Record<string, string> | undefined;
+    baseline_attestations: Record<string, unknown> | undefined;
+    absence_attestations: Record<string, unknown> | undefined;
+  } {
+    const oldBaselines = SterlingTools.normalizedKeys((old.file_baselines as Record<string, string> | undefined) ?? {});
+    const oldAttestations = SterlingTools.normalizedKeys((old.baseline_attestations as Record<string, unknown> | undefined) ?? {});
+    const oldAbsences = SterlingTools.normalizedKeys((old.absence_attestations as Record<string, unknown> | undefined) ?? {});
+    const owned = SterlingTools.baselineablePaths(next);
+    const stamp = new Set(owned.filter((rel) => resolvedKeys.has(rel) || oldBaselines[rel] === undefined));
+    const fresh = stamp.size ? (this.computeBaselines(next, stamp) ?? {}) : {};
+    const baselines: Record<string, string> = {};
+    const attestations: Record<string, unknown> = {};
+    const absences: Record<string, unknown> = {};
+    for (const rel of owned) {
+      if (fresh[rel] !== undefined) {
+        baselines[rel] = fresh[rel];
+        continue;
+      }
+      // a resolved path that could not be hashed is still re-stamped (to no
+      // baseline) and loses its markers; an unbaselined path that still cannot
+      // be hashed was not stamped at all, so its absence attestation stands
+      if (resolvedKeys.has(rel)) continue;
+      if (oldBaselines[rel] !== undefined) baselines[rel] = oldBaselines[rel];
+      if (oldAttestations[rel] !== undefined) attestations[rel] = oldAttestations[rel];
+      if (oldAbsences[rel] !== undefined) absences[rel] = oldAbsences[rel];
+    }
+    const orUndefined = <T,>(map: Record<string, T>) => (Object.keys(map).length ? map : undefined);
+    // `owned` is normalized (baselineablePaths), so every map written here is
+    // keyed by the spelling the store persists and every reader compares.
+    return {
+      file_baselines: orUndefined(baselines),
+      baseline_attestations: orUndefined(attestations),
+      absence_attestations: orUndefined(absences),
+    };
+  }
+
+  /**
+   * Resolve the working tree a record's file paths live in: no working_tree →
+   * the project root; a name mapped in config.working_trees → that path
+   * (absolute, or joined to the project root); an unmapped value naming THIS
+   * project's own root (either host spelling, see declaresForeignTree) → the
+   * project root; any other UNMAPPED name → unresolved, and every consumer
+   * abstains LOUD rather than resolving against the wrong tree (the
+   * comsoft-juiced false-deletion class).
+   */
+  private treeRootFor(record: Record<string, unknown>): { root?: string; unresolved: boolean } {
+    const name = (record as { working_tree?: string }).working_tree;
+    if (!name) return { root: this.repoRoot, unresolved: false };
+    const mapped = this.config.working_trees?.[name];
+    if (!mapped) {
+      if (!this.declaresForeignTree(name)) return { root: this.repoRoot, unresolved: false };
+      return { root: undefined, unresolved: true };
+    }
+    // HOST-INDEPENDENT classification (decision windows-linux-parity):
+    // config.working_trees maps a name to an absolute-OR-project-relative path
+    // (decision foreign_a0fc8743), so this branch decides which. node:path's isAbsolute
+    // is host-native, so the SAME config resolved differently depending on which
+    // OS ran the server — 'C:\\tree' and '\\tree' read as absolute on Windows and
+    // as relative on Linux, where they were then joined onto the project root.
+    if (isAbsolutePathAnyHost(mapped)) return { root: mapped, unresolved: false };
+    if (!this.repoRoot) return { root: undefined, unresolved: true };
+    return { root: join(this.repoRoot, mapped), unresolved: false };
+  }
+
+  /**
+   * Does a record's working_tree name a tree OTHER than this project? A
+   * working_tree that resolves to the project's own root — in its Windows drive
+   * spelling ('C:/Users/x/Proj') or its WSL /mnt spelling, trailing slash or
+   * DrvFs case aside — names the project itself, so the record owns root paths
+   * exactly as one with no working_tree does (Dome Farmer issue entry 454; user
+   * ruling 2026-09-28 "Code: self-root = own"). Mirrors H10's isUnowned, which
+   * asks the same question through the same shared sameLocationAnyHost.
+   */
+  private declaresForeignTree(workingTree: unknown): boolean {
+    if (!workingTree) return false;
+    return !(this.repoRoot && sameLocationAnyHost(String(workingTree), this.repoRoot));
+  }
+
+  /**
+   * Is `rel` registered as a generated projection (config.generated_projections)?
+   * A generated file changes on every regen by design, so the drift check's
+   * CONTENT-change arm skips it — its currency is guarded by
+   * check-projection-fresh at the merge gate, not by article baselines (the
+   * regen↔baseline circularity: draining the false item required an article
+   * write, whose regen re-armed the detector, forever). Deletion still flags:
+   * a vanished committed deliverable is real drift however it is produced.
+   */
+  private isGeneratedProjection(rel: string): boolean {
+    return this.config.generated_projections.includes(rel);
+  }
+
+  /**
+   * A file absent from the working tree may still be ALIVE on another git ref —
+   * parked on an unmerged branch rather than deleted (board 1d6a721a), OR still
+   * present on base because the deletion hasn't reached base yet (board
+   * 07baa42b). ANCESTRY-AWARE (board 07baa42b): a missing file is PARKED iff
+   * (a) it still exists on the BASE branch, or (b) it exists on a branch that
+   * is NOT YET merged into base. A blob surviving ONLY on branches that are
+   * fully-merged ancestors of base does NOT park — the deletion reading (base
+   * no longer has it, and no unmerged work holds it either) applies instead.
+   * Returns the first qualifying ref that holds it, or undefined if none does.
+   *
+   * ONLY CALLED ON THE ALREADY-RARE MISSING-FILE PATH, never on the hot read
+   * path: shelling out per owned file per query would be a real regression, and
+   * the whole point is that absence is unusual. Bounded by PARKED_REF_PROBE_CAP
+   * so a repo with hundreds of stale branches cannot turn one absent file into
+   * hundreds of subprocesses.
+   *
+   * HEAD is probed FIRST and separately: a file present in HEAD but not on disk
+   * is the commonest shape (someone deleted it without committing), and catching
+   * it in one call avoids walking the branch list at all. HEAD is case (a)/(b)
+   * territory regardless — it is checked for blob presence exactly as before,
+   * with no ancestry filtering (it's the branch currently checked out, not a
+   * candidate to filter against base).
+   *
+   * BASE resolution: `git symbolic-ref --short refs/remotes/origin/HEAD`
+   * (origin/ prefix stripped), else a local `main`, else `master`. If none of
+   * those resolve, ancestry cannot be judged — fall back to today's behaviour
+   * (no ancestry filtering) rather than throw or suppress. The base branch
+   * itself is checked by blob presence (case (a)); every other local branch is
+   * skipped when `git merge-base --is-ancestor <branch> <base>` exits 0 (fully
+   * merged — case not satisfied), and checked by blob presence otherwise
+   * (case (b), unmerged work).
+   *
+   * Every git failure degrades to PROBE_FAILED, which reads as today's
+   * pre-ancestry behaviour — a reconcile_needed deletion item. That direction is
+   * deliberate: a missing git, a non-repo tree root, or a corrupt ref must not
+   * SUPPRESS a real deletion finding, and it must not be mistaken for a
+   * CONFIRMED verdict either — the deletion_candidate lane (board e939fd21) is
+   * for a file whose HISTORY (not just its live ref tips) proves it was NEVER
+   * tracked anywhere this repo can reach — `git rev-list --all -- <path>`,
+   * exhaustive over every ref and not subject to PARKED_REF_PROBE_CAP; a file
+   * deleted from a merged-into-base ancestor DOES have history (confirmed_absent,
+   * the classic reconcile_needed reading) even though no live tip holds it. A
+   * probe that could not run proved nothing, so it gets the old, safer reading
+   * rather than the new, more assertive one.
+   */
+  private parkedOnRef(rel: string, treeRoot: string): MissingFileProbe {
+    const run = (args: string[]) => {
+      try {
+        return spawnSync('git', ['-C', treeRoot, ...args], { encoding: 'utf8', windowsHide: true });
+      } catch {
+        return undefined;
+      }
+    };
+    // CONFIRM THIS IS A USABLE GIT REPO before trusting an empty scan as a real
+    // verdict (board e939fd21, AC2/AC4 of file-parked-ancestry.test.ts): without
+    // this, "no repo at all" and "a repo that genuinely never tracked the file"
+    // both scan to nothing and were indistinguishable — the first must stay on
+    // the old reconcile_needed reading, the second is what earns the new
+    // deletion_candidate lane.
+    const repoCheck = run(['rev-parse', '--is-inside-work-tree']);
+    if (repoCheck?.status !== 0) return { status: 'probe_failed' };
+    const has = (ref: string): boolean => run(['cat-file', '-e', `${ref}:${rel}`])?.status === 0;
+    const resolveBase = (): string | undefined => {
+      const symbolic = run(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+      if (symbolic?.status === 0 && typeof symbolic.stdout === 'string') {
+        const name = symbolic.stdout.trim();
+        if (name) return name.startsWith('origin/') ? name.slice('origin/'.length) : name;
+      }
+      const mainCheck = run(['show-ref', '--verify', '--quiet', 'refs/heads/main']);
+      if (mainCheck?.status === 0) return 'main';
+      const masterCheck = run(['show-ref', '--verify', '--quiet', 'refs/heads/master']);
+      if (masterCheck?.status === 0) return 'master';
+      return undefined;
+    };
+    const isMergedIntoBase = (branch: string, base: string): boolean => {
+      const r = run(['merge-base', '--is-ancestor', branch, base]);
+      return r?.status === 0;
+    };
+    try {
+      if (has('HEAD')) return { status: 'parked', ref: 'HEAD' };
+      const refs = run(['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+      if (refs?.status !== 0 || typeof refs.stdout !== 'string') return { status: 'probe_failed' };
+      const branches = refs.stdout
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, PARKED_REF_PROBE_CAP);
+      const base = resolveBase();
+      if (base === undefined) {
+        for (const b of branches) {
+          if (has(b)) return { status: 'parked', ref: b };
+        }
+      } else {
+        for (const b of branches) {
+          if (!has(b)) continue;
+          if (b === base) return { status: 'parked', ref: b }; // case (a): base itself still has it
+          if (isMergedIntoBase(b, base)) continue; // fully merged into base — not a park
+          return { status: 'parked', ref: b }; // case (b): unmerged branch still holds it
+        }
+      }
+      // NOT parked on any ref TIP scanned. A tip-only scan cannot tell "deleted,
+      // but real git history exists" (confirmed_absent — the classic, closeable
+      // reconcile_needed case: file-parked-ancestry.test.ts AC2, a blob
+      // surviving only as a merged-into-base ancestor) from "never existed at
+      // all" (never_tracked — the new deletion_candidate lane, board e939fd21).
+      // HISTORY, not tips, answers that: one exhaustive `git rev-list --all --
+      // <path>` walks every commit reachable from EVERY ref (branches, tags,
+      // remote-tracking — not just refs/heads) and is NOT bounded by
+      // PARKED_REF_PROBE_CAP the way the tip scan above is (fixer round 2,
+      // findings 1+2 — the two collapse into one fix: never_tracked no longer
+      // depends on the capped per-ref tip loop at all, so a truncated tip scan
+      // can only ever under-detect a live PARK — an already-accepted, documented
+      // degrade (decision foreign_30d18443: a failed or bounded probe must never SUPPRESS
+      // a real deletion finding) — never inflate into a false never_tracked).
+      // One subprocess per already-rare missing file is the accepted cost here.
+      const history = run(['rev-list', '--all', '--', rel]);
+      if (history?.status !== 0 || typeof history.stdout !== 'string') return { status: 'probe_failed' };
+      return { status: history.stdout.trim().length > 0 ? 'confirmed_absent' : 'never_tracked' };
+    } catch {
+      return { status: 'probe_failed' };
+    }
+  }
+
+  /**
+   * board-provenance-measured-at-head: one shared, swallowing git runner —
+   * the same spawn pattern parkedOnRef already uses (never throws; a failure
+   * or absent git surfaces as `undefined`, and every caller here decides for
+   * itself what an absent result means for ITS disclosure).
+   */
+  private runGit(treeRoot: string, args: string[]): { status: number | null; stdout: string } | undefined {
+    try {
+      const r = spawnSync('git', ['-C', treeRoot, ...args], { encoding: 'utf8', windowsHide: true });
+      return { status: r.status, stdout: typeof r.stdout === 'string' ? r.stdout : '' };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Current HEAD's full object id in `treeRoot`, or undefined if git/the tree is
+   * unavailable (board-provenance-measured-at-head: what board_add/board_update
+   * stamp measured_at_head with; also what the attested close names as the commit
+   * its bytes were observed against).
+   *
+   * ACCEPTS 40- OR 64-HEX (GIT_OBJECT_ID_RE). A SHA-256 repository's ids are 64
+   * hex, so the old 40-only test reported a valid HEAD as unavailable and made
+   * every attested close refuse there (review finding 4, 2026-09-06). The
+   * NARROWING lives at the two `measured_at_head` stamping sites, whose record
+   * schema pins 40 — widening here must never turn a silent no-stamp into a zod
+   * refusal on the board write.
+   */
+  private currentHeadSha(treeRoot: string | undefined): string | undefined {
+    if (!treeRoot) return undefined;
+    const r = this.runGit(treeRoot, ['rev-parse', 'HEAD']);
+    if (!r || r.status !== 0) return undefined;
+    const sha = r.stdout.trim();
+    return GIT_OBJECT_ID_RE.test(sha) ? sha : undefined;
+  }
+
+  /**
+   * Does `sha` resolve to a real commit in `treeRoot`? Used to refuse a
+   * caller-supplied measured_at_head BY NAME rather than silently replacing
+   * it with HEAD (P5, decision board-provenance-measured-at-head) — the exact
+   * inverse of parkedOnRef's swallow-to-undefined direction, because here an
+   * unresolvable value is a caller error that must be reported, not degraded
+   * past.
+   */
+  private shaResolves(sha: string, treeRoot: string | undefined): boolean {
+    if (!treeRoot) return false;
+    const r = this.runGit(treeRoot, ['cat-file', '-e', `${sha}^{commit}`]);
+    return r?.status === 0;
+  }
+
+  /**
+   * board-provenance-measured-at-head: bounded `git log` walks per board_query
+   * call — never per item, which is the decision's whole point. ONE walk for the
+   * KEYED lane (`--name-only`, path-touch counts) and, only when the page holds
+   * keyless measured items, ONE more names-free walk for their distance
+   * annotation; the two are deliberately separate so the keyless lane can never
+   * change a keyed verdict or the envelope value (see the FIX 6 note in the body
+   * and provenanceWalk).
+   *
+   * FIX F1 (review 2026-08-24): the walk is RANGE-BOUNDED by the OLDEST
+   * eligible item's measured_at_head, not an unconditional HEAD-relative cap
+   * — `<oldestBase>^..HEAD` (backstopped by `-n PROVENANCE_WALK_COMMIT_CAP+1`
+   * so a query never pays for history no returned item's evidence predates).
+   * Finding the oldest base costs exactly ONE extra subprocess regardless of
+   * how many eligible items there are: `git rev-list --no-walk --timestamp
+   * <every unique sha>` resolves each sha's commit time directly (no
+   * traversal), and the minimum timestamp names the oldest — cheaper than N
+   * `merge-base --is-ancestor` calls and cheaper than walking full history to
+   * derive it. If that resolution fails for any reason (unexpected — every
+   * stored sha was validated resolvable at write time) or `<oldestBase>^`
+   * itself doesn't exist (oldestBase is the repo's root commit), the walk
+   * falls back to the unbounded-range `-n cap HEAD` form — the cap stays the
+   * backstop either way (never a silent unbounded walk).
+   *
+   * For every record carrying both file_keys and a (40-hex) measured_at_head,
+   * counts — in JS, over this single walk — how many of the commits STRICTLY
+   * NEWER than its measured_at_head touched one of its file_keys.
+   *
+   * FIX F3: a sha genuinely absent from the walked range (rebased away, or a
+   * non-ancestor of HEAD) previously skipped SILENTLY while the envelope
+   * still reported 'checked' — a missing warning read as fresh, the exact P5
+   * inversion the whole feature exists to avoid. It now ALWAYS gets a visible
+   * per-item note rather than being dropped.
+   *
+   * Never throws: an absent/failing git, a non-repo tree, or nothing eligible
+   * all degrade to a disclosed 'unavailable:<reason>'.
+   */
+  private computeProvenance(
+    records: DurableRecord[],
+    treeRoot: string | undefined
+  ): { status: string; warnings: Map<string, { full: string; short: string }> } {
+    const warnings = new Map<string, { full: string; short: string }>();
+    const all = records as unknown as Record<string, unknown>[];
+    const hasFileKeys = (r: Record<string, unknown>) => {
+      const fk = r.file_keys as string[] | undefined;
+      return Array.isArray(fk) && fk.length > 0;
+    };
+    const hasValidHead = (r: Record<string, unknown>) => {
+      const head = r.measured_at_head as string | undefined;
+      return typeof head === 'string' && /^[0-9a-f]{40}$/.test(head);
+    };
+    const withFileKeys = all.filter(hasFileKeys);
+    // KEYLESS ITEMS ARE ANNOTATED TOO (board ab5ef216, decision
+    // queue-truth-at-read-annotation-design §4): a keyless item's evidence still
+    // ages, and excluding it meant the one item that can say NOTHING about paths
+    // also said nothing about its own age — the absence a reader most easily
+    // misreads as freshness (P5).
+    //
+    // BUT STRICTLY ADDITIVELY (review FIX 6, 2026-08-31). The broadening first
+    // shipped by widening THE SHARED eligibility set, which is not additive: a
+    // keyless sha joined the oldest-base selection and the single walk, so an
+    // older keyless base could widen the range past PROVENANCE_WALK_COMMIT_CAP,
+    // flip the shared `walkTruncated` flag, and thereby change a KEYED item's
+    // verdict ('not an ancestor of HEAD' → 'walk cap reached', or a real count →
+    // no count at all) plus the envelope's own provenance value
+    // ('checked' → 'unavailable:walk_cap'). The keyed lane's verdicts and the
+    // envelope value are therefore computed from the ORIGINAL keyed-only
+    // eligibility, over their own walk, exactly as before the broadening; the
+    // keyless distances ride a SEPARATE bounded walk whose truncation is
+    // disclosed per item and never touches the keyed lane or the envelope.
+    const keyed = all.filter((r) => hasFileKeys(r) && hasValidHead(r));
+    const keyless = all.filter((r) => !hasFileKeys(r) && hasValidHead(r));
+    if (!treeRoot) return { status: 'unavailable:no_repo_root', warnings };
+    const headCheck = this.runGit(treeRoot, ['rev-parse', 'HEAD']);
+    if (!headCheck || headCheck.status !== 0) return { status: 'unavailable:no_git', warnings };
+    const branchCheck = this.runGit(treeRoot, ['symbolic-ref', '-q', 'HEAD']);
+    if (!branchCheck || branchCheck.status !== 0) return { status: 'unavailable:detached_head', warnings };
+    // FIX F2: distinguish "nothing here even carries file_keys" from "file_keys
+    // exist but none of them have been stamped yet" — different remedies. Both
+    // reasons report on the same NOTHING-TO-CHECK case: with no annotatable item
+    // at all there is no walk to run, and the reason names which of the two
+    // inputs was missing.
+    if (keyed.length === 0 && keyless.length === 0) {
+      return { status: withFileKeys.length === 0 ? 'unavailable:no_file_keys' : 'unavailable:no_measured_items', warnings };
+    }
+    // The CURRENT tip, for the keyless distance wording below — the reader needs
+    // the sha the distance is measured TO, and it is already in hand.
+    const headShaNow = headCheck.stdout.trim();
+    const headNow8 = /^[0-9a-f]{40}$/.test(headShaNow) ? headShaNow.slice(0, 8) : headShaNow;
+
+    // ---- THE KEYED LANE: byte-identical to the pre-broadening behaviour ----
+    let capHit = false;
+    if (keyed.length) {
+      const keyedWalk = this.provenanceWalk(
+        treeRoot,
+        keyed.map((r) => r.measured_at_head as string),
+        true
+      );
+      if (!keyedWalk) return { status: 'unavailable:no_git', warnings };
+      const { commits, truncated: walkTruncated } = keyedWalk;
+      for (const rec of keyed) {
+        const fileKeys = rec.file_keys as string[];
+        const head = rec.measured_at_head as string;
+        const id = rec.id as string;
+        const idx = commits.findIndex((c) => c.sha === head);
+        if (idx === -1) {
+          // F3: never silently skip — the sha is either older than a truncated
+          // window (cap genuinely hit) or not on HEAD's ancestry at all
+          // (rebased/orphaned); either way the count cannot be trusted, so say
+          // so on the item rather than reporting nothing.
+          if (walkTruncated) capHit = true;
+          const reason = walkTruncated ? 'walk cap reached' : 'not an ancestor of HEAD';
+          warnings.set(id, {
+            full: `⚠ measured_at_head ${head.slice(0, 7)} not found in the walked history (${reason}) — re-verify`,
+            // OUTSIDE-MODEL FINDING 3 (headline stays compact): no sha/reason detail.
+            short: ` ⚠not verifiable — re-verify`,
+          });
+          continue;
+        }
+        const count = commits.slice(0, idx).filter((c) => c.files.some((f) => fileKeys.includes(f))).length;
+        if (count > 0) {
+          warnings.set(id, {
+            full: `⚠ file_keys changed in ${count} commits since this item's evidence was measured (${head.slice(0, 7)})`,
+            // OUTSIDE-MODEL FINDING 3 (2026-08-24): appending the full sentence
+            // after headlineRecord's clip broke headline's compact-line contract
+            // (an 80-char line became 170+ chars, multiline). Headline gets a
+            // short marker instead; digest/full keep the full sentence.
+            short: ` ⚠${count} commits since measured`,
+          });
+        }
+      }
+    }
+
+    // ---- THE KEYLESS LANE: its own walk, its own truncation, ADDITIVE ONLY ----
+    // KEYLESS DISTANCE (board ab5ef216): with no file_keys there is no
+    // path-touch count to compute, so the item gets the one thing a walk CAN say
+    // about it — how far behind HEAD its evidence was measured. AN AGE SIGNAL,
+    // NEVER CALLED STALENESS: commits that touched nothing this item cares about
+    // still move the number, so the annotation asks for re-verification rather
+    // than asserting anything about the item's content. Zero distance says so
+    // plainly instead of dressing "no drift" up as a measurement.
+    //
+    // Names are NOT requested here (no path counting to do), and this walk's own
+    // truncation is disclosed PER ITEM only — it deliberately never feeds
+    // `capHit`, because the envelope's provenance value describes the keyed
+    // path-level check (review FIX 6).
+    if (keyless.length) {
+      const keylessWalk = this.provenanceWalk(
+        treeRoot,
+        keyless.map((r) => r.measured_at_head as string),
+        false
+      );
+      for (const rec of keyless) {
+        const head = rec.measured_at_head as string;
+        const id = rec.id as string;
+        const idx = keylessWalk ? keylessWalk.commits.findIndex((c) => c.sha === head) : -1;
+        if (idx === -1) {
+          // Same P5 posture as the keyed lane's F3 arm: never silently skip. A
+          // failed walk is its own named reason rather than an absent annotation.
+          const reason = !keylessWalk ? 'git walk unavailable' : keylessWalk.truncated ? 'walk cap reached' : 'not an ancestor of HEAD';
+          warnings.set(id, {
+            full: `⚠ measured_at_head ${head.slice(0, 7)} not found in the walked history (${reason}) — re-verify`,
+            short: ` ⚠not verifiable — re-verify`,
+          });
+          continue;
+        }
+        warnings.set(id, {
+          full:
+            idx === 0
+              ? `ℹ measured at current HEAD (${headNow8}) — no file_keys, path-level provenance unavailable; re-verify any absence claim before acting`
+              : // The decision's verbatim wording. Plural 'commits' at every N,
+                // deliberately: the phrase is quoted as-is by the pins and by the
+                // decision, and a singular special case would make the one
+                // reader who greps for it miss exactly the N=1 case.
+                `⚠ measured ${idx} commits before HEAD at ${headNow8} — no file_keys, path-level provenance unavailable; re-verify any absence claim before acting`,
+          // Headline keeps its compact line (OUTSIDE-MODEL FINDING 3) while
+          // still carrying the phrase a reader greps for.
+          short: idx === 0 ? ` ℹmeasured at current HEAD` : ` ⚠measured ${idx} commits before HEAD`,
+        });
+      }
+    }
+    // THE ENVELOPE VALUE IS THE KEYED LANE'S (review FIX 6): with no keyed item
+    // on the page the path-level check had nothing to run, and its reason is
+    // exactly the one it reported before keyless items were annotated at all.
+    if (keyed.length === 0) {
+      return { status: withFileKeys.length === 0 ? 'unavailable:no_file_keys' : 'unavailable:no_measured_items', warnings };
+    }
+    return { status: capHit ? 'unavailable:walk_cap' : 'checked', warnings };
+  }
+
+  /**
+   * ONE bounded `git log` walk over the range that covers every sha in `shas`,
+   * newest-first. Extracted (review FIX 6, 2026-08-31) so the keyed and keyless
+   * lanes can each have their OWN walk: sharing one walk meant a keyless sha's
+   * range could flip the keyed lane's truncation flag and, through it, both a
+   * keyed item's verdict and the envelope's provenance value.
+   *
+   * Every command, flag and ordering below is unchanged from the single-walk
+   * version, so the keyed lane — handed exactly the shas it was handed before —
+   * gets byte-identical results.
+   *
+   * F1 / OUTSIDE-MODEL FINDING 1 (2026-08-24, repro d5b84e6→3ef9fbc): resolve
+   * the oldest base topologically, never by commit TIMESTAMP — a child and its
+   * parent can share a timestamp, which made the CHILD "oldest" and excluded the
+   * PARENT's range entirely, falsely reporting the parent's sha as "not in
+   * current history". `git merge-base --octopus <shas>` returns a commit
+   * reachable from EVERY given base — an ancestor of all of them by construction
+   * — so `<that>^..HEAD` is guaranteed to cover every base's range regardless of
+   * commit-time skew. Pre-filter to shas that actually resolve (rev-list
+   * --ignore-missing) first: merge-base refuses outright if handed one that
+   * doesn't, and one rebased-away sha must not poison the whole batch back to
+   * the unbounded walk.
+   *
+   * Returns undefined when git could not be walked at all (the caller's
+   * 'unavailable:no_git' / per-item disclosure decision, never a throw).
+   */
+  private provenanceWalk(
+    treeRoot: string,
+    shas: string[],
+    withNames: boolean
+  ): { commits: { sha: string; files: string[] }[]; truncated: boolean } | undefined {
+    const uniqueShas = [...new Set(shas)];
+    let oldestBase: string | undefined = uniqueShas.length === 1 ? uniqueShas[0] : undefined;
+    if (uniqueShas.length > 1) {
+      const resolveCheck = this.runGit(treeRoot, ['rev-list', '--no-walk', '--ignore-missing', ...uniqueShas]);
+      const resolvableShas =
+        resolveCheck && resolveCheck.status === 0
+          ? resolveCheck.stdout
+              .split('\n')
+              .map((l) => l.trim())
+              .filter((l) => /^[0-9a-f]{40}$/.test(l))
+          : [];
+      if (resolvableShas.length === 1) {
+        oldestBase = resolvableShas[0];
+      } else if (resolvableShas.length > 1) {
+        const mb = this.runGit(treeRoot, ['merge-base', '--octopus', ...resolvableShas]);
+        const candidate = mb && mb.status === 0 ? mb.stdout.trim() : '';
+        if (/^[0-9a-f]{40}$/.test(candidate)) oldestBase = candidate;
+      }
+      // Any failure above (missing/unrelated histories/no common ancestor)
+      // leaves oldestBase undefined — the walk below falls back to the
+      // unbounded-range/-n-cap-backstop form (never a throw).
+    }
+
+    // The `-n` request asks for one MORE than the disclosed cap so a
+    // cap-truncated walk is detectable by comparing the RETURNED count
+    // against the cap (F4 — `commits.length < CAP` misreads a repo with
+    // EXACTLY `CAP` commits as truncated; requesting CAP+1 and trimming the
+    // lookahead entry fixes the off-by-one instead of guessing at it).
+    // --no-renames (OUTSIDE-MODEL FINDING 2, repro 644b46e): --name-only's
+    // default rename detection reports only the NEW path for a renamed file,
+    // so an item keyed to the path it was renamed FROM never saw its own
+    // change. --no-renames reports both the old and new paths as plain
+    // add/delete entries. A names-free walk (the keyless lane, which counts
+    // commits rather than path touches) asks for neither flag and parses the
+    // same way — every line is a sha.
+    const requestCap = PROVENANCE_WALK_COMMIT_CAP + 1;
+    const nameArgs = withNames ? ['--no-renames', '--name-only'] : [];
+    const logArgs = ['log', ...nameArgs, '--format=%H', '-n', String(requestCap)];
+    const rangedWalk = oldestBase ? this.runGit(treeRoot, [...logArgs, `${oldestBase}^..HEAD`]) : undefined;
+    const walk = rangedWalk && rangedWalk.status === 0 ? rangedWalk : this.runGit(treeRoot, [...logArgs, 'HEAD']);
+    if (!walk || walk.status !== 0) return undefined;
+    const commits: { sha: string; files: string[] }[] = [];
+    for (const raw of walk.stdout.split('\n')) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (/^[0-9a-f]{40}$/.test(line)) {
+        commits.push({ sha: line, files: [] });
+      } else if (commits.length) {
+        commits[commits.length - 1].files.push(line);
+      }
+    }
+    const truncated = commits.length > PROVENANCE_WALK_COMMIT_CAP;
+    if (truncated) commits.length = PROVENANCE_WALK_COMMIT_CAP; // drop the CAP+1'th lookahead entry
+    return { commits, truncated };
+  }
+
+  /**
+   * TRUTH AT READ for the reconcile_needed lane (decision
+   * queue-truth-at-read-annotation-design; boards be0ea20a HIGH + ab5ef216).
+   *
+   * THE MEASURED PROBLEM: the reconcile lane is minted by the READ path
+   * (research_finding foreign_f512020b), so READ VOLUME — not drift volume — drives the
+   * queue, and 12 of 14 lane items measured stale-open: the drift they name had
+   * already been reconciled away, and nothing said so. A drainer had to
+   * re-derive each item's premise by hand, which is exactly the cost that makes
+   * a queue get skipped.
+   *
+   * WHAT THIS DOES: for the reconcile_needed rows ON THIS PAGE, re-run the SAME
+   * per-file predicate the mint uses (classifyOwnedFileDrift) against the live
+   * working tree, and annotate the verdict. Composition, per the decision:
+   *   - ANY path still reconciling ⇒ the item reproduces ⇒ NO annotation (a
+   *     reproducing item is the normal case and needs no decoration);
+   *   - EVERY path clean AND fully evaluated ⇒ the stale annotation;
+   *   - ANY required check abstained (or was cut off by the budget) ⇒
+   *     `unavailable`, NEVER stale. An overflow item is never declared stale on
+   *     a partial check — the whole failure mode this closes is an absence being
+   *     read as a positive claim.
+   *
+   * WORKING-TREE WORDING, deliberately: the predicate reads TREE bytes, not the
+   * committed tree, so the annotation says "in the working tree at HEAD <sha8>"
+   * rather than implying anything about the commit. A mapped working tree is
+   * judged against THAT tree's own HEAD.
+   *
+   * NEVER CLOSURE AUTHORITY. Decision foreign_68988832's rejection of auto-closure and
+   * auto-drain STANDS: this is a best-effort READ annotation that makes a human
+   * drain cheap, and it writes nothing (a read is a pure function here — AC2
+   * pins two identical reads producing identical records).
+   *
+   * SCOPE: source:'system' + system_reason:'reconcile_needed' rows only, so a
+   * source:'user' board_query pays ZERO drift-recompute cost. Implemented at the
+   * ONE shared seam (boardQueryResult) that maintenance_query already delegates
+   * to — the rejected alternative, annotating only the drain surface, would have
+   * left board_query's system rows disagreeing with maintenance_query's about
+   * whether the same row is a closeable no-op.
+   */
+  private reconcileTruthAtRead(records: DurableRecord[]): {
+    status: string;
+    annotations: Map<string, { full: string; short: string }>;
+  } {
+    const annotations = new Map<string, { full: string; short: string }>();
+    const lane = (records as unknown as Record<string, unknown>[]).filter(
+      (r) => r.source === 'system' && r.system_reason === 'reconcile_needed'
+    );
+    // An ABSENT annotation is never a freshness claim (P5), so every reason a
+    // check could not run is named — including "there was nothing on this page
+    // to check", which is the reason a silent field would misrepresent as fine.
+    if (lane.length === 0) return { status: 'unavailable:no_reconcile_items', annotations };
+    if (!this.repoRoot) return { status: 'unavailable:no_repo_root', annotations };
+    const budget: DriftBudget = { attempts: 0, bytesHashed: 0, gitProbes: 0, truncated: false, memo: new Map() };
+    // PER-TREE HEAD, resolved once per distinct tree (review FIX 2, 2026-08-31).
+    // Classification reads the RESOLVED tree's bytes, so both the git-availability
+    // gate and the sha the annotation names must come from THAT tree — the
+    // decision says so in as many words ("mapped working trees use THAT tree's
+    // HEAD"). Reading them from the project root instead meant a mapped-tree item
+    // was judged against one tree and stamped with another tree's HEAD, and a
+    // mapped tree that is not a git repo at all passed a gate the project root
+    // happened to satisfy.
+    const headByTree = new Map<string, string | undefined>();
+    const headFor = (root: string): string | undefined => {
+      if (!headByTree.has(root)) headByTree.set(root, this.currentHeadSha(root));
+      return headByTree.get(root);
+    };
+    for (const item of lane) {
+      const id = item.id as string;
+      const abstain = (reason: string) => annotations.set(id, this.reconcileUnavailableAnnotation([reason]));
+      // BUDGET AXIS 1, PAGE-WIDE STOP (review FIX 4, 2026-08-31): once the
+      // attempt counter has parked at the cap, NOTHING further is spent on this
+      // page — no article resolution, no memo-key construction, no memo write, no
+      // per-path verdict allocation. file_keys carries no schema cardinality cap,
+      // so an adversarial or merely enormous item bounds I/O through the
+      // classifier's own axes but would still have paid CPU and allocation per
+      // path here. Every remaining item is disclosed as unavailable:budget, which
+      // is the same verdict it would have received one layer down (AC6: the item
+      // that blew the budget and the small item behind it are BOTH disclosed).
+      if (budget.attempts >= RECONCILE_RECHECK_FILE_ATTEMPT_CAP) {
+        budget.truncated = true;
+        abstain('budget');
+        continue;
+      }
+      const link = item.feature_link as string | undefined;
+      if (!link) {
+        abstain('no_feature_link');
+        continue;
+      }
+      const article = this.liveArticleFor(link);
+      if (!article) {
+        abstain('article_unresolved');
+        continue;
+      }
+      const tree = this.treeRootFor(article);
+      if (tree.unresolved || !tree.root) {
+        abstain('unmapped_working_tree');
+        continue;
+      }
+      // GIT AVAILABILITY IS PER TREE (review FIX 2). No resolvable HEAD in the
+      // tree actually being read means the annotation could not even NAME the
+      // state it was measured at, which is half of what makes it re-checkable.
+      const head = headFor(tree.root);
+      if (!head) {
+        abstain('no_git');
+        continue;
+      }
+      const paths = (item.file_keys as string[] | undefined) ?? [];
+      if (paths.length === 0) {
+        // A keyless reconcile item names no path to re-check. The keyless
+        // measured_at_head DISTANCE annotation (computeProvenance) still covers
+        // it — a different check, disclosed separately.
+        abstain('no_file_keys');
+        continue;
+      }
+      const detailedArticle = article as unknown as {
+        file_baselines?: Record<string, string>;
+        absence_attestations?: Record<string, unknown>;
+      };
+      const baselines = detailedArticle.file_baselines;
+      const absenceAttestedPaths = new Set(Object.keys(detailedArticle.absence_attestations ?? {}));
+      const version = (article as unknown as { version?: number }).version ?? 0;
+      const verdicts: DriftVerdict[] = [];
+      for (const path of paths) {
+        // PAGE-WIDE STOP, again (review FIX 4): the attempt counter parks at the
+        // cap, so once it is exhausted this item stops allocating per-path work
+        // and rides ONE unavailable:budget verdict into the composition below —
+        // the same verdict the classifier would return one layer down, without
+        // the per-path memo key and Map write. file_keys has no schema
+        // cardinality cap, so CPU and allocation have to be bounded here, not
+        // only I/O.
+        if (budget.attempts >= RECONCILE_RECHECK_FILE_ATTEMPT_CAP) {
+          budget.truncated = true;
+          verdicts.push({ kind: 'unavailable', reason: 'budget' });
+          break;
+        }
+        // PER-CALL MEMOIZATION by (resolved tree, article version, path):
+        // sibling items under one article — the ordinary shape, since the mint
+        // splits one article's drift into one item per file — re-ask about the
+        // same paths, and a memo hit costs no budget. NO POLICY DISCRIMINATOR IS
+        // NEEDED any more (review FIX 1): the recheck runs exactly ONE policy (it
+        // always hashes), and this memo is per CALL and reachable only from this
+        // method — the mint passes no budget, so its prefilter-honouring verdicts
+        // can neither enter nor read this map.
+        //
+        // INJECTIVE key by construction (Codex re-review 01a0576f): a separator
+        // can never be impossibility-proof here because normalizeRepoPath and
+        // working_trees permit ANY byte in a path, \x1F included — so crafted
+        // (treeRoot, path) tuples could collide a separator-joined key.
+        // JSON.stringify of the tuple is injective for arbitrary strings.
+        const key = JSON.stringify([tree.root, article.id, version, path]);
+        const cached = budget.memo.get(key);
+        if (cached) {
+          verdicts.push(cached);
+          continue;
+        }
+        // THE RECHECK ALWAYS HASHES (review FIX 1, 2026-08-31 — REPLACING the
+        // 'licensed prefilter' this call site first shipped with). The licence was
+        // "the article was re-baselined after this item was minted", and it does
+        // not hold: drift lands, a later write re-stamps the file (before decision
+        // [baseline-advance-is-evidence-gated-ordinary-writes-preserve-baselines]
+        // ANY article write did; now a resolves claim naming it), then a second edit whose mtime is preserved (a copy, a
+        // restore, clock skew) sits at or below updated_at and short-circuits to
+        // `clean`. At the MINT `clean` raises nothing; HERE it is the affirmative
+        // claim "the drift no longer reproduces", which is precisely the P5
+        // inversion this feature exists to close. So the prefilter's terminating
+        // power stays where its inference is sound — the mint — and the recheck
+        // pays the hash, bounded by the attempt and byte axes.
+        const { verdict } = this.classifyOwnedFileDrift(
+          path,
+          { mode: 'recheck', treeRoot: tree.root, baselines, baselinedAt: article.updated_at, honorMtimePrefilter: false, absenceAttestedPaths },
+          budget
+        );
+        budget.memo.set(key, verdict);
+        verdicts.push(verdict);
+      }
+      // ANY path still reconciling wins outright — never a first-path-wins or
+      // all-paths-must-differ rule (a whole-area change reconciles one file at a
+      // time, so a single live difference means the item still has work in it).
+      if (verdicts.some((v) => v.kind === 'reconcile' || v.kind === 'deletion_candidate')) continue;
+      const reasons = [
+        ...new Set(verdicts.filter((v) => v.kind === 'unavailable' || v.kind === 'parked').map((v) => (v.kind === 'unavailable' ? v.reason : 'parked_on_branch'))),
+      ].sort();
+      if (reasons.length) {
+        annotations.set(id, this.reconcileUnavailableAnnotation(reasons));
+        continue;
+      }
+      const sha8 = head.slice(0, 8);
+      annotations.set(id, {
+        full:
+          `⚠ TRUTH AT READ: the drift this item names no longer reproduces in the working tree at HEAD ${sha8} — ` +
+          `every path it names matches the live article's recorded baseline, so this is very likely a closeable no-op. ` +
+          `A BEST-EFFORT READ CHECK, NEVER CLOSURE AUTHORITY: confirm it yourself, then close it by NAMING it in a write's ` +
+          `resolves claim (or maintenance_remove) — nothing here closes anything. CONFIRM WHAT "MATCHES" MEANS HERE: a later ` +
+          `write whose resolves names a path (or an attested close of it) RE-STAMPS that path's baseline, so a re-stamp can absorb a ` +
+          `drift whose PROSE was never reconciled — the bytes agreeing with the recorded baseline does not prove the article still ` +
+          `describes them.`,
+        short: ` ⚠no longer reproduces in the working tree at HEAD ${sha8}`,
+      });
+    }
+    // The budget's truncation rides the STATUS, not only a note: a page that
+    // could not finish its own check must not report the same word as one that
+    // did (P5), and the per-item `unavailable:budget` reasons above are the
+    // detail behind it.
+    return { status: budget.truncated ? 'checked:budget_truncated' : 'checked', annotations };
+  }
+
+  /** The one wording for a reconcile item whose drift could not be re-checked — named reasons, never a shrug. */
+  private reconcileUnavailableAnnotation(reasons: string[]): { full: string; short: string } {
+    const joined = reasons.join(', ');
+    return {
+      full:
+        `⚠ TRUTH AT READ: this item's drift could NOT be re-checked (unavailable:${joined}) — treat it as OPEN and re-verify by hand. ` +
+        `An absent verdict is never a freshness claim (P5); in particular 'budget' means this page's re-check ran out of its own ` +
+        `cost allowance, not that the item is clean.`,
+      short: ` ⚠not re-checkable (unavailable:${joined})`,
+    };
+  }
+
+  /**
+   * The LIVE owner record (a feature_article by default; see `types`) a queue
+   * item's feature_link points at, following the
+   * supersede chain to its head (decision queue-truth-at-read-annotation-design:
+   * "legacy feature_links resolve through the supersede chain to the LIVE
+   * article's baselines").
+   *
+   * WHY THE WALK MATTERS: an item minted against an article that was later
+   * superseded still points at the DEAD id, and a dead predecessor's baselines
+   * are stale or (for a raw legacy insert) absent entirely — comparing against
+   * them would report a drift that reproduces perfectly well against the live
+   * article, or abstain where a real verdict was available.
+   *
+   * Returns undefined when the link resolves to nothing, or to a type the caller
+   * did not admit — an abstention, never a guess. store.get() (not the
+   * id-resolution ladder) deliberately: a feature_link is a full uuid written by
+   * the mint, and a READ path must not throw on a broken pointer.
+   *
+   * `types` IS THE CALLER'S ADMISSION, and it defaults to feature_article alone —
+   * the drift-recheck annotation reads an ARTICLE's baselines and is unchanged.
+   * The attested close passes ATTESTABLE_OWNER_TYPES, because settlement mints
+   * reconcile_needed items against reference_material owners too and such an item
+   * would otherwise be unclosable (review finding 1). The chain walk, the cycle
+   * guard, the hop cap and the live-status requirement are identical either way:
+   * only the terminal type test widens, so there is no second resolver to drift.
+   *
+   * IT MUST TERMINATE ON A LIVE ARTICLE OR ABSTAIN (review FIX 3, 2026-08-31).
+   * The first implementation exited the walk on a BROKEN chain — a superseded
+   * record with no superseded_by, a successor missing from the store, a
+   * self-loop, a cycle — and then returned that last node merely because its
+   * type was feature_article. The whole reason for walking is that a DEAD
+   * predecessor's baselines are stale or absent, so handing one back is worse
+   * than abstaining: it produces a full verdict (including the affirmative "no
+   * longer reproduces" claim) from bytes nothing current was ever compared
+   * against. Every abnormal shape now returns undefined, and the caller's
+   * `unavailable:article_unresolved` disclosure is what the reader sees.
+   */
+  private liveArticleFor(link: string, types: readonly string[] = ['feature_article']): DurableRecord | undefined {
+    let record = this.store.get(link);
+    // Bounded AND cycle-guarded: a torn store degrades to an abstention rather
+    // than spinning a read forever. The hop cap is a second, shape-independent
+    // backstop — the `seen` set already catches a cycle, but a pathological
+    // (or maliciously long) chain must not be walked at read time either.
+    const seen = new Set<string>();
+    let hops = 0;
+    while (record && record.status === 'superseded') {
+      if (hops++ >= LIVE_ARTICLE_CHAIN_HOP_CAP) return undefined;
+      if (!record.superseded_by || seen.has(record.id)) return undefined;
+      seen.add(record.id);
+      const next = this.store.get(record.superseded_by);
+      if (!next || next.id === record.id) return undefined;
+      record = next;
+    }
+    // Both conditions, not just the type: only a LIVE owner's baselines
+    // describe the bytes a current read should be compared against.
+    return record && types.includes(record.type) && record.status === 'active' ? record : undefined;
+  }
+
+  /**
+   * Does this files[] entry's own ROLE TEXT disclaim ownership of the path
+   * (board b7269100 / feedback §2.10)?
+   *
+   * The degenerate case a consuming project found: an article owns a 2717-line
+   * file and its own role text says the entry is HISTORICAL — a leftover from
+   * proving something once — then redirects the reader to three other articles
+   * for the file's actual behaviour. So it owns a file it makes no claims about,
+   * and every future edit to that file, for any reason, enqueues an already-paid
+   * no-op against it. Forever, by construction, and nothing noticed.
+   *
+   * Detection is a HINT, so it is tuned for precision over recall: only phrases
+   * that state the entry is not really this article's business count. A false
+   * positive would tell someone to drop a path they actually own, which is the
+   * expensive direction, so borderline wording is deliberately left undetected.
+   */
+  private disclaimsOwnership(role: string | undefined): boolean {
+    if (!role) return false;
+    return [
+      /\bhistorical\b/i,
+      /\bleftover\b/i,
+      /\bno longer (?:owns?|describes?|governs?|relevant)\b/i,
+      /\bnot (?:the )?(?:owner|owned|this article's)\b/i,
+      /\bsee .{0,40}\bfor (?:the )?(?:actual|real)\b/i,
+      /\bmakes no claims?\b/i,
+      /\bvestigial\b/i,
+    ].some((re) => re.test(role));
+  }
+
+  /** sha256 of a file's bytes under the given tree root, or undefined if it cannot be read.
+   *  PATHNAME-BASED and symlink-FOLLOWING, deliberately unchanged: its callers are the
+   *  read-time drift wires, which ask "do the bytes this path resolves to still match the
+   *  baseline?" and are answered by the same resolution computeBaselines used to write that
+   *  baseline. The attestation does NOT share it — it collects its own evidence
+   *  through ./attestation-proof.ts, whose whole claim is about a buffer it read
+   *  itself, not about a pathname. */
+  private hashFile(rel: string, root: string | undefined = this.repoRoot): string | undefined {
+    if (!root) return undefined;
+    try {
+      return createHash('sha256').update(readFileSync(join(root, rel))).digest('hex');
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Has the file at `rel` actually changed since its recorded baseline? mtime
+   * has already said "maybe" (the cheap pre-filter); this is the authoritative
+   * content check that suppresses the false positives a git merge/checkout
+   * produces by resetting mtimes without changing content. No baseline for the
+   * file (a record written before this wire, or a file absent at write time) →
+   * returns FALSE: mtime alone is a proven-unreliable signal, so the check
+   * ABSTAINS rather than raise a flag it cannot stand behind. The baseline is
+   * established on the next create/reconcile; H7 covers every governed edit
+   * meanwhile. An unreadable file also abstains (no fabricated flag).
+   */
+  private contentChanged(rel: string, baselines: Record<string, string> | undefined, root: string | undefined = this.repoRoot): boolean {
+    const baseline = baselines?.[rel];
+    if (baseline === undefined) return false;
+    const current = this.hashFile(rel, root);
+    if (current === undefined) return false;
+    return current !== baseline;
+  }
+
+  /**
+   * THE ONE per-owned-file drift classifier (decision
+   * queue-truth-at-read-annotation-design, predicate half). The read-time MINT
+   * (knowledgeQuery's feature-article wire) and the queue's TRUTH-AT-READ
+   * annotation (reconcileTruthAtRead) both call THIS — a second implementation
+   * at the annotation site was explicitly rejected: "the mint predicate is seven
+   * coupled checks, not a hash compare; a copy drifts from the mint and the
+   * annotation then lies about what a fresh read would do".
+   *
+   * THE SEVEN CHECKS, in this order (the mint's original order, preserved so its
+   * decisions are byte-identical before and after the extraction):
+   *   1. working-tree resolution — done by the CALLER (treeRootFor), because an
+   *      unmapped tree abstains for the whole record, not per file;
+   *   2. existence (stat) — absence is not deletion, so it routes to (3);
+   *   3. missing-file classification via parkedOnRef: parked / never_tracked
+   *      (deletion_candidate) / confirmed_absent+probe_failed (reconcile);
+   *   4. the stat-first MTIME PREFILTER — the cheap "could this have changed at
+   *      all" gate that keeps a re-baselined file from being hashed;
+   *   5. generated-projection exclusion (regen churn is by design);
+   *   6. baseline availability;
+   *   7. the authoritative content hash against that baseline.
+   *
+   * MODE DIFFERS IN EXACTLY TWO PLACES, both marked `MODE:` below, because the
+   * two callers ask different questions of the same bytes (see DriftCheckMode).
+   * Everything else — including which verdict each git probe status earns — is
+   * shared, which is the whole point of the extraction.
+   *
+   * NEVER THROWS and never writes: every failure is a named `unavailable`.
+   */
+  private classifyOwnedFileDrift(rel: string, ctx: DriftCheckContext, budget?: DriftBudget): OwnedFileDrift {
+    // BUDGET AXIS 1 — attempts. Checked BEFORE the stat so the cap bounds the
+    // syscall fan-out itself, and NOT incremented on the refusal path, so the
+    // counter parks at the cap and every later item reads the same exhausted
+    // budget (AC6: the item that blew the budget and the small item behind it
+    // are BOTH disclosed, not just the first).
+    if (budget && budget.attempts >= RECONCILE_RECHECK_FILE_ATTEMPT_CAP) {
+      budget.truncated = true;
+      return { verdict: { kind: 'unavailable', reason: 'budget' } };
+    }
+    if (budget) budget.attempts++;
+    const baseline = ctx.baselines?.[rel];
+    // THE STAT IS WRAPPED (review FIX 5, 2026-08-31): throwIfNoEntry:false only
+    // silences ENOENT. EACCES (an unreadable directory on the path), ELOOP (a
+    // symlink cycle), ENOTDIR and ENAMETOOLONG all still THROW — and an
+    // exception here does not fail one path, it escapes this method's
+    // NEVER-THROWS contract and aborts the whole board/maintenance read for
+    // every item on the page. Any stat failure is a named abstention instead;
+    // the mint reads `unavailable` exactly as it reads `clean`, so its behaviour
+    // is unchanged, and the annotation site discloses the class.
+    let stat: { size: number; mtimeMs: number } | undefined;
+    try {
+      stat = statSync(join(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? undefined;
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      return { verdict: { kind: 'unavailable', reason: `stat_failed_${String(code ?? 'unknown').toLowerCase()}` } };
+    }
+    if (!stat) {
+      // The affirmative absence proof settles this state. The stat remains
+      // necessary: its later success is what invalidates the historical miss.
+      if (ctx.absenceAttestedPaths?.has(rel)) return { verdict: { kind: 'clean' } };
+      // MODE (1/2) — A MISSING FILE WITH NO BASELINE.
+      // The mint asks whether the article's OWNERSHIP claim is still true, so an
+      // absent owned path is a finding regardless of baselines (that is what
+      // mints the deletion_candidate / out-of-band-deletion items, board
+      // e939fd21). The recheck asks whether an ALREADY-RECORDED drift still
+      // reproduces — and with no recorded bytes for the path there is nothing
+      // to reproduce AGAINST, so the honest answer is abstention, not a verdict.
+      // Abstaining first also spares the git probe entirely.
+      if (ctx.mode === 'recheck' && baseline === undefined) {
+        return { verdict: { kind: 'unavailable', reason: 'no_baseline' } };
+      }
+      // BUDGET AXIS 3 — git probes. parkedOnRef shells out per absent path, so
+      // it gets its own axis: a page full of missing files must not turn into
+      // hundreds of subprocesses.
+      if (budget) {
+        if (budget.gitProbes >= RECONCILE_RECHECK_GIT_PROBE_CAP) {
+          budget.truncated = true;
+          return { verdict: { kind: 'unavailable', reason: 'budget' } };
+        }
+        budget.gitProbes++;
+      }
+      // ABSENT FROM THE WORKING TREE IS NOT THE SAME AS DELETED (board
+      // 1d6a721a): ask git before concluding anything. 'never_tracked' (every
+      // reachable ref checked, none EVER held the blob) is the only verdict that
+      // earns deletion_candidate (board e939fd21); 'confirmed_absent' (real git
+      // history, merged into base) and 'probe_failed' (git could not be
+      // consulted at all) both keep the classic reconcile reading — a failed
+      // probe proves nothing and must not be read as the stronger verdict.
+      const probe = this.parkedOnRef(rel, ctx.treeRoot);
+      if (probe.status === 'parked') return { verdict: { kind: 'parked', ref: probe.ref } };
+      if (probe.status === 'never_tracked') return { verdict: { kind: 'deletion_candidate' } };
+      return { verdict: { kind: 'reconcile', missing: true } };
+    }
+    const size = stat.size;
+    // A path that reappeared after an absence attestation is live drift before
+    // any mtime shortcut or generated-projection exemption can hide it.
+    if (ctx.absenceAttestedPaths?.has(rel)) return { verdict: { kind: 'reconcile', missing: false }, size };
+    // MODE (2/2) — THE MTIME PREFILTER'S TERMINATING POWER.
+    //
+    // At the MINT the prefilter is unconditional and is the cheap half of the
+    // two-step check (decision foreign_57d9a52d): mtime no newer than the article's last
+    // update means the file cannot have moved since its baseline was taken, so
+    // no content read is owed.
+    //
+    // AT THE RECHECK THE PREFILTER IS OFF — ALWAYS (review FIX 1, 2026-08-31;
+    // the caller passes honorMtimePrefilter:false unconditionally, and the flag
+    // survives only because the mint still legitimately sets it). An earlier
+    // version kept the prefilter under a "licence" (the article was re-baselined
+    // after the item was minted), meaning to honour the cost design's
+    // "re-baselined items terminate without hashing". That licence does not hold:
+    // drift lands, a later write re-stamps the file (any article write did,
+    // before the evidence-gated advance; a resolves claim naming it does now), and
+    // a second edit whose mtime is preserved or skewed to at-or-below updated_at
+    // (an mtime-preserving copy, a restore from backup, a clock skew) then
+    // short-circuits to `clean`. At the mint `clean` merely raises nothing; at
+    // the recheck it is published as the affirmative claim "the drift no longer
+    // reproduces", so a timestamp is nowhere near enough evidence. The content
+    // hash decides there, bounded by the attempt and byte axes.
+    //
+    // AND IT IS OFF PER-PATH FOR AN ATTESTED PATH (board 8c8b6d78 / R9), at the
+    // mint too. An attestation re-stamps one path's baseline while PRESERVING the
+    // article's updated_at, so for that path the prefilter's premise ("mtime no
+    // newer than updated_at ⇒ unchanged since the baseline was taken") is simply
+    // false: the baseline is newer than the clock. Hashing is the only sound
+    // answer there, and it is what makes a post-attestation mtime-preserved edit
+    // still visible. See DriftCheckContext.attestedPaths.
+    if (ctx.honorMtimePrefilter && !ctx.attestedPaths?.has(rel) && !(stat.mtimeMs > Date.parse(ctx.baselinedAt))) {
+      return { verdict: { kind: 'clean' }, size };
+    }
+    // A registered generated projection never CONTENT-flags: every regen changes
+    // it by design and check-projection-fresh guards its currency at the merge
+    // gate (decision foreign_e1275166). Its DELETION still flags, in the arm above.
+    if (this.isGeneratedProjection(rel)) return { verdict: { kind: 'clean' }, size };
+    if (baseline === undefined) {
+      // NOT collapsed to `false`/clean here (the contentChanged() anti-model):
+      // the mint's call site reads `unavailable` as no-drift, so its behaviour is
+      // unchanged, while the annotation site can say WHY it abstained.
+      return { verdict: { kind: 'unavailable', reason: 'no_baseline' }, size };
+    }
+    // BUDGET AXIS 2 — bytes hashed. The size is already known, so an oversize
+    // file is refused BEFORE it is read rather than after.
+    //
+    // THE PARKING ASYMMETRY IS DELIBERATE (review FIX 8): the ATTEMPT axis parks
+    // — its counter stops incrementing at the cap, so every later path and item
+    // reads the same exhausted budget and is disclosed (AC6). The BYTE axis does
+    // NOT park: one oversize file is refused and the walk CONTINUES, because
+    // bytesHashed is only advanced by files actually read, so the next (small)
+    // file can still legitimately be checked. A parking byte axis would let a
+    // single large file suppress every remaining verdict on the page as
+    // unavailable:budget — a worse read for no cost saving, since the refusal
+    // happens before the file is opened either way.
+    if (budget) {
+      if (budget.bytesHashed + size > RECONCILE_RECHECK_HASH_BYTE_CAP) {
+        budget.truncated = true;
+        return { verdict: { kind: 'unavailable', reason: 'budget' }, size };
+      }
+      budget.bytesHashed += size;
+    }
+    const current = this.hashFile(rel, ctx.treeRoot);
+    if (current === undefined) return { verdict: { kind: 'unavailable', reason: 'unreadable' }, size };
+    return { verdict: current === baseline ? { kind: 'clean' } : { kind: 'reconcile', missing: false }, size };
+  }
+
+  /**
+   * THE PRUNED-PATH DRIFT VERDICT (board 7e779e1f) — "did this path, as the
+   * record's OWN prose stood right before this write, actually disagree with
+   * the working tree?" Reuses classifyOwnedFileDrift in 'recheck' mode (the
+   * ONE per-file predicate; never a second copy) against `oldOwner` — the
+   * pre-write record `knowledgeUpdate` already read at the top of the call —
+   * so the baseline compared against is the OLD one, not whatever this write
+   * just re-baselined it to.
+   *
+   * No DriftBudget: a prune touches at most a handful of paths in one write
+   * (never a whole page of queue items), so the budget axes that bound
+   * reconcileTruthAtRead's page-wide re-check do not apply here.
+   *
+   * Returns 'unknown' — never a fabricated true/false — whenever the
+   * evidence to answer is unavailable: an unresolved/unmapped working tree,
+   * no recorded baseline for this path (verdict.kind 'unavailable'), an
+   * unreadable file, or a path currently absent with no way to tell parked
+   * from deleted. Only 'reconcile'/'deletion_candidate' report `true` and
+   * only 'clean' reports `false` — pruning never asserts a verdict this
+   * predicate itself would not stand behind.
+   */
+  private classifyPrunedPathDrift(oldOwner: DurableRecord, path: string): boolean | 'unknown' {
+    const rec = oldOwner as unknown as Record<string, unknown>;
+    const tree = this.treeRootFor(rec);
+    if (tree.unresolved || !tree.root) return 'unknown';
+    const baselines = (rec as { file_baselines?: Record<string, string> }).file_baselines;
+    const absenceAttestedPaths = new Set(Object.keys((rec as { absence_attestations?: Record<string, unknown> }).absence_attestations ?? {}));
+    const { verdict } = this.classifyOwnedFileDrift(path, {
+      mode: 'recheck',
+      treeRoot: tree.root,
+      baselines,
+      baselinedAt: (rec.updated_at as string | undefined) ?? '',
+      honorMtimePrefilter: false,
+      absenceAttestedPaths,
+    });
+    if (verdict.kind === 'reconcile' || verdict.kind === 'deletion_candidate') return true;
+    if (verdict.kind === 'clean') return false;
+    return 'unknown';
+  }
+
+  /**
+   * The staleness verdict knowledge_query never surfaced (reported 2026-08-29:
+   * "no equivalent staleness annotation at all" on knowledge_query). Nothing new
+   * is COMPUTED here — the baselines exist, H7 and the read-time drift wires
+   * already consult them, and projectForQuery strips them from query output so
+   * a reader could not see that a record's owned file had moved since the bytes
+   * the record STANDS BEHIND. This DERIVES that verdict for the window and hands
+   * it to the reader, mirroring board_query's annotation + `provenance` pair.
+   *
+   * "STANDS BEHIND" IS THE HONEST WORDING, and it covers two provenances (board
+   * 8c8b6d78 / R9): a baseline is EITHER the bytes the record was last
+   * content-reconciled against, OR the bytes an already-paid close explicitly
+   * ATTESTED the existing prose already describes. Both are claims the record
+   * makes about live bytes, which is what this check tests; the two are told
+   * apart per path by `baseline_attestations`, never by the baseline alone.
+   *
+   * WHY NOT contentChanged(): that helper deliberately collapses "no baseline"
+   * and "cannot read the file" into `false`, because its callers RAISE FLAGS and
+   * must abstain rather than fabricate one. Here abstention is itself something
+   * to report, so the same primitive (hashFile vs. the recorded baseline) is
+   * read at finer grain — one policy, two readings, not two policies.
+   *
+   * A FLAG ONLY, never a mint: this path enqueues nothing. Invalidation already
+   * exists (H7 / the read-time drift wires, decision foreign_57d9a52d) and a second lane
+   * on the same fact would be double-reporting.
+   *
+   * Baselines exist for feature_article and reference_material only (see
+   * computeBaselines), which is exactly why the envelope has to disclose
+   * whether the check ran: over a window of decisions there is nothing to
+   * compare, and silence there means "unknowable", not "fresh".
+   */
+  private computeBaselineDrift(records: DurableRecord[]): { status: string; annotations: Map<string, BaselineDrift> } {
+    const annotations = new Map<string, BaselineDrift>();
+    if (!this.repoRoot) return { status: 'unavailable:no_repo_root', annotations };
+    // BASELINEABLE PATHS ONLY — EXACTLY what computeBaselines hashes, and
+    // deliberately NOT the write boundary's wider claimedPaths() (M2, final
+    // delta review). The drift check reports "could not be re-read", so its
+    // path set must be the set that can HAVE a baseline: widening it to every
+    // claimed path made every decision/anti_pattern/research_finding/todo
+    // file_key and every live_test_refs[].test_paths report as unverifiable on
+    // EVERY knowledge_query — 70+ decisions on tools.ts alone — which is noise,
+    // not a finding. The two enumerators answer two different questions: what a
+    // record CLAIMS (the write boundary refuses a directory there) versus what
+    // this read can COMPARE.
+    const ownedPaths = (r: Record<string, unknown>): string[] => SterlingTools.baselineablePaths(r);
+    const eligible = (records as unknown as Record<string, unknown>[]).filter((r) => {
+      const baselines = r.file_baselines as Record<string, string> | undefined;
+      const baselined = baselines !== undefined && Object.keys(baselines).length > 0;
+      // board edf13edf: a record that OWNS files but has NO baseline for any of
+      // them (absent at create, or written before baselines existed) used to be
+      // dropped here — so the very disclosure `unverifiable[]` exists for was
+      // unreachable, and the read stayed silent about paths it never checked.
+      return baselined || ownedPaths(r).length > 0;
+    });
+    if (eligible.length === 0) return { status: 'unavailable:no_baselines', annotations };
+    for (const rec of eligible) {
+      const baselines = (rec.file_baselines as Record<string, string> | undefined) ?? {};
+      const absenceAttestedPaths = new Set(Object.keys((rec.absence_attestations as Record<string, unknown> | undefined) ?? {}));
+      // The iterated set is the UNION of what was baselined and what the record
+      // OWNS — iterating the baseline map alone could only ever re-check paths
+      // that already had something to compare against (board edf13edf).
+      const paths = [...new Set([...Object.keys(baselines), ...absenceAttestedPaths, ...ownedPaths(rec)])].sort();
+      const changed: string[] = [];
+      const unverifiable: string[] = [];
+      // WHY each unverifiable path could not be settled, decided AT THE SITE
+      // that abstained rather than re-derived afterwards — the only place that
+      // knows whether the path had a baseline at all (item 5: a present,
+      // readable file with no baseline is 'no_baseline', never 'unreadable').
+      const unverifiableDetail: { path: string; reason: 'directory' | 'absent' | 'unreadable' | 'no_baseline' }[] = [];
+      const abstain = (rel: string, hadBaseline: boolean): void => {
+        unverifiable.push(rel);
+        if (!tree.root || tree.unresolved) {
+          unverifiableDetail.push({ path: rel, reason: 'unreadable' });
+          return;
+        }
+        const verdict = classifyClaimPath(tree.root, rel);
+        if (verdict === 'real_directory') unverifiableDetail.push({ path: rel, reason: 'directory' });
+        else if (verdict === 'absent') unverifiableDetail.push({ path: rel, reason: 'absent' });
+        else if (verdict === 'leaf' && !hadBaseline) unverifiableDetail.push({ path: rel, reason: 'no_baseline' });
+        else unverifiableDetail.push({ path: rel, reason: 'unreadable' });
+      };
+      // Detached-working-tree resolution, same as every other baseline consumer:
+      // an unmapped working_tree name is never checked against the wrong tree —
+      // it abstains, LOUDLY, as the whole record's unverifiable set.
+      const tree = this.treeRootFor(rec);
+      if (tree.unresolved || !tree.root) {
+        for (const rel of paths) abstain(rel, baselines[rel] !== undefined);
+      } else {
+        for (const rel of paths) {
+          if (absenceAttestedPaths.has(rel)) {
+            const shape = classifyClaimPath(tree.root, rel);
+            if (shape === 'absent') continue;
+            if (shape === 'leaf' || shape === 'real_directory') changed.push(rel);
+            else abstain(rel, false);
+            continue;
+          }
+          const baseline = baselines[rel];
+          // An owned path with NOTHING to compare against is UNDETERMINED, never
+          // drift: reporting it as changed would be a positive claim the record
+          // cannot support (board edf13edf).
+          if (baseline === undefined) {
+            abstain(rel, false);
+            continue;
+          }
+          const current = this.hashFile(rel, tree.root);
+          if (current === undefined) abstain(rel, true);
+          else if (current !== baseline) changed.push(rel);
+        }
+      }
+      if (!changed.length && !unverifiable.length) continue; // unmoved: say nothing (P1)
+      // `unverifiable` keeps its string[] shape for existing consumers;
+      // `unverifiable_detail` (filled by `abstain` above) says WHY each entry
+      // could not be settled — a claim that has BECOME a directory since it was
+      // written is the case the write boundary cannot catch until the next
+      // write, so a reader can tell it from an absent file, an unreadable one
+      // and one that simply has no baseline. Reads never refuse.
+      const notes: string[] = [];
+      const byteChanged = changed.filter((rel) => !absenceAttestedPaths.has(rel));
+      const absenceInvalidated = changed.filter((rel) => absenceAttestedPaths.has(rel));
+      if (byteChanged.length) {
+        notes.push(
+          `⚠ ${byteChanged.length} owned file(s) changed since this record's baseline (${byteChanged.join(', ')}) — the baseline is the bytes this record was last content-reconciled against, or that an already-paid close explicitly attested it already describes, and they are no longer the bytes on disk, so re-read the code before trusting it`
+        );
+      }
+      if (absenceInvalidated.length) {
+        notes.push(
+          `⚠ ${absenceInvalidated.length} path(s) previously attested ABSENT from HEAD now exist (${absenceInvalidated.join(', ')}) — the historical tree-miss proof no longer describes the working tree, so re-read the record before trusting it`
+        );
+      }
+      if (unverifiable.length) {
+        // M1: 'no_baseline' is a DIFFERENT fact from the other three and must
+        // read as one. "Could not be re-read" is false for a file that is
+        // present and perfectly readable — what is missing is the recorded
+        // baseline, and the remedy is to reconcile the record, not to go
+        // looking for a lost file. When EVERY entry is that case the whole note
+        // says so; a mixed set keeps the original sentence and names which
+        // paths are which, so neither cause hides behind the other.
+        const byReason = (want: string): string[] => unverifiableDetail.filter((d) => d.reason === want).map((d) => d.path);
+        const neverBaselined = byReason('no_baseline');
+        if (neverBaselined.length === unverifiable.length) {
+          notes.push(
+            `⚠ ${unverifiable.length} owned file(s) have NEVER been baselined (${neverBaselined.join(', ')}) — they are present and readable, but this record carries nothing to compare them against, so their freshness is UNKNOWN rather than drifted; reconcile the record to baseline them`
+          );
+        } else {
+          const parts: string[] = [];
+          for (const [reason, label] of [
+            ['directory', 'a DIRECTORY on disk, which can never be a claim that delivers'],
+            ['absent', 'absent from this tree'],
+            ['unreadable', 'unreadable, or in an unmapped working_tree'],
+            ['no_baseline', 'never baselined — present and readable, nothing to compare against'],
+          ] as const) {
+            const hits = byReason(reason);
+            if (hits.length) parts.push(`${hits.join(', ')}: ${label}`);
+          }
+          notes.push(
+            `⚠ ${unverifiable.length} owned file(s) could not be re-read, so their freshness is NOT verified (${unverifiable.join(', ')}) — ${parts.join('; ')}`
+          );
+        }
+      }
+      annotations.set(rec.id as string, {
+        changed,
+        ...(unverifiable.length ? { unverifiable, unverifiable_detail: unverifiableDetail } : {}),
+        note: notes.join('; '),
+      });
+    }
+    return { status: 'checked', annotations };
+  }
+
+  /**
+   * EVERY repo-relative path a record of this type CLAIMS — the ONE enumerator
+   * the write-boundary claim check runs over, on every mutation surface
+   * (decision [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]:
+   * "enumerated ONCE ... never a hand-listed subset per mutation surface").
+   *
+   * It is the REGISTRY's per-type `fileKeys` extractor (feature_article
+   * files[].path, decision/anti_pattern/research_finding/todo file_keys[],
+   * reference_material's repo-located location, brief blast_radius.files[].path
+   * — packages/schemas/src/records.ts) PLUS the one path-bearing field no
+   * consumer of `fileKeys` wants folded into it: a feature_article's
+   * live_test_refs[].test_paths. Those are claims under the same contract but
+   * are NOT baselined (computeBaselines mints hashes for fileKeys only), so
+   * widening the registry extractor itself would make every read-time drift
+   * check report them as permanently unverifiable.
+   *
+   * WRITE BOUNDARY ONLY. The read-time drift check deliberately does NOT use
+   * this set — it uses baselineablePaths below. Widening the drift check to
+   * every claimed path was tried and reverted (M2, final delta review) for
+   * exactly the reason the paragraph above gives: it turns every file_key on
+   * every ruling type, and every test path, into a permanent "could not be
+   * re-read" line on every knowledge_query.
+   */
+  private static claimedPaths(record: Record<string, unknown>): { path: string; field: string }[] {
+    const type = record.type as string;
+    const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
+    // The FIELD is a LABEL for the refusal message, not a second enumerator:
+    // the paths themselves always come from the registry extractor above, so a
+    // schema change moves them without touching this map.
+    const field =
+      type === 'feature_article' ? 'files[].path' : type === 'reference_material' ? 'location' : type === 'brief' ? 'blast_radius.files[].path' : 'file_keys';
+    const claims = registered ? registered.fileKeys(record).map((path) => ({ path, field })) : [];
+    if (type === 'feature_article' && Array.isArray(record.live_test_refs)) {
+      for (const ref of record.live_test_refs as { test_paths?: unknown }[]) {
+        if (Array.isArray(ref?.test_paths)) {
+          for (const p of ref.test_paths as unknown[]) {
+            if (typeof p === 'string') claims.push({ path: p, field: 'live_test_refs[].test_paths' });
+          }
+        }
+      }
+    }
+    const seen = new Set<string>();
+    return claims.filter((c) => (seen.has(c.path) ? false : (seen.add(c.path), true)));
+  }
+
+  /**
+   * The paths a record can HAVE A BASELINE for — EXACTLY the set
+   * computeBaselines hashes (a feature_article's files[].path, a repo-located
+   * reference_material's location; the registry extractor answers both). One
+   * definition, two consumers, so the writer of baselines and the reader that
+   * re-checks them can never disagree about which paths were ever measured.
+   *
+   * The complement of claimedPaths above: what this read can COMPARE, versus
+   * what a record CLAIMS.
+   */
+  private static baselineablePaths(record: Record<string, unknown>): string[] {
+    const type = record.type as string;
+    if (type !== 'feature_article' && type !== 'reference_material') return [];
+    // NORMALIZED AND DEDUPED, because the write path baselines the PRE-SCHEMA
+    // record: a caller's './src/a.ts' reaches here raw, while the store persists
+    // (and every reader compares) the schema-normalized 'src/a.ts'. Keying the
+    // baseline by the raw spelling emitted an orphan key nothing ever read, and
+    // made a re-spelled owned path look newly claimed. A path that cannot be
+    // normalized is skipped here only because the schema boundary refuses the
+    // whole write for it; a stored record never carries one.
+    const paths = new Set<string>();
+    for (const raw of RECORD_TYPES[type].fileKeys(record)) {
+      try {
+        paths.add(normalizeRepoPath(raw));
+      } catch {
+        continue;
+      }
+    }
+    return [...paths];
+  }
+
+  /** Bound a caller-supplied path before it is interpolated into a refusal the
+   *  MODEL reads: control characters stripped, length clipped. A claim string is
+   *  untrusted input on its way to an agent's context. */
+  private static safeClaimText(value: string): string {
+    const stripped = value.replace(SterlingTools.CLAIM_CONTROL_CHARS, '␦');
+    return stripped.length > 512 ? `${stripped.slice(0, 512)}… (clipped from ${stripped.length} chars)` : stripped;
+  }
+
+  /** C0 + DEL — the characters that can move a cursor or forge structure inside
+   *  the agent-visible refusal text a claim path is interpolated into. Built
+   *  from escapes via RegExp() so the pattern itself stays readable in source. */
+  private static readonly CLAIM_CONTROL_CHARS = new RegExp('[\\u0000-\\u001f\\u007f]', 'g');
+
+  /**
+   * THE WRITE-BOUNDARY CLAIM CHECK (decision
+   * [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]).
+   *
+   * Every path a record claims must name a NON-DIRECTORY LEAF or a path that
+   * does not exist yet. A path that IS a directory on disk is refused: it is
+   * schema-valid and behaviourally meaningless, because every delivery join,
+   * every baseline hash and board_query's lane advisory compare EXACT file
+   * paths — so a directory claim never delivers, never baselines, and reads as
+   * ownership it does not have.
+   *
+   * RUN OVER THE FULLY MERGED CANDIDATE, so an unrelated update of a record
+   * still carrying a stale directory claim refuses too — by design: the
+   * measured offenders are migrated by hand before this goes live, and the
+   * refusal names the exact remedy.
+   *
+   * IT RETURNS THE RECEIPT DISCLOSURE, so the caller cannot report a check that
+   * did not run. Two shapes are ABNORMAL and neither refuses, because in both
+   * the CAPABILITY — not the claim — is what is missing: no repoRoot →
+   * `claims_check:'unavailable:no_repo_root'`; a candidate declaring a
+   * working_tree this config does not map → `unavailable:unmapped_working_tree`
+   * (an abstention computeBaselines and the drift check already make, but a
+   * SILENT skip here would be a caller-supplied field switching the gate off
+   * with nothing said — the disclosure keys on the SAME resolution the check
+   * used, never on repoRoot alone).
+   *
+   * A stat that throws for ONE claim (EACCES/ELOOP/ENOTDIR) is the opposite
+   * case — the capability exists and this claim cannot be classified — so it
+   * REFUSES naming the errno (P5).
+   *
+   * NORMALIZATION FIRST, THEN STAT. The candidate reaching an update/board
+   * write is CALLER INPUT that zod has not parsed yet (the store parses later),
+   * so an escaping claim like '../../../../home/x' would otherwise be stat'ed
+   * OUTSIDE the repo and its existence, type and errno reported back. Every
+   * claim goes through the shared normalizeRepoPath first and a path that
+   * cannot be normalized is refused NAMING THE FIELD, before any filesystem
+   * contact. (knowledge_create already schema-parses before calling here; the
+   * second pass is idempotent.)
+   *
+   * COST, ACCEPTED AND STATED: one stat per claimed path, no cap and no cache —
+   * linear in the record's own claim count, which the record schema already
+   * bounds. There is deliberately no store-wide ancestor scan (the decision
+   * rejected it).
+   *
+   * WHERE, AND ONLY HERE: the tool layer is the only layer holding a repo root.
+   * Never in the shared zod path normalization (no repo context), never inside
+   * packages/store (which exports the classifier and decides nothing).
+   */
+  private assertClaimedPaths(op: string, candidate: Record<string, unknown>): { claims_check?: string } {
+    if (!this.repoRoot) return { claims_check: 'unavailable:no_repo_root' };
+    const { root, unresolved } = this.treeRootFor(candidate);
+    if (unresolved || !root) return { claims_check: 'unavailable:unmapped_working_tree' };
+    const id = candidate.id as string | undefined;
+    const subject = id ? `record '${id}'` : `this ${String(candidate.type)}`;
+    // A write reached from ANOTHER write (a mechanism-minted maintenance item)
+    // cannot promise that nothing at all was written — only that THIS write did
+    // not land. Stated rather than asserted, so the sentence is never false.
+    const nothingWritten =
+      `Nothing was written by this ${op} call (if it was a maintenance item minted as a side effect of another write, that other ` +
+      `record may already have landed — re-read before retrying).`;
+    for (const claim of SterlingTools.claimedPaths(candidate)) {
+      const shown = SterlingTools.safeClaimText(claim.path);
+      let rel: string;
+      try {
+        rel = normalizeRepoPath(claim.path);
+      } catch (err) {
+        throw new Error(
+          `${op}: ${subject} claims the path '${shown}' in ${claim.field}, which is not a repo-relative path — ` +
+            `${(err as Error).message}. A claim must name a path INSIDE this project (no absolute path, no '..' escape); it is refused ` +
+            `before the filesystem is consulted at all, so nothing outside the project is even looked at. ${nothingWritten}`
+        );
+      }
+      const verdict = classifyClaimPath(root, rel);
+      if (verdict === 'real_directory') {
+        throw new Error(
+          `${op}: ${subject} claims the path '${shown}' in ${claim.field}, which is an existing DIRECTORY in this working tree — a claimed ` +
+            `path must be a non-directory leaf, or a path that does not exist yet. A directory claim delivers NOTHING: every knowledge ` +
+            `join, every content baseline and the board's lane advisory match exact file paths, so the claim reads as ownership it does ` +
+            `not have. REMEDY: name the specific files beneath '${shown}' that this record actually discusses, or drop the claim. ${nothingWritten}`
+        );
+      }
+      if (typeof verdict === 'object') {
+        throw new Error(
+          `${op}: ${subject} claims the path '${shown}' in ${claim.field}, which could NOT be classified — reading it failed with ` +
+            `${verdict.errno}. A claim that cannot be checked is not admitted: unlike an absent repo root (an absent CAPABILITY, which is ` +
+            `disclosed on the receipt), this capability exists and this one claim is unverifiable. Fix the path or its readability and ` +
+            `retry. ${nothingWritten}`
+        );
+      }
+    }
+    return {};
+  }
+
+  // -- knowledge CRUD ---------------------------------------------------------
+
+  /**
+   * Refuse a write that tries to ASSIGN a server-owned envelope key, instead of
+   * stripping it in silence. The stripping itself is correct and stays (finding
+   * 14/43 — a caller must not be able to fabricate an id, a clock, or a status);
+   * what was wrong is that the caller was told the write succeeded.
+   *
+   * MEASURED 2026-07-29, and this is the sharpest instance of the whole class: a
+   * project trying to retire a duplicate passed {status:'superseded',
+   * superseded_by:'<canonical>'} to knowledge_update. The call SUCCEEDED and
+   * returned status:'active', superseded_by:null — both fields discarded, no error,
+   * no warning. Their words: "that's the dangerous shape — a caller who doesn't
+   * re-read the result believes it worked." They then wrote store records asserting
+   * a retirement that had never happened.
+   *
+   * So the message must not merely refuse: for status/superseded_by it has to say
+   * where the caller's actual intent belongs, because reaching for these fields
+   * means wanting something these fields cannot do, and silence let them believe
+   * otherwise.
+   *
+   * CORRECTED 2026-08-04: this message used to end "There is NO way to retire a
+   * record to a non-serving state through this surface". True when written, and
+   * outlived five days later by knowledge_retire (decision foreign_9948475b) — which
+   * rewrote the same claim in CLAUDE.md and missed this copy. It now NAMES the
+   * retirement path and its boundary in one breath: retirement is for a genuine
+   * DUPLICATE, never for a record that is merely wrong, because a caller here may
+   * want either and pointing at retirement alone would trade a stale denial for an
+   * invitation to retire away every error instead of correcting it.
+   */
+  /**
+   * The unforgeable envelope: every write REFUSES these by name (board
+   * 617e97d4 hoisted this out of refuseServerOwnedFields so knowledge_schema's
+   * server_owned mask derives from the SAME list this refusal guard consumes —
+   * the two surfaces used to be two hand-maintained copies of one truth, and
+   * the projection's copy was missing four of these names).
+   *
+   * lifecycle/freshness/file_baselines joined on this slice's review (both
+   * reviewers, independently). The genuinely reachable forgeries were
+   * freshness:'flagged_stale' (resolveIdentity honors a directly-given value,
+   * deriving status 'flagged_stale' — a forged-stale record) and the silent
+   * file_baselines overwrite — the misleading-success shape this guard exists
+   * to eliminate. lifecycle:'retired' alone was already blocked one layer down
+   * (the store's born-dead refusal demands a superseded_by, itself refused
+   * here), so its entry is defense-in-depth at the right layer: the tool
+   * surface names the caller's mistake instead of leaking a store-internal
+   * message. The store's own readEnum refusal for lifecycle/freshness is now
+   * tool-unreachable — it survives for internal/MountedStores callers only.
+   * Internal writers are unaffected:
+   * knowledgeSplit's create passes an explicit field list, knowledgePromote
+   * copies through store.create below this guard, and update/supersede spread
+   * the OLD record after this refusal has run on the caller's input.
+   *
+   * The destructure-strips in knowledgeCreate/knowledgeUpdate/knowledgeSupersede
+   * still enumerate names literally — dead code for refused names (the refusal
+   * throws first), kept as defense-in-depth; the shared list binds the two
+   * surfaces that must agree, the guard and the projection.
+   */
+  private static readonly WRITE_REFUSED_FIELDS = WRITE_REFUSED_FIELDS;
+
+  private refuseServerOwnedFields(
+    fields: Record<string, unknown>,
+    op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append' | 'knowledge_supersede' | 'knowledge_array_remove'
+  ): void {
+    const attempted = SterlingTools.WRITE_REFUSED_FIELDS.filter((k) => k in fields);
+    if (attempted.length === 0) {
+      // MUTATION-ONLY refusals run after the server-owned set, so a call
+      // carrying both still gets the older, more specific message first.
+      this.refuseMutationOnlyFields(fields, op);
+      return;
+    }
+    const retiring = attempted.includes('status') || attempted.includes('superseded_by');
+    throw new Error(
+      `${op}: ${attempted.map((k) => `'${k}'`).join(', ')} ${attempted.length === 1 ? 'is' : 'are'} SERVER-OWNED and cannot be assigned by a caller — ` +
+        `the value would have been discarded and the write reported success. ` +
+        (retiring
+          ? `status/superseded_by are set only by supersession: knowledge_update writes a NEW version and retires the prior one automatically. ` +
+            `To correct a WRONG record, knowledge_update it in place (the correction supersedes the error); do NOT create a second record under the same slug. ` +
+            `The one retirement path is knowledge_retire(id, in_favor_of), and it is NARROW: it is for a genuine DUPLICATE whose reader must be sent to the survivor, ` +
+            `never for a record that is merely wrong — /sterling:cleanup never hard-deletes knowledge either.`
+          : `id and the clocks are assigned at write; type is fixed at create; lifecycle/freshness are derived by the store; file_baselines is computed server-side at create/reconcile; ` +
+            `baseline_attestations is drift PROVENANCE minted only when a reconcile_needed item is closed as already-paid (board_remove / maintenance_remove), from hashes the server takes itself.`)
+    );
+  }
+
+  /**
+   * `scope` IS CREATION-ONLY (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 3).
+   * It routes a record to its physical store at CREATE time
+   * (MountedStores.storeFor) and is never consulted again: every later write
+   * routes by the store PHYSICALLY HOLDING the id. A mutation that changes it
+   * therefore cannot move the record — it only makes the body disagree with the
+   * mount, which is the whole defect (anti_pattern
+   * [record-body-scope-is-not-physical-store-identity]). Refused by name here,
+   * and pinned from the row's own `scope` COLUMN one layer down in the store, so
+   * a direct or internal caller cannot walk around this refusal.
+   */
+  private refuseMutationOnlyFields(
+    fields: Record<string, unknown>,
+    op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append' | 'knowledge_supersede' | 'knowledge_array_remove'
+  ): void {
+    if (op === 'knowledge_create') return;
+    const attempted = MUTATION_REFUSED_FIELDS.filter((k) => k in fields);
+    if (attempted.length === 0) return;
+    throw new Error(
+      `${op}: ${attempted.map((k) => `'${k}'`).join(', ')} ${attempted.length === 1 ? 'is' : 'are'} CREATION-ONLY and cannot be changed by a later write — ` +
+        `the value would have been discarded and the write reported success. \`scope\` chooses which physical store holds a record AT CREATE TIME and is ` +
+        `never consulted again (every later write routes by the store that already holds the id), so changing it moves nothing — it only makes the ` +
+        `record's body disagree with the mount it actually lives in. To move a record between stores use knowledge_promote (an explicit copy-and-retire ` +
+        `across mounts); knowledge_create still accepts \`scope\` as routing input.`
+    );
+  }
+
+  /**
+   * Refuse a write carrying fields the record type does not define, naming them
+   * AND the valid set — the write-side half of fail-loud (P5), symmetric with the
+   * strict tool PARAMETERS of decision foreign_b47889b7. The valid set is in the message
+   * because discoverability is the actual complaint: per-type required fields and
+   * the files-vs-file_keys split (feature_article uses files[].path, decision /
+   * anti_pattern / research_finding / todo use file_keys, reference_material
+   * derives paths from location) cost a round-trip each to learn otherwise.
+   * An unregistered type is left to validateRecord's louder rejection.
+   */
+  private refuseUnknownFields(type: string, candidate: Record<string, unknown>, op: string = 'knowledge write'): void {
+    const unknown = unknownFieldsIn(type, candidate);
+    if (unknown.length === 0) return;
+    const valid = [...(knownFieldsFor(type) ?? [])].sort().join(', ');
+    throw new Error(
+      `${op}: '${type}' does not define ${unknown.map((k) => `'${k}'`).join(', ')} — ` +
+        `the field would have been silently dropped and the write reported success. Valid fields: ${valid}.`
+    );
+  }
+
+  /**
+   * Caller-facing field path for a zod issue: numeric segments render as
+   * `[n]` (array indices), string segments join with '.' — 'history[19]',
+   * 'dependencies.relies_on[0]'. Never the raw ["history",19] zod form.
+   */
+  private static renderIssuePath(path: (string | number)[]): string {
+    let out = '';
+    for (const seg of path) {
+      out = typeof seg === 'number' ? `${out}[${seg}]` : out ? `${out}.${seg}` : String(seg);
+    }
+    return out || '(root)';
+  }
+
+  /**
+   * Render a zod schema-validation failure in this surface's own idiom
+   * (board 03c92e2a; decision foreign_d0b88e27 — a refusal names its DISCRIMINATOR,
+   * not just its rule) instead of leaking the raw issue array. Per issue:
+   * the caller-facing field path (renderIssuePath), what was RECEIVED vs
+   * EXPECTED, and — when the failing element itself should have been an
+   * object (an array-of-objects entry, e.g. a bad history/files/current_ac
+   * element) — that element's expected shape enumerated by name/type/
+   * required-ness. The shape and any enum's permitted values are pulled
+   * from schemaFor(type) — the SAME schema-walk knowledge_schema projects
+   * (decision foreign_9948475b) — never a second hand-written description, so this
+   * cannot drift from what knowledge_schema itself reports.
+   */
+  private renderValidationFailure(err: ZodError, type: string, op: string): Error {
+    const described = schemaFor(type);
+    const fieldsByName = new Map((described?.fields ?? []).map((f) => [f.name, f]));
+    const renderIssue = (issue: ZodIssue): string => {
+      const path = SterlingTools.renderIssuePath(issue.path as (string | number)[]);
+      if (issue.code === 'invalid_enum_value') {
+        const topField = typeof issue.path[0] === 'string' ? fieldsByName.get(issue.path[0] as string) : undefined;
+        const options = topField?.enum_values && topField.enum_values.length ? topField.enum_values : (issue.options as unknown[] | undefined)?.map(String) ?? [];
+        return `${path}: received '${String(issue.received)}', expected one of: ${options.join(', ')}`;
+      }
+      if (issue.code === 'invalid_type') {
+        let text = `${path}: received ${issue.received}, expected ${issue.expected}`;
+        if (issue.expected === 'object' && issue.path.length >= 2) {
+          const ownerName = issue.path[issue.path.length - 2];
+          const owner = typeof ownerName === 'string' ? fieldsByName.get(ownerName) : undefined;
+          if (owner?.element_fields?.length) {
+            const shape = owner.element_fields
+              .map(
+                (ef) =>
+                  `${ef.name}: ${ef.type}${ef.enum_values?.length ? ` (one of: ${ef.enum_values.join(', ')})` : ''} (${ef.required ? 'required' : 'optional'})`
+              )
+              .join(', ');
+            text += ` — expected shape: {${shape}}`;
+          }
+        }
+        return text;
+      }
+      // Board a9280db7 (decision foreign_c48380bf): current_ac/live_test_refs are now a
+      // union (real content OR the structured not_applicable exemption), so a
+      // bad element inside the array branch surfaces as a single top-level
+      // 'invalid_union' issue instead of a direct 'invalid_type' — without
+      // this, the caller-facing message collapsed to a bare "Invalid input",
+      // losing the per-element path/received/expected detail every other
+      // array-of-objects field still reports. Drill into whichever union
+      // branch produced the DEEPEST (most specific) sub-issue — that is the
+      // branch that actually explains the failure, not the sibling branch
+      // that never matched the shape at all — and render THAT issue with the
+      // same rules, recursively.
+      if (issue.code === 'invalid_union') {
+        const subIssues = (issue.unionErrors ?? []).flatMap((sub) => sub.issues);
+        if (subIssues.length) {
+          const deepest = subIssues.reduce((a, b) => (b.path.length > a.path.length ? b : a));
+          return renderIssue(deepest);
+        }
+      }
+      return `${path}: ${issue.message}`;
+    };
+    const parts = err.issues.map(renderIssue);
+    return new Error(`${op}: '${type}' failed validation — ${parts.join('; ')}`);
+  }
+
+  /**
+   * FIELD-EFFECT VISIBILITY (board 8659a573): a small, DATA-DRIVEN map of
+   * fields whose consumer is server-side and invisible in-session — a caller
+   * has no way to observe these fields' effect within a single tool response.
+   * Measured cost of the gap: volatility_hint was judged "unconsumed" (it
+   * drives stale_research's staleness clocks) and working_tree judged
+   * "unused" (it resolves a record's file paths server-side), both false
+   * claims that invited removal of load-bearing fields (research_finding
+   * 179d8161). Every entry here MUST be a VERIFIED consumer (grepped, not
+   * inferred) — an invented consumed_by is worse than none.
+   *
+   * Keyed by `${type}:${field}`, NOT by bare field name (review finding):
+   * a note is a claim about ONE type's verified consumer, and two types can
+   * share a field name with only one of them actually consumed server-side
+   * (or consumed differently) — a bare-name key would let any future type
+   * reusing the name silently inherit an unverified note.
+   */
+  private static readonly FIELD_CONSUMERS: Readonly<Record<string, string>> = {
+    // Consumed at the staleness threshold lookup (config.staleness.research_days
+    // keyed by volatility_hint) that decides when a research_finding reads as
+    // flagged_stale — a read-time computation with no caller-visible trace.
+    // volatility_hint is declared only on research_finding today.
+    'research_finding:volatility_hint': 'drives stale_research staleness clocks (research_days threshold lookup)',
+    // Consumed by treeRootFor()'s working-tree resolution (config.working_trees):
+    // unset means the project root; a mapped name resolves file paths
+    // server-side for the read-time drift/baseline checks and H7/H10
+    // ownership — none of which surfaces the lookup itself to the caller.
+    // Verified for BOTH types that declare working_tree: computeBaselines
+    // (tools.ts) gates on type === 'feature_article' || 'reference_material'
+    // before calling treeRootFor, so both consumers are confirmed, not assumed.
+    'feature_article:working_tree': 'resolves copy-file paths server-side (config.working_trees lookup for drift/baseline checks)',
+    'reference_material:working_tree': 'resolves copy-file paths server-side (config.working_trees lookup for drift/baseline checks)',
+  };
+
+  /**
+   * knowledge_schema — ask what a type requires instead of guessing (board
+   * 7acfbe48). Read-only, derived from the registered zod schema, so it cannot
+   * drift from what a write will actually accept. Listing the registered type
+   * names on an unknown type is deliberate: the commonest reason to call this is
+   * not knowing the vocabulary.
+   */
+  knowledgeSchema(
+    type: string
+  ): { type: string; fields: (FieldShape & { server_owned?: boolean; consumed_by?: string })[]; required: string[]; optional: string[] } {
+    const described = schemaFor(type);
+    if (!described) {
+      throw new Error(`knowledge_schema: '${type}' is not a registered record type. Registered: ${Object.keys(RECORD_TYPES).sort().join(', ')}.`);
+    }
+    // SERVER-OWNED FIELDS ARE REPORTED AS SUCH ([stable-identity-design-v2]
+    // contract 1/4; widened to the whole write-refused envelope by board
+    // 617e97d4): everything in SERVER_OWNED_FIELDS is refused or stripped by
+    // the write path, so reporting any of it as caller-required (as the raw
+    // zod shape does, because the envelope still declares them for API
+    // compatibility) told callers to supply exactly what they must not: the
+    // measured cost of a wrong schema answer is one write attempt each.
+    //
+    // They stay listed in `fields` — a reader still needs to know they exist
+    // and what they hold — but marked with `server_owned: true`, and they appear
+    // in neither `required` nor `optional`, because both lists answer "what may I
+    // supply". There is deliberately NO top-level server_owned[] array: the
+    // per-field flag already answers the question at the place a reader is
+    // looking, and a second copy of the same list is one more thing to drift.
+    //
+    // CREATE-DEFAULTED fields (author/links/scope/stack_tags) are the second
+    // mask: zod declares them required, but knowledge_create defaults every
+    // one when absent, so to a caller they are optional — required[] is
+    // exactly the set a create must supply.
+    const serverOwned = new Set(SterlingTools.SERVER_OWNED_FIELDS);
+    const defaulted = new Set(SterlingTools.CREATE_DEFAULTED_FIELDS);
+    const fields = described.fields.map((f) => {
+      const consumedBy = SterlingTools.FIELD_CONSUMERS[`${described.type}:${f.name}`];
+      const withConsumer = consumedBy !== undefined ? { consumed_by: consumedBy } : {};
+      return serverOwned.has(f.name)
+        ? { ...f, ...withConsumer, required: false, server_owned: true }
+        : defaulted.has(f.name)
+          ? { ...f, ...withConsumer, required: false }
+          : { ...f, ...withConsumer };
+    });
+    // The split lists are redundant with `fields` on purpose — "what must I
+    // supply" is the actual question, and making the reader filter the array to
+    // answer it is how the guessing starts.
+    return {
+      type: described.type,
+      fields,
+      required: fields.filter((f) => f.required && !serverOwned.has(f.name)).map((f) => f.name),
+      optional: fields.filter((f) => !f.required && !serverOwned.has(f.name)).map((f) => f.name),
+    };
+  }
+
+  /**
+   * knowledge_stats — size and composition WITHOUT the body (board a382af6b).
+   * Per-id: the shared size decomposition (recordSizes — the same numbers the
+   * article_oversize lane judges) plus composition counts. No-arg: the
+   * store-wide aggregate, so bloat is visible before a knowledge_get chokes on
+   * it. Read-only; the digest size column (size_chars) is the cheap scan and
+   * this is the drill-down.
+   */
+  knowledgeStats(id?: string): Record<string, unknown> {
+    const threshold = this.config.article_oversize_chars;
+    if (id) {
+      // A HISTORICAL id READS (review finding): letting the ladder's refusal
+      // through here contradicted its own text — it says reads through this id
+      // still work — and stats ARE a read. Sized over the ARCHIVED body, which
+      // is what that id addresses, with the legacy_resolution block knowledge_get
+      // serves, so the caller can see which body was measured. The block is
+      // split off before recordSizes so it never inflates the numbers it
+      // annotates.
+      let rec: Record<string, unknown>;
+      let legacy: unknown;
+      try {
+        rec = this.resolveRecordId(id, 'knowledge_stats') as unknown as Record<string, unknown>;
+      } catch (err) {
+        if (!(err instanceof HistoricalIdError)) throw err;
+        const { legacy_resolution, ...snapshot } = this.serveArchivedAlias(err.alias);
+        rec = snapshot;
+        legacy = legacy_resolution;
+      }
+      const sizes = recordSizes(rec);
+      const history = Array.isArray(rec.history) ? (rec.history as unknown[]) : [];
+      const links = Array.isArray(rec.links) ? (rec.links as { rel: string }[]) : [];
+      return {
+        id: rec.id,
+        type: rec.type,
+        ...(rec.slug ? { slug: rec.slug } : {}),
+        ...(rec.title ? { title: rec.title } : {}),
+        ...(rec.version !== undefined ? { version: rec.version } : {}),
+        body_chars: sizes.body_chars,
+        history_chars: sizes.history_chars,
+        total_chars: sizes.body_chars + sizes.history_chars,
+        history_entries: history.length,
+        supersedes_count: links.filter((l) => l.rel === 'supersedes').length,
+        ...(rec.type === 'feature_article' ? { oversize_threshold: threshold, over_threshold: sizes.body_chars > threshold } : {}),
+        ...(legacy !== undefined ? { legacy_resolution: legacy } : {}),
+      };
+    }
+    const by_type: Record<string, { count: number; body_chars: number }> = {};
+    const articles: { slug: string; body_chars: number }[] = [];
+    for (const type of Object.keys(RECORD_TYPES)) {
+      const records = this.store.query({ types: [type], cap: 100000 }) as unknown as Record<string, unknown>[];
+      let chars = 0;
+      for (const r of records) {
+        const s = recordSizes(r);
+        chars += s.body_chars;
+        if (type === 'feature_article') articles.push({ slug: String(r.slug ?? r.id), body_chars: s.body_chars });
+      }
+      by_type[type] = { count: records.length, body_chars: chars };
+    }
+    articles.sort((a, b) => b.body_chars - a.body_chars);
+    return {
+      by_type,
+      total_body_chars: Object.values(by_type).reduce((n, t) => n + t.body_chars, 0),
+      oversize_threshold: threshold,
+      largest_articles: articles.slice(0, 10).map((a) => ({ ...a, over_threshold: a.body_chars > threshold })),
+    };
+  }
+
+  knowledgeCreate(
+    type: string,
+    fields: Record<string, unknown>,
+    opts?: {
+      deferCheckSkipped?: boolean;
+      /**
+       * INTERNAL MECHANISM MINT — not reachable from the tool surface: it is a
+       * separate PARAMETER, never a field inside `fields`, so no caller payload
+       * can set it. Only maintenanceEnqueue passes it; see the exemption ruling
+       * quoted there.
+       */
+      internalMint?: boolean;
+    }
+  ): CreateResult {
+    // deferCheckSkipped (default false): when true, the check_skipped audit rows
+    // are NOT persisted here — they are still returned on the result so the
+    // caller records them itself. Only knowledge_extract sets this, and only so a
+    // domain-mount transaction's audit rows land post-commit (see `skip`). Every
+    // other caller omits it, so their behaviour is byte-identical.
+    const persistSkips = opts?.deferCheckSkipped !== true;
+    this.refuseServerOwnedFields(fields, 'knowledge_create');
+    const ts = this.now();
+    // The envelope is SERVER-OWNED: strip these keys from caller fields before
+    // assembling the candidate, so a caller cannot override id/timestamps/status/
+    // superseded_by/type via `...fields` (audit finding 14/43 — e.g. status:
+    // 'superseded' would create an already-invisible record). knowledgeUpdate
+    // strips the identical set for the same reason.
+    const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, version: smuggledVersion, ...body } = fields;
+    const candidate: Record<string, unknown> = {
+      id: this.newId(),
+      type,
+      created_at: ts,
+      updated_at: ts,
+      author: (body.author as string) ?? 'conductor',
+      status: 'active',
+      superseded_by: null,
+      links: body.links ?? [],
+      scope: (body.scope as string) ?? 'project',
+      stack_tags: body.stack_tags ?? [],
+      ...body,
+      // THE COUNTER IS SERVER-OWNED AT BIRTH TOO ([stable-identity-design-v2]
+      // contract 1): every record starts at version 1 and only a write moves
+      // it, so a caller-supplied value is stripped above and replaced here
+      // rather than seeding the count. It is set explicitly (not left to the
+      // store's default) because feature_article DECLARES version as a required
+      // field, and this candidate is schema-parsed before it ever reaches the
+      // store. The strip is disclosed on the result's warnings, never silent.
+      version: 1,
+    };
+    // links[].target_id THROUGH THE LADDER (board 2e71d464) — set AFTER the
+    // `...body` spread above so a caller-supplied `links` array (which lands
+    // inside `body`) does not silently reintroduce its own unresolved
+    // target_id past this resolution.
+    candidate.links = this.resolveLinksTargets(candidate.links, 'knowledge_create') ?? [];
+    // dedup_override is a create-time directive, never a stored field
+    const dedupOverride = candidate.dedup_override === true;
+    delete candidate.dedup_override;
+    // validate BEFORE any dedup logic: a schema-invalid candidate gets the
+    // schema error, never a dedup refusal (board 3f9591e9 defect 3); unknown
+    // types fall through to store.create for its canonical rejection.
+    // Keep the parsed result — its repoPath transform fully normalizes file_keys
+    // ('./x'→'x'), so the dedup key-overlap compares like-for-like against stored
+    // records (audit finding 28/43); the raw candidate skipped the assist tier.
+    const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
+    // A field this type does not define is REFUSED, never dropped (P5). zod
+    // objects strip unknown keys, so before this a misfiled field was accepted,
+    // discarded, and the create returned SUCCESS — the caller found out only by
+    // querying for what the write was supposed to have stored (sibling report
+    // 2026-07-29: reference_material has no files/file_keys, its paths come from
+    // location). Checked BEFORE schema.parse so the error names the actual
+    // mistake instead of a required field that went missing because of it.
+    this.refuseUnknownFields(type, candidate);
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, type, 'knowledge_create');
+      throw err;
+    }
+    // THE CLAIM CHECK, on the parsed candidate (paths already normalized) and
+    // before ANY write, so a refused create leaves nothing behind — including
+    // the create knowledge_extract and knowledge_split perform inside their own
+    // transaction, which rolls back with it (assertClaimedPaths).
+    //
+    // AND BEFORE computeBaselines, deliberately: baselining lstat's every owned
+    // path, so an unreadable claim surfaced a RAW EACCES from that call instead
+    // of this check's named refusal. The named refusal always wins now.
+    //
+    // RULING (amending decision
+    // [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]):
+    // the claim check governs CALLER writes through the tool surface; an
+    // INTERNAL mechanism mint is EXEMPT, because its file_keys come from records
+    // already admitted or from git touches, and a mint must never make a READ
+    // throw or lose detected debt.
+    const claimsCheck = opts?.internalMint === true ? {} : this.assertClaimedPaths('knowledge_create', parsed);
+    // record the owned-file content baseline at birth (server-computed, never
+    // author-supplied) so the read-time drift check is content-aware (§3.2.3).
+    // Written onto BOTH views: `candidate` is what the store persists, `parsed`
+    // is the dedup-comparison view.
+    if (type === 'feature_article' || type === 'reference_material') {
+      candidate.file_baselines = this.computeBaselines(candidate);
+      parsed.file_baselines = candidate.file_baselines;
+    }
+    const skipped: SkippedCheck[] = [];
+
+    if (type === 'anti_pattern') {
+      // dedup guard (§3.2.2): an overlapping anti_pattern is REFUSED LOUD, never
+      // silently merged — a wrong merge costs the whole lesson (2026-07-04: a
+      // distinct lesson was swallowed on one shared file_key, board 3f9591e9);
+      // a refusal costs one round-trip. The author decides: same finding →
+      // knowledge_update the match (append source_evidence); distinct lesson →
+      // re-submit with dedup_override: true.
+      if (!dedupOverride) {
+        const match = this.findAntiPatternOverlap(parsed);
+        if (match) {
+          const { record, predicate, dice } = match;
+          const predicateDesc =
+            predicate === 'title_trigger'
+              ? `title+trigger Dice similarity ${dice.toFixed(2)} >= ${0.5} on their own`
+              : `title+trigger Dice similarity ${dice.toFixed(2)} >= ${0.3}, assisted by a shared file_key (the false-positive-prone branch — a busy multi-concern file can host distinct lessons)`;
+          throw new Error(
+            `knowledge_create: this anti_pattern overlaps existing '${record.id}' — "${(record as { title?: string }).title ?? ''}" ` +
+              `(matched on ${predicateDesc}). ` +
+              `Same finding: knowledge_update that record, appending your source_evidence. Distinct lesson: re-submit with dedup_override: true.`
+          );
+        }
+      }
+      skipped.push(this.skip('noise-gate', this.activeRunId(), persistSkips));
+    } else if (type === 'feature_article') {
+      // SLUG COLLISION IS REFUSED LOUD (board 56c8a509). Two records under one
+      // slug is worse than one wrong record, because retrieval serves BOTH and
+      // they contradict — and it is worse still than that, as a consuming project
+      // proved: retiring the loser by RETITLING it made the tombstone the NEWEST
+      // record under the slug, so H19 resolved the slug to the tombstone and
+      // served "RETIRED DUPLICATE — DO NOT READ THIS ARTICLE" as the
+      // authoritative answer for a live concept. A whole article went dark.
+      // Resolution is store.articlesBySlug — deterministic, never a ranked
+      // capped query, so this refusal cannot be a bm25 artefact (decision
+      // 3db7095f). No dedup_override escape hatch, deliberately: unlike two
+      // anti_patterns that may carry genuinely distinct lessons on one file, two
+      // articles under one slug have no legitimate shape. The remedies are named
+      // in the message because "refused" without a next step is where authors
+      // invent the tombstone workaround that caused the incident.
+      const slug = (parsed as { slug?: string }).slug;
+      if (slug) {
+        const clash = this.store.articlesBySlug(slug);
+        if (clash.length) {
+          throw new Error(
+            `knowledge_create: a feature_article with slug '${slug}' already exists ('${clash[0].id}'). ` +
+              `Two records under one slug is worse than one wrong record — retrieval serves both and they contradict. ` +
+              `Revising that article: knowledge_update '${clash[0].id}' (the correction supersedes the error — fix it FORWARD). ` +
+              `Genuinely a different concept: choose a distinct slug. Replacing it wholesale: knowledge_create the new article ` +
+              `under its own slug, then knowledge_retire the old one in_favor_of the new — never leave both live.`
+          );
+        }
+      }
+      skipped.push(this.skip('dedup-merge', this.activeRunId(), persistSkips));
+    } else {
+      // dedup guarding is defined for anti_patterns and feature_article slugs;
+      // other types skip loudly
+      skipped.push(this.skip('dedup-merge', this.activeRunId(), persistSkips));
+    }
+
+    // STABLE HANDLES (board 1e639f32): decision / anti_pattern / research_finding
+    // gain the slug feature_article and brief already had — the id re-mints on
+    // every supersession, the slug names the CONCEPT and survives. Auto-minted
+    // from the headline when absent (an auto-derived clash takes a -2/-3 suffix,
+    // deterministic); an EXPLICIT slug that collides with ANY slug-bearing
+    // record is refused loudly — same two-records-one-handle reasoning as the
+    // feature_article branch above, across every type knowledge_get resolves.
+    // attestation joins the EXPLICIT-collision half only (review finding 1,
+    // 2026-08-21): it has no title/question headline, so nothing auto-mints —
+    // but an explicit slug colliding with a live record would brick slug
+    // addressing of that record for every reader (the 1e639f32 incident shape).
+    //
+    // `open_question` joins BOTH halves (board 4ffb95be): it declares a `slug`
+    // and mintHeadlineOf already falls through to `question`, so it auto-mints
+    // exactly the way research_finding does — the two types are the same shape,
+    // a question that IS the identity. Omitting it here would have been silent
+    // in both directions: no handle minted, AND no collision refusal, so an
+    // explicit open_question slug could take a live ruling's handle and brick
+    // slug addressing of that record for every reader — the 1e639f32 incident
+    // shape this branch exists to prevent.
+    //
+    // `todo` JOINS THE SAME ONE NAMESPACE (S1, decision
+    // human-readable-ids-for-board-items) — deliberately through THIS branch
+    // rather than a private check on board_add, because board_add funnels here
+    // and recordsBySlug is type-agnostic, so both directions are covered by one
+    // rule: a board item cannot take a live ruling's handle, and a ruling
+    // cannot take a live board item's. A private per-surface check would give
+    // `todo` a namespace of its own, which is exactly the read-time ambiguity
+    // de1a7329 rejected. Its headline comes from mintHeadlineOf (a board item
+    // has no title field; see todoHeadline).
+    if (
+      type === 'decision' ||
+      type === 'anti_pattern' ||
+      type === 'research_finding' ||
+      type === 'open_question' ||
+      type === 'attestation' ||
+      type === 'todo'
+    ) {
+      const explicit = (parsed as { slug?: string }).slug;
+      if (explicit) {
+        if (this.store.recordsBySlug(explicit).length) {
+          throw new Error(
+            `knowledge_create: a record with slug '${explicit}' already exists — one handle resolves to one record. ` +
+              `Choose a distinct slug, or omit it to auto-derive a unique one.`
+          );
+        }
+      } else {
+        const headline = SterlingTools.mintHeadlineOf(type, parsed as Record<string, unknown>);
+        const minted = this.mintSlug(headline);
+        if (minted) {
+          // store.create persists `candidate` (parsed is the dedup-comparison
+          // view), so the minted slug must land on BOTH.
+          (parsed as { slug?: string }).slug = minted;
+          candidate.slug = minted;
+        }
+      }
+    }
+
+    // A SYSTEM maintenance item takes the ATOMIC dedup path (board 2ded3b4b):
+    // check-and-insert in one transaction, keyed (system_reason, feature_link,
+    // file_keys). Every producer funnels through here, so the four hand-rolled
+    // query-then-insert copies that raced each other are gone, and the key now
+    // includes the FILE — which fixes the opposite bug in the same stroke, where
+    // a second drifting file was suppressed and then absorbed by the next
+    // re-baseline. A duplicate returns the EXISTING item rather than throwing:
+    // producers are mechanisms reporting a fact, and a fact reported twice is
+    // not an error.
+    // Cited-id resolution warnings (board fc053051): scanned from the same
+    // text the FTS extractor already derives for this type, so no new
+    // per-type field list is invented here. Computed on `parsed` (post-schema,
+    // pre-store) so a scan sees exactly what is about to be written.
+    const citationWarnings = registered ? this.citedIdWarnings(registered.fts(parsed)) : [];
+    // The stripped counter is DISCLOSED, not silently dropped
+    // ([stable-identity-design-v2] contract 1) — a caller who thought it was
+    // seeding version 42 needs to know the record was born at 1.
+    //
+    // EXCEPT for the value 1, deliberately (adjudicated, not an oversight):
+    // feature_article's schema still REQUIRES `version: 1` on a create, so every
+    // legitimate article create passes it. Warning there would fire on the
+    // correct call, every time, telling the caller nothing they did not already
+    // intend — ceremony, not disclosure (P1). Any OTHER value is a caller who
+    // believed it controlled the counter, which is exactly what must be said.
+    if (smuggledVersion !== undefined && smuggledVersion !== 1) {
+      citationWarnings.push(
+        `'version' is SERVER-OWNED and was ignored: you passed ${JSON.stringify(smuggledVersion)}, this record was created at version 1. ` +
+          `Every knowledge_update/append/edit bumps it by exactly one, in place, on the same id.`
+      );
+    }
+
+    const isSystemTodo = type === 'todo' && (candidate as { source?: string }).source === 'system';
+    if (isSystemTodo) {
+      const res = this.store.enqueueSystemTodo(candidate);
+      this.surfacePromotionCandidate(res.record, type);
+      return {
+        record: res.record,
+        check_skipped: skipped,
+        ...(res.deduped ? { deduped: true } : {}),
+        ...(res.text_updated ? { text_updated: true } : {}),
+        warnings: citationWarnings,
+        ...claimsCheck,
+      };
+    }
+    const record = this.store.create(candidate);
+    this.surfacePromotionCandidate(record, type);
+    // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): only for the three ruling
+    // types — other types' create responses stay byte-identical. Computed
+    // AFTER the store write (AC6: disclosure never blocks or gates), on the
+    // registered FTS extractor's text (same source citedIdWarnings already
+    // used above), excluding only the record just minted.
+    const sameSubject = SterlingTools.SAME_SUBJECT_TYPES.includes(type)
+      ? this.sameSubjectDigest(registered ? registered.fts(parsed) : '', new Set([record.id]))
+      : undefined;
+    return {
+      record,
+      check_skipped: skipped,
+      warnings: citationWarnings,
+      ...(sameSubject ? { same_subject: sameSubject } : {}),
+      ...claimsCheck,
+    };
+  }
+
+  /**
+   * §3.3 project-store-then-promote: reference/research records are
+   * domain-candidates by default. One born project-scoped, when the project has
+   * a domain mounted to promote into, surfaces a single promotion_review
+   * maintenance item — the human decides at the queue drain, never an automatic
+   * move. No domain mounted → nowhere to promote → nothing surfaced (so a
+   * domain-less project sees no promotion noise). A record the conductor already
+   * scoped to a domain at creation is not a candidate.
+   */
+  private surfacePromotionCandidate(record: DurableRecord, type: string): void {
+    if (type !== 'reference_material' && type !== 'research_finding') return;
+    if (record.scope !== 'project' || this.config.stack_tags.length === 0) return;
+    const label = (record as { title?: string; question?: string }).title ?? (record as { question?: string }).question ?? type;
+    this.maintenanceEnqueue({
+      reason: 'promotion_review',
+      text: `review '${label}' for promotion to a domain store — project-scoped ${type}, a domain-candidate by default (§3.3)`,
+      file_keys: (record as { file_keys?: string[] }).file_keys,
+      feature_link: record.id,
+    });
+  }
+
+  private findAntiPatternOverlap(
+    candidate: Record<string, unknown>
+  ): { record: DurableRecord; predicate: 'title_trigger' | 'key_assisted'; dice: number } | undefined {
+    const existing = this.store.query({ types: ['anti_pattern'], cap: 1000 });
+    const candKeys = new Set(((candidate.file_keys as string[]) ?? []).map((p) => p.replace(/\\/g, '/')));
+    const tokens = (r: Record<string, unknown>) =>
+      new Set(
+        `${r.title ?? ''} ${r.trigger ?? ''}`
+          .toLowerCase()
+          .split(/\W+/)
+          .filter((w) => w.length > 3)
+      );
+    const candTokens = tokens(candidate);
+    // Dice coefficient over the significant-token sets (2·|A∩B| / (|A|+|B|)):
+    // flag only on STRONG overlap — a genuine restatement of the same
+    // anti-pattern — not on a couple of shared domain words. The prior
+    // `shared >= 2` absolute gate collapsed distinct same-domain gotchas: any
+    // two "Genesys Cloud …" titles share genesys+cloud, any two Power Automate
+    // gotchas share power+automate. file_key overlap is an ASSIST, not a hard
+    // signal — a busy multi-concern file (e.g. agent-distribution.mjs) hosts
+    // many distinct lessons (board 3f9591e9, 2026-07-04); a shared key only
+    // lowers the token bar for records that already sound alike.
+    const DICE_OVERLAP_THRESHOLD = 0.5;
+    const DICE_KEY_ASSISTED_THRESHOLD = 0.3;
+    for (const e of existing) {
+      const rec = e as unknown as Record<string, unknown>;
+      const recTokens = tokens(rec);
+      const denom = candTokens.size + recTokens.size;
+      if (denom === 0) continue;
+      let shared = 0;
+      for (const t of recTokens) if (candTokens.has(t)) shared++;
+      const dice = (2 * shared) / denom;
+      const keyOverlap = ((rec.file_keys as string[]) ?? []).some((k) => candKeys.has(k));
+      if (dice >= DICE_OVERLAP_THRESHOLD) return { record: e, predicate: 'title_trigger', dice };
+      if (keyOverlap && dice >= DICE_KEY_ASSISTED_THRESHOLD) return { record: e, predicate: 'key_assisted', dice };
+    }
+    return undefined;
+  }
+
+  /**
+   * Retrieval (§3.4): records pass through with lazy stale-at-read
+   * annotations — research findings get both clocks + a staleness flag;
+   * platform/external-basis records past threshold get verify_before_use.
+   * Annotations are computed at read, never persisted (P4: no sweeps).
+   */
+  knowledgeQuery(opts: QueryOptions): (DurableRecord & { staleness?: object; verify_before_use?: boolean })[] {
+    const nowMs = Date.parse(this.now());
+    const ageDays = (iso: string) => Math.floor((nowMs - Date.parse(iso)) / DAY_MS);
+    return this.store.query(opts).map((record) => {
+      if (record.type === 'research_finding') {
+        const r = record as unknown as { source_date: string; capture_date: string; volatility_hint?: 'fast' | 'medium' | 'stable'; status: string };
+        const threshold = this.config.staleness.research_days[r.volatility_hint ?? 'medium'];
+        const sourceAge = ageDays(r.source_date);
+        const stale = r.status === 'flagged_stale' || sourceAge > threshold;
+        return {
+          ...record,
+          staleness: {
+            source_age_days: sourceAge,
+            capture_age_days: ageDays(r.capture_date),
+            threshold_days: threshold,
+            stale,
+            ...(stale ? { note: 'stale — re-verify before use; re-verification supersedes this finding' } : {}),
+          },
+        };
+      }
+      // §3.2.5: repo-located docs — out-of-band edits caught at read time.
+      // File mtime newer than source_date → verify_before_use + ONE deduplicated
+      // refresh_reference maintenance item (a hundred stale reads, one queue entry).
+      if (record.type === 'reference_material' && (record as unknown as { kind: string }).kind === 'doc' && this.repoRoot) {
+        const r = record as unknown as { id: string; title: string; location: string; source_date: string; file_baselines?: Record<string, string> };
+        // Detached-working-tree resolution (comsoft-juiced 2026-07-17): resolve
+        // against the record's declared tree; an unmapped name abstains LOUD —
+        // never checked against the wrong tree, never a fabricated queue item.
+        const tree = this.treeRootFor(record as unknown as Record<string, unknown>);
+        if (tree.unresolved) return { ...record, verify_before_use: true };
+        let rel: string | undefined;
+        try {
+          rel = normalizeRepoPath(r.location);
+        } catch {
+          rel = undefined; // absolute/escaping location: not repo-located
+        }
+        if (rel && tree.root) {
+          const stat = statSync(join(tree.root, rel), { throwIfNoEntry: false });
+          // mtime > source_date is the cheap pre-filter; confirm a real content
+          // change against the baseline before flagging (an mtime-only bump from
+          // a merge is not an out-of-band edit). No baseline → abstain. A
+          // registered generated projection never content-flags (regen churn is
+          // by design; this wire has no deletion arm — that is the feature-
+          // article check's job for files an article owns).
+          if (stat && stat.mtimeMs > Date.parse(r.source_date) && !this.isGeneratedProjection(rel) && this.contentChanged(rel, r.file_baselines, tree.root)) {
+            // NO PRE-CHECK (board e939fd21): maintenanceEnqueue's atomic choke
+            // point (SterlingStore.enqueueSystemTodo) already keys on
+            // (system_reason, feature_link, file_keys) inside its own
+            // transaction, so a re-enqueued open item returns rather than
+            // duplicates. This pre-check queried on (system_reason, file_keys)
+            // alone — WITHOUT feature_link — which is a weaker key than the
+            // choke point's: two different reference_material records sharing
+            // a path would have the first one's open item silently suppress
+            // the second SUBJECT's finding, and duplicating the dedup rule
+            // here is exactly how the four hand-rolled copies drifted apart
+            // (decision foreign_194f43e4).
+            this.maintenanceEnqueue({
+              reason: 'refresh_reference',
+              text: `refresh reference '${r.title}' — ${rel} changed on disk after source_date (out-of-band edit); refresh summary + source_date`,
+              file_keys: [rel],
+              feature_link: r.id,
+            });
+            return { ...record, verify_before_use: true };
+          }
+        }
+      }
+      // §3.2.3: feature-article drift caught at read — H7 covers governed
+      // touches; this catches out-of-band edits. Any owned file newer than the
+      // article's updated_at, or missing from disk (deletion is drift), flags
+      // the article and enqueues ONE reconcile_needed item (same feature_link
+      // dedup as H7 — one drain surface regardless of trigger).
+      if (record.type === 'feature_article' && this.repoRoot) {
+        const a = record as unknown as {
+          id: string;
+          slug: string;
+          files?: { path: string; role?: string }[];
+          file_baselines?: Record<string, string>;
+          baseline_attestations?: Record<string, unknown>;
+          absence_attestations?: Record<string, unknown>;
+        };
+        const roleFor = (p: string) => (a.files ?? []).find((f) => f.path === p)?.role;
+        // Paths whose baseline came from an ALREADY-PAID close rather than a
+        // content reconcile (board 8c8b6d78 / R9): the article's updated_at was
+        // preserved by that write, so the mtime prefilter must not terminate on
+        // them — see DriftCheckContext.attestedPaths.
+        const attestedPaths = new Set(Object.keys(a.baseline_attestations ?? {}));
+        const absenceAttestedPaths = new Set(Object.keys(a.absence_attestations ?? {}));
+        // Detached-working-tree resolution (comsoft-juiced 2026-07-17): a copy-
+        // describing article's files are stat'd against ITS tree — resolving
+        // against the project root produced false "out-of-band deletion" items
+        // for every copy-only file. An unmapped tree name abstains LOUD.
+        const tree = this.treeRootFor(record as unknown as Record<string, unknown>);
+        if (tree.unresolved) return { ...record, verify_before_use: true };
+        const treeRoot = tree.root ?? this.repoRoot;
+        // EVERY drifting file, not just the first (board 2ded3b4b). This loop used
+        // to `break` on the first drift, and the enqueue dedup keyed on the
+        // ARTICLE — so a second drifting file never got an item, and because
+        // knowledge_update then re-baselined EVERY owned file (since superseded by
+        // the evidence-gated advance), reconciling the first absorbed the second's
+        // drift into a fresh baseline. The finding neither
+        // queued nor survived. Each call below still passes ONE file's worth of
+        // file_keys and its own specific per-file text (missing vs edited) — that
+        // is what makes each finding actionable and legible on its own — but the
+        // choke point (board b0bb9d96 / I-29) now FOLDS every reconcile_needed
+        // call sharing this article's feature_link into ONE stored item, unioning
+        // file_keys rather than minting a second item per file: "one item per
+        // FILE" describes this loop's calls, never the resulting queue depth.
+        const drifts: { path: string; missing: boolean; neverTracked?: boolean }[] = [];
+        const parkedFiles: { path: string; ref: string }[] = [];
+        // Owned bytes that actually exist — the evidence for the state check below.
+        // Free here: the stat is already being taken for the drift comparison.
+        let liveBytes = 0;
+        for (const f of a.files ?? []) {
+          // ONE SHARED PREDICATE (decision queue-truth-at-read-annotation-design):
+          // the seven checks this loop used to inline now live in
+          // classifyOwnedFileDrift, which the queue's truth-at-read annotation
+          // calls too. Same order, same verdicts, same git-probe readings — the
+          // extraction is behaviour-preserving here by construction, and mode
+          // 'mint' selects the two policy points that belong to THIS caller.
+          const { verdict, size } = this.classifyOwnedFileDrift(f.path, {
+            mode: 'mint',
+            treeRoot,
+            baselines: a.file_baselines,
+            baselinedAt: record.updated_at,
+            honorMtimePrefilter: true,
+            attestedPaths,
+            absenceAttestedPaths,
+          });
+          // Owned bytes that actually exist, for the state-honesty check below —
+          // free, because the classifier already took the stat.
+          if (size !== undefined) liveBytes += size;
+          if (verdict.kind === 'parked') {
+            // The article is CORRECT — the path returns on merge (board 1d6a721a).
+            parkedFiles.push({ path: f.path, ref: verdict.ref });
+            continue;
+          }
+          if (verdict.kind === 'deletion_candidate') {
+            drifts.push({ path: f.path, missing: true, neverTracked: true });
+            continue;
+          }
+          if (verdict.kind === 'reconcile') {
+            drifts.push({ path: f.path, missing: verdict.missing, neverTracked: false });
+            continue;
+          }
+          // 'clean' AND every 'unavailable:<reason>' raise NOTHING here, exactly
+          // as before the extraction: no baseline, an unreadable file and a
+          // generated projection all made contentChanged() return false. THE
+          // MINT ABSTAINS rather than fabricate a flag it cannot stand behind —
+          // that is this CALL SITE's policy, which is why the shared predicate
+          // reports the abstention instead of collapsing it (the annotation site
+          // has to disclose it).
+        }
+        if (drifts.length) {
+          // NO PRE-CHECK: enqueueSystemTodo is atomic. For reconcile_needed
+          // with a feature_link (this lane), identity is (reason,
+          // feature_link) ALONE — file_keys is NOT part of the key — so
+          // re-enqueueing here folds into the one open item for this
+          // article, unioning this call's file_keys into it, rather than
+          // duplicating or suppressing. The old pre-check keyed on the
+          // ARTICLE alone and DISCARDED a second file's finding; the choke
+          // point's fold keeps it, just inside the same item — and doing a
+          // pre-check here as well as in the store would put the dedup rule
+          // in two places, which is how the four copies drifted apart to
+          // begin with.
+          for (const d of drifts.slice(0, DRIFT_ITEMS_PER_READ)) {
+            // If the article's OWN role text disclaims the path, say so on the
+            // item (board b7269100). Otherwise this exact no-op gets re-audited
+            // on every future edit to that file, forever — the item is the only
+            // place a reader will ever look, so it is where the observation has
+            // to land, and offering the real remedy converts a permanent
+            // irritant into one decision taken once.
+            const disclaimed = this.disclaimsOwnership(roleFor(d.path))
+              ? ` NOTE: this article's own files[] role for ${d.path} disclaims ownership of it, so this item will recur on every future edit to that file and each one will be a no-op. Consider REMOVING ${d.path} from files[] instead of reconciling — check the co-owners first (knowledge_query file_keys:["${d.path}"]) so the path is not left orphaned.`
+              : '';
+            // A file NEVER TRACKED on any git ref this repo can reach (board
+            // e939fd21) is not a RECONCILE — no write can ever close "the file
+            // no longer exists", so reconcile_needed for this shape re-mints
+            // forever (the config.ts incident). It gets its own gated lane
+            // instead — deletion_candidate, whose deed is confirming/undoing
+            // the deletion, never editing the article's prose. A file that WAS
+            // once tracked (real git history, now a merged-into-base ancestor)
+            // or a file the probe could not check at all (no repo, no git) both
+            // keep the classic reconcile_needed reading — the former IS a
+            // normal, closeable editorial fact, and the latter's probe proved
+            // nothing, so it must not be read as the stronger verdict.
+            const deletionCandidate = d.missing && d.neverTracked;
+            this.maintenanceEnqueue({
+              reason: deletionCandidate ? 'deletion_candidate' : 'reconcile_needed',
+              text:
+                (d.missing
+                  ? deletionCandidate
+                    ? `owned file ${d.path} of article '${a.slug}' no longer exists (out-of-band deletion) and was never tracked on any git ref this repo can reach — DELETION CANDIDATE, not a reconcile: confirm the deletion (drop ${d.path} from files[]) or restore the file, then close this via the deletion_candidate drain`
+                    : `reconcile article '${a.slug}' — owned file ${d.path} no longer exists (out-of-band deletion)`
+                  : `reconcile article '${a.slug}' — owned file ${d.path} changed on disk after the article's last update (out-of-band edit)`) + disclaimed,
+              file_keys: [d.path],
+              feature_link: a.id,
+            });
+          }
+          if (drifts.length > DRIFT_ITEMS_PER_READ) {
+            // Never truncate SILENTLY (P5): the remainder is named on the item(s)
+            // that land, so a reader knows the queue is a floor here. LANE-HONEST
+            // (board e939fd21, fixer round 2, finding 4): a deletion_candidate is
+            // a DIFFERENT, gated deed from a reconcile — collapsing the overflow
+            // into one hard-coded reconcile_needed summary either misclassifies a
+            // genuinely never-tracked file as an editable reconcile (re-minting
+            // it forever, the exact defect this change exists to close) or buries
+            // a real editorial fact inside a deletion-candidate summary. Split the
+            // overflow BY LANE and emit one truthful summary per lane actually
+            // represented, rather than one summary naming the wrong deed.
+            const overflow = drifts.slice(DRIFT_ITEMS_PER_READ);
+            const overflowDeletions = overflow.filter((d) => d.missing && d.neverTracked);
+            const overflowReconciles = overflow.filter((d) => !(d.missing && d.neverTracked));
+            if (overflowReconciles.length) {
+              this.maintenanceEnqueue({
+                reason: 'reconcile_needed',
+                text:
+                  `reconcile article '${a.slug}' — ${overflowReconciles.length} owned files drifted in one read beyond the first ${DRIFT_ITEMS_PER_READ} (which have their own items); the remainder (${overflowReconciles
+                    .map((d) => d.path)
+                    .join(', ')}) is covered by this one. A drift this wide usually means a whole-area change — reconcile the article as a whole.`,
+                file_keys: overflowReconciles.map((d) => d.path),
+                feature_link: a.id,
+              });
+            }
+            if (overflowDeletions.length) {
+              this.maintenanceEnqueue({
+                reason: 'deletion_candidate',
+                text:
+                  `article '${a.slug}' — ${overflowDeletions.length} owned files beyond the first ${DRIFT_ITEMS_PER_READ} are DELETION CANDIDATES: never tracked on any git ref this repo can reach (${overflowDeletions
+                    .map((d) => d.path)
+                    .join(', ')}). Confirm the deletions (drop them from files[]) or restore the files, then close via the deletion_candidate drain.`,
+                file_keys: overflowDeletions.map((d) => d.path),
+                feature_link: a.id,
+              });
+            }
+          }
+          return { ...record, verify_before_use: true };
+        }
+        // A PARKED file is recorded once and does NOT raise verify_before_use:
+        // the article's claims are accurate, the path is simply not in this
+        // checkout, and telling a reader to verify before use would be false
+        // alarm. Deduped on (feature_link, file) so a read loop cannot pile up
+        // copies. Not auto-drained by knowledge_update either — that drain is
+        // scoped to the two drift lanes — because no article write changes
+        // where the file lives.
+        for (const p of parkedFiles.slice(0, DRIFT_ITEMS_PER_READ)) {
+          this.maintenanceEnqueue({
+            reason: 'file_parked',
+            text:
+              `article '${a.slug}' — owned file ${p.path} is absent from the working tree but ALIVE on '${p.ref}'. ` +
+              `INFORMATIONAL: no reconcile is owed and the article is correct as written. ` +
+              `DO NOT DROP ${p.path} FROM THIS ARTICLE'S files[] — the path becomes valid again when that branch merges. ` +
+              `This item closes when the branch lands (the merge gate sweeps it), not by a write.`,
+            file_keys: [p.path],
+            feature_link: a.id,
+          });
+        }
+
+        // STATE HONESTY (board db7cd16c). Nothing watched the state field: the
+        // hooks watch content hashes, so an article sat at `planned` over a
+        // shipped, wired, probe-verified feature whose ten acceptance criteria all
+        // held. The PROSE was right and the METADATA was the lie — and metadata is
+        // what a reader trusts first, so anyone querying it would have concluded a
+        // working feature did not exist.
+        //
+        // Two triggers, both cheap here because the stats are already taken:
+        //  - `planned` (or `dormant`) over more owned bytes than a placeholder;
+        //  - any files[] entry still flagged `unverified`, i.e. a role never
+        //    written from the source. That flag exists to make the honest "I don't
+        //    know this yet" cheap, and it is only worth having if something acts on
+        //    it (board db7cd16c) — otherwise it is the ⚠⚠-in-prose it replaced.
+        //
+        // NOT a trigger, deliberately: `built`/`active` while the files are ABSENT.
+        // The report asks for it, but the deletion arm above already mints an item
+        // naming the missing file, and a second lane on the same fact is the
+        // double-reporting this batch exists to reduce.
+        const state = (record as unknown as { state?: string }).state;
+        const unverifiedPaths = (a.files ?? []).filter((f) => (f as { unverified?: boolean }).unverified).map((f) => f.path);
+        const overStated = (state === 'planned' || state === 'dormant') && liveBytes > PLANNED_CREDIBLE_BYTES;
+        if (overStated || unverifiedPaths.length) {
+          const reasons: string[] = [];
+          if (overStated) {
+            reasons.push(
+              `it declares state '${state}' while the files it owns hold ${liveBytes} bytes of code on disk — 'planned' over written code reads as "this does not exist yet" to everyone who queries it`
+            );
+          }
+          if (unverifiedPaths.length) {
+            reasons.push(
+              `its files[] roles for ${unverifiedPaths.join(', ')} are still flagged unverified — the role was never written from the source, so the article does not yet describe what those files do`
+            );
+          }
+          this.maintenanceEnqueue({
+            reason: 'state_review',
+            text:
+              `review article '${a.slug}' metadata against reality: ${reasons.join('; and ')}. ` +
+              `Check the prose against the code before changing anything — in the reported case every acceptance criterion HELD and only the metadata was wrong, so the fix was a state change and a files[] role pass, not a rewrite. ` +
+              `Then knowledge_update the state` +
+              (unverifiedPaths.length
+                ? `, and clear each unverified flag once its role is written from the file — one targeted call per path, never a whole-array files[] update: ` +
+                  unverifiedPaths.map((p) => `knowledge_edit(id: '${a.id}', field: 'files[path=${p}].unverified', find: 'true', replace: 'false')`).join('; ')
+                : '') +
+              `.`,
+            file_keys: unverifiedPaths.length ? unverifiedPaths : (a.files ?? []).map((f) => f.path).slice(0, DRIFT_ITEMS_PER_READ),
+            feature_link: a.id,
+          });
+        }
+      }
+      const basis = (record as unknown as { basis?: string }).basis;
+      if ((basis === 'platform' || basis === 'external') && ageDays(record.updated_at) > this.config.staleness.platform_external_days) {
+        return { ...record, verify_before_use: true };
+      }
+      return record;
+    });
+  }
+
+  /**
+   * The MCP-facing result for knowledge_query: the flagged records, PROJECTED for
+   * reading, inside an envelope that DISCLOSES what the retrieval did. Two
+   * failures of one class — a retrieval that misrepresents itself (P5) — and both
+   * were observed, not theorized (sibling-project retrospective, 2026-07-29):
+   *
+   * (1) THE CAP WAS SILENT. query() caps at DEFAULT_QUERY_CAP, so a filter
+   * matching 200 records returned 20 with no signal the other 180 existed. A
+   * sibling conductor read such a window as the whole store and concluded it held
+   * ~20 records when it held 21 feature articles alone — then reasoned from that.
+   * count() already existed over the SAME base filter (the TUI's badges use it),
+   * so disclosure costs one COUNT(*) and no new machinery.
+   *
+   * (2) VERSION HISTORY DOMINATED THE PAYLOAD. A v42 article serializes a
+   * 42-entry supersedes chain plus 25 server-owned sha256 baselines on EVERY hit;
+   * a cap:6 query measured 56KB, nearly none of it readable content. The
+   * projection drops both — from QUERY results only. knowledge_get stays
+   * full-fidelity, so nothing becomes unreachable; it just stops being paid for on
+   * every retrieval. Semantic links (cites/informed_by/fulfills) SURVIVE: they
+   * point at the decisions and briefs a reader may need to follow, and
+   * supersedes_count keeps the version depth visible without the uuids.
+   *
+   * Scoped to this boundary deliberately: internal consumers read the fields the
+   * projection drops (promotion.mjs filters links.rel==='fulfills'; the drift
+   * wires above read file_baselines), and they call store.query/knowledgeQuery
+   * directly — so trimming in the store would have starved them. knowledgeQuery
+   * keeps returning full flagged records for exactly that reason.
+   */
+  /**
+   * APPEND to an array field without retransmitting it (decision foreign_44e45931's
+   * successor — the append half of the append/identity problem).
+   *
+   * knowledgeUpdate REPLACES each field it receives, so adding one history entry
+   * to a 25-entry article meant resending all 25 byte-exact. That cost scales with
+   * how valuable a record has become, which is exactly backwards, and it produced
+   * the pathology two consuming projects independently ranked their #1: a record
+   * gets richer, gets bigger, becomes unwriteable, stops being updated, starts
+   * lying. Measured here on 2026-07-29: reconciling one session's work took three
+   * full-article hand re-transmits, one of a ~5,000-word what_it_does with a
+   * 25-entry history, to add one history entry each.
+   *
+   * It delegates to knowledgeUpdate rather than writing its own supersede, so it
+   * CANNOT diverge from the update path's guarantees: version bump, prior version
+   * retained, the evidence-gated file_baselines advance, and (decision foreign_68988832) an EXPLICIT
+   * resolves claim — never an implicit drain — all happen exactly once and
+   * exactly as before. Any open reconcile_needed/refresh_reference debt on the
+   * chain not named in resolves is warned on the receipt, not silently
+   * discharged. Only the caller's transmission cost changes — this is not a
+   * second write path (invariant: one write code path).
+   *
+   * Refuses loudly (P5) rather than guessing: an unknown field for the type (with
+   * the valid set named, same helper as the write guards), a field whose current
+   * value is not an array, an empty entry list, and `links` — typed edges have
+   * their own tool and a second path would let the record_links index drift.
+   */
+  knowledgeAppend(
+    id: string,
+    field: string,
+    entries: unknown[],
+    resolves?: string[]
+  ): { record: DurableRecord; warnings: string[]; claims_check?: string } {
+    const old = this.resolveRecordId(id, 'knowledge_append');
+    this.refuseStaleAddress(old, id, 'knowledge_append');
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw new Error(`knowledge_append: 'entries' must be a non-empty array — nothing to append`);
+    }
+    if (field === 'links') {
+      throw new Error(`knowledge_append: 'links' is not appendable here — use knowledge_link, which also maintains the record_links index`);
+    }
+    this.refuseServerOwnedFields({ [field]: entries }, 'knowledge_append');
+    this.refuseUnknownFields(old.type, { [field]: entries }, 'knowledge_append');
+    const current = (old as unknown as Record<string, unknown>)[field];
+    if (current !== undefined && !Array.isArray(current)) {
+      throw new Error(
+        `knowledge_append: '${field}' on ${old.type} is ${typeof current}, not an array — append only extends array fields; use knowledge_update to set a scalar`
+      );
+    }
+    const next = [...((current as unknown[]) ?? []), ...entries];
+    // Straight through the ONE update path — every guarantee above rides along,
+    // including the oversize check (board 8390f8fa) and the resolves claim
+    // (decision foreign_68988832): the write's result carries a warning on the SAME
+    // channel knowledge_update uses. same_subject (ruling types only) is
+    // split off rather than left inside `record` — see splitSameSubject.
+    // THE APPEND-JOIN CANDIDATE PATHS (board 31b2c872; rebuilt per decision
+    // [append-join-discharge-rebuilt-as-one-atomic-transition]): every
+    // normalized path THIS call supplies for an existing article's files[] —
+    // the only write shape that may close an `article_missing` resolves claim.
+    // Computed here because `entries` is the one place the paths this call
+    // ADDS are distinguishable from the ones already stored; undefined for
+    // every other field and every other record type, which is what keeps the
+    // admission narrow.
+    //
+    // THIS IS A CANDIDATE SET, NOT THE DISCHARGING SET. The NOT-NEW rule
+    // (which of these the article did not ALREADY own — re-appending an owned
+    // path establishes no ownership, it just duplicates a files[] row) is
+    // applied INSIDE dischargeAppendJoin's transaction, against a re-read of
+    // the article taken under the write lock. Filtering here as well would put
+    // the decision back on the wrong side of the transaction boundary, which
+    // is the exact cause this mechanism was rebuilt to remove.
+    const appendJoin =
+      old.type === 'feature_article' && field === 'files'
+        ? {
+            appendedPaths: entries
+              .map((e) => (e as { path?: unknown } | null)?.path)
+              .filter((p): p is string => typeof p === 'string')
+              .map((p) => normalizeRepoPath(p)),
+            // The RETENTION SINK: knowledgeUpdate fills this AFTER the discharge
+            // transaction commits, one entry per article_missing item this
+            // append only PARTIALLY covered. It rides back out as a warning
+            // below, because a partial close that reads like a full close is
+            // worse than a refusal.
+            retained: [] as { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[],
+          }
+        : undefined;
+    const { record, claims_check } = this.splitSameSubject(
+      this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_append', appendJoin)
+    );
+    // Cited-id scan (board fc053051 extension): only the newly APPENDED
+    // entries — never the array's pre-existing elements, which were already
+    // scanned (or not) on whatever write introduced them.
+    return {
+      record,
+      warnings: [
+        ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record),
+        ...this.articleOversizeWarnings(record),
+        ...this.citedIdWarnings(JSON.stringify(entries)),
+        ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+        ...(appendJoin?.retained ?? []).map(
+          (r) =>
+            `article_missing item ${r.item_id} was PARTIALLY closed, not drained: this append established ownership for ` +
+            `${r.joined.length} of its file_keys (${r.joined.join(', ')}), so the item was REWRITTEN IN PLACE — same id, same ` +
+            `article_missing lane — and still names ${r.keys.length} path(s) nothing owns: ${r.keys.join(', ')}. ` +
+            `Those need an owning article too; the item stays open until they have one.` +
+            // A key discharged because some OTHER project record already owned it
+            // was never paid by this append — say so rather than letting the
+            // shrunken file_keys read as if this write covered it.
+            (r.already_owned.length
+              ? ` (A further ${r.already_owned.length} of its keys were dropped as already owned by another project record, not by this append: ${r.already_owned.join(', ')}.)`
+              : '')
+        ),
+      ],
+      ...(claims_check ? { claims_check } : {}),
+    };
+  }
+
+  /**
+   * knowledge_edit — a SURGICAL replacement inside a long STRING field (board
+   * fd6d8da9), the sibling knowledge_append never had.
+   *
+   * knowledge_append covers arrays; a string field could only be changed by
+   * retransmitting all of it. For most records that is merely wasteful, but a
+   * registry-style article eventually outgrows its own round-trip: measured
+   * 2026-08-03, the hooks-suite article's `what_it_does` is a single 26,364-token
+   * string — too large to READ in one piece, let alone re-send byte-perfect. A
+   * librarian dispatched to bump the hook count in it correctly REFUSED rather
+   * than risk a silent transcription corruption, which left the article
+   * un-reconcilable by any caller and blocked reconcile-always outright. Board
+   * 8390f8fa had already recorded that ceiling being hit twice; this was the
+   * third.
+   *
+   * FIND MUST MATCH EXACTLY ONCE. Zero matches and several matches are BOTH
+   * refused, and the count is reported. This is the same contract as the editor
+   * tools every agent already uses, for the same reason: a blind
+   * replace-first-occurrence inside a field nobody can read in full is an
+   * unreviewable write. Refusing on ambiguity costs a round-trip; guessing costs
+   * the article.
+   *
+   * Everything else rides the ONE update path — version bump, retained prior
+   * version, the evidence-gated file_baselines advance, the explicit resolves claim (decision
+   * 68988832 — never an implicit auto-drain), coherence warnings — so an edit
+   * is a normal supersession and not a back door around any of it.
+   */
+  /**
+   * Occurrences of `find` in `current`, counting OVERLAPPING matches — the
+   * count the exactly-once contract needs. `current.split(find).length - 1`
+   * counts only NON-OVERLAPPING matches: 'aaa' with find 'aa' counted ONE, so
+   * a genuinely ambiguous edit passed the uniqueness check and spliced the
+   * first of two real match sites. Each step advances by ONE character, so a
+   * match starting inside the previous one is seen.
+   *
+   * SABOTAGE that must turn the ambiguity pins red: restore
+   * `current.split(find).length - 1` — 'aaa'/'aa' is then admitted as unique.
+   */
+  private static countOccurrences(current: string, find: string): number {
+    // Every caller refuses an empty `find` before reaching here; this keeps the
+    // loop terminating rather than trusting that to stay true, and returns what
+    // the previous split-based expression did for that input.
+    if (find.length === 0) return current.length + 1;
+    let count = 0;
+    for (let at = current.indexOf(find); at !== -1; at = current.indexOf(find, at + 1)) count++;
+    return count;
+  }
+
+  /**
+   * Replace the SINGLE located occurrence of `find` LITERALLY. Never
+   * String.prototype.replace: its string replacement interprets `$&`,
+   * '$' + backtick, "$'" and `$$` as substitution patterns inside
+   * CALLER-SUPPLIED text, silently corrupting it — replace text
+   * "cost $5 and $& and $$" was stored as "cost $5 and <the matched text>
+   * and $". Callers refuse a zero- or multi-occurrence `find` first
+   * (countOccurrences), so `indexOf` addresses exactly the validated site.
+   *
+   * SABOTAGE that must turn the literal-replace pins red: restore
+   * `current.replace(find, replace)`.
+   */
+  private static spliceOnce(current: string, find: string, replace: string): string {
+    const at = current.indexOf(find);
+    return current.slice(0, at) + replace + current.slice(at + find.length);
+  }
+
+  knowledgeEdit(
+    id: string,
+    field: string,
+    find: string,
+    replace: string,
+    resolves?: string[]
+  ): {
+    record: DurableRecord;
+    replaced: { field: string; chars_before: number; chars_after: number };
+    warnings: string[];
+    claims_check?: string;
+  } {
+    const old = this.resolveRecordId(id, 'knowledge_edit');
+    this.refuseStaleAddress(old, id, 'knowledge_edit');
+    if (typeof find !== 'string' || find.length === 0) {
+      throw new Error(`knowledge_edit: 'find' must be a non-empty string — an empty match would insert at every position`);
+    }
+    // ARRAY-ELEMENT ADDRESSING (board b078167a, 2026-08-09): field may be a
+    // selector `arr[key=value].sub` — the one shape neither append (add-only)
+    // nor plain edit (string fields only) could reach. Correcting ONE string
+    // inside ONE element of a long array (canonically a stale files[].role)
+    // previously required a full knowledge_update retransmitting every sibling
+    // element under the documented truncation hazard; a consuming project left
+    // the drift in place as the lesser evil — a bad outcome delivered by a
+    // good rule. Same exactly-once contract at BOTH levels: the selector must
+    // match exactly one element, and find must match exactly once inside that
+    // element's field — zero and multiple are refused with the count.
+    const selector = /^([A-Za-z_]\w*)\[([A-Za-z_]\w*)=(.+)\]\.([A-Za-z_]\w*)$/.exec(field);
+    if (selector) {
+      const [, base, key, value, sub] = selector;
+      this.refuseServerOwnedFields({ [base]: replace }, 'knowledge_update');
+      this.refuseUnknownFields(old.type, { [base]: replace });
+      const arr = (old as unknown as Record<string, unknown>)[base];
+      if (!Array.isArray(arr)) {
+        throw new Error(
+          `knowledge_edit: '${base}' on ${old.type} is ${arr === undefined ? 'absent' : typeof arr}, not an array — the [${key}=…] selector addresses array elements; a plain field name edits a string field`
+        );
+      }
+      // OWNERSHIP FIRST via the shared elementOwnsScalar (board c61c9a3a) —
+      // `String(el[key]) === value` alone read an ABSENT key as the string
+      // 'undefined', so `[anykey=undefined]` matched every element LACKING
+      // the key. Same predicate knowledge_array_remove uses (tools.ts, near
+      // its own `hits` filter), so the two selectors cannot re-diverge.
+      const hits = arr.filter((el) => elementOwnsScalar(el, key) && String(el[key]) === value);
+      if (hits.length !== 1) {
+        throw new Error(
+          `knowledge_edit: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required, nothing was written. ` +
+            (hits.length === 0 ? `Confirm the ${key} value against the live array.` : `Select on a key whose value is unique in the array.`)
+        );
+      }
+      const el = hits[0] as Record<string, unknown>;
+      const cur = el[sub];
+      // BOOLEAN SUB-FIELD (Dome Farmer issue #48): a state_review item directs
+      // clearing files[].unverified, and refusing every non-string left only a
+      // whole-array knowledge_update. The exactly-once contract maps onto the
+      // value: `find` must spell the CURRENT value, `replace` the new one.
+      if (typeof cur === 'boolean') {
+        if (find !== String(cur)) {
+          throw new Error(
+            `knowledge_edit: '${sub}' on the selected ${base} element is ${cur}, not '${find}' — for a boolean sub-field 'find' must be its current value ('${cur}'); nothing was written.`
+          );
+        }
+        if (replace !== 'true' && replace !== 'false') {
+          throw new Error(`knowledge_edit: '${sub}' on the selected ${base} element is boolean — 'replace' must be 'true' or 'false'; nothing was written.`);
+        }
+        const nextEl = { ...el, [sub]: replace === 'true' };
+        const nextArr = arr.map((e) => (e === el ? nextEl : e));
+        const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_edit'));
+        return {
+          record,
+          ...(claims_check ? { claims_check } : {}),
+          replaced: { field, chars_before: find.length, chars_after: replace.length },
+          warnings: [
+            ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record),
+            ...this.articleOversizeWarnings(record),
+            ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+          ],
+        };
+      }
+      if (typeof cur !== 'string') {
+        throw new Error(
+          `knowledge_edit: '${sub}' on the selected ${base} element is ${cur === undefined ? 'absent' : typeof cur}, not a string — edit replaces text inside a string`
+        );
+      }
+      const occ = SterlingTools.countOccurrences(cur, find);
+      if (occ === 0) {
+        throw new Error(
+          `knowledge_edit: 'find' does not appear in the selected element's '${sub}' (${cur.length} chars) — nothing was written. Confirm the exact text (including whitespace and punctuation) before retrying.`
+        );
+      }
+      if (occ > 1) {
+        throw new Error(
+          `knowledge_edit: 'find' appears ${occ} times in the selected element's '${sub}' — refused as ambiguous, nothing was written. Extend 'find' with surrounding text until it identifies exactly one site.`
+        );
+      }
+      const nextEl = { ...el, [sub]: SterlingTools.spliceOnce(cur, find, replace) };
+      const nextArr = arr.map((e) => (e === el ? nextEl : e));
+      // same_subject (ruling types only) is split off rather than left
+      // inside `record` — see splitSameSubject.
+      const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_edit'));
+      return {
+        record,
+        ...(claims_check ? { claims_check } : {}),
+        replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
+        // Cited-id scan (board fc053051 extension): the REPLACE text only —
+        // never `find`, never the rest of the record, which was already
+        // scanned (or not) on whatever write introduced it.
+        warnings: [
+          ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record),
+          ...this.articleOversizeWarnings(record),
+          ...this.citedIdWarnings(replace),
+          ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+        ],
+      };
+    }
+    this.refuseServerOwnedFields({ [field]: replace }, 'knowledge_update');
+    this.refuseUnknownFields(old.type, { [field]: replace });
+    const current = (old as unknown as Record<string, unknown>)[field];
+    if (typeof current !== 'string') {
+      throw new Error(
+        `knowledge_edit: '${field}' on ${old.type} is ${current === undefined ? 'absent' : typeof current}, not a string — ` +
+          `edit replaces text inside a string field. Arrays extend with knowledge_append; anything else sets with knowledge_update.`
+      );
+    }
+    // Counted without a regex, so `find` needs no escaping — it is the literal
+    // text the caller saw — and OVERLAP-AWARE, so 'aa' in 'aaa' is ambiguous
+    // rather than silently unique (see countOccurrences).
+    const occurrences = SterlingTools.countOccurrences(current, find);
+    if (occurrences === 0) {
+      throw new Error(
+        `knowledge_edit: 'find' does not appear in ${old.type}.${field} — nothing was written. ` +
+          `The field is ${current.length} chars; confirm the exact text (including whitespace and punctuation) before retrying.`
+      );
+    }
+    if (occurrences > 1) {
+      throw new Error(
+        `knowledge_edit: 'find' appears ${occurrences} times in ${old.type}.${field} — refused as ambiguous, nothing was written. ` +
+          `Extend 'find' with surrounding text until it identifies exactly one site.`
+      );
+    }
+    const next = SterlingTools.spliceOnce(current, find, replace);
+    // same_subject (ruling types only) is split off rather than left inside
+    // `record` — see splitSameSubject.
+    const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_edit'));
+    return {
+      record,
+      ...(claims_check ? { claims_check } : {}),
+      replaced: { field, chars_before: current.length, chars_after: next.length },
+      // Cited-id scan (board fc053051 extension): the REPLACE text only —
+      // never `find`, never the rest of the record (scope guarantee: an edit
+      // must not warn about a pre-existing citation elsewhere in the record
+      // just because that record happens to get written again).
+      warnings: [
+        ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record),
+        ...this.articleOversizeWarnings(record),
+        ...this.citedIdWarnings(replace),
+        ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+      ],
+    };
+  }
+
+  /** The six checks of knowledge_line_ref_fix, named in every refusal it throws. */
+  private static readonly LINE_REF_CHECKS: Record<number, string> = {
+    1: 'record, field and match',
+    2: 'line-reference form',
+    3: 'path in files[]',
+    4: 'line at HEAD',
+    5: 'anchor',
+    6: 'substitution only',
+  };
+  /** `[path]:N` or `[path]:N-M`, nothing else. The path charset is the repo-relative POSIX one. */
+  private static readonly LINE_REF_RE = /^([A-Za-z0-9_.@+\-/]+)?:([1-9]\d*)(?:-([1-9]\d*))?$/;
+  private static readonly LINE_REF_PATH_CHAR = /[A-Za-z0-9_.@+\-/]/;
+  /** The only fields a line reference may be fixed in — prose that cites code. Never history, titles or paths. */
+  private static readonly LINE_REF_PLAIN_FIELDS = ['what_it_does', 'intended_behavior', 'steps_runbook'];
+  private static readonly LINE_REF_ELEMENT_FIELDS: Record<string, string> = { current_ac: 'text', files: 'role' };
+  /** How far (in field characters, either side, the reference itself excluded) the anchor may sit from `find`. */
+  private static readonly LINE_REF_ANCHOR_REACH = 120;
+
+  /**
+   * knowledge_line_ref_fix — the ONE store write the background maintenance
+   * worker may make (decision maintenance-queue-background-haiku-worker-simple-redesign,
+   * point 3a, user-ruled 2026-09-30: "Line references only"): move a stale
+   * `path:line` reference inside a feature_article string field, accepted only
+   * when the server verifies the new line mechanically. Everything else in the
+   * article stays with the conductor.
+   *
+   * FAIL-CLOSED: every check below refuses with nothing written, naming the
+   * check that failed —
+   *   1. an active feature_article; the field is on the allowlist
+   *      (what_it_does, intended_behavior, steps_runbook, current_ac[..].text,
+   *      files[..].role — never history) and is a string; `find` matches exactly
+   *      once and as a WHOLE reference (`worker.mjs:4` inside `worker.mjs:41`,
+   *      or a bare `:4` inside `x.ts:4`, is refused rather than spliced).
+   *   2. `find` and `replace` are both `[path]:N[-M]` after trimming, with the
+   *      SAME path part (or both bare); replace differs from find; it is a
+   *      SHIFT only (a point stays a point, a range keeps its width); a bare
+   *      `:N` resolves only when the article owns exactly one files[] entry.
+   *   3. the path is one files[] path, exactly or as a unique suffix on a `/`
+   *      boundary.
+   *   4. every line of the new reference exists in the file AS COMMITTED AT
+   *      HEAD (readHeadFile: `ls-tree` + `cat-file`, never the working tree),
+   *      and the anchor is a literal substring of the FIRST new line.
+   *   5. the anchor is at least 6 non-blank characters, not only punctuation,
+   *      and appears literally in the field's own text OUTSIDE the reference
+   *      being replaced, within 120 characters of it — the caller quotes it
+   *      from the prose around the reference, never invents it.
+   *   6. only the substitution changes: the new value is built from the one
+   *      validated site (so no INPUT can widen it), and a write that landed
+   *      after the checks read the record refuses — re-checked after the git
+   *      reads, and backstopped by expected_version on the write itself — so
+   *      this call's stale copy of the field never overwrites it.
+   *
+   * NO `resolves`: a queue item closes only through the attested
+   * maintenance_remove, never as a side effect of this write (review round
+   * 2026-09-30).
+   *
+   * NOT GUARANTEED: that the new line is the one the prose MEANS — only that it
+   * carries a fragment the prose itself quotes. The git reads happen before
+   * knowledgeUpdate opens its transaction, never under the writer lock.
+   */
+  knowledgeLineRefFix(
+    id: string,
+    field: string,
+    find: string,
+    replace: string,
+    anchor: string
+  ): {
+    record: DurableRecord;
+    replaced: { field: string; find: string; replace: string };
+    verification: { path: string; lines: string; anchor: string; head_commit: string; blob: string };
+    warnings: string[];
+    claims_check?: string;
+  } {
+    const op = 'knowledge_line_ref_fix';
+    const refuse = (check: number, detail: string): never => {
+      throw new Error(`${op}: refused at check ${check} (${SterlingTools.LINE_REF_CHECKS[check]}) — ${detail}. Nothing was written.`);
+    };
+    const old = this.resolveRecordId(id, op);
+    this.refuseStaleAddress(old, id, op);
+    if (old.type !== 'feature_article') refuse(1, `'${old.id}' is a ${old.type}, not a feature_article — line references are fixed only in articles`);
+    if (old.status !== 'active') refuse(1, `'${old.id}' is ${old.status}, not active`);
+    const rec = old as unknown as Record<string, unknown>;
+
+    // CHECK 1 — the field resolves to ONE string (knowledge_edit's selector grammar).
+    let current: string;
+    let bodyFor: (next: string) => Record<string, unknown>;
+    const selector = /^([A-Za-z_]\w*)\[([A-Za-z_]\w*)=(.+)\]\.([A-Za-z_]\w*)$/.exec(field);
+    const allowed = selector
+      ? SterlingTools.LINE_REF_ELEMENT_FIELDS[selector[1]!] === selector[4]
+      : SterlingTools.LINE_REF_PLAIN_FIELDS.includes(field);
+    if (!allowed) {
+      return refuse(
+        1,
+        `field '${field}' is not one of the fields a line reference may be fixed in (${SterlingTools.LINE_REF_PLAIN_FIELDS.join(', ')}, ` +
+          `${Object.entries(SterlingTools.LINE_REF_ELEMENT_FIELDS).map(([b, sub]) => `${b}[..].${sub}`).join(', ')})`
+      );
+    }
+    if (selector) {
+      const [, base, key, value, sub] = selector as unknown as [string, string, string, string, string];
+      const arr = rec[base];
+      if (!Array.isArray(arr)) return refuse(1, `'${base}' on ${old.type} is ${arr === undefined ? 'absent' : typeof arr}, not an array`);
+      const hits = arr.filter((el) => elementOwnsScalar(el, key) && String(el[key]) === value);
+      if (hits.length !== 1) return refuse(1, `selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required`);
+      const el = hits[0] as Record<string, unknown>;
+      const cur = el[sub];
+      if (typeof cur !== 'string') return refuse(1, `'${sub}' on the selected ${base} element is ${cur === undefined ? 'absent' : typeof cur}, not a string`);
+      current = cur;
+      bodyFor = (next) => ({ [base]: arr.map((e) => (e === el ? { ...el, [sub]: next } : e)) });
+    } else {
+      const cur = rec[field];
+      if (typeof cur !== 'string') return refuse(1, `'${field}' on ${old.type} is ${cur === undefined ? 'absent' : typeof cur}, not a string`);
+      current = cur;
+      bodyFor = (next) => ({ [field]: next });
+    }
+
+    // CHECK 2 — both sides are bare line references with the same path part.
+    const f = typeof find === 'string' ? find.trim() : '';
+    const r = typeof replace === 'string' ? replace.trim() : '';
+    const pf = SterlingTools.LINE_REF_RE.exec(f);
+    if (!pf) return refuse(2, `'find' is not a line reference ('${find}') — it must be [path]:N or [path]:N-M with no other text`);
+    const pr = SterlingTools.LINE_REF_RE.exec(r);
+    if (!pr) return refuse(2, `'replace' is not a line reference ('${replace}') — it must be [path]:N or [path]:N-M with no other text`);
+    if (f === r) return refuse(2, `no-op: replace equals find ('${f}')`);
+    const start = Number(pr[2]);
+    const end = pr[3] === undefined ? start : Number(pr[3]);
+    if (end < start) return refuse(2, `'replace' range ${start}-${end} runs backwards`);
+    const findStart = Number(pf[2]);
+    const findEnd = pf[3] === undefined ? findStart : Number(pf[3]);
+    if (findEnd < findStart) return refuse(2, `'find' range ${findStart}-${findEnd} runs backwards`);
+    if ((pf[3] === undefined) !== (pr[3] === undefined) || findEnd - findStart !== end - start) {
+      return refuse(
+        2,
+        `shift only: 'find' ('${f}') spans ${findEnd - findStart + 1} line(s) as a ${pf[3] === undefined ? 'point' : 'range'} but 'replace' ('${r}') spans ` +
+          `${end - start + 1} as a ${pr[3] === undefined ? 'point' : 'range'} — a point stays a point and a range keeps its width`
+      );
+    }
+    if (pf[1] !== pr[1]) {
+      return refuse(
+        2,
+        `'replace' must keep find's path ${pf[1] ? `'${pf[1]}'` : '(the bare :N form)'}, but it has ${pr[1] ? `'${pr[1]}'` : 'the bare :N form'} — only the line number may change`
+      );
+    }
+    const files = (Array.isArray(rec.files) ? rec.files : []) as { path?: unknown }[];
+    const filePaths = files.map((e) => e.path).filter((p): p is string => typeof p === 'string');
+    if (pf[1] === undefined && filePaths.length !== 1) {
+      return refuse(2, `a bare ':N' reference names no path, and the article owns ${filePaths.length} files[] entries, so its path cannot be resolved unambiguously — use the path-qualified form`);
+    }
+
+    // CHECK 1 (continued) — `find` occurs exactly once, as a whole reference.
+    const occurrences = SterlingTools.countOccurrences(current, f);
+    if (occurrences === 0) return refuse(1, `'find' ('${f}') does not appear in ${field}`);
+    if (occurrences > 1) return refuse(1, `'find' ('${f}') appears ${occurrences} times in ${field} — exactly once is required`);
+    const at = current.indexOf(f);
+    const prev = at > 0 ? current[at - 1]! : '';
+    const tail = current.slice(at + f.length, at + f.length + 2);
+    if ((prev && SterlingTools.LINE_REF_PATH_CHAR.test(prev)) || /^(?:\d|[-:]\d)/.test(tail)) {
+      return refuse(1, `'find' ('${f}') is not a whole reference in ${field}: it is part of '${current.slice(Math.max(0, at - 20), at + f.length + 2)}'`);
+    }
+
+    // CHECK 5 — the anchor is substantive and quoted from the field itself.
+    if (typeof anchor !== 'string' || anchor.trim().length < 6) {
+      return refuse(5, `'anchor' must be at least 6 characters (got ${typeof anchor === 'string' ? anchor.trim().length : 0})`);
+    }
+    if (!/[\p{L}\p{N}]/u.test(anchor)) return refuse(5, `'anchor' ('${anchor}') is only whitespace or punctuation`);
+    const outside = current.slice(0, at) + '\u0000' + current.slice(at + f.length);
+    if (!outside.includes(anchor)) {
+      return refuse(5, `'anchor' ('${anchor}') does not appear in the field's own text outside the reference being replaced — it must be quoted from the article, never supplied fresh`);
+    }
+    const reach = SterlingTools.LINE_REF_ANCHOR_REACH;
+    const near = current.slice(Math.max(0, at - reach), at) + '\u0000' + current.slice(at + f.length, at + f.length + reach);
+    if (!near.includes(anchor)) {
+      return refuse(5, `anchor is not next to the reference: '${anchor}' appears in the field, but not within ${reach} characters of '${f}' on either side`);
+    }
+
+    // CHECK 3 — the path is one of the article's files[].
+    let path: string;
+    if (pf[1] === undefined) {
+      path = filePaths[0]!;
+    } else {
+      const short = pf[1];
+      const owners = filePaths.filter((p) => p === short || p.endsWith(`/${short}`));
+      if (owners.length === 0) return refuse(3, `path '${short}' matches none of the article's files[] (${filePaths.join(', ') || 'none'})`);
+      if (owners.length > 1) return refuse(3, `path '${short}' is ambiguous: it matches ${owners.length} files[] entries (${owners.join(', ')})`);
+      path = owners[0]!;
+    }
+
+    // CHECK 4 — the new lines exist at HEAD and carry the anchor.
+    const tree = this.treeRootFor(rec);
+    if (tree.unresolved || !tree.root) {
+      return refuse(4, `cannot resolve the working tree this article owns its paths in (${tree.unresolved ? 'working_tree is not mapped in config.working_trees' : 'no repo root is configured'})`);
+    }
+    let head: ReturnType<typeof readHeadFile>;
+    try {
+      head = readHeadFile(tree.root, path);
+    } catch (err) {
+      if (err instanceof AttestationRefusal) return refuse(4, `cannot read '${path}' at HEAD: ${err.reason}`);
+      throw err;
+    }
+    const lines = head.text.split('\n');
+    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+    const commit = head.head_commit.slice(0, 12);
+    const label = end === start ? String(start) : `${start}-${end}`;
+    if (end > lines.length) return refuse(4, `'${path}' has ${lines.length} lines at HEAD (${commit}), so line ${end} does not exist`);
+    if (!lines[start - 1]!.replace(/\r$/, '').includes(anchor)) {
+      return refuse(
+        4,
+        end === start
+          ? `line ${start} of '${path}' at HEAD (${commit}) does not contain the anchor '${anchor}'`
+          : `the first line (${start}) of lines ${label} of '${path}' at HEAD (${commit}) does not contain the anchor '${anchor}' — the anchor must be on the first line of the new reference`
+      );
+    }
+
+    // CHECK 6 — the new value differs from the old one only at the validated
+    // site, and only if nothing wrote the record while the checks ran. The
+    // re-read names the failure; expected_version on the write is the backstop
+    // for a write landing after it.
+    const live = this.store.get(old.id) as { version?: number } | null;
+    if (!live || live.version !== old.version) {
+      return refuse(
+        6,
+        `'${old.id}' moved from version ${old.version} to version ${live?.version ?? '(absent)'} while the checks ran — this call's copy of '${field}' is stale ` +
+          `and writing it would overwrite that change; re-read the record and retry`
+      );
+    }
+    const next = current.slice(0, at) + r + current.slice(at + f.length);
+    const body = bodyFor(next);
+    const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, body, undefined, old.version, op));
+    return {
+      record,
+      ...(claims_check ? { claims_check } : {}),
+      replaced: { field, find: f, replace: r },
+      verification: { path, lines: label, anchor, head_commit: head.head_commit, blob: head.blob },
+      warnings: [
+        ...this.historyRotationWarnings(this.attemptedHistoryLen(old, body), record),
+        ...this.articleOversizeWarnings(record),
+        ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+      ],
+    };
+  }
+
+  /**
+   * knowledge_array_remove — the DELETE verb the append/edit family never had
+   * (board 39673f6a, article `knowledge-array-element-removal`).
+   *
+   * knowledge_append only ADDS to files[]/history/current_ac; knowledge_edit's
+   * `arr[key=value].sub` selector replaces one STRING inside one element but
+   * cannot remove the element. So dropping a single stale path meant a
+   * knowledge_update retransmitting the whole array — exactly the shape that
+   * produced a measured silent-truncation incident (recorded in a consuming
+   * project's store): the write succeeds and the article quietly loses
+   * entries nobody re-sent. The
+   * asymmetry was the smell: append is protected from retransmission, edit is
+   * protected from retransmission, and removal — the one operation that
+   * DESTROYS content — was the one demanding you re-send everything correctly.
+   *
+   * SAME SELECTOR GRAMMAR, ONE LEVEL SHORTER: `arr[key=value]` with no trailing
+   * `.sub`, because the whole matched element goes, not one of its strings. A
+   * destroying operation with its own bespoke addressing form is how a wrong
+   * target gets selected, so this reuses knowledge_edit's grammar rather than
+   * inventing a second one — and its refuse-on-any-count-but-one contract.
+   *
+   * EXACT FULL ID ONLY. Every path that DESTROYS demands the exact full id
+   * (anti-pattern `no-bounded-trail-guard-for-destructive-addressing`, severity
+   * block — the collision-guard design that tried to make a forgiving form safe
+   * was retracted the same day it shipped). An unambiguous 8-char prefix
+   * resolves fine on knowledge_get/knowledge_update, whose worst case is a
+   * recoverable edit; here the worst case is content gone from an array too
+   * large to have read in full, so the ladder stops at the door.
+   *
+   * VERSIONED, and expected_version is REQUIRED rather than optional: the
+   * caller of a destroy states which version it read, and a stale token refuses
+   * naming BOTH versions instead of silently removing an element from a body
+   * the caller never saw.
+   */
+  knowledgeArrayRemove(
+    id: string,
+    selector: string,
+    expectedVersion: number,
+    resolves?: string[]
+  ): { record: DurableRecord; removed: { selector: string; element: unknown; note?: string }; warnings: string[]; claims_check?: string } {
+    // EXACT FULL ID ONLY — checked FIRST, before any lookup, so a prefix is
+    // refused on its SHAPE and never gets the chance to resolve to something.
+    if (!SterlingTools.FULL_UUID_RE.test(id)) {
+      throw new Error(
+        `knowledge_array_remove: '${id}' is not a full uuid — this call DESTROYS an array element, so it addresses records by their EXACT ` +
+          `full id only (no slug, no 8-char citation prefix), even though knowledge_get, knowledge_update and knowledge_edit resolve all three. ` +
+          `An abbreviation whose worst case is a recoverable edit is not the same abbreviation on a call that removes content you may not be able ` +
+          `to re-read; that is why the full id is required here (anti-pattern no-bounded-trail-guard-for-destructive-addressing). ` +
+          `Re-read the record with knowledge_get and re-issue with its full uuid; nothing was written.`
+      );
+    }
+    const old = this.store.get(id);
+    if (!old) {
+      throw new Error(
+        `knowledge_array_remove: no record '${id}' — this tool matches the EXACT full uuid only (no slug, no 8-char citation prefix), ` +
+          `because it destroys content. Look the record up with knowledge_get and re-issue with its full uuid; nothing was written.`
+      );
+    }
+    this.refuseStaleAddress(old, id, 'knowledge_array_remove');
+    // expected_version is REQUIRED here (it is optional on knowledge_update):
+    // a destroy states what it read, or it is not a conditional write at all.
+    // INVALID ARGUMENT, not a CAS conflict — and it is checked HERE rather than
+    // left to server.ts's `.int().positive()`, because this method is directly
+    // callable and a guarantee that exists only at the MCP surface is not a
+    // guarantee of the method. The two refusals are deliberately distinct: no
+    // record is ever at version 0, -1 or 1.5, so calling a garbage token a
+    // "version conflict" would teach the caller to retry with the current
+    // version when the real fix is to pass a real token.
+    if (typeof expectedVersion !== 'number' || !Number.isInteger(expectedVersion) || expectedVersion < 1) {
+      throw new Error(
+        `knowledge_array_remove: 'expected_version' is REQUIRED and must be a positive integer (got ${String(expectedVersion)}) — pass the ` +
+          `version you read, so a removal can never land on a body you never saw. This is an invalid argument, not a stale token: no record is ` +
+          `ever at version 0 or below, so re-reading the record will not help until a real version is supplied. Nothing was written.`
+      );
+    }
+    const currentVersion = (old as unknown as { version?: number }).version;
+    // A record carrying NO stored version cannot satisfy the CAS contract that
+    // `expected_version` exists to provide: there is nothing for the stated
+    // token to be checked against, so ANY token — right, wrong or invented —
+    // would be accepted, which is precisely the outcome the required token is
+    // there to forbid. Skipping the check on a DESTROYING call is therefore the
+    // one thing that must not happen; an unversionable record is not
+    // destroyable through this door.
+    if (currentVersion === undefined) {
+      throw new Error(
+        `knowledge_array_remove: record '${id}' carries no stored version, so this destroying removal is REFUSED — 'expected_version' is a ` +
+          `conditional-write token and an unversioned record cannot be version-checked against it: any token at all would be accepted, which is ` +
+          `exactly the guarantee the required token exists to provide. Nothing was written; repair the record's version before removing from it.`
+      );
+    }
+    if (expectedVersion !== currentVersion) {
+      throw new Error(
+        `knowledge_array_remove: version conflict — the caller supplied expected_version ${expectedVersion} but record '${id}' is at version ` +
+          `${currentVersion}: it moved while you held it. Nothing was written; re-read the record and retry against version ${currentVersion}.`
+      );
+    }
+    // `arr[key=value]` — knowledge_edit's grammar minus the `.sub` tail.
+    const parsed = /^([A-Za-z_]\w*)\[([A-Za-z_]\w*)=(.+)\]$/.exec(selector);
+    if (!parsed) {
+      throw new Error(
+        `knowledge_array_remove: selector '${selector}' is not of the form arr[key=value] (e.g. "files[path=scripts/prep.mjs]") — removal takes ` +
+          `the WHOLE matched element, so it carries NO trailing '.sub'; that longer form is knowledge_edit's in-place string edit. Nothing was written.`
+      );
+    }
+    const [, base, key, value] = parsed;
+    // Both refusals name THIS tool: a caller mistyping a base field on a
+    // knowledge_array_remove call was previously told "knowledge_update:",
+    // sending them to read the wrong tool's contract.
+    this.refuseServerOwnedFields({ [base]: [] }, 'knowledge_array_remove');
+    this.refuseUnknownFields(old.type, { [base]: [] }, 'knowledge_array_remove');
+    const arr = (old as unknown as Record<string, unknown>)[base];
+    if (!Array.isArray(arr)) {
+      throw new Error(
+        `knowledge_array_remove: '${base}' on ${old.type} is ${arr === undefined ? 'absent' : typeof arr}, not an array — the [${key}=…] selector ` +
+          `addresses array elements. Nothing was written.`
+      );
+    }
+    // SCALAR-DISCRIMINATOR RULE, checked across the WHOLE array before any
+    // matching is trusted: `String(el[key]) === value` compares a non-scalar
+    // value LOSSILY (an object stringifies to "[object Object]", an array to
+    // a comma-joined list), so a key that any element owns as an object or
+    // array is unsound to address elements by — even for an element that
+    // itself holds the key as a clean scalar, because the destroy is keyed on
+    // the selector's KEY, not on any one element's value. Scanned over every
+    // element that OWNS the key with a defined value (absent/undefined stays
+    // a plain non-match, covered by the zero-match refusal below), so the
+    // refusal fires regardless of whether the naive string comparison would
+    // have produced a match.
+    const nonScalarOwners = arr.filter((el) => elementOwnsScalar(el, key) && typeof el[key] === 'object');
+    if (nonScalarOwners.length > 0) {
+      throw new Error(
+        `knowledge_array_remove: selector key '${key}' is not a scalar discriminator on ${old.type}.${base} — ${nonScalarOwners.length} ` +
+          `element(s) own '${key}' with a non-scalar (object, array, or null) value. knowledge_array_remove addresses elements by scalar discriminators ` +
+          `only (string, number, or boolean): a non-scalar value compares lossily via String() and can turn an unrelated element into a false ` +
+          `match or hide a true one. Nothing was written.`
+      );
+    }
+    // OWNERSHIP FIRST, then value. `String(el[key]) === value` alone reads an
+    // ABSENT key as the string 'undefined', so `[anykey=undefined]` matched
+    // every element LACKING that key — on a destroying call that turns "this
+    // property does not exist" into "delete this element". The fix is an
+    // ownership test, NOT a ban on the token `undefined` (an element whose
+    // value genuinely IS the string "undefined" stays selectable) and NOT a
+    // ban on optional keys (a present optional key stays selectable by its
+    // real value). A missing key simply matches nothing, so the outcome is
+    // zero matches and the refusal below already covers it.
+    const hits = arr.filter((el) => elementOwnsScalar(el, key) && String(el[key]) === value);
+    // IDENTICAL DUPLICATES (decision array-remove-identical-duplicates-remove-one):
+    // when 2+ elements match and every one is deep-equal to the first, removing
+    // any one leaves the same array, so the ambiguity the refusal below guards
+    // against does not exist and exactly ONE is removed. isDeepStrictEqual is
+    // key-order independent. Any hit that differs in any field falls through to
+    // the refusal unchanged.
+    const identicalDuplicates = hits.length > 1 && hits.every((h) => isDeepStrictEqual(h, hits[0]));
+    if (hits.length !== 1 && !identicalDuplicates) {
+      throw new Error(
+        `knowledge_array_remove: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required, ` +
+          `nothing was written. ` +
+          (hits.length === 0
+            ? `Confirm the ${key} value against the live array.`
+            : `A blind delete inside an array too large to read is exactly the unreviewable write this grammar exists to prevent — select on a key whose value is unique in the array.`)
+      );
+    }
+    // THE SCHEMA FLOOR, mirrored from knowledge_split's own refusal: a
+    // feature_article must retain at least one owned file. featureArticleSchema
+    // does not put .min(1) on files[], so an empty array would validate and the
+    // article would silently become un-ownable territory — the floor has to be
+    // stated here, as knowledge_split states it, and for the same reason (full
+    // donation is retire-and-replace, rejected by decision foreign_8b87efcb).
+    if (old.type === 'feature_article' && base === 'files' && arr.length === 1) {
+      throw new Error(
+        `knowledge_array_remove: this would remove the LAST entry of feature_article.files — the article must retain at least one owned file ` +
+          `(an empty files[] leaves the code it describes unowned; emptying an article is retire-and-replace, not a removal, and knowledge_split ` +
+          `refuses a full donation for the same reason). Nothing was written.`
+      );
+    }
+    // THE AUDIT-TRAIL FLOOR — A POLICY FLOOR, NOT A SCHEMA FACT. Stated
+    // precisely because the first version of this comment got it wrong and an
+    // independent security review caught it: `featureArticleSchema` puts NO
+    // `.min(1)` on `history`, a `history: []` article parses, and there is a
+    // green test proving exactly that (packages/schemas/src/tests/schemas.test.ts
+    // ~:593). So the earlier claim that "no record is born without history" was
+    // FALSE, and a maintainer who checked the schema would have found the
+    // rationale contradicted and been entitled to delete this floor.
+    //
+    // The floor stands on POLICY instead, which is the stronger ground anyway:
+    // `history` is the record's own account of what happened to it, and
+    // anti-pattern no-bounded-trail-guard-for-destructive-addressing rests its
+    // whole protection on that trail surviving — so a destroying call able to
+    // empty it is that anti-pattern's root case, not an exception to it.
+    //
+    // The asymmetry with current_ac and live_test_refs is deliberate and rests
+    // on a DIFFERENT footing, which is schema-real: both are routinely BORN
+    // empty, so a removal returning one to a birth-legal state is refused by
+    // nothing. History being schema-legal-empty too is why this floor must be
+    // justified as policy rather than smuggled in as a schema consequence.
+    if (base === 'history' && arr.length === 1) {
+      throw new Error(
+        `knowledge_array_remove: this would remove the LAST entry of ${old.type}.history — the record must retain at least one history entry ` +
+          `(history is the record's audit trail; a destroying call that can empty it is the root case of anti-pattern ` +
+          `no-bounded-trail-guard-for-destructive-addressing, whose whole protection rests on that trail surviving). The selector DID match — ` +
+          `this is the floor refusing, not a failed selection. Nothing was written.`
+      );
+    }
+    const el = hits[0];
+    // Filter by IDENTITY, not by re-testing the predicate: the surviving
+    // elements are the same object references in their original order, so
+    // nothing is reordered, renormalised, or re-serialised on the way through.
+    // For identical duplicates the FIRST occurrence goes, by index — an
+    // identity filter would drop every occurrence should two slots ever share
+    // one object reference.
+    const removeAt = arr.indexOf(el);
+    const nextArr = arr.filter((_, i) => i !== removeAt);
+    // links[] is materialized from record_relations, not from the JSON body.
+    // Keep the ordinary update path additive, and pass this one explicit graph
+    // deletion through its versioned transaction instead. Crucially, do NOT
+    // re-resolve surviving links here: a legacy dangling edge must be removable.
+    const relationRemoval =
+      base === 'links'
+        ? { rel: (el as { rel: string }).rel, target_id: (el as { target_id: string }).target_id }
+        : undefined;
+    const { record, claims_check } = this.splitSameSubject(
+      this.knowledgeUpdate(
+        old.id,
+        relationRemoval ? {} : { [base]: nextArr },
+        resolves,
+        expectedVersion,
+        'knowledge_array_remove',
+        undefined,
+        relationRemoval
+      )
+    );
+    return {
+      record,
+      ...(claims_check ? { claims_check } : {}),
+      removed: {
+        selector,
+        element: el,
+        ...(identicalDuplicates ? { note: `removed 1 of ${hits.length} identical elements; ${hits.length - 1} identical remain` } : {}),
+      },
+      warnings: [...this.articleOversizeWarnings(record), ...this.openReconcileLaneWarnings(this.supersedeChain(old))],
+    };
+  }
+
+  /**
+   * Board 8390f8fa: warn a registry-style article BEFORE it outgrows its own
+   * round-trip. Measured, not guessed — every knowledge_append to
+   * mcp-tool-surface (29 history entries) blew the MCP token cap on its own
+   * response (68KB, then 70KB), and hooks-suite's what_it_does alone is a
+   * 26,364-token string. The AC that was supposed to catch this ("split before
+   * it blocks a write") is prose inside the very article it governs, and prose
+   * is something a caller must CHOOSE to check — it did not fire. This does,
+   * on every write that can grow a feature_article: knowledge_update (direct),
+   * knowledge_append and knowledge_edit (both delegate to knowledgeUpdate, so
+   * calling this once here — from THEM, on the record it returns — covers all
+   * three without a second definition).
+   *
+   * Rides the EXISTING coherence-warning channel (decision foreign_8ed62c1b) rather
+   * than inventing a second one: knowledge_update already returns
+   * {record, warnings[]} via knowledgeUpdateResult, and append/edit now carry
+   * the same shape. WARNS, never refuses — same reasoning as the coherence
+   * check: the write already landed, and ceremony on every partial update
+   * would train callers to over-transmit, which is the problem this exists to
+   * prevent.
+   *
+   * Size is measured as knowledge_get would return the record — i.e. the
+   * record itself, since a direct-id hit in knowledge_get is exactly store.get
+   * with no further projection. Deduped per ARTICLE via file_keys, not the
+   * record id: a feature_article mints a new id on every version, so an
+   * id-keyed maintenance item would silently stop matching the very next
+   * reconcile (the same stranding bug board 6202a0f5 reports for
+   * promotion_review) — the article's owned files are what stays stable.
+   */
+  private articleOversizeWarnings(record: DurableRecord): string[] {
+    if (record.type !== 'feature_article') return [];
+    // NON-history body only (board 0697c6bd): the remedy this lane names is a
+    // SPLIT, and a split only ever redistributes prose — history weight is
+    // bounded separately by rotation (article_history_max_entries), so counting
+    // it here flagged articles a split could not fix and minted duplicate items
+    // from writes the reconcile contract itself demanded.
+    // recordSizes is the ONE size decomposition (board a382af6b) — the digest
+    // size column and knowledge_stats measure with the same function.
+    const size = recordSizes(record as unknown as Record<string, unknown>).body_chars;
+    const threshold = this.config.article_oversize_chars;
+    if (size <= threshold) return [];
+    const a = record as unknown as { slug: string; files?: { path: string }[] };
+
+    // Decision foreign_881baf13 (supersedes foreign_d547d3b0): per-article accepted-oversize
+    // exemption register, config.article_oversize_exempt[slug] -> justifying
+    // decision id. The exemption suppresses the mint ONLY while the cited
+    // decision resolves through the SAME id ladder as knowledge_get and is
+    // live (status active, not superseded/retired) in the store this method
+    // already has open. A missing, unresolvable, or dead citation VOIDS the
+    // exemption — the mint proceeds, with the void reason appended to the
+    // item text — never a silent suppression (P5).
+    const exemptDecisionId = Object.hasOwn(this.config.article_oversize_exempt, a.slug)
+      ? this.config.article_oversize_exempt[a.slug]
+      : undefined;
+    let voidReason: string | null = null;
+    if (exemptDecisionId) {
+      let cited: DurableRecord | undefined;
+      let resolveErr: string | null = null;
+      try {
+        cited = this.resolveRecordId(exemptDecisionId, 'article_oversize_exempt');
+      } catch (err) {
+        // Carry the resolver's real refusal (collision/ambiguity/torn store)
+        // instead of asserting a cause this code did not determine.
+        resolveErr = err instanceof Error ? err.message : String(err);
+        cited = undefined;
+      }
+      if (!cited) {
+        voidReason = `exemption for '${a.slug}' VOID: cited decision '${exemptDecisionId}' is unresolvable (${resolveErr ?? 'does not resolve in the store'})`;
+      } else if (cited.type !== 'decision') {
+        voidReason = `exemption for '${a.slug}' VOID: cited record ${cited.id} is a ${cited.type}, not a decision`;
+      } else if (cited.status !== 'active') {
+        const supersededBy = (cited as unknown as { superseded_by?: string | null }).superseded_by;
+        voidReason = `exemption for '${a.slug}' VOID: cited decision ${cited.id} is ${cited.status}${supersededBy ? ` (superseded_by ${supersededBy})` : ''}`;
+      } else {
+        return []; // exemption holds — suppress the mint entirely
+      }
+    }
+
+    const remedy =
+      'split it (one feature_article per concept FAMILY — the concept-article granularity rubric; a sub-concept splits out only when it accrues its own intent + interactions distinct from the parent) ' +
+      'or, for future writes, use knowledge_edit (string fields) / knowledge_append (array fields) instead of a full knowledge_update retransmit.';
+    const text = `article '${a.slug}' non-history body is ${size} chars, over the ${threshold}-char article_oversize_chars threshold — ${remedy}${voidReason ? ` (${voidReason})` : ''}`;
+    const fileKeys = (a.files ?? []).map((f) => f.path);
+    // Dedup on the SLUG, here at the site that owns the text format (board
+    // 3acb0126): the generic enqueue dedup keys on the exact sorted file set,
+    // and a reconcile that legitimately grows files[] changes that key and
+    // mints a duplicate — measured 2026-08-11, contradicting decision
+    // 86216751's refreshes-in-place contract. The slug is the one handle
+    // stable across versions AND files[] changes; the closing quote in the
+    // marker keeps a slug from prefix-matching a longer sibling.
+    const marker = this.articleOversizeMarker(a.slug);
+    const open = this.maintenanceQuery({ system_reason: 'article_oversize', cap: 1000 }) as unknown as { id: string; text?: string }[];
+    const existing = open.find((t) => (t.text ?? '').startsWith(marker));
+    if (existing) {
+      this.boardUpdate(existing.id, { text, file_keys: fileKeys });
+    } else {
+      this.maintenanceEnqueue({ reason: 'article_oversize', text, file_keys: fileKeys });
+    }
+    return [
+      `feature_article '${a.slug}' non-history body is now ${size} chars — over the ${threshold}-char article_oversize_chars threshold. ${remedy} ` +
+        `A deduped article_oversize maintenance item has been queued.`,
+    ];
+  }
+
+  /**
+   * History rotation disclosure (board 0697c6bd; middle-out since ab87fe24).
+   * knowledgeUpdate bounds a feature_article's history to the first
+   * article_history_genesis_entries plus the newest remainder at the
+   * write; this reports it on the same warnings channel the coherence and
+   * oversize checks use. `attempted` is what the merged write WOULD have stored
+   * unbounded (computed by attemptedHistoryLen from the caller's body and the
+   * prior record). Nothing is lost by rotation — the store retains every
+   * superseded version, so the chain is the archive — but a silent drop would
+   * still be a lie about what the write stored (P5), hence the disclosure.
+   */
+  private historyRotationWarnings(attempted: number, record: DurableRecord): string[] {
+    if (record.type !== 'feature_article') return [];
+    const kept = ((record as unknown as { history?: unknown[] }).history ?? []).length;
+    if (kept >= attempted) return [];
+    const max = this.config.article_history_max_entries;
+    const genesis = Math.min(this.config.article_history_genesis_entries, max - 1);
+    const recentKeep = max - genesis;
+    return [
+      `history rotated (middle-out): kept ${kept} of ${attempted} entries — the ${genesis} genesis/founding entries plus the newest ${recentKeep} ` +
+        `(article_history_max_entries=${max}, article_history_genesis_entries=${this.config.article_history_genesis_entries}); the entries evicted from the middle ` +
+        `are not lost — they remain readable in the retained superseded prior version (knowledge_get a prior version's id).`,
+    ];
+  }
+
+  /** The history length the caller's write would store unbounded: the passed array if the write touches history, else the prior record's. */
+  private attemptedHistoryLen(old: DurableRecord, body: Record<string, unknown>): number {
+    if (Array.isArray(body.history)) return body.history.length;
+    const h = (old as unknown as { history?: unknown[] }).history;
+    return Array.isArray(h) ? h.length : 0;
+  }
+
+  /**
+   * The MCP-facing result for knowledge_update: the new version plus any COHERENCE
+   * WARNINGS about what the merge left behind.
+   *
+   * knowledgeUpdate keeps every field you do not pass, which is what makes a
+   * partial update cheap and also what lets it ship a self-contradicting record:
+   * revise what_it_does, leave an intended_behavior or current_ac now asserting
+   * the opposite, and nothing objects — the stale half then reads as
+   * authoritative. One consuming project did exactly that four times in a single
+   * session on one article.
+   *
+   * It WARNS rather than refuses, deliberately: only the author can judge whether
+   * the untouched pairing is genuinely unaffected, and plenty of legitimate
+   * updates change the description without changing the intent. A refusal here
+   * would be ceremony on the common case (P1) and would train callers to pass
+   * fields they had no reason to touch — which is its own drift.
+   */
+  knowledgeUpdateResult(
+    id: string,
+    body: Record<string, unknown>,
+    resolves?: string[],
+    expectedVersion?: number
+  ): { record: DurableRecord; warnings: string[]; same_subject?: SameSubjectEntry[]; claims_check?: string } {
+    // Resolved the SAME way knowledgeUpdate resolves its own `id` (uuid/slug/
+    // 8-char-prefix ladder) — review finding, 2026-08-21: a raw store.get(id)
+    // here only matches an exact uuid, so a slug- or prefix-addressed write
+    // skipped the pre-state entirely and with it every warning below
+    // (history-rotation, coherence, and the open-reconcile-lane disclosure).
+    // Exact-uuid callers see byte-identical behavior — resolveRecordId returns
+    // the same record store.get would, and a genuinely bad id throws here with
+    // the same 'knowledge_update' naming knowledgeUpdate's own resolution would.
+    const before = this.resolveRecordId(id, 'knowledge_update');
+    // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5, HIGH review finding): lift
+    // same_subject OUT of the flattened record and onto its own envelope
+    // sibling — mirroring knowledge_create/knowledge_supersede — BEFORE this
+    // wraps it as `record`. Left inside, the digest write-projection
+    // (writeProjected -> digestRecord's field whitelist) silently drops it,
+    // and projection:'full' would echo it back as a fake record field.
+    const { record, same_subject, claims_check } = this.splitSameSubject(this.knowledgeUpdate(id, body, resolves, expectedVersion));
+    const warnings: string[] = before ? this.historyRotationWarnings(this.attemptedHistoryLen(before, body), record) : [];
+    // A SMUGGLED `version` IS STRIPPED, AND SAID SO ([stable-identity-design-v2]
+    // contract 1): the counter is server-owned, so the caller's value never
+    // lands — but a silent strip is how a caller comes to believe it controls
+    // the number. Refusing outright was rejected: a body copied from a previous
+    // read legitimately carries the version it was read at, and refusing that
+    // shape would punish the round-trip the update path exists to serve.
+    if (body.version !== undefined) {
+      warnings.push(
+        `'version' is SERVER-OWNED and was ignored: you passed ${JSON.stringify(body.version)}, the record is now at version ` +
+          `${(record as unknown as { version?: number }).version}. Each write bumps it by exactly one; pass expected_version to make a write conditional on the version you read.`
+      );
+    }
+    if (before?.type === 'feature_article' && 'what_it_does' in body) {
+      const untouched = ['intended_behavior', 'current_ac'].filter((f) => !(f in body));
+      if (untouched.length > 0) {
+        warnings.push(
+          `what_it_does changed but ${untouched.join(' and ')} ${untouched.length === 1 ? 'was' : 'were'} not passed, so the prior text persists — ` +
+            `re-read the new version and confirm it does not now contradict itself. This is a WARNING, not a refusal: the pairing is often genuinely unaffected, ` +
+            `and only you can tell. (knowledge_append extends history/files/current_ac without retransmitting them.)`
+        );
+      }
+    }
+    warnings.push(...this.articleOversizeWarnings(record));
+    // Cited-id scan (board fc053051 extension): only the WRITTEN partial
+    // fields — `body`, the caller's own overrides — never the untouched rest
+    // of the merged record, which was already scanned (or not) on whatever
+    // write introduced it.
+    warnings.push(...this.citedIdWarnings(JSON.stringify(body)));
+    // OPEN RECONCILE-LANE DEBT DISCLOSURE (decision foreign_68988832-2ef5-4ff3-b693-
+    // d8bd8dae1): any reconcile_needed/refresh_reference item still open on
+    // this article's chain, not named in this write's resolves, is unclaimed
+    // debt — named here so it is visible at the exact moment the writer is
+    // looking, never silent (P5). Empty when nothing is owed (P1).
+    if (before) warnings.push(...this.openReconcileLaneWarnings(this.supersedeChain(before)));
+    return { record, warnings, ...(same_subject ? { same_subject } : {}), ...(claims_check ? { claims_check } : {}) };
+  }
+
+  /**
+   * Digest projection for WRITE responses (2026-08-09 consuming-project
+   * retrospective). Every write tool echoes the record it just wrote, and on a
+   * grown article that echo is the single biggest context cost the conductor
+   * pays: one history append measured 49.8KB, and two sessions independently
+   * put full-record write echoes at 100KB+ of pure waste each — content the
+   * caller had JUST authored and gains nothing from re-reading. With
+   * projection:"digest" the result envelope survives intact (warnings,
+   * check_skipped, replaced, deduped — everything a caller acts on) and only
+   * the echoed record collapses to its digestRecord headline, the same
+   * projection vocabulary the read side already has (decision foreign_87a12a1e): one
+   * projection concept, not two. The default is the DIGEST receipt (board
+   * 7ddf13a7, flipping e23f38f8's default-full after the 2026-08-10
+   * retrospective measured the echo as the biggest single context leak): the
+   * envelope a caller acts on (warnings, check_skipped, replaced, deduped)
+   * survives, the body the caller just authored does not come back, and
+   * projection:'full' opts back in. Every boundary consumer of the full echo
+   * was swept before the flip — internal callers use the tools.* methods
+   * directly and still receive full records.
+   */
+  writeProjected<T>(result: T, projection?: 'full' | 'digest'): T | Record<string, unknown> {
+    if (projection === 'full') return result;
+    if (result && typeof result === 'object' && 'record' in result) {
+      return { ...(result as Record<string, unknown>), record: this.digestWriteEcho((result as { record: unknown }).record as Record<string, unknown>) };
+    }
+    // knowledge_promote's envelope carries the written record under `promoted`
+    // (not `record` — the field name says what happened to it), so it needs
+    // its own branch rather than falling through to the bare-record case below,
+    // which would run digestRecord over the WHOLE envelope (promoted/retired/
+    // drained_review/warnings) instead of just the record it names.
+    if (result && typeof result === 'object' && 'promoted' in result) {
+      return { ...(result as Record<string, unknown>), promoted: this.digestWriteEcho((result as { promoted: unknown }).promoted as Record<string, unknown>) };
+    }
+    return this.digestWriteEcho(result as unknown as Record<string, unknown>);
+  }
+
+  /**
+   * digestRecord, plus the two identity numbers a WRITE receipt exists to
+   * report ([stable-identity-design-v2] contract 1): `version` and, on an
+   * in-place write, `previous_version`. The whole visible contract of the pass
+   * is "the id did not move, the version did" — a receipt that dropped the
+   * version would hide exactly the thing the caller needs to see, and the
+   * default receipt IS the digest. Only the write echo is widened; the read-side
+   * digest projection (query lines) is untouched, so no read result changes
+   * shape.
+   */
+  private digestWriteEcho(record: Record<string, unknown>): Record<string, unknown> {
+    const digested = digestRecord(record);
+    if (record.version !== undefined && digested.version === undefined) digested.version = record.version;
+    if (record.previous_version !== undefined) digested.previous_version = record.previous_version;
+    // The one write whose id MOVES (an attestation concept replacement) keeps its
+    // identity_moved disclosure on the digest receipt for the same reason
+    // previous_version is here: a receipt that dropped it would hide the single
+    // fact the caller cannot reconstruct from what it sent.
+    if (record.identity_moved !== undefined) digested.identity_moved = record.identity_moved;
+    // THE CLAIM-CHECK DISCLOSURE SURVIVES THE DIGEST for the same reason
+    // previous_version and identity_moved do: it is a fact about the WRITE that
+    // the caller cannot reconstruct from what it sent, and digestRecord's field
+    // whitelist would otherwise drop it. This is the ONLY carriage for a receipt
+    // that is a BARE record rather than an envelope with a `record` key —
+    // board_update — where writeProjected digests the whole return value.
+    if (record.claims_check !== undefined) digested.claims_check = record.claims_check;
+    // resolved_items (board b0bb9d96 / I-29) SURVIVES THE DIGEST for the same
+    // reason: it is a fact about the WRITE (what its resolves claim actually
+    // closed, and with which file_keys at close time) that the caller cannot
+    // reconstruct from what it sent, and digestRecord's field whitelist would
+    // otherwise drop it.
+    if (record.resolved_items !== undefined) digested.resolved_items = record.resolved_items;
+    // pruned_reconcile_items (board 7e779e1f) SURVIVES THE DIGEST for the
+    // same reason resolved_items does: it is a fact about the WRITE (which
+    // paths this record stopped claiming pruned which open item, and whether
+    // each pruned path actually drifted) that the caller cannot reconstruct
+    // from what it sent, and digestRecord's field whitelist would otherwise
+    // drop it.
+    if (record.pruned_reconcile_items !== undefined) digested.pruned_reconcile_items = record.pruned_reconcile_items;
+    return digested;
+  }
+
+  knowledgeQueryResult(opts: QueryOptions & { projection?: Projection }): KnowledgeQueryResult {
+    const { projection = 'full', ...filter } = opts;
+    // projection:'count' never enumerates — no records fetch, no cap, no rank.
+    // The store's uncapped count() IS the whole answer (board fa19524d): a
+    // capped window can never establish absence, so a count sidesteps the
+    // question of "how many can I see" entirely by never taking a window.
+    if (projection === 'count') {
+      const matchedFilter = this.store.count(filter);
+      const byType =
+        (filter.types?.length ?? 0) > 1
+          ? Object.fromEntries((filter.types as string[]).map((t) => [t, this.store.count({ ...filter, types: [t] })]))
+          : undefined;
+      return {
+        matched_filter: matchedFilter,
+        returned: 0,
+        cap: filter.cap ?? DEFAULT_QUERY_CAP,
+        capped: false,
+        answerability: matchedFilter === 0 ? 'insufficient' : 'ready',
+        // A count NEVER enumerates, so no record's baseline was consulted —
+        // said out loud rather than left to read as "nothing is stale here".
+        provenance: 'unavailable:count_projection',
+        records: [],
+        ...(byType ? { by_type: byType } : {}),
+      };
+    }
+    const records = this.knowledgeQuery(filter);
+    const cap = filter.cap ?? DEFAULT_QUERY_CAP;
+    // count() shares query()'s base filter but is rank-BLIND (rank_terms is a
+    // no-op there), so this is "records matching the filter", which is exactly
+    // the number a caller needs to see it is holding a window. Claiming it as
+    // "records your query would return" would trade a silent lie for a loud one.
+    const matchedFilter = this.store.count(filter);
+    // returned === cap is the only truthful truncation signal: the LIMIT was
+    // reached, so more MAY exist past it. returned < cap guarantees nothing was
+    // dropped. Deriving capped from matchedFilter alone would false-positive
+    // every time rank_terms legitimately narrowed the set.
+    const capped = records.length === cap;
+    const ranked = (filter.rank_terms?.length ?? 0) > 0;
+    const rankRestricted = ranked && !capped && matchedFilter > records.length;
+    // H19/H20 relevance slice 4b: a capped window can never establish absence
+    // (verify_targets), a zero-return window carries no basis to answer from
+    // (insufficient), otherwise the window is complete and non-empty (ready).
+    const answerability: KnowledgeQueryResult['answerability'] = capped ? 'verify_targets' : records.length === 0 ? 'insufficient' : 'ready';
+    // ABSENCE QUERY (board a577a69d): computed over the FULL match set, never
+    // the capped `records` window above — min_score requires rank_terms
+    // (countAboveScore refuses loudly otherwise), so a caller asking "is
+    // anything ruled about X" combines the two rather than reading a bare
+    // filter count as if it were a relevance judgement.
+    const aboveThreshold = filter.min_score !== undefined ? this.store.countAboveScore(filter, filter.min_score) : undefined;
+    // The derived baseline verdict rides EVERY enumerating projection: an
+    // annotation only the expensive projection can see is one a paging reader
+    // never sees. Computed over the pre-projection records, which still carry
+    // the baselines projectForQuery strips.
+    const { status: provenance, annotations } = this.computeBaselineDrift(records);
+    const projectRecord = (r: (typeof records)[number]): Record<string, unknown> => {
+      const base = projection === 'digest' ? digestRecord(r as unknown as Record<string, unknown>) : this.projectForQuery(r);
+      const drift = annotations.get(r.id);
+      return drift ? { ...base, baseline_drift: drift } : base;
+    };
+    return {
+      matched_filter: matchedFilter,
+      returned: records.length,
+      cap,
+      capped,
+      ...(capped
+        ? { note: this.cappedNote(records.length, matchedFilter, ranked, projection) }
+        : rankRestricted
+          ? {
+              note: `rank_terms restricted this to ${records.length} FTS match(es); ${matchedFilter} records match the filter alone — drop or widen rank_terms to see them`,
+            }
+          : {}),
+      answerability,
+      provenance,
+      records: records.map(projectRecord),
+      ...(aboveThreshold !== undefined ? { above_threshold: aboveThreshold } : {}),
+    };
+  }
+
+  /**
+   * "Does the store govern this subject?" — asked BEFORE dispatching, rather
+   * than discovering a governing record only after a subagent has already gone
+   * wrong (H20/H19 relevance slice 4b). Reuses the SAME axis extraction +
+   * stage-2 centrality floors H20 already applies at delivery time. Since
+   * board 39c3d762 (widened by e7157d0b, then by a9be48f2) the candidate
+   * surface spans all six governing types — anti_pattern, decision,
+   * feature_article (territory = slug/family/title), research_finding,
+   * disconfirmed_hypothesis and open_question (subject = question) — because a
+   * missing type made an article-governed question answer 'nothing governs
+   * this', a false negative dressed as a verdict; and
+   * the no-match verdict is 'ungoverned' (renamed from 'ready', whose
+   * query-envelope reading is the opposite).
+   *
+   * MATCHED-HITS FLOOR: candidates need only PREFLIGHT_MIN_HITS (1) matched
+   * term here, against AXIS_MIN_HITS (2) for the write-time same_subject
+   * surface below — measured relaxation (research findings on the
+   * preflight-floor counterfactual and its validation): an explicit pull the
+   * conductor asked for tolerates a weaker total-hit floor than unsolicited
+   * write-time advice nobody asked for. hasDiscriminatingHit only asks
+   * whether the matched hit(s) escape GENERIC_DEV_TERMS and stays mandatory
+   * for both callers, unchanged. hasRecordCentralityHit separately asks
+   * whether the OUTGOING TEXT's own words (every word >= AXIS_MIN_TERM_LEN,
+   * generic or not, via symmetric prefix matching —
+   * packages/store/src/axis.ts) cover the record's central terms — mandatory
+   * for same_subject (sameSubjectDigest, unchanged) but, since the B2G
+   * widening below (findings f6ada94d and
+   * preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
+   * september-2026), NO LONGER a listing floor here: it now gates only
+   * matched_total/answerability, computed separately from the LISTED
+   * `matches` window. Nothing requires the discriminating hit ITSELF to be
+   * one of the covered central terms: a record can pass on a peripheral
+   * discriminating hit while an unrelated, even generic, outgoing word
+   * happens to prefix-cover its central vocabulary (cross-family review
+   * MEDIUM finding, fix round). The INPUT guard just below is separate: it
+   * demands >=2 extractable terms IN THE QUESTION TEXT itself (a one-word
+   * question is still insufficient) even though a candidate may now qualify
+   * on a single MATCHED term. RESULT SIZE: the sorted match list is capped at
+   * PREFLIGHT_MATCH_CAP after sorting (see below) — the sort itself is now
+   * centrality-hit-count DESC, then raw-hits DESC, then the existing
+   * recency/id tie-break, so a central match always outranks a merely-hitting
+   * one regardless of which side has more raw hits. `matched_total` always
+   * reports the pre-cap count of CENTRALITY-PASSING records AMONG THE
+   * CANDIDATES ACTUALLY EVALUATED (not a true/exact/full count: each type's
+   * own query is itself capped at 40 FTS candidates, so a qualifying record
+   * beyond a type's first 40 is never seen and never counted), `capped` is
+   * present (true) only when the WIDENED list (centrality-passing plus
+   * non-central survivors) exceeds PREFLIGHT_MATCH_CAP, and answerability is
+   * decided from the centrality-passing set, not the PREFLIGHT_MATCH_CAP
+   * window.
+   */
+  knowledgePreflight(text: string): KnowledgePreflightResult {
+    const terms = extractAxisTerms(text, MAX_RANK_TERMS);
+    if (terms.length < AXIS_MIN_HITS) {
+      return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matched_total: 0, matches: [] };
+    }
+    // B2G widening (findings f6ada94d and
+    // preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
+    // september-2026): requireCentrality=false — the record-centrality floor
+    // no longer gates LISTING here, only matched_total/answerability below.
+    // sameSubjectDigest keeps passing true (unchanged, see that method).
+    const allMatches = this.axisCandidateMatches(text, terms, SterlingTools.PREFLIGHT_MIN_HITS, false);
+    // Re-derive centrality per survivor EXACTLY ONCE here (fix round, Sol's
+    // pre-commit review MEDIUM finding: axisCandidateMatches no longer scores
+    // centrality for this requireCentrality=false caller — see its tail below
+    // — so the redundant per-candidate text scan this widening could have
+    // introduced, up to PREFLIGHT_MIN_HITS's ~240-candidate ceiling, never
+    // happens). `centralHits` (the covered-terms array) is kept and reused
+    // for the sort key AND the rendered `central` field below — never
+    // recomputed. hasRecordCentralityHit is a GENUINELY DIFFERENT predicate,
+    // not a shortcut derivable from `centralHits.length > 0`: read literally
+    // (packages/store/src/axis.ts's hasRecordCentralityHit/
+    // recordCentralityHits), it returns `covered.length >=
+    // Math.min(minTerms, central.length)` — with AXIS_MIN_RECORD_TERMS
+    // (minTerms) = 2, a record with zero extractable central terms passes
+    // VACUOUSLY (0 >= 0) even though its covered array is empty, and a record
+    // needing 2 covered terms is NOT passed by exactly one (the AC-h1 fixture
+    // this file already pins, via the manifold/manifolds prefix quirk, relies
+    // on covered.length reaching 2, not merely > 0) — so it stays its own
+    // call, once, alongside the reused array.
+    const withCentrality = allMatches.map(({ record, hits }) => ({
+      record,
+      hits,
+      centralHits: recordCentralityHits(record, text),
+      passesCentrality: hasRecordCentralityHit(record, text),
+      at: Date.parse(record.updated_at),
+    }));
+    const matchedTotal = withCentrality.filter((c) => c.passesCentrality).length;
+    // Sort centrality-first (this session's B2G decision): centrality hit
+    // count desc, then raw hits desc, then the existing recency/id
+    // tie-break — a central match always outranks a merely-hitting one, over
+    // the WIDENED list (not just the centrality-passing subset above).
+    const sorted = [...withCentrality].sort(
+      (a, b) =>
+        b.centralHits.length - a.centralHits.length ||
+        b.hits.length - a.hits.length ||
+        b.at - a.at ||
+        (a.record.id < b.record.id ? -1 : a.record.id > b.record.id ? 1 : 0)
+    );
+    // Cap AFTER the sort, over the WIDENED list — `matched_total` above
+    // already reports the true centrality-passing count; `capped`/`matches`
+    // reflect the full (possibly non-central) survivor set, so a large
+    // widened list can cap even when matched_total itself is small.
+    const windowed = sorted.slice(0, SterlingTools.PREFLIGHT_MATCH_CAP);
+    const capped = sorted.length > windowed.length;
+    const matches = windowed.map(({ record, hits, centralHits }) => {
+      // board c6e3561f disclosure-carry: a matched record carries the same
+      // inbound-supersedes disclosure as knowledge_get / knowledge_query-full,
+      // omitted when nothing supersedes it.
+      const inbound = this.inboundSupersedesFor(record.id);
+      return {
+        id: record.id,
+        type: record.type,
+        // research_finding carries no title — its question IS the identity;
+        // an article's slug beats its long title as the handle.
+        title: SterlingTools.axisRecordTitle(record),
+        matched_on: hits,
+        central: centralHits,
+        ...(inbound.length ? { inbound_supersedes: inbound } : {}),
+      };
+    });
+    // Answerability reflects the FULL match set (matchedTotal), never the
+    // capped window — a window of 20 out of 25 is still "the store governs
+    // this", not a truncated maybe.
+    return {
+      terms,
+      matched_total: matchedTotal,
+      ...(capped ? { capped: true as const } : {}),
+      matches,
+      answerability: matchedTotal ? 'verify_targets' : 'ungoverned',
+    };
+  }
+
+  /** PULL floor (knowledgePreflight only): one matched term suffices once
+   *  hasDiscriminatingHit and hasRecordCentralityHit both already pass —
+   *  measured 2026-09-21 (research findings on the preflight-floor
+   *  counterfactual and its validation) as the one relaxation of the four
+   *  tried whose false-positive cost stayed small on the benchmark's
+   *  preflight cases. An explicit pull the conductor asked for can tolerate a
+   *  weaker total-hit floor than unsolicited write-time advice; see
+   *  sameSubjectDigest below, which still passes AXIS_MIN_HITS (2). */
+  private static readonly PREFLIGHT_MIN_HITS = 1;
+
+  /** Post-sort disclosure cap on knowledgePreflight's `matches` window
+   *  (fix-round finding, cross-family review): the relaxed one-hit floor
+   *  above makes a very large response plausible (up to 6 types x 40
+   *  candidates surviving the floors). Applied AFTER axisCandidateMatches'
+   *  sort, so an overflow drops the lowest-ranked (often one-hit) survivors
+   *  first, mirroring SAME_SUBJECT_CAP's role for the write-time surface. */
+  private static readonly PREFLIGHT_MATCH_CAP = 20;
+
+  /**
+   * The candidate-matching CORE shared by knowledgePreflight and same-subject
+   * surfacing on write (decision foreign_7e3c66c5) — the preflight axis floors
+   * (extractAxisTerms already run by the caller -> store.query the six
+   * governing types, cap 40 each -> axisHits/hasDiscriminatingHit/
+   * hasRecordCentralityHit), extracted so the floor logic is defined ONCE.
+   * Callers differ only in what they do with the (record, hits) pairs, in
+   * which candidates they exclude, in the MINIMUM MATCHED-HITS floor each
+   * passes explicitly (since PREFLIGHT_MIN_HITS above — no default here, so
+   * a caller can never inherit a floor value silently), and — since this
+   * session's B2G widening (findings f6ada94d and
+   * preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
+   * september-2026) — in whether hasRecordCentralityHit gates LISTING at
+   * all, via the explicit `requireCentrality` flag (also no default).
+   * hasDiscriminatingHit stays mandatory for every caller, unchanged.
+   * knowledgePreflight passes requireCentrality=false: a candidate can now
+   * survive this method's filter without passing centrality, and
+   * knowledgePreflight itself re-derives centrality separately to decide
+   * matched_total/answerability and to sort. sameSubjectDigest passes
+   * requireCentrality=true, unchanged — the write-time surface keeps
+   * centrality as a listing floor.
+   */
+  private axisCandidateMatches(
+    text: string,
+    terms: string[],
+    minHits: number,
+    requireCentrality: boolean
+  ): { record: DurableRecord; hits: string[] }[] {
+    // rank_terms is schema-bound to <=64 chars (store's §3.4 QueryOptions
+    // parse) — extractAxisTerms has no upper bound (only AXIS_MIN_TERM_LEN, a
+    // floor), so a long unbroken run of the same character in authored
+    // content (e.g. a filler/placeholder body) mints a term that store.query
+    // would refuse outright. This is the query-building step only — filtered
+    // terms still surface on knowledgePreflight's own `terms` field unchanged.
+    const queryTerms = terms.filter((t) => t.length <= 64);
+    // Every extracted term exceeded 64 chars: rank_terms would be [], and
+    // store.query's empty-rank_terms path is a MECHANICAL RECENCY FALLBACK
+    // (40 newest per type) — the wrong candidate semantics for axis matching
+    // (a candidate must share vocabulary with `text`, not merely be recent)
+    // and a wasted 4-type query for a result that filters to nothing once
+    // axisHits runs against the (long, filtered-out-of-the-query) terms.
+    if (queryTerms.length === 0) return [];
+    const candidates = [
+      ...this.store.query({ types: ['anti_pattern'], rank_terms: queryTerms, cap: 40 }),
+      ...this.store.query({ types: ['decision'], rank_terms: queryTerms, cap: 40 }),
+      ...this.store.query({ types: ['feature_article'], rank_terms: queryTerms, cap: 40 }),
+      ...this.store.query({ types: ['research_finding'], rank_terms: queryTerms, cap: 40 }),
+      // Refuted trails join the prior-answer surface (board e7157d0b): a brief
+      // about to re-litigate a disproved hypothesis is the exact re-derivation
+      // waste preflight exists to stop.
+      ...this.store.query({ types: ['disconfirmed_hypothesis'], rank_terms: queryTerms, cap: 40 }),
+      // OPEN QUESTIONS join it too (board a9be48f2, wiring decision
+      // open-question-record-type-authorized's registered type into its
+      // consuming surfaces): the prior-answer surface answers "has this been
+      // settled?" — an open_question answers the adjacent "is this ALREADY
+      // BEING INVESTIGATED?", and a preflight that cannot see one lets a
+      // second lane restart a live investigation. axisNarrowText/axisTitleText
+      // already match its `question` (packages/store/src/axis.ts), so nothing
+      // in the shared matcher changes.
+      ...this.store.query({ types: ['open_question'], rank_terms: queryTerms, cap: 40 }),
+    ];
+    // decision pull-ranking-at-scale-order-of-work-coverage-before-columns-no-narrowing-ladder
+    // (17fa1c59) STEP 1; measured cause: research_finding
+    // why-dome-farmer-pull-cases-miss-mechanisms-september-2026 (a6503bf7),
+    // mechanism 4, benchmark cases p-003/p-006: hit count alone left ties to
+    // fall back to the fixed type-order concatenation above, e.g. a
+    // feature_article tied with a decision on hit count sorted below it purely
+    // because 'decision' is queried first. Centrality is computed ONCE per
+    // surviving candidate here (not inside the comparator, which would
+    // recompute it on every pairwise call) and the four keys are type-neutral:
+    // hit count desc, then centrality-hit count desc, then updated_at desc,
+    // then id asc as the final deterministic tie-break. updated_at is parsed to
+    // its epoch ms ONCE here too, alongside centrality — not compared as a raw
+    // string: the base envelope schema's z.string().datetime() permits variable
+    // UTC fractional-second precision, so a schema-valid '...:00Z' sorts AFTER
+    // the genuinely later '...:00.001Z' under a lexicographic compare (cross-family
+    // pre-commit review, MEDIUM finding).
+    return candidates
+      .map((record) => ({ record, hits: axisHits(record, terms) }))
+      .filter(
+        ({ record, hits }) =>
+          hits.length >= minHits &&
+          hasDiscriminatingHit(hits) &&
+          (!requireCentrality || hasRecordCentralityHit(record, text))
+      )
+      .map((c) => ({
+        ...c,
+        // Scored only when this caller actually gates/sorts on it
+        // (requireCentrality=true, same_subject, unchanged). A caller that
+        // does not (knowledgePreflight, requireCentrality=false) re-derives
+        // and sorts by centrality itself afterwards, over a WIDER survivor
+        // set this internal sort never influences — scoring it here too
+        // would be a wasted text scan per candidate, up to the ~240-candidate
+        // ceiling the relaxed floor admits (fix round, Sol's pre-commit
+        // review MEDIUM finding).
+        central: requireCentrality ? recordCentralityHits(c.record, text).length : 0,
+        at: Date.parse(c.record.updated_at),
+      }))
+      .sort(
+        (a, b) =>
+          b.hits.length - a.hits.length ||
+          b.central - a.central ||
+          b.at - a.at ||
+          (a.record.id < b.record.id ? -1 : a.record.id > b.record.id ? 1 : 0)
+      )
+      .map(({ record, hits }) => ({ record, hits }));
+  }
+
+  /** research_finding carries no title — its question IS the identity; an
+   *  article's slug beats its long title as the handle. Shared by
+   *  knowledgePreflight and sameSubjectDigest so the fallback chain is
+   *  defined once. */
+  private static axisRecordTitle(record: DurableRecord): string {
+    return (
+      (record as unknown as { title?: string }).title ??
+      (record as unknown as { question?: string }).question ??
+      (record as unknown as { slug?: string }).slug ??
+      ''
+    );
+  }
+
+  /** Disclosure cap (decision foreign_7e3c66c5, AC7): same_subject is a hint at what
+   *  else governs this subject, never an unbounded inventory. */
+  private static readonly SAME_SUBJECT_CAP = 5;
+
+  /**
+   * SAME-SUBJECT SURFACING ON WRITE (decision foreign_7e3c66c5): reuses
+   * axisCandidateMatches unchanged, sourced from the WRITTEN record's own text
+   * (the registered FTS extractor's output — the same text the citation scan
+   * uses) rather than an outgoing dispatch prompt, and excludes a
+   * caller-supplied set of ids (the write's own lineage: on update, the prior
+   * version and every ancestor; on supersede, the old record and its chain;
+   * on create, just the new id) rather than nothing. Advisory only: the
+   * caller decides whether/where to attach the result, this never throws and
+   * never influences the write itself.
+   */
+  private sameSubjectDigest(text: string, excludeIds: Set<string>): SameSubjectEntry[] {
+    const terms = extractAxisTerms(text, MAX_RANK_TERMS);
+    if (terms.length < AXIS_MIN_HITS) return [];
+    return this.axisCandidateMatches(text, terms, AXIS_MIN_HITS, true)
+      .filter(({ record }) => !excludeIds.has(record.id))
+      .slice(0, SterlingTools.SAME_SUBJECT_CAP)
+      .map(({ record, hits }) => ({
+        id: record.id,
+        slug: (record as unknown as { slug?: string }).slug,
+        type: record.type,
+        title: SterlingTools.axisRecordTitle(record),
+        matched_on: hits,
+        status: record.status,
+      }));
+  }
+
+  /**
+   * Batch preflight (board 39c3d762 slice 2 — the design_pass core): an agenda
+   * of question texts in, one verdict row per question out, in input order.
+   * A pure loop over knowledgePreflight — the judgment (drafting decisions for
+   * the open questions) deliberately stays with the conductor (P3).
+   */
+  knowledgePreflightBatch(texts: string[]): { verdicts: (KnowledgePreflightResult & { text: string })[] } {
+    if (!Array.isArray(texts) || texts.length === 0) {
+      throw new Error(`knowledge_preflight: 'texts' must be a non-empty array of question texts`);
+    }
+    return { verdicts: texts.map((text) => ({ text, ...this.knowledgePreflight(text) })) };
+  }
+
+  /**
+   * What a capped window means, and the cheapest way out of it.
+   *
+   * Two reported misreadings are answered here, both measured in a consuming
+   * project rather than imagined:
+   *
+   * (1) "matched_filter: 179" against rank_terms:["garage","loadout"] was read
+   *     as "179 garage decisions". It is not — rank_terms ORDER the set through
+   *     bm25, they never narrow it (store query(): ORDER BY bm25, not WHERE), so
+   *     the count belongs to types/stack_tags/file_keys alone. Saying only
+   *     "records matching this filter" was technically true and still misread,
+   *     which makes it a bad message: it let a reader believe a capped window
+   *     was a relevance ranking over a relevant set.
+   *
+   * (2) "showing 12 of 315" left no route to the landscape — "I can neither see
+   *     the whole set nor trust the sample". The digest is that route, so the
+   *     message names it rather than leaving it to be discovered in a schema.
+   */
+  private cappedNote(returned: number, matchedFilter: number, ranked: boolean, projection: Projection): string {
+    const parts = [`cap reached — showing ${returned} of ${matchedFilter} records matching the FILTER (types/stack_tags/file_keys)`];
+    if (ranked) {
+      parts.push(
+        `rank_terms ORDERED those ${matchedFilter} and did not narrow them, so this count is NOT a measure of how many are relevant — and a capped window can never establish absence`
+      );
+    }
+    parts.push(
+      projection === 'digest'
+        ? `raise cap to see the rest — at this projection every record is one headline line`
+        : `raise cap, narrow the filter, or re-run with projection:"digest" to see all ${matchedFilter} as one-line headlines (id + title/trigger, no bodies) and then knowledge_get the few you want`
+    );
+    return parts.join('; ');
+  }
+
+  /** Query-result projection (see knowledgeQueryResult): drop the supersedes
+   *  chain and the server-owned baseline hashes, keep every semantic link. */
+  private projectForQuery(record: DurableRecord & { staleness?: object; verify_before_use?: boolean }): Record<string, unknown> {
+    const { file_baselines: _baselines, ...rest } = record as unknown as Record<string, unknown>;
+    const links = (rest.links ?? []) as { rel: string; target_id: string }[];
+    const semantic = links.filter((l) => l.rel !== 'supersedes');
+    const supersedesCount = links.length - semantic.length;
+    // board c6e3561f disclosure-carry: the FULL projection carries the same
+    // inbound-supersedes disclosure knowledge_get does (records elsewhere
+    // holding a rel:'supersedes' edge onto this one). DIGEST deliberately does
+    // NOT — digestRecord is a separate path that never reaches here, keeping
+    // the per-record reverse-edge lookup off the landscape projection (perf).
+    // Omitted when empty, matching the omit-when-empty contract.
+    const inbound = this.inboundSupersedesFor(record.id);
+    return {
+      ...rest,
+      links: semantic,
+      ...(supersedesCount > 0 ? { supersedes_count: supersedesCount } : {}),
+      ...(inbound.length ? { inbound_supersedes: inbound } : {}),
+    };
+  }
+
+  /** The citation format the repo actually writes: 8-char id prefixes. */
+  private static readonly CITATION_PREFIX_LEN = 8;
+
+  /**
+   * FULL-UUID SHAPE (canonical 8-4-4-4-12 hex, as this.newId/randomUUID mint):
+   * the queue_drain_log table is keyed by exact full record id (`WHERE
+   * record_id = ?`, no prefix matching), so consulting it is only a
+   * meaningful check for an identifier shaped like the thing it is keyed on.
+   * Gates removedItemError's drain-log clause (2026-08-22 adjudicated fix):
+   * an 8-char prefix or any other non-uuid-shaped citation was NEVER going to
+   * be a drain-log key, so offering "it may have aged out of the log" for one
+   * sends the caller down a false trail — the honest answer is that the
+   * id-resolution ladder itself found nothing, full stop.
+   */
+  private static readonly FULL_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+  /**
+   * Fields knowledge_schema reports as SERVER-OWNED rather than caller-supplied:
+   * the whole write-refused envelope (WRITE_REFUSED_FIELDS — one shared list
+   * with refuseServerOwnedFields, so the projection and the refusal guard
+   * cannot re-diverge) plus `version`, the counter this surface owns (stripped
+   * with a disclosed warning at create, never honored).
+   *
+   * REVERSED from the earlier stance ("refuseServerOwnedFields already teaches
+   * those at the write") by board 617e97d4: teaching-at-the-write IS
+   * learn-by-rejection, the exact habit knowledge_schema exists to eliminate —
+   * measured, a caller followed the projection's required[] verbatim and
+   * composed a write the guard refused.
+   */
+  private static readonly SERVER_OWNED_FIELDS = SERVER_OWNED_FIELDS;
+
+  /**
+   * Envelope fields knowledge_create DEFAULTS when absent (author 'conductor',
+   * links [], scope 'project', stack_tags []) — caller-SUPPLIABLE but never
+   * caller-REQUIRED, so knowledge_schema reports them optional (board
+   * 617e97d4: with these masked, required[] is exactly what a create must
+   * supply). Keep in lockstep with the `??` defaults in knowledgeCreate.
+   */
+  private static readonly CREATE_DEFAULTED_FIELDS = CREATE_DEFAULTED_FIELDS;
+
+  /** Kebab-case a record headline into its auto-minted slug (board 1e639f32). */
+  private static slugify(text: string): string {
+    return (
+      text
+        // TRANSLITERATE non-ASCII letters, never strip them (S1 design call,
+        // decision human-readable-ids-for-board-items): NFD splits an accented
+        // letter into its base plus a combining mark, so dropping the marks
+        // gives café -> cafe and naïve -> naive. Dropping the whole letter
+        // instead would give 'caf'/'nave' — a handle nobody recognises, which
+        // defeats what a human-readable handle is FOR. Applied in the shared
+        // slugify rather than a todo-only copy: one concept, one implementation
+        // (every slug-bearing type mints the same way, canonical-naming).
+        .normalize('NFD')
+        .replace(/\p{M}/gu, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60)
+        .replace(/-+$/, '')
+    );
+  }
+
+  /**
+   * A BOARD ITEM'S HEADLINE — what its slug is minted from (S1, decision
+   * human-readable-ids-for-board-items). `todo` is the one slug-bearing type
+   * with no headline FIELD: the precedent (de1a7329) mints from `title`, or
+   * `question` on a research_finding, and a board item has only a multi-KB
+   * `text`.
+   *
+   * FIRST LINE, NOT FIRST SENTENCE. Board items are written with an ALL-CAPS
+   * opening headline on its own line, and real headlines carry internal
+   * punctuation ("S1 (FIRST — S2 AND S3 BOTH CONSUME IT) — MINT A SLUG ON
+   * `todo`, REUSING de1a7329."), so a first-SENTENCE rule would cut some
+   * headlines mid-thought and swallow body prose whenever the headline has no
+   * terminal period. The first non-blank line is the unit the convention
+   * actually writes.
+   *
+   * A PARENTHETICAL ASIDE IS DROPPED, because real items lead with one and it
+   * eats the whole 60-char budget: the item above would otherwise mint
+   * 's1-first-s2-and-s3-both-consume-it-mint-a-slug-on-todo', naming the
+   * sequencing note instead of the task. An aside is by definition not the main
+   * clause. Fallback: a headline that is ENTIRELY parenthetical keeps its full
+   * line, so dropping asides can never mint nothing.
+   */
+  private static todoHeadline(text: string): string {
+    const line = text.split('\n').find((l) => l.trim().length > 0) ?? '';
+    const withoutAsides = line.replace(/\([^)]*\)/g, ' ');
+    return SterlingTools.slugify(withoutAsides) ? withoutAsides : line;
+  }
+
+  /**
+   * The headline an auto-mint derives from, per type — the ONE place the
+   * per-type answer lives, so the mint and any future caller cannot disagree.
+   *
+   * `attestation` returns '' deliberately: it has no headline field, so nothing
+   * auto-mints and its slug stays explicit-only (review finding 1, 2026-08-21).
+   *
+   * A SYSTEM `todo` (a maintenance-queue item) likewise returns '' and mints no
+   * handle (S1 design call; arm E3 of the frozen pin accepts either). Three
+   * reasons: queue items are addressed by mechanisms, never cited by a human,
+   * so a handle buys nothing there; their texts are near-identical by
+   * construction ("reconcile article 'x' — owned file y changed"), so every
+   * enqueue would walk a -2/-3/-4… suffix chain, one store query per step; and
+   * a lane that mints thousands of handles would flood the one namespace the
+   * cross-type collision refusal protects. Queue items still read back a
+   * DISPLAY name through board_get (withDisplayLabel).
+   */
+  private static mintHeadlineOf(type: string, rec: Record<string, unknown>): string {
+    if (type === 'todo') {
+      return rec.source === 'user' ? SterlingTools.todoHeadline(String(rec.text ?? '')) : '';
+    }
+    return (rec.title as string | undefined) ?? (rec.question as string | undefined) ?? '';
+  }
+
+  /**
+   * Auto-mint a slug from a headline (title, or question for
+   * research_finding), suffixing -2/-3/... on collision. Returns undefined
+   * when the headline slugifies to nothing (blank/symbols-only headline).
+   * Shared by knowledgeCreate (a new record with no explicit slug) and
+   * knowledge_supersede (F4 review finding: a slugless old record — e.g. a
+   * pre-slug legacy row — must not silently produce a slugless new head; it
+   * mints exactly the same way a brand-new create would).
+   *
+   * THE ≤60 CLAMP GOVERNS THE DERIVED BASE, NOT THE DISAMBIGUATOR (S1 design
+   * call — de1a7329 pins "kebab-case, ≤60 chars" and says nothing about the
+   * two interacting). A clash on a 60-char base therefore yields a 62-char
+   * '<base>-2'. Reserving room by clamping the base shorter would shorten
+   * EVERY handle to guard against a rare clash, and would break the rule that
+   * the second item's handle is exactly the first's plus '-2'. The suffix is a
+   * uniqueness marker, not headline text, so it is not what the budget is for.
+   */
+  private mintSlug(headline: string): string | undefined {
+    const base = SterlingTools.slugify(headline);
+    if (!base) return undefined;
+    let slug = base;
+    for (let n = 2; this.store.recordsBySlug(slug).length; n++) slug = `${base}-${n}`;
+    return slug;
+  }
+
+  /**
+   * knowledge_get — full uuid, or the 8-char PREFIX every citation in this repo
+   * uses (decision foreign_27f148c2). CLAUDE.md, code comments and record prose all cite
+   * "decision foreign_6dfbe675" style, and check-record-citations already resolves that
+   * form mechanically through recordIdIndex() — so an agent handed a citation
+   * from any of those surfaces could read it everywhere except through the tool
+   * built for reading. Two agents in a consuming project burned a session on
+   * `no record '51735bec'` for exactly this reason (the id was not stale, as
+   * they concluded — superseded rows are retained by f64fd9a5 and resolve fine
+   * by full id; it was truncated).
+   *
+   * Resolution spans the mounted fan and ANY status, tombstones included, because
+   * citing a superseded record is legitimate and common. AMBIGUITY REFUSES rather
+   * than picking: a prefix collision means the caller's citation is under-specified,
+   * and silently serving one of two records is how a reader ends up acting on the
+   * wrong one (P5).
+   *
+   * Extracted to `resolveRecordId` (board slice 85ecfe43) so the five write
+   * tools that also take a caller-addressed id (knowledge_append, _edit,
+   * _update, _retire, _link) resolve through the exact same three-form
+   * contract instead of a bare store.get — knowledge_get is now a thin
+   * wrapper over it.
+   *
+   * WINDOWED/FIELD READ (decision compaction-tooling-windowed-read-plus-split,
+   * board 136091d2): `opts.field` requests one field's value instead of the
+   * whole record, so an oversize article stays readable through the tool that
+   * is supposed to read it — the measured defect was 4 of 77 articles in a
+   * consuming project overflowing their own read tool. No `opts` (or an `opts`
+   * with none of field/offset/length set) is UNCHANGED behavior — full record,
+   * terminus handling included. With `field`: validated against
+   * knownFieldsFor(record.type) (unknown field refused, naming it plus the
+   * valid set), then projected by its runtime shape — string → kind:'string'
+   * (offset/length address CHARACTERS), array → kind:'array' (offset/length
+   * address ELEMENTS), anything else → kind:'value' (offset/length are refused
+   * as not windowable — there is nothing to page through). offset at/past the
+   * end is NOT an error: empty value/entries with the TRUE total, so paging
+   * has a clean termination. `offset`/`length` without `field` is refused — a
+   * window addresses one named field, never the whole record.
+   *
+   * VERSION PARAMETER ([stable-identity-design-v2] contract 2): `version` reads
+   * the ARCHIVED snapshot at (id, version) out of record_versions, byte-exact
+   * as it was stored — the point of an in-place, permanently-identified record
+   * is that its history stays addressable. A version that was never archived
+   * REFUSES naming it (never a silent fall back to the head, which would answer
+   * a different question than the one asked); the record's CURRENT version
+   * resolves to the live head, since the head is not archived until the next
+   * write moves it. The parameter also accepts the bare number form
+   * knowledgeGet(id, 2) alongside the options object, because the frozen S3 pin
+   * suite addresses it positionally.
+   */
+  knowledgeGet(
+    id: string,
+    opts?: number | { field?: string; offset?: number; length?: number; version?: number }
+  ): DurableRecord | Record<string, unknown> {
+    const options = typeof opts === 'number' ? { version: opts } : opts;
+    let record: DurableRecord;
+    try {
+      record = this.resolveRecordId(id, 'knowledge_get');
+    } catch (err) {
+      // A HISTORICAL id is not a miss: it resolved, to a record that now lives
+      // under a canonical id. Reads serve the pinned archived snapshot plus the
+      // legacy_resolution block; only writes inherit the refusal.
+      //
+      // THE OPTIONS ARE CONSULTED ON THIS PATH TOO (review finding): serving the
+      // snapshot before reading them silently DROPPED version/field/offset/length,
+      // so a windowed read through a dead id answered with a whole record and a
+      // version read answered with a different version than the one asked for —
+      // the exact "answered a question nobody asked" failure the version refusal
+      // below exists to prevent. `version` is a pin CHECK here rather than a
+      // lookup (the alias addresses exactly one archived version, so any other
+      // number refuses naming both, mirroring archivedVersion's shape), and the
+      // field window then rides projectFieldWindow — the same tail the live path
+      // uses, which carries legacy_resolution onto the windowed shape too.
+      if (err instanceof HistoricalIdError) {
+        const alias = err.alias;
+        if (options?.version !== undefined && options.version !== alias.archived_version) {
+          throw new Error(
+            `knowledge_get: '${alias.historical_id}' is a HISTORICAL id pinned to version ${alias.archived_version} of '${alias.canonical_id}', ` +
+              `so version ${options.version} cannot be read through it — a dead id addresses exactly the one snapshot it was collapsed at. ` +
+              `Nothing was served in its place; read version ${options.version} through the canonical id '${alias.canonical_id}'.`
+          );
+        }
+        return this.projectFieldWindow(this.serveArchivedAlias(alias), options);
+      }
+      // DEAD-SLUG FALLTHROUGH (decision foreign_df361a0f, board 2b9f2f1a part 3,
+      // 'supersede + disclose'), knowledge_get-ONLY: resolveRecordId already
+      // tried live-slug then id-prefix resolution and both failed, so this
+      // can never shadow a live record. If the id names a slug carried only
+      // by superseded rows, serve the NEWEST carrier, version-pinned (own
+      // id/body/status) — never redirected to the live head, which stays a
+      // straight id/slug citation. No match at all (a slug never carried, or
+      // an ambiguous/torn-store error) rethrows the original refusal
+      // unchanged. The write surface (resolveRecordId's other callers) never
+      // sees this fallback — a dead slug is not a write handle.
+      //
+      // The fallthrough only fires for a genuine UNRESOLVED IDENTIFIER
+      // (UnresolvedIdentifierError — see resolveRecordId): the too-short and
+      // no-match throws, where nothing at all matched the citation. Every
+      // other refusal — a live slug collision, an ambiguous id prefix, or a
+      // torn-store inconsistency — names records that DID match and must
+      // reach the caller unchanged, never be swallowed in favour of a
+      // superseded body (review finding, 2026-08-20).
+      if (!(err instanceof UnresolvedIdentifierError)) throw err;
+      const deadSlugCarriers = this.store.supersededRecordsBySlug(id);
+      if (!deadSlugCarriers.length) throw err;
+      record = deadSlugCarriers[0];
+    }
+    // Additive terminus disclosure (decision foreign_de1a7329): the pinned record's own
+    // fields are never touched — a live record gets no `terminus` key at all,
+    // never a null/undefined one (AC6). Only a superseded record gains it,
+    // sourced from store.resolveTerminus so the disclosed end is the true chain
+    // end, not the one-hop superseded_by (AC7).
+    let full: DurableRecord | (DurableRecord & { terminus: unknown }) = record;
+    if (options?.version !== undefined) {
+      // An ARCHIVED read replaces the record entirely — no terminus disclosure,
+      // because a version is not a supersession and the snapshot must come back
+      // exactly as it was stored.
+      full = this.archivedVersion(record, options.version) as DurableRecord;
+    } else if (record.status === 'superseded') {
+      const terminus = this.store.resolveTerminus(record.id);
+      if (terminus) full = { ...record, terminus } as DurableRecord & { terminus: typeof terminus };
+    }
+
+    // Additive INBOUND supersedes disclosure (board c6e3561f part (a)):
+    // records elsewhere holding a rel:'supersedes' link TARGETING this one.
+    // Independent of this record's own status/terminus above — the whole-
+    // record terminus block only ever fires for a record retired via
+    // supersede(); a clause-level/partial override recorded via
+    // knowledge_link never retires its target, so it stays invisible without
+    // this. Skipped on an archived-version read (options.version) — a pinned
+    // past snapshot is not the live relation graph — AND on a FIELD-WINDOW
+    // read (options.field): projectFieldWindow's windowed shape never carries
+    // this top-level key, so computing it there is pure waste (roster review
+    // F1). Omitted entirely (never an empty array) when nothing supersedes
+    // this record, per the "no empty-array noise" contract the rest of this
+    // read already follows.
+    let served: Record<string, unknown> = full as unknown as Record<string, unknown>;
+    if (options?.version === undefined && options?.field === undefined) {
+      const inbound = this.inboundSupersedesFor(record.id);
+      if (inbound.length) {
+        served = { ...served, inbound_supersedes: inbound };
+      }
+    }
+
+    return this.projectFieldWindow(served, options);
+  }
+
+  /** knowledge_render's ids[] bound (board efe6f3fc): 1–20, refused loudly naming the bound. */
+  private static readonly RENDER_MAX_IDS = 20;
+
+  /**
+   * Total-output ceiling (Codex review, thread 01a05ba4, M1): the 20-id bound
+   * caps how many RECORDS a call can name, not how much TEXT they render to —
+   * 20 oversize feature_article bodies can still exhaust a consumer's
+   * context. The full render is always computed first, then measured against
+   * this; over the ceiling REFUSES the whole call naming the measured size,
+   * the ceiling, and the fix (fewer ids) — never a silent truncation, which
+   * would hand an external reviewer a partial ruling with no marker that
+   * anything was cut.
+   */
+  private static readonly RENDER_MAX_CHARS = 120_000;
+
+  /** Header components (title, handle) are collapsed to this many chars, ellipsized. */
+  private static readonly RENDER_HEADER_CLIP = 120;
+
+  /** Body lines are indented by this prefix so no record-content line can land at column 0. */
+  private static readonly RENDER_BODY_INDENT = '  ';
+
+  /**
+   * Fields never rendered in a knowledge_render body — the record's own
+   * server-owned envelope (SERVER_OWNED_FIELDS: id/created_at/updated_at/
+   * status/superseded_by/type/lifecycle/freshness/file_baselines/version),
+   * reused rather than re-listed (invariant 1 — one registry, not a second
+   * copy that can drift from it), plus `slug`, which is already carried in
+   * full in the header handle (a slug is a short caller-chosen stable
+   * handle, never a multi-KB field, so nothing is lost by never repeating it
+   * in the body). Unlike an earlier draft, the field used for the header's
+   * `<title>` slot (RENDER_TITLE_FIELDS) is NOT skipped here — Codex review
+   * M2 — because the header now renders a CLIPPED, single-line form of that
+   * value, so the field's full content must still appear in the body or it
+   * is lost entirely (worst case for a multi-KB todo `text`).
+   */
+  private static readonly RENDER_SKIP_FIELDS = new Set<string>([...SterlingTools.SERVER_OWNED_FIELDS, 'slug']);
+
+  /**
+   * The field checked, in order, for the header's `<title>` slot — the first
+   * one present as a non-empty string. Covers every registered type's own
+   * identity field: decision/feature_article/reference_material/brief carry
+   * `title`; research_finding/disconfirmed_hypothesis/open_question carry
+   * `question`; attestation carries `artifact_key`; todo carries `text`;
+   * anti_pattern falls back to `trigger` only if `title` is somehow absent
+   * (title is required on that type, so this is a defensive last resort).
+   */
+  private static readonly RENDER_TITLE_FIELDS = ['title', 'question', 'artifact_key', 'text', 'trigger'];
+
+  /**
+   * One line, safe to interpolate into a header (Codex review M2a): collapses
+   * every run of whitespace (including embedded newlines) to a single space,
+   * trims, then clips to RENDER_HEADER_CLIP with an ellipsis. Applied to BOTH
+   * header components (title and handle) — record content is caller-authored
+   * text, and an unsanitized multi-line value could otherwise inject a line
+   * that mimics the `=== ... ===` header frame.
+   */
+  private static sanitizeHeaderText(raw: string): string {
+    const collapsed = raw.replace(/\s+/g, ' ').trim();
+    if (!collapsed) return '(untitled)';
+    return collapsed.length > SterlingTools.RENDER_HEADER_CLIP ? `${collapsed.slice(0, SterlingTools.RENDER_HEADER_CLIP - 1)}…` : collapsed;
+  }
+
+  /**
+   * Indents every line of `text` (Codex review M2b) so record content can
+   * never produce a line starting at column 0 — the header line is the only
+   * text this renderer ever emits unindented, which makes it unambiguously
+   * identifiable even when a field's value is adversarial or pathological.
+   */
+  private static indentLines(text: string): string {
+    return text
+      .split('\n')
+      .map((line) => `${SterlingTools.RENDER_BODY_INDENT}${line}`)
+      .join('\n');
+  }
+
+  /**
+   * `knowledge_render(ids)` (board efe6f3fc, article knowledge-render): a
+   * READ-ONLY paste-ready dump of one or more full records for embedding
+   * store rulings into an EXTERNAL (non-MCP) reviewer prompt — Codex has no
+   * knowledge tools, and hand-transcribing rulings into consult prompts costs
+   * tokens and drifts from the source (P6 context-carriage; an index/summary
+   * is a lookup, never a source). Each id resolves through the SAME ladder
+   * knowledge_get uses (full uuid / exact slug / unambiguous 8-char prefix —
+   * resolveRecordId, not reimplemented here); an id that resolves to nothing
+   * or ambiguously REFUSES THE WHOLE CALL loudly, naming the failing id,
+   * before any output is built — never a partial render with silent skips
+   * (P5). Every id is resolved first, into an array, and the text is built
+   * only after every one has succeeded, so a failure never leaves a
+   * truncated block behind.
+   *
+   * Bounds: 1–20 ids (RENDER_MAX_IDS), refused loudly naming the bound on
+   * either side (empty or oversize) — AND a total-output ceiling
+   * (RENDER_MAX_CHARS), refused loudly naming the measured size, the
+   * ceiling, and the fix, since 20 valid ids can still render more text than
+   * a consumer can hold (Codex review M1).
+   *
+   * Rendering is DATA-DRIVEN off the record's own schema-declared fields
+   * (knownFieldsFor(record.type), the same registry knowledge_schema reads),
+   * never a hand-enumerated per-type template — a field added to a schema is
+   * rendered the moment it exists, with no second place to update. Server-
+   * owned plumbing (RENDER_SKIP_FIELDS) never appears in the body; a
+   * superseded/retired record still renders in full, with its status carried
+   * loudly in the header (never silently dropped or hidden). An unregistered
+   * record type is refused loudly naming the type and id, rather than
+   * falling open to dumping every stored key (Codex review L1).
+   *
+   * Takes a single `{ids}` object (not a bare array) — the MCP tool's only
+   * parameter is `ids`, and this mirrors every other multi-field tool method
+   * on this class (knowledgeSplitResult, knowledgeExtractResult, …).
+   */
+  knowledgeRender(args: { ids: string[] }): string {
+    const ids = args?.ids;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      throw new Error(
+        `knowledge_render: ids must be a non-empty array of 1-${SterlingTools.RENDER_MAX_IDS} record ids — got ${Array.isArray(ids) ? 'an empty array' : typeof ids}`
+      );
+    }
+    if (ids.length > SterlingTools.RENDER_MAX_IDS) {
+      throw new Error(`knowledge_render: ids must contain at most ${SterlingTools.RENDER_MAX_IDS} entries — got ${ids.length}`);
+    }
+    // Resolve EVERY id before rendering anything (P5): a failure here throws
+    // before a single character of output is produced, so the call is never
+    // half-served.
+    const records = ids.map((id) => this.resolveRecordId(id, 'knowledge_render'));
+    const output = records.map((record) => this.renderRecordBlock(record)).join('\n\n');
+    if (output.length > SterlingTools.RENDER_MAX_CHARS) {
+      throw new Error(
+        `knowledge_render: the rendered output is ${output.length} chars, over the ${SterlingTools.RENDER_MAX_CHARS}-char ceiling — nothing was rendered (never a silent truncation). Request fewer ids, or split this call into smaller batches, and retry.`
+      );
+    }
+    return output;
+  }
+
+  /** One record's `knowledge_render` block: header line + labeled body fields. */
+  private renderRecordBlock(record: DurableRecord): string {
+    const r = record as unknown as Record<string, unknown>;
+    const fieldNames = knownFieldsFor(String(r.type));
+    if (!fieldNames) {
+      throw new Error(
+        `knowledge_render: record '${String(r.id)}' has type '${String(r.type)}', which is not a registered record type — refusing rather than rendering its raw stored fields`
+      );
+    }
+    const titleField = SterlingTools.RENDER_TITLE_FIELDS.find((f) => typeof r[f] === 'string' && (r[f] as string).trim().length > 0);
+    const rawTitle = titleField ? (r[titleField] as string) : '(untitled)';
+    const rawHandle = typeof r.slug === 'string' && r.slug.trim().length > 0 ? r.slug : String(r.id).slice(0, SterlingTools.CITATION_PREFIX_LEN);
+    // Both header components are sanitized to one clipped line (Codex review
+    // M2a) — the full title still appears in the body below (titleField is
+    // NOT in RENDER_SKIP_FIELDS), so nothing is lost, only de-duplicated
+    // between a safe locator (header) and the full value (body).
+    const title = SterlingTools.sanitizeHeaderText(rawTitle);
+    const handle = SterlingTools.sanitizeHeaderText(rawHandle);
+    const header = `=== ${String(r.type)} '${title}' [${handle}] (status: ${String(r.status)}) ===`;
+
+    const bodyLines: string[] = [];
+    for (const field of fieldNames) {
+      if (SterlingTools.RENDER_SKIP_FIELDS.has(field)) continue;
+      const rendered = SterlingTools.renderFieldValue(r[field]);
+      if (rendered === undefined) continue;
+      bodyLines.push(`${field.toUpperCase().replace(/_/g, ' ')}: ${rendered}`);
+    }
+    if (bodyLines.length === 0) return header;
+    // Every body line is indented (Codex review M2b) so record content can
+    // never produce a line starting at column 0 that mimics the header frame.
+    return `${header}\n${SterlingTools.indentLines(bodyLines.join('\n'))}`;
+  }
+
+  /**
+   * One field's readable rendering for `knowledge_render` — undefined means
+   * "omit this field entirely" (empty string / empty array / empty object /
+   * null / undefined all carry no substance worth pasting).
+   */
+  private static renderFieldValue(value: unknown): string | undefined {
+    if (value === undefined || value === null) return undefined;
+    if (typeof value === 'string') return value.trim().length > 0 ? value : undefined;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (Array.isArray(value)) return value.length > 0 ? `\n${JSON.stringify(value, null, 2)}` : undefined;
+    if (typeof value === 'object') return Object.keys(value as object).length > 0 ? `\n${JSON.stringify(value, null, 2)}` : undefined;
+    return String(value);
+  }
+
+  /**
+   * One entry of knowledgeGet's `inbound_supersedes` array — {id} always,
+   * plus slug/title when cheaply available (same enrichment shape
+   * knowledgePreflight's `matches` already uses via axisRecordTitle).
+   *
+   * INCLUDE-WITH-STATUS, not exclusion (Codex converged finding, HIGH):
+   * a superseder recorded here can itself later be retired/superseded — B
+   * partially supersedes A, then B is retired in favor of C — and dropping B
+   * silently would recreate the exact invisibility this field exists to fix
+   * (A's clause reads live-and-fresh again). So `status` always rides the
+   * entry, and when the source itself is not active its own successor
+   * pointer (`superseded_by`, already server-derived at hydrate time —
+   * nothing extra to fetch) rides too, so the reader can follow the chain to
+   * the actual survivor. A source id that no longer resolves at all is
+   * dropped by the existing undefined filter in inboundSupersedes() —
+   * removal already deletes the edge rows, so that case does not reach here.
+   */
+  private static inboundSupersedesEntry(record: DurableRecord): InboundSupersedesEntry {
+    const slug = (record as unknown as { slug?: string }).slug;
+    const title = SterlingTools.axisRecordTitle(record);
+    const supersededBy = (record as unknown as { superseded_by?: string | null }).superseded_by;
+    return {
+      id: record.id,
+      ...(slug ? { slug } : {}),
+      ...(title ? { title } : {}),
+      status: record.status,
+      ...(record.status !== 'active' && supersededBy ? { superseded_by: supersededBy } : {}),
+    };
+  }
+
+  /**
+   * The single inbound-supersedes computation shared by every read surface
+   * that carries the disclosure (knowledge_get part (a); knowledge_query-full
+   * and knowledge_preflight, board c6e3561f): store.inboundSupersedes fans the
+   * reverse edge across mounts, each holder is hydrated to the pinned
+   * {id, slug?, title?, status, superseded_by?} entry shape. Returns [] when
+   * nothing supersedes the record — every caller spreads it conditionally so
+   * the key is OMITTED (never present-and-empty), matching the omit-when-empty
+   * contract the rest of the read surface follows.
+   */
+  private inboundSupersedesFor(id: string): InboundSupersedesEntry[] {
+    return this.store.inboundSupersedes(id).map((r) => SterlingTools.inboundSupersedesEntry(r));
+  }
+
+  /**
+   * knowledge_get's FIELD-WINDOW tail (decision compaction-tooling-windowed-read-
+   * plus-split), extracted so the ARCHIVED-ALIAS read shares it byte-for-byte
+   * instead of skipping it (review finding — see the HistoricalIdError branch
+   * above). `full` is whatever body the read resolved to: the live record, an
+   * archived version snapshot, or an alias snapshot. legacy_resolution rides
+   * through onto the windowed shape when the body carries one, because a reader
+   * holding a window must still be told the id they cited is historical.
+   */
+  private projectFieldWindow(
+    full: Record<string, unknown>,
+    options?: { field?: string; offset?: number; length?: number; version?: number }
+  ): DurableRecord | Record<string, unknown> {
+    // No windowing requested at all: exactly today's behavior, untouched.
+    if (!options || (options.field === undefined && options.offset === undefined && options.length === undefined)) {
+      return full;
+    }
+    const { field, offset, length } = options;
+    if (field === undefined) {
+      throw new Error(
+        `knowledge_get: 'offset'/'length' require 'field' to be set — a window addresses one named field on the record, never the whole thing.`
+      );
+    }
+    const type = String(full.type);
+    const rec = full;
+    const base: Record<string, unknown> = {
+      id: full.id,
+      type: full.type,
+      status: full.status,
+      field,
+      ...(rec.slug !== undefined ? { slug: rec.slug } : {}),
+      ...(rec.version !== undefined ? { version: rec.version } : {}),
+      // An ALIAS read keeps its disclosure on the windowed shape too: the block
+      // is what tells the reader the id they cited is historical and where the
+      // concept lives now, which a window has no other way to say.
+      ...(rec.legacy_resolution !== undefined ? { legacy_resolution: rec.legacy_resolution } : {}),
+    };
+    // REAL FIELDS WIN OVER THE VIRTUAL ONE (roster review follow-up): check
+    // knownFieldsFor FIRST — if some type ever registers an actual field
+    // literally named 'headline', it must be reachable by field:'headline'
+    // exactly like any other real field, never shadowed by the fallback
+    // below. Only when no type declares 'headline' as a real field does the
+    // virtual resolver get a turn.
+    const known = knownFieldsFor(type);
+    if (!known?.has(field)) {
+      // N26: a type-agnostic headline read. 'headline' is a VIRTUAL field
+      // name — not registered per-type in knownFieldsFor, because the whole
+      // point is that it resolves the same way (title, falling back to
+      // question, falling back to slug) on every record type, so a caller
+      // does not need to know whether this record's headline lives in
+      // `title` (decision/feature_article) or `question` (research_finding,
+      // which carries no title at all). Reuses axisRecordTitle unchanged —
+      // the same fallback chain knowledgePreflight and sameSubjectDigest
+      // already rely on — so there is exactly one definition of "this
+      // record's headline" in the codebase. Not windowable: it is always a
+      // short derived scalar, never a long field offset/length would matter
+      // for.
+      if (field === 'headline') {
+        if (offset !== undefined || length !== undefined) {
+          throw new Error(
+            `knowledge_get: field 'headline' is a derived scalar (title ?? question ?? slug) — offset/length are not windowable on it.`
+          );
+        }
+        const value = SterlingTools.axisRecordTitle(rec as unknown as DurableRecord);
+        return { ...base, kind: 'value', value };
+      }
+      const valid = known ? [...known].sort().join(', ') : '(unregistered type)';
+      throw new Error(
+        `knowledge_get: '${type}' does not define field '${field}' — valid fields: ${valid}, plus 'headline' (a virtual field on every type: title ?? question ?? slug).`
+      );
+    }
+    const value = rec[field];
+    if (typeof value === 'string') {
+      const off = offset ?? 0;
+      const windowed = length !== undefined ? value.slice(off, off + length) : value.slice(off);
+      return { ...base, kind: 'string', total_chars: value.length, offset: off, value: windowed };
+    }
+    if (Array.isArray(value)) {
+      const off = offset ?? 0;
+      const windowed = length !== undefined ? value.slice(off, off + length) : value.slice(off);
+      return { ...base, kind: 'array', total_entries: value.length, offset: off, entries: windowed };
+    }
+    // scalar / object / undefined: whole value, no offset/length — there is
+    // nothing to page through.
+    if (offset !== undefined || length !== undefined) {
+      throw new Error(
+        `knowledge_get: field '${field}' on ${type} is not a string or array — offset/length are not windowable on it.`
+      );
+    }
+    return { ...base, kind: 'value', value };
+  }
+
+  /**
+   * Shared id resolution (board slice 85ecfe43): full uuid, exact slug (board
+   * 1e639f32), or the 8-char citation prefix (decision foreign_27f148c2) — the same
+   * three forms knowledge_get has always resolved, now reused by every write
+   * tool that addresses a record by caller-supplied id so none of them can
+   * drift from knowledge_get's own resolution or its ambiguity wording.
+   *
+   * `toolName` only changes the error prefix. `noun` lets a caller addressing
+   * a LINK TARGET (knowledge_link's `to`) keep its existing "no target
+   * record" phrasing distinct from "no record" for a primary subject —
+   * callers outside this file already match on that distinction.
+   *
+   * NOT REACHED BY THE THREE DESTRUCTIVE-PATH TOOLS. board_remove,
+   * maintenance_remove and validateResolveClaim resolve by EXACT id only
+   * (user-ruled retraction 2026-08-22, partly retracting decision
+   * id-ladder-extends-to-board-tools-with-collision-guard): every id those
+   * three accept names a row that is HARD-DELETED, and an abbreviation that
+   * can silently retarget must not address a destroy. They call store.get
+   * directly and say why they refuse anything else — see boardRemove,
+   * maintenanceRemove and validateResolveClaim.
+   */
+  private resolveRecordId(id: string, toolName: string, noun: 'record' | 'target record' = 'record'): DurableRecord {
+    const direct = this.store.get(id);
+    if (direct) return direct;
+    // SLUG resolution before prefix resolution (board 1e639f32): an exact slug
+    // is an IDENTITY, deterministic across the fan, and — unlike an id — it
+    // names the concept, so it serves the live HEAD after any number of
+    // supersessions. Slugs are unique at create, so >1 hit means a legacy or
+    // cross-store clash: refuse rather than pick (P5).
+    const bySlug = this.store.recordsBySlug(id);
+    if (bySlug.length === 1) return bySlug[0];
+    if (bySlug.length > 1) {
+      // NOT an UnresolvedIdentifierError: the slug matched — more than one
+      // record — so this is a genuine collision (e.g. a project record plus
+      // a promoted domain copy under one slug), not a miss. knowledge_get's
+      // dead-slug fallthrough must never swallow this in favour of a
+      // superseded body (review finding, 2026-08-20).
+      throw new Error(
+        `${toolName}: slug '${id}' resolves to ${bySlug.length} records (${bySlug.map((r) => `${r.id} (${r.type})`).join('; ')}) — a slug must name one record; cite the id.`
+      );
+    }
+    if (id.length < SterlingTools.CITATION_PREFIX_LEN) {
+      throw new UnresolvedIdentifierError(
+        `${toolName}: no ${noun} '${id}' — no slug matches, and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve as an id. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, the full uuid, or an exact slug.`
+      );
+    }
+    // HISTORICAL (aliased) ids join the ladder here, between exact-slug and
+    // prefix resolution ([stable-identity-design-v2] contract 3): a LIVE record
+    // always wins — an alias is consulted only once nothing live matches — and
+    // an EXACT historical id is checked before any prefix, so a full dead uuid
+    // never has to compete with prefixes for precedence. Read after the
+    // too-short refusal because a historical id is a full uuid: nothing shorter
+    // than the citation prefix can match one, so the index is not even fetched
+    // on that path.
+    const aliases = this.store.recordAliases();
+    const exactAlias = aliases.find((a) => a.historical_id === id);
+    if (exactAlias) throw this.historicalIdRefusal(exactAlias, id, toolName);
+    const hits = this.store.recordIdIndex().filter((r) => r.id.startsWith(id));
+    // Prefix resolution spans live ids AND aliases in ONE ambiguity judgement:
+    // a prefix matching one live record and one dead id is genuinely ambiguous
+    // and must refuse naming both, exactly as two live records do — picking the
+    // live one silently would answer a different question than the one asked.
+    // NOT an UnresolvedIdentifierError: the prefix matched real records — an
+    // ambiguity between hits, not a miss. It must reach the caller unchanged,
+    // same reasoning as the slug-collision throw above.
+    const aliasHits = aliases.filter((a) => a.historical_id.startsWith(id));
+    if (hits.length + aliasHits.length > 1) {
+      throw new Error(
+        `${toolName}: '${id}' is ambiguous — it prefixes ${hits.length + aliasHits.length} records: ${[
+          ...hits.map((r) => `${r.id} (${r.type}, ${r.status})`),
+          ...aliasHits.map((a) => `${a.historical_id} (historical id → ${a.canonical_id})`),
+        ].join('; ')}. Cite more of the id.`
+      );
+    }
+    if (hits.length === 0 && aliasHits.length === 1) throw this.historicalIdRefusal(aliasHits[0], id, toolName);
+    if (hits.length === 0) throw new UnresolvedIdentifierError(`${toolName}: no ${noun} '${id}' in the project store or any mounted domain, at any status — and no slug matches`);
+    const record = this.store.get(hits[0].id);
+    // The index and the bodies come from the same rows, so a hit with no body is
+    // a torn store, not a miss — say which it is rather than reporting "no record".
+    // NOT an UnresolvedIdentifierError: the index DID resolve the id; the
+    // inconsistency is in the store, not the citation.
+    if (!record) throw new Error(`${toolName}: index resolved '${id}' to '${hits[0].id}' but no body was stored — the store is inconsistent`);
+    return record;
+  }
+
+  /**
+   * links[].target_id through the SAME id-resolution ladder as knowledge_get
+   * (board 2e71d464) — a caller-supplied links[] array (knowledge_create /
+   * knowledge_update / knowledge_supersede) previously reached the envelope's
+   * `target_id: z.string().uuid()` schema check BEFORE anything resolved it,
+   * so an 8-char prefix or a slug failed validation outright and never got
+   * near resolveRecordId; the measured workaround was dropping the edge
+   * entirely and keeping only a prose citation. Every string target, including
+   * a full uuid, routes through the ladder so each newly admitted edge names a
+   * record in the project store or a mounted domain. An ambiguous prefix/slug refuses naming the
+   * candidates, exactly as knowledge_get does; worst case here is a
+   * recoverable wrong edge, unlike the destroying paths (board_remove,
+   * maintenance_remove) whose exact-id rule is untouched by this change.
+   */
+  private resolveLinksTargets(links: unknown, toolName: string): unknown {
+    if (!Array.isArray(links)) return links;
+    return links.map((link) => {
+      if (!link || typeof link !== 'object') return link;
+      const targetId = (link as { target_id?: unknown }).target_id;
+      if (typeof targetId !== 'string') return link;
+      const resolved = this.resolveRecordId(targetId, toolName, 'target record');
+      return { ...(link as Record<string, unknown>), target_id: resolved.id };
+    });
+  }
+
+  /**
+   * knowledge_get's `version` read ([stable-identity-design-v2] contract 2):
+   * the archived snapshot at (record id, version), or the live head when the
+   * asked-for version IS the current one (the head is only archived when the
+   * next write displaces it — asking for it is not an error).
+   *
+   * An unknown version REFUSES naming the version asked for, the versions that
+   * do exist as a range, and the record — never a silent latest, which is the
+   * failure that makes a reader believe an old assertion is current (P5).
+   */
+  private archivedVersion(record: DurableRecord, version: number): Record<string, unknown> {
+    const current = (record as unknown as { version?: number }).version;
+    if (!Number.isInteger(version) || version < 1) {
+      throw new Error(
+        `knowledge_get: version ${version} is not a positive integer — versions start at 1 and count up by one per write` +
+          `${current !== undefined ? ` (record '${record.id}' is at version ${current})` : ''}.`
+      );
+    }
+    if (current !== undefined && version === current) return record as unknown as Record<string, unknown>;
+    const snapshot = this.store.getRecordVersion(record.id, version);
+    if (!snapshot) {
+      throw new Error(
+        `knowledge_get: record '${record.id}' has no archived version ${version}` +
+          `${current !== undefined ? ` — it is at version ${current}, so the addressable versions are 1..${current}` : ''}. ` +
+          `Nothing was fabricated and the current record was NOT served in its place; re-read without 'version' for the head.`
+      );
+    }
+    return snapshot;
+  }
+
+  /**
+   * The one refusal an aliased (historical) id produces
+   * ([stable-identity-design-v2] contract 3). It NAMES THE CANONICAL ID and the
+   * version that id is now at, because the whole promise of the alias table is
+   * that a citation written anywhere keeps resolving: telling the caller "no
+   * such record" when the record is alive under another id is the false
+   * negative the pass exists to remove. knowledge_get intercepts this and
+   * serves the archived snapshot instead; every write tool lets it through,
+   * because a write must land on the live record, never on a version-pinned
+   * dead id.
+   */
+  private historicalIdRefusal(
+    alias: { historical_id: string; canonical_id: string; archived_version: number },
+    addressed: string,
+    toolName: string
+  ): HistoricalIdError {
+    const canonical = this.store.get(alias.canonical_id) as (DurableRecord & { version?: number }) | undefined;
+    const currentVersion = canonical?.version;
+    const addressedAs = addressed === alias.historical_id ? `'${addressed}'` : `'${addressed}' → '${alias.historical_id}'`;
+    return new HistoricalIdError(
+      `${toolName}: ${addressedAs} is a HISTORICAL id — the record it named was collapsed into canonical record '${alias.canonical_id}'` +
+        `${currentVersion !== undefined ? ` (now at version ${currentVersion})` : ''}, and version ${alias.archived_version} is the snapshot this id is pinned to. ` +
+        `Reads through this id still work (knowledge_get serves that archived snapshot with a legacy_resolution block); a WRITE must address '${alias.canonical_id}'. Nothing was written.`,
+      alias
+    );
+  }
+
+  /**
+   * knowledge_get's read through an alias ([stable-identity-design-v2] contract
+   * 3): the ARCHIVED snapshot the historical id is pinned to, plus the
+   * legacy_resolution block that tells the reader where the concept lives now
+   * and how far behind this body is. Version-pinned on purpose — a citation
+   * meant a specific text, and silently forwarding it to a rewritten head is
+   * the failure mode decision foreign_de1a7329 already ruled out for dead ids.
+   *
+   * A missing snapshot refuses LOUDLY rather than falling back to the head: an
+   * alias promising version N while record_versions holds no such row is a torn
+   * index, and answering with different content than the caller asked for is
+   * how a reader comes to believe an old citation said something it never said.
+   */
+  private serveArchivedAlias(alias: { historical_id: string; canonical_id: string; archived_version: number }): Record<string, unknown> {
+    const canonical = this.store.get(alias.canonical_id) as (DurableRecord & { version?: number }) | undefined;
+    const snapshot =
+      canonical && canonical.version === alias.archived_version
+        ? (canonical as unknown as Record<string, unknown>)
+        : this.store.getRecordVersion(alias.canonical_id, alias.archived_version);
+    if (!snapshot) {
+      throw new Error(
+        `knowledge_get: '${alias.historical_id}' is a historical id pinned to version ${alias.archived_version} of '${alias.canonical_id}', ` +
+          `but no such archived version is stored${canonical?.version !== undefined ? ` (that record is at version ${canonical.version})` : ''} — ` +
+          `the alias index and the version archive disagree, and nothing was fabricated in their place.`
+      );
+    }
+    return {
+      ...snapshot,
+      legacy_resolution: {
+        canonical_id: alias.canonical_id,
+        archived_version: alias.archived_version,
+        current_version: canonical?.version ?? alias.archived_version,
+      },
+    };
+  }
+
+  /**
+   * Cited-id resolution warnings (board fc053051 — the phantom-id propagation
+   * defect: a fabricated decision id was cited by three agents across three
+   * sessions because nothing verified that record ids quoted INSIDE written
+   * text actually resolve).
+   *
+   * Matches a citation-shaped token — a full uuid, or an 8-plus-hex-char
+   * prefix — immediately following `knowledge_get` or a record-type word, the
+   * convention already used throughout this store's own prose (e.g.
+   * "(knowledge_get 19b506ce-…)", "decision foreign_de1a7329"). Deliberately
+   * conservative: a hex-looking word with no adjacent trigger word never
+   * matches, so false negatives are preferred over false positives.
+   *
+   * Resolution reuses recordIdIndex() — the same cheap, no-body-fetch read
+   * knowledge_get's own prefix resolution uses — so ANY status resolves,
+   * tombstones included (decision foreign_de1a7329: a superseded record is a
+   * legitimate citation).
+   */
+  // Separator class widened (board fc053051 extension) to tolerate the
+  // spellings already seen in review feedback and in this store's own prose:
+  // a plain space, an opening paren, a colon ("decision: foreign_19b506ce"), and a
+  // backtick ("decision `foreign_19b506ce`") — alongside the original space/paren.
+  // The id capture is widened from EXACTLY 8 hex chars to 8-40, because a
+  // dash-less citation longer than 8 (e.g. a 12- or 16-char prefix) used to
+  // be clipped at 8 chars and then fail the trailing \b boundary check
+  // (still a hex digit, not a boundary) — so it silently matched nothing. A
+  // real uuid's first segment is exactly 8 hex chars before its own dash, so
+  // the greedy {8,40} run still stops there and the optional dashed
+  // remainder below picks up the rest unchanged.
+  private static readonly CITATION_TRIGGER = ['knowledge_get', ...Object.keys(RECORD_TYPES)].join('|');
+  private static readonly CITATION_RE = new RegExp(
+    `\\b(?:${SterlingTools.CITATION_TRIGGER})\\b[\\s(:\`]*([0-9a-fA-F]{8,40}(?:-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?)\\b`,
+    'g'
+  );
+
+  // The SAME origin-only marker the knowledge-export exporter honors
+  // (scripts/knowledge-export.mjs ORIGIN_IDS_OPEN/CLOSE, board c3705a15 design
+  // pass 2026-08-24): prose wrapped in [origin-ids: <reason>] ... [/origin-ids]
+  // legitimately carries ids that resolve on ANOTHER machine (a payload's
+  // provenance block, an id map recorded in an article's history) and is never
+  // meant to be treated as a fresh citation here. Duplicated rather than
+  // imported — scripts/ stays standalone .mjs, tools.ts is compiled TypeScript
+  // in a different workspace — so the two constants are kept textually
+  // identical on purpose; a future divergence must change both call sites.
+  private static readonly ORIGIN_IDS_OPEN_RE = /\[origin-ids:/g;
+  private static readonly ORIGIN_IDS_CLOSE_RE = /\[\/origin-ids\]/g;
+  private static readonly ORIGIN_IDS_BLOCK_RE = /\[origin-ids:[\s\S]*?\[\/origin-ids\]/g;
+
+  /**
+   * Strip balanced origin-ids regions before a citation scan. UNLIKE the
+   * exporter (which REFUSES on an unbalanced marker — it can afford to, since
+   * nothing has shipped yet), this write path only ever WARNS, so an
+   * unbalanced '[origin-ids:' grants NO exemption at all rather than guessing
+   * which close it pairs with — the citation(s) it would have shielded are
+   * scanned and, if fabricated, still warned about. Fail-safe, not fail-open.
+   */
+  private stripOriginIdsRegions(text: string): string {
+    const opens = (text.match(SterlingTools.ORIGIN_IDS_OPEN_RE) ?? []).length;
+    const closes = (text.match(SterlingTools.ORIGIN_IDS_CLOSE_RE) ?? []).length;
+    if (opens === 0 || opens !== closes) return text;
+    return text.replace(SterlingTools.ORIGIN_IDS_BLOCK_RE, '');
+  }
+
+  private citedIdWarnings(text: string): string[] {
+    if (!text) return [];
+    const scanText = this.stripOriginIdsRegions(text);
+    const index = this.store.recordIdIndex();
+    // ALIASES COUNT AS RESOLUTION ([stable-identity-design-v2] contract 3): a
+    // HISTORICAL id resolves — knowledge_get serves its archived snapshot with a
+    // legacy_resolution block — so warning "fabricated or mistyped" on it would
+    // be exactly the FALSE POSITIVE the pass promises never to produce, on every
+    // migrated citation in the store's own prose. No new wording for this case,
+    // deliberately: a citation that resolves produces NO warning, whichever
+    // index resolved it.
+    const aliases = this.store.recordAliases();
+    const seen = new Set<string>();
+    const warnings: string[] = [];
+    for (const match of scanText.matchAll(SterlingTools.CITATION_RE)) {
+      const cited = match[1];
+      const lower = cited.toLowerCase();
+      if (seen.has(lower)) continue;
+      seen.add(lower);
+      // AMBIGUOUS PREFIX (board c3705a15 design pass): the same rule
+      // scripts/lib/citations.mjs buildResolver enforces — a FULL id must
+      // match a FULL id (no ambiguity is possible there, only exists/doesn't),
+      // but a bare 8-hex-char citation with no dashed remainder is a PREFIX,
+      // and a prefix matching more than one record's id (or historical alias)
+      // is not a clean resolve — it is a distinct record picked ambiguously,
+      // which must never pass silently as "resolves" just because SOME record
+      // happens to start with it.
+      if (lower.length === 8) {
+        const hits = new Set<string>();
+        for (const r of index) if (r.id.toLowerCase().startsWith(lower)) hits.add(r.id.toLowerCase());
+        for (const a of aliases) if (a.historical_id.toLowerCase().startsWith(lower)) hits.add(a.historical_id.toLowerCase());
+        if (hits.size === 0) {
+          warnings.push(
+            `cited id '${cited}' does not resolve to any record in the project store or any mounted domain, at any status — check for a fabricated or mistyped citation`
+          );
+        } else if (hits.size > 1) {
+          warnings.push(`cited id '${cited}' is an ambiguous 8-char prefix — it matches more than one record; cite more of the id`);
+        }
+        continue;
+      }
+      const resolves =
+        index.some((r) => r.id.toLowerCase().startsWith(lower)) ||
+        aliases.some((a) => a.historical_id.toLowerCase().startsWith(lower));
+      if (!resolves) {
+        warnings.push(
+          `cited id '${cited}' does not resolve to any record in the project store or any mounted domain, at any status — check for a fabricated or mistyped citation`
+        );
+      }
+    }
+    return warnings;
+  }
+
+  /**
+   * knowledgeUpdate's return is the new record FLATTENED, with same_subject
+   * spliced in as an extra property for ruling types — convenient for a
+   * direct caller reading `.status` and `.same_subject` off one object, but
+   * poison for anything that re-wraps the return as `record`: the field
+   * would either vanish under the digest write-projection's field whitelist
+   * (finding: knowledge_update's disclosure never reached MCP callers while
+   * create/supersede, which emit it as a proper envelope sibling, survived)
+   * or, on projection:'full', round-trip as a FAKE record field. Every
+   * internal re-wrapper (knowledgeAppend, knowledgeEdit, knowledgeUpdateResult)
+   * splits it off here first and puts it on its own envelope instead.
+   */
+  private splitSameSubject(
+    rec: DurableRecord & { same_subject?: SameSubjectEntry[]; claims_check?: string }
+  ): { record: DurableRecord; same_subject?: SameSubjectEntry[]; claims_check?: string } {
+    // `claims_check` rides out on the same envelope-sibling principle as
+    // same_subject: it is a receipt disclosure, not a record field, so a
+    // re-wrapper must lift it out rather than echo it back as one.
+    const { same_subject, claims_check, ...record } = rec;
+    return { record: record as DurableRecord, same_subject, claims_check };
+  }
+
+  /**
+   * The whole supersede lineage a maintenance item's feature_link may point
+   * at: `record`'s own id plus every ancestor it already carries a
+   * 'supersedes' link to. An item raised against an earlier version still
+   * matches after a later reconcile superseded it — chain membership, not
+   * exact-id match. Shared by knowledgeUpdate's resolves validation/drain,
+   * repointPromotionReview, and the open-reconcile-lane disclosure below.
+   */
+  private supersedeChain(record: DurableRecord): Set<string> {
+    const chain = new Set<string>([record.id]);
+    for (const link of (record.links ?? []) as { rel: string; target_id: string }[]) {
+      if (link.rel === 'supersedes') chain.add(link.target_id);
+    }
+    return chain;
+  }
+
+  /**
+   * The article_oversize dedup marker articleOversizeWarnings mints/matches
+   * for a slug (decision article-oversize-dedups-on-the-slug-at-its-minting-
+   * site, 19b506ce-5c12-46d5-afa1-5a32170bab8d). Extracted so every caller
+   * that needs to recognize "is this item the oversize item for THIS article"
+   * — articleOversizeWarnings itself and validateResolveClaim's split
+   * semantics below — derives the prefix from the ONE place that owns the
+   * text format, never a hand-copied literal.
+   */
+  private articleOversizeMarker(slug: string): string {
+    return `article '${slug}'`;
+  }
+
+  /**
+   * VERSION-CONFLICT DISCLOSURE (board 13bd5507's live half): a uuid that
+   * resolves to a SUPERSEDED record means the writer read a version that
+   * moved while they held it. The store's supersede() guard would refuse the
+   * fork anyway — this refusal fires FIRST, before any field logic operates
+   * on the stale body (knowledge_edit's find-match, knowledge_append's array
+   * read), so the stale reader learns WHAT happened and WHERE the head is
+   * instead of an opaque low-context error. Slug addresses always serve the
+   * head, so they never land here. resolveTerminus never PROMISES a live
+   * terminus (truncation past MAX_HOPS; a dangling chain returns the record
+   * itself), so the head is named only when verifiably live; otherwise the
+   * remedy is slug resolution (review finding 2026-08-21).
+   */
+  private refuseStaleAddress(old: DurableRecord, id: string, toolName: string): void {
+    if (old.status !== 'superseded') return;
+    const terminus = this.store.resolveTerminus(old.id);
+    const head = terminus && !terminus.truncated ? this.store.get(terminus.id) : null;
+    const h = head as { id: string; status: string; slug?: string; version?: number } | null;
+    const headIsLive = h !== null && h.status !== 'superseded' && h.id !== old.id;
+    const where = headIsLive
+      ? `The live head is ${h.id}${h.slug ? ` (slug '${h.slug}')` : ''}${h.version !== undefined ? ` v${h.version}` : ''}.`
+      : `The supersession chain could not be followed to a live head from this record — resolve by SLUG, which always serves the head.`;
+    const addressed = id === old.id ? `'${old.id}'` : `'${id}' → '${old.id}'`;
+    throw new Error(
+      `${toolName}: version conflict — ${addressed} resolves to a SUPERSEDED record: it was superseded (or retired in favour of a survivor) while you held it. ` +
+        `${where} Re-read the live head and re-apply your change on it — nothing was written.`
+    );
+  }
+
+  /**
+   * Validate ONE `resolves` claim BEFORE any write lands (decision
+   * 68988832-2ef5-4ff3-b693-4f0f0ea8dae1; board 68fe8373 — replaces the
+   * implicit chain-based auto-drain of decision foreign_8ecd435f). The named id must:
+   * exist as an open maintenance item; be in a DRAINABLE lane
+   * (reconcile_needed or refresh_reference — promotion_review and every
+   * other lane close only through their own mechanism, never resolves); and
+   * key to the record being written, via feature_link landing in its
+   * supersedes chain (this id or an ancestor). Any miss throws, naming the
+   * offending id and the reason, so a write that lands is a write whose
+   * claims were checked — no version minted, no item removed on a refusal.
+   *
+   * `options.splitMarker`, set ONLY by knowledge_split (decision
+   * compaction-tooling-windowed-read-plus-split), widens the lane/match rules
+   * without a second copy of this function: promotion_review stays refused
+   * UNCONDITIONALLY either way (P1 — a human gate, same wording both paths);
+   * every OTHER lane closes when the item's feature_link lands in the
+   * supersede chain passed in OR its text starts with the article-oversize
+   * marker for the split's parent slug — the item a split most naturally
+   * discharges (article_oversize) predates the split and carries neither a
+   * matching feature_link nor a restriction to knowledgeUpdate's two lanes.
+   */
+  /**
+   * Lanes a knowledge_update (in-place, non-split) `resolves` claim may close —
+   * board 4afbfa56, extending decision foreign_68988832's original reconcile_needed/
+   * refresh_reference pair. The fulfilling-write discharge shape for these
+   * three ALREADY EXISTS (knowledge_update), so this is exactly the same
+   * mechanism, just a wider allowed set — not a new abstraction. The other
+   * five open lanes stay unwired here on purpose: capture_owed/article_missing/
+   * research_owed/concept_article_missing discharge via knowledge_create (no
+   * resolves parameter yet — separate gap); deletion_candidate via
+   * knowledge_retire (separate gap); promotion_review/file_parked are
+   * removal-only by design; restore_performed is keyed by file_keys, not
+   * feature_link, and needs its own design. USER-RULED 2026-08-25: only these
+   * three tranches were selected — knowledge_create and knowledge_retire were
+   * NOT.
+   *
+   * article_missing IS NOW ADMITTED, but only in ONE SHAPE (board 31b2c872,
+   * issues log 2026-09-05) — hence a separate constant rather than membership
+   * in the set above. The 2026-08-25 exclusion assumed the lane always closes
+   * by knowledge_create ("no article owns this file" → write the article), and
+   * that assumption did not cover the other real discharge: JOINING the file to
+   * an EXISTING article, which is a knowledge_append to files[] and mints no
+   * record at all — so the demand was genuinely paid while the only route to
+   * close it was a bare maintenance_remove with no artifact behind it. The
+   * admitted shape is exactly that write and nothing wider: knowledge_append,
+   * field `files`, on a feature_article, where at least one APPENDED entry's
+   * normalized path is one of the item's file_keys. Every other write naming an
+   * article_missing item still refuses (knowledge_create's own discharge path is
+   * untouched — it has no resolves parameter and never consulted these lanes).
+   */
+  private static readonly UPDATE_RESOLVABLE_LANES = new Set([
+    'reconcile_needed',
+    'refresh_reference',
+    'stale_research',
+    'wire_in_dormant',
+    'state_review',
+  ]);
+
+  /** The one lane closeable ONLY by the files[]-append join described above. */
+  private static readonly APPEND_JOIN_RESOLVABLE_LANE = 'article_missing';
+
+  /**
+   * H10's OWNERSHIP PREDICATE, mirrored — AND RESTRICTED TO THE PROJECT STORE
+   * (decision [append-join-discharge-rebuilt-as-one-atomic-transition],
+   * requirement B; the project-local posture itself was already ruled in
+   * decision foreign_8c65937e).
+   *
+   * The append-join admission and the hook that MINTS the items it closes must
+   * never be able to disagree about what "owned" means, so this asks the same
+   * question of the same two types with the same working_tree exclusion
+   * (h10-direct-capture.mjs, `isUnowned = (p) => !ownerRows(p).some((r) =>
+   * !foreignTree(r))` — a working_tree naming this project's own root is not
+   * foreign, see declaresForeignTree), and counts first so the read is never a window (the
+   * false-demand hazard H10 documents at its own join).
+   *
+   * HOW THE PROJECT-LOCAL RESTRICTION IS OBTAINED — BY ASKING THE STORAGE
+   * LAYER, NEVER BY READING `scope` (anti_pattern
+   * [record-body-scope-is-not-physical-store-identity]; outside-model review,
+   * 2026-09-05). H10 opens ONLY the project database (scripts/hooks/lib/
+   * common.mjs), while the MCP `query` / `count` surface FANS across every
+   * mounted store (packages/store/src/mounted.ts), so the fanned result must be
+   * narrowed to the rows that live in the same file H10 reads. Unfiltered, a
+   * key owned only by a DOMAIN record would be treated as discharged here while
+   * H10 went on raising it forever — the two sides of one mechanism disagreeing
+   * about ownership.
+   *
+   * THE NARROWING USED TO BE `scope === 'project'`, AND THAT WAS FALSE. `scope`
+   * decides where a record is CREATED (MountedStores.storeFor); every write
+   * after that routes by the store PHYSICALLY HOLDING the id
+   * (MountedStores.storeHolding); `scope` is caller-writable through
+   * knowledge_update (it is not among the refused server-owned fields and is
+   * merged straight into the new body); and the store's in-place update pins
+   * id/type/created_at but never the row's mount. So a DOMAIN-HELD record
+   * labelled 'project' passed as a project-local owner H10 cannot see —
+   * reopening the very debt-loss finding this predicate exists to close — while
+   * a PROJECT-HELD record labelled 'domain:x' was wrongly excluded. The
+   * membership question now goes to store.projectStoreHolds, the one component
+   * that can answer it; the body's `scope` is not consulted here at all.
+   *
+   * FAIL DIRECTION, DELIBERATE: a row the project store does not hold counts as
+   * NOT an owner — and so does a legacy row whose `scope` is UNDEFINED, which is
+   * now simply irrelevant rather than special-cased — so the key stays in the
+   * item's remainder. That fails toward RETAINING the debt (a stale nag a later
+   * drain can look at) rather than LOSING it (an H10 demand with no item behind
+   * it), which is the safe direction of the two.
+   *
+   * The cross-mount `count` is used only as an upper bound for `cap` — it can
+   * over-estimate (it counts domain rows too) without ever narrowing the window.
+   */
+  private pathHasProjectOwner(path: string): boolean {
+    const filter = { types: ['feature_article', 'reference_material'], file_keys: [normalizeRepoPath(path)] };
+    const total = this.store.count(filter);
+    if (total === 0) return false;
+    return this.store.query({ ...filter, cap: total }).some((r) => {
+      const owner = r as unknown as { id: string; working_tree?: unknown };
+      return this.store.projectStoreHolds(owner.id) && !this.declaresForeignTree(owner.working_tree);
+    });
+  }
+
+  /**
+   * The item keys THIS append newly joins to the target article — the ONE
+   * definition, called by the admission (validateResolveClaim) and by the
+   * in-transaction classifier (dischargeAppendJoin), so a refusal and a
+   * retention can never disagree about what was joined. `newPaths` is always
+   * the NOT-NEW-filtered set: a path the article already owned is not a join.
+   */
+  private static appendJoinedKeys(itemKeys: string[], newPaths: string[]): string[] {
+    return [...new Set(itemKeys.map((k) => normalizeRepoPath(k)))].filter((k) => newPaths.includes(k));
+  }
+
+  /**
+   * "Can a resolves claim ride a write to THIS record?" — the ONE definition of
+   * the target-mount test, shared by the append-join discharge's in-transaction
+   * guard and knowledgeUpdate's ordinary-path guard, so the two can never
+   * disagree about what a legal target is. Returns the human-readable FAULT
+   * when the record is not a legal target, `undefined` when it is.
+   *
+   * A maintenance item is PROJECT-LOCAL (§3.3), so a claim can only be closed
+   * atomically beside a write to a record the PROJECT store holds. BOTH halves
+   * are required and neither implies the other: the LABEL must say 'project'
+   * (fail closed — a missing/legacy scope is not implicitly project, P5), and
+   * the STORAGE LAYER must confirm the mount, because `scope` is caller-
+   * writable and is not the routing key for anything after creation
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]).
+   */
+  private static targetMountFault(scope: unknown, projectHeld: boolean): string | undefined {
+    if (scope === undefined) return `carries no scope at all (a legacy body) — the target must BE scope='project'`;
+    if (scope !== 'project') return `has scope='${String(scope)}'`;
+    if (!projectHeld) {
+      return (
+        `is labelled scope='project' but the PROJECT store does not hold it — the record physically lives in a domain mount, ` +
+        `and its body's scope says nothing about that`
+      );
+    }
+    return undefined;
+  }
+
+  /**
+   * The ONE explanation-and-remedy every targetMountFault refusal carries (board
+   * e9095562). It states WHAT WAS CHECKED — the body's scope label and the
+   * physical holder, both required, neither implying the other — instead of
+   * asserting that the write is domain-scoped. That assertion is FALSE for the
+   * legacy shape (a body carrying no scope on a row the PROJECT store does
+   * hold), and it made the old tail's remedy — "claim them from a write to a
+   * record the PROJECT store holds" — unactionable for exactly that shape,
+   * since the project store already held it. One wording, no branch: it is
+   * accurate for all three refused shapes (absent scope, domain label,
+   * project label on a domain-held row).
+   */
+  private static readonly TARGET_MOUNT_FAULT_TAIL =
+    `Maintenance todos are project-local, so a claim can only ride a write whose target is PROVABLY project-held — which is what was checked: ` +
+    `the body must carry scope='project' AND the project store must physically hold the record. A body label is not a mount, so neither half ` +
+    `implies the other (anti_pattern [record-body-scope-is-not-physical-store-identity]). Close those items separately with maintenance_remove, ` +
+    `or claim them from a write to a record that passes BOTH checks.`;
+
+  /**
+   * THE ONE NAMED MOUNT REFUSAL (decision
+   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]).
+   * Both sites that can refuse a `resolves` claim on mount grounds build their
+   * message HERE — knowledgeUpdate's ordinary-lane guard and the append-join
+   * discharge's in-transaction guard inside validateResolveClaim — so the two
+   * can never drift into naming different things.
+   *
+   * It always states: the TARGET id and the PHYSICAL scope of the store holding
+   * it (store.scopeOfHolder — never a bare projectStoreHolds:false, because a
+   * body label is not a mount), the fault that was detected, every claimed item
+   * with its LANE, and the TWO-STEP remedy in order — write first, close second,
+   * so a crash between them leaves extra VISIBLE debt rather than falsely
+   * discharged debt. It deliberately never uses the store's generic
+   * 'nested transaction' wording: that guard is the backstop, not the message.
+   */
+  private mountRefusalMessage(args: {
+    lane: string;
+    targetId: string;
+    fault: string;
+    claims: { id: string; system_reason?: string }[];
+    why: string;
+  }): string {
+    const holder = this.store.scopeOfHolder(args.targetId);
+    const items = args.claims.map((c) => `'${c.id}' (${c.system_reason ?? 'unknown'} lane)`).join(', ');
+    const removals = args.claims.map((c) => `maintenance_remove ${c.id}`).join('; ');
+    return (
+      `${args.lane}: 'resolves' names ${args.claims.length} maintenance item(s) — ${items} — but the target record '${args.targetId}' is ` +
+      `physically held by the '${holder}' store (it ${args.fault}). Maintenance items are PROJECT-LOCAL, so ${args.why} ` +
+      `REMEDY (two steps, in this order): perform the write WITHOUT resolves; verify it paid this lane; then close the item with ` +
+      `${removals}. Nothing was written.`
+    );
+  }
+
+  private validateResolveClaim(
+    id: string,
+    chain: Set<string>,
+    options?: {
+      splitMarker?: string;
+      appendedArticlePaths?: string[];
+      /** the append-join target's id — the refusal names WHICH record is in the
+       *  wrong mount, and resolves its physical holder through scopeOfHolder */
+      targetId?: string;
+      /** the lane label the refusal names (the tool the caller invoked) */
+      targetLane?: string;
+      targetWorkingTree?: unknown;
+      targetScope?: unknown;
+      /** Whether the PROJECT store physically holds the target article — read
+       *  from the storage layer under the write lock by dischargeAppendJoin,
+       *  never inferred from `targetScope` (anti_pattern
+       *  [record-body-scope-is-not-physical-store-identity]). */
+      targetProjectHeld?: boolean;
+    }
+  ): DurableRecord {
+    // EXACT FULL ID ONLY — no slug rung, no prefix rung (USER-RULED RETRACTION
+    // 2026-08-22, partly retracting decision
+    // id-ladder-extends-to-board-tools-with-collision-guard, which had wired
+    // the ladder here on the rationale that this is "an in-place edit").
+    //
+    // THAT RATIONALE WAS FALSE, and this is a DESTRUCTIVE path: every claim
+    // this validator returns is HARD-DELETED by its caller — the attestation
+    // (supersede) branch of the shared update path calls store.remove on each
+    // claim directly, the in-place branch threads them into store.updateRecord
+    // which drains them inside the same transaction, and knowledgeSplit removes
+    // them too. So the prefix rung here was a third irreversible destruction
+    // path with no guard on it at all.
+    //
+    // WORST CASE, concretely: reconcile_needed items A and B are SIBLINGS under
+    // one article, so lane, source and feature_link are IDENTICAL and nothing
+    // downstream can tell them apart. Cite prefix P for A, A is drained, B also
+    // starts with P — the claim silently retargets to B, hard-deletes real
+    // un-discharged reconcile debt, and the receipt reports success. Hence the
+    // full uuid or nothing (P5: the dangerous case must fail loud).
+    const record = this.store.get(id);
+    if (!record) {
+      // SHAPE FIRST: the removal log is keyed by exact full record id, so an
+      // abbreviation was never a key in it — telling the caller its trace "may
+      // have aged out" would be a false trail. What it actually needs to hear
+      // is that this tool takes the full uuid, and why.
+      if (!SterlingTools.FULL_UUID_RE.test(id)) {
+        throw new Error(
+          `resolves: names '${id}', which is not a full record id — resolves requires the FULL uuid of every maintenance item it claims. ` +
+            `A claimed item is HARD-DELETED as the write lands, so an abbreviated citation (an 8-char prefix or a slug) could silently ` +
+            `retarget to a DIFFERENT, un-discharged item — sibling reconcile items under one article are indistinguishable by lane, ` +
+            `source or feature_link, so nothing downstream would catch it. Look the item up with maintenance_query and cite its full ` +
+            `id; nothing was written.`
+        );
+      }
+      // Distinguish "never existed" from "already removed" the same way
+      // removedItemError does for maintenance_remove — a closed item cannot
+      // be re-claimed, and that is a different refusal than a bogus id.
+      const trace = this.store.drainLogEntry(id);
+      if (trace) {
+        throw new Error(
+          `resolves: names '${id}', which is not OPEN — it was already removed` +
+            (trace.drained_at ? ` at ${trace.drained_at}` : '') +
+            ` (per the drain log). A closed item cannot be re-claimed; nothing was written.`
+        );
+      }
+      throw new Error(
+        `resolves: names '${id}', which does not exist as a maintenance item under that EXACT id. ` +
+          `resolves matches the full uuid only — no slug, no 8-char prefix — because a claimed item is hard-deleted as the write ` +
+          `lands and a stale abbreviation could silently retarget to a different item. Nothing was written.`
+      );
+    }
+    const it = record as unknown as {
+      type: string;
+      source?: string;
+      system_reason?: string;
+      feature_link?: string;
+      text?: string;
+      file_keys?: string[];
+    };
+    if (it.type !== 'todo' || it.source !== 'system') {
+      throw new Error(`resolves: names '${id}', which is not a system maintenance-queue item; nothing was written.`);
+    }
+    const isSplit = options?.splitMarker !== undefined;
+    // THE APPEND-JOIN ADMISSION (board 31b2c872): an article_missing item closes
+    // when THIS write is the knowledge_append that joins one of its own
+    // file_keys to an existing article's files[]. The paths are supplied by
+    // knowledgeAppend (only the append surface knows which entries are NEW —
+    // matching against the merged files[] would let any append close the item on
+    // a path the article already owned). Both halves are required, so the
+    // admission is the SHAPE, never the lane name on its own.
+    const appendedPaths = options?.appendedArticlePaths;
+    const isAppendJoinLane = !isSplit && it.system_reason === SterlingTools.APPEND_JOIN_RESOLVABLE_LANE;
+    const joinedKeys =
+      isAppendJoinLane && appendedPaths !== undefined
+        ? SterlingTools.appendJoinedKeys(it.file_keys ?? [], appendedPaths)
+        : [];
+    // ONLY A PROJECT-HELD ARTICLE CAN DISCHARGE A PROJECT-LOCAL ITEM (decision
+    // [append-join-discharge-rebuilt-as-one-atomic-transition], requirement A).
+    // Maintenance items are project-local by definition (§3.3), while a domain
+    // article lives in a DIFFERENT physical store — and a cross-mount
+    // transaction is refused outright (runScopedTransaction,
+    // packages/store/src/mounted.ts), so the article write and the item's drain
+    // could not share one atomic boundary even in principle. Article scope is
+    // NOT enforced at creation (knowledgeCreate takes a caller-supplied
+    // `scope`), so this shape is reachable and is refused BY NAME here — naming
+    // `scope` exactly as the working_tree refusal below names `working_tree` —
+    // rather than surfacing as an opaque nested-transaction error from two
+    // layers down (or, worse, as a silent second connection committing on its
+    // own). Three corrections from the 2026-09-05 outside-model review:
+    //
+    // (i) IT FAILS CLOSED. The old test was `targetScope !== undefined &&
+    //     targetScope !== 'project'`, which let an UNDEFINED (legacy) scope
+    //     PASS. The requirement is that the target scope must BE 'project', so
+    //     every other value — missing included — is refused (P5).
+    //
+    // (ii) IT IS NO LONGER GATED ON joinedKeys. `joinedKeys` is non-empty only
+    //     for an article_missing claim, but the discharge TRANSACTION opens for
+    //     ANY knowledge_append(files) carrying a non-empty resolves
+    //     (knowledgeUpdate's isAppendJoinWrite), so a claim in a PASS-THROUGH
+    //     lane could ride a domain-targeted append into a project-store
+    //     transaction whose article write then routed to the domain mount: two
+    //     connections committing independently, which is exactly what
+    //     runScopedTransaction exists to refuse. The refusal therefore covers
+    //     EVERY claim validated inside the discharge transaction, whatever its
+    //     lane. That is the fix chosen over narrowing isAppendJoinWrite by the
+    //     claims' lanes, because narrowing would have to read those lanes
+    //     BEFORE the write lock — a second copy of the lane decision on the
+    //     wrong side of the transaction boundary, which is precisely what the
+    //     rebuild removed.
+    //
+    // (iii) SCOPE IS A LABEL, NOT A LOCATION. `scope` cannot say which physical
+    //     store holds the article (anti_pattern
+    //     [record-body-scope-is-not-physical-store-identity]): a domain-held
+    //     record can carry scope 'project'. So the guard ALSO requires the
+    //     storage layer to confirm the project mount holds the target
+    //     (targetProjectHeld, read under the write lock by dischargeAppendJoin).
+    //     Not-provably-project-held is refused, the honest fallback when a
+    //     transaction's atomicity depends on the answer.
+    const inAppendJoinTransaction = appendedPaths !== undefined;
+    const fault = inAppendJoinTransaction
+      ? SterlingTools.targetMountFault(options?.targetScope, options?.targetProjectHeld === true)
+      : undefined;
+    if (fault) {
+      // ONE BUILDER, TWO CALL SITES (see mountRefusalMessage): this refusal used
+      // to name neither the target record nor its physical holder nor the
+      // two-step remedy, so the append lane told a caller strictly less than the
+      // ordinary lanes did about the same fault. `targetId` is supplied by
+      // dischargeAppendJoin from the record it re-read under the write lock.
+      throw new Error(
+        options?.targetId
+          ? this.mountRefusalMessage({
+              lane: options.targetLane ?? 'knowledge_append',
+              targetId: options.targetId,
+              fault,
+              claims: [{ id, system_reason: it.system_reason }],
+              why:
+                `the discharge must close the item and write the article in ONE project-store transaction, and a transaction cannot ` +
+                `span two mounts — this join can never be atomic.`,
+            })
+          : `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane), but the article this append targets ${fault}. ` +
+            `The discharge must close the item and write the article in ONE project-store transaction, and a transaction cannot span ` +
+            `two mounts, so this join can never be atomic. ${SterlingTools.TARGET_MOUNT_FAULT_TAIL} Nothing was written.`
+      );
+    }
+    // FOREIGN-TREE ARTICLES CANNOT DISCHARGE ROOT OWNERSHIP DEBT (review
+    // finding, 2026-09-05). H10 mints these items from `isUnowned`, which
+    // EXCLUDES every owner row declaring a working_tree — that article owns a
+    // different tree's copy of the same-named path (decision foreign_a0fc8743), so its
+    // files[] entry never makes the ROOT's path owned. Admitting the join here
+    // would discharge the item while H10 went on demanding an article for the
+    // very same path: the debt closed without the ownership that created it
+    // ever existing. Refused BY NAME rather than by silently declining to join,
+    // because the caller's next move (own it from a root-scoped article) is not
+    // guessable from a generic lane refusal.
+    if (joinedKeys.length > 0 && this.declaresForeignTree(options?.targetWorkingTree)) {
+      throw new Error(
+        `resolves: names '${id}' (${SterlingTools.APPEND_JOIN_RESOLVABLE_LANE} lane), but the article this append targets declares ` +
+          `working_tree='${String(options?.targetWorkingTree)}' — it owns the copy of ${joinedKeys.join(', ')} in THAT tree, not this ` +
+          `repository root's path, so appending the path to it establishes no ownership here. H10 raised the item precisely because no ` +
+          `record WITHOUT a working_tree owns the path, and it would go on raising it. Join the path to a root-scoped article (one with ` +
+          `no working_tree) and claim the item from that write instead. Nothing was written.`
+      );
+    }
+    const joinsThisArticle = joinedKeys.length > 0;
+    const laneAllowed = isSplit
+      ? it.system_reason !== 'promotion_review'
+      : SterlingTools.UPDATE_RESOLVABLE_LANES.has(it.system_reason ?? '') || joinsThisArticle;
+    if (!laneAllowed) {
+      throw new Error(
+        `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane) — only ${[...SterlingTools.UPDATE_RESOLVABLE_LANES].join(', ')} items ` +
+          `close via resolves; every other lane, including promotion_review, closes only through its own mechanism. ` +
+          `The one exception is ${SterlingTools.APPEND_JOIN_RESOLVABLE_LANE}, which closes ONLY on a knowledge_append to the ` +
+          `files[] of an existing feature_article where an APPENDED entry's path is one of the item's own file_keys — any other ` +
+          `write naming it is refused here. Nothing was written.`
+      );
+    }
+    const inChain = it.feature_link !== undefined && chain.has(it.feature_link);
+    const marksThisArticle = isSplit && (it.text ?? '').startsWith(options!.splitMarker!);
+    // joinsThisArticle IS the key for its lane: an article_missing item is raised
+    // on territory NO article owns, so it carries no feature_link to match — the
+    // appended path is the whole join.
+    if (!inChain && !marksThisArticle && !joinsThisArticle) {
+      throw new Error(
+        isSplit
+          ? `resolves: names '${id}', whose feature_link does not match this split's parent (or its supersedes-chain ancestors), and whose text does not match the article-oversize marker for the parent's slug; nothing was written.`
+          : `resolves: names '${id}', whose feature_link does not match this record or any of its supersedes-chain ancestors; nothing was written.`
+      );
+    }
+    return record;
+  }
+
+  /**
+   * Open debt still standing on `chain` after a write, across every lane a
+   * knowledge_update `resolves` claim can close (UPDATE_RESOLVABLE_LANES) —
+   * one line per item (id + text prefix), never the whole item (decision
+   * 68988832, widened board 4afbfa56). Called AFTER the write, so any item
+   * this same write's `resolves` claimed is already gone from
+   * maintenanceQuery and never appears here; empty when nothing is owed (P1 —
+   * a clean write stays clean).
+   */
+  private openReconcileLaneWarnings(chain: Set<string>): string[] {
+    const warnings: string[] = [];
+    const sweepCap = 1000;
+    const items = this.maintenanceQuery({ cap: sweepCap });
+    for (const item of items) {
+      const it = item as unknown as { id: string; feature_link?: string; system_reason?: string; text?: string };
+      if (
+        it.system_reason !== undefined &&
+        SterlingTools.UPDATE_RESOLVABLE_LANES.has(it.system_reason) &&
+        it.feature_link !== undefined &&
+        chain.has(it.feature_link)
+      ) {
+        warnings.push(`open ${it.system_reason} item '${it.id}' on this article is not named in resolves and stays open — ${(it.text ?? '').slice(0, 120)}`);
+      }
+    }
+    // The sweep is capped (P5): a queue exactly AT the cap may be hiding more
+    // open debt past this window — say so rather than reading the sweep as
+    // exhaustive (mirrors boardFiltered's scanTruncated disclosure).
+    if (items.length >= sweepCap) {
+      warnings.push(
+        `the open-reconcile-lane sweep hit its ${sweepCap}-item cap — more open ${[...SterlingTools.UPDATE_RESOLVABLE_LANES].join('/')} debt may exist past this window; narrow with maintenance_query to confirm.`
+      );
+    }
+    return warnings;
+  }
+
+  /**
+   * The sentinel separating the REGENERATED canonical statement of an
+   * article_missing item from the item's ORIGINAL text — see
+   * appendJoinItemText. Deliberately long and structural: it must never occur
+   * by accident in operator prose, because it is the only thing this mechanism
+   * pattern-matches on, and it matches its OWN previous output rather than
+   * anybody else's writing.
+   */
+  private static readonly APPEND_JOIN_ORIGINAL_TEXT_MARKER =
+    '\n\n--- ORIGINAL ITEM TEXT (retained verbatim; superseded by the line above — any count or path list below predates this partial close) ---\n';
+
+  /**
+   * REGENERATE an article_missing item's human-facing text from the item's own
+   * structured state. It does NOT edit the old string, and it never parses it.
+   *
+   * WHY REGENERATION REPLACED PATTERN-EDITING. Four rounds of this mechanism
+   * rewrote the stored text by regex, and every round found a new shape the
+   * regex got wrong: an anchored pattern silently no-opped on any wording but
+   * H10's, and the widened non-anchored one rewrote the FIRST `N file(s)` it
+   * found whatever it described — turning a persisted operator note reading
+   * `audited 20 file(s); article missing: 3 file(s)…` into `audited 2 file(s)`,
+   * i.e. corrupting prose it had no business touching. Both failure modes come
+   * from the same root: the text was treated as a document to be amended
+   * instead of a projection of state.
+   *
+   * SO: the count and the path list in the AUTHORITATIVE head come from
+   * `remaining` — which IS the item's new file_keys — and never from the
+   * previous string. The previous string is carried through below the marker
+   * so an operator's note is not destroyed, with ONE transformation applied to
+   * it: a `N file(s)` token whose number equals `countBefore` — the number of
+   * keys this item carried GOING INTO this close — is VOIDED to
+   * `N [superseded] file(s)`.
+   *
+   * TWO PROPERTIES, AND BOTH ARE WHY THIS IS NOT THE OLD COUNT-CORRECTION.
+   * (a) IT SELECTS ON THE ITEM'S OWN STATE, NOT ON PROSE. The old code voided
+   * whichever token came FIRST, so `audited 20 file(s); article missing: 3
+   * file(s)` had its unrelated historical total rewritten. A token is this
+   * item's own total only if it states the number of files this item actually
+   * named, and that number is structured state we hold — so `20` is left alone
+   * for a reason a reader can check, not by luck of ordering.
+   * (b) IT WRITES NO NUMBER AT ALL. The old code recomputed a value INTO
+   * someone else's sentence, which is how a mismatch produced a FALSE fact.
+   * Voiding leaves the original digits visible and merely marks them as no
+   * longer current: nothing is destroyed, and nothing false is ever asserted.
+   *
+   * The two shapes that defeated the old code are therefore handled by
+   * construction — a text with NO count token has nothing to void and still
+   * gains a true count from the regenerated head, and a text with SEVERAL
+   * counts has exactly the item's own total voided, however many others sit
+   * beside it and whatever order they appear in.
+   *
+   * KNOWN AND ACCEPTED IMPRECISION: an unrelated historical count that happens
+   * to equal `countBefore` is voided too. That mislabels a sentence, which is
+   * recoverable and visible; it never states a wrong number, which is not.
+   *
+   * IDEMPOTENT ACROSS REPEATED PARTIAL CLOSES: the marker is this function's
+   * own output, so a second close extracts exactly the same original text (its
+   * tokens already voided, hence unchanged by a second voiding) and re-emits
+   * ONE freshly generated head. Clauses cannot stack, and no intermediate count
+   * from an earlier close can survive — the head is never built from the
+   * previous head, only from current state.
+   */
+  private appendJoinItemText(
+    currentText: string,
+    countBefore: number,
+    remaining: string[],
+    joined: string[],
+    alreadyOwned: string[],
+    articleSlug: string,
+    at: string
+  ): string {
+    const marker = SterlingTools.APPEND_JOIN_ORIGINAL_TEXT_MARKER;
+    const cut = currentText.indexOf(marker);
+    const original = (cut === -1 ? currentText : currentText.slice(cut + marker.length))
+      .trim()
+      // VOID, never recompute — see the contract above. `[superseded]` sits
+      // between the digits and `file(s)`, so the voided text no longer reads as
+      // a count of this item's files to any reader (human or mechanical) while
+      // the original number itself is still there to be read. Only a token
+      // stating THIS item's own pre-close total is touched.
+      .replace(/(\d+)(\s*)file\(s\)/gi, (whole, digits: string, gap: string) =>
+        Number(digits) === countBefore ? `${digits} [superseded]${gap}file(s)` : whole
+      );
+    const head =
+      `article missing: ${remaining.length} file(s) nothing owns (feature_article or repo-located reference doc) — ` +
+      `create the owning article(s) (§6 H10 / §12 accretion). ` +
+      `AUTHORITATIVE REMAINDER (equals this item's file_keys): ${remaining.join(', ')}. ` +
+      `Partially closed at ${at}: ${joined.length} path(s) joined to article '${articleSlug}'` +
+      (joined.length ? ` (${joined.join(', ')})` : '') +
+      (alreadyOwned.length ? `; ${alreadyOwned.length} path(s) already owned by another project record (${alreadyOwned.join(', ')})` : '') +
+      `.`;
+    return original ? `${head}${marker}${original}` : head;
+  }
+
+  /**
+   * ========================================================================
+   * THE APPEND-JOIN DISCHARGE — ONE ATOMIC STATE TRANSITION
+   * ========================================================================
+   * Decision [append-join-discharge-rebuilt-as-one-atomic-transition]
+   * (knowledge_get 26e8f8ac-e0c7-4206-b0ee-640583eb9e87). This block was
+   * REBUILT FROM BLANK against frozen pins rather than patched a fifth time
+   * ([rebuild-over-patch-third-round-rebuilds-against-frozen-pins]): four fix
+   * rounds and two independent review passes produced six defects, every one
+   * of them in the partial-close path and every one BETWEEN the guards rather
+   * than in them. THE CAUSE, in one sentence: the lane decided what to
+   * discharge from evidence read OUTSIDE the transaction that discharged it,
+   * and edited human-facing item text by pattern-matching rather than owning
+   * it. Adding a fifth round of handlers would have left that cause untouched.
+   *
+   * THE INVARIANT. A discharge is ONE ATOMIC STATE TRANSITION. Inside a single
+   * project-store transaction, entered AFTER the write lock is held
+   * (store.withTransaction → BEGIN IMMEDIATE):
+   *   1. re-read the target article and every claimed item;
+   *   2. revalidate everything against those fresh reads — the lane
+   *      (article_missing closes ONLY via a files[] append), the append shape,
+   *      the NOT-NEW rule (satisfying paths = appended MINUS the article's
+   *      pre-append paths), the working_tree refusal and the target refusal
+   *      (the target must BE scope='project' AND be physically held by the
+   *      project store — the mount is read from the storage layer, never
+   *      inferred from the body's `scope`);
+   *   3. classify each claimed item's keys into JOINED (in this call's new-path
+   *      set), ALREADY-OWNED-ELSEWHERE or REMAINING, using a PROJECT-LOCAL
+   *      owner lookup (pathHasProjectOwner);
+   *   4. write the article;
+   *   5. per claimed item: REMOVE it when nothing remains (via store.remove, so
+   *      the §3.2.7 drain log is preserved and maintenance_remove later answers
+   *      already_drained:true), else UPDATE it with its FRESHLY-READ
+   *      expected_version, regenerated file_keys and REGENERATED text;
+   *   6. any failure rolls the article write, the item rewrites and the drains
+   *      back TOGETHER — there is no post-commit repair step left that can fail
+   *      on its own and report a landed write as a failed one;
+   *   7. warnings are built by the caller only AFTER this returns, i.e. after
+   *      the transaction has committed.
+   *
+   * HOW ATOMICITY IS OBTAINED. SterlingStore.withTransaction is REENTRANT
+   * (`txDepth`): a nested updateRecord / updateTodo / remove JOINS the open
+   * transaction instead of opening a second one, so this composite calls the
+   * ORDINARY primitives inside one wrapper. On MountedStores, withTransaction
+   * routes to the PROJECT store, which is exactly the mount this mechanism is
+   * allowed to touch (hence the target-scope refusal in validateResolveClaim).
+   *
+   * WHAT DELIBERATELY DID NOT CHANGE: RecordWriteOptions.resolves stays
+   * DELETE-ONLY. `drainResolves` (packages/store/src/index.ts) is a generic
+   * store primitive and must not grow a conditional-rewrite special case for
+   * one mechanism, so claims in OTHER lanes still ride the article write's own
+   * `resolves` while article_missing claims are removed or rewritten
+   * explicitly here, inside the same transaction.
+   *
+   * WHAT THIS DOES NOT GUARANTEE — stated, not silently diverged from. It does
+   * NOT prune keys that have become gitignored or deleted from disk, although
+   * H10's own retention predicate DOES (`stillOwed = (p) => !prunable.has(p) &&
+   * isUnowned(p)`, scripts/hooks/h10-direct-capture.mjs:1367, where `prunable`
+   * is the gitignored-or-absent set). A partial close can therefore RETAIN a
+   * key that can never gain an owning article. That divergence is ACCEPTED —
+   * importing git-ignore knowledge into the store layer is a larger change than
+   * the defect warrants — and is recorded here so the next reader neither
+   * "fixes" it by accident nor mistakes this predicate for H10 parity.
+   */
+  private dischargeAppendJoin(args: {
+    old: DurableRecord;
+    next: Record<string, unknown>;
+    resolves: string[];
+    chain: Set<string>;
+    appendedPaths: string[];
+    expectedVersion?: number;
+    previousVersion?: number;
+    ts: string;
+    toolName: string;
+    /** knowledgeUpdate's evidence-gated baseline advance, fed the claims as
+     *  revalidated HERE, under this transaction's lock */
+    advance: (liveClaims: readonly unknown[]) => void;
+  }): { updated: DurableRecord; retained: { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[] } {
+    const { old, next, resolves, chain, appendedPaths, expectedVersion, previousVersion, ts, toolName, advance } = args;
+
+    // (1) RE-READ THE TARGET ARTICLE, under the write lock this transaction
+    //     already holds. `next` was merged from a read taken before the lock;
+    //     if the stored record has moved since, the merge is built on a body
+    //     this call never saw, so the discharge refuses rather than deciding
+    //     from it. (store.updateRecord's own CAS would also refuse the write,
+    //     but it would do so AFTER the classification had already been made
+    //     against stale evidence — which is the class of defect this rebuild
+    //     exists to remove.)
+    const fresh = this.store.get(old.id) as
+      | (DurableRecord & { version?: number; files?: unknown[]; working_tree?: unknown; slug?: string })
+      | undefined;
+    if (!fresh) {
+      throw new Error(`${toolName}: record '${old.id}' no longer exists — it was removed concurrently. Nothing was written.`);
+    }
+    if (fresh.version !== previousVersion) {
+      throw new Error(
+        `${toolName}: record '${old.id}' was concurrently written — this call merged from version ${previousVersion} but the store is at ` +
+          `version ${fresh.version}. The append-join discharge decides what to close from THIS read, so it refuses rather than closing ` +
+          `maintenance debt against a body it never saw. Nothing was written; re-read the record and retry.`
+      );
+    }
+
+    // (2) THE NOT-NEW RULE, against the FRESH pre-append files[]. Re-appending
+    //     a path the article ALREADY owns establishes no ownership — it only
+    //     duplicates a files[] row — so it can never close an article_missing
+    //     item. Computing the difference here, rather than in knowledgeAppend,
+    //     is what makes the satisfying set and the write agree by construction.
+    const ownedBefore = new Set(
+      ((fresh.files ?? []) as { path?: unknown }[])
+        .map((f) => f?.path)
+        .filter((p): p is string => typeof p === 'string')
+        .map((p) => normalizeRepoPath(p))
+    );
+    const newPaths = [...new Set(appendedPaths.filter((p) => !ownedBefore.has(p)))];
+
+    // Revalidation. validateResolveClaim owns EVERY message a caller reads
+    // (full-uuid addressing, open/already-drained traces, lane rules,
+    // feature_link matching, the working_tree and target-scope refusals), and
+    // it reads each item through store.get — so calling it HERE, inside the
+    // transaction, is simultaneously the revalidation and the fresh re-read of
+    // every claimed item that step 1 of the invariant requires.
+    // PHYSICAL mount membership, read under this same write lock: `fresh` came
+    // from the cross-mount fan (store.get), so it resolves a domain-held
+    // article just as happily as a project-held one, and its body's `scope`
+    // cannot tell the two apart (anti_pattern
+    // [record-body-scope-is-not-physical-store-identity]). The project store is
+    // the ONLY mount this transaction commits on, so the guard inside
+    // validateResolveClaim gets the storage layer's answer rather than a label.
+    const targetProjectHeld = this.store.projectStoreHolds(fresh.id);
+    const claims = resolves.map((rid) =>
+      this.validateResolveClaim(rid, chain, {
+        appendedArticlePaths: newPaths,
+        targetWorkingTree: fresh.working_tree,
+        targetScope: fresh.scope,
+        targetProjectHeld,
+        // Named so the mount refusal can report WHICH record is in the wrong
+        // mount and resolve its physical holder (shared mountRefusalMessage).
+        targetId: fresh.id,
+        targetLane: toolName,
+      })
+    );
+
+    // (3) CLASSIFY, still inside the lock. THIS IS THE HIGH DEFECT'S FIX: the
+    //     owner lookup that decides a key is already discharged now happens in
+    //     the same transaction as the removal it justifies. Previously the
+    //     lookup ran before the transaction, so an article retired in between
+    //     could leave an item deleted whole while one of its paths was in fact
+    //     unowned — permanent debt loss, because H10 only re-raises TOUCHED
+    //     territory.
+    //
+    //     H10 consolidates every unowned path a Stop found into ONE item, so an
+    //     item routinely names paths belonging in DIFFERENT articles. Draining
+    //     on the first joined path would silently discard the rest; refusing
+    //     until one append covers them all would make the common case
+    //     undischargeable. Hence REWRITE-DOWN: the item keeps its id and its
+    //     article_missing lane and shrinks to what is still unowned; only full
+    //     coverage drains it.
+    const dispositions: {
+      item: DurableRecord & { version?: number; text?: string; file_keys?: string[] };
+      countBefore: number;
+      joined: string[];
+      alreadyOwned: string[];
+      remaining: string[];
+    }[] = [];
+    // Claims in the OTHER resolvable lanes are not this mechanism's business:
+    // they ride the article write's own `resolves` drain exactly as they do on
+    // every non-append write, inside this same transaction.
+    const passThrough: string[] = [];
+    for (const claim of claims) {
+      const item = claim as DurableRecord & { system_reason?: string; version?: number; text?: string; file_keys?: string[] };
+      if (item.system_reason !== SterlingTools.APPEND_JOIN_RESOLVABLE_LANE) {
+        passThrough.push(item.id);
+        continue;
+      }
+      const keys = [...new Set((item.file_keys ?? []).map((k) => normalizeRepoPath(k)))];
+      const joined = SterlingTools.appendJoinedKeys(keys, newPaths);
+      const rest = keys.filter((k) => !joined.includes(k));
+      const alreadyOwned = rest.filter((k) => this.pathHasProjectOwner(k));
+      const remaining = rest.filter((k) => !alreadyOwned.includes(k));
+      dispositions.push({ item, countBefore: keys.length, joined, alreadyOwned, remaining });
+    }
+
+    // (4) WRITE THE ARTICLE. The baseline advance re-stamps the paths of every
+    //     item this write RESOLVES, as revalidated above under this lock (rule
+    //     (d) has no lane exception): the pass-through (reconcile/refresh)
+    //     claims, which the store drains below, and each article_missing item
+    //     step 5 FULLY drains (no remaining keys). A partially covered item is
+    //     rewritten and stays open, so it resolves nothing and advances nothing;
+    //     the paths it joins are newly claimed and stamped regardless.
+    advance([
+      ...claims.filter((claim) => passThrough.includes(claim.id)),
+      ...dispositions.filter((d) => d.remaining.length === 0).map((d) => d.item),
+    ]);
+    const cas = expectedVersion ?? previousVersion;
+    const updated = this.store.updateRecord(old.id, next, {
+      ...(cas !== undefined ? { expected_version: cas } : {}),
+      ...(passThrough.length ? { resolves: passThrough } : {}),
+    });
+
+    // (5) ACT ON EACH CLAIMED ITEM — remove or rewrite, never both, never
+    //     neither. A throw anywhere in this loop unwinds step 4 with it.
+    const articleSlug = (fresh.slug ?? fresh.id) as string;
+    const retained: { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[] = [];
+    for (const d of dispositions) {
+      if (d.remaining.length === 0) {
+        // Fully covered: the debt is PAID, so the item leaves through the
+        // artifact-write that fulfilled it (P4), logged like every other
+        // system removal.
+        this.store.remove(d.item.id, ts);
+        continue;
+      }
+      // Partially covered: rewrite in place, CAS-GUARDED on the version this
+      // transaction just read. Without the token a concurrent H10 heal that
+      // ADDED newly-unowned keys would be silently clobbered by our shrunken
+      // list — a lost-update in the same file that explains at length why
+      // every in-place write must be CAS-guarded.
+      this.store.updateTodo(
+        d.item.id,
+        {
+          ...(d.item as unknown as Record<string, unknown>),
+          file_keys: d.remaining,
+          text: this.appendJoinItemText(String(d.item.text ?? ''), d.countBefore, d.remaining, d.joined, d.alreadyOwned, articleSlug, ts),
+          updated_at: ts,
+        },
+        d.item.version !== undefined ? { expected_version: d.item.version } : {}
+      );
+      retained.push({ item_id: d.item.id, keys: d.remaining, joined: d.joined, already_owned: d.alreadyOwned });
+    }
+    return { updated, retained };
+  }
+
+  /**
+   * Versioned change (§10) — IN PLACE since S3 ([stable-identity-design-v2]):
+   * the record's id NEVER changes, the server-owned `version` counter bumps by
+   * one, and the full prior body is archived in record_versions (readable via
+   * knowledge_get's `version` parameter). The write rides the store's in-place
+   * triad (store.updateRecord), which is the single transaction that also
+   * drains any `resolves` claim — so a refused claim rolls the version bump
+   * back with it, rather than leaving a bumped record beside an undrained item.
+   *
+   * WHY THIS REPLACED RE-MINTING: every citation written anywhere — commit
+   * message, brief, board item, article prose, a maintenance item's
+   * feature_link — used to rot the moment the record it named was edited, and
+   * "this record changed" was expressed by minting a new id, which made
+   * supersession meaningless as a statement about CONCEPTS. Version says
+   * "changed"; supersession now says only "replaced by a different ruling".
+   *
+   * THE ONE EXCEPTION IS attestation: an inspection verdict is immutable by
+   * construction, so an update to one is a CONCEPT REPLACEMENT — a new record
+   * with a new id, the prior one retired (pinned by attestation-immutability
+   * and S3-2). Nothing else re-mints here.
+   *
+   * `expectedVersion` is the CAS token that replaces the accidental
+   * UUID-as-token of the supersede era: a stale value refuses naming BOTH
+   * versions, with nothing written. It sits in the 4th positional slot and
+   * `toolName` moves to the 5th — the least-disruptive extension of the already
+   * frozen (id, patch, resolves) shape.
+   *
+   * A caller-supplied `version` is STRIPPED here, never honored: the counter is
+   * server-owned at every surface, so a smuggled value can neither jump the
+   * count nor be silently persisted (knowledgeUpdateResult surfaces the strip
+   * as a warning rather than letting it pass unremarked).
+   */
+  knowledgeUpdate(
+    id: string,
+    body: Record<string, unknown>,
+    resolves?: string[],
+    expectedVersion?: number,
+    toolName = 'knowledge_update',
+    /**
+     * Set ONLY by knowledgeAppend, and only for an append to a feature_article's
+     * files[]. `appendedPaths` are every normalized path this call supplies —
+     * the CANDIDATE set; the not-new filter, the target article's working_tree
+     * and its scope are all derived inside dischargeAppendJoin from a re-read
+     * taken under the write lock, never passed in from a pre-transaction read.
+     * Its presence is what admits a resolves claim on an `article_missing` item
+     * (the append-join admission, board 31b2c872, rebuilt by decision
+     * [append-join-discharge-rebuilt-as-one-atomic-transition]); it never
+     * affects what is written to the article itself.
+     * `retained` is an OUT parameter, filled AFTER the discharge transaction
+     * commits: one entry per item this append only partially covered, so
+     * knowledgeAppend can say so on the receipt.
+     */
+    appendJoin?: {
+      appendedPaths: string[];
+      retained: { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[];
+    },
+    /** Internal-only: knowledge_array_remove's exact authoritative graph deletion. */
+    relationRemoval?: { rel: string; target_id: string },
+    /**
+     * Internal-only: knowledge_split drains its OWN resolves claims beside this
+     * nested update (its lane rules differ from this path's), so it passes the
+     * claimed items' file_keys — re-read inside its transaction — for the
+     * baseline advance to re-stamp exactly what the split closes.
+     */
+    outerResolvedKeys?: ReadonlySet<string>
+  ): DurableRecord & {
+    same_subject?: SameSubjectEntry[];
+    previous_version?: number;
+    identity_moved?: { previous_id: string; note: string };
+    /** see CreateResult.claims_check — the same disclosure on this write's receipt */
+    claims_check?: string;
+    /**
+     * WHAT resolves ACTUALLY CLOSED, named with its file_keys AS THEY STOOD
+     * AT THE MOMENT OF REMOVAL (board b0bb9d96 / I-29, fix-round HIGH):
+     * reconcile_needed's identity now folds and widens between a reader
+     * seeing an item and this write claiming it — a write closing "src/a.ts"
+     * could really be closing "src/a.ts, src/b.ts, src/c.ts" if another
+     * session's read-time or settlement mint widened it first. Sourced from
+     * `SterlingStore.drainResolves`'s own `receipt` out-param — a snapshot
+     * taken INSIDE the write's transaction, immediately before that item's
+     * removal — never from `claims` (this call's PRE-transaction validation
+     * read, which a concurrent widen can already have made stale by the time
+     * the drain actually runs; the target record's own CAS cannot catch this,
+     * because the concurrent write touched the TODO, not the target). One
+     * entry per claimed id actually drained; order matches the drain, not
+     * necessarily `resolves` order. NOT populated for the append-join
+     * (article_missing) discharge lane — its claims are validated and closed
+     * inside dischargeAppendJoin's own transaction, never surfaced to this
+     * scope (see that method's `retained` receipt for ITS disclosure of
+     * partial closes). The attestation-replacement lane below IS populated,
+     * but with a NARROWER guarantee than the ordinary path's: it reads each
+     * item via `store.get()` immediately before that item's own
+     * `store.remove()` call — fresher than a pre-transaction validation read,
+     * but NOT inside one shared transaction the way `drainResolves` is (each
+     * `store.remove` there opens its own), so another writer can still widen
+     * the item in the gap between that read and the remove. Residual, rated
+     * MEDIUM on re-review, confined to this one pre-existing non-atomic
+     * replacement lane.
+     */
+    resolved_items?: { id: string; system_reason?: string; file_keys?: string[] }[];
+    /**
+     * PATH-PRUNE DISCLOSURE (board 7e779e1f): when this write makes the
+     * record stop claiming a path, and an open reconcile_needed item pinned
+     * to it named that path, the path is pruned from the item's own
+     * file_keys in the SAME transaction (SterlingStore.pruneReconcileNeeded)
+     * — never a second write, and never through this call's own `resolves`.
+     * Pruning is bookkeeping, NOT evidence anyone reconciled anything, so
+     * `drifted` is disclosed per pruned path rather than implied by the
+     * prune itself: `true` when the OLD baseline (this record as it stood
+     * BEFORE this write) no longer matches the working tree, `false` when it
+     * still does, `'unknown'` when the evidence to say either is unavailable
+     * (no recorded old baseline for the path, an unresolved/unmapped working
+     * tree, an unreadable file). Sourced from `SterlingStore.updateRecord`'s
+     * own `prunedReceipt` out-param — the committed state at prune time —
+     * with the drift verdict computed here, never in the store, because it
+     * needs the filesystem/git tree the store layer never touches.
+     */
+    pruned_reconcile_items?: { id: string; removed: boolean; paths: { path: string; drifted: boolean | 'unknown' }[] }[];
+  } {
+    const old = this.resolveRecordId(id, toolName);
+    this.refuseStaleAddress(old, id, toolName);
+    this.refuseServerOwnedFields(body, 'knowledge_update');
+    const ts = this.now();
+    const { id: _i, status: _s, superseded_by: _sb, created_at: _c, updated_at: _u, type: _t, version: _v, ...overrides } = body;
+    // Same refusal as create, applied to the CALLER's fields rather than the
+    // merged record: `old` is already valid, so anything unknown came from this
+    // call. Without it the merge silently discarded the field and reported a new
+    // version — the failure that makes a "fix" look applied when it never landed.
+    this.refuseUnknownFields(old.type, overrides);
+    // links[].target_id THROUGH THE LADDER (board 2e71d464): a caller-supplied
+    // `links` array in this update's own body may cite a slug or 8-char prefix
+    // the same way knowledge_get already resolves; `old.links` (spread into
+    // `next` below when this call touches no links) is already stored as full
+    // ids from a prior resolved write, so only an EXPLICIT overrides.links
+    // needs this pass.
+    if (overrides.links !== undefined) {
+      overrides.links = this.resolveLinksTargets(overrides.links, toolName);
+    }
+    // The item's feature_link points to whatever version was current when it
+    // was raised, which may now be an ancestor, so match the whole supersede
+    // chain — computed for every type, since promotion_review (below) can
+    // point at any supersedable record, not only feature_article/reference_material.
+    const chain = this.supersedeChain(old);
+    // A duplicated id is a meaningless second claim — the item can only be
+    // drained once, so naming it twice is refused loudly rather than silently
+    // validating and no-oping on the repeat (same refuse-on-meaningless-claim
+    // posture as every other resolves violation below).
+    if (resolves) {
+      const seen = new Set<string>();
+      const duplicate = resolves.find((rid) => (seen.has(rid) ? true : (seen.add(rid), false)));
+      if (duplicate !== undefined) {
+        throw new Error(`resolves: '${duplicate}' is named more than once — an item can only be claimed once; nothing was written.`);
+      }
+    }
+    // RESOLVES CLAIM VALIDATION runs BEFORE any write (decision foreign_68988832): a
+    // write that does not validate is a write that must not land.
+    //
+    // THE APPEND-JOIN PATH VALIDATES INSIDE ITS TRANSACTION INSTEAD, and
+    // deliberately does not pre-validate here as well: its whole invariant is
+    // that the evidence a discharge acts on is read under the same write lock
+    // that performs it, and a second copy of the decision on this side of the
+    // boundary is exactly what the rebuild removed. See dischargeAppendJoin.
+    const isAppendJoinWrite = appendJoin !== undefined && (resolves?.length ?? 0) > 0;
+    const claims = isAppendJoinWrite ? [] : (resolves ?? []).map((rid) => this.validateResolveClaim(rid, chain));
+    // A CLAIM CAN ONLY RIDE A WRITE THE PROJECT STORE WILL RECEIVE (mount-
+    // boundary review, 2026-09-06; NAMED and reordered per decision
+    // [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]).
+    // The append-join path makes this decision ONCE, inside its transaction,
+    // from a re-read under the write lock — so this pre-write copy is
+    // deliberately NOT applied to it (a second copy of the same decision on the
+    // other side of the lock is exactly what the rebuild removed).
+    //
+    // IT FIRES ON EVERY ORDINARY resolves-BEARING LANE — knowledge_update,
+    // _append, _edit and _array_remove all land here — and it fires AFTER the
+    // items are resolved and lane-validated above: an unknown id or a lane the
+    // item's system_reason forbids is a more fundamental problem and keeps its
+    // own, more useful refusal. It also fires BEFORE the store's generic
+    // cross-mount transaction guard, which is the BACKSTOP and never the
+    // message: that wording reads as "your item id is wrong" when the truth is
+    // "this target is in a different mount".
+    //
+    // THE MESSAGE NAMES THE PHYSICAL HOLDER (scopeOfHolder), never a bare
+    // projectStoreHolds:false — a body label is not a mount (anti_pattern
+    // [record-body-scope-is-not-physical-store-identity]) — plus each item, its
+    // lane, and the TWO-STEP remedy: the knowledge write first, the queue close
+    // second, so a crash between them leaves extra VISIBLE debt rather than
+    // falsely discharged debt.
+    if (!isAppendJoinWrite && claims.length > 0) {
+      const fault = SterlingTools.targetMountFault(
+        (old as unknown as { scope?: unknown }).scope,
+        this.store.projectStoreHolds(old.id)
+      );
+      if (fault) {
+        throw new Error(
+          this.mountRefusalMessage({
+            lane: toolName,
+            targetId: old.id,
+            fault,
+            claims: claims as unknown as { id: string; system_reason?: string }[],
+            why: `the item's deletion and this write would land on two different SQLite connections and could never commit together.`,
+          })
+        );
+      }
+    }
+    // ATTESTATION ONLY: a new id, a new birth clock, a retired predecessor.
+    // Every other type keeps its id and its created_at — identity and birth are
+    // properties of the RECORD, not of the version being written.
+    const replaced = old.type === 'attestation';
+    const next: Record<string, unknown> = {
+      ...old,
+      ...overrides,
+      id: replaced ? this.newId() : old.id,
+      type: old.type,
+      created_at: replaced ? ts : old.created_at,
+      updated_at: ts,
+      ...(replaced ? { status: 'active', superseded_by: null } : {}),
+    };
+    if (relationRemoval) {
+      // The relation row is authoritative, but keep the stored body honest as
+      // well. This removes only the selected existing edge and deliberately
+      // does not call resolveLinksTargets over surviving legacy entries.
+      const links = next.links;
+      if (!Array.isArray(links)) {
+        throw new Error(`${toolName}: internal relation removal reached a non-array links field; nothing was written.`);
+      }
+      next.links = links.filter(
+        (link) =>
+          !(
+            link &&
+            typeof link === 'object' &&
+            (link as { rel?: unknown }).rel === relationRemoval.rel &&
+            (link as { target_id?: unknown }).target_id === relationRemoval.target_id
+          )
+      );
+    }
+    // History rotation (board 0697c6bd): bound the stored history to genesis +
+    // newest entries. The middle is dropped from the version being written —
+    // the PRIOR body, archived whole in record_versions by this same write,
+    // retains them forever (the archive that decision foreign_c68eb219's rotation
+    // originally leaned on the supersede chain for), so no entry ever becomes
+    // unreadable. Callers see the rotation via historyRotationWarnings on the
+    // write's result envelope.
+    if (old.type === 'feature_article') {
+      const hist = next.history as unknown[] | undefined;
+      const max = this.config.article_history_max_entries;
+      if (Array.isArray(hist) && hist.length > max) {
+        // MIDDLE-OUT rotation (board ab87fe24, replacing the old "keep newest
+        // max" behavior): keep the first `genesis` entries (founding, by array
+        // position) plus the newest (max - genesis) entries, evicting the
+        // middle. genesis clamps to max - 1 so at least one recent entry
+        // always survives even when genesis_entries >= max.
+        const genesis = Math.min(this.config.article_history_genesis_entries, max - 1);
+        const recentKeep = max - genesis;
+        next.history = [...hist.slice(0, genesis), ...hist.slice(hist.length - recentKeep)];
+      }
+    }
+    // THE CLAIM CHECK, over the FULLY MERGED CANDIDATE and before any write:
+    // an update of a record that still carries a stale directory claim refuses
+    // even when the patch touches an unrelated field, by design (decision
+    // [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]).
+    // Placed here so knowledge_append / _edit / _array_remove — which all merge
+    // through this one path — are covered by the same call, never by a second
+    // per-surface copy; and BEFORE the baseline advance below, whose lstat would
+    // otherwise surface a raw EACCES ahead of this check's named refusal.
+    const claimsCheck = this.assertClaimedPaths(toolName, next);
+    // EVIDENCE-GATED BASELINE ADVANCE (decision
+    // [baseline-advance-is-evidence-gated-ordinary-writes-preserve-baselines]).
+    // A versioned write no longer re-hashes every owned path: that silently
+    // erased un-reconciled drift on any unrelated write (finding
+    // a-re-baseline-can-auto-drain-a-reconcile-needed-item-before). Only the
+    // resolved items' own file_keys are re-stamped, plus owned paths that have
+    // no baseline yet; every other baseline and its attestation entry stays
+    // as it was. See advanceBaselines for the per-path rule.
+    //
+    // THE RE-STAMP SET COMES FROM THE SAME TRANSACTIONAL SNAPSHOT AS THE DRAIN.
+    // `claims` is a pre-transaction read, and an item can fold or widen before
+    // the drain removes it; stamping from `claims` would re-stamp paths the
+    // drain no longer closes, or drain paths nothing re-stamped. So every branch
+    // below calls this with the claimed items as read INSIDE its transaction,
+    // immediately before the write that drains them.
+    const advance = (liveClaims: readonly unknown[]): void => {
+      if (next.type !== 'feature_article' && next.type !== 'reference_material') return;
+      const resolvedKeys = SterlingTools.claimedFileKeys(liveClaims);
+      for (const key of outerResolvedKeys ?? []) resolvedKeys.add(key);
+      Object.assign(next, this.advanceBaselines(old as unknown as Record<string, unknown>, next, resolvedKeys));
+    };
+    const previousVersion = (old as unknown as { version?: number }).version;
+    // EXPLICIT-RESOLVES CLOSURE (decision foreign_68988832;
+    // board 68fe8373): drain EXACTLY the named+validated items, through the
+    // SAME drain-log path maintenance_remove uses, so maintenance_remove later
+    // answers already_drained:true. The old implicit chain-based auto-drain
+    // (decision foreign_8ecd435f — every open reconcile_needed/refresh_reference item
+    // on the chain, discharged by ANY write, no claim required) is REMOVED: a
+    // write that does not name an item leaves it open, however tightly linked.
+    //
+    // Since S3 the drain rides INSIDE the store write's own transaction
+    // ([stable-identity-design-v2] contract 5) rather than following it as a
+    // separate loop: a claim that the store cannot close now rolls the version
+    // bump and the snapshot back with it. The tool-layer validation above still
+    // runs FIRST and still owns every message a caller reads (lane rules,
+    // feature_link matching, already-drained traces) — the store's own check is
+    // the transactional backstop, not the explanation.
+    let updated: DurableRecord;
+    // FILLED FROM THE STORE, NEVER FROM `claims` (board b0bb9d96 fix-round
+    // HIGH — see resolved_items' own doc comment above): `claims` is this
+    // call's pre-transaction validation read, which the fold can make stale
+    // before the drain actually runs. Each populated branch below reads the
+    // item immediately before removing it and pushes the COMMITTED snapshot
+    // here instead.
+    const resolvedReceipt: { id: string; system_reason?: string; file_keys?: string[]; text?: string }[] = [];
+    // OUT-PARAM for SterlingStore.applyInPlace's own path-prune (board
+    // 7e779e1f) — filled ONLY on the ordinary in-place branch below, since
+    // that is the only branch calling store.updateRecord; the replaced
+    // (attestation) and append-join branches never shrink a files[]/location
+    // claim, so leaving this empty for them discloses nothing false.
+    const prunedReceipt: { id: string; system_reason?: string; removed: boolean; pruned_paths: string[]; remaining_file_keys: string[] }[] = [];
+    // The store's own validateRecord re-parses the merged record (`next`) and,
+    // on a caller-supplied bad element (e.g. a history entry passed as a bare
+    // string), throws zod's raw ZodError across the store boundary — the
+    // knowledge_append/knowledge_create shared refusal-shape contract (board
+    // 03c92e2a) applies here too, so it is caught and re-rendered the same way.
+    try {
+      if (replaced) {
+        // The attestation path keeps expected_version meaningful by checking it
+        // here: store.supersede has no CAS token of its own, and silently
+        // ignoring a caller's token would be the exact failure the token exists
+        // to prevent.
+        if (expectedVersion !== undefined && previousVersion !== undefined && expectedVersion !== previousVersion) {
+          throw new Error(
+            `${toolName}: stale expected_version — the caller supplied expected_version ${expectedVersion} but record '${old.id}' is at version ` +
+              `${previousVersion}. Nothing was written; re-read the record and retry against version ${previousVersion}.`
+          );
+        }
+        updated = this.store.supersede(old.id, next);
+        for (const claim of claims) {
+          // Read IMMEDIATELY before remove, never the earlier `claims` value:
+          // this narrows the staleness window this lane cannot fully close
+          // (each store.remove below opens its OWN transaction — there is no
+          // single transaction here the way drainResolves gives the ordinary
+          // path — but reading right here is still strictly fresher than the
+          // pre-transaction validation read `claims` holds).
+          const atRemoval = this.store.get(claim.id) as (DurableRecord & { system_reason?: string; file_keys?: string[]; text?: string }) | undefined;
+          this.store.remove(claim.id, ts);
+          if (atRemoval) {
+            resolvedReceipt.push({ id: atRemoval.id, system_reason: atRemoval.system_reason, file_keys: atRemoval.file_keys ?? [], text: atRemoval.text });
+          }
+        }
+      } else if (isAppendJoinWrite) {
+        // THE ATOMIC APPEND-JOIN DISCHARGE. Everything — the fresh reads, the
+        // revalidation, the classification, the article write, and each claimed
+        // item's removal or rewrite — happens inside ONE project-store
+        // transaction, so a failure anywhere unwinds all of it together and
+        // there is no post-commit repair step that can report a landed write as
+        // a failed one. See dischargeAppendJoin for the full invariant.
+        const outcome = this.store.withTransaction(() =>
+          this.dischargeAppendJoin({
+            old,
+            next,
+            resolves: resolves ?? [],
+            chain,
+            appendedPaths: appendJoin!.appendedPaths,
+            expectedVersion,
+            previousVersion,
+            ts,
+            toolName,
+            advance,
+          })
+        );
+        updated = outcome.updated;
+        // Filled only now, after COMMIT: the receipt describes a transition
+        // that actually happened (invariant step 7).
+        appendJoin!.retained.push(...outcome.retained);
+      } else {
+        // EVERY in-place write is CAS-GUARDED, not only the ones that passed a
+        // token (review finding): this tool layer is a READ-MODIFY-WRITE — `next`
+        // is merged from the `old` read at the top of this call — so the version
+        // that read observed IS the write's precondition. Without it two writers
+        // against one store (MCP server + TUI, both importing packages/store) can
+        // each merge from version n and the second silently overwrites the first's
+        // fields: a LOST UPDATE nobody sees, rather than a conflict. Covers
+        // knowledge_append and knowledge_edit too, whose merge is entirely
+        // server-side and had no token to pass.
+        //
+        // A caller-supplied expected_version still WINS — it is a stricter
+        // statement about what the CALLER read, and a mismatch between the two is
+        // itself a conflict worth refusing. A conflict surfaces as the store's own
+        // version-conflict refusal, naming both versions with nothing written; no
+        // retry loop, deliberately (a silent retry would re-merge onto a body the
+        // caller never saw, which is the lost update by another route).
+        const cas = expectedVersion ?? previousVersion;
+        const write = (): DurableRecord =>
+          this.store.updateRecord(old.id, next, {
+            ...(cas !== undefined ? { expected_version: cas } : {}),
+            ...(claims.length ? { resolves: claims.map((claim) => claim.id), resolvedReceipt } : {}),
+            ...(relationRemoval ? { remove_relation: relationRemoval } : {}),
+            prunedReceipt,
+          });
+        if (claims.length) {
+          // The claims already passed the project-mount check above, so the
+          // PROJECT transaction is the one the drain joins (withTransaction is
+          // reentrant): the re-read, the advance and the drain see one state.
+          updated = this.store.withTransaction(() => {
+            advance(claims.map((claim) => this.store.get(claim.id)).filter((item) => item !== undefined));
+            return write();
+          });
+        } else {
+          advance([]);
+          updated = write();
+        }
+      }
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, old.type, toolName);
+      throw err;
+    }
+    // NOTE FOR THE NEXT READER: there is deliberately NO post-write repair step
+    // here. The partial-close rewrite used to live at this point, outside the
+    // article write's transaction, and that placement was the cause of three of
+    // the six defects this mechanism was rebuilt to remove (a lost-debt race, a
+    // post-commit throw reported as "nothing was written", and an unguarded
+    // read-modify-write). It now happens inside dischargeAppendJoin's own
+    // transaction; re-introducing anything here would re-open exactly that gap.
+    this.repointPromotionReview(chain, updated.id, ts);
+    // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): only for the three ruling
+    // types — other types' update responses stay byte-identical. Excludes
+    // the update's own lineage: `chain` (the prior version plus every
+    // ancestor it already carries a 'supersedes' link to — the exact set
+    // repointPromotionReview reuses above) plus the new record's own id, so
+    // the disclosure never names the write's own prior self or its own new
+    // self. Sourced from the registered FTS extractor's text over the
+    // MERGED record about to be persisted.
+    //
+    // `previous_version` rides the echo on the in-place path so a caller can
+    // SEE the bump it just caused (n-1 → n) without a second read — the receipt
+    // for "the id did not move, the version did". The replacement path omits it:
+    // a new record's version 1 has no predecessor of its own.
+    //
+    // THE REPLACEMENT PATH DISCLOSES THE MOVE INSTEAD (review finding): this is
+    // the ONE write where the id legitimately changes, and a receipt that only
+    // carried the new id left the caller's own handle silently dead — the caller
+    // asked to update '<previous_id>' and got back a record with a different id,
+    // with nothing saying so. `identity_moved` names it explicitly; digestWriteEcho
+    // carries it through the default digest receipt the same way it carries
+    // previous_version, so the disclosure survives the projection it is for.
+    const bumpedTo = (updated as unknown as { version?: number }).version;
+    // Sourced from `resolvedReceipt` — the COMMITTED state each populated
+    // branch above captured immediately before removing the item — never from
+    // `claims` (board b0bb9d96 fix-round HIGH; see resolved_items' own doc
+    // comment). Not populated on the append-join path (resolvedReceipt stays
+    // empty there; see the field's own doc comment).
+    const resolvedItems = resolvedReceipt.length
+      ? resolvedReceipt.map((item) => ({ id: item.id, system_reason: item.system_reason, file_keys: item.file_keys ?? [] }))
+      : undefined;
+    // Sourced from `prunedReceipt` — the store's own committed prune, taken
+    // strictly after the resolves drain above, so an item this same write
+    // ALSO named in `resolves` is reported once, as drained, never as pruned
+    // too (board 7e779e1f: SterlingStore.pruneReconcileNeeded's own doc
+    // comment). The drift verdict is computed HERE, against `old` — the
+    // record exactly as it stood before this write — because that is the
+    // baseline a pruned path's "did it actually drift" question is asked of.
+    const prunedItems = prunedReceipt.length
+      ? prunedReceipt.map((item) => ({
+          id: item.id,
+          removed: item.removed,
+          paths: item.pruned_paths.map((path) => ({ path, drifted: this.classifyPrunedPathDrift(old, path) })),
+        }))
+      : undefined;
+    const echo = replaced
+      ? {
+          ...claimsCheck,
+          ...updated,
+          ...(resolvedItems ? { resolved_items: resolvedItems } : {}),
+          ...(prunedItems ? { pruned_reconcile_items: prunedItems } : {}),
+          identity_moved: {
+            previous_id: old.id,
+            note: `an attestation update is a CONCEPT REPLACEMENT, not an in-place version bump (an inspection verdict is immutable by construction): this is a NEW record with a new id, and '${old.id}' was retired pointing at it. Cite '${updated.id}' from here on.`,
+          },
+        }
+      : {
+          ...claimsCheck,
+          ...updated,
+          ...(resolvedItems ? { resolved_items: resolvedItems } : {}),
+          ...(prunedItems ? { pruned_reconcile_items: prunedItems } : {}),
+          previous_version: previousVersion ?? (typeof bumpedTo === 'number' ? bumpedTo - 1 : undefined),
+        };
+    if (SterlingTools.SAME_SUBJECT_TYPES.includes(old.type)) {
+      const registered = RECORD_TYPES[old.type as keyof typeof RECORD_TYPES];
+      const excludeIds = new Set(chain);
+      excludeIds.add(updated.id);
+      const sameSubject = this.sameSubjectDigest(registered ? registered.fts(next) : '', excludeIds);
+      return { ...echo, same_subject: sameSubject };
+    }
+    return echo;
+  }
+
+  /**
+   * knowledge_split (decision compaction-tooling-windowed-read-plus-split,
+   * board 136091d2) mechanically enforces the split invariants decision
+   * 8b87efcb established BY HAND for the hooks-suite split. The MECHANICAL
+   * guarantees — the ones this function actually enforces, in code — are:
+   * files[]/current_ac[]/live_test_refs ENTRIES are relocated VERBATIM (moved
+   * as the identical object, never rewritten), ac_ids are INHERITED never
+   * renumbered, live_test_refs is RE-POINTED (an entry follows its ac_id to
+   * whichever side — parent or child — now owns it), the parent SURVIVES
+   * under its ORIGINAL slug (a split is additive children plus a parent
+   * trim, never a retire-and-replace), and FILE COVERAGE stays TOTAL — every
+   * path the parent owned before the split lands on exactly the parent or
+   * one child afterward, never both, never neither. "VERBATIM" describes
+   * ONLY that entry relocation and these structural invariants — it does
+   * NOT extend to the narrative prose (each child's what_it_does/
+   * intended_behavior, parent_what_it_does/parent_intended_behavior): that
+   * text is caller-authored free-form content, and its fidelity to what the
+   * pre-split parent actually said remains conductor discipline, the same as
+   * any other knowledge_update/knowledge_create body.
+   *
+   * ALL validation — parent type/status, per-child move_files/move_ac_ids
+   * ownership, cross-child claim collisions, child slug collisions (reusing
+   * the same store.articlesBySlug check knowledgeCreate's feature_article
+   * branch uses), and the retain-at-least-one-file floor (full donation is
+   * refused: that shape is retire-and-replace, rejected by decision
+   * 8b87efcb's own alternatives) — runs BEFORE any write, so a call mixing a
+   * valid and an invalid child refuses the WHOLE thing, never creates the
+   * valid one first. One shape is validated only INSIDE knowledgeCreate,
+   * post-write rather than pre-write, because it is knowledgeCreate's own
+   * schema that owns it, not a knowledge_split-specific rule: a child whose
+   * move_files/move_ac_ids/dependencies would make the created record itself
+   * schema-invalid fails there, inside the same transaction, and rolls back
+   * exactly like any other mid-split failure — safe, just not pre-empted.
+   *
+   * The children-plus-parent write then lands in ONE store transaction
+   * (store.withTransaction) so a mid-split failure leaves the store
+   * byte-for-byte untouched — nothing rides on process-level try/catch
+   * cleanup. `resolves` closes named open maintenance items via
+   * validateResolveClaim's split semantics (options.splitMarker) — broader
+   * than knowledgeUpdate's own lane-restricted resolves, since the item a
+   * split most naturally discharges (article_oversize) is outside that
+   * lane: promotion_review still refuses unconditionally (P1), every other
+   * lane closes on a chain-matching feature_link OR the article-oversize
+   * marker for this parent's slug. An item left unnamed stays open, exactly
+   * the explicit-claim posture decision foreign_68988832 established.
+   */
+  knowledgeSplit(input: KnowledgeSplitInput): {
+    parent: { id: string; slug: string; version: number };
+    children: { id: string; slug: string }[];
+    claims_check?: string;
+  } {
+    const { id, children, parent_what_it_does, parent_intended_behavior, reason, resolves } = input;
+
+    if (!Array.isArray(children) || children.length === 0) {
+      throw new Error(`knowledge_split: 'children' must be a non-empty array — at least one child is required; nothing was written.`);
+    }
+
+    const parent = this.resolveRecordId(id, 'knowledge_split');
+    if (parent.type !== 'feature_article') {
+      throw new Error(
+        `knowledge_split: '${id}' resolves to a ${parent.type}, not a feature_article — only a feature_article can be split; nothing was written.`
+      );
+    }
+    if (parent.status !== 'active') {
+      throw new Error(`knowledge_split: parent '${id}' is not active (status ${parent.status}) — only a live feature_article can be split; nothing was written.`);
+    }
+    const parentRec = parent as unknown as {
+      id: string;
+      slug: string;
+      state: string;
+      history: { date: string; event: string; target_id?: string }[];
+      files: { path: string; role: string; unverified?: boolean }[];
+      current_ac: { ac_id: string; text: string; verifiable_at: string }[] | { not_applicable: { reason: string; ruling_record_id?: string } };
+      live_test_refs: { ac_id: string; test_paths: string[] }[] | { not_applicable: { reason: string; ruling_record_id?: string } };
+      dependencies?: { relies_on: string[]; relied_by: string[] };
+    };
+    // Board a9280db7 (decision foreign_c48380bf): current_ac/live_test_refs may now be
+    // the structured not_applicable exemption object on a probe|tool article,
+    // not an array — every read below assumed array shape unconditionally
+    // (.map/.filter), which would THROW rather than refuse cleanly on such a
+    // parent. Normalize FOR THE OWNERSHIP/MOVE bookkeeping only (an
+    // exemption-shaped parent simply owns no ac_id entries to move, so
+    // move_ac_ids validation below refuses it by its EXISTING "not owned by
+    // parent" message, never a crash) — the PARENT UPDATE below does NOT use
+    // these arrays: it preserves the exemption object VERBATIM when present,
+    // so a file-only split of a probe/tool parent keeps its exemption and
+    // succeeds, rather than being silently flattened to an empty array (which
+    // the new schema gate would then reject outright on kind probe/tool).
+    const currentAcIsArray = Array.isArray(parentRec.current_ac);
+    const liveRefsIsArray = Array.isArray(parentRec.live_test_refs);
+    const parentAcArray = currentAcIsArray ? (parentRec.current_ac as { ac_id: string; text: string; verifiable_at: string }[]) : [];
+    const parentRefsArray = liveRefsIsArray ? (parentRec.live_test_refs as { ac_id: string; test_paths: string[] }[]) : [];
+
+    // Child slugs pairwise distinct within this call, and none colliding with
+    // an existing feature_article slug — the same two-records-one-slug refusal
+    // knowledgeCreate's feature_article branch already enforces (board 56c8a509).
+    const seenSlugs = new Set<string>();
+    for (const child of children) {
+      if (seenSlugs.has(child.slug)) {
+        throw new Error(`knowledge_split: two children in this call share slug '${child.slug}' — child slugs must be pairwise distinct; nothing was written.`);
+      }
+      seenSlugs.add(child.slug);
+      const clash = this.store.articlesBySlug(child.slug);
+      if (clash.length) {
+        throw new Error(
+          `knowledge_split: child slug '${child.slug}' collides with an existing feature_article ('${clash[0].id}') — two records under one slug is worse than one wrong record; choose a distinct slug. Nothing was written.`
+        );
+      }
+    }
+
+    // Ownership + no-double-claim validation for move_files/move_ac_ids — ALL
+    // of it before any write (P5): a call mixing a valid and an invalid child
+    // must refuse the WHOLE call, never create the valid one first.
+    const parentPaths = new Set(parentRec.files.map((f) => f.path));
+    const parentAcIds = new Set(parentAcArray.map((a) => a.ac_id));
+    const claimedPaths = new Map<string, string>();
+    const claimedAcIds = new Map<string, string>();
+    for (const child of children) {
+      for (const path of child.move_files ?? []) {
+        if (!parentPaths.has(path)) {
+          throw new Error(
+            `knowledge_split: child '${child.slug}' names move_files path '${path}', which parent '${parentRec.slug}' does not own — nothing was written.`
+          );
+        }
+        if (claimedPaths.has(path)) {
+          throw new Error(
+            `knowledge_split: path '${path}' is claimed by two children ('${claimedPaths.get(path)}' and '${child.slug}') — a path moves to exactly one child; nothing was written.`
+          );
+        }
+        claimedPaths.set(path, child.slug);
+      }
+      for (const acId of child.move_ac_ids ?? []) {
+        if (!parentAcIds.has(acId)) {
+          throw new Error(
+            `knowledge_split: child '${child.slug}' names move_ac_ids '${acId}', which parent '${parentRec.slug}' does not own — nothing was written.`
+          );
+        }
+        if (claimedAcIds.has(acId)) {
+          throw new Error(
+            `knowledge_split: ac_id '${acId}' is claimed by two children ('${claimedAcIds.get(acId)}' and '${child.slug}') — an ac_id moves to exactly one child; nothing was written.`
+          );
+        }
+        claimedAcIds.set(acId, child.slug);
+      }
+    }
+
+    // A child owning zero files is refused — it would be invisible to
+    // path-scoped delivery (same invariant class as the parent's
+    // retain-at-least-one floor). Checked AFTER the ownership/double-claim
+    // loop so a child whose real offense is a bad ac_id is refused by that
+    // name first; the wire schema (.min(1)) refuses the shape outright.
+    for (const child of children) {
+      if (!child.move_files?.length) {
+        throw new Error(
+          `knowledge_split: child '${child.slug}' names no move_files — a child article must own at least one file; nothing was written.`
+        );
+      }
+    }
+
+    // Full donation refused (decision foreign_8b87efcb's own rejected alternatives:
+    // that shape is retire-and-replace, not a split) — the parent must retain
+    // at least one owned file.
+    if (parentRec.files.length > 0 && claimedPaths.size >= parentRec.files.length) {
+      throw new Error(
+        `knowledge_split: this split moves all ${parentRec.files.length} of parent '${parentRec.slug}''s files — the parent must retain at least one owned file (full donation is retire-and-replace, not a split); nothing was written.`
+      );
+    }
+
+    // resolves: validated (broader than knowledgeUpdate's own lane-restricted
+    // check — see validateResolveClaim's options.splitMarker) BEFORE any
+    // write, same duplicate-claim refusal knowledgeUpdate itself applies.
+    if (resolves) {
+      const seen = new Set<string>();
+      for (const rid of resolves) {
+        if (seen.has(rid)) {
+          throw new Error(`resolves: '${rid}' is named more than once — an item can only be claimed once; nothing was written.`);
+        }
+        seen.add(rid);
+      }
+    }
+    const parentChain = this.supersedeChain(parent);
+    const splitMarker = this.articleOversizeMarker(parentRec.slug);
+    const resolveClaims = (resolves ?? []).map((rid) => this.validateResolveClaim(rid, parentChain, { splitMarker }));
+
+    const ts = this.now();
+    const childSlugs = children.map((c) => c.slug).join(', ');
+    const childResults: { id: string; slug: string }[] = [];
+    let parentResult!: DurableRecord;
+
+    // SYMMETRIC DEPENDENCY EDGE (skeptic finding 2, knowledge_get foreign_2334f653):
+    // relied_by is derived at READ time from the union of every OTHER
+    // article's relies_on, so leaving the parent's STORED relied_by
+    // untouched would read back as relied_by_stored_stale the instant a
+    // reader compares it — right after the split that created the mismatch.
+    // Only a child whose relies_on actually names the parent (the default —
+    // dependencies ?? {relies_on: [parentRec.slug], ...} — earns the parent
+    // a back-edge; a caller who passed EXPLICIT dependencies without the
+    // parent gets no fabricated edge. Existing stored entries are preserved
+    // and deduped, never dropped.
+    const reliedByAdditions = children
+      .filter((child) => (child.dependencies?.relies_on ?? [parentRec.slug]).includes(parentRec.slug))
+      .map((child) => child.slug);
+    const parentReliedBy = Array.from(new Set([...(parentRec.dependencies?.relied_by ?? []), ...reliedByAdditions]));
+
+    this.store.withTransaction(() => {
+      for (const child of children) {
+        const movedFiles = parentRec.files.filter((f) => claimedPaths.get(f.path) === child.slug);
+        const movedAc = parentAcArray.filter((a) => claimedAcIds.get(a.ac_id) === child.slug);
+        const movedRefs = parentRefsArray.filter((r) => claimedAcIds.get(r.ac_id) === child.slug);
+        const created = this.knowledgeCreate('feature_article', {
+          slug: child.slug,
+          title: child.title,
+          what_it_does: child.what_it_does,
+          intended_behavior: child.intended_behavior,
+          files: movedFiles,
+          current_ac: movedAc,
+          live_test_refs: movedRefs,
+          dependencies: child.dependencies ?? { relies_on: [parentRec.slug], relied_by: [] },
+          state: parentRec.state,
+          // No `version` passed: the counter is SERVER-OWNED at birth
+          // ([stable-identity-design-v2] contract 1), so knowledgeCreate strips
+          // it and stamps 1 itself. Passing 1 relied on the strip being silent
+          // for that exact value — a contract this surface does not make.
+          history: [{ date: ts, event: `split from '${parentRec.slug}'${reason ? ` — ${reason}` : ''}` }],
+        });
+        childResults.push({ id: created.record.id, slug: child.slug });
+      }
+
+      const remainingFiles = parentRec.files.filter((f) => !claimedPaths.has(f.path));
+      // An exemption-shaped field is preserved VERBATIM (no ac_id was ever
+      // claimable from it, so filtering would be a no-op anyway) rather than
+      // flattened to []: current_ac/live_test_refs on kind probe|tool must
+      // never be re-written to an empty array by this path, or the new
+      // article_kind schema gate (board a9280db7) would reject the parent
+      // update outright on a file-only split.
+      const remainingAc = currentAcIsArray ? parentAcArray.filter((a) => !claimedAcIds.has(a.ac_id)) : parentRec.current_ac;
+      const remainingRefs = liveRefsIsArray ? parentRefsArray.filter((r) => !claimedAcIds.has(r.ac_id)) : parentRec.live_test_refs;
+      const splitEvent = { date: ts, event: `split off ${childSlugs}${reason ? ` — ${reason}` : ''}` };
+      // The claims as they stand NOW, inside this transaction — the same state
+      // the removals below act on — so the parent re-stamps exactly the paths
+      // the split closes (evidence-gated baseline advance).
+      const liveClaimKeys = SterlingTools.claimedFileKeys(
+        resolveClaims.map((claim) => this.store.get(claim.id)).filter((item) => item !== undefined)
+      );
+      parentResult = this.knowledgeUpdate(
+        parentRec.id,
+        {
+          what_it_does: parent_what_it_does,
+          ...(parent_intended_behavior !== undefined ? { intended_behavior: parent_intended_behavior } : {}),
+          files: remainingFiles,
+          current_ac: remainingAc,
+          live_test_refs: remainingRefs,
+          history: [...parentRec.history, splitEvent],
+          dependencies: { relies_on: parentRec.dependencies?.relies_on ?? [], relied_by: parentReliedBy },
+        },
+        undefined,
+        undefined,
+        'knowledge_update',
+        undefined,
+        undefined,
+        liveClaimKeys
+      );
+
+      // Explicit-claim closure (decision foreign_68988832's posture, broadened per
+      // validateResolveClaim's split semantics above): drained INSIDE the
+      // same transaction so a claim only lands alongside a split that
+      // actually landed.
+      for (const claim of resolveClaims) {
+        this.store.remove(claim.id, ts);
+      }
+    });
+
+    return {
+      parent: {
+        id: parentResult.id,
+        slug: (parentResult as unknown as { slug: string }).slug,
+        version: (parentResult as unknown as { version: number }).version,
+      },
+      children: childResults,
+      // Reported from the parent update's own receipt — the check that ran, not
+      // a second derivation of it.
+      ...((parentResult as unknown as { claims_check?: string }).claims_check
+        ? { claims_check: (parentResult as unknown as { claims_check?: string }).claims_check }
+        : {}),
+    };
+  }
+
+  /**
+   * knowledge_split's MCP-facing wrapper (review finding B): every other
+   * write surface re-measures oversize via its own *Result wrapper
+   * (knowledgeUpdateResult, above) after the version lands — knowledgeSplit
+   * itself was measured by NOTHING, so a split that trimmed the parent too
+   * little, or handed a child too much, silently skipped the article_oversize
+   * lane every other write is held to. Wraps knowledgeSplit — which stays
+   * exactly as the frozen split suite calls and asserts it, no warnings
+   * expected there — and appends an ADDITIVE `warnings` sibling, the same
+   * shape knowledgeUpdateResult already returns, covering the trimmed parent
+   * AND every newly-created child.
+   */
+  knowledgeSplitResult(input: KnowledgeSplitInput): {
+    parent: { id: string; slug: string; version: number };
+    children: { id: string; slug: string }[];
+    warnings: string[];
+    claims_check?: string;
+  } {
+    const result = this.knowledgeSplit(input);
+    const warnings: string[] = [];
+    const parentRecord = this.store.get(result.parent.id);
+    if (parentRecord) warnings.push(...this.articleOversizeWarnings(parentRecord));
+    for (const child of result.children) {
+      const childRecord = this.store.get(child.id);
+      if (childRecord) warnings.push(...this.articleOversizeWarnings(childRecord));
+    }
+    return { ...result, warnings };
+  }
+
+  /**
+   * knowledge_extract (decision knowledge-extract-design; board ff07e314): lift
+   * a PASSAGE out of one string field of a live record into a NEW standalone
+   * record, while the original stays active minus the extracted claim. Kin to
+   * knowledge_split (which redistributes a feature_article among children under
+   * one slug) but extract lifts a passage from a PROJECT-SCOPED, NON-ATTESTATION
+   * source (domain sources are refused, pending per-mount transaction routing;
+   * attestation sources are refused because knowledgeUpdate's supersession
+   * semantics contradict extract's stays-live contract) into a fresh record of a
+   * caller-chosen type — the point of the feature being that a half-portable
+   * clause in an article most wants to become a citable decision/research_finding.
+   *
+   * EXCISION IS PASSAGE-SCOPED, not field-scoped (Q1): the removed text is a
+   * (field, find) substring under the SAME exactly-once contract knowledge_edit
+   * enforces (occurrences counted OVERLAP-AWARE by countOccurrences; 0 refused
+   * with the char count, >1 refused as ambiguous). The post-removal value is NEVER taken from
+   * the caller (Q2) — the single occurrence located by the exactly-once check is
+   * spliced in LITERALLY (never String.replace, which would interpret
+   * $&/$`/$'/$$ in caller-supplied `replace` text as substitution patterns),
+   * because the exactly-once check IS the safety property that a blind
+   * full-field retransmit would defeat. `replace` defaults to '' (pure excision).
+   *
+   * PROVENANCE BOTH WAYS (Q4, the architect-flagged highest-risk path): new
+   * --informed_by--> original (the edge knowledge_promote writes) AND original
+   * --cites--> new. Each direction is a real record_relations row written
+   * explicitly, because a generic relation materializes on the SOURCE only at
+   * read — so "both ways" needs one addLink per direction. Both addLink calls run
+   * INSIDE the outer store.withTransaction: `tx` is reentrant (txDepth), so the
+   * create, the source update, and both edges commit as ONE transaction and a
+   * mid-op failure rolls the whole thing back byte-for-byte (validated by the
+   * frozen suite's both-ways + atomicity invariants).
+   *
+   * Extract does NOT cross scope (Q5): the new record inherits the source's scope
+   * (project→project); project→domain stays knowledge_promote's job (compose
+   * extract-then-promote). todo and attestation are barred targets (Q3, mirrors
+   * promote's UNPROMOTABLE). resolves is the PLAIN lane (Q6): reconcile_needed +
+   * refresh_reference only, promotion_review always refused, chain membership by
+   * file_keys overlap with the source (see validateExtractResolveClaim) — drained
+   * inside the same transaction, exactly like knowledge_split's explicit-claim
+   * closure.
+   *
+   * NOTE (history) — the source-update appends ONE history entry ONLY for a
+   * source type whose schema actually defines a `history` field (feature_article
+   * / reference_material). A decision/research_finding/anti_pattern has no history
+   * field (a decision is immutable-by-design, §3.2.1), so a history write would be
+   * refused by refuseUnknownFields; the append is therefore conditional rather
+   * than unconditional as the design's STORE-OPS line reads literally.
+   */
+  knowledgeExtract(input: {
+    id: string;
+    field: string;
+    find: string;
+    replace?: string;
+    new_record: { type: string; fields: Record<string, unknown> };
+    reason?: string;
+    resolves?: string[];
+  }): { extracted: string; source: { id: string; version: number }; edges: { informed_by: string; cites: string }; claims_check?: string } {
+    const { id, field, find, new_record, reason, resolves } = input;
+    const replace = input.replace ?? '';
+
+    // new_record shape + barred target types FIRST (mirrors promote's
+    // UNPROMOTABLE) — a barred type is refused for BEING that type, before any
+    // field/find work, so the refusal names the type rather than an incidental
+    // downstream error.
+    if (!new_record || typeof new_record !== 'object' || typeof new_record.type !== 'string' || typeof new_record.fields !== 'object' || new_record.fields === null) {
+      throw new Error(`knowledge_extract: 'new_record' must be a { type, fields } object — nothing was written.`);
+    }
+    const newType = new_record.type;
+    const BARRED_TARGETS = ['todo', 'attestation'];
+    if (BARRED_TARGETS.includes(newType)) {
+      throw new Error(
+        `knowledge_extract: new_record.type '${newType}' is a barred extraction target — extract lifts a passage into a durable, citable knowledge record; a ${newType} is not one (mirrors knowledge_promote's UNPROMOTABLE). Nothing was written.`
+      );
+    }
+
+    // Resolve the source through the shared ladder, then guard: a superseded id
+    // gets the version-conflict redirect first (refuseStaleAddress), a
+    // non-active source is refused before any write.
+    const original = this.resolveRecordId(id, 'knowledge_extract');
+    this.refuseStaleAddress(original, id, 'knowledge_extract');
+    if (original.status !== 'active') {
+      throw new Error(
+        `knowledge_extract: source '${original.id}' is not active (status ${original.status}) — only a live record can be extracted from; nothing was written.`
+      );
+    }
+
+    // PHYSICAL MOUNT MEMBERSHIP, asked of the STORAGE LAYER — the ONE routing
+    // input for every mount decision in this method (decision
+    // [scope-drift-closed-by-column-authoritative-reads-not-format-change],
+    // part C4). `original` came out of the cross-mount fan, so its body's
+    // `scope` resolves a domain-held record and a project-held one exactly
+    // alike and cannot tell them apart (anti_pattern
+    // [record-body-scope-is-not-physical-store-identity]). The project store is
+    // the only mount a project-local maintenance item lives in, and the mount
+    // that HOLDS the source is the only one its transaction can commit on — so
+    // both questions are answered here, physically, once.
+    const sourceProjectHeld = this.store.projectStoreHolds(original.id);
+    // THE SCOPE THE NEW RECORD INHERITS — the scope of the MOUNT that
+    // physically holds the source, asked of the storage layer (scopeOfHolder),
+    // never reconstructed here.
+    //
+    // WHAT THIS REPLACED: `sourceProjectHeld ? 'project' : original.scope`. Its
+    // project half was right; its DOMAIN half — the only half that actually has
+    // to NAME a mount — fell straight back to the body label, in the one method
+    // whose transaction is already routed physically two lines below. The two
+    // then disagreed for exactly the records the routing exists to handle. A
+    // domain-held source whose label is wrong (or, for a legacy body, absent)
+    // sent `scope` into knowledgeCreate, which routes by storeFor(scope): a
+    // 'project' label targeted the PROJECT store while the transaction was open
+    // on the domain mount, so assertMountAffinity refused and the whole extract
+    // rolled back; a label naming a DIFFERENT mounted domain landed in the wrong
+    // store and was refused the same way; a label naming an UNMOUNTED domain
+    // made storeFor throw mid-transaction. Every one of those turns a valid
+    // extraction into a refusal — the precise outcome the governing decision
+    // REJECTED as its alternative 5 ("the backstop then refuses — turning a
+    // valid extraction into a refusal rather than making it work"). The
+    // transaction half of that fix landed; this line was the residue.
+    //
+    // Deriving both answers from the same physical question also removes the
+    // possibility of them disagreeing: scopeOfHolder names the mount, and
+    // projectStoreHolds (retained above) answers the ATOMICITY question — which
+    // mount this transaction can commit on, and therefore whether project-local
+    // `resolves` items and the check_skipped audit row can ride inside it.
+    const sourceScope = this.store.scopeOfHolder(original.id);
+
+    // PER-MOUNT TRANSACTION ROUTING (board d47a9e2d): a domain-held source's
+    // create + source-trim + both addLinks commit atomically on the ONE mount
+    // that owns the source, via store.withTransactionForRecord(original.id, ...)
+    // below — see mounted.ts's storeHolding/withTransactionForRecord. The one
+    // remaining hazard is `resolves`: maintenance todos are always
+    // project-local (mounted.ts, §3.3), and extract removes each claimed item
+    // INSIDE the transaction (below) — a domain-mount transaction cannot
+    // atomically delete a project-store row, so a non-empty `resolves` is
+    // refused loudly for a source the project store does not hold, rather than
+    // silently split across two connections.
+    if (!sourceProjectHeld && resolves && resolves.length > 0) {
+      throw new Error(
+        `knowledge_extract: source '${original.id}' is held by the '${sourceScope}' mount, not the PROJECT store, and 'resolves' names ${resolves.length} item(s) — maintenance todos are project-local, so a domain-mount extract's transaction cannot atomically close them. Retry without resolves, or close those items separately. Nothing was written.`
+      );
+    }
+
+    // FIXER-MODE (converging review finding, attestation source): knowledgeUpdate
+    // treats an attestation update as a concept REPLACEMENT (fresh id, retired
+    // predecessor — see the ATTESTATION ONLY branch above), which contradicts
+    // extract's "original stays live minus the passage" contract. Refused as a
+    // SOURCE type — attestation is now barred BOTH ways: as a new_record.type
+    // TARGET (BARRED_TARGETS above) and, here, as the extraction SOURCE.
+    // (todo sources remain allowed; only todo as a new_record.type TARGET is barred.)
+    if (original.type === 'attestation') {
+      throw new Error(
+        `knowledge_extract: source '${original.id}' is an attestation — knowledgeUpdate's attestation-supersession semantics (a fresh id + retired predecessor) contradict extract's stays-live contract; attestation sources are refused. Nothing was written.`
+      );
+    }
+
+    // FIXER-MODE (converging review finding, scope): a caller-supplied
+    // new_record.fields.scope must not silently win over the source's scope —
+    // extract NEVER crosses scope (decision knowledge-extract-design Q5); an
+    // explicit mismatching scope is refused, naming both values. An identical
+    // explicit scope is harmless and passes.
+    // Compared against the scope the new record will actually INHERIT — the
+    // scope of the mount that PHYSICALLY holds the source — not against the
+    // source's body label, so the check and the create can never disagree.
+    // MISMATCH-ONLY, deliberately: an unconditional refusal of any explicit
+    // new_record.fields.scope was proposed and WITHDRAWN as too broad
+    // (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change],
+    // corrected 2026-09-06). new_record.fields is CREATION-shaped, `scope` is
+    // legitimate creation input there, and a frozen pin requires an explicitly
+    // supplied scope IDENTICAL to the source's to SUCCEED.
+    if (Object.prototype.hasOwnProperty.call(new_record.fields, 'scope') && new_record.fields.scope !== sourceScope) {
+      throw new Error(
+        `knowledge_extract: new_record.fields.scope '${String(new_record.fields.scope)}' differs from the source's scope '${sourceScope}' — the scope of the mount that physically holds source '${original.id}'. Extract never crosses scope (decision knowledge-extract-design Q5); nothing was written.`
+      );
+    }
+
+    // field/find validation (the same shape knowledge_edit uses): known string
+    // field, non-empty find, exactly-once occurrence.
+    if (typeof find !== 'string' || find.length === 0) {
+      throw new Error(`knowledge_extract: 'find' must be a non-empty string — an empty match would insert at every position; nothing was written.`);
+    }
+    this.refuseUnknownFields(original.type, { [field]: replace }, 'knowledge_extract');
+    const current = (original as unknown as Record<string, unknown>)[field];
+    if (typeof current !== 'string') {
+      throw new Error(
+        `knowledge_extract: '${field}' on ${original.type} is ${current === undefined ? 'absent' : typeof current}, not a string — extract lifts a passage out of a STRING field. Nothing was written.`
+      );
+    }
+    // Counted without a regex, so `find` is the literal text the caller saw —
+    // the SAME overlap-aware mechanism knowledge_edit uses (countOccurrences).
+    const occurrences = SterlingTools.countOccurrences(current, find);
+    if (occurrences === 0) {
+      throw new Error(
+        `knowledge_extract: 'find' appears 0 times in ${original.type}.${field} (${current.length} chars) — nothing was written. ` +
+          `Confirm the exact text (including whitespace and punctuation) before retrying.`
+      );
+    }
+    if (occurrences > 1) {
+      throw new Error(
+        `knowledge_extract: 'find' appears ${occurrences} times in ${original.type}.${field} — refused as ambiguous, nothing was written. ` +
+          `Extend find with surrounding text until it matches exactly one site.`
+      );
+    }
+    // FIXER-MODE (converging review finding, literal replacement): the
+    // exactly-once count above already guarantees a single occurrence, so
+    // splice on that occurrence's own indexOf position rather than
+    // String.replace(find, replace) — String.replace interprets $&/$`/$'/$$
+    // as substitution patterns in caller-supplied `replace` text (e.g.
+    // replace:'$&' would leave the passage in place instead of excising it).
+    // The splice itself now lives in spliceOnce, shared with knowledge_edit's
+    // two paths, which had the String.replace defect this site avoided.
+    const splicedValue = SterlingTools.spliceOnce(current, find, replace);
+
+    // resolves: validated BEFORE any write (P5) — plain lane, file_keys overlap
+    // with the source. Duplicate ids refused loudly, exactly like knowledgeUpdate.
+    if (resolves) {
+      const seen = new Set<string>();
+      for (const rid of resolves) {
+        if (seen.has(rid)) throw new Error(`resolves: '${rid}' is named more than once — an item can only be claimed once; nothing was written.`);
+        seen.add(rid);
+      }
+    }
+    const sourceFileKeys = Array.isArray((original as unknown as { file_keys?: unknown }).file_keys)
+      ? ((original as unknown as { file_keys: string[] }).file_keys)
+      : [];
+    const resolveClaims = (resolves ?? []).map((rid) => this.validateExtractResolveClaim(rid, sourceFileKeys));
+
+    const ts = this.now();
+    // History append is conditional on the source type actually defining a
+    // `history` field — see the NOTE on this method. Types without one (decision,
+    // research_finding, anti_pattern) skip it rather than have refuseUnknownFields
+    // reject the write.
+    const typeHasHistory = (knownFieldsFor(original.type) ?? new Set<string>()).has('history');
+
+    let newId!: string;
+    let sourceVersion!: number;
+    let deferredSkips: SkippedCheck[] = [];
+    // The claim-check disclosure is taken from the create this extract performs,
+    // never re-derived here: the receipt must report the check that actually ran
+    // (including 'unavailable:unmapped_working_tree', which only the candidate
+    // being written can decide).
+    let claimsCheck: { claims_check?: string } = {};
+    // FIXER-MODE (converging review finding, project-scope regression): only a
+    // DOMAIN-HELD source needs the defer-then-flush dance below — its
+    // transaction opens on the domain mount, while recordCheckSkipped always
+    // routes to the PROJECT mount (see the comment above), so an inline audit
+    // write there would commit independently of the domain BEGIN — and, since
+    // the affinity backstop landed, be REFUSED as a cross-mount write. A
+    // project-held source's transaction already IS the project mount, so
+    // its audit row was atomic inline before board d47a9e2d and stays that way
+    // here — deferring it would instead turn a committed project extract into
+    // a window where a post-commit flush failure errors after the records are
+    // already durable. The test is PHYSICAL membership, the same question the
+    // transaction below routes on — a body label cannot answer it.
+    const isDomainScope = !sourceProjectHeld;
+    // ONE transaction on the source's OWNING mount (board d47a9e2d): create the
+    // new record, trim the source, write BOTH provenance edges, drain resolves.
+    // The knowledge RECORDS and their provenance links commit atomically on the
+    // owning mount — any failure inside this body rolls all of them back. What
+    // does NOT belong inside is the check_skipped AUDIT ROW: recordCheckSkipped
+    // always routes to the PROJECT mount (MountedStores.recordCheckSkipped), so
+    // for a domain-scoped source it would commit independently of this domain
+    // BEGIN and survive a rollback. So knowledgeCreate DEFERS its skips here and
+    // they are persisted AFTER a successful commit below — a rolled-back extract
+    // therefore leaves NO audit row, a committed one still records them (P5). Note
+    // the SEAM (deliberately narrow, not the atomicity guarantee the records get):
+    // an audit-row write that itself failed after a successful record commit would
+    // lose the audit row, not corrupt the records. THE SOURCE'S PHYSICAL HOLDER is
+    // the SOLE routing input here (decision
+    // [scope-drift-closed-by-column-authoritative-reads-not-format-change], part
+    // C3): id/alias/slug/prefix resolution above already ran across every mount,
+    // and once `original` is resolved the store that HOLDS it decides where this
+    // transaction opens. Routing on its body's `scope` instead — as this line did
+    // — opened the transaction on the mount the LABEL named while every write
+    // inside it independently resolved to the mount that actually holds the id,
+    // so a drifted label put the BEGIN on the wrong database.
+    this.store.withTransactionForRecord(original.id, () => {
+      // scope inherited from the source (Q5) — from its physical mount, not its
+      // body label. An explicit new_record.fields.scope that DIFFERS was already
+      // refused above, so the spread here can only ever carry the same scope back
+      // (or none at all) — it can no longer override it.
+      const created = this.knowledgeCreate(newType, { scope: sourceScope, ...new_record.fields }, { deferCheckSkipped: isDomainScope });
+      // created.check_skipped is populated either way (knowledgeCreate always
+      // returns what it skipped) — but for a project-scoped source it was
+      // ALREADY persisted inline above (deferCheckSkipped: false), so only a
+      // domain-scoped source's skips are collected here for the post-commit
+      // flush; collecting them unconditionally would double-write the audit
+      // row for project scope.
+      deferredSkips = isDomainScope ? (created.check_skipped ?? []) : [];
+      claimsCheck = created.claims_check ? { claims_check: created.claims_check } : {};
+      newId = created.record.id;
+      const updateBody: Record<string, unknown> = { [field]: splicedValue };
+      if (typeHasHistory) {
+        const priorHistory = Array.isArray((original as unknown as { history?: unknown }).history)
+          ? ((original as unknown as { history: unknown[] }).history)
+          : [];
+        updateBody.history = [
+          ...priorHistory,
+          { date: ts, event: `extracted a passage from '${field}' into ${newType} '${newId}'${reason ? ` — ${reason}` : ''}` },
+        ];
+      }
+      const updated = this.knowledgeUpdate(original.id, updateBody);
+      sourceVersion = (updated as unknown as { version: number }).version;
+      // BOTH-WAYS provenance, each a real record_relations row (the flagged
+      // highest-risk path — direct addLink inside the outer tx, verified to
+      // persist both rows without a nested-tx conflict).
+      this.store.addLink(newId, 'informed_by', original.id);
+      this.store.addLink(original.id, 'cites', newId);
+      // Explicit-claim closure (decision foreign_68988832), drained inside this same
+      // transaction so a claim only lands alongside an extract that landed.
+      for (const claim of resolveClaims) this.store.remove(claim.id, ts);
+    });
+
+    // Post-commit: persist the deferred check_skipped audit rows now that the
+    // mount transaction has committed (see the deferCheckSkipped rationale above).
+    // Same (check, reason, runId, at) shape the in-line skip() would have used.
+    for (const s of deferredSkips) {
+      this.store.recordCheckSkipped(s.check, s.reason, this.activeRunId(), this.now());
+    }
+
+    return {
+      extracted: find,
+      source: { id: original.id, version: sourceVersion },
+      edges: { informed_by: original.id, cites: newId },
+      ...claimsCheck,
+    };
+  }
+
+  /**
+   * knowledge_extract's MCP-facing wrapper (the *Result convention every other
+   * write surface follows): wraps knowledgeExtract — which stays exactly as the
+   * frozen extract suite calls and asserts it — and appends an ADDITIVE
+   * `warnings` sibling, covering the newly-created record AND the trimmed source,
+   * the same article_oversize re-measure knowledgeSplitResult/knowledgeUpdateResult
+   * carry. Warnings never gate the write (P1).
+   */
+  knowledgeExtractResult(input: {
+    id: string;
+    field: string;
+    find: string;
+    replace?: string;
+    new_record: { type: string; fields: Record<string, unknown> };
+    reason?: string;
+    resolves?: string[];
+  }): {
+    extracted: string;
+    source: { id: string; version: number };
+    edges: { informed_by: string; cites: string };
+    warnings: string[];
+    claims_check?: string;
+  } {
+    const result = this.knowledgeExtract(input);
+    const warnings: string[] = [];
+    const newRecord = this.store.get(result.edges.cites);
+    if (newRecord) warnings.push(...this.articleOversizeWarnings(newRecord));
+    const sourceRecord = this.store.get(result.source.id);
+    if (sourceRecord) warnings.push(...this.articleOversizeWarnings(sourceRecord));
+    return { ...result, warnings };
+  }
+
+  /**
+   * knowledge_extract's resolves validator — the PLAIN lane (reconcile_needed +
+   * refresh_reference; promotion_review and every other lane refused), keyed on
+   * FILE_KEYS OVERLAP with the source record rather than the feature_link/chain
+   * predicate validateResolveClaim uses. WHY IT DIVERGES: an extract source is
+   * commonly a decision/research_finding, whose reconcile debt is raised with
+   * file_keys but NO feature_link (feature_link points at feature_articles), so
+   * the feature_link/chain match validateResolveClaim performs would refuse every
+   * such item. Chain membership for a non-article source is therefore file_keys
+   * overlap (the frozen extract suite pins this; conductor ambiguity resolution
+   * #3). EXACT FULL ID ONLY, same as validateResolveClaim — a claim is
+   * hard-deleted as the write lands, so an abbreviation could silently retarget.
+   */
+  private validateExtractResolveClaim(id: string, sourceFileKeys: string[]): DurableRecord {
+    const record = this.store.get(id);
+    if (!record) {
+      if (!SterlingTools.FULL_UUID_RE.test(id)) {
+        throw new Error(
+          `resolves: names '${id}', which is not a full record id — resolves requires the FULL uuid of every maintenance item it claims. ` +
+            `A claimed item is HARD-DELETED as the write lands, so an abbreviated citation could silently retarget to a DIFFERENT item. ` +
+            `Look the item up with maintenance_query and cite its full id; nothing was written.`
+        );
+      }
+      const trace = this.store.drainLogEntry(id);
+      if (trace) {
+        throw new Error(
+          `resolves: names '${id}', which is not OPEN — it was already removed` +
+            (trace.drained_at ? ` at ${trace.drained_at}` : '') +
+            ` (per the drain log). A closed item cannot be re-claimed; nothing was written.`
+        );
+      }
+      throw new Error(
+        `resolves: names '${id}', which does not exist as a maintenance item under that EXACT id; nothing was written.`
+      );
+    }
+    const it = record as unknown as { type: string; source?: string; system_reason?: string; file_keys?: string[] };
+    if (it.type !== 'todo' || it.source !== 'system') {
+      throw new Error(`resolves: names '${id}', which is not a system maintenance-queue item; nothing was written.`);
+    }
+    if (it.system_reason !== 'reconcile_needed' && it.system_reason !== 'refresh_reference') {
+      throw new Error(
+        `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane) — only reconcile_needed and refresh_reference items close via ` +
+          `resolves; every other lane, including promotion_review, closes only through its own mechanism. Nothing was written.`
+      );
+    }
+    const itemFileKeys = Array.isArray(it.file_keys) ? it.file_keys : [];
+    if (!itemFileKeys.some((k) => sourceFileKeys.includes(k))) {
+      throw new Error(
+        `resolves: names '${id}', whose file_keys do not overlap the extract source's — an extract only discharges reconcile debt on its own chain; nothing was written.`
+      );
+    }
+    return record;
+  }
+
+  /**
+   * promotion_review stays a human gate (P1) — a supersession never DRAINS it,
+   * it is not the review being paid. But leaving its feature_link pointed at a
+   * now-superseded id STRANDS it silently (todo 6202a0f5): the review is still
+   * owed, same lineage, so RE-POINT rather than drop. In-place via updateTodo
+   * (no new version, no id churn) so every other reference to the item survives.
+   *
+   * Shared by knowledgeUpdate (decision foreign_01f31039) and knowledge_supersede
+   * (decision foreign_e17794ea). Since S3 ([stable-identity-design-v2]) knowledgeUpdate
+   * writes IN PLACE, so only two shapes actually move an id and owe a re-point:
+   * knowledge_supersede, and knowledgeUpdate's ONE re-minting branch — an
+   * attestation concept replacement. On the in-place path `newId` IS the id the
+   * item already points at, so the `feature_link !== newId` guard below makes
+   * this a no-op rather than a rewrite; it is called unconditionally because the
+   * caller cannot tell the two branches apart cheaply, not because both re-mint.
+   * `chain` is every id this supersession's target answers
+   * for (the old id plus any ancestors it already carries a 'supersedes' link
+   * to) — computed for every type, since promotion_review can point at any
+   * supersedable record, not only feature_article/reference_material.
+   */
+  private repointPromotionReview(chain: Set<string>, newId: string, ts: string): void {
+    for (const item of this.maintenanceQuery({ system_reason: 'promotion_review', cap: 1000 })) {
+      const it = item as DurableRecord & { feature_link?: string; system_reason?: string };
+      if (it.feature_link !== undefined && chain.has(it.feature_link) && it.feature_link !== newId) {
+        this.store.updateTodo(it.id, { ...it, feature_link: newId, updated_at: ts });
+      }
+    }
+  }
+
+  /**
+   * knowledge_promote (§3.3 project→domain promotion EXECUTION): move a
+   * project-scoped learning into a mounted domain store so it is shared by every
+   * project that mounts that domain. Copies the record into the domain store (new
+   * id, scope domain:<name>, content + clocks + author preserved, an informed_by
+   * link back to the origin) and retires the project original as a superseded
+   * tombstone pointing at the promoted copy — provenance and inbound links
+   * survive. Promoting IS the review outcome, so a matching promotion_review is
+   * drained (done = removed). feature_article is always project (§3.3); todo is
+   * a project surface — neither promotes. An unmounted target domain is
+   * rejected loudly by the store routing before anything is written.
+   *
+   * METADATA SANITISATION (board ff07e314, measured 2026-08-22): a whole-record
+   * copy was carrying LOCAL SCAFFOLDING verbatim into the shared per-user
+   * domain store — file_keys (a repo-relative path means nothing outside the
+   * originating project) and stack_tags (copied wholesale, so a record
+   * promoted to one domain kept advertising every OTHER stack tag its origin
+   * project happened to carry). Both are sanitised at this one crossing point:
+   * file_keys is dropped entirely (optional at the schema layer — nothing to
+   * backfill), stack_tags is INTERSECTED with the target domain, and the drop
+   * is disclosed on the receipt (dropped_file_keys/dropped_stack_tags/
+   * kept_stack_tags) alongside a warn-only scan for suspicious project-local
+   * labels (slice labels, repo-relative path mentions) still sitting in the
+   * promoted prose — never a refusal (P1): the reviewer sanitises the source
+   * record and re-promotes if it actually matters.
+   */
+  knowledgePromote(
+    id: string,
+    domain: string
+  ): {
+    promoted: DurableRecord;
+    retired: string;
+    drained_review: string | null;
+    dropped_file_keys: number;
+    dropped_stack_tags: string[];
+    kept_stack_tags: string[];
+    warnings: string[];
+  } {
+    // Through the SHARED LADDER (decision foreign_2debab53), not a raw store.get: a
+    // slug or an 8-char citation prefix resolves here exactly as it does
+    // everywhere else, and — the reason this changed — a HISTORICAL id now
+    // produces the designed refusal naming the canonical record instead of a
+    // bare "no record", which would tell the caller their citation was wrong
+    // when the record is alive under another id ([stable-identity-design-v2]
+    // contract 3).
+    const original = this.resolveRecordId(id, 'knowledge_promote');
+    // Everything downstream addresses the RESOLVED id, never the caller's
+    // spelling: a slug/prefix caller would otherwise tombstone-and-link a
+    // record by a handle the store cannot resolve.
+    const originalId = original.id;
+    if (original.status !== 'active') throw new Error(`knowledge_promote: record '${originalId}' is not active (status ${original.status})`);
+    // BOTH HALVES, neither implying the other (decision
+    // [scope-drift-closed-by-column-authoritative-reads-not-format-change], part
+    // C4): the body must SAY 'project', and the PROJECT store must physically
+    // hold the record. Promotion copies into a domain store and then tombstones
+    // the original in its own store, so a project-LABELLED record that actually
+    // lives in a domain mount would be "promoted" out of one domain store into
+    // another — a shape §3.3 does not define. `scope` is not the routing key for
+    // anything after creation (anti_pattern
+    // [record-body-scope-is-not-physical-store-identity]), so the label alone
+    // cannot answer this.
+    if (original.scope !== 'project') throw new Error(`knowledge_promote: record '${originalId}' is ${original.scope} — only project-scoped records promote`);
+    if (!this.store.projectStoreHolds(originalId)) {
+      throw new Error(
+        `knowledge_promote: record '${originalId}' is labelled scope='project' but the PROJECT store does not hold it — it physically lives in a ` +
+          `domain mount, and its body's scope says nothing about that. Only project-scoped records the project store actually holds promote (§3.3); ` +
+          `nothing was written.`
+      );
+    }
+    const UNPROMOTABLE = ['feature_article', 'todo', 'attestation'];
+    if (UNPROMOTABLE.includes(original.type)) {
+      throw new Error(
+        `knowledge_promote: ${original.type} never promotes — feature_article is always project (§3.3); todo is a project surface; an attestation's artifact_key names a project-local artifact that means nothing in a shared domain store (review finding, 2026-08-21)`
+      );
+    }
+    const ts = this.now();
+    // copy content; the envelope (id/clocks/status/scope/links) is rebuilt for the domain
+    const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, scope: _sc, links: _l, ...content } = original as unknown as Record<string, unknown>;
+
+    // (1) DROP file_keys — a repo-relative path is by definition project-scoped;
+    // the schema leaves the field optional everywhere, so omitting it entirely
+    // satisfies the write with nothing to backfill.
+    const originalFileKeys = Array.isArray((content as Record<string, unknown>).file_keys)
+      ? ((content as Record<string, unknown>).file_keys as unknown[])
+      : [];
+    delete (content as Record<string, unknown>).file_keys;
+
+    // (2) INTERSECT stack_tags with the target domain rather than copying —
+    // promoting to domain:node keeps 'node', drops every other tag (e.g. the
+    // origin project's own 'sterling') the record happened to carry.
+    const originalStackTags = Array.isArray((content as Record<string, unknown>).stack_tags)
+      ? ((content as Record<string, unknown>).stack_tags as string[])
+      : [];
+    const keptStackTags = originalStackTags.filter((t) => t === domain);
+    const droppedStackTags = originalStackTags.filter((t) => t !== domain);
+    // Empty-intersection invisibility (review finding): a record tagged only
+    // for OTHER stacks (e.g. only 'sterling', promoted to domain:node) is a
+    // legitimate promote, but the result carries NO stack_tags at all — and a
+    // zero-tag record is unreachable by every stack_tags-filtered query while
+    // the project original sits tombstoned. Warned, never blocked (P1).
+
+    // RAW-ZOD LEAK INVENTORY (board a00689b9, site 5, adjudicated): a `domain`
+    // outside SCOPE_RE (project|domain:[a-z0-9_-]+ — e.g. an uppercase or
+    // space-bearing name) fails MountedStores.create's own validateRecord call
+    // BEFORE its unmounted-domain routing check ever runs, throwing a raw
+    // ZodError across this boundary — caught and re-rendered the same way as
+    // the other sites (958df5e) rather than leaking the raw issue array.
+    let promoted: DurableRecord;
+    try {
+      promoted = this.store.create({
+        ...content,
+        stack_tags: keptStackTags,
+        id: this.newId(),
+        created_at: ts,
+        updated_at: ts,
+        status: 'active',
+        superseded_by: null,
+        scope: `domain:${domain}`,
+        links: [{ rel: 'informed_by', target_id: originalId }],
+      });
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, original.type, 'knowledge_promote');
+      throw err;
+    }
+    // tombstone the project original, pointing forward to the promoted copy —
+    // 'promoted' (not the default 'retired') so the activity feed names this
+    // for what it is (board 39d6462d)
+    this.store.retireInFavorOf(originalId, promoted.id, ts, 'promoted');
+    const review = this.maintenanceQuery({ system_reason: 'promotion_review', cap: 1000 }).find(
+      (t) => (t as { feature_link?: string }).feature_link === originalId
+    );
+    if (review) this.store.remove(review.id, ts);
+
+    // (3) RECEIPT DISCLOSURE: what crossed the project→domain boundary and
+    // what did not, surfaced on the write result — warn-only, never a
+    // refusal (P1).
+    const warnings: string[] = [];
+    if (originalFileKeys.length) {
+      warnings.push(`dropped ${originalFileKeys.length} file_keys (repo-relative paths are project-scoped and meaningless in a shared domain store)`);
+    }
+    if (droppedStackTags.length) {
+      warnings.push(`dropped stack_tags not shared by domain:${domain}: ${droppedStackTags.join(', ')}`);
+    }
+    if (keptStackTags.length === 0) {
+      warnings.push(
+        `promoted record carries no stack_tags — unreachable by tag-filtered queries; consider tagging it in the domain store`
+      );
+    }
+    warnings.push(...this.suspiciousLocalLabelWarnings(content as Record<string, unknown>));
+
+    return {
+      promoted,
+      retired: originalId,
+      drained_review: review?.id ?? null,
+      dropped_file_keys: originalFileKeys.length,
+      dropped_stack_tags: droppedStackTags,
+      kept_stack_tags: keptStackTags,
+      warnings,
+    };
+  }
+
+  /**
+   * knowledge_promote's warn-only scan (board ff07e314 (c)) over a record's
+   * PROSE for project-local labels that read as fine inside the originating
+   * project but are noise or actively misleading once shared: a slice label
+   * ('S1'/'S2', word-bounded so it never matches inside a longer token) and a
+   * repo-relative path mention (word/word.ext). Covers TOP-LEVEL string
+   * fields (answer/statement/summary/etc) AND the nested string leaves of the
+   * known array fields where the measured pollution actually lived —
+   * history[].event, alternatives_rejected[].{option,reason},
+   * current_ac[].text — walked cheaply rather than a generic deep-walk. Never
+   * a refusal — the finding is surfaced so the reviewer can judge it, per
+   * (3)'s warn-only contract.
+   */
+  private suspiciousLocalLabelWarnings(content: Record<string, unknown>): string[] {
+    const proseParts = Object.values(content).filter((v): v is string => typeof v === 'string');
+    const history = Array.isArray(content.history) ? (content.history as Record<string, unknown>[]) : [];
+    for (const entry of history) if (typeof entry?.event === 'string') proseParts.push(entry.event);
+    const alternatives = Array.isArray(content.alternatives_rejected) ? (content.alternatives_rejected as Record<string, unknown>[]) : [];
+    for (const alt of alternatives) {
+      if (typeof alt?.option === 'string') proseParts.push(alt.option);
+      if (typeof alt?.reason === 'string') proseParts.push(alt.reason);
+    }
+    const currentAc = Array.isArray(content.current_ac) ? (content.current_ac as Record<string, unknown>[]) : [];
+    for (const ac of currentAc) if (typeof ac?.text === 'string') proseParts.push(ac.text);
+    const prose = proseParts.join('\n');
+    const found = new Set<string>();
+    for (const m of prose.matchAll(/\bS\d{1,3}\b/g)) found.add(m[0]);
+    for (const m of prose.matchAll(/\b(?:[\w-]+\/)+[\w.-]+\.[a-zA-Z0-9]{1,6}\b/g)) found.add(m[0]);
+    if (!found.size) return [];
+    const list = [...found];
+    return [
+      `WARNING: possible project-local label(s) in the promoted prose — review before relying on this in a shared domain: ${list.slice(0, 10).join(', ')}${list.length > 10 ? ', …' : ''}`,
+    ];
+  }
+
+  // -- session-event register writers (boards 75b1a05f + 1af5d630) ------------
+
+  /**
+   * The conductor declarations that previously lived ONLY in standalone
+   * scripts (scripts/no-capture.mjs, scripts/concept-designed.mjs) join the
+   * §10 surface: the scripts' relative paths are unreachable from a consuming
+   * project's shell — they live in the plugin clone, not the project cwd, and
+   * the 2026-08-09 retrospective burned two failed node invocations plus a
+   * Glob hunt on exactly that — while the MCP surface is mounted wherever the
+   * store is. The scripts survive as the no-server fallback; both writers
+   * append the SAME sessionEventSchema shape to the same register, so H10
+   * cannot tell them apart — one shape, one consumer (invariant 1).
+   */
+  private appendSessionEvents(entries: { kind: SessionEvent['kind']; detail: string; lane?: NoCaptureLane; target?: string }[]): { at: string } {
+    if (!this.repoRoot) {
+      throw new Error(
+        'session-event write: no project root is known to this server, so the transient register location cannot be resolved — use the script fallback (bin/no-capture.mjs / bin/concept-designed.mjs under ${CLAUDE_PLUGIN_ROOT})'
+      );
+    }
+    const eventsPath = join(this.repoRoot, '.sterling', 'transient', 'session-events.json');
+    mkdirSync(dirname(eventsPath), { recursive: true });
+    let events: unknown[] = [];
+    if (existsSync(eventsPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync(eventsPath, 'utf8'));
+        if (Array.isArray(parsed)) events = parsed;
+      } catch {
+        // tolerate a malformed register exactly as H10 does — degrade to empty
+        // rather than refusing the write (the register is transient state)
+      }
+    }
+    const at = this.now();
+    // `lane` rides through only when present: an entry without it is written
+    // byte-identical to a pre-lane (legacy) event, which H10 reads as the
+    // capture lane (decision no-capture-discharge-is-lane-scoped).
+    for (const e of entries) events.push({ ...e, at });
+    writeFileSync(eventsPath, JSON.stringify(events));
+    return { at };
+  }
+
+  /**
+   * no_capture (§10): the explicit nothing-durable-was-learned declaration
+   * (board 7bbec3bd shape, MCP-served since board 75b1a05f).
+   *
+   * LANE-SCOPED (decision no-capture-discharge-is-lane-scoped,
+   * 51ebe0dd-099e-40a9-abc5-d3c8cc767883; USER-RULED 2026-08-22): the
+   * declaration discharges only the duty lane it CLAIMS. Omitted `lane` is the
+   * BARE declaration — the capture lane only, exactly its pre-2026-08-22
+   * behavior — so clearing the research duty takes lane 'research' or 'all'.
+   * Mirrors scripts/no-capture.mjs --lane (one contract, two producers). An
+   * unrecognized value is REFUSED naming the valid set, never coerced to
+   * 'capture' or 'all': a discharge must be no broader than the human's claim,
+   * and the silent-loss direction (a truthful "typo fix" clearing an unrelated
+   * earlier research duty) is the one that loses knowledge with no trace.
+   */
+  noCapture(reason: string, lane?: string): { declared: string; at: string; lane: NoCaptureLane } {
+    if (!reason || !reason.trim()) {
+      throw new Error(`no_capture: 'reason' is required — a false declaration is drift, so say why there is nothing durable`);
+    }
+    if (lane !== undefined && !(NO_CAPTURE_LANES as readonly string[]).includes(lane)) {
+      throw new Error(
+        `no_capture: lane '${lane}' is not a valid duty lane — use one of ${NO_CAPTURE_LANES.join(' | ')}. ` +
+          `Omitting lane declares the 'capture' lane only; discharging the research duty requires lane 'research' or 'all'. ` +
+          `Nothing was written (decision no-capture-discharge-is-lane-scoped).`
+      );
+    }
+    const declaredLane = lane as NoCaptureLane | undefined;
+    const { at } = this.appendSessionEvents([
+      declaredLane ? { kind: 'no_capture', detail: reason, lane: declaredLane } : { kind: 'no_capture', detail: reason },
+    ]);
+    return { declared: reason, at, lane: declaredLane ?? 'capture' };
+  }
+
+  /** concept_designed (§10): a domain concept family's design settled — H10 will demand the family's concept article (decision foreign_7208729b). */
+  conceptDesigned(families: string[]): { registered: string[]; at: string } {
+    if (!Array.isArray(families) || families.length === 0 || families.some((f) => typeof f !== 'string' || !f.trim())) {
+      throw new Error(`concept_designed: 'families' must be a non-empty array of concept family slugs — blank entries are refused`);
+    }
+    const { at } = this.appendSessionEvents(families.map((f) => ({ kind: 'concept_designed', detail: f })));
+    return { registered: families, at };
+  }
+
+  /**
+   * capture_pending (§10, board 1af5d630): the capture EXISTS and its write is
+   * in flight on a named target (a pending gated commit, a dispatched agent, a
+   * lane). Unlike no_capture this is not a claim that nothing durable was
+   * learned — it is the truthful middle state the register previously could
+   * not express, which trained operators to write boilerplate no_capture
+   * declarations (six in ~90 minutes, measured 2026-08-09), and boilerplate is
+   * exactly how a FALSE declaration eventually slips through. H10's contract
+   * for this kind (decision
+   * capture-pending-grace-per-declaration-held-while-any-dispatch-live): hold
+   * while any dispatched subagent is live, then give THIS declaration event
+   * (identified by its `at` and detail) one Stop of grace, registers preserved
+   * (a landed write settles the duty cleanly), then convert a still-pending
+   * duty to a capture_owed item keyed by its declared target — pending work
+   * defers or lands on the queue, never evaporates.
+   */
+  capturePending(target: string, reason: string): { pending: string; at: string } {
+    if (!target || !target.trim()) {
+      throw new Error(`capture_pending: 'target' is required — name the commit/agent/lane the capture rides, so the deferred debt stays traceable`);
+    }
+    if (!reason || !reason.trim()) {
+      throw new Error(`capture_pending: 'reason' is required — say what capture is in flight`);
+    }
+    const detail = `${target.trim()} — ${reason.trim()}`;
+    // `target` rides as its own field (board f003082d): H10 keys the lapsed
+    // debt on it alone, so the same target with a different reason is one item.
+    const { at } = this.appendSessionEvents([{ kind: 'capture_pending', detail, target: target.trim() }]);
+    return { pending: detail, at };
+  }
+
+  // -- config_set (allowlist removed 2026-09-19, decision scale-down-enforcement-rules-and-locks-are-friction; conductor-run) ------
+
+  configSet(args: { path: string; value: unknown; expected_digest?: string }): { path: string; previous_value: unknown; value: unknown; digest: string } {
+    return configSetImpl(this.repoRoot, args?.path, args?.value, args?.expected_digest);
+  }
+
+  // enforcement_reconcile (the H17 (B) surface taint-latch front door) was
+  // removed together with H17 itself (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — with the latch
+  // gone, its only sanctioned clearer has nothing left to clear.
+
+  // -- board (§3.2.7) ----------------------------------------------------------
+
+  /**
+   * A RE-CHECKABLE REFERENCE, in any one of the accepted forms (board fd0e0907,
+   * article `board-add-evidence-notice`).
+   *
+   * A board item states its EVIDENCE, not its conclusion: "the view faces one
+   * fixed direction (camera.gd:1591 writes an identity basis)" can be re-checked
+   * in one grep; "the facing is broken" cannot, and rots invisibly. MEASURED in
+   * a consuming project (2026-08-28): of eight open defects re-audited, two were
+   * already fixed and three had changed shape — 5 of 8 wrong, and none of it
+   * failed loudly; it failed by sending a session at work that did not need
+   * doing.
+   *
+   * ANY ONE FORM SUFFICES, and the notice therefore fires only on the absence of
+   * ALL of them together. The signal is deliberately NOT "contains a number" —
+   * the board item names that heuristic as too weak, because dates, ids and
+   * priorities are all numbers. What counts is something a later reader can go
+   * and CHECK.
+   *
+   * DELIBERATELY GENEROUS. A noisy advisory gets ignored, and the true positive
+   * goes with it, so every form here errs toward ACCEPTING the text: a false
+   * alarm costs the author's trust in the whole channel, while a missed
+   * evidence-free item costs one un-warned write.
+   */
+  private hasCheckableEvidence(text: string): boolean {
+    return [
+      // a repo-relative path — a token carrying a separator and an extension
+      /[\w.-]+\/[\w./-]*\.\w{1,8}\b/,
+      // a path with a line number (the canonical form the contract quotes)
+      /[\w.-]+\.\w{1,8}:\d+/,
+      // a double-quoted literal, quoted from code or output
+      /"[^"\n]+"/,
+      // a backticked literal
+      /`[^`\n]+`/,
+      // a measured number carrying a unit or a counted noun (never a bare digit)
+      /\b\d[\d,]*(\.\d+)?\s*%/,
+      /\b\d[\d,]*(\.\d+)?\s+[A-Za-z]{3,}/,
+      // a spelled-out count with the thing counted — the AC's worked example
+      // ("three commits") is exactly this shape
+      /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)\s+[A-Za-z]{3,}/i,
+      // a record id, or the 8-char citation prefix this repo cites by
+      /\b[0-9a-f]{8}\b/,
+    ].some((re) => re.test(text));
+  }
+
+  /** The one refusal for blocked_by on a maintenance item, shared by board_add and board_update. */
+  private static blockedBySystemRefusal(toolName: string): Error {
+    return new Error(
+      `${toolName}: 'blocked_by' orders source:'user' board tasks only — maintenance-queue items are lane-keyed by system_reason and never carry blocked_by`
+    );
+  }
+
+  /**
+   * blocked_by AT THE WRITE (decision every-user-ask-is-boarded-at-intake-with-slim-blocked-by,
+   * rule 6). Each entry resolves through the same ladder as board_get (slug, full
+   * uuid, 8-char prefix) and must name an open source:'user' board item that
+   * carries a slug; the SLUG is what gets stored, because a slug is the immutable
+   * address (decision board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address) while the caller's id form is only a way to
+   * find it. Every bad entry is collected and refused in one error naming each,
+   * before anything is written. `selfId` is the item being edited: it cannot
+   * block itself. No cycle detection (the ruling defers it until a session
+   * shows a need). Repeated entries collapse to one.
+   */
+  private resolveBlockedBy(entries: unknown, toolName: string, selfId?: string): string[] {
+    if (!Array.isArray(entries)) {
+      throw new Error(`${toolName}: 'blocked_by' must be a list of board item slugs, got ${typeof entries}`);
+    }
+    const slugs: string[] = [];
+    const refused: string[] = [];
+    for (const entry of entries) {
+      const ref = String(entry);
+      let target: DurableRecord;
+      try {
+        target = this.resolveRecordId(ref, toolName);
+      } catch (err) {
+        refused.push(`'${ref}' does not resolve (${err instanceof Error ? err.message : String(err)})`);
+        continue;
+      }
+      const t = target as unknown as { id: string; type: string; source?: string; status?: string; slug?: string };
+      if (t.type !== 'todo' || t.source !== 'user') {
+        refused.push(`'${ref}' is a ${t.type === 'todo' ? 'maintenance-queue item' : t.type}, not a user board item`);
+      } else if (t.status !== 'active') {
+        refused.push(`'${ref}' is not an open board item (status '${t.status}')`);
+      } else if (selfId !== undefined && t.id === selfId) {
+        refused.push(`'${ref}' is the item itself — an item cannot block itself`);
+      } else if (!t.slug) {
+        refused.push(`'${ref}' (${t.id}) has no slug, and blocked_by stores slugs only`);
+      } else if (!slugs.includes(t.slug)) {
+        slugs.push(t.slug);
+      }
+    }
+    if (refused.length) {
+      throw new Error(`${toolName}: blocked_by refused, nothing written — ${refused.join('; ')}`);
+    }
+    return slugs;
+  }
+
+  /**
+   * Each stored blocker's CURRENT state: open while a live board item still
+   * carries the slug, closed once it has been removed. Read-time only; the
+   * stored list is never rewritten when a blocker closes.
+   */
+  private blockerStates(slugs: readonly string[]): BlockerState[] {
+    return slugs.map((slug) => ({
+      slug,
+      state: this.store.recordsBySlug(slug).some((r) => r.type === 'todo') ? 'open' : 'closed',
+    }));
+  }
+
+  /** blocked_by_state for a record that carries a non-empty blocked_by, else nothing. */
+  private blockedByStateOf(record: DurableRecord): { blocked_by_state?: BlockerState[] } {
+    const list = (record as unknown as { blocked_by?: unknown }).blocked_by;
+    return Array.isArray(list) && list.length ? { blocked_by_state: this.blockerStates(list as string[]) } : {};
+  }
+
+  boardAdd(
+    args: Record<string, unknown>,
+    /**
+     * SECOND PARAMETER, never part of `args` — the tool surface passes the
+     * caller's payload as `args` alone (server.ts board_add), so an internal
+     * mint cannot be impersonated by anything a caller sends. Only
+     * maintenanceEnqueue sets it.
+     */
+    opts?: { internalMint?: boolean }
+  ): CreateResult & { notice?: string } {
+    const { text, source, objective, measured_at_head, blocked_by, ...rest } = args;
+    // Objective grouping (decision foreign_a8d2ce6c): a grouping key for the human's
+    // board only — maintenance items are lane-keyed by system_reason.
+    if (objective !== undefined && source === 'system') {
+      throw new Error(
+        `board_add: 'objective' groups source:'user' board tasks only — maintenance-queue items are lane-keyed by system_reason, never objective-grouped`
+      );
+    }
+    if (blocked_by !== undefined && source === 'system') throw SterlingTools.blockedBySystemRefusal('board_add');
+    // Resolved BEFORE the write, so a refused entry leaves nothing behind.
+    const blockers = blocked_by !== undefined ? this.resolveBlockedBy(blocked_by, 'board_add') : [];
+    // 'standalone' (exact lowercase) is the declared answer for "not a slice";
+    // it normalizes to field-absent so ungrouped items stay shapeless.
+    const normalized = objective === 'standalone' ? undefined : objective;
+    // board-provenance-measured-at-head: server-stamps HEAD at add time unless
+    // the caller supplies its own sha (decision — the foreign_a2a17efa §13.2 incident:
+    // an author who knew the head had nowhere to put it). A caller-supplied
+    // sha that does not resolve in this repo is refused BY NAME rather than
+    // silently replaced with HEAD (P5); an absent/unavailable git degrades to
+    // no stamp at all, same swallow direction as every other write-time probe
+    // in this file — the annotation surface (board_query) is where absence
+    // gets disclosed, not the write.
+    let stampedHead: string | undefined;
+    if (measured_at_head !== undefined) {
+      const candidate = String(measured_at_head);
+      // FIX F5 (review 2026-08-24): the 40-hex SHAPE check runs BEFORE
+      // shaResolves — git resolves an abbreviated sha too, so a short-but-real
+      // value would pass shaResolves and only fail later at the schema layer
+      // with a bare zod message instead of this refusal naming the value.
+      if (!MEASURED_AT_HEAD_RE.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
+        throw new Error(
+          `board_add: measured_at_head '${candidate}' does not resolve to a commit in this repo — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
+        );
+      }
+      stampedHead = candidate;
+    } else {
+      // NARROWED TO THE SCHEMA'S SHAPE. currentHeadSha now also answers with a
+      // 64-hex id in a SHA-256 repository (so the attested close works there),
+      // but `todo.measured_at_head` is pinned to 40 hex — stamping the wider form
+      // would turn today's silent no-stamp degrade into a zod refusal that fails
+      // the whole board write. Unstampable stays unstamped, and board_query's
+      // annotation surface is where the absence is disclosed, exactly as when git
+      // is unavailable.
+      const head = this.currentHeadSha(this.repoRoot);
+      stampedHead = head !== undefined && MEASURED_AT_HEAD_RE.test(head) ? head : undefined;
+    }
+    const res = this.knowledgeCreate(
+      'todo',
+      {
+        text,
+        source,
+        ...(normalized !== undefined ? { objective: normalized } : {}),
+        ...(stampedHead !== undefined ? { measured_at_head: stampedHead } : {}),
+        ...(blockers.length ? { blocked_by: blockers } : {}),
+        ...rest,
+      },
+      // Forwarded, never derived from `args`: a board_add from the TOOL SURFACE
+      // keeps the claim check for every source, system items included.
+      opts?.internalMint === true ? { internalMint: true } : undefined
+    );
+    const notices: string[] = [];
+    if (source === 'user' && objective === undefined) {
+      // Never a throw on the capture path — the item is saved; the default is
+      // disclosed loudly with its remedy (decision foreign_a8d2ce6c: the server has no
+      // caller identity, so a refusal could lose a user-stated task).
+      notices.push(
+        `objective undeclared — saved as standalone; if this task is a slice of a larger objective, set it via board_update {objective: "<name>"}`
+      );
+    }
+    // EVIDENCE, NOT CONCLUSION (board fd0e0907). A NOTICE, NEVER A REFUSAL:
+    // some legitimate items genuinely have no file evidence yet — a design
+    // question, a user ruling to obtain, a coordinating parent — and a refusal
+    // would force either ceremony or a fake citation, both worse than the gap.
+    // It also has to be a notice for the same reason the objective default is:
+    // the server has no caller identity, so refusing could lose a user-stated
+    // task outright. Write time is the only cheap moment to fix this — the
+    // author is still holding the evidence they are about to omit.
+    //
+    // USER ITEMS ONLY (AC4): the maintenance queue is mechanism-minted and
+    // carries a registered system_reason, not prose evidence. Noticing it would
+    // fire on every enqueue forever, which is how a channel gets ignored.
+    if (source === 'user' && !this.hasCheckableEvidence(String(text ?? ''))) {
+      notices.push(
+        `no checkable evidence in this item's text — it reads as a CONCLUSION rather than the evidence for one, so a later reader cannot re-check ` +
+          `it and it will rot invisibly (measured: of eight defects re-audited in one consuming project, 5 of 8 were wrong at HEAD). ` +
+          `Quote the deciding reference: a file:line citation such as src/foo.ts:42, a repo-relative path, the literal string you saw, ` +
+          `a measured count, or the id of the record this concerns. The item WAS saved — fix it in place with board_edit.`
+      );
+    }
+    // NO HANDLE COULD BE DERIVED — SAY SO (review finding 3, 2026-08-29). The
+    // mint is silent by construction: slugify keeps ASCII alphanumerics, so a
+    // headline written entirely in CJK, Cyrillic or emoji ('日本語のタスク')
+    // slugifies to '', mintSlug returns undefined, and the item is saved with
+    // no handle at all and no word said. The item LEAST readable to the slug
+    // machinery is exactly the one a human most needs a name for, so a silent
+    // no-mint is the worst possible place for silence (P5).
+    //
+    // A NOTICE, NOT TRANSLITERATION: romanising a non-Latin script is a
+    // language-specific judgment (は is 'ha' or 'wa' by grammatical role), and
+    // a wrong romanisation is a handle nobody recognises — the same failure the
+    // notice exists to report, wearing a costume. Latin-script accents are a
+    // different case and ARE handled, by the NFD pass in slugify.
+    //
+    // USER ITEMS ONLY: a system maintenance item mints nothing BY DESIGN (see
+    // mintHeadlineOf), so noticing it would fire on every enqueue and say
+    // nothing true.
+    if (source === 'user' && !(res.record as unknown as { slug?: string }).slug) {
+      notices.push(
+        `no handle could be derived from this item's headline — it slugifies to nothing (non-Latin script, digits or symbols only), so this item has no readable name and can be cited only by its id; give it one via board_add {slug: "<handle>"} on a re-add, or lead the text with a Latin-script headline line`
+      );
+    }
+    if (notices.length) return { ...res, notice: notices.join(' | ') };
+    return res;
+  }
+
+  /**
+   * The whole filtered set, uncapped — ONE definition of the board filter, shared
+   * by the capped array (boardQuery, for internal callers) and the disclosed
+   * envelope (boardQueryResult, for the tool surface). Extracted so the two can
+   * never disagree about what "matching" means.
+   */
+  private boardFiltered(filter: BoardFilter): { matching: DurableRecord[]; scanTruncated: boolean } {
+    const todos = this.store.query({ types: ['todo'], file_keys: filter.file_keys, cap: BOARD_SCAN_CAP });
+    // Apply EVERY filter BEFORE the cap slice (audit finding 33/43): capping the
+    // mixed set first silently dropped matching items past the cap (the store
+    // orders updated_at DESC, so long-standing reason-filtered items vanished).
+    let filtered = filter.source ? todos.filter((t) => (t as { source: string }).source === filter.source) : todos;
+    if (filter.system_reason) {
+      filtered = filtered.filter((t) => (t as { system_reason?: string }).system_reason === filter.system_reason);
+    }
+    if (filter.contains) {
+      const needle = filter.contains.toLowerCase();
+      filtered = filtered.filter((t) => ((t as { text?: string }).text ?? '').toLowerCase().includes(needle));
+    }
+    if (filter.objective !== undefined) {
+      // Same normalization the WRITE side applies (decision foreign_a8d2ce6c):
+      // 'standalone' means ungrouped, which is stored as field-absent.
+      const wanted = filter.objective === 'standalone' ? undefined : filter.objective;
+      filtered = filtered.filter((t) => (t as { objective?: string }).objective === wanted);
+    }
+    if (filter.feature_slug !== undefined) {
+      const chain = this.articleChainIds(filter.feature_slug);
+      filtered = chain ? filtered.filter((t) => chain.has((t as { feature_link?: string }).feature_link ?? '')) : [];
+    }
+    // DETERMINISTIC TOTAL ORDER (board abafbd48, Codex-adjudicated, upgrading
+    // b786a84f, PAGING): the store's own order for a rank_terms-less query() is
+    // `updated_at DESC` (mechanical fallback rank, §3.4). Re-sorted here on
+    // that SAME key so the order is a property of this method rather than an
+    // incidental SQL detail — and now `id DESC` as the FINAL tiebreaker, so two
+    // todos sharing one updated_at (minted in the same write, or the same test
+    // tick) no longer resolve to "whatever order the underlying scan happened
+    // to produce" (a non-total order Array.prototype.sort's stability alone
+    // cannot fix, since a fresh scan's own incoming order is not itself
+    // guaranteed stable across calls). A prior version of this comment argued
+    // for returning 0 on a tie; that left ties genuinely unordered across
+    // separate scans, which is exactly what breaks a keyset cursor's "resume
+    // strictly after this tuple" contract — see compareBoardOrder. The total
+    // order alone does not make paging immune to concurrent writes: offset
+    // paging over it can still SKIP an item bumped toward the head between
+    // page fetches (offset is a position, not an identity) — see
+    // BoardFilter.cursor for the continuation that instead cannot omit an
+    // item behind it, at the cost of being unable to surface one that jumps
+    // ahead of it after the cursor was minted.
+    filtered = [...filtered].sort((a, b) => {
+      const rec = (r: DurableRecord) => r as unknown as { updated_at: string; id: string };
+      const ra = rec(a);
+      const rb = rec(b);
+      return compareBoardOrder(ra.updated_at, ra.id, rb.updated_at, rb.id);
+    });
+    // The underlying scan is itself bounded; if it came back full, the count we
+    // can report is a FLOOR, and saying so beats quietly under-reporting (P5).
+    return { matching: filtered, scanTruncated: todos.length >= BOARD_SCAN_CAP };
+  }
+
+  /**
+   * Resolves a feature_slug to its owning article's id PLUS every ancestor id
+   * in its supersede chain — the article's own rel:'supersedes' links, which
+   * accumulate every prior version across reconciles (the same join
+   * knowledgeUpdate's drift-item auto-drain already walks, decision foreign_8ecd435f),
+   * so an item raised against an earlier version of the article still matches
+   * after it was superseded. Returns null when the slug resolves to no article
+   * at all — the caller treats that as "narrows to nothing", not an error.
+   */
+  private articleChainIds(slug: string): Set<string> | null {
+    const articles = this.store.articlesBySlug(slug);
+    if (articles.length === 0) return null;
+    const chain = new Set<string>();
+    for (const article of articles) {
+      chain.add(article.id);
+      for (const link of (article.links ?? []) as { rel: string; target_id: string }[]) {
+        if (link.rel === 'supersedes') chain.add(link.target_id);
+      }
+    }
+    return chain;
+  }
+
+  /**
+   * PARALLEL-LANE SEED — derive `lane_advisory` from the FULL MATCHED SET.
+   *
+   * Deliberately fed `matching`, never the post-cap `records` window: a
+   * collision the caller's cap happens to split across two pages is exactly the
+   * collision most likely to be missed by hand, so scanning the page would make
+   * the advisory least useful precisely where it is most needed.
+   *
+   * `file_keys` is read as a proxy for a slice's WRITE-SET. That proxy was
+   * MEASURED before this shipped (2026-08-29, 14 sampled open user items / ~29
+   * entries): all but ~2 entries were write targets, the exceptions being paths
+   * an item named as the mechanism to derive FROM. So false collisions from
+   * read-only entries are rare; and because this never denies anything, a false
+   * collision costs a line of prose rather than a serialized lane. The blast
+   * radius of the proxy being wrong is bounded BY the advisory-only design.
+   *
+   * Returns undefined — not an empty block — when nothing collides: an empty
+   * advisory is a claim ("checked, nothing found") this cannot honestly make
+   * for items that declare no file_keys at all, and absence keeps the envelope
+   * silent on a board with nothing to say.
+   */
+  private laneAdvisory(matching: DurableRecord[]): LaneAdvisory | undefined {
+    // AC4: system-source items are maintenance debt drained by an artifact-write,
+    // not parallel work — they never join a group, so maintenance_query (all
+    // system) never carries this key.
+    const userItems = matching.filter((r) => (r as unknown as { source?: string }).source === 'user');
+    // path -> the user items declaring it, in `matching` order (updated_at DESC).
+    const byPath = new Map<string, DurableRecord[]>();
+    for (const item of userItems) {
+      const keys = (item as unknown as { file_keys?: unknown }).file_keys;
+      if (!Array.isArray(keys)) continue;
+      // Dedupe WITHIN one item: a path listed twice by one item is not a
+      // collision with itself.
+      for (const path of new Set(keys.filter((k): k is string => typeof k === 'string' && k.length > 0))) {
+        const bucket = byPath.get(path);
+        if (bucket) bucket.push(item);
+        else byPath.set(path, [item]);
+      }
+    }
+    // Merge paths sharing the IDENTICAL item set into one group — that is what
+    // makes `paths` plural. Five slices that all write the same hook AND the
+    // same test file read as one collision, not two.
+    const groups = new Map<string, { paths: string[]; items: DurableRecord[] }>();
+    for (const [path, items] of byPath) {
+      if (items.length < 2) continue; // AC1: two or more, or it is not a collision
+      // Separator is a SOURCE-LEVEL escape (anti-pattern foreign_d7e03137): \x1F cannot
+      // occur in a uuid, so the impossibility property holds without a raw
+      // control byte flipping this file to binary for grep/tooling.
+      const key = items.map((i) => (i as unknown as { id: string }).id).join('\x1F');
+      const group = groups.get(key);
+      if (group) group.paths.push(path);
+      else groups.set(key, { paths: [path], items });
+    }
+    if (groups.size === 0) return undefined; // AC3: absent, never an empty block
+    const collisions: LaneCollision[] = [...groups.values()]
+      .map((g) => ({
+        paths: [...g.paths].sort(),
+        // AC7: name first, id retained — never a bare id in front of a human.
+        items: g.items.map((i) => {
+          const rec = i as unknown as Record<string, unknown>;
+          return { id: String(rec.id), name: SterlingTools.boardItemName(rec) };
+        }),
+      }))
+      // Deterministic and useful: the widest collision first, ties broken on the
+      // first path so the order never depends on Map insertion order.
+      .sort((a, b) => b.items.length - a.items.length || (a.paths[0] < b.paths[0] ? -1 : a.paths[0] > b.paths[0] ? 1 : 0));
+    return {
+      serialized_lane: 'implementation',
+      parallel_safe_lanes: ['read_only_scoping', 'test_authoring'],
+      collisions,
+    };
+  }
+
+  /**
+   * A board item's human-readable name: the clipped first non-blank line of
+   * its CURRENT text (boardDisplayLabel, board 081508d0), falling back to its
+   * slug only when text yields nothing at all. NEVER slug-first: a slug is
+   * minted once and never re-derived (updateTodo), so leading with it is
+   * exactly the defect this fix closes — a renamed/renumbered item shown
+   * under its stale original headline. Deliberately more forgiving than
+   * headlineRecord's name-or-nothing rule: that surface prints a name BESIDE
+   * a field the reader can already see, whereas a collision group's whole job
+   * is to let a human recognise which items collide, and a group of bare
+   * uuids is the unanswerable-question failure this rule exists to close.
+   */
+  private static boardItemName(rec: Record<string, unknown>): string {
+    const label = boardDisplayLabel(rec.text, rec.slug);
+    // Last resort only — an item with neither slug nor text should not exist,
+    // and a marker beats an empty string that reads as a missing field.
+    return label ? clipName(label) : '(unnamed board item)';
+  }
+
+  /** The ONE compact {id8,type,name} record both evidence surfaces (board_query and the removal receipt) emit. */
+  private static artifactEvidenceRecord(r: DurableRecord): ArtifactEvidenceRecord {
+    const body = r as unknown as Record<string, unknown>;
+    return { id8: String(body.id).slice(0, 8), type: String(body.type), name: SterlingTools.artifactEvidenceName(body) };
+  }
+
+  /**
+   * A matched EVIDENCE record's human name: slug → title → question → location,
+   * first present. Deliberately a fallback LADDER rather than a per-type switch:
+   * the evidence set spans seven types with three different naming fields
+   * (feature_article slugs, decision/anti_pattern titles, disconfirmed_hypothesis
+   * and open_question questions, a location-only reference doc), and a switch
+   * would silently name the eighth type `undefined` the day one is registered.
+   * Clipped like every other display name — names clip, ids never do — and the
+   * id8 beside it stays whole, since that is the address the reader cites.
+   */
+  private static artifactEvidenceName(rec: Record<string, unknown>): string {
+    const field = (name: string): string => {
+      const value = rec[name];
+      return typeof value === 'string' && value.trim().length > 0 ? value.trim() : '';
+    };
+    const slug = field('slug');
+    const headline = field('title') || field('question');
+    // ONE EXCEPTION TO SLUG-FIRST, and it is not a type special-case. Of the
+    // evidence types, FOUR auto-mint their slug from their own headline
+    // (knowledgeCreate's mint branch covers decision | anti_pattern |
+    // research_finding | open_question — plus attestation and todo, neither of
+    // which is an evidence type; attestation mints nothing anyway, having no
+    // headline): for those, slug-first would print 'references-item-3642b2c5'
+    // where the record's own name is "references item 3642b2c5" — the SAME name,
+    // kebab-flattened, in front of a human trying to recognise it. NOTE the
+    // predicate is CONTENT-based, not type-based (delta review LOW, 2026-09-01):
+    // a feature_article's slug is authored (schema-required, never minted), but
+    // the common shape — slug 'csv-export' beside title 'CSV export' — satisfies
+    // the predicate and takes the demotion branch, displaying the title. That is
+    // acceptable output for a human; what the predicate protects is a slug that
+    // DIFFERS from its headline's kebab form (a deliberately distinct authored
+    // address), which always wins. disconfirmed_hypothesis and
+    // reference_material carry no slug field at all.
+    if (slug && !SterlingTools.slugIsMintedFrom(slug, headline)) return clipName(slug);
+    if (headline) return clipName(headline);
+    const location = field('location');
+    if (location) return clipName(location);
+    // Should not be reachable for a registered evidence type; a marker beats an
+    // empty string that reads as a missing field (same reasoning as boardItemName).
+    return '(unnamed record)';
+  }
+
+  /**
+   * Whether `slug` is exactly what mintSlug would derive from `headline` — the
+   * bare slugified base, or that base plus the disambiguator mintSlug ACTUALLY
+   * generates. That loop starts at 2 and counts up in canonical decimal, so
+   * '-0', '-1' and '-01' are shapes it can never produce: matching them would
+   * demote an AUTHORED slug ('foo-1' beside a 'foo' title) to its title, which is
+   * the opposite of what this predicate is for. Recognising only the mintable
+   * shape keeps the exception as narrow as its justification.
+   */
+  private static slugIsMintedFrom(slug: string, headline: string): boolean {
+    const base = SterlingTools.slugify(headline);
+    if (!base) return false;
+    if (slug === base) return true;
+    if (!slug.startsWith(`${base}-`)) return false;
+    const suffix = slug.slice(base.length + 1);
+    // Canonical decimal, no leading zeros, >= 2 — mintSlug's own suffix alphabet.
+    return /^[1-9][0-9]*$/.test(suffix) && Number(suffix) >= 2;
+  }
+
+  /**
+   * DERIVED PER-ITEM ARTIFACT EVIDENCE (board 00fa8adb) — board_remove's removal
+   * receipt (removalArtifactEvidence) brought forward to QUERY time, so the
+   * reader auditing a board sees "something was written near this item" BEFORE
+   * choosing what to act on, instead of only at the moment of removal. Same
+   * evidence types, same two arms, same 200-record windows, same since-filter:
+   * the two surfaces share ARTIFACT_EVIDENCE_TYPES precisely so they cannot come
+   * to different conclusions about one item.
+   *
+   * PAGE-SCOPED, like the reconcile drift re-check beside it and for the same
+   * reason: the cost is paid per item actually served, never per matched item.
+   *
+   * COST SHAPE — the whole method is one shared scan plus one query per DISTINCT
+   * file-key set:
+   *  - the CITATION arm runs ONE store.query for the page and JSON.stringify's
+   *    each scanned record ONCE into `bodies`; the per-item test is then a pair
+   *    of substring checks over strings already built, so a 50-item page costs
+   *    one scan and one serialization pass rather than fifty of each.
+   *  - the FILE-KEY arm is memoized on the item's NORMALIZED (deduped, sorted)
+   *    key set. Memoized per set and never UNIONED across items: the store ranks
+   *    by file-key overlap count, so a union query's 200-record window is not the
+   *    union of the individual windows — items with few keys would be crowded out
+   *    by whichever item declared the most, and their evidence would vanish.
+   *    Because it cannot be unioned, it is BUDGETED instead
+   *    (ARTIFACT_EVIDENCE_KEY_SET_QUERY_CAP): `cap` is caller-controlled, so the
+   *    distinct-key-set query count is bounded per page and the overflow is
+   *    disclosed per item and on the envelope, exactly like the reconcile
+   *    re-check's DriftBudget beside it.
+   *
+   * STRICTLY READ-ONLY: unlike removalArtifactEvidence, the keyless case records
+   * NO check_skipped audit row — a query that writes to the store on being read
+   * would make reading the board an event, and the skip is disclosed in the
+   * returned `file_key_check` field instead (the same fact, same call, no write).
+   *
+   * FAILS OPEN: any throw from the evidence scan yields an empty map and
+   * 'unavailable:store_query_failed', because losing the page itself to a broken
+   * advisory annotation would be a far worse trade than losing the annotation.
+   */
+  private pageArtifactEvidence(items: DurableRecord[]): { evidence: Map<string, ArtifactEvidence>; provenance: string } {
+    const evidence = new Map<string, ArtifactEvidence>();
+    if (items.length === 0) return { evidence, provenance: 'checked' };
+    try {
+      // CITATION ARM, hoisted: one scan + one serialization pass for the page.
+      const scanned = this.store.query({ types: ARTIFACT_EVIDENCE_TYPES, cap: ARTIFACT_EVIDENCE_SCAN_CAP });
+      const bodies = scanned.map((r) => JSON.stringify(r));
+      const fileKeyScans = new Map<string, DurableRecord[]>();
+      let truncated = false;
+      for (const item of items) {
+        const rec = item as unknown as { id: string; created_at: string; file_keys?: unknown };
+        const since = rec.created_at;
+        const fileKeys = Array.isArray(rec.file_keys)
+          ? [...new Set((rec.file_keys as unknown[]).filter((k): k is string => typeof k === 'string' && k.length > 0))].sort()
+          : [];
+        let fileKeyMatches: DurableRecord[] = [];
+        let file_key_check: ArtifactEvidence['file_key_check'] = fileKeys.length > 0 ? 'checked' : 'skipped:no_file_keys';
+        if (fileKeys.length > 0) {
+          // Keyed on the normalized set, so two items declaring the same paths in
+          // different order share one query rather than issuing two identical ones.
+          //
+          // INJECTIVE BY CONSTRUCTION (Codex review, this slice — the same finding
+          // and the same remedy as the reconcile re-check's memo key): a separator
+          // join can never be impossibility-proof here, because normalizeRepoPath
+          // permits ANY byte in a path, \x1F included, so crafted key sets
+          // (["a","b\x1Fc"] vs ["a\x1Fb","c"]) would alias and one item would read
+          // another item's store result. JSON.stringify of the array is injective
+          // for arbitrary strings.
+          const memoKey = JSON.stringify(fileKeys);
+          let scan = fileKeyScans.get(memoKey);
+          if (!scan) {
+            // BUDGET, checked only on a MISS: a memo hit issues no query and
+            // therefore costs nothing. Once the page's distinct-key-set allowance
+            // is spent, this item's file-key arm abstains LOUDLY rather than
+            // returning a zero that reads as "checked and found nothing" — and its
+            // citation arm below still runs, since that scan is shared and paid.
+            if (fileKeyScans.size >= ARTIFACT_EVIDENCE_KEY_SET_QUERY_CAP) {
+              truncated = true;
+              file_key_check = 'unavailable:budget';
+            } else {
+              scan = this.store.query({ types: ARTIFACT_EVIDENCE_TYPES, file_keys: fileKeys, cap: ARTIFACT_EVIDENCE_SCAN_CAP });
+              fileKeyScans.set(memoKey, scan);
+            }
+          }
+          // The since-filter is PER ITEM even when the scan is shared: two items
+          // over the same files were created at different times.
+          fileKeyMatches = (scan ?? []).filter((r) => r.created_at >= since || r.updated_at >= since);
+        }
+        const prefix = rec.id.slice(0, 8);
+        const idMatches = scanned.filter(
+          (r, i) => (r.created_at >= since || r.updated_at >= since) && (bodies[i].includes(rec.id) || bodies[i].includes(prefix))
+        );
+        // Dedupe across the arms by record id — file_keys order first, then any
+        // citation match not already covered (removalArtifactEvidence's order).
+        const seen = new Set<string>();
+        const combined: DurableRecord[] = [];
+        for (const r of [...fileKeyMatches, ...idMatches]) {
+          if (seen.has(r.id)) continue;
+          seen.add(r.id);
+          combined.push(r);
+        }
+        evidence.set(rec.id, {
+          count: combined.length,
+          // The count stays FULL while the named records clip: a reader must be
+          // able to see that six things were written even when only three fit.
+          ...(combined.length > 0
+            ? {
+                records: combined.slice(0, ARTIFACT_EVIDENCE_RECORD_CAP).map((r) => SterlingTools.artifactEvidenceRecord(r)),
+              }
+            : {}),
+          file_key_check,
+        });
+      }
+      return { evidence, provenance: truncated ? 'checked:budget_truncated' : 'checked' };
+    } catch {
+      // FAIL OPEN — the page survives, and the envelope says the check did not run.
+      return { evidence: new Map(), provenance: 'unavailable:store_query_failed' };
+    }
+  }
+
+  boardQuery(filter: BoardFilter = {}, surface: BoardSurface = 'board_query'): DurableRecord[] {
+    return this.pageBoard(surface, this.boardFiltered(filter).matching, filter).records;
+  }
+
+  /**
+   * ONE page of an already-sorted `matching` set, shared by boardQuery and
+   * boardQueryResult — and by BOTH board_query and maintenance_query, which
+   * is why `surface` is explicit rather than assumed (board abafbd48
+   * re-review, HIGH: a maintenance_query refusal must never say "board_query").
+   * `offset` and `cursor` are two different continuation strategies over the
+   * SAME total order (compareBoardOrder) — passing both is ambiguous and
+   * refused; a `cursor` that fails to decode, or was minted under DIFFERENT
+   * filters than this call, is refused naming the parameter/mismatch, never
+   * silently ignored (board abafbd48 re-review, MEDIUM-HIGH). `capped` is
+   * exact (more matched than returned); when true, `next_cursor` names the
+   * boundary for a keyset-continued next call — present whenever more
+   * remains, regardless of which strategy read this page.
+   */
+  private pageBoard(
+    surface: BoardSurface,
+    matching: DurableRecord[],
+    filter: BoardFilter
+  ): { records: DurableRecord[]; offset: number; capped: boolean; next_cursor?: string } {
+    const cap = filter.cap ?? DEFAULT_BOARD_CAP;
+    if (filter.cursor !== undefined && filter.offset !== undefined) {
+      throw new Error(
+        `${surface}: 'cursor' and 'offset' are two different continuation strategies — passing both is ambiguous and refused; page with one or the other, never both.`
+      );
+    }
+    const currentIdentity = boardCursorIdentity(surface, filter);
+    const rest =
+      filter.cursor !== undefined
+        ? (() => {
+            const decoded = decodeBoardCursor(surface, filter.cursor as string);
+            const mismatch = describeIdentityMismatch(decoded.identity, currentIdentity);
+            if (mismatch) {
+              throw new Error(
+                `${surface}: this cursor was minted for a DIFFERENT query (${mismatch}) — a cursor is a position in ONE specific query's ` +
+                  `total order, so continuing it under different filters (source/system_reason/objective/file_keys/contains/feature_slug) is ` +
+                  `refused rather than silently omitting whatever the new filter excludes but the old one didn't. cap/projection may change ` +
+                  `freely; start a fresh, uncursored call to change anything else.`
+              );
+            }
+            return matching.filter((r) => {
+              const rec = r as unknown as { updated_at: string; id: string };
+              return compareBoardOrder(rec.updated_at, rec.id, decoded.updated_at, decoded.id) > 0;
+            });
+          })()
+        : matching.slice(filter.offset ?? 0);
+    const records = rest.slice(0, cap);
+    const capped = records.length < rest.length;
+    const last = records[records.length - 1] as unknown as { updated_at: string; id: string } | undefined;
+    return {
+      records,
+      offset: filter.offset ?? 0,
+      capped,
+      next_cursor: capped && last ? encodeBoardCursor(surface, filter, last.updated_at, last.id) : undefined,
+    };
+  }
+
+  /**
+   * The MCP-facing result for board_query / maintenance_query: the same envelope
+   * knowledge_query gained in decision foreign_b47889b7, extended to the two surfaces it
+   * MISSED. That omission was reported from the field within a day: "maintenance_
+   * query caps at 50 silently. No count, no '50 of N'. I only learned the tail was
+   * deep because removing 19 revealed 19 more, including a capture_owed reason not
+   * previously visible." A queue that under-reports its own depth reads as drained
+   * when it is merely truncated — and a drain is exactly the operation that must
+   * know what remains.
+   *
+   * One difference from knowledge_query, in this surface's favour: the filter runs
+   * in JS over the scanned set, so `capped` here is EXACT (returned < matching)
+   * rather than the returned === cap heuristic that FTS rank-blindness forces
+   * there. The field NAME is deliberately the same (matched_filter = records
+   * matching the filter you gave) — one name per concept, with each tool
+   * documenting its own guarantee.
+   */
+  boardQueryResult(filter: BoardFilter = {}, surface: BoardSurface = 'board_query'): BoardQueryResult {
+    const { matching, scanTruncated } = this.boardFiltered(filter);
+    const cap = filter.cap ?? DEFAULT_BOARD_CAP;
+    const { records, offset, capped, next_cursor } = this.pageBoard(surface, matching, filter);
+    const projection = filter.projection ?? 'text';
+    const notes: string[] = [];
+    // MODE-SPECIFIC ADVICE (board abafbd48 re-review, MEDIUM): this page was
+    // read by cursor iff the caller passed one — `offset` on the pageBoard
+    // result is always 0 in that mode (nothing was ever asked to position-page),
+    // so surfacing "offset:0" as a continuation there would just re-fetch this
+    // SAME page, not the next one. A cursor page therefore offers ONLY
+    // next_cursor; an offset page offers both, since either genuinely continues
+    // it. The keyset claim itself is qualified, not absolute (server.ts states
+    // the same boundary): a cursor page can never OMIT an item that was behind
+    // the cursor, but it also cannot surface one that jumped AHEAD of the
+    // cursor after it was minted — a churn-exposed walk still needs a
+    // terminal head re-query either way.
+    const cursorMode = filter.cursor !== undefined;
+    if (capped) {
+      const cursorAdvice =
+        `page with cursor:"${next_cursor}" to continue by KEYSET — it will never omit an item that was behind the cursor, ` +
+        `though it still cannot surface one that jumped AHEAD of the cursor after this page was read`;
+      const offsetAdvice = `or offset:${offset + records.length} to continue by position (can SKIP an item bumped toward the head between page fetches)`;
+      notes.push(
+        `cap reached — showing ${records.length} of ${matching.length} matching items${cursorMode ? '' : ` (offset ${offset})`}; ` +
+          (cursorMode ? cursorAdvice : `${cursorAdvice}, ${offsetAdvice}`) +
+          `, or raise cap to see more per page (a drain that stops at the cap leaves the tail behind)` +
+          // PROJECTION HINT PER RUNG, not full-only (board fb7c43fb): a capped
+          // DIGEST page is still paying per-item text it can shed, so it gets
+          // the next rung down; only `headline` — the smallest rung there is —
+          // has nothing left to offer and stays hint-free.
+          (projection === 'full'
+            ? `, or re-run with projection:"digest"/"headline" for compact items (board items run to several KB of text each)`
+            : projection === 'digest' || projection === 'text'
+              ? `, or re-run with projection:"headline" for the smallest per-item line (id, priority, system_reason, first 80 chars)`
+              : '')
+      );
+    }
+    if (scanTruncated) {
+      notes.push(
+        `the underlying todo scan hit its ${BOARD_SCAN_CAP}-record ceiling, so matched_filter is a FLOOR, not a total — ` +
+          `and PAGING IS BOUNDED BY THAT SAME CEILING EITHER WAY: an offset at or past ${BOARD_SCAN_CAP} addresses items the scan never reached, so it cannot be served (an empty page here is not necessarily the end of the queue), and cursor paging is equally bounded — a cursor whose position lies past the scanned window cannot resume into rows the scan never saw either`
+      );
+    }
+    // board-provenance-measured-at-head: ONE bounded git walk for this whole
+    // page (never per item), then the warning — if any — is appended to the
+    // projected record's `text` (full/digest/headline all read `text`, and
+    // this keeps the annotation visible through whichever projection the
+    // caller asked for without adding a wire field no projection declares).
+    const { status: provenance, warnings } = this.computeProvenance(records, this.repoRoot);
+    // TRUTH AT READ (decision queue-truth-at-read-annotation-design): the ONE
+    // integration point for the reconcile_needed drift re-check. Gated INSIDE to
+    // this page's source:'system'/reconcile_needed rows, so a source:'user'
+    // query pays nothing; maintenance_query delegates to this same method, so
+    // both public views of one row agree about whether it is a closeable no-op.
+    // AFTER pagination, deliberately: the check is page-scoped, never
+    // matched-set-scoped, because its cost is per item actually served.
+    const { status: reconcile_provenance, annotations: reconcileNotes } = this.reconcileTruthAtRead(records);
+    if (reconcile_provenance === 'checked:budget_truncated') {
+      notes.push(
+        `the reconcile_needed drift re-check hit its per-call BUDGET on this page and was TRUNCATED — the items it could not finish ` +
+          `say 'unavailable:budget' themselves and must be treated as OPEN; narrow the page (cap/offset, or system_reason) to re-check them`
+      );
+    }
+    // PARALLEL-LANE SEED: derived from `matching` (the FULL matched set), NOT
+    // from `records` — see laneAdvisory. Advisory only: it is computed after
+    // `records` is already fixed and never touches it.
+    const lane_advisory = this.laneAdvisory(matching);
+    // DERIVED ARTIFACT EVIDENCE (board 00fa8adb): PAGE-scoped — computed from
+    // `records`, after cap/offset/cursor resolution, never from `matching` (the
+    // opposite of lane_advisory above, deliberately: an advisory about lane
+    // collisions is useless if the cap splits the collision, whereas this one's
+    // cost is per item actually served and its verdict is per item anyway).
+    const { evidence: artifactEvidence, provenance: artifact_evidence_provenance } = this.pageArtifactEvidence(records);
+    if (artifact_evidence_provenance === 'checked:budget_truncated') {
+      notes.push(
+        `the artifact_evidence FILE-KEY arm hit its per-call query budget on this page — the items it could not reach say ` +
+          `file_key_check:'unavailable:budget' themselves and their count is a CITATION-ONLY floor; narrow the page (a smaller cap, or offset/cursor) to check them`
+      );
+    }
+    const projectRecord = (r: DurableRecord): Record<string, unknown> => {
+      const projected =
+        projection === 'text'
+          ? textRowRecord(r as unknown as Record<string, unknown>)
+          : projection === 'headline'
+            ? headlineRecord(r as unknown as Record<string, unknown>)
+            : projection === 'digest'
+              ? digestRecord(r as unknown as Record<string, unknown>)
+              : { ...(r as unknown as Record<string, unknown>) };
+      // text and full rows carry each blocker's current state beside the stored
+      // blocked_by list (rule 6); headline and digest stay one compact line.
+      const base = projection === 'text' || projection === 'full' ? { ...projected, ...this.blockedByStateOf(r) } : projected;
+      const id = (r as unknown as { id: string }).id;
+      const warning = warnings.get(id);
+      // COMPOSED AFTER THE PROJECTION CLIP, like the provenance warning beside
+      // it and for the same reason: a verdict clipped away by digest/headline
+      // would make those surfaces the ones that lie about the item.
+      const note = reconcileNotes.get(id);
+      // ALSO after the clip, and a WIRE FIELD rather than an appendix to `text`
+      // (the two annotations above ride `text` because they are prose): the
+      // block is structured data every projection can carry, and it is ABSENT
+      // when the derivation failed, never a zero-count that would read as a
+      // checked-and-found-nothing result.
+      const derived = artifactEvidence.get(id);
+      // projection:'text' keeps only the COUNT (the per-row records list is
+      // the heavy part); absent when the derivation failed, as in full.
+      const withEvidence = derived
+        ? projection === 'text'
+          ? { ...base, artifact_evidence_count: derived.count }
+          : { ...base, artifact_evidence: derived }
+        : base;
+      if (!warning && !note) return withEvidence;
+      const text = typeof base.text === 'string' ? base.text : '';
+      // OUTSIDE-MODEL FINDING 3: headline's line stays compact (short markers,
+      // appended directly, no separator) — the full sentences only land on
+      // digest/full, which already tolerate multi-line text. Both annotations
+      // can apply to one row (an aged keyed item whose drift is also gone), so
+      // they compose rather than one displacing the other.
+      // Keep the compact row's text bounded without clipping away warnings.
+      // Both annotations remain visible as separate scalar fields.
+      if (projection === 'text') return { ...withEvidence, ...(warning ? { provenance_warning: warning.short } : {}), ...(note ? { reconcile_warning: note.short } : {}) };
+      if (projection === 'headline') return { ...withEvidence, text: `${text}${warning ? warning.short : ''}${note ? note.short : ''}` };
+      const parts = [text, warning?.full, note?.full].filter((p): p is string => typeof p === 'string' && p.length > 0);
+      return { ...withEvidence, text: parts.join('\n\n') };
+    };
+    return {
+      matched_filter: matching.length,
+      returned: records.length,
+      cap,
+      capped,
+      offset,
+      provenance,
+      reconcile_provenance,
+      // KEYSET CONTINUATION (board abafbd48): present only when more items
+      // remain past this page — absent, never null, mirroring lane_advisory's
+      // own "presence is the signal" convention.
+      ...(next_cursor !== undefined ? { next_cursor } : {}),
+      // AC3: the key is ABSENT when nothing collides, never an empty block.
+      // Non-full projections carry only the group count.
+      ...(lane_advisory ? (projection === 'full' ? { lane_advisory } : { lane_advisory_count: lane_advisory.collisions.length }) : {}),
+      // board 00fa8adb: the status ALWAYS present (an absent per-item block must
+      // be readable as "not checked" rather than "nothing found"), and the
+      // reading instruction with it — once per envelope, not once per item.
+      artifact_evidence_provenance,
+      artifact_evidence_note: projection === 'full' ? ARTIFACT_EVIDENCE_NOTE : ARTIFACT_EVIDENCE_NOTE_SHORT,
+      ...(notes.length ? { note: notes.join('; ') } : {}),
+      // AC6: unchanged, unfiltered, unreordered — the advisory above is derived
+      // FROM this page's matched set and never acts on it.
+      records: records.map(projectRecord),
+    };
+  }
+
+  /**
+   * IN-PLACE edit of a board/queue item's text/priority/file_keys (work order
+   * 9a06b6aa) — the id stays stable and NO new version is minted, unlike every
+   * other durable record's change primitive (knowledge_update supersedes). That
+   * asymmetry is deliberate: a todo is not in the immutable set (only decision
+   * is), and rewriting one via remove+re-add was costing full retransmission on
+   * every edit ("every retransmission is a chance to corrupt an item that was
+   * previously correct") while stranding every reference keyed on the old id
+   * (feature_link, H7/H10 items) on every edit — the id-rot complaint this
+   * closes.
+   *
+   * UPDATING NEVER CLOSES AN ITEM: board_remove, bound to the fulfilling
+   * artifact-write, remains the only exit (P4) — this is not a soft-close and
+   * must not be used as one.
+   *
+   * Only text/priority/file_keys may change through this path: source and
+   * system_reason decide which surface (board vs. queue) an item lives on, and
+   * an edit must never move an item between them; status/id/created_at/type/
+   * superseded_by are server-owned everywhere else in this store, and this
+   * surface is no exception. Anything outside that set is REFUSED BY NAME,
+   * naming the valid set — the same refuse-don't-drop convention as
+   * refuseUnknownFields/refuseServerOwnedFields (decision foreign_b47889b7 class) —
+   * rather than silently ignored, which would report success on a write that
+   * changed nothing the caller asked for. An empty patch is refused for the
+   * same reason: nothing to update is not a no-op success.
+   */
+  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective', 'measured_at_head', 'blocked_by'] as const;
+
+  boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord & { claims_check?: string } {
+    // Resolves through the SAME ladder as knowledge_get/board_get (full uuid,
+    // exact slug, 8-char citation prefix — resolveRecordId, decision foreign_2debab53):
+    // board_update previously used a raw store.get(id), so an unresolved
+    // prefix that board_get resolved fine threw a bare "no record" here
+    // (measured 2026-08-22 friction). A HistoricalIdError is deliberately left
+    // to propagate unchanged — a write must address the live record, never a
+    // version-pinned dead id.
+    const old = this.resolveRecordId(id, 'board_update');
+    if (old.type !== 'todo') throw new Error(`board_update: '${id}' is a ${old.type}, not a task — board_update only edits board/queue items`);
+    const updatable: readonly string[] = SterlingTools.BOARD_UPDATABLE_FIELDS;
+    const unknown = Object.keys(patch).filter((k) => !updatable.includes(k));
+    if (unknown.length) {
+      throw new Error(
+        `board_update: ${unknown.map((k) => `'${k}'`).join(', ')} ${unknown.length === 1 ? 'is' : 'are'} not editable through board_update — ` +
+          `only ${updatable.join('/')} may change in place. source/system_reason decide which surface an item lives on and must never move by edit; ` +
+          `status/id/created_at/type/superseded_by are server-owned. Updating never closes an item — board_remove, bound to the fulfilling ` +
+          `artifact-write, remains the only exit. Valid fields: ${updatable.join(', ')}.`
+      );
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new Error(`board_update: no fields to update — pass at least one of ${updatable.join(', ')}`);
+    }
+    if ('blocked_by' in patch) {
+      if ((old as unknown as { source?: string }).source === 'system') throw SterlingTools.blockedBySystemRefusal('board_update');
+      patch = { ...patch, blocked_by: this.resolveBlockedBy(patch.blocked_by, 'board_update', old.id) };
+    }
+    // board-provenance-measured-at-head: a text/file_keys rewrite carries new
+    // evidence, so it re-stamps measured_at_head to the CURRENT HEAD — unless
+    // the caller explicitly named a measured_at_head in this same patch, which
+    // wins verbatim (validated below). priority/objective-only patches leave
+    // the field untouched entirely (no key added to `next`). A caller-supplied
+    // measured_at_head that does not resolve is refused by name, never
+    // silently replaced with HEAD (P5) — on EITHER path (bare re-verify or
+    // alongside a text/file_keys change).
+    if ('measured_at_head' in patch) {
+      const candidate = String(patch.measured_at_head);
+      // FIX F5: shape check before shaResolves (see boardAdd's identical fix).
+      if (!MEASURED_AT_HEAD_RE.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
+        throw new Error(
+          `board_update: measured_at_head '${candidate}' does not resolve to a commit in this repo — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
+        );
+      }
+    } else if ('text' in patch || 'file_keys' in patch) {
+      // Narrowed to the schema's 40-hex shape, same reasoning as boardAdd's
+      // stamping arm: a 64-hex SHA-256 id would be refused by zod, converting a
+      // silent no-stamp into a failed board write.
+      const head = this.currentHeadSha(this.repoRoot);
+      if (head && MEASURED_AT_HEAD_RE.test(head)) patch = { ...patch, measured_at_head: head };
+    }
+    const next = { ...old, ...patch, updated_at: this.now() } as Record<string, unknown>;
+    // 'standalone' clears the grouping to absent (decision foreign_a8d2ce6c) — the same
+    // sentinel board_add takes, so re-grouping and un-grouping share one vocabulary.
+    if (next.objective === 'standalone') delete next.objective;
+    // An empty blocked_by clears the field to absent, like 'standalone' above.
+    if (Array.isArray(next.blocked_by) && next.blocked_by.length === 0) delete next.blocked_by;
+    // old.id (the resolved canonical id), not the caller's possibly-short
+    // citation — a mounted domain store's routing (storeHolding) keys off the
+    // real id, and a bare prefix would not resolve there.
+    //
+    // RAW-ZOD LEAK INVENTORY (board a00689b9, site 2): store.updateTodo
+    // re-parses the merged candidate against the todo schema (e.g. an empty
+    // `text` fails its min(1)) and throws the raw ZodError across the store
+    // boundary — caught and re-rendered the same way as knowledgeUpdate's
+    // own store-validation catch, rather than leaking the raw issue array on
+    // a caller-triggerable, constantly-used surface.
+    // A board item's file_keys are claims under the same leaf-or-absent
+    // contract as any other record's (decision
+    // [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]:
+    // "board AND maintenance items"), and board_update is the one write to them
+    // that does not funnel through knowledgeCreate/knowledgeUpdate — so the
+    // merged candidate is checked here.
+    const claimsCheck = this.assertClaimedPaths('board_update', next);
+    try {
+      const updated = this.store.updateTodo(old.id, next as typeof old);
+      // The disclosure rides the record itself because board_update's receipt IS
+      // the bare record (its frozen callers read fields straight off the return),
+      // and digestWriteEcho carries claims_check through the DEFAULT digest
+      // projection for exactly that reason — see its own comment.
+      return claimsCheck.claims_check ? { ...updated, ...claimsCheck } : updated;
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, 'todo', 'board_update');
+      throw err;
+    }
+  }
+
+  /**
+   * board_get(id) — the full, untruncated board/queue item (board e725979c):
+   * board_query/maintenance_query's projection:'digest' clips text at
+   * DIGEST_CLIP, and until now there was no escape hatch back to the whole
+   * record short of an uncapped full-projection re-query. Resolves through the
+   * SAME three-form ladder as knowledge_get (full uuid, exact slug, 8-char
+   * citation prefix — resolveRecordId, board slice 85ecfe43), so a citation
+   * copied from anywhere in this store resolves the same way here as
+   * everywhere else. An unknown id is refused, naming the id that was not
+   * found, rather than returning undefined.
+   *
+   * RETURNS `BoardGetResult`, NOT the bare `DurableRecord` its every field
+   * still is (review round 2, MEDIUM finding): the old signature promised
+   * `DurableRecord` while withDisplayLabel actually added `label` and
+   * double-cast back through `unknown` to hide the mismatch — a typed
+   * consumer had no way to read `.label` without its own escape hatch. The
+   * declared type now says what the call actually returns.
+   */
+  boardGet(id: string): BoardGetResult {
+    let record: DurableRecord;
+    try {
+      record = this.resolveRecordId(id, 'board_get');
+    } catch (err) {
+      // A HISTORICAL id READS (review finding), same as knowledge_get: the
+      // ladder's refusal is written for WRITES and says so ("reads through this
+      // id still work"), so serving it here would contradict itself. The
+      // archived snapshot comes back carrying its legacy_resolution block, and
+      // the type guard below still applies to it — a dead id that named
+      // something other than a board item is still not a board_get.
+      if (!(err instanceof HistoricalIdError)) throw err;
+      record = this.serveArchivedAlias(err.alias) as unknown as DurableRecord;
+    }
+    if (record.type !== 'todo') {
+      throw new Error(
+        `board_get: '${id}' resolves to a ${record.type}, not a board/queue item — board_get reads board_add/maintenance_enqueue items only; use knowledge_get for other record types`
+      );
+    }
+    return this.withDisplayLabel(record);
+  }
+
+  /**
+   * ATTACH AN EXPLICIT DISPLAY LABEL, NEVER TOUCH `slug` (board 081508d0,
+   * superseding the earlier withDisplaySlug design below). The old mechanism
+   * synthesized a VALUE INTO THE `slug` FIELD for a legacy slugless item —
+   * shaped exactly like a real minted handle, which is what made it dangerous
+   * (see the retired shadow-suppression reasoning this replaces). The fix
+   * moves the derived name to its OWN field, `label`, computed the same way
+   * every other display site now does (boardDisplayLabel: the item's CURRENT
+   * text, falling back to slug only when text is blank) — and leaves `slug`
+   * exactly as stored, every time, for every item. A label CAN lexically
+   * equal some other record's real slug (it is ordinary prose, not
+   * guaranteed-distinct kebab-case) — the guarantee is STRUCTURAL, not
+   * textual: nothing feeds `label` into resolveRecordId (its rungs are `id`
+   * and `slug` only), and `board_get` never writes a fabricated value into
+   * `slug` the way the old mechanism did. There is nothing left to shadow,
+   * because there is no longer a derive-then-write step to get wrong.
+   */
+  private withDisplayLabel(record: DurableRecord): BoardGetResult {
+    const r = record as unknown as { slug?: string; text?: string };
+    const label = boardDisplayLabel(r.text, r.slug);
+    const blockers = this.blockedByStateOf(record);
+    return label ? { ...record, label, ...blockers } : { ...record, ...blockers };
+  }
+
+  /**
+   * board_edit(id, find, replace) — knowledge_edit's exactly-once find/replace
+   * contract (board fd6d8da9), applied to a board/queue item's `text` IN
+   * PLACE: id preserved, no new version minted, unlike knowledge_edit's
+   * supersession (decision foreign_a91c80b5 — board_update's identity semantics, not
+   * knowledge_update's). Delegates the actual write to boardUpdate so there is
+   * exactly one in-place-edit code path — source/system_reason cannot move an
+   * item between surfaces, status/id/created_at stay server-owned, updated_at
+   * moves to the write-time clock — and works identically on a user task or a
+   * system maintenance item; this method only adds the surgical find/replace
+   * over `text` that boardUpdate's retransmit-the-whole-field shape lacked.
+   * FIND MUST MATCH EXACTLY ONCE: zero and multiple matches are BOTH refused,
+   * naming the count, with nothing written — the same contract knowledge_edit
+   * already holds callers to, so a caller cannot lean on a blind
+   * replace-first-occurrence against text nobody re-read in full.
+   */
+  boardEdit(id: string, find: string, replace: string): { record: DurableRecord; replaced: { chars_before: number; chars_after: number } } {
+    const old = this.resolveRecordId(id, 'board_edit');
+    if (old.type !== 'todo') {
+      throw new Error(`board_edit: '${id}' is a ${old.type}, not a task — board_edit only edits board/queue items`);
+    }
+    if (typeof find !== 'string' || find.length === 0) {
+      throw new Error(`board_edit: 'find' must be a non-empty string — an empty match would insert at every position`);
+    }
+    const current = (old as unknown as { text?: string }).text;
+    if (typeof current !== 'string') {
+      throw new Error(`board_edit: '${id}' has no 'text' field to edit`);
+    }
+    // Same two corrections as knowledge_edit's sibling paths, from the ONE
+    // definition, because this method's own contract is documented as "the same
+    // contract knowledge_edit already holds callers to": the count is
+    // OVERLAP-AWARE (countOccurrences), and the write is a literal splice
+    // (spliceOnce), never String.replace's pattern-interpreting replacement.
+    const occurrences = SterlingTools.countOccurrences(current, find);
+    if (occurrences === 0) {
+      throw new Error(
+        `board_edit: 'find' does not appear in the item's text — nothing was written. ` +
+          `The text is ${current.length} chars; confirm the exact text (including whitespace and punctuation) before retrying.`
+      );
+    }
+    if (occurrences > 1) {
+      throw new Error(
+        `board_edit: 'find' appears ${occurrences} times in the item's text — refused as ambiguous, nothing was written. ` +
+          `Extend 'find' with surrounding text until it identifies exactly one site.`
+      );
+    }
+    const next = SterlingTools.spliceOnce(current, find, replace);
+    const record = this.boardUpdate(old.id, { text: next });
+    return { record, replaced: { chars_before: current.length, chars_after: next.length } };
+  }
+
+  /**
+   * P4: done = removed. The artifact-write binding is now BUILT as EVIDENCE
+   * DISCLOSURE, deliberately not a refusal (board b8ff0b68 — 'the plugin's own
+   * receipt admits its close-with-artifact rule is unenforced'). Two reasons a
+   * hard gate is the wrong shape here: the user board is the human's own
+   * surface and legitimate abandonment exists ('no longer wanted' has no
+   * artifact and needs none — a refusal would trap exactly the closes only the
+   * human may judge); and the failure mode P4 guards against — calling work
+   * done in conversation with no artifact — is a VISIBILITY problem, so the
+   * receipt now shows what the store can see: durable records touching the
+   * item's file_keys written since the item was born. An empty list means the
+   * close rides the operator's word, and the receipt says so out loud.
+   */
+  private removalArtifactEvidence(item: DurableRecord): { artifact_evidence: ArtifactEvidenceRecord[]; artifact_evidence_count: number; note?: string; check_skipped?: SkippedCheck[] } {
+    const fileKeys = ((item as unknown as { file_keys?: string[] }).file_keys ?? []).filter(Boolean);
+    const since = item.created_at;
+    // The evidence set is ONE module-level list (ARTIFACT_EVIDENCE_TYPES, which
+    // documents why open_question is in it) shared with board_query's derived
+    // per-item evidence — the two surfaces must never disagree about what counts
+    // as an artifact for the same item.
+    const evidenceTypes = ARTIFACT_EVIDENCE_TYPES;
+    // FIX M1 (upgrade-polish review, 2026-08-21): the id-citation arm below needs
+    // no file identity at all — concept_article_missing / research_owed / plain
+    // tasks routinely carry no file_keys, and those are exactly the items most
+    // wronged by an early return that skipped BOTH arms. Only the file_keys arm
+    // is conditional on fileKeys being non-empty; the id-citation arm always runs.
+    let fileKeyMatches: DurableRecord[] = [];
+    const checkSkipped: SkippedCheck[] = [];
+    if (fileKeys.length === 0) {
+      // No file identity to join on for THIS arm only — it cannot run, and says
+      // so (P5: a skipped check is loud, never a silent no-op).
+      const skipped = { check: 'board-remove-artifact-binding', reason: 'no_file_keys' };
+      this.store.recordCheckSkipped(skipped.check, skipped.reason, this.activeRunId(), this.now());
+      checkSkipped.push(skipped);
+    } else {
+      // Scan WIDE, filter by since, THEN trim the receipt (review finding 12,
+      // 2026-08-09 — the same pre-cap/post-cap ordering hazard as audit finding
+      // 33/43): the store orders by file-key-overlap count first and updated_at
+      // only as a tiebreak, so a small cap on a well-documented area fills with
+      // old high-overlap records and pushes the one NEW artifact out — and this
+      // receipt would then accuse the operator of drift that never happened.
+      // 200 is a bounded scan, not a guarantee; past it the disclosure errs
+      // toward the scanned window and never blocks either way.
+      fileKeyMatches = this.store
+        .query({ types: evidenceTypes, file_keys: fileKeys, cap: 200 })
+        .filter((r) => r.created_at >= since || r.updated_at >= since);
+    }
+    // FIX B (upgrade-polish, 2026-08-21): a durable record can fulfil this item
+    // WITHOUT ever touching its file_keys — e.g. a decision that closes the
+    // item by citing its own id (the citation convention: decisions write
+    // 'board <prefix8>', or occasionally the full uuid). Scan wide over the
+    // same record surface (no store schema or new index — a linear scan is
+    // cheap at this scale) and keep only records written at-or-after the item
+    // was created, so a coincidental same-prefix record predating the item
+    // never counts as its fulfilling write.
+    const prefix = item.id.slice(0, 8);
+    const citesItem = (r: DurableRecord): boolean => {
+      const body = JSON.stringify(r);
+      return body.includes(item.id) || body.includes(prefix);
+    };
+    // 200 is the SAME bounded scan as the file_keys arm above — the id-citation
+    // window covers only the 200 most-recently-updated records of the evidence
+    // types, never the whole store; past it the disclosure errs toward the
+    // scanned window and never blocks either way.
+    const idMatches = this.store
+      .query({ types: evidenceTypes, cap: 200 })
+      .filter((r) => (r.created_at >= since || r.updated_at >= since) && citesItem(r));
+    // Dedupe across the two arms by record id — file_keys order first, then any
+    // id-citation matches not already covered.
+    const seen = new Set<string>();
+    const combined: DurableRecord[] = [];
+    for (const r of [...fileKeyMatches, ...idMatches]) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      combined.push(r);
+    }
+    // The receipt carries board_query's CAPPED compact shape (Dome Farmer,
+    // sterling-issues.md:100-107: ~25 full digests per removal, 11-13KB into the
+    // caller's context): at most ARTIFACT_EVIDENCE_RECORD_CAP {id8,type,name}
+    // records, with the dedup'd match count within the two 200-record scan windows beside them in artifact_evidence_count
+    // so a clipped list never reads as a complete one. Empty stays `[]`.
+    const evidence: ArtifactEvidenceRecord[] = combined.slice(0, ARTIFACT_EVIDENCE_RECORD_CAP).map((r) => SterlingTools.artifactEvidenceRecord(r));
+    return {
+      artifact_evidence: evidence,
+      artifact_evidence_count: combined.length,
+      ...(checkSkipped.length > 0 ? { check_skipped: checkSkipped } : {}),
+      ...(combined.length === 0
+        ? {
+            // FIX M2 (upgrade-polish review, 2026-08-21): disclose the id arm's
+            // window honestly — it is a bounded scan of the 200 most-recently-
+            // updated records of the evidence types, not an exhaustive search of
+            // everything ever written citing this id.
+            //
+            // ROSTER REVIEW FIX (N28, follow-up): the file-key clause must not
+            // claim a negative result for a scan that never ran. When fileKeys
+            // is empty the file-key arm is SKIPPED (see check_skipped above) —
+            // saying "no knowledge record touching this item's file_keys...
+            // since it was created" on exactly those items (concept_article_
+            // missing / research_owed / plain tasks, per the FIX M1 comment
+            // above) restates the false-reason defect this note exists to fix,
+            // just relocated to the keyless case. And when the file-key arm DID
+            // run, it is the SAME bounded, overlap-ordered 200-record window as
+            // the id-citation arm (see the comment above fileKeyMatches) — an
+            // unhedged claim there is exactly as overclaiming as the id arm's
+            // own "not an exhaustive search" note already guards against, so
+            // both clauses carry the same window disclosure.
+            note:
+              (fileKeys.length > 0
+                ? `no knowledge record touching this item's file_keys among the 200 most-recently-updated evidence records`
+                : `this item carries no file_keys, so the file-key scan could not run (see check_skipped)`) +
+              `, and no knowledge record citing its id among the 200 most-recently-updated evidence records, since it was created — removed on the operator's word. ` +
+              `This checks the durable knowledge store only, never git — a commit that fulfilled this item leaves no trace here unless it was also captured as a record. ` +
+              `If work fulfilled this item, its capture is missing (that is drift, not a formality).`,
+          }
+        : {}),
+    };
+  }
+
+  /**
+   * 'ALREADY REMOVED' IS NOT 'NEVER EXISTED' (board 97d773ef): a remove on a
+   * freshly-minted maintenance id routinely finds the item gone because the
+   * article re-baseline AUTO-DRAINED it between minting and the call — the
+   * NORMAL path, not an error in the caller's id. A bare "no record" forced a
+   * board_query round-trip to tell the two apart; the drain-log trace answers
+   * it directly. The log keeps only the newest 50 rows, so a missing trace is
+   * "no recent trace", never proof of non-existence — the message says so.
+   *
+   * SHAPE-GATED (2026-08-22 adjudicated fix, kept and REPOINTED by the
+   * user-ruled retraction of decision
+   * id-ladder-extends-to-board-tools-with-collision-guard): the drain log is
+   * keyed by exact FULL record id (FULL_UUID_RE), so consulting it — and
+   * offering "it may have aged out" — is only honest for an identifier that
+   * could actually have been a drain-log key. An 8-char citation prefix or any
+   * other non-uuid-shaped identifier was NEVER going to appear there, whatever
+   * its history, so it gets a clean identifier-SHAPE refusal instead: no
+   * drain-log clause, no "aged out" false trail.
+   *
+   * The shape branch is MORE useful now that both callers (board_remove and
+   * maintenance_remove) take the exact full id ONLY: a prefix handed to a tool
+   * that HARD-DELETES needs to be told it is not a full record id — and why
+   * this tool insists on one — rather than be sent to the removal log.
+   */
+  private removedItemError(op: string, id: string): Error {
+    if (!SterlingTools.FULL_UUID_RE.test(id)) {
+      // Deliberately never mentions the removal log or "aged" — that clause
+      // is only honest for a full-uuid-shaped citation (see doc comment
+      // above); a shorter or non-hex identifier was never a candidate key
+      // for it, whatever the item's actual history.
+      return new UnresolvedIdentifierError(
+        `${op}: no record '${id}' — and this tool addresses items by their EXACT full uuid only (no slug, no 8-char citation ` +
+          `prefix), which '${id}' is not. Board rows are HARD-DELETED, so an abbreviation that once named a now-removed item can ` +
+          `silently retarget to a different, live item and destroy it irreversibly; that is why the full id is required here — ` +
+          `board_get, board_update and board_edit still resolve abbreviations, because their worst case is a recoverable edit. ` +
+          `Look the item up with board_query or maintenance_query and re-issue with the full uuid; nothing was removed.`
+      );
+    }
+    const trace = this.store.drainLogEntry(id);
+    if (trace) {
+      return new Error(
+        `${op}: item '${id}' was ALREADY REMOVED at ${trace.drained_at} (${trace.system_reason || 'user item'}, per the drain log) — ` +
+          `most likely auto-drained by a knowledge_update re-baseline or closed by an earlier remove. Nothing further to do.`
+      );
+    }
+    return new Error(
+      `${op}: no record '${id}', and no trace of it in the drain log (which keeps the newest 50 removals) — ` +
+        `either the id is wrong, or the item was removed long enough ago that its trace aged out. ` +
+        `Note that this tool matches the EXACT full uuid only (board rows are hard-deleted, so a stale abbreviation could ` +
+        `silently retarget to a different item) — if you cited an abbreviation of a live item, re-issue with its full id.`
+    );
+  }
+
+  /**
+   * ========================================================================
+   * THE ALREADY-PAID ATTESTATION — CLOSING A reconcile_needed ITEM IS A CLAIM
+   * ========================================================================
+   * Board 8c8b6d78 (R9), objective rebuild-2026-09.
+   *
+   * THE DEFECT. The drain SOP says an already-paid reconcile_needed item closes
+   * with board_remove / maintenance_remove and NO knowledge_update. But H7's
+   * settlement predicate compares live bytes against the owning article's
+   * UNCHANGED `file_baselines` (scripts/hooks/lib/settlement.mjs), and no remove
+   * verb moves a baseline — so the SOP as written GUARANTEES the re-mint.
+   * Measured in a consuming project 2026-09-05: 90 items drained by that rule,
+   * five re-minted by the next commit, which touched none of their files.
+   *
+   * THE SEMANTICS. A present regular-file close attests "the prose already
+   * describes these bytes" and re-stamps that path's baseline. A literal HEAD
+   * tree MISS instead records an `absence_attestations` entry — WHICH close,
+   * WHEN, and against WHICH COMMIT proved that exact name absent — with no hash,
+   * blob, read, or baseline. A NAKED baseline write was rejected: three readers
+   * already read a matching baseline as "last CONTENT-RECONCILED against exactly
+   * this content", so a bare stamp would make all three lie. The two sibling
+   * maps keep content, byte-attestation and absence-attestation provenance
+   * distinguishable per path forever.
+   *
+   * THE INVARIANT (decision
+   * [attested-close-proves-buffer-equality-through-git-not-path-resolution]).
+   * For each PRESENT path P: the baseline written is sha256(B), where B is a
+   * byte buffer THIS PROCESS READ from the worktree at P, and the proof that B is
+   * HEAD's content is made about B ITSELF — `git hash-object --path=P --stdin`
+   * fed B prints exactly the blob id of P's regular-file entry in the tree of
+   * commit C. For an ABSENT path, that same literal `git ls-tree` query proves
+   * no exact-name entry exists in C and the process performs no filesystem read.
+   * Membership, NAME and MODE come from `git ls-tree` against C with the returned
+   * name required to equal P byte-for-byte, so git's tree is the name authority
+   * and no filesystem-level alias (trailing dot, 8.3, case) can ever match.
+   *
+   * NOT GUARANTEED, stated plainly: that the worktree stays clean afterwards
+   * (read-time drift detection owns that, and a byte-attested path is never
+   * mtime-short-circuited); whether an absence remains absent afterwards; any
+   * non-regular tree entry, which is refused; and on Windows, where O_NOFOLLOW
+   * does not exist, the no-follow read is best-effort (lstat before open).
+   *
+   * THE STATE TRANSITION, in this order:
+   *   1. pre-lock: admission (exact full uuid, system source, reconcile_needed
+   *      lane, generated-projection exemption, feature_link resolving to a live
+   *      article), the scope refusals, and then ALL git/filesystem evidence —
+   *      outside the writer lock, because `--path=` runs the repository's
+   *      configured clean filter, an arbitrary program;
+   *   2. inside ONE transaction opened on the store PHYSICALLY HOLDING the
+   *      article (withTransactionForRecord — the holder-affine helper, never the
+   *      label-routed one: a body's `scope` is caller-writable and is not a
+   *      mount, anti_pattern [record-body-scope-is-not-physical-store-identity]),
+   *      re-read the ITEM and the ARTICLE and re-run every admission and scope
+   *      check against THOSE reads — including the two pre-lock fall-through
+   *      tests, which under the lock REFUSE rather than fall through (see the
+   *      fall-through note below), plus a check that the evidence still answers
+   *      for this exact tree and key set;
+   *   3. write the article: version+1, prior body archived, CAS on the version
+   *      just read, baselines MERGED per key, provenance added — and
+   *      `updated_at` PRESERVED (see the clock note below);
+   *   4. remove the item, which writes the §3.2.7 drain log;
+   *   5. any failure rolls all of it back together — there is no partial
+   *      attestation and no closed item beside an unstamped article.
+   *
+   * THE CLOCK IS PRESERVED, AND THAT IS LOAD-BEARING. `updated_at` doubles as
+   * "the instant these baselines were taken" and drives the read-time mtime
+   * prefilter. Advancing it while re-stamping only SOME owned paths MASKS real
+   * standing drift on the others: baselines for `a` and `b` at T0; `b` drifts at
+   * T1; an attestation close for `a` moves the clock to T2; a later read stats
+   * `b`, sees mtime(b)=T1 <= T2, and returns `clean` WITHOUT ever comparing `b`
+   * to its stale hash. store.updateRecordMetadata preserves it; the REAL time
+   * goes to `baseline_attestations[path].attested_at`, to the activity row and
+   * to the drain log, so no chronology is falsified.
+   *
+   * WHY THERE IS NO ATOMICITY DISCLOSURE ANY MORE. The old design compared a
+   * PATH's bytes to HEAD and then wrote a baseline, so every gap between the
+   * check and the write was a hole, and the disclosure had to enumerate how
+   * narrow each one was. The proof is now made about the BUFFER, so there is
+   * nothing left to narrow: whatever else the filesystem does, the bytes that
+   * were hashed are the bytes that were proven, and the receipt claims exactly
+   * that and nothing about later instants. The SQLite transaction still does not
+   * freeze the working tree — it never needed to.
+   *
+   * WHAT AN ACCEPTED CLOSE CAN AND CANNOT COST. Acceptance requires the read
+   * buffer to hash (through git's clean filter for that path) to that path's own
+   * committed blob id, so a close can never mint an arbitrary baseline nor attest
+   * attacker-chosen bytes, and it returns no bytes to the caller. The residual
+   * harm is a wrongly-ACCEPTED close: the item is closed while the in-tree file
+   * is genuinely drifted. H7 still detects that drift afterwards, because the
+   * stamped baseline is HEAD content and the real file differs from it, and the
+   * backstop is the per-attested-path ALWAYS-HASH rule at read time
+   * (DriftCheckContext.attestedPaths) — an attested path never short-circuits on
+   * mtime again, so a post-attestation edit still surfaces as drift even if it
+   * preserved or backdated its mtime.
+   *
+   * WHAT IS DELIBERATELY NOT AN ATTESTATION REFUSAL. A NON-reconcile_needed item,
+   * and an item ALL of whose keys are registered generated projections, fall
+   * THROUGH to today's ordinary removal, unchanged — for the projection case
+   * because settlement strips those paths and read-time classification calls
+   * them clean without ever consulting baselines, so minting durable baseline
+   * provenance for a path H7 does not govern would simply be a lie. A MIXED item
+   * does NOT fall through: it refuses, because its governed path is real debt and
+   * closing it bare would reopen the very loop this mechanism exists to end
+   * (decision
+   * [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]
+   * — a bypass needs an AFFIRMATIVE exemption covering the WHOLE item).
+   *
+   * THAT FALL-THROUGH IS AN ADMISSION DECISION, MADE BEFORE THE LOCK — AND IT IS
+   * NOT REPEATED INSIDE (review finding 3). `file_keys` is caller-updatable
+   * (board_update), so an item's keys can be rewritten to a generated-projection
+   * path between the pre-lock test and BEGIN IMMEDIATE. Inside the transaction
+   * that is not a second chance to fall through: the evidence this call was
+   * admitted on has been invalidated, so the whole attestation REFUSES, naming
+   * the offending key. The caller's retry re-reads the new keys pre-lock and
+   * falls through correctly then. Same posture as decision
+   * [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]:
+   * invalidated evidence never earns a bypass.
+   *
+   * Returns the receipt when it attested (the item is REMOVED by then, so the
+   * caller must not remove it again), or undefined when this item is not an
+   * attestation candidate and the caller should perform its ordinary removal.
+   * Every other outcome THROWS, with nothing written.
+   */
+  private attestAlreadyPaidClose(op: string, item: DurableRecord): BaselineAttestationReceipt | undefined {
+    const it = item as unknown as { id: string; source?: string; system_reason?: string; feature_link?: string; file_keys?: string[] };
+    // FALL-THROUGH, NOT REFUSAL — every other lane and every user item removes
+    // exactly as it does today.
+    if (it.source !== 'system' || it.system_reason !== 'reconcile_needed') return undefined;
+    const keys = this.attestationKeys(op, it.id, it.file_keys);
+    // GENERATED PROJECTIONS: NONE → attest, ALL → ordinary removal, MIXED →
+    // REFUSE naming the projection key(s).
+    //
+    // The exemption exists because settlement strips a projection path from every
+    // candidate set BEFORE it evaluates ownership or drift, and the read-time
+    // classifier calls it clean without consulting baselines (decision foreign_e1275166's
+    // territory) — so H7 does not govern it and there is no re-mint to suppress.
+    // That is an AFFIRMATIVE exemption, and decision
+    // [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]
+    // says a bypass needs one for the WHOLE item. A MIXED item has none: its real
+    // path IS governed, and falling through would close a live debt that the next
+    // settlement pass re-mints — the exact loop R9 exists to end. It cannot attest
+    // just the real path either, because the receipt's scope would then misdescribe
+    // the item it names. So it refuses, naming what disqualified it.
+    const exempt = keys.filter((k) => this.isGeneratedProjection(k));
+    if (exempt.length === keys.length && keys.length > 0) return undefined;
+    if (exempt.length > 0) {
+      throw new Error(
+        `${op}: reconcile_needed item '${it.id}' mixes ${exempt.length} registered generated projection(s) (${exempt.join(', ')}) with ` +
+          `${keys.length - exempt.length} governed path(s) — a projection key exempts an item from attestation only when EVERY key is ` +
+          `exempt, because a partial fall-through would close a live reconcile debt on the governed path and the next settlement pass ` +
+          `would re-mint it. Split the item with board_update (projections in one, governed paths in another), or reconcile the article ` +
+          `with knowledge_update and claim this item in 'resolves'. Nothing was written.`
+      );
+    }
+    // EXACT FULL UUID, defensively re-asserted (anti_pattern
+    // [no-bounded-trail-guard-for-destructive-addressing]): both callers already
+    // reach this item through an exact store.get, but this branch both DESTROYS
+    // the item and mints durable provenance naming it, so the addressing contract
+    // is stated where the provenance is minted rather than inferred from a caller.
+    if (!SterlingTools.FULL_UUID_RE.test(it.id)) {
+      throw new Error(
+        `${op}: '${it.id}' is not a full record id, and closing a reconcile_needed item as ALREADY-PAID writes durable provenance ` +
+          `naming the closed item — an abbreviation could name a different item in that record forever. Nothing was written.`
+      );
+    }
+    if (!it.feature_link) {
+      throw new Error(
+        `${op}: reconcile_needed item '${it.id}' carries no feature_link, so there is no ${ATTESTABLE_OWNER_NOUN} whose baseline this close could ` +
+          `attest — and removing it bare would leave H7 re-minting it on the next touch of the same bytes (board 8c8b6d78). ` +
+          `Nothing was written.`
+      );
+    }
+    // PRE-LOCK READ, FOR ROUTING ONLY. It decides which MOUNT the transaction
+    // opens on and nothing else; every fact the attestation acts on is re-read
+    // inside. (The alternative — opening on the project store by assumption —
+    // would put the transaction on a different database than the article write
+    // whenever the two disagree, which is exactly the affinity defect
+    // withTransactionForRecord exists to close.)
+    const routing = this.liveArticleFor(it.feature_link, ATTESTABLE_OWNER_TYPES);
+    if (!routing) {
+      throw new Error(
+        `${op}: reconcile_needed item '${it.id}' has feature_link '${it.feature_link}', which does not resolve to a LIVE ` +
+          `${ATTESTABLE_OWNER_NOUN} (missing, retired into a broken chain, or a type that carries no file_baselines — settlement ` +
+          `mints these items only against ${ATTESTABLE_OWNER_TYPES.join(' / ')}) — there is nothing to attest against. Nothing was written.`
+      );
+    }
+    // ALL GIT AND FILESYSTEM EVIDENCE IS COLLECTED HERE, OUTSIDE THE LOCK.
+    // `git hash-object --path=` runs the repository's configured CLEAN FILTER,
+    // which is an arbitrary program; running it while holding the store's single
+    // writer would put an unbounded external execution surface inside a database
+    // transaction. Inside the lock only the CAS write and the item removal remain.
+    // The evidence is bound to the exact keys and tree it was taken for, and the
+    // transaction refuses if either has moved (see attestInTransaction).
+    const prepared = this.collectAttestationProof(op, it.id, routing, keys);
+    return this.store.withTransactionForRecord(routing.id, () => this.attestInTransaction(op, it.id, routing.id, prepared));
+  }
+
+  /**
+   * The pre-lock evidence pass: resolve the article's tree, decide the key set,
+   * and prove — through git, about the buffers this process reads — that each
+   * key's worktree bytes are its committed content at one captured commit.
+   *
+   * Everything here is READ-ONLY and re-validated under the lock; nothing it
+   * returns is trusted on its own. It exists at this position for one reason:
+   * the proof spawns git (and, through `--path=`, whatever clean filter the
+   * repository configures), and that must not happen under the writer lock.
+   */
+  private collectAttestationProof(op: string, itemId: string, article: DurableRecord, keys: string[]): PreparedAttestation {
+    const rec = article as unknown as Record<string, unknown>;
+    // The article's OWN tree — a mapped working_tree has its own bytes AND its own
+    // HEAD, and an unmapped name abstains loud everywhere else, so it refuses here
+    // rather than reading the project root's same-named files. A MISSING repo root
+    // refuses on the same footing (decision
+    // [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]):
+    // evidence this process cannot obtain is never an exemption.
+    const tree = this.treeRootFor(rec);
+    if (tree.unresolved || !tree.root) {
+      throw new Error(
+        `${op}: cannot resolve the working tree the ${ATTESTABLE_OWNER_NOUN} '${article.id}' owns its paths in` +
+          (tree.unresolved
+            ? ` (working_tree='${String((rec as { working_tree?: unknown }).working_tree)}' is not mapped in config.working_trees)`
+            : ` (no repo root is configured)`) +
+          ` — an attestation must prove the bytes the record actually describes, never another tree's same-named files. Nothing was written.`
+      );
+    }
+    this.refuseAttestationScope(op, itemId, article, keys);
+    return { root: tree.root, keys, evidence: this.attestationEvidence(op, itemId, tree.root, keys) };
+  }
+
+  /**
+   * The scope refusals, in the order that keeps the expensive work last: no keys,
+   * an unowned key, then the path-count cap. Run BOTH pre-lock (so the evidence
+   * pass never touches a set that was never admissible) and again under the lock
+   * against the re-read item and article, because `file_keys` is caller-updatable
+   * through board_update and the two reads can disagree.
+   */
+  private refuseAttestationScope(op: string, itemId: string, article: DurableRecord, keys: string[]): void {
+    if (keys.length === 0) {
+      throw new Error(
+        `${op}: reconcile_needed item '${itemId}' names no files, so closing it as ALREADY-PAID would attest nothing while ` +
+          `claiming the debt is paid. Reconcile the ${ATTESTABLE_OWNER_NOUN} with knowledge_update and claim the item in 'resolves' instead. Nothing was written.`
+      );
+    }
+    // SCOPE AS A SUBSET, NOT AN INTERSECTION. An intersection would silently
+    // permit an EMPTY successful attestation (every key unowned → nothing stamped
+    // → item closed → the debt is lost and the re-mint returns). Owned paths come
+    // from the REGISTERED file-key extractor for THIS OWNER'S TYPE — the same
+    // definition computeBaselines uses (a feature_article's files[].path, a
+    // reference_material's repo-relative location) — never a second hand-rolled
+    // walk, and never the article extractor applied to the other type.
+    const owned = new Set(this.attestableOwnedKeys(op, article));
+    const unowned = keys.filter((k) => !owned.has(k));
+    if (unowned.length) {
+      const slug = (article as unknown as { slug?: string }).slug;
+      throw new Error(
+        `${op}: item '${itemId}' names ${unowned.length} path(s) the ${ATTESTABLE_OWNER_NOUN} '${slug ?? article.id}' does not own ` +
+          `(${unowned.join(', ')}) — an attestation can only claim "the prose already describes these bytes" for paths the prose ` +
+          `actually owns, and stamping a baseline for an unowned path would mint provenance nothing reads. Either bring the path under ` +
+          `the record's ownership (an article's files[], a reference document's location) and reconcile it, or close the item some ` +
+          `other way — for instance, a knowledge_update on '${slug ?? article.id}' naming this item in resolves:['${itemId}'] closes it ` +
+          `WHEN that write genuinely reconciles the record, which also prunes any path the record no longer claims from this item's own ` +
+          `file_keys, so a later close of what remains need not pass through this refusal at all. Nothing was written.`
+      );
+    }
+    // THE PATH-COUNT CAP, checked whole before any evidence is gathered and again
+    // before any mutation: `todo.file_keys` has no schema cardinality limit, and
+    // each path costs a read plus a git subprocess.
+    if (keys.length > ATTESTATION_MAX_PATHS) {
+      throw new Error(
+        `${op}: item '${itemId}' names ${keys.length} paths, over the ${ATTESTATION_MAX_PATHS}-path attestation cap. ` +
+          `The whole close is refused (never a partial attestation). Reconcile the ${ATTESTABLE_OWNER_NOUN} with knowledge_update, ` +
+          `claiming the item in 'resolves' — that write re-stamps every owned path the item names. Nothing was written.`
+      );
+    }
+  }
+
+  /**
+   * The owner's OWN owned paths, from the registered extractor for its own type
+   * — the one definition computeBaselines uses, never a second walk and never
+   * one type's extractor applied to another's shape.
+   *
+   * The type test is re-asserted here rather than assumed from the resolver: this
+   * is the function that decides what "owned" means for the scope subset check,
+   * and an unregistered or non-baseline-carrying type reaching it would silently
+   * produce an EMPTY owned set — which reads as "every key is unowned" and
+   * refuses, but for the wrong stated reason. Refusing by name keeps the message
+   * true to what happened.
+   */
+  private attestableOwnedKeys(op: string, owner: DurableRecord): string[] {
+    const type = owner.type;
+    if (!ATTESTABLE_OWNER_TYPES.includes(type)) {
+      throw new Error(
+        `${op}: '${owner.id}' is a ${type}, not ${ATTESTABLE_OWNER_TYPES.join(' or ')} — only those carry the file_baselines an ` +
+          `attested close re-stamps. Nothing was written.`
+      );
+    }
+    return RECORD_TYPES[type as 'feature_article' | 'reference_material'].fileKeys(owner as unknown as Record<string, unknown>);
+  }
+
+  /** The one place `collectAttestationEvidence`'s typed refusals are rendered in
+   *  this surface's refusal voice. The path and the reason come from the refusal
+   *  itself, so no failure shape can be dropped by omission here. */
+  private attestationEvidence(op: string, itemId: string, root: string, keys: string[]): AttestationEvidence {
+    try {
+      return collectAttestationEvidence({ root, keys, maxTotalBytes: ATTESTATION_MAX_TOTAL_BYTES });
+    } catch (err) {
+      if (err instanceof AttestationRefusal) {
+        throw new Error(
+          `${op}: item '${itemId}' cannot be closed as ALREADY-PAID — ${err.message}. An attestation states that the article's prose ` +
+            `already describes bytes that are COMMITTED, so it refuses the WHOLE close rather than stamp a claim nobody could ` +
+            `re-check. Nothing was written.`
+        );
+      }
+      throw err;
+    }
+  }
+
+  /** The attestation's state transition, run under the write lock — see
+   *  attestAlreadyPaidClose for the invariant. `itemId` / `articleId` are
+   *  IDENTIFIERS ONLY: every fact is re-read here, including the two the caller
+   *  already tested pre-lock (lane, generated projections) — which here REFUSE
+   *  rather than fall through, because a fall-through is an admission decision and
+   *  the item has changed under us.
+   *
+   *  `prepared` carries the git evidence, collected before this lock was taken. It
+   *  is accepted only if the tree and the key set it was taken for are STILL the
+   *  ones this transaction reads; otherwise the evidence describes a different
+   *  question and the close refuses. No git call and no file read happens from
+   *  here on — only the CAS write and the item removal. */
+  private attestInTransaction(op: string, itemId: string, articleId: string, prepared: PreparedAttestation): BaselineAttestationReceipt {
+    const ts = this.now();
+    // (1) THE ITEM, re-read. A concurrent close refuses HERE even though ordinary
+    //     maintenance_remove treats a recent drain-log hit as idempotent success:
+    //     that idempotency answers "the item is gone, which is what you wanted",
+    //     but this branch would additionally mint durable provenance claiming a
+    //     close that this call did not perform.
+    const freshItem = this.store.get(itemId) as
+      | (DurableRecord & { source?: string; system_reason?: string; feature_link?: string; file_keys?: string[] })
+      | undefined;
+    if (!freshItem) {
+      throw new Error(
+        `${op}: item '${itemId}' was removed concurrently — it is already closed, but this call would have written baseline ` +
+          `provenance naming it, so it refuses rather than attesting a close it did not perform. Nothing was written.`
+      );
+    }
+    if (freshItem.type !== 'todo' || freshItem.source !== 'system' || freshItem.system_reason !== 'reconcile_needed') {
+      throw new Error(
+        `${op}: item '${itemId}' is no longer a system-source reconcile_needed item (it now reads type '${freshItem.type}', ` +
+          `source '${freshItem.source ?? 'user'}', lane '${freshItem.system_reason ?? 'none'}') — it changed under this call. Nothing was written.`
+      );
+    }
+    // (2) THE OWNER (article or reference document), re-read, and the admission
+    //     checks against THAT read.
+    const article = this.store.get(articleId) as (DurableRecord & { slug?: string; version?: number; working_tree?: unknown }) | undefined;
+    if (!article) {
+      throw new Error(`${op}: the ${ATTESTABLE_OWNER_NOUN} '${articleId}' was removed concurrently; nothing was written.`);
+    }
+    if (!ATTESTABLE_OWNER_TYPES.includes(article.type)) {
+      throw new Error(
+        `${op}: '${articleId}' is a ${article.type}, not ${ATTESTABLE_OWNER_TYPES.join(' or ')} — only an ${ATTESTABLE_OWNER_NOUN} ` +
+          `carries the baselines this close attests. Nothing was written.`
+      );
+    }
+    // The link must STILL resolve to this same record (its chain included) —
+    // re-resolved from the fresh item, so a feature_link edited between the
+    // routing read and the lock cannot attest against the record we happened to
+    // open the transaction on.
+    const relinked = freshItem.feature_link ? this.liveArticleFor(freshItem.feature_link, ATTESTABLE_OWNER_TYPES) : undefined;
+    if (!relinked || relinked.id !== article.id) {
+      throw new Error(
+        `${op}: item '${itemId}' no longer links to the ${ATTESTABLE_OWNER_NOUN} '${article.id}' — its feature_link now resolves to ` +
+          `'${relinked?.id ?? 'nothing live'}'. Nothing was written.`
+      );
+    }
+    // MOUNT AFFINITY, from the STORAGE LAYER and the label together, neither
+    // implying the other (targetMountFault — the one definition, shared with the
+    // resolves paths). A maintenance item is project-local, so a domain-held
+    // owner record could never share one transaction with its drain.
+    const fault = SterlingTools.targetMountFault(
+      (article as unknown as { scope?: unknown }).scope,
+      this.store.projectStoreHolds(article.id)
+    );
+    if (fault) {
+      throw new Error(
+        `${op}: cannot attest the baseline of the ${ATTESTABLE_OWNER_NOUN} '${article.id}', because it ${fault}. ` +
+          `${SterlingTools.TARGET_MOUNT_FAULT_TAIL} Nothing was written.`
+      );
+    }
+    // The OWNER's OWN tree, re-resolved — a mapped working_tree has its own
+    // bytes AND its own HEAD, and an unmapped name abstains loud everywhere else,
+    // so it refuses here rather than attesting the project root's same-named files.
+    const tree = this.treeRootFor(article as unknown as Record<string, unknown>);
+    if (tree.unresolved || !tree.root) {
+      throw new Error(
+        `${op}: cannot resolve the working tree the ${ATTESTABLE_OWNER_NOUN} '${article.id}' owns its paths in` +
+          (tree.unresolved ? ` (working_tree='${String(article.working_tree)}' is not mapped in config.working_trees)` : ` (no repo root is configured)`) +
+          ` — an attestation must prove the bytes the record actually describes, never another tree's same-named files. Nothing was written.`
+      );
+    }
+    if (tree.root !== prepared.root) {
+      throw new Error(
+        `${op}: the working tree the ${ATTESTABLE_OWNER_NOUN} '${article.id}' owns its paths in changed under this call ('${prepared.root}' → ` +
+          `'${tree.root}') — the evidence was gathered in the first tree, so it does not answer for the second. Retry. Nothing was written.`
+      );
+    }
+    const keys = this.attestationKeys(op, itemId, freshItem.file_keys);
+    // THE GENERATED-PROJECTION TEST, RE-RUN UNDER THE LOCK — AND HERE IT REFUSES
+    // (review finding 3). Pre-lock, a projection key routes the item to ordinary
+    // removal; that is an ADMISSION decision taken on the item as it was then.
+    // `file_keys` is caller-updatable through board_update, so the keys can be
+    // rewritten to a projection path between that read and BEGIN IMMEDIATE — and
+    // at that point the evidence this call was admitted on is no longer valid.
+    // Falling through HERE would stamp durable provenance for a path H7 does not
+    // govern; so the whole close refuses, naming the key, and a retry re-decides
+    // pre-lock on the new keys. (Decision
+    // [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]:
+    // a bypass needs an AFFIRMATIVE exemption, never invalidated evidence.)
+    const projections = keys.filter((k) => this.isGeneratedProjection(k));
+    if (projections.length) {
+      throw new Error(
+        `${op}: item '${itemId}' changed under this call — its file_keys now name ${projections.length} registered generated ` +
+          `projection(s) (${projections.join(', ')}), which were not there when this close was admitted. A projection key routes an ` +
+          `item to ORDINARY removal, a decision made before the lock; it is not a fall-through once the item has mutated, because the ` +
+          `evidence this attestation was admitted on is no longer valid. Retry: the retry re-reads these keys and falls through. Nothing was written.`
+      );
+    }
+    // THE SAME SCOPE REFUSALS the pre-lock pass ran, re-run against the re-read
+    // item and article: no keys, an unowned key, the path cap.
+    this.refuseAttestationScope(op, itemId, article, keys);
+    // THE EVIDENCE MUST ANSWER FOR EXACTLY THIS KEY SET. `file_keys` is
+    // caller-updatable through board_update, so the item can be rewritten between
+    // the evidence pass and BEGIN IMMEDIATE. A key added since then has no proof; a
+    // key removed since then would be stamped without being claimed. Either way the
+    // evidence describes a different question, so the whole close refuses rather
+    // than re-reading the filesystem under the writer lock.
+    const proven = Object.keys(prepared.evidence.perPath).sort();
+    if (proven.length !== keys.length || keys.some((k, i) => k !== proven[i])) {
+      throw new Error(
+        `${op}: item '${itemId}' changed under this call — its file_keys now read (${keys.join(', ') || 'none'}) but the committed-bytes ` +
+          `evidence was gathered for (${proven.join(', ') || 'none'}). The evidence is bound to the exact paths it was taken for, so the ` +
+          `whole close is refused rather than stamped from a proof of something else. Retry. Nothing was written.`
+      );
+    }
+    // (4) THE COMMIT THE PROOF WAS MADE AGAINST. There is no HEAD re-check and no
+    //     second read: `head_commit` is the commit the evidence pass captured, and
+    //     every proven hash is the hash of a buffer that was shown to equal THAT
+    //     commit's blob for THAT path. A ref that moved afterwards changes nothing
+    //     about what was proven — the receipt names the commit the bytes were
+    //     compared against, which is exactly what happened.
+    const headBefore = prepared.evidence.head_commit;
+    // (5) THE ARTICLE WRITE — MERGED PER KEY, never a replacement map: every
+    //     baseline this close does not attest keeps whatever generation produced
+    //     it, so unrelated standing drift on the article's other owned files
+    //     survives untouched.
+    const baselines: Record<string, string> = { ...((article as unknown as { file_baselines?: Record<string, string> }).file_baselines ?? {}) };
+    const attestations: Record<string, { attested_at: string; item_id: string; head_commit: string; sha256: string }> = {
+      ...((article as unknown as { baseline_attestations?: Record<string, { attested_at: string; item_id: string; head_commit: string; sha256: string }> })
+        .baseline_attestations ?? {}),
+    };
+    const existingAbsenceAttestations =
+      (article as unknown as { absence_attestations?: Record<string, { attested_at: string; item_id: string; head_commit: string }> }).absence_attestations ?? {};
+    const absenceAttestations: Record<string, { attested_at: string; item_id: string; head_commit: string }> = { ...existingAbsenceAttestations };
+    const presentPaths: string[] = [];
+    const absencePaths: string[] = [];
+    for (const rel of keys) {
+      const evidence = prepared.evidence.perPath[rel]!;
+      if (evidence.kind === 'present') {
+        baselines[rel] = evidence.sha256;
+        attestations[rel] = { attested_at: ts, item_id: itemId, head_commit: headBefore, sha256: evidence.sha256 };
+        delete absenceAttestations[rel];
+        presentPaths.push(rel);
+      } else {
+        // An absence has no bytes to baseline. Delete any prior byte claim for
+        // this path and retain only the distinct tree-miss provenance.
+        delete baselines[rel];
+        delete attestations[rel];
+        absenceAttestations[rel] = { attested_at: ts, item_id: itemId, head_commit: headBefore };
+        absencePaths.push(rel);
+      }
+    }
+    const updated = this.store.updateRecordMetadata(
+      article.id,
+      {
+        file_baselines: baselines,
+        baseline_attestations: attestations,
+        // Do not add an empty new field to the present-file path. Write this
+        // map only when this close minted an absence or replaced one with bytes.
+        ...(absencePaths.length || keys.some((rel) => Object.hasOwn(existingAbsenceAttestations, rel))
+          ? { absence_attestations: absenceAttestations }
+          : {}),
+      },
+      // CAS on the version THIS transaction read, and the real time for the
+      // activity row — the body's updated_at is preserved by the primitive.
+      { ...(article.version !== undefined ? { expected_version: article.version } : {}), activity_at: ts }
+    );
+    // (6) THE ITEM LEAVES, through store.remove so the §3.2.7 drain log records
+    //     it exactly as every other system close does. EXPLICIT, not
+    //     `opts.resolves` — the write above would drain it inside the same
+    //     transaction and doing BOTH would double-remove.
+    this.store.remove(itemId, ts);
+    const note =
+      absencePaths.length === 0
+        ? `Closed as ALREADY-PAID: the ${ATTESTABLE_OWNER_NOUN}'s baseline for ${keys.length} path(s) was re-stamped and marked as an ATTESTATION ` +
+          `("the prose already describes these bytes"), not as a content reconcile — so H7 will not re-mint this item on the next touch ` +
+          `of the same bytes, and a reader can still tell the two apart (baseline_attestations). WHAT WAS ACTUALLY PROVEN, per path: ` +
+          `git's tree for commit ${headBefore.slice(0, 8)} was asked for an entry whose name equals the path BYTE-FOR-BYTE and whose ` +
+          `mode is a regular file (so a symlink, a submodule gitlink, a directory or any filesystem-level name alias is refused, not ` +
+          `resolved); the file was then read ONCE through ONE descriptor (lstat-checked, and opened with O_NOFOLLOW where the platform ` +
+          `has it — on Windows it does not, and the no-follow read is best-effort there); and \`git hash-object --path\` of THAT SAME ` +
+          `BUFFER printed exactly that tree entry's blob id. The stamped baseline is the sha256 of that same buffer, so the proof and ` +
+          `the baseline are about one set of bytes this process read — which is what makes the claim un-raceable, rather than merely ` +
+          `narrowly-timed. WHAT IS NOT CLAIMED: that the file stays unchanged afterwards. It may change a millisecond later, which is ` +
+          `why an attested path is ALWAYS re-hashed at read time rather than trusted on mtime. The record's updated_at was ` +
+          `deliberately NOT advanced (advancing it would suppress unrelated standing drift on its other owned files). ` +
+          `THE STANDING COST OF THAT, so it is not a surprise later: from now on EVERY knowledge_query that returns this record ` +
+          `re-reads and sha256s each of these ${keys.length} attested path(s) — the mint-side drift check has no byte budget, so the ` +
+          `always-hash rule is uncapped there — and the cost stands, per path, until a write whose resolves names that path ` +
+          `re-stamps it (or the record stops claiming it); an unrelated write keeps the attestation.`
+        : `Closed as ALREADY-PAID: ${presentPaths.length ? `${presentPaths.length} path(s) were marked as BYTE ATTESTATIONS ("the prose already describes these bytes"), not as a content reconcile. ` : ''}` +
+          `${absencePaths.length} path(s) were marked as proven ABSENCE ATTESTATIONS: git's tree for commit ${headBefore.slice(0, 8)} has NO entry whose name equals the path BYTE-FOR-BYTE. No file was read, no blob or sha256 exists, and no baseline was stamped for those paths. ` +
+          `${presentPaths.length ? `For each byte attestation, git's tree for commit ${headBefore.slice(0, 8)} supplied an exact-name regular-file entry; the file was read ONCE through ONE descriptor (lstat-checked and opened with O_NOFOLLOW where available), and \`git hash-object --path\` of THAT SAME BUFFER printed that entry's blob id. The stamped baseline is the sha256 of that same buffer. ` : ''}` +
+          `WHAT IS NOT CLAIMED: that either state stays unchanged afterwards. A present attested path is ALWAYS re-hashed at read time; an absence-attested path reopens drift immediately if it appears. The record's updated_at was deliberately NOT advanced (advancing it would suppress unrelated standing drift on its other owned files).`;
+    return {
+      article_id: article.id,
+      ...(article.slug ? { article_slug: article.slug } : {}),
+      article_version: (updated as unknown as { version?: number }).version ?? -1,
+      head_commit: headBefore,
+      attested_at: ts,
+      paths: keys,
+      ...(absencePaths.length ? { absence_paths: absencePaths } : {}),
+      note,
+    };
+  }
+
+  /**
+   * The item's file_keys, normalized, deduped and sorted — or the STANDARD
+   * refusal (review finding 6).
+   *
+   * normalizeRepoPath THROWS on an absolute, drive-prefixed or parent-escaping
+   * key, and `todo.file_keys` is caller-updatable through board_update, so such a
+   * key is reachable. Called bare, it surfaced a raw "path invariant violation"
+   * instead of the "Nothing was written." refusal every other branch of this
+   * close emits. It failed closed either way; this is message fidelity, and it is
+   * shared by BOTH normalization sites (pre-lock routing and under the lock) so
+   * the two cannot drift apart.
+   */
+  private attestationKeys(op: string, itemId: string, fileKeys: string[] | undefined): string[] {
+    try {
+      return [...new Set((fileKeys ?? []).map((k) => normalizeRepoPath(k)))].sort();
+    } catch (err) {
+      throw new Error(
+        `${op}: reconcile_needed item '${itemId}' carries a file_key that is not a repo-relative POSIX path ` +
+          `(${err instanceof Error ? err.message : String(err)}) — an attestation stamps provenance per path, so it refuses rather ` +
+          `than guess which bytes were meant. Fix the item's file_keys with board_update, or close it some other way. Nothing was written.`
+      );
+    }
+  }
+
+  /**
+   * EXACT FULL ID ONLY on the destructive board path (USER-RULED RETRACTION
+   * 2026-08-22, partly retracting decision
+   * id-ladder-extends-to-board-tools-with-collision-guard).
+   *
+   * That decision extended the id-resolution ladder (full uuid → exact slug →
+   * unambiguous 8-char prefix) to board_remove and maintenance_remove, and
+   * closed the resulting hard-delete retarget hazard with a removal-trail
+   * collision guard. TWO INDEPENDENT REVIEWS then showed the guard does not
+   * close it: both removal trails are capped at 50 rows and the activity log
+   * records created/updated/removed alike, so ANY 50 writes evict a removal
+   * record and the guard is frequently simply ABSENT — and an absent trail read
+   * as permission to delete. Prefix resolution also spans every MOUNTED store
+   * while the guard read only the project store.
+   *
+   * THE RULING: prefix addressing is REVERTED wherever the worst case DESTROYS,
+   * and kept where the worst case is a recoverable edit. So board_remove,
+   * maintenance_remove and validateResolveClaim take the exact full id only;
+   * board_get (read) and board_update / board_edit (in-place, visible, fixable
+   * forward) keep the full ladder. Board todos carry no slug, so for these
+   * three the exact id IS the whole addressing contract.
+   *
+   * Every refusal here NAMES WHY (removedItemError) — a bare "no record" is
+   * what sent callers hunting for a deleted item in the first place.
+   */
+  boardRemove(id: string): {
+    removed: string;
+    artifact_evidence?: ArtifactEvidenceRecord[];
+    /** the FULL dedup'd match count — may exceed artifact_evidence.length (capped like board_query's) */
+    artifact_evidence_count?: number;
+  note?: string;
+  check_skipped?: SkippedCheck[];
+  baseline_attestation?: BaselineAttestationReceipt;
+  /** Mirrored from baseline_attestation for an absence close, so callers of the
+   * removal tool can see the proven outcome without unpacking the receipt. */
+  absence_paths?: string[];
+  } {
+    const record = this.store.get(id);
+    if (!record) throw this.removedItemError('board_remove', id);
+    if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a task`);
+    const evidence = this.removalArtifactEvidence(record);
+    // R9 PARITY (board 8c8b6d78): a system reconcile_needed item closes the SAME
+    // way from either removal tool. board_remove is the conductor's surface and
+    // maintenance_remove the librarian's, but the item and the debt are identical,
+    // so the attestation cannot live on one of them only — a close through the
+    // other would re-mint on the next touch and the two tools would disagree
+    // about what closing an already-paid item means.
+    const attestation = this.attestAlreadyPaidClose('board_remove', record);
+    if (attestation) {
+      return {
+        removed: record.id,
+        ...evidence,
+        baseline_attestation: attestation,
+        ...(attestation.absence_paths ? { absence_paths: attestation.absence_paths, note: attestation.note } : {}),
+      };
+    }
+    this.store.remove(record.id, this.now()); // system todos land in the §3.2.7 drain log
+    return { removed: record.id, ...evidence };
+  }
+
+  /**
+   * maintenance_remove — board_remove NARROWED TO THE MAINTENANCE QUEUE, so the
+   * librarian can finish its own job (board afeae7d9).
+   *
+   * The librarian is the role defined to drain the queue, and it held
+   * maintenance_query without any removal tool: it could READ the queue and not
+   * close anything in it. Every lane WITHOUT a feature_link (article_missing,
+   * capture_owed, concept_article_missing, research_owed) is therefore
+   * unclosable by it, because those never auto-drain through knowledge_update —
+   * so they all bounced back to the conductor.
+   *
+   * WHY A SEPARATE TOOL RATHER THAN GRANTING board_remove. The MCP server has NO
+   * notion of caller identity — there is no agent_id anywhere in it — so a scope
+   * PARAMETER on board_remove would be no protection at all: the caller could
+   * simply omit it. The scoping has to live in the TOOL, and the grant then
+   * selects which surface an agent can reach. The user board (source 'user') is
+   * the human's own surface and stays read-only to every agent; this tool refuses
+   * a user item by design, naming board_remove as the conductor's path so the
+   * refusal teaches rather than merely blocks.
+   */
+  maintenanceRemove(id: string): {
+    removed: string;
+    artifact_evidence?: ArtifactEvidenceRecord[];
+    /** the FULL dedup'd match count — may exceed artifact_evidence.length (capped like board_query's) */
+    artifact_evidence_count?: number;
+    note?: string;
+    check_skipped?: SkippedCheck[];
+  already_drained?: boolean;
+  baseline_attestation?: BaselineAttestationReceipt;
+  /** Mirrored from baseline_attestation for an absence close. */
+  absence_paths?: string[];
+  } {
+    // EXACT FULL ID ONLY, for the same reason board_remove is — this tool
+    // hard-deletes a row too (see boardRemove's doc comment for the reverted
+    // ladder extension and the two reviews that reverted it).
+    const found = this.store.get(id);
+    if (!found) {
+      // IDEMPOTENT ALREADY-DRAINED (board 83478fc6, extending 97d773ef): a
+      // drain-log trace naming a SYSTEM item (system_reason set, per the store's
+      // `record.system_reason ?? ''` write) means this id was a maintenance-queue
+      // item that is already gone — auto-drained by a knowledge_update
+      // re-baseline (decision foreign_8ecd435f) or closed a moment earlier by a
+      // concurrent librarian call. That is the caller's desired end state, not a
+      // failure, so it SUCCEEDS idempotently instead of throwing. A trace with no
+      // system_reason (a user item) or no trace at all still falls through to the
+      // loud refusal below — collapsing either into "already drained" would let
+      // a genuine typo, or a request against the human's own board, silently
+      // read as success.
+      const trace = this.store.drainLogEntry(id);
+      if (trace && trace.system_reason) {
+        return { removed: id, already_drained: true };
+      }
+      throw this.removedItemError('maintenance_remove', id);
+    }
+    const record = found;
+    if (record.type !== 'todo') throw new Error(`maintenance_remove: '${id}' is a ${record.type}, not a todo`);
+    const source = (record as unknown as { source?: string }).source;
+    if (source !== 'system') {
+      throw new Error(
+        `maintenance_remove: '${id}' is a ${source ?? 'user'}-source board item, not a maintenance-queue item. ` +
+          `This tool removes system-source items only — the user board is the human's own surface and is not an agent's to clear. ` +
+          `If you are the conductor and this item is genuinely fulfilled, use board_remove.`
+      );
+    }
+    const evidence = this.removalArtifactEvidence(record);
+    // R9: same attestation branch board_remove takes — see its parity note.
+    const attestation = this.attestAlreadyPaidClose('maintenance_remove', record);
+    if (attestation) {
+      return {
+        removed: record.id,
+        ...evidence,
+        baseline_attestation: attestation,
+        ...(attestation.absence_paths ? { absence_paths: attestation.absence_paths, note: attestation.note } : {}),
+      };
+    }
+    this.store.remove(record.id, this.now()); // logged to the §3.2.7 drain log, as every system removal is
+    return { removed: record.id, ...evidence };
+  }
+
+  /**
+   * knowledge_retire — the retirement path, built from a primitive that already
+   * existed (board 77f00139).
+   *
+   * Until now `status`/`superseded_by` were server-owned and refused from the
+   * tool surface, no delete tool existed, and `state: 'deprecated'` was the only
+   * signal an author could set — which does not remove a record from ANY result
+   * set. So retiring made a record MORE visible, not less, and if it was the
+   * newest under its slug it WON retrieval. That is how a tombstone became the
+   * authoritative answer for a live concept in a consuming project.
+   *
+   * store.retireInFavorOf already had exactly the right semantics (built for
+   * knowledge_promote's cross-store tombstone): status → superseded,
+   * superseded_by → the survivor, NO new row, provenance and inbound links
+   * intact, and query() already never serves superseded records. It was simply
+   * unreachable except through promotion. This exposes it.
+   *
+   * in_favor_of is REQUIRED, and that is the point. Retirement is not deletion:
+   * the fix-it-forward rule stands, so a record that is merely WRONG gets
+   * knowledge_update, not this. This tool is for the one shape update cannot
+   * repair — a genuine DUPLICATE, where two records both claim to describe one
+   * thing and the reader needs to be sent to the survivor. Requiring the survivor
+   * means a retired record always forwards somewhere, so an old citation lands on
+   * the right record instead of dangling.
+   */
+  knowledgeRetire(id: string, inFavorOf: string): { retired: DurableRecord } {
+    if (id === inFavorOf) throw new Error(`knowledge_retire: a record cannot be retired in favour of itself ('${id}')`);
+    // Only the id BEING RETIRED resolves through the shared contract
+    // (slug/prefix/uuid) — in_favor_of stays a plain lookup, unchanged.
+    const record = this.resolveRecordId(id, 'knowledge_retire');
+    // The transient/user surfaces have their own P4 removal paths and must not
+    // acquire a second one that leaves a superseded husk behind in a queue.
+    if (record.type === 'todo') {
+      throw new Error(
+        `knowledge_retire: '${id}' is a todo — those leave through board_remove / maintenance_remove (done = removed, P4), not retirement.`
+      );
+    }
+    // in_favor_of resolves through the SHARED LADDER too (review finding): a raw
+    // store.get answered a HISTORICAL survivor id with "no record", which reads
+    // as "your citation is fabricated" for a record that is alive under a
+    // canonical id — the exact false negative record_aliases exists to remove
+    // ([stable-identity-design-v2] contract 3). The historical-id refusal
+    // propagates unchanged (it names the canonical id to retire into); only a
+    // GENUINE miss keeps this tool's own survivor-shaped wording, which says
+    // more than the ladder's generic one.
+    let survivor: DurableRecord;
+    try {
+      survivor = this.resolveRecordId(inFavorOf, 'knowledge_retire', 'target record');
+    } catch (err) {
+      if (!(err instanceof UnresolvedIdentifierError)) throw err;
+      throw new Error(
+        `knowledge_retire: no record '${inFavorOf}' to retire in favour of. The survivor must exist first — ` +
+          `retiring into a void leaves the reader nowhere to go, which is the failure this tool exists to prevent.`
+      );
+    }
+    // The literal-string self-retire check above cannot see two SPELLINGS of one
+    // record (id vs slug vs prefix), which resolving in_favor_of through the
+    // ladder now makes reachable — so it is re-checked on the resolved ids.
+    if (record.id === survivor.id) {
+      throw new Error(
+        `knowledge_retire: '${id}' and '${inFavorOf}' both resolve to record '${record.id}' — a record cannot be retired in favour of itself.`
+      );
+    }
+    if (survivor.status === 'superseded') {
+      throw new Error(
+        `knowledge_retire: '${inFavorOf}' is itself superseded — retiring into a dead record forwards the reader to a tombstone. ` +
+          `Resolve the survivor's chain to its live head first.`
+      );
+    }
+    // No check_skipped here, deliberately: skip() reports reason 'not_built',
+    // and there is no deferred retirement check to declare. Emitting one would
+    // claim an obligation nobody planned — the opposite of what the loud-skip
+    // channel is for.
+    const retired = this.store.retireInFavorOf(record.id, survivor.id, this.now());
+    return { retired };
+  }
+
+  // -- knowledge_supersede (decision foreign_e17794ea, board 0b33c27b) ----------------
+
+  /** old-record types knowledge_supersede accepts — see the class comment above.
+   *  attestation is deliberately NOT here: its supersession path is
+   *  knowledge_update fix-forward (immutable-by-construction, the decision
+   *  analog), and the orphan-coverage check below is ruling-prose-shaped. */
+  private static readonly SUPERSEDE_ALLOWED_TYPES = ['decision', 'anti_pattern', 'research_finding'];
+
+  /** ruling-write types whose create/update receipts surface SAME-SUBJECT
+   *  records (decision foreign_7e3c66c5). Superset of SUPERSEDE_ALLOWED_TYPES since
+   *  2026-08-21 (review finding on board 259a455f): a second attestation on
+   *  one artifact_key is exactly the write that must surface the prior verdict. */
+  private static readonly SAME_SUBJECT_TYPES = ['decision', 'anti_pattern', 'research_finding', 'attestation'];
+
+  /** Coverage threshold: a ruling unit counts as covered when at least this fraction of its own content words reappear in the replacement fields. */
+  private static readonly ORPHAN_COVERAGE_THRESHOLD = 0.4;
+
+  private static readonly ORPHAN_STOPWORDS = new Set([
+    'this', 'that', 'with', 'from', 'have', 'will', 'were', 'been', 'into', 'than', 'then', 'them',
+    'they', 'also', 'each', 'such', 'some', 'more', 'most', 'over', 'under', 'about', 'which',
+    'while', 'still', 'only', 'just', 'very', 'much', 'many', 'both', 'after', 'before', 'being',
+    'doing', 'having', 'itself', 'those', 'these', 'would', 'could', 'should', 'shall', 'must',
+    'might', 'when', 'where', 'what', 'your', 'their', 'there', 'here', 'other', 'above', 'below',
+    'again', 'because',
+  ]);
+
+  /** Numbered marker forms: "1.", "2)", "(3)" — a marker sits at the start of the string or after whitespace, and is itself followed by whitespace. Digits land in either capture group depending on which form matched. */
+  private static readonly ORPHAN_NUMBER_RE = /(?:^|(?<=\s))(?:(\d{1,3})[).]|\((\d{1,3})\))(?=\s)/g;
+
+  /** Bulleted marker forms: "- ", "* ", "• " — counted ONLY at the start of a line (start of text, or immediately after a newline plus optional indent) so a mid-sentence prose dash ("the gate holds - which surprised us") never counts as a marker (F1 review finding). */
+  private static readonly ORPHAN_BULLET_RE = /(?:^|\n)[ \t]*[-*•](?=\s)/g;
+
+  /** The old record's primary ruling fields, per type — the fields a ruling actually lives in, not provenance/rationale filler. Returned as SEPARATE field texts, not joined, so segmentation never straddles a field boundary (F2 review finding: a final unit used to run from a marker in one field into the next field's own text). */
+  private static rulingSourceFields(record: DurableRecord): string[] {
+    const r = record as unknown as Record<string, unknown>;
+    const parts: unknown[] =
+      record.type === 'decision'
+        ? [r.title, r.statement]
+        : record.type === 'anti_pattern'
+          ? [r.title, r.trigger, r.guidance, r.wrong_way, r.right_way]
+          : record.type === 'research_finding'
+            ? [r.question, r.answer]
+            : [];
+    return parts.filter((v): v is string => typeof v === 'string');
+  }
+
+  /**
+   * Enumerated ruling units — numbered or bulleted items — segmented from
+   * `text`. Bullets count only at line-start (see ORPHAN_BULLET_RE). Numbered
+   * markers count as an enumeration only when the FULL sequence of numbers
+   * found in `text`, in order, forms an ascending run starting at 1 — "as of
+   * step 2. ... fixed in phase 3." starts at 2 and is discarded WHOLE (not
+   * partially), because a fragment of an unrelated list is not evidence of an
+   * enumerated ruling. Fewer than 2 total markers (bullets plus a qualifying
+   * numbered run) means the record makes no enumerated claim, so this returns
+   * [].
+   */
+  private static segmentRulingUnits(text: string): string[] {
+    const bulletRe = new RegExp(SterlingTools.ORPHAN_BULLET_RE.source, 'g');
+    const bulletMarkers: { start: number; contentStart: number }[] = [];
+    let bm: RegExpExecArray | null;
+    while ((bm = bulletRe.exec(text))) {
+      const bulletPos = bm.index + bm[0].length - 1;
+      bulletMarkers.push({ start: bulletPos, contentStart: bulletPos + 1 });
+    }
+
+    const numberRe = new RegExp(SterlingTools.ORPHAN_NUMBER_RE.source, 'g');
+    const numberMarkers: { start: number; contentStart: number; value: number }[] = [];
+    let nm: RegExpExecArray | null;
+    while ((nm = numberRe.exec(text))) {
+      numberMarkers.push({ start: nm.index, contentStart: nm.index + nm[0].length, value: Number(nm[1] ?? nm[2]) });
+    }
+    const numbersAscendFromOne = numberMarkers.length > 0 && numberMarkers.every((mk, i) => mk.value === i + 1);
+
+    const markers = [...bulletMarkers, ...(numbersAscendFromOne ? numberMarkers : [])].sort((a, b) => a.start - b.start);
+    if (markers.length < 2) return [];
+    return markers
+      .map((mk, i) => text.slice(mk.contentStart, i + 1 < markers.length ? markers[i + 1].start : text.length).trim())
+      .filter((u) => u.length > 0);
+  }
+
+  /** Every distinct content word (lowercase, alphanumeric, 4+ chars, not a stopword) in `text`. */
+  private static contentWords(text: string): Set<string> {
+    const words = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').match(/[a-z0-9]{4,}/g) ?? [];
+    return new Set(words.filter((w) => !SterlingTools.ORPHAN_STOPWORDS.has(w)));
+  }
+
+  /** Every string value in `value`, recursively (arrays and plain objects) — "the combined text of fields". */
+  private static flattenFieldStrings(value: unknown, out: string[] = []): string[] {
+    if (typeof value === 'string') out.push(value);
+    else if (Array.isArray(value)) for (const v of value) SterlingTools.flattenFieldStrings(v, out);
+    else if (value && typeof value === 'object') for (const v of Object.values(value)) SterlingTools.flattenFieldStrings(v, out);
+    return out;
+  }
+
+  private static clipExcerpt(text: string, max = 160): string {
+    return text.length > max ? `${text.slice(0, max)}…` : text;
+  }
+
+  /**
+   * knowledge_supersede — atomic replacement of a ruling record (decision /
+   * anti_pattern / research_finding), riding the existing store.supersede()
+   * transaction (new row + CAS retire of the old row, no second supersession
+   * path). Distinct from knowledge_update (a fix-forward DELTA within one
+   * lineage — the caller passes only what changed) and knowledge_retire (a
+   * no-new-row duplicate tombstone): `fields` here is a COMPLETE create-shaped
+   * body of the same type, because this is a REPLACEMENT, not a patch.
+   *
+   * ORPHAN DETECTION (ADDENDUM 08-14-2045): the measured incident was a
+   * decision recording three separable rulings, superseded by a record that
+   * only restated one of them — the other two silently stopped being served.
+   * When the old record's primary text enumerates 2+ ruling units (numbered or
+   * bulleted), each unit must have substantive lexical coverage in the new
+   * fields or the write is REFUSED, naming the orphaned excerpts and both
+   * remedies. `orphans_acknowledged: true` proceeds anyway and the response
+   * discloses which candidates were accepted. Fewer than 2 units is ordinary
+   * single-ruling supersession — no check.
+   *
+   * Every refusal below runs before store.supersede is ever called, so a
+   * refused call leaves the store untouched.
+   */
+  knowledgeSupersede(oldId: string, fields: Record<string, unknown>, orphansAcknowledged?: boolean): { superseded: string; id: string; type: string; slug?: string; orphan_candidates?: string[]; warnings: string[]; same_subject: SameSubjectEntry[] } {
+    const old = this.resolveRecordId(oldId, 'knowledge_supersede');
+    if (old.type === 'todo') {
+      throw new Error(
+        `knowledge_supersede: '${oldId}' is a todo — those leave through board_remove / maintenance_remove (done = removed, P4), not supersession.`
+      );
+    }
+    if (old.type === 'feature_article' || old.type === 'reference_material') {
+      throw new Error(
+        `knowledge_supersede: '${oldId}' is a ${old.type} — those evolve in place via knowledge_update (fix-forward, same lineage), or for a genuine ` +
+          `duplicate, knowledge_retire(id, in_favor_of). knowledge_supersede replaces decision / anti_pattern / research_finding only.`
+      );
+    }
+    if (!SterlingTools.SUPERSEDE_ALLOWED_TYPES.includes(old.type)) {
+      throw new Error(
+        `knowledge_supersede: '${old.type}' records are not supported — allowed: ${SterlingTools.SUPERSEDE_ALLOWED_TYPES.join(', ')}.`
+      );
+    }
+    if (old.status === 'superseded') {
+      throw new Error(`knowledge_supersede: '${oldId}' is already superseded — resolve its chain to the live head first (knowledge_get discloses the terminus).`);
+    }
+
+    this.refuseServerOwnedFields(fields, 'knowledge_supersede');
+    const type = old.type;
+    const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, ...body } = fields;
+
+    // Slug continuity (decision foreign_de1a7329): fields with no slug inherit the old
+    // record's slug so the concept handle survives the replacement — the old
+    // record itself still owns that slug at this point (it is still active),
+    // so its own id is excluded from the collision check.
+    const explicitSlug = (body as { slug?: string }).slug;
+    let slug: string | undefined;
+    if (explicitSlug !== undefined) {
+      const clash = this.store.recordsBySlug(explicitSlug).filter((r) => r.id !== old.id);
+      if (clash.length) {
+        throw new Error(
+          `knowledge_supersede: a record with slug '${explicitSlug}' already exists ('${clash[0].id}') — one handle resolves to one record. ` +
+            `Choose a distinct slug, or omit it to inherit '${(old as unknown as { slug?: string }).slug ?? ''}'.`
+        );
+      }
+      slug = explicitSlug;
+    } else {
+      slug = (old as unknown as { slug?: string }).slug;
+      // F4 review finding: an old record with NO slug (e.g. a pre-slug legacy
+      // row) used to leave the new head slugless too — the same auto-mint
+      // path knowledgeCreate takes for a slugless new record applies here,
+      // so a replacement of a legacy record gains the stable handle it never
+      // had, exactly as if it were freshly created.
+      if (slug === undefined) {
+        // THROUGH mintHeadlineOf, not a second inlined `title ?? question`
+        // (review finding 2, 2026-08-29): that helper's contract is to be the
+        // ONE place the per-type answer lives, and a copy here made the claim
+        // false as shipped. The two agree for every type SUPERSEDE_ALLOWED_TYPES
+        // currently admits, so this is a latent divergence rather than a live
+        // defect — it would become one the moment a headline-less type (todo,
+        // attestation) joined that list and this site kept minting from a
+        // `title` those types do not have.
+        slug = this.mintSlug(SterlingTools.mintHeadlineOf(type, body));
+      }
+    }
+
+    const ts = this.now();
+    const candidate: Record<string, unknown> = {
+      id: this.newId(),
+      type,
+      created_at: ts,
+      updated_at: ts,
+      author: (body.author as string) ?? 'conductor',
+      status: 'active',
+      superseded_by: null,
+      links: body.links ?? [],
+      // THE REPLACEMENT INHERITS THE SCOPE OF THE MOUNT THAT PHYSICALLY HOLDS
+      // THE OLD RECORD — never a caller value (refused above by
+      // refuseMutationOnlyFields), never the old record's own body label, and
+      // never a bare 'project' default (decision
+      // [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+      // store.supersede inserts the replacement into the SAME PHYSICAL STORE as
+      // the record it retires (MountedStores.supersede routes by storeHolding),
+      // so the scope this site supplies is only ever a LABEL for a destination
+      // already chosen physically — and asking the storage layer to name that
+      // destination (scopeOfHolder) is the only way to get the two to agree.
+      //
+      // WHAT THIS REPLACED, and why the earlier shape was still wrong after it
+      // stopped being obviously wrong: `old.scope ?? 'project'` closed the
+      // domain-LABELLED branch and left two open. (1) The `?? 'project'`
+      // fallback is a fail-OPEN default on exactly the value that must fail
+      // CLOSED — "a guard on `scope` must fail closed on undefined rather than
+      // treating a missing field as 'probably project'" (anti_pattern
+      // [record-body-scope-is-not-physical-store-identity]). (2) More
+      // reachable: `old.scope` is now the old row's `scope` COLUMN (the
+      // column-authoritative decoder overwrites the parsed body on every live
+      // read), and the column can still contradict the MOUNT — a row seeded
+      // into the domain store carrying a 'project' column reads back as
+      // 'project', and this site would have minted a second project-labelled
+      // row inside that domain database, manufacturing exactly the drift the
+      // slice exists to end. The mount is the fact; the column is a label.
+      //
+      // store.supersede ALSO pins candidate.scope from the old row's column, so
+      // a wrong value here was corrected one layer down and the persisted row
+      // was never at risk — which is why this was a MEDIUM. It is fixed anyway:
+      // wrong-but-rescued is still wrong, the tool-layer echo is what the
+      // caller sees, and a comment claiming this branch was closed while it was
+      // open is the kind of false assurance a later reader stops re-checking.
+      scope: this.store.scopeOfHolder(old.id),
+      stack_tags: body.stack_tags ?? [],
+      ...body,
+      ...(slug !== undefined ? { slug } : {}),
+    };
+    // links[].target_id THROUGH THE LADDER (board 2e71d464), set AFTER the
+    // `...body` spread above for the same reason as knowledgeCreate.
+    candidate.links = this.resolveLinksTargets(candidate.links, 'knowledge_supersede') ?? [];
+    this.refuseUnknownFields(type, candidate, 'knowledge_supersede');
+    const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
+    // RAW-ZOD LEAK INVENTORY (board a00689b9, site 1): this parse is directly
+    // MCP-reachable and does not route through knowledgeUpdate, so it was
+    // untouched by the original knowledge_create/append/edit fix (board
+    // 03c92e2a). Caught and re-rendered the same way (renderValidationFailure)
+    // rather than letting a bad field (e.g. a malformed history element) leak
+    // the raw zod issue array.
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = registered ? (registered.schema.parse(candidate) as Record<string, unknown>) : candidate;
+    } catch (err) {
+      if (err instanceof ZodError) throw this.renderValidationFailure(err, type, 'knowledge_supersede');
+      throw err;
+    }
+    // Cited-id resolution warnings (board fc053051, F3 review finding: every
+    // other write path emits these — knowledge_supersede was the one gap).
+    // Computed on `parsed` (post-schema, pre-store) so a scan sees exactly
+    // what is about to be written, same as knowledgeCreate (tools.ts:688).
+    const citationWarnings = registered ? this.citedIdWarnings(registered.fts(parsed)) : [];
+
+    // Orphan detection — deterministic, no model call (P3), scoped to the
+    // measured defect shape (enumerated multi-ruling records).
+    const units = SterlingTools.rulingSourceFields(old).flatMap((f) => SterlingTools.segmentRulingUnits(f));
+    let orphanCandidates: string[] = [];
+    if (units.length >= 2) {
+      const fieldsWords = SterlingTools.contentWords(SterlingTools.flattenFieldStrings(fields).join(' '));
+      const uncovered = units.filter((u) => {
+        const unitWords = SterlingTools.contentWords(u);
+        if (unitWords.size === 0) return false;
+        let shared = 0;
+        for (const w of unitWords) if (fieldsWords.has(w)) shared++;
+        return shared / unitWords.size < SterlingTools.ORPHAN_COVERAGE_THRESHOLD;
+      });
+      if (uncovered.length > 0) {
+        if (orphansAcknowledged !== true) {
+          throw new Error(
+            `knowledge_supersede: '${oldId}' enumerates ${units.length} ruling units and the replacement fields leave ${uncovered.length} of them ` +
+              `without substantive coverage — a whole-record supersession would silently drop the surviving ruling(s), the exact failure this check ` +
+              `exists to catch. Orphaned:\n` +
+              uncovered.map((u) => `  - "${SterlingTools.clipExcerpt(u)}"`).join('\n') +
+              `\nExtend fields to carry the surviving ruling(s) forward, or re-call with orphans_acknowledged:true to proceed and accept the loss.`
+          );
+        }
+        orphanCandidates = uncovered.map((u) => SterlingTools.clipExcerpt(u));
+      }
+    }
+
+    const chain = new Set<string>([old.id]);
+    for (const link of (old.links ?? []) as { rel: string; target_id: string }[]) {
+      if (link.rel === 'supersedes') chain.add(link.target_id);
+    }
+    const updated = this.store.supersede(old.id, parsed);
+    this.repointPromotionReview(chain, updated.id, ts);
+
+    // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): knowledge_supersede only
+    // ever operates on the three ruling types (SUPERSEDE_ALLOWED_TYPES,
+    // enforced above), so this always applies here. Excludes the old,
+    // just-superseded record and its own supersede chain, plus the new
+    // record's own id — never the write's own lineage.
+    const sameSubjectExclude = new Set(chain);
+    sameSubjectExclude.add(updated.id);
+    const sameSubject = this.sameSubjectDigest(registered ? registered.fts(parsed) : '', sameSubjectExclude);
+
+    return {
+      superseded: old.id,
+      id: updated.id,
+      type: updated.type,
+      slug: (updated as unknown as { slug?: string }).slug,
+      ...(orphanCandidates.length > 0 ? { orphan_candidates: orphanCandidates } : {}),
+      warnings: citationWarnings,
+      same_subject: sameSubject,
+    };
+  }
+
+  // The run protocol (§5.2, §10) — runState, requireWireRun, agentExit,
+  // runSignal — was removed with the staged pipeline (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1).
+
+  /**
+   * knowledge_link (§10): typed graph edge. Both endpoints resolve through the
+   * shared contract (board slice 85ecfe43) before reaching store.addLink, so a
+   * slug or citation prefix links the SAME record knowledge_get would show —
+   * `to` keeps the 'target record' noun addLink's own target-not-found error
+   * already used, so an unresolvable target still reads the way it always has.
+   */
+  knowledgeLink(from: string, rel: string, to: string): DurableRecord {
+    const fromRecord = this.resolveRecordId(from, 'knowledge_link');
+    const toRecord = this.resolveRecordId(to, 'knowledge_link', 'target record');
+    return this.store.addLink(fromRecord.id, rel, toRecord.id);
+  }
+
+  // run_escalate (§10) was removed with the staged pipeline (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1).
+
+  /**
+   * maintenance_enqueue / maintenance_query (§10): the maintenance queue IS
+   * the todo store filtered source=system (§3.2.7) — no second queue exists.
+   */
+  maintenanceEnqueue(args: { reason: string; text: string; file_keys?: string[]; feature_link?: string }): {
+    record: DurableRecord;
+    check_skipped: SkippedCheck[];
+  } {
+    // THE CLAIM-CHECK EXEMPTION (ruling amending decision
+    // [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]):
+    // the leaf-or-absent check governs CALLER writes through the tool surface,
+    // and an INTERNAL mechanism mint is exempt — its file_keys come from records
+    // already admitted or from git touches, and a mint must never make a READ
+    // throw (this path is reached from read-time drift) or lose detected debt.
+    // A board_add arriving from the tool surface keeps the refusal for EVERY
+    // source, system items included: `internalMint` is a second parameter, so
+    // nothing in a caller's payload can reach it.
+    return this.boardAdd(
+      {
+        text: args.text,
+        source: 'system',
+        system_reason: args.reason,
+        file_keys: args.file_keys,
+        feature_link: args.feature_link,
+      },
+      { internalMint: true }
+    );
+  }
+
+  maintenanceQuery(
+    filter: {
+      system_reason?: string;
+      file_keys?: string[];
+      contains?: string;
+      feature_slug?: string;
+      cap?: number;
+      offset?: number;
+      cursor?: string;
+    } = {}
+  ): DurableRecord[] {
+    // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
+    // so a reason-filtered query no longer misses matches past the cap. contains
+    // (work order d9960c98) and feature_slug (board e725979c) ride the same
+    // boardFiltered pass for the same reason, and combine as a genuine AND.
+    // `cursor` FORWARDS to the shared pageBoard (board abafbd48 re-review, HIGH:
+    // the queue is paged in exactly the concurrent-write conditions cursor
+    // continuation exists for — DROPPING it here, rather than forwarding it,
+    // was the defect: a capped maintenance page's own advice then named a
+    // parameter this surface refused as unknown) — the 'maintenance_query'
+    // surface tag keeps its refusal messages honest about which tool they are.
+    return this.boardQuery(
+      {
+        source: 'system',
+        system_reason: filter.system_reason,
+        file_keys: filter.file_keys,
+        contains: filter.contains,
+        feature_slug: filter.feature_slug,
+        cap: filter.cap,
+        offset: filter.offset,
+        cursor: filter.cursor,
+      },
+      'maintenance_query'
+    );
+  }
+
+  /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
+  maintenanceQueryResult(
+    filter: {
+      system_reason?: string;
+      file_keys?: string[];
+      contains?: string;
+      feature_slug?: string;
+      cap?: number;
+      offset?: number;
+      cursor?: string;
+      projection?: BoardProjection;
+    } = {}
+  ): BoardQueryResult {
+    return this.boardQueryResult(
+      {
+        source: 'system',
+        system_reason: filter.system_reason,
+        file_keys: filter.file_keys,
+        contains: filter.contains,
+        feature_slug: filter.feature_slug,
+        cap: filter.cap,
+        offset: filter.offset,
+        cursor: filter.cursor,
+        projection: filter.projection,
+      },
+      'maintenance_query'
+    );
+  }
+
+  // The handoff pair (§10: handoffWrite/handoffRead) was removed with the
+  // staged pipeline (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1).
+}

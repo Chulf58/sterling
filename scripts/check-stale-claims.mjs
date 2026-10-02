@@ -1,0 +1,149 @@
+// check-stale-claims [S] (board fd8d081c): the diff-time half of cross-file
+// stale-claim detection. When a diff ADDS a caller for symbol X, report every
+// other file whose COMMENT claims X is absent ("not yet", "unwired", …).
+//
+//   node scripts/check-stale-claims.mjs --base <ref> [--target <dir>] [--json]
+//
+// REGISTERED as the tenth `npm run check` arm on 2026-08-04 (board 8c4b52ca,
+// option b: measure on real branches first, then register). The measurement
+// record: the pre-filter version scored 0/16 precision over five diffs; the
+// current filter set produced zero findings and zero false positives across
+// six historical diffs (up to 191 symbols) PLUS the 2026-08-04 board-blitz
+// branch diff (122 newly-called symbols, 174 files). Registered with
+// `--base main`: on a work branch the arm scans branch-vs-main (exactly the
+// merge gate's question); on main itself the diff is empty and the arm is a
+// no-op — deliberate, this is a diff-time check, not a repo sweep.
+//
+// Exit 1 on findings, 0 when clean, 2 when the adapter cannot supply a symbol
+// notion (capability_absent — degrade LOUDLY, never a silent pass, P5), 3 when
+// the check cannot even RUN (missing --base, an unreadable target, a git
+// failure building the diff) — an ENVIRONMENT failure, distinct from a
+// finding, so a caller (e.g. sterling-check.mjs) never conflates "the check
+// ran and found something" with "the check could not run at all".
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { arg, fail } from './lib/project.mjs';
+import { buildDiffJson } from './lib/diff-json.mjs';
+import { scanStaleClaims } from './lib/stale-claim-scan.mjs';
+import { loadAdapter } from './adapters/resolve.mjs';
+
+// Candidates come from git, not a filesystem walk: this check is git-diff-driven
+// already, `git ls-files` costs one process, and the node adapter's own
+// walkSources is module-private (node.mjs:175) — widening the §9.1 adapter
+// interface for one caller's convenience is not worth it.
+const CODE_EXT = /\.(mjs|cjs|js|jsx|ts|tsx|mts|cts|ps1|psm1)$/;
+function trackedCodeFiles(cwd) {
+  const r = spawnSync('git', ['ls-files', '-z'], { cwd, encoding: 'utf8', timeout: 60_000 });
+  if (r.status !== 0) fail(`check-stale-claims: git ls-files failed (${r.status}): ${(r.stderr || '').trim()}`, 3);
+  return r.stdout.split('\0').filter((p) => p && CODE_EXT.test(p));
+}
+
+const target = arg('--target') ?? process.cwd();
+const base = arg('--base');
+const asJson = process.argv.includes('--json');
+if (!base) fail('check-stale-claims: --base <ref> is required (the diff is the input; there is no repo-wide mode)', 3);
+
+let diff;
+try {
+  diff = buildDiffJson({ cwd: target, base });
+} catch (e) {
+  fail(`check-stale-claims: could not build the diff against '${base}': ${e?.message ?? e}`, 3);
+}
+
+// Test-path notion comes from the DECLARED toolchain's adapter (§9.1). A
+// caller added in a test file is not wiring landing, so its symbols must not
+// count.
+//
+// CONSUMER-RUNNABLE FIX (board 4ccf0644): adapters are a CLONE-shared
+// registry — they never live inside `target` — so the adapter is resolved
+// the same way scripts/adapters/resolve.mjs resolves them for init (§9.1):
+// by DECLARED TOOLCHAIN NAME, read from `target`'s own `.sterling/config.json`,
+// loading the module from the CLONE's scripts/adapters/ directory (loadAdapter's
+// default `dir` — its own dirname — always resolves there, regardless of
+// `target`). The earlier `join(target, 'scripts', 'adapters', 'node.mjs')` only
+// ever worked when target WAS the clone; for a consumer project it never
+// existed, so the check silently ran with no adapter. Worse than that: a fix
+// that just hardcoded loading the clone's node.mjs unconditionally would make
+// a project declaring ONLY a non-node toolchain (e.g. pester) silently run
+// with node's testPathGlobs/static_wiring instead of the loud capability_absent
+// exit 2 the header promises (P5) — so the adapter must be picked from what
+// the project actually DECLARED, not assumed.
+function declaredToolchainNames(dir) {
+  const configPath = join(dir, '.sterling', 'config.json');
+  if (!existsSync(configPath)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
+    return Array.isArray(parsed.toolchains) ? parsed.toolchains.map((t) => t?.adapter).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+const declaredToolchains = declaredToolchainNames(target);
+let adapter = null;
+for (const name of declaredToolchains) {
+  let mod;
+  try {
+    mod = await loadAdapter(name);
+  } catch {
+    continue; // an unregistered/unloadable adapter name — try the next declared toolchain
+  }
+  if (mod?.capabilities?.static_wiring) {
+    adapter = mod;
+    break;
+  }
+}
+const testGlobs = adapter?.testPathGlobs ?? [];
+const isTest = (p) => testGlobs.some((g) => globMatch(p, g));
+
+function globMatch(path, glob) {
+  const re = new RegExp(
+    '^' +
+      String(glob)
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*\*/g, '\x1F')
+        .replace(/\*/g, '[^/]*')
+        .replace(/\x1F/g, '.*') +
+      '$'
+  );
+  return re.test(path);
+}
+
+const candidates = trackedCodeFiles(target);
+const { findings, symbols_added, skipped } = scanStaleClaims({
+  diff,
+  candidates,
+  isTest,
+  capability: !!adapter?.capabilities?.static_wiring,
+  readFile: (p) => {
+    try {
+      return readFileSync(join(target, p), 'utf8');
+    } catch {
+      return null;
+    }
+  },
+});
+
+if (skipped) {
+  const declaredDetail = declaredToolchains.length ? declaredToolchains.join(', ') : 'none declared';
+  console.error(`check-stale-claims: SKIPPED LOUDLY — ${skipped.reason} (declared toolchain(s): ${declaredDetail}). No declared toolchain adapter supplies a symbol notion, so this check cannot run; it is not a pass.`);
+  process.exit(2);
+}
+
+if (asJson) {
+  console.log(JSON.stringify({ findings, symbols_added, scanned: candidates.length }, null, 2));
+} else if (findings.length === 0) {
+  console.log(`stale-claim scan: ok (${symbols_added.length} symbol(s) newly called, ${candidates.length} file(s) scanned, no contradicting comment)`);
+} else {
+  console.error(
+    [
+      `stale-claim scan FAILED: ${findings.length} comment(s) claim a symbol is absent that this diff now CALLS.`,
+      'A work order written from one of these comments would instruct work that already exists.',
+      ...findings.map((f) => `  ${f.path}:${f.line}  claims '${f.symbol}' is ${f.marker}\n      ${f.text}`),
+      '',
+      `Fix the COMMENT (that is the stale artifact), or mark a genuine exception with '${'stale-claim-ok'}' on the comment line.`,
+    ].join('\n')
+  );
+}
+process.exit(findings.length > 0 ? 1 : 0);

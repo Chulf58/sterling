@@ -1,0 +1,31 @@
+{
+  "id": "probe-002-ask-deny",
+  "kind": "ask",
+  "note": "DENY. A first-attempt AskUserQuestion whose subject is already settled by the deny-once ruling itself — the self-referential case, which is the sharpest one available: if H20 lets THIS through to the user, the mechanism cannot be relying on the ruling it was built from. Note the shape: AskUserQuestion has NO prompt field (decision f5638a84), so the subject lives entirely in questions[].question and in the OPTION label/description text — an oracle that only scans a prompt field scores this as ungoverned and reports a false miss. Written by hand 2026-09-05; the option descriptions carry the governed subject on purpose, because that is the measured incident (AC11).",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "When a question I am about to put to you strongly matches a stored ruling, should the hook deny that first attempt outright, or just inject the ruling beside your answer?",
+        "header": "Ask gate",
+        "options": [
+          {
+            "label": "Deny first attempt",
+            "description": "Block the first-attempt question before it reaches the user, return the matched rulings' substance in the denial, and require a retry that cites the ruling id plus an unresolved delta."
+          },
+          {
+            "label": "Inject alongside",
+            "description": "Never block the question; attach the matched decision and anti_pattern records to the tool result so the ruling arrives with the user's answer instead of before it."
+          }
+        ]
+      }
+    ]
+  },
+  "expected_ids": [
+    "68332e4b-da25-474e-a973-7cb53a0da40b"
+  ],
+  "expected_absent_ids": [],
+  "expect_deny": true,
+  "expect_deny_ids": [
+    "68332e4b-da25-474e-a973-7cb53a0da40b"
+  ]
+}

@@ -1,0 +1,5 @@
+STERLING MECHANISM-AXIS DELIVERY (H20) — you have just put a CHOICE TO THE USER.
+
+▸ DECISIONS for this path (2) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:
+  → [standing] Sterling's review posture: per-slice work is verification-only (the implementing agent pastes its test output, the condu… [review-sparsely-before-commit-ledger-kept] (knowledge_get 276cd235-2455-4b0c-bb52-9f592138c3a4)
+    ✗ ALREADY REJECTED: Sparse review before commit with NO enforcement (drop the ledger, the trailer refusal and commit-reviewed, as OpenSterling did); Keep Sterli…

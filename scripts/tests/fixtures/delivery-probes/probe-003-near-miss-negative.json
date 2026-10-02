@@ -1,0 +1,17 @@
+{
+  "id": "probe-003-near-miss-negative",
+  "kind": "agent",
+  "note": "NEAR-MISS NEGATIVE — the hardest arm, and the reason the positives mean anything. It borrows the exact vocabulary of the H15 realpath cluster (realpath, canonical path, symlink, resolve, provenance of a file) in a domain this store rules on NOTHING: photo import and EXIF sidecars. If delivery fires here, that is a PRECISION finding to adjudicate against the matcher's thresholds — a false positive trains the reader to skip the channel (P1) — not automatically an oracle bug. Written by hand 2026-09-05. Frozen: if the store later gains a genuine ruling on this subject, the probe is REPLACED deliberately, never quietly re-expected.",
+  "tool_input": {
+    "subagent_type": "coder",
+    "description": "Deduplicate EXIF sidecars across symlinked albums",
+    "prompt": "In the photo-import CLI, resolve every uploaded image's canonical path with fs.realpath before writing its EXIF sidecar, so two album directories that are symlinks to the same folder on disk stop producing duplicate sidecar files. Keep the provenance field in the sidecar pointing at the path the user actually supplied, not the resolved one. No hook, plugin or store surface is involved."
+  },
+  "expected_ids": [],
+  "expected_absent_ids": [
+    "5b82e94f-3f42-415b-b8d1-983b78e50095",
+    "a206a529-28fe-4271-b7a1-dd40593e2401",
+    "1434cd54-04d9-42de-b7f2-2e7a3fda288d"
+  ],
+  "expect_deny": false
+}

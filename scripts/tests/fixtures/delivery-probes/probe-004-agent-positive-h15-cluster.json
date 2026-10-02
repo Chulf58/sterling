@@ -1,0 +1,24 @@
+{
+  "id": "probe-004-agent-positive-h15-cluster",
+  "kind": "agent",
+  "note": "REPLACES probe-001-agent-positive (2026-09-08). Reason: the H15 realpath/provenance cluster grew around probe-001's original two-id expectation after 2026-09-05 (five more decisions/anti_patterns opened on the exact same mechanism), so a same-vocabulary dispatch now legitimately matches all seven — each added id was opened and verified on-subject before being listed here: caecf8a6 (unanchored-substring allowlist bypass in the command guard), 43bebe5c (inverted protection — the guard blocks the conductor's own sanctioned remedy), 1434cd54 (the sanctioned list drifted from the documented remedies), 95c2c109 (H15 provenance review fixes — interpreter code-execution flags and the walk-up-preferred seam), 37e588fb (R3 plugin-root resolver extraction and win32 word-syntax). b60b5cc5 is expected ABSENT because it is the review-receipt-territory anti_pattern, which fires ONLY through the machine-readable REVIEW-TERRITORY boilerplate line this prompt carries — it is the pin for FIX 1 (stripReviewTerritoryLine), never a genuine subject match on H15/realpath/provenance. 8ff011e4 (domain-doctor article) is deliberately left unlisted as borderline and not asserted either way. Per the probe README contract this is a REPLACEMENT with its own identity, not a repoint of probe-001's expected_ids. ONE FORMATTING CORRECTION FROM probe-001'S BYTES (disclosed, not silent): probe-001's prompt ran the REVIEW-TERRITORY marker onto the SAME line as the preceding sentence ('...runnable. REVIEW-TERRITORY: [...]', a single space, no newline) — that shape does not match the canonical terminal-line regex (^REVIEW-TERRITORY:...$, decision h20-specificity-rebuild-not-fourth-patch-structural-fixes-now-red-probes-frozen fix 1), which is also the shape H22's own established REVIEW_TERRITORY_RE (decision review-territory-structured-receipt-files) has always required, and the shape every real dispatch brief in this repo actually uses (REVIEW-TERRITORY on its own line). Verified live 2026-09-08 (coder lane, end-to-end subprocess run of scripts/hooks/h20-mechanism-axis.mjs against this repo's real store): the byte-verbatim probe-001 shape (no newline) leaves b60b5cc5 UNSTRIPPED and it is delivered — the fix does not close the measured case for that literal text. A single space was changed to a newline before REVIEW-TERRITORY so this probe accurately exercises FIX 1. MEASURED, DISCLOSED RESIDUAL: even with the newline correction, the current (pre-rebuild) H20 stage-2 matcher's general term-cap competition (MAX_RANK_TERMS) means 95c2c109 does not reliably survive alongside the other six in every run, and two topically-adjacent but off-subject records (d0cdd940 sanctioned-script containment-helper decision, 1689e92f test-unfreeze-claims article) can enter the delivered set instead — this is the SAME pre-existing recall/precision imprecision decision 80d897b2 defers to the matcher rebuild (the next objective slice), not a FIX 1/FIX 2 regression.",
+  "tool_input": {
+    "subagent_type": "coder",
+    "description": "Bind H15 sanctioned-script matching to realpath",
+    "prompt": "Change how the store guard decides that a script is sanctioned. Today the allowlist entry is compared against the path string the command names, so a copy of a sanctioned script placed outside the plugin clone still satisfies the exemption and gets write access to the store. Resolve both the active plugin root and the candidate script through realpath and require the candidate to sit inside the clone root before granting the exemption; a symlink that points back into the clone must not launder an outside script. Keep the documented remedies runnable.\nREVIEW-TERRITORY: [\"scripts/hooks/h15-store-guard.mjs\"]"
+  },
+  "expected_ids": [
+    "5b82e94f-3f42-415b-b8d1-983b78e50095",
+    "a206a529-28fe-4271-b7a1-dd40593e2401",
+    "caecf8a6-b520-49fd-9b8b-ed41660a9fab",
+    "43bebe5c-87ae-4ff4-af60-afc351f895d9",
+    "1434cd54-04d9-42de-b7f2-2e7a3fda288d",
+    "95c2c109-ea95-4be3-921b-92cbda6cc9b8",
+    "37e588fb-95ca-43a5-b325-669c42fb1ac0"
+  ],
+  "expected_absent_ids": [
+    "b60b5cc5-9e8a-4c60-a61b-cef62b7c21d2",
+    "68332e4b-da25-474e-a973-7cb53a0da40b"
+  ],
+  "expect_deny": false
+}

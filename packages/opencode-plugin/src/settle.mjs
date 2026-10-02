@@ -1,0 +1,262 @@
+// Settlement at the end of an execution: mint reconcile duties for the files the
+// last turn changed, weigh H10's other duties (below), advance the settled
+// snapshot, and notify. The maintenance worker launch that follows is worker.mjs.
+//
+// H10's other session-end duties on OpenCode: capture_owed, article_missing,
+// concept_article_missing and research_owed. OpenCode has no stop block, so
+// each settlement does what H10's two Stops do (decision
+// sterling-is-fully-standalone-on-opencode-2-full-parity-with-claude-code):
+// a duty first found unpaid is a NEXT-TURN NOTICE (H10's nag); a duty still
+// unpaid at the next settlement is queued as its maintenance item (H10's second
+// pass). The rules and the item texts are H10's, from
+// scripts/hooks/lib/session-duties.mjs.
+//
+// Inputs: the files the turn changed are settlement's git candidates (H7's
+// touches register is Claude-only); concept_designed, no_capture and research
+// events come from .sterling/transient/session-events.json, which the MCP
+// tools write on both hosts. An event is weighed once: its key is remembered
+// in DUTIES_REL until it leaves the register.
+import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { parseConfig } from '@sterling/schemas';
+import { gitIgnored, loadConfig } from '../../../scripts/hooks/lib/common.mjs';
+import {
+  IMAGE_BINARY_EXT,
+  articleMissingText,
+  capturedSince,
+  captureOwedText,
+  conceptArticleMissingText,
+  conceptFamiliesFrom,
+  demandExemption,
+  dischargedByCutoff,
+  hasOpenSystemTodo,
+  isValidAt,
+  noCaptureCutoffs,
+  ownershipJoin,
+  researchCapturedSince,
+  researchOwedText,
+  systemTodo,
+  unmetConceptFamilies,
+} from '../../../scripts/hooks/lib/session-duties.mjs';
+import { gitTouches, loadGeneratedProjections, mintSettlementReconcile, writeGitSettled, writeInitialGitSettled } from '../../../scripts/hooks/lib/settlement.mjs';
+import { readRegister } from '../../../scripts/lib/dispatch-register.mjs';
+import { errText, logLine } from './log.mjs';
+import { addNotice, pruneShownNotices } from './notices.mjs';
+
+export const DUTIES_REL = '.sterling/transient/opencode-duties.json';
+const EVENTS_REL = '.sterling/transient/session-events.json';
+const WEIGHED_KINDS = new Set(['concept_designed', 'research_tool', 'agent_dispatch']);
+
+const eventKey = (e) => `${e.kind}|${e.detail ?? ''}|${e.at ?? ''}`;
+
+function readDutyState(root) {
+  const p = join(root, DUTIES_REL);
+  if (!existsSync(p)) return { owed: [], weighed: [] };
+  const parsed = JSON.parse(readFileSync(p, 'utf8'));
+  if (!parsed || !Array.isArray(parsed.owed) || !Array.isArray(parsed.weighed)) throw new Error(`${DUTIES_REL} is not a {owed, weighed} object`);
+  return parsed;
+}
+
+/** The session-event register, or { error } when it cannot be read; an absent register is empty. */
+function readSessionEvents(root) {
+  const p = join(root, EVENTS_REL);
+  if (!existsSync(p)) return { events: [] };
+  try {
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    if (!Array.isArray(parsed)) return { events: [], error: 'it is not a JSON array' };
+    return { events: parsed.filter((e) => e && typeof e === 'object') };
+  } catch (e) {
+    return { events: [], error: String((e && e.message) || e) };
+  }
+}
+
+/** Paths among `paths` absent from `base`'s tree (git ls-tree), or null when git cannot answer. */
+function newSince(root, base, paths) {
+  if (!paths.length) return [];
+  const r = spawnSync('git', ['ls-tree', '-r', base, '--name-only', '--', ...paths], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+  if (r.status !== 0) return null;
+  const inBase = new Set(r.stdout.split('\n').filter(Boolean));
+  return paths.filter((p) => !inBase.has(p));
+}
+
+/**
+ * The article demand over `paths`: { unowned, newly } when it fires, else null.
+ * `degraded` collects what could not be checked (the demand then leans toward
+ * signaling, as H10's does).
+ */
+function articleDemand(store, root, config, paths, base, degraded) {
+  const exempt = demandExemption(config, loadGeneratedProjections(root));
+  const { isUnowned } = ownershipJoin(store, root);
+  let unowned = paths.filter((p) => existsSync(join(root, p)) && !exempt(p) && isUnowned(p));
+  if (unowned.length) {
+    const ignored = gitIgnored(unowned, root);
+    if (ignored === null) degraded.push('git check-ignore failed, so ignored files may be named');
+    else unowned = unowned.filter((p) => !ignored.has(p));
+  }
+  let newly = newSince(root, base, unowned);
+  if (newly === null) {
+    degraded.push(`git ls-tree ${base} failed, so newly created files were not told apart`);
+    newly = [];
+  }
+  return unowned.length && (unowned.length >= config.article_demand.min_unowned_files || newly.length > 0) ? { unowned, newly } : null;
+}
+
+const describe = (d) => {
+  if (d.duty === 'capture') return `capture owed: ${d.paths.length} changed file(s) and no knowledge record written since ${d.since} (${d.paths.slice(0, 5).join(', ')}${d.paths.length > 5 ? ', ...' : ''}). Capture what the turn learned (knowledge_create or knowledge_update), or declare no_capture if nothing durable was learned.`;
+  if (d.duty === 'article') return `article missing: ${d.paths.length} changed file(s) nothing owns${d.newly.length ? ` (${d.newly.length} newly created)` : ''}: ${d.paths.join(', ')}. Create the owning feature_article, or add the files to an existing one (knowledge_append files[]).`;
+  if (d.duty === 'concept') return `concept article missing: concept_designed was registered for concept_family '${d.family}' and no feature_article with that concept_family was written. Create or update it.`;
+  return `research owed: research ran (${d.details.join('; ')}) and no research_finding, decision or anti_pattern was written since ${d.since}. Capture the finding, or declare no_capture with lane research.`;
+};
+
+/**
+ * Weigh this settlement's duties: queue last settlement's still-unpaid ones,
+ * then find this turn's. Returns { notices } for the caller to raise, and
+ * writes the duty state. `git` is settlement's gitTouches result.
+ */
+export function settleDuties(store, root, git, at) {
+  const config = parseConfig(loadConfig(root) ?? {});
+  const state = readDutyState(root);
+  const register = readSessionEvents(root);
+  const events = register.events;
+  const cutoffs = noCaptureCutoffs(events);
+  const notices = [];
+  const degraded = [];
+  if (register.error) notices.push(`Sterling settlement: ${EVENTS_REL} could not be read (${register.error}); the concept and research duties were not weighed this settlement. Fix or remove the file.`);
+  const base = git.base_lost ? 'HEAD' : git.settled.sha;
+
+  // Second pass: last settlement's nagged duties, re-checked against their own anchors.
+  const queued = [];
+  for (const d of state.owed) {
+    if (d.duty === 'capture') {
+      if (capturedSince(store, d.since) || dischargedByCutoff(d.last, cutoffs.capture)) continue;
+      if (!hasOpenSystemTodo(store, 'capture_owed')) {
+        const keys = d.paths.slice(0, 20);
+        const clipped = d.paths.length > keys.length ? ` (file list truncated: naming ${keys.length} of ${d.paths.length} touched path(s))` : '';
+        store.enqueueSystemTodo(systemTodo(at, { text: captureOwedText(d.paths.length, clipped), system_reason: 'capture_owed', file_keys: keys }));
+      }
+      queued.push('capture_owed');
+    } else if (d.duty === 'article') {
+      const still = articleDemand(store, root, config, d.paths, base, degraded);
+      if (!still) continue;
+      const overlapping = store.query({ types: ['todo'], cap: 1000 }).some((t) => t.source === 'system' && t.system_reason === 'article_missing' && (t.file_keys ?? []).some((k) => still.unowned.includes(k)));
+      if (!overlapping) store.enqueueSystemTodo(systemTodo(at, { text: articleMissingText(still.unowned, { newlyCreated: still.newly.length }), system_reason: 'article_missing', file_keys: still.unowned }));
+      queued.push('article_missing');
+    } else if (d.duty === 'concept') {
+      if (!unmetConceptFamilies(store, new Map([[d.family, d.since]]), d.window_start).length) continue;
+      store.enqueueSystemTodo(systemTodo(at, { text: conceptArticleMissingText(d.family), system_reason: 'concept_article_missing' }));
+      queued.push(`concept_article_missing (${d.family})`);
+    } else if (d.duty === 'research') {
+      if (researchCapturedSince(store, d.since) || dischargedByCutoff(d.last, cutoffs.research)) continue;
+      if (!hasOpenSystemTodo(store, 'research_owed')) store.enqueueSystemTodo(systemTodo(at, { text: researchOwedText(d.details.join('; ')), system_reason: 'research_owed' }));
+      queued.push('research_owed');
+    } else {
+      throw new Error(`${DUTIES_REL} holds an unknown duty '${d.duty}'`);
+    }
+  }
+  if (queued.length) notices.push(`Sterling settlement: duties the previous turn left unpaid are now queued as maintenance items: ${queued.join(', ')}. Pay them, or drain them with /sterling:drain.`);
+
+  // First pass: this turn's duties.
+  const owed = [];
+  const windowStart = isValidAt(git.settled.at) ? git.settled.at : at;
+  const changed = git.candidates.filter((c) => existsSync(join(root, c.path)));
+  const generated = loadGeneratedProjections(root);
+  const touched = changed.filter((c) => !IMAGE_BINARY_EXT.test(c.path) && !generated.has(c.path) && !dischargedByCutoff(c.at, cutoffs.capture));
+  if (touched.length && !capturedSince(store, windowStart)) {
+    const ats = touched.map((c) => c.at).filter(isValidAt).sort();
+    owed.push({ duty: 'capture', since: windowStart, last: ats.at(-1) ?? at, paths: touched.map((c) => c.path) });
+  }
+  const demand = articleDemand(store, root, config, changed.map((c) => c.path), base, degraded);
+  if (demand) owed.push({ duty: 'article', paths: demand.unowned, newly: demand.newly });
+
+  const weighed = new Set(state.weighed);
+  const fresh = events.filter((e) => WEIGHED_KINDS.has(e.kind) && !weighed.has(eventKey(e)));
+  const sessionAts = fresh.map((e) => e.at).filter(isValidAt).sort();
+  const earliestSessionAt = sessionAts[0] ?? at;
+  const families = conceptFamiliesFrom(fresh);
+  for (const family of unmetConceptFamilies(store, families, earliestSessionAt)) owed.push({ duty: 'concept', family, since: families.get(family), window_start: earliestSessionAt });
+  const researchAgents = new Set(config.session_events.research_agents);
+  const research = fresh.filter((e) => (e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && researchAgents.has(e.detail))) && !dischargedByCutoff(e.at, cutoffs.research));
+  if (research.length) {
+    const ats = research.map((e) => e.at).filter(isValidAt).sort();
+    const since = ats[0] ?? at;
+    if (!researchCapturedSince(store, since)) owed.push({ duty: 'research', since, last: ats.at(-1) ?? at, details: research.map((e) => e.detail).filter(Boolean) });
+  }
+  if (owed.length) notices.push(`Sterling settlement: the last turn left ${owed.length} duty(ies) unpaid (OpenCode has no stop block, so this is the reminder; still unpaid at the next settlement, each is queued as a maintenance item):\n${owed.map((d) => `- ${describe(d)}`).join('\n')}`);
+  if (degraded.length) notices.push(`Sterling settlement: the article demand was checked with a degraded probe: ${degraded.join('; ')}.`);
+
+  const present = new Set(events.map(eventKey));
+  const nextWeighed = [...new Set([...state.weighed.filter((k) => present.has(k)), ...fresh.map(eventKey)])];
+  writeJsonAtomic(join(root, DUTIES_REL), { owed, weighed: nextWeighed });
+  return { notices };
+}
+
+function writeJsonAtomic(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(value));
+    renameSync(tmp, path);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+}
+
+/**
+ * A live Claude Code dispatch means H10 is holding paths it will settle
+ * itself, so the snapshot must not advance past them. Any row without
+ * `ended` counts; a register that cannot be read counts as live (fail closed).
+ */
+export function liveDispatch(root) {
+  const reg = readRegister(root);
+  if (reg.availability === 'absent') return { live: false };
+  if (reg.availability !== 'ok') return { live: true, why: `the dispatch register is ${reg.availability}` };
+  const rows = reg.entries.filter((e) => !e.ended);
+  return rows.length ? { live: true, why: `${rows.length} Claude dispatch(es) still registered (${rows.map((r) => r.agent_id).join(', ')})` } : { live: false };
+}
+
+/** The settle step for one execution; `launchWorkerFor(root, at)` runs after a settlement that did not fail. */
+export function createSettle({ openStore, now, launchWorkerFor }) {
+  async function settle(root) {
+    pruneShownNotices(root);
+    const at = now();
+    const git = gitTouches(root, at);
+    if (!git.ok) {
+      if (git.reason !== 'no_git') addNotice(root, `Sterling settlement skipped: git could not answer (${git.reason}).`, at);
+      return;
+    }
+    if (!git.settled) {
+      writeInitialGitSettled(root, git.next);
+      return;
+    }
+    const dispatch = liveDispatch(root);
+    let store;
+    try {
+      store = openStore(join(root, '.sterling', 'sterling.db'));
+      const minted = mintSettlementReconcile(store, root, git.candidates.map((c) => c.path), at);
+      const duties = settleDuties(store, root, git, at);
+      if (!dispatch.live) writeGitSettled(root, git.next);
+      if (minted.length) {
+        const lines = minted.map((m) => {
+          const a = store.get(m.article_id);
+          return `${a?.slug ?? m.article_id} (${m.paths.join(', ')})`;
+        });
+        addNotice(root, `Sterling settlement: the last turn changed files owned by ${minted.length} article(s) and queued reconcile duties: ${lines.join('; ')}. Bring each article in line with the change (knowledge_update), or confirm it already is.`, at);
+      }
+      for (const text of duties.notices) addNotice(root, text, at);
+      if (git.base_lost) addNotice(root, `Sterling settlement: the settled commit ${git.settled.sha} is no longer reachable from HEAD ${git.next.sha}; duties for the commits between them were not derived. Reconcile them by hand from git log.`, at);
+      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; Claude Code settles those paths when the dispatch ends.`, at);
+    } catch (e) {
+      logLine(root, `settle failed: ${errText(e)}`);
+      addNotice(root, `Sterling settlement failed (${errText(e)}); the settled snapshot was not advanced, so the next turn retries the same range.`, at);
+      return;
+    } finally {
+      store?.close();
+    }
+    launchWorkerFor(root, at);
+  }
+
+  return settle;
+}

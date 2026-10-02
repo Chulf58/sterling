@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "adapters": [
+    { "name": "node", "module": "node.mjs" },
+    { "name": "pester", "module": "pester.mjs" },
+    { "name": "none", "module": "none.mjs" }
+  ]
+}

@@ -1,0 +1,785 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SterlingStore } from '@sterling/store';
+import { AGENT_MODEL_KEY } from '@sterling/schemas';
+import { buildDashboardState, initialUi, TABS, type UiState, type DashboardState } from '../state.js';
+import * as stateMod from '../state.js';
+import * as viewmodel from '../viewmodel.js';
+
+// ===========================================================================
+// FROZEN PHASE-4 oracle (run r-f9a7) — SPEC-ONLY, written before the TUI
+// System tab exists. These pin brief tui-system-tab's phase-4 ACs at the level
+// the TUI's PURE layers permit:
+//
+//   AC1  a new 'System' tab lists every registered agent with the model +
+//        effort read from its INSTALLED .claude/agents/* frontmatter — the copy
+//        that actually governs dispatch (buildSystemTab rows, per config.models
+//        KEY, governed agents listed, the INSTALLED values shown).
+//   AC4  an agent whose installed frontmatter disagrees with config.models
+//        shows a visible DRIFT marker (driftOf + the row marker; a partially
+//        applied projection surfaces as drift — the P5 backstop).
+//   AC5  every swap emits ONE commit effect carrying the config.models write,
+//        the surgical installed-frontmatter projection, and a swap DECISION
+//        record titled 'Model swap: <key> <old>→<new> (System tab)'.
+//
+// Plus the phase-4 machinery the ACs ride on: the last TABS entry + hotkey/
+// hit-test scaling by TABS.length; the inline selector state machine
+// (open/navigate/commit/cancel); the effort rule (no xhigh/max for ANY key —
+// the sole one-time exception, coder_hard, is no longer even a renderable
+// row, LOW-3); the ^claude- model-value refusal; the catalog-status banner
+// (absent / fresh / stale-with-date); and rendering at the 33-column floor.
+//
+// OUT OF THIS ORACLE (impure — main.ts owns them, unreachable from the pure
+// layers): the actual config.json write, the actual setInstalledModelEffort
+// file rewrite, the actual store.create of the decision record, the tab-
+// activation snapshot READ, and the "never on the 1 Hz loop" perf guarantee.
+// We specify the EFFECT VALUE the impure layer runs, never the IO.
+//
+// ---------------------------------------------------------------------------
+// CONTRACT this oracle OWNS (decisions_made — the coder implements to these;
+// they are not otherwise fixed by the interface slice, so the test defines
+// them, exactly as the run r-dd88 oracles defined the cat:/src: id conventions
+// and the { type:'select', ... } effect shape):
+//
+//   • state.SYSTEM_TAB === 3; TABS[3] === 'System'; TABS.length === 4.
+//   • buildSystemTab(snapshot, ui, width?) is a PURE projection returning
+//     { rows, banner }. rows carry ONE row per config.models KEY, in the
+//     configModels key insertion order, id 'sys:<key>'.
+//   • driftOf(installedValue, configValue) is a pure SCALAR (string) comparison
+//     → true iff the two differ.
+//   • the drifted row exposes row.drift === true AND renders the word 'drift'
+//     in its text (the visible AC4 marker); an aligned row does neither.
+//   • reduce/buildDashboardState gain a TRAILING optional roster? param (after
+//     the existing knowledge? param) — the additive-optional-param idiom of
+//     decision foreign_34d61f60. buildSystemTab reads the same snapshot from ui.
+//   • inline selector protocol: on a key row ENTER opens the MODEL picker
+//     (options = catalog entries, highlight at index 0); UP/DOWN move the
+//     highlight; ENTER confirms the model and opens the EFFORT picker (options
+//     honor the rule, highlight at index 0); ENTER commits (emits the effect);
+//     ESCAPE cancels at any stage with no effect.
+//   • the commit effect: { type:'model_swap', key, from:{model,effort},
+//     to:{model,effort}, agents:string[] (governed agent names, [] for a
+//     config-only key), decisionTitle }.  from = the CURRENT config value
+//     (the authoritative copy being replaced).  decisionTitle follows the
+//     convention 'Model swap: <key> <oldModel>→<newModel> (System tab)'.
+//   • a selected model failing /^claude-/ is REFUSED at commit (no effect).
+//
+// CLEAN-RED discipline (mirrors the run r-dd88 vm/S/S4 casts in state.test.ts):
+//   • the not-yet-exported symbols (SYSTEM_TAB, buildSystemTab, driftOf) are
+//     reached through NARROW casts on the module namespaces so the file
+//     COMPILES under tsc strict before they exist; a symbol may land in either
+//     state.ts or viewmodel.ts, so it is resolved from EITHER namespace.
+//   • every test that uses such a symbol EXISTENCE-asserts it FIRST, so an
+//     unimplemented symbol yields a clean AssertionError, never a TypeError.
+//   • reduce ALREADY exists and is defensive, so the selector/commit tests
+//     drive it with a REAL store + the roster cast: today it ignores the extra
+//     arg and the System-tab ui, emitting no swap effect → the AC5 assertions fail
+//     RED on AssertionError, never a crash.
+// ===========================================================================
+
+/** The System tab index used to DRIVE the entry points without passing a raw
+ *  `undefined` tab (mirrors KNOW_TAB=2 in state.test.ts). The exported
+ *  state.SYSTEM_TAB is asserted to equal this by the registry test below. */
+const SYS_TAB = 4;
+
+const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over });
+
+/** One rendered tab cell as the hit-test measures it (state.tabs[i].label).
+ *  Narrow cast + an existence assert per read, so a missing label fails on an
+ *  assertion rather than on undefined arithmetic. */
+interface TabCell {
+  label?: string;
+  index?: number;
+}
+/** The x of tab i's label, DERIVED from the labels the renderer produced: cells
+ *  start at terminal x=1 and each cell is `label.length + 2` wide. Tab labels
+ *  are dynamic (the Tasks label carries its open-task count), so the tab row's
+ *  absolute coordinates are not a constant this oracle may hardcode. */
+function tabLabelX(s: DashboardState, tabIndex: number): number {
+  const cells = s.tabs as unknown as TabCell[];
+  const i = cells.findIndex((c) => c.index === tabIndex);
+  assert.ok(i >= 0, `tab ${tabIndex} is present in the rendered tab row`);
+  let x = 1;
+  for (let j = 0; j < i; j++) {
+    assert.equal(typeof cells[j].label, 'string', `tab cell ${j} exposes its rendered label`);
+    x += cells[j].label!.length + 2;
+  }
+  return x + 1;
+}
+
+// ---- injected snapshot shape (interface slice: AgentRosterSnapshot) --------
+interface CatalogEntry {
+  id: string;
+  label: string;
+  tier: string;
+  status: string;
+}
+/** The catalog-status VIEW the impure layer computes at tab activation
+ *  (catalogStatus(record|null, now, thresholdDays) → present/stale/staleDate)
+ *  and injects alongside the entries. Precomputed so buildSystemTab stays pure
+ *  and deterministic (no `now` inside the projection). */
+interface CatalogStatusView {
+  present: boolean;
+  stale: boolean;
+  staleDate: string | null;
+  entries: CatalogEntry[];
+}
+interface RosterAgent {
+  name: string;
+  installedModel: string;
+  installedEffort: string;
+}
+interface AgentRosterSnapshot {
+  agents: RosterAgent[];
+  configModels: Record<string, { model: string; effort: string }>;
+  catalog: CatalogStatusView;
+}
+
+// ---- projected shapes buildSystemTab returns -------------------------------
+interface SystemLine {
+  text: string;
+  kind?: string;
+  selected?: boolean;
+}
+interface SystemRow {
+  id: string;
+  key?: string;
+  drift?: boolean;
+  agents?: string[];
+  lines: SystemLine[];
+}
+interface SystemTabView {
+  rows: SystemRow[];
+  banner: string | string[];
+}
+
+// ---- the commit effect the impure layer runs (SYSTEM_TAB commit effect) ----
+interface ModelSwapEffect {
+  type: string;
+  key?: string;
+  from?: { model?: string; effort?: string };
+  to?: { model?: string; effort?: string };
+  agents?: string[];
+  decisionTitle?: string;
+}
+
+// ---- narrow casts for not-yet-exported symbols (clean-red) -----------------
+const stateNs = stateMod as unknown as Record<string, unknown>;
+const vmNs = viewmodel as unknown as Record<string, unknown>;
+/** Resolve a phase-4 symbol from EITHER the state or the viewmodel namespace
+ *  (the interface slice calls buildSystemTab/driftOf a "state/viewmodel
+ *  projection" — placement is the coder's call). Returns undefined until it
+ *  exists, so callers existence-assert first. */
+function resolve(name: string): unknown {
+  return stateNs[name] !== undefined ? stateNs[name] : vmNs[name];
+}
+const buildSystemTab = resolve('buildSystemTab') as
+  | ((snap: AgentRosterSnapshot, ui: UiState, width?: number) => SystemTabView)
+  | undefined;
+const driftOf = resolve('driftOf') as ((installed: string, config: string) => boolean) | undefined;
+
+interface SystemTabConst {
+  SYSTEM_TAB?: number;
+}
+const STc = stateMod as unknown as SystemTabConst;
+
+/** reduce with the additive trailing roster? param (after knowledge?). The
+ *  committed signature lacks it, so the cast lets tsc accept the extra arg
+ *  before the coder adds it; the leading args stay real so today's code runs
+ *  the (no-op-for-tab-5) path WITHOUT throwing. */
+interface SystemArityStateMod {
+  reduce: (
+    store: SterlingStore,
+    ui: UiState,
+    event: unknown,
+    viewport?: unknown,
+    knowledge?: unknown,
+    roster?: AgentRosterSnapshot,
+  ) => { ui: UiState; effects: { type: string }[] };
+}
+const SR = stateMod as unknown as SystemArityStateMod;
+
+// ---- fixtures --------------------------------------------------------------
+// GOVERNED roster agents only (main.ts's buildSystemTab source: Object.keys(AGENT_MODEL_KEY)) —
+// NOT every registry.json entry. Route A (decision
+// conductor-instructions-via-main-session-agent-route-a) added 'conductor' to the
+// registry with no AGENT_MODEL_KEY entry (a main-session agent, never dispatched,
+// has no model:/effort: to govern here), so the full registry list is no longer
+// 1:1 with "agents this tab lists a row for".
+const ROSTER_AGENTS: string[] = JSON.parse(
+  readFileSync(join(process.cwd(), 'agent-templates', 'registry.json'), 'utf8'),
+)
+  .agents.map((agent: { name: string }) => agent.name)
+  .filter((name: string) => name in AGENT_MODEL_KEY);
+const GOVERNED_KEY = ROSTER_AGENTS[0];
+
+/** Catalog entries. Entry[0] is claude-opus-4-8 (the researcher
+ *  current model), so a single DOWN lands on entry[1] regardless of whether the
+ *  picker highlights index 0 or the current model. 'Opus 4.1' is used by NO
+ *  config key — its appearance is the "picker is open" tell. */
+const CATALOG_ENTRIES: CatalogEntry[] = [
+  { id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' },
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', tier: 'sonnet', status: 'active' },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', tier: 'haiku', status: 'active' },
+  { id: 'claude-opus-4-1', label: 'Opus 4.1', tier: 'opus', status: 'legacy' },
+];
+function freshCatalog(entries: CatalogEntry[] = CATALOG_ENTRIES): CatalogStatusView {
+  return { present: true, stale: false, staleDate: null, entries };
+}
+
+function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnapshot {
+  return {
+    agents: ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
+    // insertion order fixes the row order + the cursor index per key:
+    // implementor=0, researcher=1, scout=2, librarian=3, classifiers=4, reviewer=5.
+    // LOW-3 (second Opus re-check round): the System tab now filters
+    // config.models to exactly this 6-key set (the classless four-agent
+    // roster, decision agent-roster-is-classless-four-agents f0893161, plus
+    // classifiers and reviewer) — the fixture previously also carried an orphan 'coder'
+    // key + agent (a relic of the pre-rename roster) at index 0 specifically
+    // to exercise "an unmapped key/agent renders inertly"; that behavior no
+    // longer exists to exercise (an unmapped key is now FILTERED OUT, never
+    // rendered at all — see the dedicated LOW-3 test below), so it was
+    // removed here rather than kept as dead weight every other test had to
+    // route cursor math around.
+    configModels: {
+      implementor: { model: 'claude-opus-4-8', effort: 'low' },
+      researcher: { model: 'claude-opus-4-8', effort: 'low' },
+      scout: { model: 'claude-opus-4-8', effort: 'low' },
+      librarian: { model: 'claude-opus-4-8', effort: 'low' },
+      classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
+      // last, so the cursor indices above are unchanged (reviewer joined the
+      // roster in decision reviewer-agent-is-the-one-review-rubric-for-claude-and-codex)
+      reviewer: { model: 'claude-opus-4-8', effort: 'low' },
+    },
+    catalog: freshCatalog(),
+    ...over,
+  };
+}
+
+function storeFixture() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-systab-'));
+  const store = new SterlingStore(join(dir, 'sterling.db'));
+  return { store, cleanup: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
+}
+
+/** Flatten every rendered line + the banner into one haystack for substring
+ *  assertions that don't care WHERE (banner field vs a header row) a status
+ *  line lives. */
+function allText(view: SystemTabView): string {
+  const banner = Array.isArray(view.banner) ? view.banner.join('\n') : (view.banner ?? '');
+  return [banner, ...view.rows.flatMap((r) => r.lines.map((l) => l.text))].join('\n');
+}
+function rowText(row: SystemRow): string {
+  return row.lines.map((l) => l.text).join(' ');
+}
+function rowOf(view: SystemTabView, key: string): SystemRow | undefined {
+  return view.rows.find((r) => r.id === `sys:${key}` || r.key === key);
+}
+
+/** Drive reduce through a keystroke sequence, threading ui and collecting every
+ *  effect emitted across all steps. */
+function drive(
+  store: SterlingStore,
+  ui: UiState,
+  events: unknown[],
+  roster?: AgentRosterSnapshot,
+): { ui: UiState; effects: { type: string }[] } {
+  let cur = ui;
+  const all: { type: string }[] = [];
+  for (const ev of events) {
+    const r = SR.reduce(store, cur, ev, undefined, undefined, roster);
+    cur = r.ui;
+    for (const e of r.effects) all.push(e);
+  }
+  return { ui: cur, effects: all };
+}
+function findSwap(effects: { type: string }[]): ModelSwapEffect | undefined {
+  return effects.find((e) => (e as ModelSwapEffect).type === 'model_swap') as ModelSwapEffect | undefined;
+}
+const key = (name: string) => ({ kind: 'key', name });
+
+// ===========================================================================
+// TABS registry — the last tab; hotkey + hit-test scale by TABS.length
+// ===========================================================================
+
+test('phase4 registry: TABS ends with "System" after the Agents tab; state.SYSTEM_TAB === 4', () => {
+  assert.strictEqual(typeof STc.SYSTEM_TAB, 'number', 'state.SYSTEM_TAB must be an exported number');
+  assert.equal(STc.SYSTEM_TAB, SYS_TAB, 'the System tab is index 4 (last, after Agents)');
+  assert.equal(TABS.length, 5, 'TABS has five entries');
+  assert.equal(TABS[3], 'Agents', 'TABS[3] is the "Agents" label');
+  assert.equal(TABS[4], 'System', 'TABS[4] is the "System" label');
+});
+
+test('phase4 registry: on a host without the Agents tab the digit-4 hotkey selects the System tab', () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    // '4' selects the fourth tab this host reaches (Agents is not painted by default), which is System.
+    const r = SR.reduce(store, st(), { kind: 'char', ch: '4' });
+    assert.equal(r.ui.tab, SYS_TAB, "the '4' hotkey switches to the fourth (System) tab");
+  } finally {
+    cleanup();
+  }
+});
+
+test('phase4 registry: a tab-bar click on the last cell hit-tests to the System tab (layout scales by TABS.length)', () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    // the established tab-bar layout is a 1-space-padded cell per RENDERED label
+    // on terminal row 2: cell_i starts at 1 + Σ_{j<i}(len_j + 2), its label's
+    // first char at start+1. The lengths come from the labels the renderer
+    // actually produced (state.tabs[j].label) — NOT from the bare TABS registry
+    // labels, since the Tasks label carries its open-task count. The last cell
+    // must appear by the SAME formula — that IS the scaling contract.
+    const x = tabLabelX(buildDashboardState(store, st()), SYS_TAB);
+    const r = SR.reduce(store, st(), { kind: 'click', x, y: 2 });
+    assert.equal(r.ui.tab, SYS_TAB, 'clicking the last tab cell selects the System tab');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// AC1 — the roster: one row per config.models KEY, governed agents listed,
+// the INSTALLED frontmatter values shown (the copy that governs dispatch)
+// ===========================================================================
+
+test('AC1: buildSystemTab renders exactly one row per config.models KEY, in key order, id "sys:<key>"', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported (state/viewmodel projection)');
+  const snap = baseSnapshot();
+  const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
+  assert.ok(Array.isArray(view.rows), 'buildSystemTab returns a rows array');
+  assert.deepEqual(
+    view.rows.map((r) => r.id),
+    Object.keys(snap.configModels).map((k) => `sys:${k}`),
+    'one row per config.models key, in configModels key order',
+  );
+});
+
+test('AC1: each current registry agent is listed under its governed key with installed model + effort', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const view = buildSystemTab!(baseSnapshot(), st({ tab: SYS_TAB }), 80);
+  for (const name of ROSTER_AGENTS) {
+    const row = rowOf(view, name);
+    assert.ok(row, `the ${name} row is present`);
+    const text = rowText(row!);
+    assert.match(text, new RegExp(name), `the ${name} row lists its governed agent`);
+    assert.match(text, /claude-opus-4-8/, `the ${name} row shows the installed model`);
+    assert.match(text, /\blow\b/, `the ${name} row shows the installed effort`);
+  }
+});
+
+test('AC1: config-only key (classifiers) appears with no governed agent, showing its config model+effort', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const view = buildSystemTab!(baseSnapshot(), st({ tab: SYS_TAB }), 80);
+  const hard = rowOf(view, 'classifiers');
+  assert.ok(hard, 'the classifiers config-only row is present');
+  const hardText = rowText(hard!);
+  // no installed/registered agent maps to classifiers, so no agent name is listed on it
+  for (const name of ROSTER_AGENTS) {
+    assert.doesNotMatch(hardText, new RegExp(name), `classifiers is config-only — it does not list the agent ${name}`);
+  }
+  assert.match(hardText, /claude-haiku-4-5/, 'classifiers shows its config model');
+  assert.match(hardText, /low/, 'classifiers shows its config effort');
+});
+
+test('AC1: every registered agent in the snapshot appears in exactly one row (the tab lists every agent)', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const snap = baseSnapshot();
+  const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
+  for (const agent of snap.agents.filter((agent) => ROSTER_AGENTS.includes(agent.name))) {
+    const hits = view.rows.filter((r) => new RegExp(agent.name).test(rowText(r)));
+    assert.equal(hits.length, 1, `agent ${agent.name} is listed in exactly one row`);
+  }
+});
+
+test('AC1: the row shows the INSTALLED frontmatter value (the governing copy), NOT the config value, when they differ', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  // researcher: installed frontmatter says opus-4-8, but config.models says sonnet-4-6.
+  // The tab must surface the INSTALLED opus value — the copy that governs dispatch.
+  const snap = baseSnapshot({
+    agents: ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
+    configModels: {
+      implementor: { model: 'claude-opus-4-8', effort: 'low' },
+      researcher: { model: 'claude-sonnet-4-6', effort: 'high' },
+      scout: { model: 'claude-opus-4-8', effort: 'low' },
+      librarian: { model: 'claude-opus-4-8', effort: 'low' },
+      classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
+    },
+  });
+  const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
+  const researcher = rowOf(view, GOVERNED_KEY);
+  assert.ok(researcher, 'the governed agent row is present');
+  const text = rowText(researcher!);
+  assert.match(text, /claude-opus-4-8/, 'the installed model (opus-4-8) is shown — the governing frontmatter copy');
+  assert.match(text, /low/, 'the installed effort (low) is shown, not the config effort');
+});
+
+// ===========================================================================
+// AC4 — drift: driftOf primitive + the visible row marker
+// ===========================================================================
+
+test('AC4: driftOf is a pure scalar comparison — equal values do not drift, differing values do', () => {
+  assert.strictEqual(typeof driftOf, 'function', 'driftOf must be exported');
+  // aligned
+  assert.equal(driftOf!('claude-opus-4-8', 'claude-opus-4-8'), false, 'identical model strings do not drift');
+  assert.equal(driftOf!('low', 'low'), false, 'identical effort strings do not drift');
+  // divergent
+  assert.equal(driftOf!('claude-sonnet-4-6', 'claude-opus-4-8'), true, 'differing model strings drift');
+  assert.equal(driftOf!('high', 'low'), true, 'differing effort strings drift');
+  // boundary: a missing installed value is drift (nothing governs → disagreement)
+  assert.equal(driftOf!('', 'claude-opus-4-8'), true, 'a blank installed value drifts against a set config value');
+  assert.equal(driftOf!('claude-opus-4-8', ''), true, 'a set installed value drifts against a blank config value');
+});
+
+test('AC4: a row whose installed model disagrees with config shows a visible drift marker; an aligned row does not', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  // every governed agent installed on sonnet, config on opus → model drift on those rows.
+  const snap = baseSnapshot({
+    agents: ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-sonnet-4-6', installedEffort: 'low' })),
+  });
+  const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
+  const governed = rowOf(view, GOVERNED_KEY)!;
+  assert.equal(governed.drift, true, 'the governed row is flagged drift (installed sonnet ≠ config opus)');
+  assert.match(rowText(governed), /drift/i, 'the drift is visible in the governed row text (AC4 marker)');
+
+  // classifiers is config-only (no governed agent, so `governed.some(...)` over
+  // an empty array is structurally always false) — a row that categorically
+  // CANNOT drift, used here as the "an aligned row does not" half of this AC
+  // (LOW-3 removed the old 'coder' row this half used to check).
+  const classifiersRow = rowOf(view, 'classifiers')!;
+  assert.notEqual(classifiersRow.drift, true, 'the config-only classifiers row is never flagged drift');
+  assert.doesNotMatch(rowText(classifiersRow), /drift/i, 'no drift marker on the classifiers row');
+});
+
+test('AC4: EFFORT-only disagreement (model equal) still drifts the row', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  // models all match config; only the governed agents' effort differs (installed high vs config low)
+  const snap = baseSnapshot({
+    agents: ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'high' })),
+  });
+  const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
+  const governed = rowOf(view, GOVERNED_KEY)!;
+  assert.equal(governed.drift, true, 'an effort-only disagreement drifts the row');
+  assert.match(rowText(governed), /drift/i, 'effort drift is visible on the row');
+});
+
+test('AC4/AC5 (P5 backstop): a partially applied projection — config updated but one governed agent still on the old model — surfaces as drift', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  // A swap wrote config.models.researcher → sonnet but its installed frontmatter
+  // still holds opus (the file write partially failed). The disagreeing agent must show drift —
+  // the AC4 marker is the P5 backstop for a partial projection (decision 98064d77c).
+  const snap = baseSnapshot({
+    agents: ROSTER_AGENTS.map((name) => ({
+      name,
+      installedModel: name === GOVERNED_KEY ? 'claude-opus-4-8' : 'claude-sonnet-4-6',
+      installedEffort: 'low',
+    })),
+    configModels: {
+      implementor: { model: 'claude-sonnet-4-6', effort: 'low' },
+      researcher: { model: 'claude-sonnet-4-6', effort: 'low' }, // config already swapped to sonnet
+      scout: { model: 'claude-sonnet-4-6', effort: 'low' },
+      librarian: { model: 'claude-sonnet-4-6', effort: 'low' },
+      classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
+    },
+  });
+  const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
+  const governed = rowOf(view, GOVERNED_KEY)!;
+  assert.equal(governed.drift, true, 'the partially projected governed row is flagged drift (installed model stayed old)');
+  assert.match(rowText(governed), /drift/i, 'the partial projection is visible as drift (P5 backstop)');
+});
+
+// ===========================================================================
+// Catalog-status banner — absent / fresh / stale-with-date
+// ===========================================================================
+
+test('catalog banner: an ABSENT catalog is announced', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const snap = baseSnapshot({ catalog: { present: false, stale: false, staleDate: null, entries: [] } });
+  const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
+  assert.match(allText(view), /no catalog|catalog.*(absent|missing|none)|absent|not found/i, 'the banner announces the catalog is absent');
+});
+
+test('catalog banner: a FRESH catalog is NOT announced as stale', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const view = buildSystemTab!(baseSnapshot(), st({ tab: SYS_TAB }), 80);
+  assert.doesNotMatch(allText(view), /stale/i, 'a fresh catalog raises no stale announcement');
+});
+
+test('catalog banner: a STALE catalog is announced WITH its date', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const snap = baseSnapshot({ catalog: { present: true, stale: true, staleDate: '2026-01-15', entries: CATALOG_ENTRIES } });
+  const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
+  const text = allText(view);
+  assert.match(text, /stale/i, 'a stale catalog raises a stale announcement');
+  assert.match(text, /2026-01-15/, 'the stale announcement carries the catalog date');
+});
+
+// ===========================================================================
+// Inline selector state machine — open / navigate / commit / cancel
+// ===========================================================================
+
+test('selector open: ENTER on a key row opens the MODEL picker listing the catalog entries', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const { store, cleanup } = storeFixture();
+  try {
+    const snap = baseSnapshot();
+    // cursor on the implementor row (index 0); ENTER opens the picker.
+    const opened = drive(store, st({ tab: SYS_TAB, cursor: 0 }), [key('ENTER')], snap);
+    const view = buildSystemTab!(snap, opened.ui, 80);
+    const text = allText(view);
+    // every catalog entry surfaces as an option — including 'Opus 4.1', which is
+    // used by NO config key, so its presence proves the picker (not the roster) is open.
+    assert.match(text, /claude-opus-4-1|Opus 4\.1/, 'the model picker lists the catalog entry unused by any config key (picker is open)');
+    assert.match(text, /claude-sonnet-4-6|Sonnet 4\.6/, 'the picker lists the other catalog models too');
+  } finally {
+    cleanup();
+  }
+});
+
+test('selector open: the plain roster (no picker) does NOT surface the unused catalog entry', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const view = buildSystemTab!(baseSnapshot(), st({ tab: SYS_TAB }), 80);
+  assert.doesNotMatch(allText(view), /claude-opus-4-1|Opus 4\.1/, 'the closed roster never shows the unused catalog entry');
+});
+
+test('audit finding 24/43: ENTER on an EMPTY catalog does NOT open the picker — it surfaces a ⚠ notice', () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    const snap = baseSnapshot({ catalog: { present: true, stale: false, staleDate: null, entries: [] } });
+    const r = drive(store, st({ tab: SYS_TAB, cursor: 0 }), [key('ENTER')], snap);
+    assert.equal(r.ui.selector, undefined, 'no picker opens on an empty catalog');
+    assert.match(r.ui.notice ?? '', /catalog empty|invalid|nothing to pick/i, 'a notice explains why');
+    assert.match(allText(buildSystemTab!(snap, r.ui, 80)), /⚠/, 'the notice renders as a ⚠ banner row');
+  } finally {
+    cleanup();
+  }
+});
+
+test('audit finding 24/43: committing a non-claude model is REFUSED with a visible notice (not a silent close)', () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    // a catalog whose only entry is a non-claude id → the commit fails MODEL_VALUE_RE
+    const snap = baseSnapshot({ catalog: freshCatalog([{ id: 'gpt-5x', label: 'GPT 5X', tier: 'opus', status: 'active' }]) });
+    // implementor row: open model picker, confirm the (only) entry, advance to effort, commit
+    const r = drive(store, st({ tab: SYS_TAB, cursor: 0 }), [key('ENTER'), key('ENTER'), key('ENTER')], snap);
+    assert.equal(findSwap(r.effects), undefined, 'no model_swap effect emitted for a non-claude model');
+    assert.equal(r.ui.selector, undefined, 'the picker closed');
+    assert.match(r.ui.notice ?? '', /refused/i, 'the refusal is surfaced, not silent');
+  } finally {
+    cleanup();
+  }
+});
+
+test('selector effort rule: a registered agent key offers efforts EXCLUDING xhigh and max', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const { store, cleanup } = storeFixture();
+  try {
+    const snap = baseSnapshot();
+    // ENTER opens model picker, ENTER confirms model → advances to the EFFORT picker.
+    const atEffort = drive(store, st({ tab: SYS_TAB, cursor: 1 }), [key('ENTER'), key('ENTER')], snap);
+    const view = buildSystemTab!(snap, atEffort.ui, 80);
+    const text = allText(view);
+    assert.match(text, /minimal|\blow\b|medium|\bhigh\b/i, 'the effort picker offers allowed efforts');
+    assert.doesNotMatch(text, /xhigh/i, 'a subagent key never offers xhigh (§7.2 hard rule)');
+    assert.doesNotMatch(text, /\bmax\b/i, 'a subagent key never offers max');
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC5 commit (governed key): ENTER→DOWN→ENTER→ENTER emits ONE model_swap effect with config write, governed agents, and the titled decision', () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    const snap = baseSnapshot();
+    // implementor row (cursor 0, GOVERNED_KEY): open model picker (highlights
+    // opus-4-8 at index 0), DOWN → sonnet-4-6 (index 1), ENTER confirm model,
+    // ENTER commit (effort[0]).
+    const res = drive(
+      store,
+      st({ tab: SYS_TAB, cursor: 0 }),
+      [key('ENTER'), key('DOWN'), key('ENTER'), key('ENTER')],
+      snap,
+    );
+    const swap = findSwap(res.effects);
+    assert.ok(swap, 'the commit emits exactly one model_swap effect');
+    assert.equal(res.effects.filter((e) => (e as ModelSwapEffect).type === 'model_swap').length, 1, 'exactly one swap effect, never a burst');
+    assert.equal(swap!.key, GOVERNED_KEY, 'the effect names the config.models key being swapped');
+    assert.equal(swap!.from?.model, 'claude-opus-4-8', 'from = the CURRENT config model (the authoritative copy being replaced)');
+    assert.equal(swap!.to?.model, 'claude-sonnet-4-6', 'to = the newly selected model');
+    // the governed agents (for the surgical setInstalledModelEffort projection)
+    assert.deepEqual([...(swap!.agents ?? [])].sort(), [GOVERNED_KEY], 'the effect carries the governed registry agent for the frontmatter projection');
+    // the durable decision title convention (AC5 + decision 98064d77e), verbatim
+    const title = swap!.decisionTitle ?? '';
+    assert.ok(title.startsWith(`Model swap: ${GOVERNED_KEY} `), `decision title names the key: "${title}"`);
+    assert.ok(title.includes('claude-opus-4-8→claude-sonnet-4-6'), `decision title records old→new: "${title}"`);
+    assert.ok(title.endsWith('(System tab)'), `decision title carries the (System tab) provenance: "${title}"`);
+    // the effort committed for a subagent key honors the rule
+    assert.ok(typeof swap!.to?.effort === 'string' && swap!.to!.effort.length > 0, 'the effect carries a committed effort');
+    assert.notEqual(swap!.to?.effort, 'xhigh', 'a subagent swap never commits xhigh');
+    assert.notEqual(swap!.to?.effort, 'max', 'a subagent swap never commits max');
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC5 commit (config-only key): a classifiers swap emits the effect with NO governed agents (config write + decision only, no frontmatter projection)', () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    const snap = baseSnapshot();
+    // classifiers row (cursor 4: implementor=0, researcher=1, scout=2,
+    // librarian=3, classifiers=4): open → DOWN to sonnet-4-6 (index 1) → confirm → commit.
+    const res = drive(
+      store,
+      st({ tab: SYS_TAB, cursor: 4 }),
+      [key('ENTER'), key('DOWN'), key('ENTER'), key('ENTER')],
+      snap,
+    );
+    const swap = findSwap(res.effects);
+    assert.ok(swap, 'a config-only key still emits a swap effect (AC5: every swap is recorded)');
+    assert.equal(swap!.key, 'classifiers', 'the effect names the classifiers key');
+    assert.equal(swap!.from?.model, 'claude-haiku-4-5', 'from = the current classifiers config model');
+    assert.equal(swap!.to?.model, 'claude-sonnet-4-6', 'to = the selected model');
+    assert.deepEqual(swap!.agents ?? [], [], 'a config-only key governs no installed agent — no frontmatter file to project');
+    assert.ok((swap!.decisionTitle ?? '').startsWith('Model swap: classifiers '), 'the decision is still titled for the config-only key');
+  } finally {
+    cleanup();
+  }
+});
+
+test('selector cancel: ESCAPE after opening dismisses the picker and emits NO swap effect', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const { store, cleanup } = storeFixture();
+  try {
+    const snap = baseSnapshot();
+    const ui0 = st({ tab: SYS_TAB, cursor: 1 });
+    // open, then confirm the picker is showing the unused catalog entry
+    const opened = drive(store, ui0, [key('ENTER')], snap);
+    assert.match(allText(buildSystemTab!(snap, opened.ui, 80)), /claude-opus-4-1|Opus 4\.1/, 'the picker is open after ENTER');
+    // ESCAPE from the opened state → picker gone, no effect
+    const cancelled = drive(store, opened.ui, [key('ESCAPE')], snap);
+    assert.equal(findSwap(cancelled.effects), undefined, 'cancel emits no swap effect');
+    assert.doesNotMatch(allText(buildSystemTab!(snap, cancelled.ui, 80)), /claude-opus-4-1|Opus 4\.1/, 'ESCAPE dismisses the picker (options no longer shown)');
+    // and no swap escaped across the whole open→cancel sequence
+    assert.equal(findSwap([...opened.effects, ...cancelled.effects]), undefined, 'no swap effect anywhere in the open→cancel path');
+  } finally {
+    cleanup();
+  }
+});
+
+test('selector validation: a selected model failing /^claude-/ is REFUSED at commit (no effect); a valid claude model commits', () => {
+  const { store, cleanup } = storeFixture();
+  try {
+    // catalog with a non-claude id at a KNOWN index (1): [opus-4-8, gpt-4o, sonnet-4-6]
+    const badCatalog = freshCatalog([
+      { id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' },
+      { id: 'gpt-4o', label: 'GPT-4o', tier: 'gpt', status: 'active' },
+      { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', tier: 'sonnet', status: 'active' },
+    ]);
+    const snap = baseSnapshot({ catalog: badCatalog });
+
+    // (refusal) implementor row (cursor 0): DOWN once → gpt-4o (index 1) → confirm → commit.
+    const refused = drive(
+      store,
+      st({ tab: SYS_TAB, cursor: 0 }),
+      [key('ENTER'), key('DOWN'), key('ENTER'), key('ENTER')],
+      snap,
+    );
+    assert.equal(findSwap(refused.effects), undefined, 'a non-claude model value is refused before commit — no swap effect (^claude- floor)');
+
+    // (happy path, red anchor) confirm opus-4-8 (index 0, a valid claude id)
+    // → commit → a swap effect IS emitted (the model floor gates on VALIDITY,
+    // not on the value actually changing).
+    const ok = drive(
+      store,
+      st({ tab: SYS_TAB, cursor: 0 }),
+      [key('ENTER'), key('ENTER'), key('ENTER')],
+      snap,
+    );
+    const swap = findSwap(ok.effects);
+    assert.ok(swap, 'a valid claude model commits (proves the refusal above is validation, not a dead path)');
+    assert.equal(swap!.to?.model, 'claude-opus-4-8', 'the valid claude model is the committed target');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// 33-column floor — narrow rendering (perf_sensitive)
+// ===========================================================================
+
+test('33-col floor: every rendered roster line fits within the 33-column pane', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const view = buildSystemTab!(baseSnapshot(), st({ tab: SYS_TAB }), 33);
+  const banner = Array.isArray(view.banner) ? view.banner : [view.banner ?? ''];
+  for (const line of banner) assert.ok(line.length <= 33, `banner line fits 33 cols: "${line}"`);
+  for (const row of view.rows) {
+    for (const line of row.lines) {
+      assert.ok(line.text.length <= 33, `row ${row.id} line fits 33 cols: "${line.text}"`);
+    }
+  }
+});
+
+test('33-col floor: an OPEN selector still renders within the 33-column pane', () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const { store, cleanup } = storeFixture();
+  try {
+    const snap = baseSnapshot();
+    const opened = drive(store, st({ tab: SYS_TAB, cursor: 1 }), [key('ENTER')], snap);
+    const view = buildSystemTab!(snap, opened.ui, 33);
+    for (const row of view.rows) {
+      for (const line of row.lines) {
+        assert.ok(line.text.length <= 33, `open-selector line fits 33 cols: "${line.text}"`);
+      }
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// LOW-3 (second Opus re-check round, on top of commit 22e20f9): the System
+// tab used to render/edit whatever key the caller's configModels handed it,
+// trusting it blindly — including a relic like 'coder_hard' that no agent
+// has EVER read (decision agent-roster-is-classless-four-agents f0893161).
+// Now filtered to exactly the classless roster + classifiers
+// (SYSTEM_TAB_MODEL_KEYS), regardless of what a stray key in the snapshot
+// carries — a defensive floor, not just fixture hygiene, since an old
+// project's config.json can carry such a key forever.
+// ===========================================================================
+
+test("LOW-3: a relic config.models key outside the classless roster (e.g. 'coder_hard') never renders a row, is skipped by cursor math, and is unreachable through the selector — even though it is present in the snapshot", () => {
+  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
+  const { store, cleanup } = storeFixture();
+  try {
+    const snap = baseSnapshot({
+      configModels: {
+        // a relic key SNUCK IN ahead of the real roster — if it were still
+        // rendered, it would occupy cursor 0 and shift every row below it,
+        // exactly the class of bug this fix closes.
+        coder_hard: { model: 'claude-opus-4-8', effort: 'xhigh' },
+        implementor: { model: 'claude-opus-4-8', effort: 'low' },
+        researcher: { model: 'claude-opus-4-8', effort: 'low' },
+        scout: { model: 'claude-opus-4-8', effort: 'low' },
+        librarian: { model: 'claude-opus-4-8', effort: 'low' },
+        classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
+      },
+    });
+    const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
+    assert.equal(rowOf(view, 'coder_hard'), undefined, 'no row is rendered for the relic key');
+    assert.equal(view.rows.length, 5, 'exactly 5 rows — the relic key never counts toward the row total');
+    assert.doesNotMatch(allText(view), /xhigh/i, "the relic key's xhigh effort value never reaches the screen");
+    // cursor 0 lands on implementor (the relic key never occupies a slot) —
+    // proven by driving ENTER→DOWN→ENTER→ENTER and checking the swap
+    // targets 'implementor', never 'coder_hard'.
+    const res = drive(store, st({ tab: SYS_TAB, cursor: 0 }), [key('ENTER'), key('DOWN'), key('ENTER'), key('ENTER')], snap);
+    const swap = findSwap(res.effects);
+    assert.ok(swap, 'cursor 0 still opens a real, committable key');
+    assert.equal(swap!.key, 'implementor', 'cursor 0 addresses implementor, not the filtered-out relic key');
+  } finally {
+    cleanup();
+  }
+});

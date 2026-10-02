@@ -1,0 +1,91 @@
+// No-capture declaration (board 7bbec3bd — H10 fires on file count, not
+// substance): the conductor appends this the moment it judges that direct-mode
+// work produced nothing durable to capture. H10's capture duty then treats it
+// as SATISFYING the demand for every touch/debug_scope event with a timestamp
+// EARLIER than this declaration; work arriving AFTER it re-arms the duty (a
+// declaration cannot cover work that hasn't happened yet). detail carries the
+// REASON — a false declaration is drift, not a bypass: this is an honesty
+// surface, not a silencer.
+//
+// LANE-SCOPED (decision no-capture-discharge-is-lane-scoped,
+// 51ebe0dd-099e-40a9-abc5-d3c8cc767883; USER-RULED 2026-08-22): the declaration
+// discharges only the duty LANE it claims. A BARE declaration covers the
+// CAPTURE lane only — exactly its pre-2026-08-22 behavior — so clearing the
+// RESEARCH duty takes an explicit `--lane research` (or `--lane all`). WHY: a
+// single global cutoff turned a locally-TRUE declaration ("typo fix, nothing
+// durable") into a globally-FALSE one that silently cleared an unrelated
+// earlier research duty, dropping the research_owed enqueue and losing the
+// knowledge with no trace. An unrecognized value is REFUSED, never coerced:
+// a discharge must be no broader than the claim the human actually made.
+//   node scripts/no-capture.mjs --reason "<why>" [--lane research|capture|all]
+//
+// `--target` was REMOVED (board scripts-no-capture-mjs-target-dir-has-no-
+// project-containment-check): it took an arbitrary directory with no
+// project-containment check, and now that no-capture.mjs is a
+// SANCTIONED_SCRIPTS entry (H15 sanctions the SCRIPT, not its arguments) that
+// let any Bash-bearing agent write a no_capture discharge event into a
+// SIBLING project's .sterling/transient/session-events.json — a
+// cross-project capture-duty forgery H15's project-scoped seal does not
+// cover. H10's printed remedy only ever used the bare form, so nothing
+// documented relied on it. The event is written to the invoking project only.
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { arg, hasFlag, fail } from './lib/project.mjs';
+import { resolveStoreWritePath } from './lib/store-path.mjs';
+import { NO_CAPTURE_LANES } from '@sterling/schemas';
+
+let reason, laneGiven, laneArg;
+try {
+  reason = arg('--reason');
+  // Presence in EITHER word form: `--target <dir>` and `--target=<dir>`.
+  // hasFlag() (lib/project.mjs) recognizes both spellings by construction now,
+  // so this is no longer a bespoke scan — an exact-token check would let the
+  // equals form pass SILENTLY, and a silent accept is the outcome this
+  // refusal exists to prevent (board 5e36fae1 asked for a loud refusal, not
+  // merely a safe one).
+  if (hasFlag('--target')) {
+    fail('no-capture: --target was removed: the event is written to the invoking project only.');
+  }
+  // Presence, not value: `--lane` with a missing or unrecognized value is a
+  // refusal, not a silent fall-through to the bare default — a mistyped lane
+  // must never be read as a narrower OR a broader claim than the one intended
+  // (P5: the refusal names its discriminator). Absence of the flag entirely is
+  // the bare declaration, which H10 reads as the capture lane. hasFlag()
+  // recognizes `--lane=research` as GIVEN (board a506e9a7 — the old bare
+  // `argv.includes('--lane')` presence test missed the equals form entirely).
+  laneGiven = hasFlag('--lane');
+  laneArg = arg('--lane');
+} catch (e) {
+  fail(`no-capture: ${e.message}`);
+}
+if (!reason || !reason.trim()) {
+  fail('no-capture: --reason "<why>" is required (a false declaration is drift, so say why there is nothing durable)');
+}
+
+if (laneGiven && (laneArg === undefined || !NO_CAPTURE_LANES.includes(laneArg))) {
+  fail(
+    `no-capture: --lane ${laneArg === undefined ? '(missing value)' : `'${laneArg}'`} is not a valid duty lane — use one of ${NO_CAPTURE_LANES.join(' | ')}. ` +
+      `A bare declaration (no --lane) covers 'capture' only; discharging the research duty requires --lane research or --lane all. ` +
+      `Nothing was written (decision no-capture-discharge-is-lane-scoped).`
+  );
+}
+const lane = laneGiven ? laneArg : undefined;
+
+let eventsPath;
+try {
+  // CONTAINMENT (board a416e276): a pre-positioned symlink at `.sterling`,
+  // `.sterling/transient`, or the file itself no longer redirects this write —
+  // resolveStoreWritePath refuses any symlink component beneath cwd on the way
+  // to the target, naming both resolved paths, before anything is written.
+  eventsPath = resolveStoreWritePath(process.cwd(), '.sterling', 'transient', 'session-events.json');
+} catch (e) {
+  fail(`no-capture: ${e.message}`);
+}
+mkdirSync(dirname(eventsPath), { recursive: true });
+const events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, 'utf8')) : [];
+const at = new Date().toISOString();
+// `lane` is omitted entirely on a bare declaration, so a bare event is
+// byte-identical to a legacy pre-ruling one — one shape, one reading (capture).
+events.push(lane ? { kind: 'no_capture', detail: reason, at, lane } : { kind: 'no_capture', detail: reason, at });
+writeFileSync(eventsPath, JSON.stringify(events));
+console.log(JSON.stringify({ declared: reason, at, lane: lane ?? 'capture (bare declaration)' }));

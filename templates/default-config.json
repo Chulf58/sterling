@@ -1,0 +1,59 @@
+{
+  "toolchains": [],
+  "context_watch": {
+    "windows": {
+      "default": 1000000
+    },
+    "conductor": { "soft_pct": 35, "hard_pct": 50 }
+  },
+  "models": {
+    "implementor": { "model": "claude-sonnet-5-5", "effort": "high" },
+    "researcher": { "model": "claude-sonnet-5-5", "effort": "medium" },
+    "scout": { "model": "claude-sonnet-5-5", "effort": "low" },
+    "classifiers": { "model": "claude-haiku-4-5", "effort": "low" },
+    "librarian": { "model": "claude-sonnet-5-5", "effort": "low" },
+    "reviewer": { "model": "claude-opus-5-5", "effort": "high" }
+  },
+  "session_events": {
+    "research_agents": ["researcher", "claude-code-guide"]
+  },
+  "delegation": {
+    "max_concurrent": 5
+  },
+  "dispatch_register": {
+    "stale_minutes": 60,
+    "resume_hold_minutes": 10
+  },
+  "maintenance_queue": {
+    "deep_threshold": 15
+  },
+  "maintenance_worker": {
+    "enabled": true
+  },
+  "attestation_path_globs": [],
+  "undeclared_source_exclude_globs": ["**/*.sh"],
+  "store_authority": "primary",
+  "staleness": {
+    "research_days": { "fast": 30, "medium": 90, "stable": 365 },
+    "platform_external_days": 180
+  },
+  "models_catalog": {
+    "staleness_days": 45
+  },
+  "delivery": {
+    "injection_rung": "read",
+    "payload_char_cap": 2400,
+    "total_cap_bytes": 3000
+  },
+  "article_history_genesis_entries": 2,
+  "sparring_partner": {
+    "enabled": true
+  },
+  "tdd": {
+    "enabled": true
+  },
+  "mode": "hobby",
+  "pr_review": {
+    "copilot_logins": []
+  }
+}

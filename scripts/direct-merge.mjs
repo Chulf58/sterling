@@ -1,0 +1,931 @@
+// Direct merge [S] (spec §8.2): the merge-to-main gate for conductor-direct
+// work — the human invoking it IS the merge-to-main decision, so run it only
+// once the change is committed and reconciled. It merges the current
+// conductor-direct branch --no-ff into the base, then deletes the merged
+// branch and sweeps every other fully-merged branch (git branch -d — refuses
+// unmerged, never loses work).
+// Refuses on a dirty tree, or when already on the base.
+// WORK mode (config.mode, decision project-mode-hobby-work-toggle-decides-flow):
+// the same preflight, then push the branch and open or reuse a GitHub PR
+// (scripts/lib/work-pr.mjs) — never a merge, sweep or push of the base.
+//   node scripts/direct-merge.mjs [--into <branch>] [--branch <branch>] [--target <dir>]
+import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { arg, fail as baseFail, openProject, resolveLinkedWorktree } from './lib/project.mjs';
+import { isGitRepo, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
+import { defaultExec } from './lib/update.mjs';
+import { mintSettlementReconcile, explainReconcileDebtLiveness, loadGeneratedProjections } from './hooks/lib/settlement.mjs';
+import { VERSION_ONLY_CANDIDATES, isVersionOnlyBetweenCommits, readVersionAtCommit } from './lib/version-only.mjs';
+import { projectRoot } from './hooks/lib/common.mjs';
+import { releaseAfterMerge } from './lib/opencode-release.mjs';
+import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
+import { SterlingStore } from '@sterling/store';
+import { readProjectMode } from './lib/handoff-projection.mjs';
+import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal, installWorkResult, armPrLoop, PR_LOOP_REL } from './lib/work-pr.mjs';
+// Attestation disclosure (decision attestation-staleness-disclosure-only-never-
+// a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
+// block above the merge action.
+import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
+const target = arg('--target') ?? process.cwd();
+// LINKED WORKTREE (board ks-dashboards-gap-1): .sterling/ is gitignored, so a
+// linked worktree never has the store or the config. The project's store, config
+// and mode live in the MAIN checkout (the parent of git's common dir); every
+// .sterling read and write below goes through storeRoot, while every git
+// operation and the branch's tree stay on `target`. Outside a worktree the two
+// are the same directory.
+const linkedWorktree = resolveLinkedWorktree(target);
+const storeRoot = linkedWorktree ? linkedWorktree.mainRoot : target;
+
+// PROJECT MODE decides the flow, read ONLY through readProjectMode (a missing
+// key is hobby), and read FIRST so a work-mode run can put every exit through
+// its one result writer. An unreadable or invalid mode is REFUSED only after
+// openProject, so a malformed config keeps its own loud refusal (ruling
+// e13f0fb5). BOUNDARY: the exits before the mode is known — a bad --target
+// argument, and an unreadable/invalid mode — keep today's behaviour (stderr
+// only, no JSON); in work mode every later exit prints one JSON object
+// (installWorkResult in scripts/lib/work-pr.mjs). Hobby is unchanged: fail()
+// below is the shared fail() whenever the mode is not work.
+let mode;
+let modeError;
+try {
+  mode = readProjectMode(storeRoot);
+} catch (e) {
+  modeError = e;
+}
+const work = mode === 'work' ? installWorkResult() : null;
+const stage = (name) => {
+  if (work) work.state.stage = name;
+};
+function fail(message, code = 1) {
+  if (work) work.fail(message, code);
+  baseFail(message, code);
+}
+
+stage('git-repo');
+if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
+
+// HOBBY from a linked worktree cannot complete: the merge checks the base out,
+// and the base is normally checked out in the main tree (git refuses to check a
+// branch out in two worktrees). Refused here, before the store and the battery,
+// with the exact way out. WORK mode only pushes the branch and opens a PR, so it
+// proceeds. An unreadable mode keeps its own refusal below.
+if (linkedWorktree && !modeError && mode !== 'work') {
+  const head = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: target, encoding: 'utf8', timeout: 60_000 });
+  const wtBranch = head.status === 0 && head.stdout.trim() ? head.stdout.trim() : '<branch>';
+  fail(
+    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree of '${linkedWorktree.mainRoot}' — refusing before the battery.\n` +
+      `A hobby merge checks the base branch out, and the base is normally checked out in the main tree, so it cannot complete from a worktree.\n` +
+      `Free the branch, then run the merge from the main checkout:\n` +
+      `  git -C ${linkedWorktree.mainRoot} worktree remove ${linkedWorktree.worktree}   (or, to keep the worktree: git -C ${linkedWorktree.worktree} checkout --detach)\n` +
+      `  git -C ${linkedWorktree.mainRoot} checkout ${wtBranch}\n` +
+      `  node ${fileURLToPath(import.meta.url)} --target ${linkedWorktree.mainRoot}`,
+    2
+  );
+}
+
+// Pre-merge preflight: openProject fails loud on a missing store or malformed
+// config BEFORE anything lands (see the post-merge note below).
+stage('open-project');
+openProject(storeRoot).store.close();
+
+if (modeError) fail(`direct-merge: ${modeError?.message ?? modeError} — refusing; nothing was run.`, 2);
+// Work-only preconditions, cheap and before the battery: --no-push cannot ship
+// a PR, and origin and gh must be usable.
+let workRepo;
+if (mode === 'work') {
+  stage('work-preflight');
+  if (process.argv.includes('--no-push')) {
+    fail(
+      'direct-merge: --no-push is refused in WORK mode — work mode ships by opening a PR, and a PR needs a pushed branch.\n' +
+        'Rerun without --no-push, or commit and keep working on the branch until it is ready.',
+      2
+    );
+  }
+  const pre = workPreflight(target);
+  if (pre.refusal) fail(pre.refusal, 2);
+  workRepo = pre.repo;
+}
+
+stage('branch');
+const into = arg('--into') ?? defaultBranch(target);
+// `git rev-parse --abbrev-ref HEAD` prints the literal 'HEAD' when detached, which
+// would equal a defaulted --branch and merge the base into itself. symbolic-ref
+// names the checked-out branch or fails when there is none.
+const symbolic = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: target, encoding: 'utf8', timeout: 60_000 });
+// Only exit 1 with no error output is the normal "HEAD is detached" answer. A spawn
+// error, a timeout or any other status means git could not answer — fail loudly.
+if (symbolic.error || (symbolic.status !== 0 && !(symbolic.status === 1 && !(symbolic.stderr ?? '').trim()))) {
+  fail(
+    `direct-merge: could not determine the checked-out branch (git symbolic-ref HEAD ` +
+      `${symbolic.error ? `failed to run: ${symbolic.error.message}` : `exited ${symbolic.status ?? `by signal ${symbolic.signal}`}: ${(symbolic.stderr || symbolic.stdout || '').trim()}`}) — refusing before the battery.`
+  );
+}
+const checkedOut = symbolic.status === 0 ? symbolic.stdout.trim() : '';
+if (!checkedOut) {
+  fail(
+    `direct-merge: no branch is checked out (detached HEAD) — refusing before the battery.\n` +
+      `The gate merges or pushes the checked-out branch, and the battery validates its tree. Check out the branch to merge and rerun.`,
+    2
+  );
+}
+const branch = arg('--branch') ?? checkedOut;
+if (work) work.state.branch = branch;
+// Decision merge-keeps-battery-and-version-refusals (audit finding A2): the
+// battery below runs `npm run check` in the CHECKED-OUT tree, so merging or
+// pushing any other branch would ship a tree the battery never validated.
+if (branch !== checkedOut) {
+  fail(
+    `direct-merge: --branch '${branch}' is not the checked-out branch '${checkedOut}' — refusing before the battery.\n` +
+      `The consistency battery (npm run check) validates the checked-out tree, so it cannot vouch for '${branch}'.\n` +
+      `Check out '${branch}' and rerun (with or without --branch).`,
+    2
+  );
+}
+if (branch === into) {
+  fail(
+    `direct-merge: currently on the base branch '${into}' — checkout the branch to merge.\n` +
+      `If a merge just completed here, the work is ALREADY on ${into} and its branch was deleted:\n` +
+      `check 'git log --oneline -3 ${into}' before merging anything again. A gate that exits\n` +
+      `non-zero after a SUCCESSFUL merge (stale bundles / failed sweep) says so on its first line.`
+  );
+}
+if (mode === 'work') {
+  const notBranch = localBranchRefusal(target, branch);
+  if (notBranch) fail(notBranch, 2);
+}
+
+// Cheap git precondition BEFORE the expensive checks (P1). mergeBranchInto keeps
+// its own dirty-tree gate as the invariant, but that gate sits AFTER the
+// multi-minute battery, so a dirty tree used to cost the whole battery and then
+// throw a RAW branch-manager stack. Checking here fails in ~2s with a message
+// that routes through fail(). The remedy text deliberately does NOT tell you to
+// "commit or discard": that advice was actively wrong for untracked documents
+// whose disposition is a user decision, so tracked and untracked are separated
+// and untracked files are named as a choice rather than an obstacle.
+stage('dirty-tree');
+const dirtyCheck = spawnSync('git', ['status', '--porcelain'], { cwd: target, encoding: 'utf8', timeout: 60_000 });
+if (dirtyCheck.status !== 0) {
+  fail(`direct-merge: git status --porcelain failed (${dirtyCheck.status}): ${(dirtyCheck.stderr || dirtyCheck.stdout || '').trim()}`);
+}
+const dirtyLines = dirtyCheck.stdout.split('\n').map((l) => l.trimEnd()).filter(Boolean);
+if (dirtyLines.length > 0) {
+  const untracked = dirtyLines.filter((l) => l.startsWith('??'));
+  // Unmerged paths carry a U on either side, plus the DD/AA both-side cases. They
+  // are dirty, but "commit or discard" is the WRONG remedy for a conflicted tree —
+  // misprescribing here is the exact defect this refusal was rewritten to stop.
+  const unmerged = dirtyLines.filter((l) => /^(DD|AA|.U|U.)/.test(l.slice(0, 2)));
+  const tracked = dirtyLines.filter((l) => !l.startsWith('??') && !unmerged.includes(l));
+  const parts = [`direct-merge: working tree is dirty — refusing before the battery (a merge must not carry uncommitted state across branches)`];
+  if (unmerged.length > 0) {
+    parts.push(
+      `\n${unmerged.length} UNMERGED path(s) — a merge or rebase is already in progress here:`,
+      ...unmerged.map((l) => `  ${l}`),
+      '  → resolve the conflicts and commit, or abort that operation',
+      '    (git merge --abort / git rebase --abort). Do NOT start another merge on top.'
+    );
+  }
+  if (tracked.length > 0) {
+    parts.push(`\n${tracked.length} tracked change(s):`, ...tracked.map((l) => `  ${l}`), '  → commit them on this branch, or discard them.');
+  }
+  if (untracked.length > 0) {
+    parts.push(
+      `\n${untracked.length} untracked path(s):`,
+      ...untracked.map((l) => `  ${l}`),
+      '  → these may not be yours to commit. Decide their disposition first —',
+      '    commit, .gitignore, move out of the repo, or remove. The gate does not',
+      '    choose for you, and "commit or discard" is not always the right answer.'
+    );
+  }
+  fail(parts.join('\n'));
+}
+
+// Reconcile debt is DISCLOSED, never refused (decision
+// merge-discloses-derived-drift-never-refuses-on-it, applied by decision
+// maintenance-queue-background-haiku-worker-simple-redesign point (4)): open
+// reconcile_needed debt on files this branch changed is printed on stderr with
+// each item's paths and age, and the merge proceeds. The background
+// maintenance worker judges and closes already-paid items; what it leaves open
+// owes article prose from the conductor.
+// -c core.quotePath=false (r-review F3, applied here too for consistency): without
+// it, non-ASCII filenames arrive C-quoted and defeat the plain-string path
+// comparisons further down.
+// SHA RESOLUTION (decision foreign_5f330fbe, a previous store's ruling):
+// resolve intoTip / branchTip / mergeBase ONCE here, fail closed (fail()) on any
+// resolution error, and reuse these three SHAs everywhere below (the version-only
+// proof, next) — never re-derive them. `git diff --name-only mergeBase branchTip`
+// is semantically identical to the three-dot `into...branch` form it replaces.
+stage('resolve');
+const resolveSha = (ref, label) => {
+  const r = spawnSync('git', ['rev-parse', ref], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+  if (r.status !== 0) fail(`direct-merge: git rev-parse ${label} ('${ref}') failed: ${(r.stderr || '').trim()}`);
+  return r.stdout.trim();
+};
+const intoTip = resolveSha(into, 'into');
+const branchTip = resolveSha(branch, 'branch');
+const mergeBaseR = spawnSync('git', ['merge-base', intoTip, branchTip], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+if (mergeBaseR.status !== 0) fail(`direct-merge: git merge-base ${intoTip} ${branchTip} failed: ${(mergeBaseR.stderr || '').trim()}`);
+const mergeBase = mergeBaseR.stdout.trim();
+
+const diff = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--name-only', '--end-of-options', mergeBase, branchTip], { cwd: target, encoding: 'utf8', timeout: 60_000 });
+if (diff.status !== 0) fail(`direct-merge: git diff ${mergeBase} ${branchTip} failed: ${(diff.stderr || '').trim()}`);
+const changed = new Set(diff.stdout.split('\n').map((l) => l.trim()).filter(Boolean));
+
+// VERSION-ONLY PROOF (article direct-merge-and-branch-sweep, AC5; decision
+// gap-hunt-2026-09-28-rulings, items 4+5). One implementation, shared with
+// H10's capture duty: scripts/lib/version-only.mjs, which states the full
+// fail-closed rule. It applies to exactly VERSION_ONLY_CANDIDATES
+// (.claude-plugin/plugin.json, package.json, and package-lock.json with its
+// 2 version lines) between mergeBase and branchTip: both regular blobs of the
+// same mode, strict UTF-8, valid JSON, a moved version string, and no other
+// changed byte. A whole-file CRLF conversion, JSON reformat, key reorder, a
+// dependency edit or ANY other change therefore fails closed.
+// Applied to exactly the candidates this branch's diff actually touched;
+// every other consumer below keeps reading the untouched `changed` set.
+const versionOnlyPaths = VERSION_ONLY_CANDIDATES.filter((p) => changed.has(p) && isVersionOnlyBetweenCommits(target, mergeBase, branchTip, p));
+// `changed` stays exactly as-is for every existing consumer (version-field
+// gate, review-receipt checks, board-payment nudge, parked sweep).
+// `reconcileChanged` is `changed` minus the proven version-only paths, used
+// ONLY for settlement minting and the reconcile disclosure's covering/liveness
+// scope — a proven version-only path is never disclosed as debt and never mints
+// from this exception alone (article direct-merge-and-branch-sweep, AC5).
+const reconcileChanged = new Set([...changed].filter((p) => !versionOnlyPaths.includes(p)));
+
+// SETTLEMENT BOUNDARY (b) — the pre-merge HARD BACKSTOP (board c198866d, H7
+// CANDIDATE-ONLY + SETTLEMENT-TIME MINTING). H7's direct-mode Arm 1 no longer
+// mints reconcile_needed at touch time — only the direct-session Stop
+// (h10-direct-capture.mjs) and this gate ever mint it now, so a branch whose
+// session died before reaching Stop-settlement (the design's NAMED HOLE) still
+// gets its debt minted HERE, against every file this branch actually changed,
+// before the disclosure below ever reads the queue. Every SURVIVING
+// reconcile_needed item covering this branch's files is then re-evaluated
+// against the LIVE predicate (current content vs the owning article's CURRENT
+// baseline) — a stale row (already reconciled since it minted, or an
+// edit-then-revert) is reported as cleared, not disclosed as live debt.
+// A row the live predicate CLEARS is NAMED, never silently dropped (board
+// 92f7e826, recurrence 2026-08-25): the exclusion already worked, but it was
+// invisible, so eight no-op items were "closed" with board_remove — which
+// never moves the owning article's file_baselines — and re-minted within
+// minutes, blocking the merge twice. The gate now reports every cleared row so
+// the close can be deliberate. It still closes NOTHING itself.
+stage('reconcile');
+const { store: settleStore } = openProject(storeRoot);
+// Settlement's ROOT is the normalized project root — the same projectRoot()
+// readStdin gives every hook as input.cwd — never the raw --target: settlement
+// decides whether a record's working_tree names THIS project (isForeignTree),
+// and a relative or trailing-slashed --target would read a self-rooted article
+// as a foreign tree and never mint its debt (Dome Farmer 454 fix round).
+// openProject just succeeded on target, so the store is there to be found.
+const settleRoot = projectRoot(storeRoot);
+if (!settleRoot) fail(`direct-merge: no Sterling store found at or above '${target}' for reconcile settlement`);
+let debt;
+let cleared;
+let versionOnlyReport;
+let settlementError;
+try {
+  mintSettlementReconcile(settleStore, settleRoot, [...reconcileChanged]);
+  const covering = settleStore
+    .query({ types: ['todo'], cap: 1000 })
+    .filter((t) => t.source === 'system' && t.system_reason === 'reconcile_needed' && (t.file_keys ?? []).some((k) => reconcileChanged.has(k)));
+  debt = [];
+  cleared = [];
+  versionOnlyReport = [];
+  // VERSION-ONLY NONBLOCKING REPORT (arm A2): an item covering a PROVEN
+  // version-only path is deliberately excluded from `covering` above
+  // (reconcileChanged drops proven paths), so it can never contribute to
+  // `debt`/`cleared` or block this merge from this exception alone — but it
+  // is still named here, loud, exactly because nothing has actually closed it.
+  if (versionOnlyPaths.length > 0) {
+    // file_keys + source passed INTO the query (Codex round-2 MEDIUM), same
+    // idiom as the board-payment nudge below: both filter BEFORE the cap:1000,
+    // so a proven path's covering item can never be crowded out of the capped
+    // window by unrelated recent todos.
+    const versionOnlyCovering = settleStore
+      .query({ types: ['todo'], file_keys: versionOnlyPaths, source: 'system', cap: 1000 })
+      .filter((t) => t.system_reason === 'reconcile_needed' && (t.file_keys ?? []).some((k) => versionOnlyPaths.includes(k)));
+    for (const t of versionOnlyCovering) {
+      const provenHere = versionOnlyPaths.filter((p) => (t.file_keys ?? []).includes(p));
+      if (!provenHere.length) continue;
+      const article = t.feature_link ? settleStore.get(t.feature_link) : null;
+      for (const p of provenHere) {
+        const oldV = readVersionAtCommit(target, mergeBase, p);
+        const newV = readVersionAtCommit(target, branchTip, p);
+        versionOnlyReport.push({
+          item: t,
+          article,
+          path: p,
+          summary: `${p}: only the version line differs mergeBase..branchTip (${oldV} -> ${newV})`,
+        });
+      }
+    }
+  }
+  for (const t of covering) {
+    // R5(b) (board c198866d round-3 fixer): widen-in-place can group a path
+    // this branch never touched into the same item as one it did (grouping is
+    // per ARTICLE, not per branch) — evaluating liveness over the FULL item
+    // would let that unrelated path's drift refuse THIS merge. Scope the live
+    // check to item.file_keys ∩ this branch's changed files (the merge gate's
+    // own scope, decision foreign_9df61181) by passing a view of the item carrying
+    // only the intersecting keys — always non-empty here, since the .some()
+    // above already guarantees at least one overlapping key.
+    //
+    // ONE SCOPE, BLOCKING AND REPORTING ALIKE (conductor ruling, board
+    // 92f7e826): an item covering no file this branch changed is out of this
+    // gate's business entirely — it cannot block, so naming it here is output
+    // nobody acts on at a merge (P1). Stale rows beyond the branch diff are
+    // /sterling:drain's lane, which already verifies queue items against HEAD.
+    const scopedFiles = (t.file_keys ?? []).filter((k) => reconcileChanged.has(k));
+    const verdict = explainReconcileDebtLiveness(settleStore, settleRoot, { ...t, file_keys: scopedFiles });
+    if (verdict.live) debt.push(t);
+    else cleared.push({ item: t, scopedFiles, verdict });
+  }
+} catch (e) {
+  settlementError = e;
+} finally {
+  settleStore.close();
+}
+// F5 (board c198866d fixer round): a mint/live-check throw left `debt`
+// undefined, so the `debt.length` read below raised a raw TypeError instead
+// of a loud, attributable refusal (P5) — fail() here, never a bare crash.
+if (settlementError) {
+  fail(`direct-merge: settlement mint/live-check failed (${settlementError?.message ?? settlementError}) — refusing rather than merging on an unverified reconcile state`);
+}
+// VERSION-ONLY NONBLOCKING REPORT, printed BEFORE the cleared/disclosure output
+// below so it appears on every path — a clean merge, a merge that proceeds
+// past cleared rows, and a merge that discloses OTHER, still-live debt (article
+// direct-merge-and-branch-sweep, AC5).
+// Nothing here closes anything: the item stays open, unverified, and the
+// exception's whole claim is nonblocking-ness, never verified-clean-ness.
+if (versionOnlyReport.length > 0) {
+  console.error(
+    [
+      '',
+      'direct-merge: VERSION-ONLY NONBLOCKING (the change to each path below is only its version line(s); it neither blocks nor mints)',
+      ...versionOnlyReport.map(({ item, article, path, summary }) => {
+        const articleLabel = article ? `${article.slug ?? article.id} (${article.id})` : '(no owning article)';
+        return `  - ${item.id}  article ${articleLabel}  path ${path}\n      ${summary}\n      still open; not verified clean; nothing closed by this exception.`;
+      }),
+      '',
+    ].join('\n')
+  );
+}
+
+// THE CLEARED ROWS, NAMED (board 92f7e826). Printed to STDERR only — stdout is
+// the gate's machine-readable JSON result and stays exactly that. Printed
+// BEFORE the live-debt disclosure below, so it appears whether or not other,
+// genuinely-live debt is disclosed too. Nothing is removed or
+// rewritten here; the remedy text says why board_remove alone is the wrong
+// close, which is the trap this report exists to stop.
+if (cleared.length > 0) {
+  const why = (v) => {
+    switch (v.code) {
+      case 'all_exempt':
+        return `every named path is a generated projection (listed in config.generated_projections: regenerated from the store, so exempt from drift): ${v.exempt_paths.join(', ')}`;
+      case 'baseline_match':
+        return `content now MATCHES the owning article's current baseline (already reconciled, edited and reverted, or an attested close re-stamped it, R9): ${v.matched.join(', ')}`;
+      case 'baseline_absent':
+        return `UNVERIFIED, not clean — the owning article records NO baseline for ${v.unbaselined.join(', ')}, so there was nothing to compare (the settlement predicate abstains rather than inventing drift); this row cannot be cleared by a baseline re-stamp`;
+      case 'baseline_match_and_absent':
+        return (
+          `content matches the current baseline for ${v.matched.join(', ')}; ` +
+          `and the article records NO baseline for ${v.unbaselined.join(', ')} (UNVERIFIED, not clean — nothing to compare)`
+        );
+      default:
+        return `live predicate false (${v.code})`;
+    }
+  };
+  // THE REMEDY IS PER-REASON, never one prescription for all of them (both
+  // reviewers, board 92f7e826): a universal "re-stamp the baseline" footer
+  // directly contradicts a baseline_absent row, which has no baseline TO
+  // re-stamp — and a footer that contradicts the line above it teaches the
+  // reader to ignore both. Each remedy line is emitted only when at least one
+  // row above actually earns it.
+  const hasRestampable = cleared.some(({ verdict }) => verdict.code !== 'baseline_absent' && verdict.code !== 'all_exempt');
+  const hasAbsent = cleared.some(({ verdict }) => verdict.code === 'baseline_absent' || verdict.code === 'baseline_match_and_absent');
+  const hasExempt = cleared.some(({ verdict }) => verdict.code === 'all_exempt');
+  console.error(
+    [
+      '',
+      `direct-merge: ${cleared.length} open reconcile_needed item(s) cover this branch's files but their LIVE predicate no longer holds —`,
+      `evaluated over the paths this branch changed (file_keys ∩ branch-changed, the merge gate's own scope), so the`,
+      `verdict is re-checkable against exactly those paths and says nothing about any other path on the same item.`,
+      `They do NOT block this merge, and NOTHING here closed them (a gate never closes debt on its own authority):`,
+      ...cleared.map(
+        ({ item, scopedFiles, verdict }) =>
+          `  - ${item.id}  [${scopedFiles.join(', ')}]${item.feature_link ? `  article ${item.feature_link}` : ''}\n      ${why(verdict)}`
+      ),
+      `Close each one DELIBERATELY — the right close depends on the reason given above, and there is no single one:`,
+      ...(hasRestampable
+        ? [
+            `  · a row reported as MATCHING the owning article's baseline: close it with a VERSIONED article write`,
+            `    that re-stamps the baseline (knowledge_update / knowledge_append naming the item in \`resolves\`).`,
+            `    Close it with an article write, and not with board_remove alone: removal never moves the owning`,
+            `    article's file_baselines, so an item whose files still differ from a stale baseline re-mints within`,
+            `    minutes (board 92f7e826, measured twice on 2026-08-25).`,
+          ]
+        : []),
+      ...(hasAbsent
+        ? [
+            `  · a row reported as UNVERIFIED because NO baseline is recorded: a re-stamp is not the remedy — there is`,
+            `    nothing to re-stamp. Either re-add that path to the owning article's files[] (the write mints its`,
+            `    baseline, and the item then discharges by being named in \`resolves\`), or — if the article genuinely no`,
+            `    longer owns the path — drop the path from the item (board_update) and close what remains on its own`,
+            `    reason. Do not read this row as verified-clean; nothing was compared.`,
+          ]
+        : []),
+      ...(hasExempt
+        ? [
+            `  · a generated-projection row: nothing needs re-stamping (the file is regenerated from the store). Settlement no longer mints`,
+            `    exempt paths and a later widen drops them from a legacy item, so closing it directly is safe.`,
+          ]
+        : []),
+      '',
+    ].join('\n')
+  );
+}
+/** Age of an open item from its created_at, as '<n>d <n>h' (or '<n>h' / '<n>m'
+ *  when younger). An unparseable timestamp prints 'unknown' rather than a
+ *  guessed number. */
+function debtAge(createdAt) {
+  const ms = Date.now() - Date.parse(createdAt);
+  if (!Number.isFinite(ms)) return 'unknown';
+  const mins = Math.max(0, Math.floor(ms / 60_000));
+  const days = Math.floor(mins / 1440);
+  const hours = Math.floor((mins % 1440) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  return hours > 0 ? `${hours}h` : `${mins}m`;
+}
+if (debt.length > 0) {
+  // GROUP BY OWNING ARTICLE (N13): the store now keeps at most one open
+  // reconcile_needed item per feature_link, with file_keys unioned
+  // (decision reconcile-needed-identity-is-reason-plus-owner-file-keys-unioned),
+  // but items with other reasons or no feature_link are still minted per
+  // path — before that decision one refusal measured 207 lines (~40KB).
+  // Group by feature_link (the owning article id H7 stamps)
+  // so the disclosure reads as N ARTICLES, not N items; every item id stays
+  // listed, nested under its group, so nothing here is lossy — only the
+  // presentation is denser. Items with NO feature_link (older/foreign
+  // items) all share ONE bucket — keying that bucket per-item (e.g. by
+  // t.id) reproduces the exact fragmentation this fix exists to remove for
+  // the legacy case: 50 unlinked items would headline as "across 50
+  // article(s)" instead of the 1 real article plus a single miscellaneous
+  // bucket. The headline's article count is REAL articles only — the
+  // no-article bucket, if present, is named separately and never inflates it.
+  const NO_ARTICLE_KEY = Symbol('no-owning-article');
+  const byArticle = new Map();
+  for (const t of debt) {
+    const key = t.feature_link ?? NO_ARTICLE_KEY;
+    if (!byArticle.has(key)) byArticle.set(key, []);
+    byArticle.get(key).push(t);
+  }
+  const realArticleCount = [...byArticle.keys()].filter((k) => k !== NO_ARTICLE_KEY).length;
+  const noArticleItems = byArticle.get(NO_ARTICLE_KEY) ?? [];
+  const grouped = [...byArticle.entries()]
+    .map(([article, items]) => {
+      const header = article === NO_ARTICLE_KEY ? `(no owning article) — ${items.length} item(s)` : `article ${article} — ${items.length} item(s)`;
+      // Each item keeps its OWN file_keys on its own line (Codex P2-A): a
+      // header union loses the item→files association the un-grouped
+      // format used to carry — two items in one group touching different
+      // files must not read as though either touched both.
+      return `  - ${header}\n` + items.map((t) => `      - ${t.id}  age ${debtAge(t.created_at)} (open since ${t.created_at})  ${t.text}  [${(t.file_keys ?? []).join(', ')}]`).join('\n');
+    })
+    .join('\n');
+  const headline =
+    noArticleItems.length > 0
+      ? `${debt.length} open reconcile_needed item(s) across ${realArticleCount} article(s) (plus ${noArticleItems.length} item(s) with no owning article)`
+      : `${debt.length} open reconcile_needed item(s) across ${realArticleCount} article(s)`;
+  // DISCLOSE, NEVER REFUSE (decision merge-discloses-derived-drift-never-refuses-on-it;
+  // decision maintenance-queue-background-haiku-worker-simple-redesign point (4)).
+  // The store is local to this machine, so a refusal protected only this
+  // machine's store, and its measured record was mostly false positives (17 of
+  // 18 items already paid). The debt stays visible here, with each item's paths
+  // and age, and in H1; the merge proceeds.
+  const remedy = [
+    '',
+    'This does NOT block the merge. The background maintenance worker judges each item and closes the ones already paid;',
+    'an item it leaves open is logged as owes prose in .sterling/maintenance-worker.jsonl. Close what remains with ONE of the two sanctioned discharges',
+    '(decision foreign_5f330fbe arm A1; drain requires an explicit `resolves` claim, never a bare knowledge_update), or /sterling:drain:',
+    '  (a) BEHAVIOR CHANGED: reconcile the article with a real write carrying resolves:[<full item id>].',
+    '  (b) VERIFIED UNAFFECTED: `resolves` deletes the WHOLE item and re-baselines EVERY file the article owns, so verify every',
+    '      file_key first — knowledge_append(id:<article>, field:"history", entries:[{date:<ISO>, event:"VERIFIED UNAFFECTED: <path(s)> — checked against the diff, no reconcile owed"}], resolves:["<full item id>"])',
+  ];
+  // PER-ITEM NOTE when an item's file_keys reach beyond this branch's diff —
+  // resolves deletes the whole item and re-baselines every owned file, so the
+  // out-of-scope paths are named for whoever reconciles it.
+  for (const t of debt) {
+    const outside = (t.file_keys ?? []).filter((k) => !changed.has(k));
+    if (outside.length) {
+      remedy.push(`  NOTE (${t.id}): this item also covers ${outside.join(', ')} beyond this branch — verify those too before resolving.`);
+    }
+  }
+  console.error(`\ndirect-merge: RECONCILE DEBT DISCLOSED — ${headline} cover files this branch changed:\n` + grouped + '\n' + remedy.join('\n') + '\n');
+}
+
+// VERSION MOVES WITH THE MERGE (decision foreign_be9168e8 + user directive 2026-08-05
+// "bump the version when you push"). The plugin version is the clone-currency
+// signal consumers read, and be9168e8 deferred automating the bump "until the
+// rule is observed to fail" — it failed on 2026-08-05 (a feature merge shipped
+// unbumped), so the gate now holds it: a branch whose diff goes beyond the
+// generated projections must move BOTH version fields together (be9168e8:
+// package.json and plugin.json move in the same commit). Fixture repos and
+// consuming projects have no plugin manifest — skipped loud. --allow-same-version
+// is the deliberate escape for a merge that genuinely deserves no bump.
+// The generated projections are the ONE config list (decision
+// gap-hunt-2026-09-28-rulings, item 1): architecture-projection.mjs and
+// rulings-projection.mjs register their files in config.generated_projections
+// the same way handoff-projection.mjs does, and settlement exempts that list.
+stage('version');
+const GENERATED_ONLY = loadGeneratedProjections(storeRoot);
+const pluginManifestRel = '.claude-plugin/plugin.json';
+if (existsSync(join(target, pluginManifestRel))) {
+  const substantive = [...changed].filter((f) => !GENERATED_ONLY.has(f));
+  if (substantive.length > 0 && !process.argv.includes('--allow-same-version')) {
+    const readVersion = (raw, label) => {
+      try {
+        return JSON.parse(raw).version ?? null;
+      } catch {
+        fail(`direct-merge: could not parse ${label} while checking the version bump`);
+      }
+    };
+    const pkgPath = join(target, 'package.json');
+    const branchPlugin = readVersion(readFileSync(join(target, pluginManifestRel), 'utf8'), pluginManifestRel);
+    const branchPkg = existsSync(pkgPath) ? readVersion(readFileSync(pkgPath, 'utf8'), 'package.json') : null;
+    const baseShow = spawnSync('git', ['show', `${into}:${pluginManifestRel}`], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+    const basePlugin = baseShow.status === 0 ? readVersion(baseShow.stdout, `${into}:${pluginManifestRel}`) : null;
+    if (branchPkg !== null && branchPlugin !== branchPkg) {
+      fail(
+        `direct-merge: version fields DIVERGED — ${pluginManifestRel} is ${branchPlugin}, package.json is ${branchPkg}. ` +
+          `They move together in the same commit. Align them, commit, rerun.`
+      );
+    }
+    if (basePlugin !== null && branchPlugin === basePlugin) {
+      fail(
+        `direct-merge: the plugin version (${branchPlugin}) did not move, but this branch changes ${substantive.length} file(s) beyond the generated projections.\n` +
+          `The version is the clone-currency signal consumers read: bump BOTH ${pluginManifestRel} and package.json\n` +
+          `(0.x rule: breaking → MINOR, additive → PATCH), commit, rerun. If this merge genuinely deserves no bump, rerun with --allow-same-version.`
+      );
+    }
+  }
+}
+
+// Consistency-check battery at the gate (R2 board 2e443375): the invariant-3
+// checkers were bound to no mechanical event — `npm run check` existed but only
+// prose invoked it, so registry/skill/bundle/projection drift could merge
+// silently. The gate is where the cost of being wrong jumps (P1). Projects
+// without a check script (consuming projects, test fixtures) skip LOUDLY.
+stage('battery');
+const pkgJsonPath = join(target, 'package.json');
+const hasCheck = existsSync(pkgJsonPath) && !!JSON.parse(readFileSync(pkgJsonPath, 'utf8')).scripts?.check;
+if (hasCheck) {
+  console.error('direct-merge: running the consistency-check battery (npm run check)…');
+  // Through defaultExec, NOT a bare spawnSync: `npm` resolves through a .cmd shim
+  // on native Windows that spawn cannot exec directly, so a bare call returned
+  // ENOENT with status null and EMPTY stdout/stderr — the gate then reported
+  // "battery FAILED" with nothing after the colon, on every Windows merge, for a
+  // battery that passes. Undiagnosable by construction (P5), and it blocked the
+  // gate rather than opening it, which is why it survived unnoticed. defaultExec
+  // owns the shell/quoting rule and normalizes a spawn error into status 1 with
+  // the message in stderr, so a future failure prints something readable.
+  const check = defaultExec('npm', ['run', 'check'], { cwd: target, timeout: 300_000 });
+  if (check.status !== 0) {
+    fail(`direct-merge: the consistency-check battery FAILED — fix before merging:\n${check.stdout + check.stderr}`);
+  }
+} else {
+  console.error("direct-merge: no `check` script in the target's package.json — battery skipped (loud)");
+}
+
+// ===========================================================================
+// ATTESTATION DISCLOSURE (decision attestation-staleness-disclosure-only-never-
+// a-refusing-gate, 1f069af4 v2; board attestation-gate 9868a0dd).
+//
+// WHY THIS SURFACE EXISTS AT ALL, given the ruling was about COMMIT time: the
+// design's first sparring round found commit-only delivery FATAL as a complete
+// shape. Commit stderr reaches the CONDUCTOR, while decision foreign_a7dbac2f reserves
+// inspection judgment for the HUMAN — and the human stands HERE, at the merge
+// gate. So the same one computation runs at both moments; this is an amendment
+// to the user-ruled commit-time disclosure, never a replacement for it.
+//
+// PRINTED BEFORE THE MERGE ACTION, so a reader sees it while the decision is
+// still theirs to make; it is ALSO carried on the final JSON report below.
+// ADVISORY ONLY — it can never refuse this merge, and the whole computation
+// is fail-open: any throw degrades to one disclosed line (P1, and the
+// disclosure-not-gate ruling itself).
+//
+// TOUCHED SET = the branch vs its merge base, rename-SAFE (--no-renames, -z).
+// The `changed` set computed at the top of this file is deliberately NOT reused:
+// it is rename-following and newline-split, and an attestation names the path a
+// human inspected — a rename must surface as a gone path, not follow silently.
+//
+// THE GLOBS COME FROM readAttestationGlobs, NEVER FROM openProject's PARSED
+// CONFIG (Codex review HIGH-1, 2026-09-01). openProject runs parseConfig at the
+// top of this file, hundreds of lines before this fail-open wrapper exists, so
+// ANY validation of this advisory field there would terminate the merge command
+// outright — a declaration that can refuse a merge is exactly what this feature
+// was redesigned not to be. The schema is unrefined; the tolerant read below
+// drops unusable entries and DISCLOSES the drop.
+// ===========================================================================
+stage('attestation');
+const attestationDisclosure = (() => {
+  try {
+    // The config and the store live under storeRoot (a linked worktree has no
+    // .sterling/); the touched set below is still diffed in the branch tree.
+    const { globs: declaredGlobs, dropped } = readAttestationGlobs(storeRoot);
+    const hasDrop = dropped.invalid_container || dropped.non_string > 0 || dropped.empty > 0 || dropped.duplicates.length > 0;
+    if (declaredGlobs.length === 0 && !hasDrop) return []; // DORMANT (shipped default) — no store read, no diff, no output
+    const d = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-renames', '--name-only', '-z', '--end-of-options', mergeBase, branchTip], {
+      cwd: target,
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+    if (d.error) throw d.error;
+    if (d.status !== 0) throw new Error(`git diff --no-renames ${mergeBase} ${branchTip} exited ${d.status}: ${(d.stderr || '').trim()}`);
+    const result = inspectAttestations({ projectRoot: storeRoot, touchedPaths: parseNulPathList(d.stdout), declaredGlobs });
+    return attestationDisclosureLines({ tool: 'direct-merge', result, declaredGlobs, subject: 'the branch tree', dropped });
+  } catch (e) {
+    return [
+      `direct-merge: ATTESTATION DISCLOSURE SKIPPED — the disclosure computation itself threw (${e?.message ?? e}). Disclosed and NON-FATAL: ` +
+        `the merge is unaffected, because this mechanism is advisory only and never a refusal.`,
+    ];
+  }
+})();
+for (const line of attestationDisclosure) console.error(line);
+
+// WORK MODE ends here: push the branch and open or reuse its PR. Nothing below
+// (merge, board nudge, sweep, rebuild, parked sweep, base push) runs — a human
+// merges the PR.
+if (work) {
+  const shipped = shipAsPr({ cwd: target, repo: workRepo, branch, base: into, mergeBase, branchTip, state: work.state, log: (m) => console.error(m) });
+  if (shipped) work.fail(shipped.error, shipped.exitCode);
+  // ARM the H10 'PR review loop owed' duty on create AND reuse (slice S3): a
+  // new head is owed a Copilot review. The PR exists either way, so a failed
+  // write never fails the ship — it is announced loudly instead (P5).
+  try {
+    armPrLoop(storeRoot, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
+    console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} — run the pr-review-loop skill (armed in ${PR_LOOP_REL}).`);
+  } catch (e) {
+    console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOP_REL}: ${e?.message ?? e}) — H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
+  }
+  work.succeed();
+}
+
+// branch-manager throws raw Errors (it is a library, shared with the §8.1 gate and
+// the MCP server, so it cannot process.exit). Routing them through fail() here
+// gives the gate ONE failure shape instead of a stack trace after the battery.
+let merged;
+let swept;
+try {
+  merged = mergeBranchInto({ cwd: target, branch, into });
+} catch (e) {
+  fail(`direct-merge: ${e?.message ?? e}`);
+}
+// The disclosure rides the machine-readable report too (decision foreign_1f069af4 v2
+// §6), not only stderr: everything below prints `{ ...merged, … }` from one of
+// five exit points, so attaching it to `merged` once is what makes every one of
+// them carry it — including the sweep-failure and stale-bundle paths, which exit
+// early and would otherwise drop it. Empty array on a dormant project; never
+// omitted, so an absent key means an older CLI rather than nothing to disclose.
+merged.attestation_disclosure = attestationDisclosure;
+
+// BOARD-PAYMENT NUDGE (board-payment-nudge-at-merge-gate, user-directed
+// 2026-08-27): the merge just landed, so any open USER-source board item
+// naming a file this branch changed may now be PAID work nobody closed —
+// measured 2026-08-27, 15 of 55 board items were exactly this. Advisory only
+// (never a refusal, P1: a gate here would add closure ceremony to every
+// merge) — stdout stays the machine-readable JSON report, so this prints to
+// stderr, only when non-empty (no noise on a clean merge), and NEVER refuses
+// the merge on its own failure. Placed immediately after the merge lands and
+// BEFORE the sweep/rebuild/stale-bundle blocks below, each of which can print
+// "THE MERGE SUCCEEDED" and exit early — the nudge must still have run by then.
+// Self-contained: builds its own query at print time rather than reusing the
+// settlement-region query above, so a nudge-only failure can never surface as
+// settlementError and refuse the merge (the advisory contract must never
+// invert into a gate). Passing file_keys into the query lets the store
+// intersect BEFORE the cap:1000 — the shared cap's recency window would
+// otherwise silently drop older matching user items.
+// KNOWN ACCEPTED LIMITATION: rename SOURCE paths are not nudged — `changed` is
+// a --name-only diff, which reports only destinations for a detected rename;
+// deliberate, so the reconcile set's own path semantics stay untouched here.
+try {
+  // An EMPTY file_keys array disables the store's file-key filter entirely
+  // (it does not mean match-nothing) — an empty-commit / edit-then-revert
+  // branch would otherwise pull in recent, unrelated todos. Skip outright.
+  if (changed.size > 0) {
+    // openProject() can itself fail()/process.exit (missing db, malformed
+    // config) — fine pre-merge, but fatal here: the merge has ALREADY landed,
+    // so this block must be exit-proof end-to-end and route any failure
+    // through the catch below instead. Construct the store directly, the same
+    // guard resolveProject uses, but throwing instead of exiting.
+    const dbPath = join(storeRoot, '.sterling', 'sterling.db');
+    if (!existsSync(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
+    const nudgeStore = new SterlingStore(dbPath);
+    let items;
+    try {
+      // source:'user' passed INTO the query (filters before the cap:1000,
+      // packages/store/src/index.ts QueryOptions.source) rather than a
+      // post-query .filter — an intersecting system item can no longer crowd
+      // a user item out of the capped window.
+      items = nudgeStore.query({ types: ['todo'], file_keys: [...changed], source: 'user', cap: 1000 });
+    } finally {
+      nudgeStore.close();
+    }
+    if (items.length > 0) {
+      console.error(
+        [
+          '',
+          `direct-merge: BOARD-PAYMENT NUDGE — ${items.length} open board item(s) name files this branch changed; the merged work may PAY them.`,
+          `Re-verify each against HEAD: close what this merge pays (board_remove), rewrite what it half-pays (board_update) — an item that outlives its payment rots invisibly (15 of 55 measured 2026-08-27).`,
+          ...items.map((t) => {
+            const keys = (t.file_keys ?? []).filter((k) => changed.has(k));
+            // Sanitize before printing: C0 controls, DEL and C1 controls
+            // (\x7f-\x9f, incl. 8-bit CSI/DCS/OSC lead-ins) in stored todo
+            // text could otherwise forge stderr lines. Full ids are
+            // server-minted uuids and stay unsanitized/unclipped.
+            const clip = String(t.text ?? '')
+              .replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 100);
+            return `  - ${t.id}  ${clip}  [${keys.join(', ')}]`;
+          }),
+        ].join('\n')
+      );
+    }
+  }
+} catch (e) {
+  console.error(`direct-merge: board-payment nudge did not run (${e?.message ?? e}) — advisory only, the merge stands.`);
+}
+
+// The sweep runs in its OWN try: once the merge has landed, a sweep failure must
+// not be reported as "the merge failed". That misreading is what teaches an
+// operator to hand-merge, which is the whole point of board f37e1dae.
+try {
+  swept = sweepMergedBranches({ cwd: target, into });
+} catch (e) {
+  console.error(
+    [
+      '',
+      `direct-merge: THE MERGE SUCCEEDED (${branch} → ${into}) — do NOT merge again.`,
+      `Only the post-merge branch sweep failed: ${e?.message ?? e}`,
+      `Sweep merged branches manually when convenient: git branch --merged ${into}`,
+    ].join('\n')
+  );
+  console.log(JSON.stringify({ ...merged, branches_swept: null, sweep_failed: true }, null, 2));
+  process.exit(1);
+}
+
+// POST-merge bundle freshness — the one staleness the battery structurally cannot
+// see. check-bundles-fresh runs BEFORE the merge, but git's auto-merge of
+// hooks/*.mjs does not equal a fresh esbuild of the MERGED source: after the
+// 2026-08-03 two-branch merge, h20's bundle had been built against pre-digest
+// store code and needed a rebuild (commit 1de585d), which the gate never flagged
+// because its battery had already passed. Re-checking after the merge closes it.
+// Sterling-specific, so it runs only where the checker exists.
+//
+// THE REBUILD IS LOAD-BEARING, NOT A CONVENIENCE (r-review finding (e)):
+// packages/*/dist/ is GITIGNORED, so it survives the checkout to `into` and still
+// holds the pre-merge build. check-bundles-fresh resolves each hook's workspace
+// imports into that dist, so a stale dist makes the temp build and the shipped
+// bundle vendor byte-IDENTICAL stale code — they compare equal and the check
+// PASSES on exactly the staleness it exists to catch. That is the 1de585d case.
+// Pre-merge this hole is covered by check-totality's stale-dist guard aborting the
+// whole battery; invoking the bundle checker ALONE has no such precondition, so
+// the dist must be rebuilt from the merged source first or the arm is theatre.
+const bundleChecker = join(target, 'scripts', 'check-bundles-fresh.mjs');
+if (existsSync(bundleChecker)) {
+  console.error('direct-merge: rebuilding packages so the post-merge bundle check compares against MERGED source…');
+  const rebuilt = defaultExec('npm', ['run', 'build'], { cwd: target, timeout: 600_000 });
+  if (rebuilt.status !== 0) {
+    console.error(
+      [
+        '',
+        `direct-merge: THE MERGE SUCCEEDED (${branch} → ${into}) — do NOT merge again.`,
+        'But `npm run build` FAILED on the merged tree, so bundle freshness could NOT be',
+        `verified — the merged source may not even compile. Fix this on ${into} now:`,
+        '  npm run build, then node scripts/check-bundles-fresh.mjs and rebuild what it names',
+        (rebuilt.stdout + rebuilt.stderr).trim(),
+      ].join('\n')
+    );
+    console.log(JSON.stringify({ ...merged, branches_swept: swept, bundles_unverified: true }, null, 2));
+    process.exit(1);
+  }
+  const bundles = spawnSync(process.execPath, [bundleChecker], { cwd: target, encoding: 'utf8', timeout: 300_000 });
+  if (bundles.status !== 0) {
+    console.error(
+      [
+        '',
+        `direct-merge: THE MERGE SUCCEEDED (${branch} → ${into}) — but a shipped bundled artifact is now STALE.`,
+        'git auto-merged bundle sources without rebuilding them, so a shipped artifact that',
+        `actually runs (hooks enforcement, TUI, …) no longer matches its source on ${into}.`,
+        'Fix it now, on ' + into + ': run the rebuild command(s) the checker output below names,',
+        '  then: git add -A <the stale paths it names> && git commit -m "fix: rebuild bundles after merge"',
+        'Checker output:',
+        (bundles.stdout + bundles.stderr).trim(),
+      ].join('\n')
+    );
+    console.log(JSON.stringify({ ...merged, branches_swept: swept, bundles_stale: true }, null, 2));
+    process.exit(1);
+  }
+}
+
+// PARKED-FILE ITEMS CLOSE ON THE MERGE, because the merge is the event that ends
+// their life (P4 — board 1d6a721a). A file_parked item says "this owned file is
+// absent here but alive on another ref"; landing that ref makes the statement
+// false, and no WRITE can close it, so it has no artifact-write binding like the
+// drift lanes do. Without this sweep it would linger as permanent noise — which
+// is the same complaint the lane was created to answer, one lane over.
+//
+// CLOSURE HAS TWO SHAPES (decision parked-close-endpoint-diff-not-history-walk):
+// the parked file RETURNED at the merge target (present on disk again), OR its
+// deletion landed IN THIS MERGE'S ENDPOINT DIFF — `git diff --diff-filter=D
+// --no-renames <pre-merge intoTip> <post-merge HEAD>` — meaning the branch that
+// just merged deleted it outright, so it can never "return". An endpoint diff,
+// never a history walk: a path added and deleted entirely between the two
+// endpoints (absent at both) does not count. When the deletion set cannot be
+// measured (any git failure — deletedBetween returns null), closure degrades to
+// presence-only: deletion-shaped items stay open rather than closing on
+// unmeasured evidence, and /sterling:drain closes them later.
+//
+// Deliberately AFTER the merge and outside any fail() path: this is bookkeeping,
+// so a failure here must never be reported as a merge problem. It reopens the
+// store because the gate closed it during the preflight.
+let parkedClosed = 0;
+try {
+  const postMergeHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+  const deletedSet =
+    postMergeHead.status === 0 ? deletedBetween(target, intoTip, postMergeHead.stdout.trim()) : null;
+  const { store: post } = openProject(target);
+  try {
+    for (const t of post.query({ types: ['todo'], cap: 1000 })) {
+      if (t.source !== 'system' || t.system_reason !== 'file_parked') continue;
+      const paths = t.file_keys ?? [];
+      if (parkedItemResolved(paths, deletedSet, (k) => existsSync(join(target, k)))) {
+        post.remove(t.id, new Date().toISOString());
+        parkedClosed += 1;
+      }
+    }
+  } finally {
+    post.close();
+  }
+} catch (e) {
+  console.error(`direct-merge: the merge succeeded; the parked-file sweep did not run (${e?.message ?? e}). Harmless — /sterling:drain will close them.`);
+}
+
+// PUSH THE MERGE TO ORIGIN — work has not "landed" until consumers can
+// fast-forward to it: /sterling:update reads origin, so a merged-but-unpushed
+// base leaves every consumer machine behind with nothing anywhere saying so.
+// Binding the push to the merge event (P4) closes that gap; --no-push opts out
+// for local-only work. A repo with no origin (test fixtures, consuming
+// projects) skips LOUD. On WSL a plain `git push` can fail where `git.exe`
+// succeeds (credentials live in Git Credential Manager on the Windows side),
+// so that interop path is tried before declaring failure. A push failure is
+// NEVER reported as a merge failure — the merge stands; the exit code still
+// goes non-zero so an unpushed base cannot read as a clean gate.
+let pushed = false;
+if (process.argv.includes('--no-push')) {
+  console.error('direct-merge: push to origin SKIPPED (--no-push) — consumers cannot see this merge until you push.');
+} else {
+  const remotes = spawnSync('git', ['remote'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+  const hasOrigin = remotes.status === 0 && remotes.stdout.split('\n').map((r) => r.trim()).includes('origin');
+  if (!hasOrigin) {
+    console.error("direct-merge: no 'origin' remote — push skipped (loud).");
+  } else {
+    const push = pushWithWindowsRetry(target, ['origin', into], (m) => console.error(m));
+    if (push.status === 0) {
+      pushed = true;
+      console.error(`direct-merge: pushed ${into} to origin.`);
+    } else {
+      console.error(
+        [
+          '',
+          `direct-merge: THE MERGE SUCCEEDED (${branch} → ${into}) — but the PUSH to origin FAILED,`,
+          `so consumer machines cannot see it (/sterling:update reads origin). Push ${into} manually:`,
+          `  git push origin ${into}   (on WSL, try: git.exe push origin ${into} — credentials live in GCM)`,
+          `A 'Repository not found' here usually means a wrong-account GCM credential.`,
+          (push.stderr || push.stdout || String(push.error?.message ?? '')).trim(),
+        ].join('\n')
+      );
+      console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed: false, opencode_release: 'skipped' }, null, 2));
+      process.exit(1);
+    }
+  }
+}
+
+// RELEASE FOR OPENCODE (decision sterling-on-opencode-installs-from-a-git-
+// release-branch-v2): a pushed hobby merge that moved package.json's version
+// writes the merged tree as a commit on `opencode-release`, tags it v<version>
+// and pushes both; `opencode plugin add/update` follows the tags. Any other
+// merge skips with one line. A refusal (origin unreadable, the tag already names
+// other content) never fails the merge; a release that ran and failed exits
+// non-zero after THE MERGE STANDS and the re-run command, like a failed push.
+const mergedHead = spawnSync('git', ['rev-parse', into], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+let opencodeRelease;
+if (mergedHead.status === 0) {
+  opencodeRelease = releaseAfterMerge({ target, into, baseSha: intoTip, headSha: mergedHead.stdout.trim(), pushed });
+} else {
+  console.error(`direct-merge: opencode release SKIPPED: could not resolve ${into} after the merge (${mergedHead.stderr.trim()}).`);
+  opencodeRelease = { status: 'skipped' };
+}
+
+console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed, opencode_release: opencodeRelease.status, ...(parkedClosed ? { parked_items_closed: parkedClosed } : {}) }, null, 2));
+if (opencodeRelease.status === 'failed') process.exit(1);

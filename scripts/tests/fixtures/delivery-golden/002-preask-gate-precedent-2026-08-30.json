@@ -1,0 +1,9 @@
+{
+  "event": "PostToolUse",
+  "payload": { "tool_name": "Read", "tool_input": { "file_path": "scripts/hooks/h20-mechanism-axis.mjs" } },
+  "expected_ids": [
+    "68332e4b-da25-474e-a973-7cb53a0da40b"
+  ],
+  "expected_absent_ids": [],
+  "source_incident": "2026-08-30: a conductor argued at length, citing the retrieval-first line, that a pre-ask gate would revive a rejected design — while H20's pre-ask deny (decision 68332e4b, shipped 2026-08-24, six days earlier) already WAS that gate. This fixture pins that a touch of the governing hook file still delivers the ruling that would have prevented the mistake."
+}

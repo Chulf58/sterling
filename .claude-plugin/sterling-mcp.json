@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "sterling": {
+      "command": "node",
+      "args": [
+        "--disable-warning=ExperimentalWarning",
+        "${CLAUDE_PLUGIN_ROOT}/mcp/sterling-mcp.mjs",
+        "--store",
+        "${CLAUDE_PROJECT_DIR}/.sterling/sterling.db"
+      ]
+    }
+  }
+}
