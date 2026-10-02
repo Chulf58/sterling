@@ -16,12 +16,12 @@
 // without a circular dependency.
 //
 // TWO PROPERTIES THIS HELPER MUST NOT CHANGE, because call sites assert on them:
-//  1. LAZY-CREATE SEMANTICS ARE MountedStores' OWN. The constructor is called
-//     with the default options (no `skipMissing`), so every mounted domain db
-//     is materialized BY THE MOUNT (mounted.ts `open()` → mkdirSync + open),
-//     exactly as before. This helper never pre-touches, stats, or otherwise
-//     materializes a domain file itself — `domainDbPath()` is pure path
-//     arithmetic and opens nothing.
+//  1. EVERY DOMAIN IS MADE THROUGH createDomain. MountedStores no longer
+//     creates a missing domain on mount (board 675daf9d (c): a new domain
+//     needs a description), so this helper creates each listed domain with
+//     createDomain and a fixed test description, then mounts with the default
+//     options (no `skipMissing`). `domainDbPath()` is pure path arithmetic and
+//     opens nothing.
 //  2. THE CLOCK IS THE CALLER'S. `now` is REQUIRED (no default) and `domains`
 //     takes no default, so no call site can silently inherit another file's
 //     frozen timestamp or another file's mount directory name.
@@ -30,7 +30,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
-import { MountedStores } from '@sterling/store';
+import { MountedStores, createDomain } from '@sterling/store';
 import { SterlingTools } from '../../tools.js';
 
 export interface MountedHarnessOptions {
@@ -55,6 +55,7 @@ export function harnessMounted(domains: string[], opts: MountedHarnessOptions): 
   const dir = mkdtempSync(join(tmpdir(), opts.prefix ?? 'sterling-mounted-'));
   const domainDbPath = (name: string) => join(dir, 'domains', name, 'sterling.db');
   const mounts = domains.map((name) => ({ name, dbPath: domainDbPath(name) }));
+  for (const m of mounts) createDomain(m.name, `test domain ${m.name}`, m.dbPath);
   const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), mounts);
   const config = parseConfig({ stack_tags: domains });
   const tools = new SterlingTools({ store, config, now: () => opts.now, newId: randomUUID });

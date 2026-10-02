@@ -24,7 +24,8 @@ import {
   type Freshness,
 } from '@sterling/schemas';
 
-export { MountedStores, type DomainMount, resolveDomainMounts } from './mounted.js';
+export { MountedStores, type DomainMount, resolveDomainMounts, createDomain, DomainNotCreatedError, DOMAIN_DESCRIPTION_KEY } from './mounted.js';
+export { allocateShares, DEFAULT_PROJECT_SHARE } from './shares.js';
 export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
 export * from './axis.js';
 import { AXIS_MAX_TERM_LEN } from './axis.js';
@@ -186,6 +187,15 @@ CREATE TABLE IF NOT EXISTS activity_log (
   type TEXT NOT NULL,
   record_id TEXT NOT NULL,
   title TEXT NOT NULL
+);
+-- Store-level key/value metadata (board 675daf9d, decision
+-- projects-mount-domains-and-sibling-projects): a domain store's description is
+-- its 'description' key. Additive: CREATE IF NOT EXISTS on every v2 open, so no
+-- user_version bump; a pre-v2 store opens read-only before this DDL runs.
+CREATE TABLE IF NOT EXISTS store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 `;
 
@@ -3494,6 +3504,30 @@ export class SterlingStore {
       this.db
         .prepare('INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at')
         .run(type, recordId, at);
+    });
+  }
+
+  /**
+   * Store-level metadata read (store_meta). undefined when the key was never
+   * set. A pre-v2 store has no store_meta table (it opens read-only before the
+   * DDL runs), so this refuses there with the migration error rather than
+   * answering "unset" for a question the store cannot answer.
+   */
+  getMeta(key: string): string | undefined {
+    this.assertV2Surface('getMeta');
+    const row = this.db.prepare('SELECT value FROM store_meta WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value;
+  }
+
+  /** Store-level metadata write (store_meta): upsert, one row per key, stamped updated_at. */
+  setMeta(key: string, value: string): void {
+    this.assertWritable('setMeta');
+    if (typeof key !== 'string' || key.length === 0) throw new Error('setMeta: key must be a non-empty string');
+    if (typeof value !== 'string') throw new Error(`setMeta: value for key '${key}' must be a string`);
+    this.tx(() => {
+      this.db
+        .prepare('INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at')
+        .run(key, value, new Date().toISOString());
     });
   }
 
