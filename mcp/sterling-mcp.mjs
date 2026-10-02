@@ -31251,7 +31251,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
    */
   appendSessionEvents(entries) {
     if (!this.repoRoot) {
-      throw new Error("session-event write: no project root is known to this server, so the transient register location cannot be resolved \u2014 use the script fallback (bin/no-capture.mjs / bin/concept-designed.mjs under ${CLAUDE_PLUGIN_ROOT})");
+      throw new Error("session-event write: no project root is known to this server, so the transient register location cannot be resolved \u2014 use the script fallback (bin/no-capture.mjs / bin/concept-designed.mjs in the Sterling install root)");
     }
     const eventsPath = join4(this.repoRoot, ".sterling", "transient", "session-events.json");
     mkdirSync3(dirname4(eventsPath), { recursive: true });
