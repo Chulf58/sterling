@@ -144,6 +144,7 @@ test('session context injects the Sterling layer, the OpenCode host tail, a stat
     assert.doesNotMatch(text, /\{\{PROJECT_NAME\}\}/);
     assert.match(text, /OpenCode host/);
     assert.match(text, /`question` tool/);
+    assert.ok(text.includes(`Sterling is installed at \`${server.sterlingRoot()}\``), 'the layer names the resolved Sterling root');
     assert.match(text, /no stop block/i);
     assert.match(text, /conductor/);
     assert.match(text, /STERLING STATUS: board 1 open, maintenance queue 0, store schema v\d+ \(current\)/);
@@ -155,10 +156,77 @@ test('session context injects the Sterling layer, the OpenCode host tail, a stat
   }
 });
 
-test('the host tail maps every Claude-only name the layer uses', () => {
-  const tail = server.OPENCODE_HOST_TAIL;
-  for (const term of ['AskUserQuestion', '`question` tool', '/plugin', '--plugin-dir', '.claude/agents', 'codex', 'stop block', 'conductor', 'next turn']) {
+test('the host tail names the Sterling root and the Claude Code surfaces OpenCode lacks', () => {
+  const tail = server.opencodeHostTail('/opt/sterling-x');
+  for (const term of ['`/opt/sterling-x`', '/opt/sterling-x/bin/', '/opt/sterling-x/commands/', '/opt/sterling-x/skills/', 'CLAUDE_PLUGIN_ROOT', '/plugin', '--plugin-dir', '.claude/agents', 'stop block', 'conductor', '`subagent` tool', 'next turn']) {
     assert.ok(tail.includes(term), `host tail names ${term}`);
+  }
+  assert.ok(!tail.includes('${CLAUDE_PLUGIN_ROOT}'), 'the tail names the variable without the shell form, so the layer greps clean');
+  assert.match(server.opencodeHostTail(null), /could not be resolved/, 'an unresolved root is said out loud');
+});
+
+test('the Sterling root comes from one function: the plugin root above the module, which holds the template and bin/', () => {
+  const root = server.sterlingRoot();
+  assert.equal(root, repo.replace(/\/$/, ''));
+  assert.equal(server.defaultTemplatePath(), join(root, 'templates', 'target-claude-md.md'));
+  assert.ok(existsSync(join(root, 'bin', 'concept-designed.mjs')));
+  // The committed bundle sits one level below the root and resolves the same root.
+  assert.equal(server.sterlingRoot(pathToFileURL(join(repo, 'opencode', 'sterling-server.mjs')).href), root);
+  assert.throws(() => server.sterlingRoot(pathToFileURL(join(tmpdir(), 'nowhere', 'x.mjs')).href), /no Sterling plugin root/);
+});
+
+test('the injected layer is fully host-mapped: no unmapped Claude-only phrase, every named Sterling file exists', () => {
+  const p = makeProject({ withGit: false });
+  try {
+    const root = server.sterlingRoot();
+    const layer = server.renderSterlingLayer(p.dir, root);
+    for (const claudeOnly of ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', '@AGENTS.md', 'sterling:de-ai-writing', 'H22 warns', 'H10 holds the demand', 'H19 delivery helps', '(Enforced: H15', 'session-start banner prints', 'backgrounds itself and returns', "Claude Code's hook, frontmatter and transcript mechanics move"]) {
+      assert.ok(!layer.includes(claudeOnly), `layer still carries the Claude-only phrase ${claudeOnly}`);
+    }
+    assert.match(layer, /^- \*\*Say `READY FOR NEW SESSION` plainly when it is time\.\*\*.*\/new/m, 'the clear line is the ruled new-session line');
+    assert.match(layer, /`question` tool \(AskUserQuestion on Claude Code\)/);
+    assert.match(layer, /\.opencode\/agents\/sterling\/conductor\.md/);
+    assert.match(layer, /default_agent/);
+    assert.match(layer, /reconcile_needed.*STERLING NOTICE/s, 'H7 is mapped to settlement notices');
+    assert.match(layer, /article_missing.*concept_article_missing.*not minted on OpenCode yet/s, 'the missing H10 demands are disclosed');
+    assert.match(layer, /codex.*MCP server is configured/s);
+    // Every /sterling:<command> named in the layer carries its OpenCode equivalent.
+    for (const m of layer.matchAll(/\/sterling:([a-z][a-z-]*)/g)) {
+      const after = layer.slice(m.index, m.index + 200);
+      assert.ok(after.includes(`${root}/commands/${m[1]}.md`), `/sterling:${m[1]} is mapped to its command file`);
+    }
+    // Every Sterling path the layer names resolves on disk.
+    const named = [...layer.matchAll(new RegExp(`${root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/[\\w./-]*[\\w]`, 'g'))].map((m) => m[0]);
+    for (const want of ['bin/concept-designed.mjs', 'bin/rotation-note.mjs', 'skills/de-ai-writing/SKILL.md', 'skills/de-ai-writing/scripts/check-ai-signs.mjs', '.claude-plugin/plugin.json']) {
+      assert.ok(named.includes(`${root}/${want}`), `layer names ${want} under the root`);
+    }
+    for (const path of named) assert.ok(existsSync(path), `${path} named in the layer exists`);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('template drift is loud: a mapped phrase that vanished, or a new unmapped Claude-only phrase, fails the render', () => {
+  const p = makeProject({ withGit: false });
+  const fake = mkdtempSync(join(tmpdir(), 'sterling-oc-fake-root-'));
+  try {
+    const root = server.sterlingRoot();
+    const real = readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8');
+    mkdirSync(join(fake, 'templates'));
+    mkdirSync(join(fake, 'commands'));
+    for (const c of ['task', 'drain']) writeFileSync(join(fake, 'commands', `${c}.md`), 'x');
+    const tpl = join(fake, 'templates', 'target-claude-md.md');
+    writeFileSync(tpl, real.replace('so H10 holds the demand at session end', 'so the demand is held'));
+    assert.throws(() => server.renderSterlingLayer(p.dir, fake), /host mapping 'concept-designed-h10'.*not found/);
+    writeFileSync(tpl, `${real}\n- run \`node "\${CLAUDE_PLUGIN_ROOT}/bin/new-thing.mjs"\`\n`);
+    assert.ok(server.renderSterlingLayer(p.dir, fake).includes(`\`node "${fake}/bin/new-thing.mjs"\``), 'any plugin-root reference becomes the resolved root');
+    writeFileSync(tpl, `${real}\n- then print READY TO CLEAR and run /clear\n`);
+    assert.throws(() => server.renderSterlingLayer(p.dir, fake), /unmapped Claude-only phrase.*READY TO CLEAR.*\/clear/);
+    writeFileSync(tpl, `${real}\n- drained by \`/sterling:nosuch\`\n`);
+    assert.throws(() => server.renderSterlingLayer(p.dir, fake), /\/sterling:nosuch.*commands\/nosuch\.md/);
+  } finally {
+    p.cleanup();
+    rmSync(fake, { recursive: true, force: true });
   }
 });
 
@@ -464,4 +532,5 @@ test('live: OpenCode 2.0.21 shows the model the injected layer and an edit deliv
   assert.equal(r.status, 0, `live smoke failed:\n${r.stdout}\n${r.stderr}`);
   assert.match(r.stdout, /LAYER-SEEN: yes/);
   assert.match(r.stdout, /DELIVERY-SEEN: yes/);
+  assert.match(r.stdout, /BIN-CALLED-BY-ROOT: yes/, 'the model ran a bin script by the root the layer names');
 });
