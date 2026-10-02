@@ -22,11 +22,11 @@ const DESCRIPTIONS: Record<string, string> = {
   sterling: 'Sterling plugin: knowledge store, board, hooks, conductor agents',
 };
 
-function harness(domains: string[], opts: { missing?: string[] } = {}) {
+function harness(domains: string[], opts: { missing?: string[]; descriptions?: Record<string, string> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-d2-'));
   const dbPath = (name: string) => join(dir, 'domains', name, 'sterling.db');
   const mounts: DomainMount[] = domains.map((name) => ({ name, dbPath: dbPath(name) }));
-  for (const m of mounts) createDomain(m.name, DESCRIPTIONS[m.name] ?? `${m.name} domain`, m.dbPath);
+  for (const m of mounts) createDomain(m.name, opts.descriptions?.[m.name] ?? DESCRIPTIONS[m.name] ?? `${m.name} domain`, m.dbPath);
   const missing = (opts.missing ?? []).map((name) => ({ name, dbPath: dbPath(name) }));
   const all = [...mounts, ...missing];
   const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), all, { skipMissing: true });
@@ -217,6 +217,36 @@ test('promotion: a record fitting several domains says to ask the user', () => {
     assert.match(items[0].text, /domain:salesforce/);
     assert.match(items[0].text, /domain:genesys/);
     assert.match(items[0].text, /several fit: ask the user/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('promotion: a record that also fits the shipped sterling description is ambiguous, so it goes to the user, and sterling is never suggested (task-end review 2026-10-03)', async () => {
+  // Conductor decision 2026-10-03: sterling counts toward "how many fit", never as a target.
+  const defaultsUrl = new URL('../../../../scripts/lib/domain-defaults.mjs', import.meta.url).href;
+  const { DEFAULT_DOMAIN_DESCRIPTIONS } = (await import(defaultsUrl)) as { DEFAULT_DOMAIN_DESCRIPTIONS: Record<string, string> };
+  const { tools, cleanup } = harness(['salesforce', 'genesys', 'sterling'], { descriptions: { sterling: DEFAULT_DOMAIN_DESCRIPTIONS.sterling } });
+  try {
+    const res = tools.knowledgeCreate(
+      'decision',
+      decision('Sterling hooks: the conductor should call knowledge_preflight before it queues a board item, so the plugin workflow never asks twice.')
+    );
+    const items = reviews(tools);
+    assert.equal(items.length, 1, JSON.stringify(items));
+    assert.match(items[0].text, /several fit: ask the user/);
+    assert.doesNotMatch(items[0].text, /domain:sterling/, 'sterling is never suggested as a target');
+    assert.ok(!res.warnings.some((w) => /domain:sterling/.test(w)), JSON.stringify(res.warnings));
+  } finally {
+    cleanup();
+  }
+});
+
+test('promotion: a record that fits ONLY the sterling domain surfaces nothing', () => {
+  const { tools, cleanup } = harness(['salesforce', 'sterling']);
+  try {
+    tools.knowledgeCreate('decision', decision('Sterling plugin hooks write the knowledge store and the board for conductor agents'));
+    assert.equal(reviews(tools).length, 0);
   } finally {
     cleanup();
   }

@@ -3970,9 +3970,12 @@ export class SterlingTools {
    * the description of at least one mounted NON-sterling domain surfaces one
    * promotion_review item naming the suggested domain(s), the description and
    * the matched terms. Exactly one fit is drainable by the agent; several fits
-   * go to the user. The 'sterling' domain is excluded because it is mounted by
-   * every project and would otherwise claim every record about Sterling work.
-   * No mounted domain with a description, or no fit, surfaces nothing. Returns
+   * go to the user. The 'sterling' domain COUNTS toward that decision but is
+   * never suggested (conductor decision 2026-10-03): a record that also fits
+   * sterling is ambiguous, so it goes to the user. Sterling is never named
+   * because it is mounted by every project and would otherwise claim every
+   * record about Sterling work. No mounted domain with a description, or no
+   * fit other than sterling, surfaces nothing. Returns
    * the receipt warning for knowledge_create, or undefined when nothing was
    * surfaced.
    */
@@ -3983,17 +3986,19 @@ export class SterlingTools {
     if (declaredRepoPaths(type, body).length) return undefined;
     const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
     if (!registered) return undefined;
-    const candidates = this.mountedDomainList().filter((d) => d.name !== 'sterling' && d.description && !d.unreadable);
-    if (!candidates.length) return undefined;
-    const fits = fitDomains(registered.fts(body), candidates, { exclude: ['sterling'] });
+    const described = this.mountedDomainList().filter((d) => d.description && !d.unreadable);
+    if (!described.some((d) => d.name !== 'sterling')) return undefined;
+    const allFits = fitDomains(registered.fts(body), described);
+    const fits = allFits.filter((f) => f.name !== 'sterling');
     if (!fits.length) return undefined;
-    const descriptionOf = new Map(candidates.map((d) => [d.name, d.description as string]));
+    const descriptionOf = new Map(described.map((d) => [d.name, d.description as string]));
     const named = fits.map((f) => `domain:${f.name} ("${descriptionOf.get(f.name)}"; matched: ${f.matched.join(', ')})`).join('; ');
-    const verdict = fits.length === 1 ? 'exactly one fit: drainable' : 'several fit: ask the user';
+    const alsoSterling = allFits.length > fits.length ? ' It also fits the sterling domain, which is never a promotion target.' : '';
+    const verdict = allFits.length === 1 ? 'exactly one fit: drainable' : 'several fit: ask the user';
     const label = SterlingTools.mintHeadlineOf(type, body) || type;
     this.maintenanceEnqueue({
       reason: 'promotion_review',
-      text: `review '${label}' for promotion: project-scoped ${type} with no file_keys fits ${named}. ${verdict}`,
+      text: `review '${label}' for promotion: project-scoped ${type} with no file_keys fits ${named}.${alsoSterling} ${verdict}`,
       feature_link: record.id,
     });
     return (
