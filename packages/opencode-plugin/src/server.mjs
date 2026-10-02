@@ -30,7 +30,7 @@
 //   context.mjs (the context handler)         delivery.mjs (tool delivery)
 //   settle.mjs (settlement)                   worker.mjs (maintenance worker)
 //   selection.mjs (prompt hook)               compaction.mjs (receipt reset)
-//   research.mjs (research_tool events)
+//   research.mjs (research_tool events)       pr-loop.mjs (the PR review loop owed notice)
 //   config.mjs (registration), sync.mjs (post-update sync)
 //   notices.mjs, log.mjs, store.mjs (shared plumbing)
 import { createCompactionHandler } from './compaction.mjs';
@@ -39,6 +39,7 @@ import { createContextHandler } from './context.mjs';
 import { createDeliveryHandlers } from './delivery.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { NOTICES_REL, addNotice } from './notices.mjs';
+import { createPrLoopNotice } from './pr-loop.mjs';
 import { createRotationRestore } from './restore.mjs';
 import { createResearchRecorder } from './research.mjs';
 import { createPromptHandler } from './selection.mjs';
@@ -47,6 +48,7 @@ import { BUSY_TIMEOUT_MS, openProjectStore } from './store.mjs';
 import { createSessionSync } from './sync.mjs';
 import { createWorkerLaunch } from './worker.mjs';
 import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
+import { WORKER_ENV_FLAG } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
 
 export { BUSY_TIMEOUT_MS, LOG_REL, NOTICES_REL, addNotice, liveDispatch, openProjectStore };
 export { defaultTemplatePath, hostBlockPairs, opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
@@ -60,7 +62,8 @@ export const BUDGET_MS = { context: 4000, delivery: 4000, research: 4000, settle
 /**
  * The plugin factory. `deps` exists for tests: openStore(dbPath), now(),
  * claudeOnPath(), launchWorker(opts), sterlingRoot (a path), renderRestore(note, opts),
- * configure(ctx) and syncSession(root, sessionID) (replace the config.mjs and sync.mjs handlers).
+ * configure(ctx) and syncSession(root, sessionID) (replace the config.mjs and sync.mjs handlers),
+ * and env (process.env for the worker-child check and sync.mjs).
  */
 export function createSterlingServer(deps = {}) {
   const openStore = deps.openStore ?? openProjectStore;
@@ -109,16 +112,22 @@ export function createSterlingServer(deps = {}) {
   }
   const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker });
   const settle = createSettle({ openStore, now, launchWorkerFor });
+  const prLoopNotice = createPrLoopNotice({ now, pluginRoot: deps.sterlingRoot });
   const onPrompt = createPromptHandler({ openStore, rootOf, fenced });
   const onCompaction = createCompactionHandler({ rootOf, fenced });
   const configure = deps.configure ?? createConfigHandler(deps);
 
   async function onEvent(ev) {
     if (ev?.type !== 'session.execution.succeeded') return;
+    // Inside the maintenance worker's own `opencode run` child (the runner sets
+    // the flag), this globally installed plugin must not settle or launch a
+    // worker: it would race the parent's settlement on the same store.
+    if ((deps.env ?? process.env)[WORKER_ENV_FLAG] === '1') return;
     const root = rootOf();
     if (!root) return;
     resetStatus(root);
     await fenced('settle', root, () => settle(root));
+    await fenced('settle', root, () => prLoopNotice(root));
   }
 
   const handlers = { context: onContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };

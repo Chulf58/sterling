@@ -563,6 +563,23 @@ test('settlement does not launch the maintenance worker when claude is not on PA
   }
 });
 
+test('inside the maintenance worker child (STERLING_MAINTENANCE_WORKER=1) the plugin never settles or launches a worker, so it cannot race the parent on the store', async () => {
+  const p = makeProject();
+  try {
+    const launches = [];
+    const { plugin, cleanup } = await setupPlugin(p.dir, { claudeOnPath: () => true, launchWorker: (o) => launches.push(o), env: { STERLING_MAINTENANCE_WORKER: '1' } });
+    await plugin.handlers.event(succeeded);
+    writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 4;\n');
+    await plugin.handlers.event(succeeded);
+    assert.equal(existsSync(settledPath(p.dir)), false, 'no settled snapshot is written');
+    assert.deepEqual(reconcileItems(p.dir), [], 'no reconcile duty is minted');
+    assert.deepEqual(launches, []);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('settlement mints but does not advance while a Claude dispatch register has a live row', async () => {
   const p = makeProject();
   try {
@@ -976,7 +993,7 @@ test('with no claude on PATH the worker skip is loud: one notice per process and
     const skip = noticeTexts(p.dir).filter((t) => /maintenance worker/i.test(t));
     assert.equal(skip.length, 1);
     assert.match(skip[0], /no maintenance runner/i);
-    assert.match(skip[0], /Parity P8/);
+    assert.match(skip[0], /neither `claude` nor an OpenCode binary/);
     const log = readFileSync(join(p.dir, server.LOG_REL), 'utf8');
     assert.match(log, /no maintenance runner/i);
     await ctx.hooks.session.context(contextInput());

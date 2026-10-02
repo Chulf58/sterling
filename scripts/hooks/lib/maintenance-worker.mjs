@@ -30,6 +30,11 @@
 // progress (only the close that follows it is). A database-locked
 // maintenance_remove is retry-later ('busy'), never a refusal.
 //
+// OPENCODE HOST (board item Parity P8): on a machine without `claude`, the
+// OpenCode plugin launches with host 'opencode'; the runner then runs `opencode
+// run` (maintenance-worker-opencode.mjs), whose event parser feeds the same
+// journal and evidence gate.
+//
 // WHAT IT DOES NOT DO: author article prose, create records, edit a queue item,
 // or retry a close the server refused. It does not guarantee a verdict is
 // right: every close is logged so it can be spot-checked (decision point (6)).
@@ -45,6 +50,7 @@ import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildOpencodeArgs, buildOpencodeConfig, opencodeEnv, opencodeStreamJournal, OPENCODE_PROMPT_NOTE } from './maintenance-worker-opencode.mjs';
 
 export const WORKER_MODEL = 'claude-sonnet-5-5';
 export const WORKER_EFFORT = 'medium';
@@ -110,6 +116,23 @@ export const WORKER_DISALLOWED_TOOLS = [
   'Edit',
   'Bash',
 ];
+
+/** The two runner hosts (board item Parity P8). The launcher records the one its
+ *  caller chose in eligible.json; H1/H10/H19 run on Claude Code and pass none,
+ *  which is 'claude'. The OpenCode plugin passes 'opencode' when `claude` is
+ *  not on PATH. */
+export const WORKER_HOSTS = ['claude', 'opencode'];
+/** Config key (in maintenance_worker) naming the OpenCode runner's model as
+ *  provider/model. It is a config choice because Anthropic OAuth through
+ *  OpenCode bills as extra usage (finding
+ *  opencode-2-plugin-spike-hooks-and-sidebar-october-2026). Unset, the OpenCode
+ *  runner REFUSES and never falls back to OpenCode's default model (user-ruled,
+ *  decision opencode-maintenance-worker-refuses-without-a-configured-model). */
+export const OPENCODE_MODEL_KEY = 'opencode_model';
+/** Is a usable OpenCode model configured? (`config` raw or parsed, as the launcher takes it.) */
+export const opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
+export const OPENCODE_MODEL_UNSET =
+  `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
 
 export function workerPaths(root) {
   const sterling = join(root, '.sterling');
@@ -571,6 +594,14 @@ function launchWorker(opts) {
       };
     }
 
+    const host = opts.host ?? 'claude';
+    if (!WORKER_HOSTS.includes(host)) return { launched: false, reason: 'error', detail: failDetail(`unknown runner host '${host}'`) };
+    const model = opencodeModelOf(opts.config);
+    if (host === 'opencode') {
+      if (typeof opts.opencodeBin !== 'string' || !opts.opencodeBin) return { launched: false, reason: 'error', detail: failDetail('the opencode host needs the path of the opencode binary') };
+      if (model === null) return { launched: false, reason: 'error', detail: failDetail(OPENCODE_MODEL_UNSET) };
+      if (model !== null && (typeof model !== 'string' || !model.trim())) return { launched: false, reason: 'error', detail: failDetail(`config maintenance_worker.${OPENCODE_MODEL_KEY} must be a provider/model string, got ${JSON.stringify(model)}`) };
+    }
     const pluginRoot = opts.pluginRoot ?? pluginRootFrom();
     if (!pluginRoot) return { launched: false, reason: 'error', detail: failDetail('plugin root not found above the hook') };
     // Resolve everything the runner needs NOW, so a broken install fails loud
@@ -586,7 +617,9 @@ function launchWorker(opts) {
     if (!token) return { launched: false, reason: 'already_running' };
     writeFileSync(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
     // The child judges ONLY these (PARTIAL 2); the runner checks the token.
-    writeFileSync(paths.eligible, JSON.stringify({ token, head: git.head, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
+    // The runner host travels with the eligible list, bound to this launch by the token.
+    const runnerHost = host === 'opencode' ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
+    writeFileSync(paths.eligible, JSON.stringify({ token, head: git.head, ...runnerHost, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
 
     let logFd;
     try {
@@ -602,7 +635,7 @@ function launchWorker(opts) {
       child.on?.('error', () => releaseLock(paths, token));
       child.unref?.();
       writeFileSync(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: 'running', token }));
-      return { launched: true, reason: 'launched', pid: child.pid, items: eligible.length };
+      return { launched: true, reason: 'launched', pid: child.pid, items: eligible.length, host };
     } catch (e) {
       releaseLock(paths, token);
       return { launched: false, reason: 'error', detail: failDetail(`spawn: ${e?.message ?? e}`) };
@@ -800,7 +833,9 @@ export function hasEvidence(item, seenArticles, seenFiles, root, seenGrepPaths =
  * 'refused' verdict keyed by id, file_keys and HEAD), charge the run to
  * today's spend, record the outcome, release the lock. Returns the process
  * exit code. opts: {root, pluginRoot, spawn, now, dryRun, out, log, trigger,
- * token, budgetUsd, claudeBin, timeoutMs, logCapBytes}.
+ * token, budgetUsd, claudeBin, timeoutMs, logCapBytes, host, opencodeBin,
+ * opencodeModel}; host and the opencode fields default to what the launcher
+ * recorded in eligible.json, and host to 'claude'.
  */
 export async function runWorker(opts) {
   const paths = workerPaths(opts.root);
@@ -817,10 +852,36 @@ export async function runWorker(opts) {
     return e && !e.unreadable && e.token === opts.token && Array.isArray(e.items) ? e : null;
   };
   const abs = (p) => (isAbsolute(String(p)) ? resolve(String(p)) : resolve(opts.root, String(p)));
-  const buildArgs = (eligible) =>
-    buildWorkerArgs({ prompt: workerPrompt(opts.pluginRoot, opts.root, eligible), mcpConfig: resolveMcpConfig(opts.pluginRoot, opts.root), budgetUsd: budgetOk ? budgetUsd : rawBudget });
+  // The host comes from the launcher (eligible.json) unless the caller names one.
+  const hostOf = (eligible) => opts.host ?? eligible?.host ?? 'claude';
+  /** {bin, args, env} for the chosen host. The OpenCode runner has no per-run
+   *  budget flag, so only the timeout bounds it. */
+  const buildRun = (eligible) => {
+    const prompt = workerPrompt(opts.pluginRoot, opts.root, eligible);
+    const mcpConfig = resolveMcpConfig(opts.pluginRoot, opts.root);
+    const host = hostOf(eligible);
+    if (host === 'opencode') {
+      const ocBin = opts.opencodeBin ?? eligible?.opencode_bin;
+      if (!ocBin) throw new Error('the opencode host was chosen but no opencode binary was recorded for this launch');
+      const model = opts.opencodeModel ?? eligible?.opencode_model ?? null;
+      if (typeof model !== 'string' || !model.trim()) throw new Error(OPENCODE_MODEL_UNSET);
+      const config = buildOpencodeConfig({ mcpConfig, model });
+      return { host, bin: ocBin, args: buildOpencodeArgs({ prompt: prompt + OPENCODE_PROMPT_NOTE, model }), env: opencodeEnv({ root: opts.root, config }) };
+    }
+    if (host !== 'claude') throw new Error(`unknown runner host '${host}'`);
+    return { host, bin, args: buildWorkerArgs({ prompt, mcpConfig, budgetUsd: budgetOk ? budgetUsd : rawBudget }), env: {} };
+  };
   if (opts.dryRun) {
-    (opts.out ?? console.log)(JSON.stringify({ dry_run: true, cwd: opts.root, command: bin, argv: buildArgs(opts.token ? readEligible() : null) }, null, 2));
+    let run;
+    try {
+      run = buildRun(opts.token ? readEligible() : null);
+    } catch (e) {
+      // An unknown host, a missing binary or model, or a broken plugin tree: the
+      // dry run prints what the real run would refuse with, and fails.
+      (opts.out ?? console.log)(JSON.stringify({ dry_run: true, cwd: opts.root, refused: e?.message ?? String(e) }, null, 2));
+      return 1;
+    }
+    (opts.out ?? console.log)(JSON.stringify({ dry_run: true, cwd: opts.root, host: run.host, command: run.bin, argv: run.args, ...(run.host === 'opencode' ? { env: run.env } : {}) }, null, 2));
     return 0;
   }
   const token = opts.token ?? randomUUID();
@@ -854,9 +915,9 @@ export async function runWorker(opts) {
         return 1;
       }
     }
-    let args;
+    let run;
     try {
-      args = buildArgs(eligible);
+      run = buildRun(eligible);
     } catch (e) {
       record({ ok: false, at: iso(), error: e?.message ?? String(e) });
       return 1;
@@ -902,14 +963,16 @@ export async function runWorker(opts) {
       else if (name === 'Read' && input.file_path) seenFiles.add(abs(input.file_path));
       else if (name === 'Grep') seenGrepPaths.add(input.path ? abs(input.path) : resolve(opts.root));
     };
-    const stream = streamJournal(journalCall, observe, new Map([...byId].map(([id, t]) => [id, t.file_keys ?? []])));
+    // Both hosts' parsers feed the SAME journalCall and observe, so one gate judges both.
+    const launchKeys = new Map([...byId].map(([id, t]) => [id, t.file_keys ?? []]));
+    const stream = run.host === 'opencode' ? opencodeStreamJournal(journalCall, observe, launchKeys) : streamJournal(journalCall, observe, launchKeys);
     const timeoutMs = opts.timeoutMs ?? WORKER_TIMEOUT_MS;
     const logCap = opts.logCapBytes ?? LOG_RUN_CAP_BYTES;
     let logged = 0;
     const { code, spawnError, timedOut } = await new Promise((resolve) => {
       let child;
       try {
-        child = opts.spawn(bin, args, { cwd: opts.root, stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env, [WORKER_ENV_FLAG]: '1', CLAUDE_PROJECT_DIR: opts.root } });
+        child = opts.spawn(run.bin, run.args, { cwd: opts.root, stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env, [WORKER_ENV_FLAG]: '1', CLAUDE_PROJECT_DIR: opts.root, ...run.env } });
       } catch (e) {
         resolve({ code: null, spawnError: e, timedOut: false });
         return;
@@ -946,7 +1009,7 @@ export async function runWorker(opts) {
     });
     const { result, removes, closedOk, lineRefFixes, lineRefFixesOk, mcpStatus, sterlingOk } = stream.end();
     if (spawnError) {
-      record({ ok: false, at: iso(), error: `could not start ${bin}: ${spawnError.message ?? spawnError}` });
+      record({ ok: false, at: iso(), error: `could not start ${run.bin}: ${spawnError.message ?? spawnError}` });
       return 1;
     }
     const verdicts = parseVerdicts(result?.result);
@@ -978,7 +1041,7 @@ export async function runWorker(opts) {
     const problems = [
       timedOut ? `killed after ${Math.round(timeoutMs / 60_000)} min timeout` : null,
       code !== 0 ? `exit ${code}` : null,
-      result ? null : 'no stream-json result event',
+      result ? null : run.host === 'opencode' ? 'no final text or error event from opencode run' : 'no stream-json result event',
       result?.is_error || String(result?.subtype ?? '').startsWith('error') ? `error result (${result?.subtype ?? 'unknown'})` : null,
       denials ? `${denials} permission denial(s)` : null,
       mcpBroken(mcpStatus, sterlingOk) ? `MCP server '${SERVER}' not connected (${mcpStatus}${mcpStatus === 'failed' || mcpStatus === 'disconnected' ? '' : '; no successful sterling tool call'})` : null,
@@ -1012,6 +1075,7 @@ export async function runWorker(opts) {
       // The MCP server's status from the stream's init event (null: never
       // reported); mcpBroken says when it counts as breakage.
       mcp_status: mcpStatus,
+      host: run.host,
     });
     return problems.length === 0 ? 0 : 1;
   } finally {

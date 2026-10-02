@@ -1,5 +1,7 @@
-// The maintenance-worker launch that follows a settlement, when `claude` is on PATH.
-// With no `claude` the skip is loud (decision
+// The maintenance-worker launch that follows a settlement. The runner host is
+// `claude -p` when `claude` is on PATH; otherwise it is `opencode run` through
+// the OpenCode binary this plugin runs inside (board item Parity P8). With
+// neither the skip is loud (decision
 // sterling-is-fully-standalone-on-opencode-2-full-parity-with-claude-code: "a
 // skip is never silent"): one notice and one log line per plugin process.
 // The worker lib spawns its runner with process.execPath, which inside
@@ -9,7 +11,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
-import { maybeLaunchMaintenanceWorker } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
+import { maybeLaunchMaintenanceWorker, OPENCODE_MODEL_UNSET, opencodeModelOf } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
 import { errText, logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
 
@@ -26,17 +28,27 @@ export function nodeOnPathDefault() {
 /** Whether `execPath` is a node binary (so the lib's process.execPath spawn runs the runner as written). */
 export const isNodeBinary = (execPath) => /^node(\.exe)?$/i.test(String(execPath ?? '').split(/[\\/]/).pop());
 
+/** The OpenCode binary to run `opencode run` with: the host binary itself
+ *  (process.execPath inside OpenCode is the OpenCode binary, finding
+ *  opencode-2-0-21-tool-shapes-execpath-and-shell-store-guard-october-2026),
+ *  or null. Not `opencode` from PATH: it can be another OpenCode version than
+ *  the one running this plugin (this machine's PATH has 1.18.31). */
+export function opencodeBinDefault(execPath = process.execPath) {
+  return !isNodeBinary(execPath) && /opencode/i.test(String(execPath ?? '').split(/[\\/]/).pop()) ? execPath : null;
+}
+
 export const NO_RUNNER_TEXT =
-  'Sterling: the maintenance worker did not run. No maintenance runner exists on this machine: the only runner today is `claude -p`, and `claude` is not on PATH. Board item Parity P8 (the maintenance worker runs without Claude Code) adds an OpenCode-based runner; until then the maintenance queue drains only by hand (/sterling:drain).';
+  'Sterling: the maintenance worker did not run. No maintenance runner exists on this machine: the worker runs `claude -p` or `opencode run`, and neither `claude` nor an OpenCode binary was found (this plugin is not running inside an OpenCode binary). The maintenance queue drains only by hand (/sterling:drain) until one is installed.';
 
 /**
  * `launchWorkerFor(root, at)`: launch the worker for `root`. `claudeOnPath`,
- * `launchWorker`, `nodeOnPath`, `execPath` and `spawnImpl` default to the real
- * ones (tests inject them).
+ * `opencodeBin`, `launchWorker`, `nodeOnPath`, `execPath` and `spawnImpl`
+ * default to the real ones (tests inject them).
  */
 export function createWorkerLaunch({
   openStore,
   claudeOnPath = claudeOnPathDefault,
+  opencodeBin = null,
   launchWorker = maybeLaunchMaintenanceWorker,
   nodeOnPath = nodeOnPathDefault,
   execPath = process.execPath,
@@ -49,9 +61,21 @@ export function createWorkerLaunch({
     logLine(root, logText);
     addNotice(root, noticeText, at);
   }
+  const findOpencode = opencodeBin ?? (() => opencodeBinDefault(execPath));
   return function launchWorkerFor(root, at) {
-    if (!claudeOnPath()) {
-      skipOnce(root, at, 'maintenance worker skipped: no maintenance runner on this machine (`claude` is not on PATH; board item Parity P8 adds an OpenCode runner)', NO_RUNNER_TEXT);
+    const ocBin = claudeOnPath() ? null : findOpencode();
+    // No host field means 'claude', the lib's default.
+    const runnerHost = ocBin ? { host: 'opencode', opencodeBin: ocBin } : {};
+    if (!ocBin && !claudeOnPath()) {
+      skipOnce(root, at, 'maintenance worker skipped: no maintenance runner on this machine (`claude` is not on PATH and no OpenCode binary was found)', NO_RUNNER_TEXT);
+      return;
+    }
+    const config = loadConfig(root);
+    // No model, no OpenCode run (decision
+    // opencode-maintenance-worker-refuses-without-a-configured-model): one loud
+    // notice per process, like the no-runner skip, never OpenCode's default model.
+    if (ocBin && opencodeModelOf(config) === null) {
+      skipOnce(root, at, `maintenance worker skipped: ${OPENCODE_MODEL_UNSET}`, `Sterling: the maintenance worker did not run. ${OPENCODE_MODEL_UNSET}.`);
       return;
     }
     const nodeCmd = isNodeBinary(execPath) ? execPath : nodeOnPath() ? 'node' : null;
@@ -69,7 +93,7 @@ export function createWorkerLaunch({
     let workerStore;
     try {
       workerStore = openStore(join(root, '.sterling', 'sterling.db'));
-      const result = launchWorker({ root, config: loadConfig(root), store: workerStore, trigger: 'stop', spawn: spawnNode });
+      const result = launchWorker({ root, config, store: workerStore, trigger: 'stop', spawn: spawnNode, ...runnerHost });
       if (result?.reason === 'error') {
         logLine(root, `maintenance worker launch failed: ${result.detail ?? 'no detail'}`);
         addNotice(root, `Sterling: the maintenance worker could not be launched (${result.detail ?? 'no detail'}).`, at);
