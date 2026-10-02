@@ -18,8 +18,9 @@
 //   deriveExpected(store, { repoRoot, outputAxisProbes }) -> Entry[]
 //     outputAxisProbes (optional, default []): the H23 output-axis probe
 //     extension (GROUP J-N below) — { rel, tool, tool_response, agent_id? }[].
-//     agent_id is optional; when present the case is silenced with
-//     expected_reason 'agent_id_present' (GROUP R below).
+//     agent_id is optional and never silences the case: live H23 delivers
+//     for the conductor and a child alike and uses agent_id only to key its
+//     guard file (GROUP R below, board cbabb551).
 //     Entry is a Case or an Exclusion.
 //     Case = {
 //       kind: 'case',
@@ -2009,15 +2010,14 @@ test('Q1: content clearing term-overlap + the discriminating floor via ONLY the 
 // ===========================================================================
 // GROUP R — H23's two SILENT gates ahead of everything else (board f1e056bd
 // item 3): deriveExpected's output-axis arm now mirrors h23-output-axis.mjs
-// :134 (an unsupported tool — anything but Read/Bash/PowerShell — silences
-// the arm with expected_reason 'unsupported_tool') and :137 (agent_id
-// present, the conductor-only gate, silences it with 'agent_id_present'),
-// CHECKED FIRST and in that exact order — ahead of the path-exclusion
-// (Group O), no-tool-response (Group P) and ownership/content (Groups J/Q)
-// gates already pinned above. Written blind (H4), from this dispatch's brief
-// alone. outputAxisProbes entries gain an optional `agent_id` field
-// alongside the existing rel/tool/tool_response (documented in the top
-// contract comment above).
+// (an unsupported tool — anything but Read/Bash/PowerShell — silences the
+// arm with expected_reason 'unsupported_tool'), CHECKED FIRST, ahead of the
+// path-exclusion (Group O), no-tool-response (Group P) and ownership/content
+// (Groups J/Q) gates already pinned above. outputAxisProbes entries carry an
+// optional `agent_id` field alongside rel/tool/tool_response. It once
+// silenced the arm as 'agent_id_present'; board cbabb551 removed that: live
+// H23 has no agent_id gate (it delivers for the conductor and a child, and
+// agent_id only keys its guard file), so R1 now pins delivery.
 // ===========================================================================
 
 test('R0 CONTROL: the SAME content over a SUPPORTED tool (Bash) matches the anti_pattern, while over an UNSUPPORTED tool (Grep) the case still exists but is silenced as "unsupported_tool" — proves the silence is about the TOOL, not a content miss', () => {
@@ -2043,25 +2043,26 @@ test('R0 CONTROL: the SAME content over a SUPPORTED tool (Bash) matches the anti
   }
 });
 
-test('R1: an agent_id present on the probe silences the arm even over a supported tool with matching content — expected_reason "agent_id_present" (the conductor-only gate; H23 stays silent for subagent-attributed touches)', () => {
-  // SABOTAGE: delete the agent_id gate entirely, or move its check to AFTER content matching has already produced a match.
+test('R1: an agent_id present on the probe does NOT silence the arm — matching content over a supported tool gets the pointer, as live H23 delivers for a child too (board cbabb551)', () => {
+  // SABOTAGE: restore the agent_id_present silence.
   const deriveExpected = fn('deriveExpected');
   const { dir, store, cleanup } = makeAxisFixtureRepo();
   try {
-    store.create(axisAntiPattern('AP-ALPHA'));
+    const ap = store.create(axisAntiPattern('AP-ALPHA'));
     const probes = [{ rel: null, tool: 'Bash', tool_response: CONTENT_SENTENCE, agent_id: 'agent-123' }];
     const entries = deriveExpected(store, { repoRoot: dir, outputAxisProbes: probes });
     const c = h23CaseOf(entries, 'Bash');
-    assert.ok(c, 'the probe still gets a case, never silently dropped');
-    assert.deepEqual(c.expected_ids, [], 'a subagent-attributed touch is silent for H23 regardless of a content match');
-    assert.equal(c.expected_reason, 'agent_id_present');
+    assert.ok(c, 'the probe gets a case');
+    assert.deepEqual(c.expected.hazards, [ap.id], 'a child-attributed touch gets the same pointer as a conductor touch');
+    assert.deepEqual(c.expected_ids, [ap.id]);
+    assert.equal(c.expected_reason, undefined, 'a delivering case carries no silence reason');
   } finally {
     cleanup();
   }
 });
 
-test('R2: an UNSUPPORTED tool WITH agent_id present reads as "unsupported_tool", not "agent_id_present" — the tool-allowlist gate runs FIRST, per h23-output-axis.mjs\'s own gate order', () => {
-  // SABOTAGE: swap the gate order (check agent_id before the tool allowlist).
+test('R2: an UNSUPPORTED tool WITH agent_id present still reads as "unsupported_tool" — agent_id changes nothing about the tool gate', () => {
+  // SABOTAGE: let agent_id short-circuit the tool allowlist.
   const deriveExpected = fn('deriveExpected');
   const { dir, store, cleanup } = makeAxisFixtureRepo();
   try {
@@ -2071,7 +2072,7 @@ test('R2: an UNSUPPORTED tool WITH agent_id present reads as "unsupported_tool",
     const c = h23CaseOf(entries, 'Grep');
     assert.ok(c);
     assert.deepEqual(c.expected_ids, []);
-    assert.equal(c.expected_reason, 'unsupported_tool', 'the tool gate is checked before the agent_id gate — R0 establishes what "unsupported_tool" alone looks like, R1 establishes what "agent_id_present" alone looks like, this is their combination');
+    assert.equal(c.expected_reason, 'unsupported_tool', 'R0 establishes what "unsupported_tool" alone looks like and R1 that agent_id alone delivers; their combination is the tool gate\'s silence');
   } finally {
     cleanup();
   }

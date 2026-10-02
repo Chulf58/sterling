@@ -38,6 +38,7 @@ import {
   ownerPointer,
   ownerSuffix,
   decisionPointerPart,
+  withInboundSupersedes,
   claimLegacyInjectionRungNotice,
 } from './lib/delivery.mjs';
 
@@ -85,7 +86,11 @@ function main(input) {
     // from owners because these types do NOT confer ownership — the frontier
     // signal still fires for territory no article owns.
     const hazards = store.query({ types: ['anti_pattern'], file_keys: [rel], cap: 100 });
-    const decisions = store.query({ types: ['decision'], file_keys: [rel], cap: 100 });
+    // Each decision carries its inbound supersedes edges (board 7e4850cf (c)),
+    // so a record another one supersedes is never rendered as [standing].
+    const decisions = store
+      .query({ types: ['decision'], file_keys: [rel], cap: 100 })
+      .map((r) => withInboundSupersedes(store, r));
 
     const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
     const guard = readGuard(gPath);

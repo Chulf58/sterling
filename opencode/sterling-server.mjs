@@ -8454,7 +8454,32 @@ function statusBracket(record) {
   return `${status}\xB7${scope}${record?.superseded_by ? `, superseded_by: ${record.superseded_by}` : ""}`;
 }
 function statusAnnotation(record) {
-  return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
+  return (record?.status === "active" ? "" : ` [${statusBracket(record)}]`) + supersededAnnotation(record);
+}
+function supersededAnnotation(record) {
+  const inbound = Array.isArray(record?.inbound_supersedes) ? record.inbound_supersedes : [];
+  if (!inbound.length) return "";
+  const names = inbound.map(
+    (s2) => `${clip(s2.slug || s2.title || s2.id, 80)} (${String(s2.id).slice(0, 8)}${s2.status && s2.status !== "active" ? `, ${s2.status}` : ""})`
+  );
+  return ` [SUPERSEDED, whole or in part, by ${names.join("; ")}: read it before relying on this]`;
+}
+function authorityMarker(record) {
+  if (Array.isArray(record?.inbound_supersedes) && record.inbound_supersedes.length) return "";
+  return record?.authority ? `[${record.authority}] ` : "";
+}
+function withInboundSupersedes(store, record) {
+  const inbound = store.inboundSupersedes(record.id);
+  if (!inbound.length) return record;
+  return {
+    ...record,
+    inbound_supersedes: inbound.map((s2) => ({
+      id: s2.id,
+      ...s2.slug ? { slug: s2.slug } : {},
+      ...s2.title ? { title: s2.title } : {},
+      status: s2.status
+    }))
+  };
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
@@ -8778,8 +8803,7 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
     `\u25B8 DECISIONS ${matchLabel} (${fullTotal}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
   for (const d of shown) {
-    const authorityMarker = d.authority ? `[${d.authority}] ` : "";
-    lines.push(`  \u2192 ${authorityMarker}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`);
+    lines.push(`  \u2192 ${authorityMarker(d)}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`);
     const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
@@ -9313,7 +9337,7 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
   });
   if (!fresh.length) return null;
   const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
-  const decisions = fresh.filter((x) => x.record.type === "decision");
+  const decisions = fresh.filter((x) => x.record.type === "decision").map((x) => ({ ...x, record: withInboundSupersedes(store, x.record) }));
   const articles = fresh.filter((x) => x.record.type === "feature_article");
   const priorAnswers = fresh.filter(
     (x) => x.record.type === "research_finding" || x.record.type === "disconfirmed_hypothesis" || x.record.type === "open_question"
@@ -9342,7 +9366,7 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
       `\u25B8 DECISIONS for this subject (${records.length}) \u2014 one may already settle the question you just put; the user's pick must not silently contradict it. One line each, knowledge_get the id for the full ruling:`,
       ...shown.map((d) => {
         const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
-        return `${pointerHead(d, d.slug || d.title || d.statement)} \u2014 ${d.authority ? `[${d.authority}] ` : ""}${clip3(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` + (rejected ? ` \u2014 rejected: ${clip3(rejected, DECISION_REJECTED_CLIP)}` : "");
+        return `${pointerHead(d, d.slug || d.title || d.statement)} \u2014 ${authorityMarker(d)}${clip3(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` + (rejected ? ` \u2014 rejected: ${clip3(rejected, DECISION_REJECTED_CLIP)}` : "");
       }),
       ...records.length > shown.length ? [`  \u2026 ${records.length - shown.length} more NOT shown (cap ${MAX_DECISIONS}) \u2014 ${remedy} for the full set`] : []
     ].join("\n");
@@ -11262,7 +11286,7 @@ function governedRel(raw, root, directory) {
 function buildDelivery(store, root, rel, sessionID, guard = readGuard(guardPath(root, void 0, sessionID))) {
   const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, root));
   const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
-  const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
+  const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 }).map((r) => withInboundSupersedes(store, r));
   const gPath = guardPath(root, void 0, sessionID);
   const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
   const freshOwners = owners.filter((r) => isOwnerDiscoveryOnly(r) ? !isDiscoveryDelivered(guard, r) : !isSubstanceDelivered(guard, r));
@@ -13567,7 +13591,7 @@ function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = 
   );
   const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !isForeignTree(r, cwd)) : [];
   const hazards = rels.length ? store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 }) : [];
-  const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }) : [];
+  const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }).map((r) => withInboundSupersedes(store, r)) : [];
   const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
   const subjectMatches = [];
   const seenSubject = /* @__PURE__ */ new Set();
@@ -13575,7 +13599,7 @@ function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = 
     const subjectText = stripReviewTerritoryLine(p);
     const terms = extractAxisTerms(subjectText, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) continue;
-    const candidatesBySubject = [...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }), ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })];
+    const candidatesBySubject = [...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }), ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 }).map((r) => withInboundSupersedes(store, r))];
     for (const r of candidatesBySubject) {
       if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
       const hits = axisHits(r, terms);
