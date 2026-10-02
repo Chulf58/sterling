@@ -105,7 +105,8 @@ test('the plugin raises the notice at an execution end, with or without git, unt
     const plugin = server.createSterlingServer({ claudeOnPath: () => false, sterlingRoot: '/opt/sterling', syncSession: async () => {}, configure: async () => {} });
     const ctx = {
       location: { directory: p.dir },
-      session: { hook: async () => {} },
+      // ses_1 is a root session (no parentID): only a root session settles (dispatch.mjs rootSessionGate).
+      session: { hook: async () => {}, get: async ({ sessionID }) => ({ id: sessionID }) },
       tool: { hook: async () => {} },
       event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {} }) },
     };

@@ -9391,25 +9391,24 @@ function dispatchOverlapNotice(input2, { now = Date.now() } = {}) {
   }
 }
 
-// scripts/hooks/h20-mechanism-axis.mjs
+// scripts/hooks/lib/axis-compose.mjs
+var HOST_TEXT = {
+  claude: { correction: "with SendMessage (or re-dispatch)", timing: " (probed 2026-08-11)" },
+  opencode: { correction: "by continuing it through the subagent tool with its sessionID (or re-dispatch)", timing: "" }
+};
 var MAX_DECISIONS = 5;
 var QUESTION_WORDS_RE = /\b(where|what|which|who|whom|whose|when|why|how|does|do|did|is|are|was|were|can|could|would|will|should)\b/i;
 function isQuestionShapedPrompt(text) {
   const t = String(text ?? "");
   return t.includes("?") && QUESTION_WORDS_RE.test(t);
 }
-var input = readStdin();
-function buildModelPin(inp) {
+function codexModelPin(root, { opener, toolInput }) {
   const PIN = "STERLING CODEX MODEL PIN (H20)";
   const show = (v) => {
     const s2 = JSON.stringify(String(v ?? ""));
     return s2.length <= 120 ? s2 : `${s2.slice(0, 120)}\u2026`;
   };
-  if (typeof inp.tool_name !== "string" || !inp.tool_name.startsWith("mcp__codex__")) return null;
-  const root = inp.cwd ? String(inp.cwd) : "";
-  const sterling = join6(root, ".sterling");
-  if (!existsSync6(join6(sterling, "sterling.db")) && !existsSync6(join6(sterling, "config.json"))) return null;
-  if (inp.tool_name !== "mcp__codex__codex") {
+  if (!opener) {
     return {
       line: `STERLING CODEX MODEL (H20) \u2014 this tool takes no model argument, so the thread keeps the model its opener started with. Sterling changes nothing on this call; to move a conversation onto a different model, open a NEW consult.`
     };
@@ -9428,7 +9427,7 @@ function buildModelPin(inp) {
       `${PIN} \u2014 the codex sparring partner is OFF for this project (config.sparring_partner.enabled:false). That is ADVISORY, NEVER A GATE: this consult is not blocked, and the model below still applies. Turn it back on in the TUI System tab if the OFF state is stale.`
     );
   }
-  const callModel = typeof inp.tool_input?.model === "string" && inp.tool_input.model !== "" ? inp.tool_input.model : null;
+  const callModel = typeof toolInput?.model === "string" && toolInput.model !== "" ? toolInput.model : null;
   const configured = sp && typeof sp.model === "string" && sp.model !== "" ? sp.model : null;
   if (callModel !== null) {
     lines.push(
@@ -9451,10 +9450,215 @@ function buildModelPin(inp) {
   lines.push(
     `${PIN} \u2014 model ${show(configured)} injected into this call from config.sparring_partner.model (.sterling/config.json), which named none. A model named on the call itself would have won instead; an already-running codex-reply thread keeps its opener's model.`
   );
-  return {
-    line: lines.join("\n"),
-    updatedInput: { ...inp.tool_input && typeof inp.tool_input === "object" ? inp.tool_input : {}, model: configured }
+  return { line: lines.join("\n"), model: configured };
+}
+function citedInBrief(record, text) {
+  const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const id8 = String(record.id ?? "").slice(0, 8);
+  if (id8.length === 8 && new RegExp(`(?<![0-9a-f])${esc(id8)}(?![0-9a-f])`, "i").test(text)) return true;
+  return !!record.slug && new RegExp(`(?<![a-z0-9-])${esc(record.slug)}(?![a-z0-9-])`, "i").test(text);
+}
+function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subagentType, guardFor, pinLine, overlap, host }) {
+  if (!Object.hasOwn(HOST_TEXT, host)) throw new Error(`composeMechanismAxis: unknown host '${host}'`);
+  const isQuestion2 = surface === "question";
+  const isConsult2 = surface === "consult";
+  const isDispatch = surface === "dispatch";
+  const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
+  if (terms.length < AXIS_MIN_HITS) return null;
+  const candidates = [
+    ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
+    ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 }),
+    ...store.query({ types: ["feature_article"], rank_terms: terms, cap: 40 }),
+    // PRIOR ANSWERS (board e7157d0b): a research_finding is an already-answered
+    // question and a disconfirmed_hypothesis an already-refuted trail — the two
+    // types a dispatch about to fan out on that question is about to RE-DERIVE
+    // (measured: a 158k-token debugger re-deriving a recorded diagnosis; a
+    // 6,142-file sweep on a question the store answered). Same floors as every
+    // other candidate; axisNarrowText matches their question fields.
+    ...store.query({ types: ["research_finding"], rank_terms: terms, cap: 40 }),
+    ...store.query({ types: ["disconfirmed_hypothesis"], rank_terms: terms, cap: 40 }),
+    // OPEN QUESTIONS (board a9be48f2) ride the SAME surface for the adjacent
+    // question: not "was this answered?" but "is this ALREADY BEING
+    // INVESTIGATED?". A fan-out onto a live open_question duplicates an
+    // investigation instead of re-deriving a finished one — the same waste,
+    // one step earlier. NOTE the deny rung is deliberately untouched: an
+    // open_question is not a RULING, so it stays out of DENY_RULING_TYPES and
+    // can never deny a user's question.
+    ...store.query({ types: ["open_question"], rank_terms: terms, cap: 40 })
+  ];
+  if (isQuestion2 && toolInput.questions.length > 1) {
+    const seen = new Set(candidates.map((r) => r.id));
+    for (const q of toolInput.questions) {
+      const subTerms = extractAxisTerms(subQuestionText(q), MAX_RANK_TERMS);
+      if (subTerms.length < AXIS_MIN_HITS) continue;
+      for (const type of DENY_RULING_TYPES) {
+        for (const r of store.query({ types: [type], rank_terms: subTerms, cap: 40 })) {
+          if (!seen.has(r.id)) {
+            seen.add(r.id);
+            candidates.push(r);
+          }
+        }
+      }
+    }
+  }
+  if (!candidates.length) return null;
+  const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
+  if (!scored.length) return null;
+  const guard = guardFor();
+  const briefText = String(toolInput?.prompt ?? "");
+  const fresh = scored.filter((x) => {
+    if (x.record.type !== "anti_pattern") return !isKnownDelivered(guard, x.record);
+    if (isDispatch && citedInBrief(x.record, briefText)) return false;
+    return isConsult2 ? !isSubstanceDelivered(guard, x.record) : !isKnownDelivered(guard, x.record);
+  });
+  if (!fresh.length) return null;
+  const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
+  const decisions = fresh.filter((x) => x.record.type === "decision");
+  const articles = fresh.filter((x) => x.record.type === "feature_article");
+  const priorAnswers = fresh.filter(
+    (x) => x.record.type === "research_finding" || x.record.type === "disconfirmed_hypothesis" || x.record.type === "open_question"
+  );
+  if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) return null;
+  const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
+  const centralCovered = boundedTermClause(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)));
+  const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
+  const header = isQuestion2 ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask${HOST_TEXT[host].timing}. Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult2 ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : (
+    // PreToolUse context arrives WITH the dispatch (timing note at the top
+    // of this file), so the brief has already gone out: the act this
+    // prompts is a correction (decision a4912f91 point 5).
+    `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just dispatched '${subagentType ?? "an agent"}'; the brief has already gone out. The store holds records matching its SUBJECT (${matchedClause}), which no file you touched would surface. If one changes the brief's premise, correct the agent now ${HOST_TEXT[host].correction} \u2014 a fan-out multiplies a bad premise by N.`
+  );
+  const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
+  const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
+  const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
+  const clip2 = (v, n = 160) => {
+    const t = String(v ?? "").replace(/\s+/g, " ").trim();
+    return t.length <= n ? t : `${t.slice(0, n)}\u2026`;
   };
+  const pointerHead = (r, name) => `  \u2192 ${clip2(name, 80)} (${String(r.id).slice(0, 8)})`;
+  const questionDecisionText = (records, remedy) => {
+    const shown = records.slice(0, MAX_DECISIONS);
+    return [
+      `\u25B8 DECISIONS for this subject (${records.length}) \u2014 one may already settle the question you just put; the user's pick must not silently contradict it. One line each, knowledge_get the id for the full ruling:`,
+      ...shown.map((d) => {
+        const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
+        return `${pointerHead(d, d.slug || d.title || d.statement)} \u2014 ${d.authority ? `[${d.authority}] ` : ""}${clip2(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` + (rejected ? ` \u2014 rejected: ${clip2(rejected, DECISION_REJECTED_CLIP)}` : "");
+      }),
+      ...records.length > shown.length ? [`  \u2026 ${records.length - shown.length} more NOT shown (cap ${MAX_DECISIONS}) \u2014 ${remedy} for the full set`] : []
+    ].join("\n");
+  };
+  const questionPriorLine = (r) => {
+    const stale = r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : "";
+    const head = pointerHead(r, r.slug || r.question);
+    const q = r.slug ? `: ${clip2(r.question, 120)}` : "";
+    if (r.type === "research_finding") return `${head} \u2014 ANSWERED${q} (captured ${r.capture_date ?? "?"}${stale})`;
+    if (r.type === "open_question") {
+      return r.resolution_status === "closed" ? `${head} \u2014 ANSWERED (question closed into ${r.closed_into ?? "an unnamed record"})${q}` : `${head} \u2014 ALREADY UNDER INVESTIGATION (open, no answer yet)${q}`;
+    }
+    return `${head} \u2014 REFUTED TRAIL${q} \u2014 rejected: ${clip2(r.rejected_answer, 100)}`;
+  };
+  const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
+  const hazardBlocks = [
+    ...hazardParts(hazards.map((x) => x.record), {
+      remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
+      // Matched on the prompt's SUBJECT, not a file path (the H19 label).
+      matchLabel: "for this subject",
+      // Dispatch: rank 1 whole, ranks 2-3 as trigger lines (a4912f91).
+      mode: isQuestion2 ? "question" : isDispatch ? "lead" : "whole"
+    })
+  ];
+  const decisionBlocks = [
+    ...decisions.length ? [
+      ((part) => isQuestion2 ? { ...part, text: questionDecisionText(decisions.map((x) => x.record), decisionRemedy) } : part)(
+        decisionPointerPart("(subject match)", decisions.map((x) => x.record), {
+          widen: decisionRemedy,
+          cap: MAX_DECISIONS,
+          remedy: decisionRemedy,
+          matchLabel: "for this subject"
+        })
+      )
+    ] : []
+  ];
+  const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
+  const articleBlocks = articles.length ? [
+    renderArticlePointers(articles.map((x) => x.record), ARTICLE_POINTER_CAP, {
+      remedy: `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`
+    })
+  ] : [];
+  const PRIOR_ANSWER_CAP = 3;
+  const shownPrior = priorAnswers.slice(0, PRIOR_ANSWER_CAP);
+  const priorBlocks = priorAnswers.length ? [
+    [
+      isQuestion2 ? `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 the question you just put may already be answered, or already under investigation. If one answers it, tell the user before acting on their pick:` : `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 this dispatch may be about to RE-DERIVE one of these, or duplicate a question already under investigation. knowledge_get before fanning out:`,
+      ...shownPrior.map((x) => {
+        const r = x.record;
+        if (isQuestion2) return questionPriorLine(r);
+        if (r.type === "research_finding") {
+          return `  \u2192 ANSWERED: ${clip2(r.question)} (source ${r.source_date ?? "?"}, captured ${r.capture_date ?? "?"}${r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : ""}) \xB7 knowledge_get ${r.id}`;
+        }
+        if (r.type === "open_question") {
+          if (r.resolution_status === "closed") {
+            return `  \u2192 ANSWERED (question closed into ${r.closed_into ?? "an unnamed record"}): ${clip2(r.question)} \xB7 knowledge_get ${r.id}`;
+          }
+          return `  \u2192 ALREADY UNDER INVESTIGATION (open, no answer yet): ${clip2(r.question)} \xB7 knowledge_get ${r.id}`;
+        }
+        return `  \u2192 REFUTED TRAIL: ${clip2(r.question)} \u2014 rejected: ${clip2(r.rejected_answer, 100)} \xB7 knowledge_get ${r.id}`;
+      }),
+      ...priorAnswers.length > PRIOR_ANSWER_CAP ? [`  (+${priorAnswers.length - PRIOR_ANSWER_CAP} more \u2014 knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",")}] cap:${priorAnswers.length})`] : []
+    ].join("\n")
+  ] : [];
+  const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
+  const asPart = (text, widen, identities) => ({ kind: "ordinary", contentClass: "discovery", identities, text, pointer: `\u25B8 held back by the delivery cap \u2014 ${widen}` });
+  const articleParts = articleBlocks.map(
+    (t) => asPart(
+      t,
+      `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`,
+      shownArticles.map((a) => ({ identity: a.id, revision: recordRevision(a), name: a.slug || a.title }))
+    )
+  );
+  const priorParts = priorBlocks.map(
+    (t) => asPart(
+      t,
+      `knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t2) => `"${t2}"`).join(",")}] cap:${priorAnswers.length}`,
+      shownPrior.map((x) => ({ identity: x.record.id, revision: recordRevision(x.record), name: x.record.slug || clip2(x.record.question, 60) }))
+    )
+  );
+  const pinPart = pinLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: pinLine }] : [];
+  const blocks = [
+    // PINNED (P5): the header attributes the whole block to H20. Unpinned it
+    // was placed AFTER whole hazards, which are exempt from the configured
+    // cap and bound only by the transport ceiling, so three whole hazards at
+    // the ceiling degraded it to nothing and the conductor got an
+    // unattributed block. Pinned chrome is placed first; a hazard that then
+    // no longer fits falls to its pointer (the existing held-back behaviour).
+    { kind: "ordinary", pinned: true, contentClass: "chrome", text: header },
+    // A prior ANSWER outranks everything on a question-shaped prompt — it is
+    // the direct "don't re-derive" signal; on a change-shaped prompt hazards
+    // still lead (stop the mistake), answers ride with the article pointers.
+    // Decisions come BEFORE hazards on a question-shaped prompt (user ruling
+    // 2026-09-24): a standing decision can answer the question outright,
+    // while a hazard only warns against a mistake the question is not yet
+    // making. On a change-shaped prompt the order is unchanged.
+    ...promptIsQuestionShaped ? [...priorParts, ...articleParts, ...decisionBlocks, ...hazardBlocks] : [...hazardBlocks, ...decisionBlocks, ...priorParts, ...articleParts],
+    // DISPATCH OVERLAP, appended and PINNED: it is about this dispatch's
+    // write territory, not a record, so the cap must not trade it away for
+    // a pointer. Absent when there is no overlap, leaving the rest unchanged.
+    ...overlap ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: overlap }] : []
+  ];
+  const assembled = assembleDelivery([...pinPart, ...blocks], resolveTotalCap(root));
+  return { assembled, guard };
+}
+
+// scripts/hooks/h20-mechanism-axis.mjs
+var input = readStdin();
+function buildModelPin(inp) {
+  if (typeof inp.tool_name !== "string" || !inp.tool_name.startsWith("mcp__codex__")) return null;
+  const root = inp.cwd ? String(inp.cwd) : "";
+  const sterling = join6(root, ".sterling");
+  if (!existsSync6(join6(sterling, "sterling.db")) && !existsSync6(join6(sterling, "config.json"))) return null;
+  const pin = codexModelPin(root, { opener: inp.tool_name === "mcp__codex__codex", toolInput: inp.tool_input });
+  if (!pin.model) return { line: pin.line };
+  return { line: pin.line, updatedInput: { ...inp.tool_input && typeof inp.tool_input === "object" ? inp.tool_input : {}, model: pin.model } };
 }
 var pinMemo;
 function modelPin() {
@@ -9490,204 +9694,27 @@ function finish(extraContext) {
 }
 var isQuestion = Array.isArray(input.tool_input?.questions);
 var isConsult = typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__");
-var isDispatch = !isQuestion && !isConsult;
-function citedInBrief(record, text) {
-  const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const id8 = String(record.id ?? "").slice(0, 8);
-  if (id8.length === 8 && new RegExp(`(?<![0-9a-f])${esc(id8)}(?![0-9a-f])`, "i").test(text)) return true;
-  return !!record.slug && new RegExp(`(?<![a-z0-9-])${esc(record.slug)}(?![a-z0-9-])`, "i").test(text);
-}
 function main(input2) {
   try {
     const outgoing = outgoingProposalText(input2.tool_input);
     if (!outgoing) return finish();
     const store = openStore(input2.cwd);
     if (!store) return finish();
-    const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
-    if (terms.length < AXIS_MIN_HITS) return finish();
-    const candidates = [
-      ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
-      ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 }),
-      ...store.query({ types: ["feature_article"], rank_terms: terms, cap: 40 }),
-      // PRIOR ANSWERS (board e7157d0b): a research_finding is an already-answered
-      // question and a disconfirmed_hypothesis an already-refuted trail — the two
-      // types a dispatch about to fan out on that question is about to RE-DERIVE
-      // (measured: a 158k-token debugger re-deriving a recorded diagnosis; a
-      // 6,142-file sweep on a question the store answered). Same floors as every
-      // other candidate; axisNarrowText matches their question fields.
-      ...store.query({ types: ["research_finding"], rank_terms: terms, cap: 40 }),
-      ...store.query({ types: ["disconfirmed_hypothesis"], rank_terms: terms, cap: 40 }),
-      // OPEN QUESTIONS (board a9be48f2) ride the SAME surface for the adjacent
-      // question: not "was this answered?" but "is this ALREADY BEING
-      // INVESTIGATED?". A fan-out onto a live open_question duplicates an
-      // investigation instead of re-deriving a finished one — the same waste,
-      // one step earlier. NOTE the deny rung is deliberately untouched: an
-      // open_question is not a RULING, so it stays out of DENY_RULING_TYPES and
-      // can never deny a user's question.
-      ...store.query({ types: ["open_question"], rank_terms: terms, cap: 40 })
-    ];
-    if (isQuestion && input2.tool_input.questions.length > 1) {
-      const seen = new Set(candidates.map((r) => r.id));
-      for (const q of input2.tool_input.questions) {
-        const subTerms = extractAxisTerms(subQuestionText(q), MAX_RANK_TERMS);
-        if (subTerms.length < AXIS_MIN_HITS) continue;
-        for (const type of DENY_RULING_TYPES) {
-          for (const r of store.query({ types: [type], rank_terms: subTerms, cap: 40 })) {
-            if (!seen.has(r.id)) {
-              seen.add(r.id);
-              candidates.push(r);
-            }
-          }
-        }
-      }
-    }
-    if (!candidates.length) return finish();
-    const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
-    if (!scored.length) return finish();
     const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
-    const guard = readGuard(gPath);
-    const briefText = String(input2.tool_input?.prompt ?? "");
-    const fresh = scored.filter((x) => {
-      if (x.record.type !== "anti_pattern") return !isKnownDelivered(guard, x.record);
-      if (isDispatch && citedInBrief(x.record, briefText)) return false;
-      return isConsult ? !isSubstanceDelivered(guard, x.record) : !isKnownDelivered(guard, x.record);
+    const composed = composeMechanismAxis(store, {
+      root: input2.cwd,
+      outgoing,
+      toolInput: input2.tool_input,
+      surface: isQuestion ? "question" : isConsult ? "consult" : "dispatch",
+      subagentType: input2.tool_input?.subagent_type,
+      guardFor: () => readGuard(gPath),
+      pinLine: modelPin()?.line,
+      overlap: overlapNotice(),
+      host: "claude"
     });
-    if (!fresh.length) return finish();
-    const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
-    const decisions = fresh.filter((x) => x.record.type === "decision");
-    const articles = fresh.filter((x) => x.record.type === "feature_article");
-    const priorAnswers = fresh.filter(
-      (x) => x.record.type === "research_finding" || x.record.type === "disconfirmed_hypothesis" || x.record.type === "open_question"
-    );
-    if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) return finish();
-    const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
-    const centralCovered = boundedTermClause(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)));
-    const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
-    const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask (probed 2026-08-11). Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : (
-      // PreToolUse context arrives WITH the dispatch (timing note at the top
-      // of this file), so the brief has already gone out: the act this
-      // prompts is a correction (decision a4912f91 point 5).
-      `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just dispatched '${input2.tool_input?.subagent_type ?? "an agent"}'; the brief has already gone out. The store holds records matching its SUBJECT (${matchedClause}), which no file you touched would surface. If one changes the brief's premise, correct the agent now with SendMessage (or re-dispatch) \u2014 a fan-out multiplies a bad premise by N.`
-    );
-    const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
-    const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
-    const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
-    const clip2 = (v, n = 160) => {
-      const t = String(v ?? "").replace(/\s+/g, " ").trim();
-      return t.length <= n ? t : `${t.slice(0, n)}\u2026`;
-    };
-    const pointerHead = (r, name) => `  \u2192 ${clip2(name, 80)} (${String(r.id).slice(0, 8)})`;
-    const questionDecisionText = (records, remedy) => {
-      const shown = records.slice(0, MAX_DECISIONS);
-      return [
-        `\u25B8 DECISIONS for this subject (${records.length}) \u2014 one may already settle the question you just put; the user's pick must not silently contradict it. One line each, knowledge_get the id for the full ruling:`,
-        ...shown.map((d) => {
-          const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
-          return `${pointerHead(d, d.slug || d.title || d.statement)} \u2014 ${d.authority ? `[${d.authority}] ` : ""}${clip2(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` + (rejected ? ` \u2014 rejected: ${clip2(rejected, DECISION_REJECTED_CLIP)}` : "");
-        }),
-        ...records.length > shown.length ? [`  \u2026 ${records.length - shown.length} more NOT shown (cap ${MAX_DECISIONS}) \u2014 ${remedy} for the full set`] : []
-      ].join("\n");
-    };
-    const questionPriorLine = (r) => {
-      const stale = r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : "";
-      const head = pointerHead(r, r.slug || r.question);
-      const q = r.slug ? `: ${clip2(r.question, 120)}` : "";
-      if (r.type === "research_finding") return `${head} \u2014 ANSWERED${q} (captured ${r.capture_date ?? "?"}${stale})`;
-      if (r.type === "open_question") {
-        return r.resolution_status === "closed" ? `${head} \u2014 ANSWERED (question closed into ${r.closed_into ?? "an unnamed record"})${q}` : `${head} \u2014 ALREADY UNDER INVESTIGATION (open, no answer yet)${q}`;
-      }
-      return `${head} \u2014 REFUTED TRAIL${q} \u2014 rejected: ${clip2(r.rejected_answer, 100)}`;
-    };
-    const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
-    const hazardBlocks = [
-      ...hazardParts(hazards.map((x) => x.record), {
-        remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
-        // Matched on the prompt's SUBJECT, not a file path (the H19 label).
-        matchLabel: "for this subject",
-        // Dispatch: rank 1 whole, ranks 2-3 as trigger lines (a4912f91).
-        mode: isQuestion ? "question" : isDispatch ? "lead" : "whole"
-      })
-    ];
-    const decisionBlocks = [
-      ...decisions.length ? [
-        ((part) => isQuestion ? { ...part, text: questionDecisionText(decisions.map((x) => x.record), decisionRemedy) } : part)(
-          decisionPointerPart("(subject match)", decisions.map((x) => x.record), {
-            widen: decisionRemedy,
-            cap: MAX_DECISIONS,
-            remedy: decisionRemedy,
-            matchLabel: "for this subject"
-          })
-        )
-      ] : []
-    ];
-    const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
-    const articleBlocks = articles.length ? [
-      renderArticlePointers(articles.map((x) => x.record), ARTICLE_POINTER_CAP, {
-        remedy: `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`
-      })
-    ] : [];
-    const PRIOR_ANSWER_CAP = 3;
-    const shownPrior = priorAnswers.slice(0, PRIOR_ANSWER_CAP);
-    const priorBlocks = priorAnswers.length ? [
-      [
-        isQuestion ? `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 the question you just put may already be answered, or already under investigation. If one answers it, tell the user before acting on their pick:` : `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 this dispatch may be about to RE-DERIVE one of these, or duplicate a question already under investigation. knowledge_get before fanning out:`,
-        ...shownPrior.map((x) => {
-          const r = x.record;
-          if (isQuestion) return questionPriorLine(r);
-          if (r.type === "research_finding") {
-            return `  \u2192 ANSWERED: ${clip2(r.question)} (source ${r.source_date ?? "?"}, captured ${r.capture_date ?? "?"}${r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : ""}) \xB7 knowledge_get ${r.id}`;
-          }
-          if (r.type === "open_question") {
-            if (r.resolution_status === "closed") {
-              return `  \u2192 ANSWERED (question closed into ${r.closed_into ?? "an unnamed record"}): ${clip2(r.question)} \xB7 knowledge_get ${r.id}`;
-            }
-            return `  \u2192 ALREADY UNDER INVESTIGATION (open, no answer yet): ${clip2(r.question)} \xB7 knowledge_get ${r.id}`;
-          }
-          return `  \u2192 REFUTED TRAIL: ${clip2(r.question)} \u2014 rejected: ${clip2(r.rejected_answer, 100)} \xB7 knowledge_get ${r.id}`;
-        }),
-        ...priorAnswers.length > PRIOR_ANSWER_CAP ? [`  (+${priorAnswers.length - PRIOR_ANSWER_CAP} more \u2014 knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",")}] cap:${priorAnswers.length})`] : []
-      ].join("\n")
-    ] : [];
-    const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
-    const asPart = (text, widen, identities) => ({ kind: "ordinary", contentClass: "discovery", identities, text, pointer: `\u25B8 held back by the delivery cap \u2014 ${widen}` });
-    const articleParts = articleBlocks.map(
-      (t) => asPart(
-        t,
-        `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`,
-        shownArticles.map((a) => ({ identity: a.id, revision: recordRevision(a), name: a.slug || a.title }))
-      )
-    );
-    const priorParts = priorBlocks.map(
-      (t) => asPart(
-        t,
-        `knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t2) => `"${t2}"`).join(",")}] cap:${priorAnswers.length}`,
-        shownPrior.map((x) => ({ identity: x.record.id, revision: recordRevision(x.record), name: x.record.slug || clip2(x.record.question, 60) }))
-      )
-    );
+    if (!composed) return finish();
+    const { assembled, guard } = composed;
     const pin = modelPin();
-    const pinPart = pin?.line ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: pin.line }] : [];
-    const blocks = [
-      // PINNED (P5): the header attributes the whole block to H20. Unpinned it
-      // was placed AFTER whole hazards, which are exempt from the configured
-      // cap and bound only by the transport ceiling, so three whole hazards at
-      // the ceiling degraded it to nothing and the conductor got an
-      // unattributed block. Pinned chrome is placed first; a hazard that then
-      // no longer fits falls to its pointer (the existing held-back behaviour).
-      { kind: "ordinary", pinned: true, contentClass: "chrome", text: header },
-      // A prior ANSWER outranks everything on a question-shaped prompt — it is
-      // the direct "don't re-derive" signal; on a change-shaped prompt hazards
-      // still lead (stop the mistake), answers ride with the article pointers.
-      // Decisions come BEFORE hazards on a question-shaped prompt (user ruling
-      // 2026-09-24): a standing decision can answer the question outright,
-      // while a hazard only warns against a mistake the question is not yet
-      // making. On a change-shaped prompt the order is unchanged.
-      ...promptIsQuestionShaped ? [...priorParts, ...articleParts, ...decisionBlocks, ...hazardBlocks] : [...hazardBlocks, ...decisionBlocks, ...priorParts, ...articleParts],
-      // DISPATCH OVERLAP, appended and PINNED: it is about this dispatch's
-      // write territory, not a record, so the cap must not trade it away for
-      // a pointer. Absent when there is no overlap, leaving the rest unchanged.
-      ...overlapNotice() ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: overlapNotice() }] : []
-    ];
-    const assembled = assembleDelivery([...pinPart, ...blocks], resolveTotalCap(input2.cwd));
     const carriage = assembled.text;
     const hookSpecificOutput = { hookEventName: input2.hook_event_name };
     if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;

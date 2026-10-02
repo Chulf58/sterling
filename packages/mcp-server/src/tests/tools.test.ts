@@ -1069,10 +1069,10 @@ test('session-event writers (no_capture / concept_designed / capture_pending) ap
     const rootless = new SterlingTools({ store, now: () => NOW });
     assert.throws(() => rootless.noCapture('x'), /no project root/);
     // the fallback it names must exist on an installed plugin copy (no node_modules):
-    // the bundled bin/ entries under ${CLAUDE_PLUGIN_ROOT}, never the scripts/ sources
+    // the bundled bin/ entries in the Sterling install root (host-neutral wording), never the scripts/ sources
     assert.throws(
       () => rootless.conceptDesigned(['x']),
-      (e: Error) => e.message.includes('bin/no-capture.mjs / bin/concept-designed.mjs under ${CLAUDE_PLUGIN_ROOT}') && !e.message.includes('in the plugin clone')
+      (e: Error) => e.message.includes('bin/no-capture.mjs / bin/concept-designed.mjs in the Sterling install root') && !e.message.includes('in the plugin clone')
     );
   } finally {
     store.close();

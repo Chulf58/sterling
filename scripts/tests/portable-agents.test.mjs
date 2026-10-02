@@ -134,11 +134,11 @@ const FENCE_BASELINE = '703a327';
 // in every template on purpose.
 const BASELINE_OVERRIDES = {
   'conductor.md': '0e5a9fe', // moved 2026-10-01 (hobby projects: the conductor runs /sterling:merge itself once a task is reviewed, reconciled and committed; board e7dff5e4); before that ef22395, moved 2026-10-01 (subagents back to the default 5-minute prompt cache, the 1h clause dropped from the warm-resume sentence; board bd3acdb4, finding subagent-1h-cache-ttl-modelled-cost-october-2026); before that 008fba1 (rotation note carries lane hand-offs and the pre-clear session id; warm agents do not survive a clear; finding warm-subagent-resume-across-clear-october-2026); before that 1a601a3 (warm-resume sentence: subagent cache tier is 5 minutes by default, 1 hour under subagentPromptCacheTtl; decision subagent-prompt-cache-ttl-one-hour-in-sterling-main); before that 364de04 (reviewer roster bullet and review-pairing line, decision reviewer-agent-is-the-one-review-rubric-for-claude-and-codex); before that fc054b1: deliberate board-intake, parallel-planning and Fable-fallback prose (462c4f8, fc054b1; decision every-user-ask-is-boarded-at-intake-with-slim-blocked-by); before that 1501adf, review-cadence prose (decision review-sparsely-before-commit-ledger-kept)
-  'implementor.md': 'edbb9f8', // moved 2026-09-30: knowledge_line_ref_fix added to disallowedTools (store writes stay the conductor's; roster.test.mjs)
+  'implementor.md': '201a0bc', // moved 2026-10-02: host-neutral wording (Bash to shell), no Claude-only tool names on OpenCode surfaces (board 57187b23); before that edbb9f8, moved 2026-09-30: knowledge_line_ref_fix added to disallowedTools (store writes stay the conductor's; roster.test.mjs)
   'researcher.md': '87aa5ff',
   'scout.md': '87aa5ff',
   'reviewer.md': '364de04', // pinned at the commit that added it
-  'librarian.md': 'edbb9f8', // moved 2026-09-30: knowledge_line_ref_fix granted (the background worker runs as --agent librarian; decision maintenance-queue-background-haiku-worker-simple-redesign 3a)
+  'librarian.md': '201a0bc', // moved 2026-10-02: host-neutral wording (Bash to shell), no Claude-only tool names on OpenCode surfaces (board 57187b23); before that edbb9f8, moved 2026-09-30: knowledge_line_ref_fix granted (the background worker runs as --agent librarian; decision maintenance-queue-background-haiku-worker-simple-redesign 3a)
 };
 const renderConfig = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
 const renderOpts = { pluginVersion: '0.0.0-test', now: '2026-01-01T00:00:00.000Z', vars: { NODE: '"/usr/bin/node"', HOOKS_DIR: '/x/hooks', GIT_RO: '/x/git-ro.mjs' }, config: renderConfig };

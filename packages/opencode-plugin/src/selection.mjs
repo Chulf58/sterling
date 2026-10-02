@@ -1,10 +1,13 @@
 // The prompt hook: a record selected in the dashboard is taken once from the
 // store and appended to the next prompt, as H2 does on Claude Code.
 import { join } from 'node:path';
+import { inWorkerChild } from './worker.mjs';
 
 /** H2's one-shot selection handoff: the pending selection row is consumed and added to the prompt text. */
-export function createPromptHandler({ openStore, rootOf, fenced }) {
+export function createPromptHandler({ openStore, rootOf, fenced, env = process.env }) {
   return async function onPrompt(input) {
+    // The selection is the user's: the maintenance worker child's prompt never takes it (worker.mjs inWorkerChild).
+    if (inWorkerChild(env)) return;
     const root = rootOf();
     if (!root) return;
     await fenced('prompt', root, () => {

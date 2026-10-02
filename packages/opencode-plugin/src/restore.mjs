@@ -7,12 +7,15 @@ import { readLock as readPlanLock } from '../../../scripts/hooks/lib/plan-lock.m
 import { consumeRotationNote, readRotationNote, renderRotationRestore, rotationNotePath } from '../../../scripts/hooks/lib/rotation-restore.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
+import { inWorkerChild } from './worker.mjs';
 
 /**
  * `getSession()` returns the plugin's ctx.session (null before setup);
- * `renderRestore` defaults to the shared renderer.
+ * `renderRestore` defaults to the shared renderer. Inside the maintenance worker
+ * child (`env`, worker.mjs inWorkerChild) the note is never read or consumed: the
+ * worker's root session is not the session the user opens next.
  */
-export function createRotationRestore({ getSession, now, renderRestore = renderRotationRestore }) {
+export function createRotationRestore({ getSession, now, renderRestore = renderRotationRestore, env = process.env }) {
   // Restore text per session that consumed a rotation note: OpenCode builds the
   // system prompt per request, so the restore is re-sent on that session's
   // later turns. Process-lifetime only; a relaunched OpenCode does not re-send it.
@@ -31,6 +34,7 @@ export function createRotationRestore({ getSession, now, renderRestore = renderR
    * the layer.
    */
   return async function rotationRestore(root, sessionID) {
+    if (inWorkerChild(env)) return '';
     if (restored.has(sessionID)) return restored.get(sessionID);
     let note;
     try {

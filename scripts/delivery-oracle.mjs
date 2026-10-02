@@ -98,6 +98,7 @@ import {
 import { arg, hasFlag } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
 import { isForeignTree } from './hooks/lib/working-tree.mjs';
+import { OUTPUT_AXIS_CLIP } from './hooks/lib/axis-compose.mjs';
 
 export const ORACLE_VERSION = 1;
 
@@ -105,7 +106,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..');
 
 // The hook predicates this oracle mirrors, named once (h19-knowledge-delivery
-// :86, h19-bash-delivery:103, h23-output-axis:165, h10-direct-capture:1117).
+// :86, h19-bash-delivery:103, h23-output-axis's outputAxisReadGated, h10-direct-capture:1117).
 const OWNER_TYPES = ['feature_article', 'reference_material'];
 const HOOK_CAP = 100;          // H19/H23's ownership cap
 const ENUM_CAP = 5000;         // enumeration only — never a predicate
@@ -128,13 +129,15 @@ const H20 = 'h20-mechanism-axis.mjs';
 // and scored every H10 case as harness_error on 2026-09-08 (correctly loud).
 const H10_DUTIES_MARKER = 'H10 ▸';
 
-// H23's own clip + candidate cap, mirrored verbatim (h23-output-axis.mjs:85,
-// :181-182) so a rename there is the only place these constants must move.
-const OUTPUT_AXIS_CLIP = 16_000;
+// H23's clip is imported from the shared composition (lib/axis-compose.mjs), so
+// there is one copy of it. The candidate cap is that composition's own per-type
+// store.query cap (the literal 40 in composeOutputAxis), mirrored here.
 const OUTPUT_AXIS_CANDIDATE_CAP = 40;
 
-// 'output_axis_pointers' is the kind the live H23 hook actually enqueues
-// (h23-output-axis.mjs:236) and is therefore the ONLY output-axis name here.
+// 'output_axis_pointers' is the output-axis kind this oracle carries in
+// QUEUE_KINDS and is therefore the ONLY output-axis name here. The live H23
+// hook does not enqueue it: it delivers its pointer block directly on the
+// PostToolUse that consumed the output.
 // An earlier draft also pre-seeded 'output_axis', a name the test pins had
 // assumed while blind and which nothing emits; it was removed rather than
 // aliased, because an oracle bucket keyed on a kind no hook produces can pass
@@ -249,21 +252,23 @@ function deriveOutputAxisExpected(store, probe, index, root) {
     expected_reason: reason,
   });
 
-  // UNSUPPORTED TOOL (h23-output-axis.mjs:134): the hook allows silently for
+  // UNSUPPORTED TOOL (the tool-name gate at the top of h23-output-axis.mjs): the hook allows silently for
   // any tool that is not Read/Bash/PowerShell, checked FIRST and before the
   // store is even opened — board f1e056bd item 3, previously omitted from
   // this mirror entirely (a probe with tool:'Grep' would have derived a
   // non-empty expected set against a hook that is correctly silent).
   if (tool !== 'Read' && tool !== 'Bash' && tool !== 'PowerShell') return silent('unsupported_tool');
 
-  // AGENT-SCOPED SILENCE (h23-output-axis.mjs:137): the pending queue serves
-  // the CONDUCTOR's next prompt; a subagent invocation carries `agent_id` and
-  // the hook allows silently before even looking at tool_response. Also board
+  // AGENT-SCOPED SILENCE: this mirror treats a probe carrying `agent_id` as
+  // silent before even looking at tool_response. The live hook no longer
+  // scopes on agent_id: H23 delivers directly for conductor and child
+  // contexts alike and uses agent_id only to key its guard file (guardPath), so
+  // this arm is a known divergence kept as the oracle's own convention. Also board
   // f1e056bd item 3 — a probe with `agent_id` set would otherwise have
   // derived a non-empty expected set against this hook's deliberate silence.
   if (probe?.agent_id) return silent('agent_id_present');
 
-  // NOTHING TO MATCH AGAINST (h23-output-axis.mjs:139-140), checked next in
+  // NOTHING TO MATCH AGAINST (the rawResponse undefined/null allow in h23-output-axis.mjs), checked next in
   // the HOOK's own order — after the tool-type and agent-scope gates above,
   // before the store is even opened, and therefore before the read-seam gates
   // below. An absent/null tool_response
@@ -280,11 +285,11 @@ function deriveOutputAxisExpected(store, probe, index, root) {
   const raw = probe?.tool_response;
   if (raw == null) return silent('no_tool_response');
 
-  // READ-SEAM GATES (h23-output-axis.mjs:159-169), applied in the hook's OWN
+  // READ-SEAM GATES (outputAxisReadGated in lib/axis-compose.mjs, called from h23-output-axis.mjs), applied in the hook's OWN
   // ORDER and checked BEFORE and INDEPENDENTLY of any content match:
   //   (1) .git, (2) .sterling/, then (3) ownership.
   // PATH EXCLUSIONS (1)+(2) mirror the hook's own mirror of
-  // h19-knowledge-delivery.mjs:41-42: reading the store's own tree or its
+  // h19-knowledge-delivery.mjs's .git and .sterling/ guards: reading the store's own tree or its
   // delivery queue is self-referential — matching on pending.json's content
   // would let the hook feed itself — so the hook is deliberately silent there.
   // They get their own reason: without it, a Read of a .sterling/ path whose
@@ -604,7 +609,7 @@ export function synthesizePayload(caseOrProbe, { cwd, agent_id, session_id } = {
           : { file_path: join(cwd, c.rel) };
       // The real tool_response shape passes through UNCHANGED: a string is
       // sent byte-for-byte, an OBJECT is sent unstringified — the real hook
-      // does its own stringification (h23-output-axis.mjs:173), so
+      // does its own stringification (the JSON.stringify of an object tool_response in h23-output-axis.mjs), so
       // pre-stringifying here would test a shape the platform never sends.
       // ABSENCE PASSES THROUGH TOO (review finding 3). The earlier
       // `?? `contents of ${c.rel}`` substitute meant the payload and
@@ -612,7 +617,7 @@ export function synthesizePayload(caseOrProbe, { cwd, agent_id, session_id } = {
       // content whenever a probe omitted tool_response. THE PROBE IS
       // AUTHORITATIVE, and deriveOutputAxisExpected mirrors it: an absent
       // tool_response stays absent so the hook takes its own no-response allow
-      // (h23-output-axis.mjs:139-140) and the case's 'no_tool_response'
+      // (the rawResponse undefined/null allow in h23-output-axis.mjs) and the case's 'no_tool_response'
       // expectation measures exactly that arm. Substituting instead would have
       // made that arm permanently unauditable. `null` is forwarded as null —
       // the hook treats it identically, and the platform can send it.
@@ -1401,7 +1406,7 @@ function goldenRel(fixture) {
 /** Two known disclosure-tail SHAPES report suppression: H19's direct
  *  decision/hazard-pointer tail "… N more NOT shown (cap N)"
  *  (scripts/hooks/lib/delivery.mjs renderDecisionPointers/renderHazards) and
- *  H23's queue tail "(+N more matched)" (decision foreign_284fc4b0). Only the first
+ *  H23's output-axis tail "(+N more matched)" (decision foreign_284fc4b0). Only the first
  *  names its own cap; the second's cap is a caller-known constant, so `cap`
  *  is null there rather than guessed. */
 function extractSuppressionTail(text) {

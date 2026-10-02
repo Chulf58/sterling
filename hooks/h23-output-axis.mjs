@@ -7943,13 +7943,6 @@ function repoRel(toolPath, cwd) {
   }
 }
 
-// scripts/hooks/lib/working-tree.mjs
-function isForeignTree(record, root) {
-  const wt = record?.working_tree;
-  if (!wt) return false;
-  return !(root && sameLocationAnyHost(String(wt), root));
-}
-
 // scripts/hooks/lib/advisory-counter.mjs
 import { appendFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "node:fs";
 import { join as join3 } from "node:path";
@@ -8007,6 +8000,15 @@ function isListingCommand(command) {
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, renameSync, openSync, closeSync } from "node:fs";
 import { join as join4, dirname as dirname3 } from "node:path";
+
+// scripts/hooks/lib/working-tree.mjs
+function isForeignTree(record, root) {
+  const wt = record?.working_tree;
+  if (!wt) return false;
+  return !(root && sameLocationAnyHost(String(wt), root));
+}
+
+// scripts/hooks/lib/delivery.mjs
 function deliveryDir(cwd) {
   return join4(cwd, ".sterling", "transient", "delivery");
 }
@@ -8072,13 +8074,46 @@ function joinPointerBlock({ header, lines = [], tail } = {}) {
   return [header, ...body, ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
 }
 
-// scripts/hooks/h23-output-axis.mjs
+// scripts/hooks/lib/axis-compose.mjs
 var OUTPUT_AXIS_CLIP = 16e3;
 var OUTPUT_AXIS_POINTER_CAP = 1;
 function clipTitle(text, cap = 140) {
   const t = String(text ?? "").replace(/\s+/g, " ").trim();
   return t.length <= cap ? t : `${t.slice(0, cap)}\u2026`;
 }
+function outputAxisReadGated(store, rel, root) {
+  if (rel === ".git" || rel?.startsWith(".git/")) return true;
+  if (rel?.startsWith(".sterling/")) return true;
+  if (rel) {
+    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, root));
+    if (owners.length) return true;
+  }
+  return false;
+}
+function composeOutputAxis(store, { content, guardFor }) {
+  const clipped = content.slice(0, OUTPUT_AXIS_CLIP);
+  const terms = extractAxisTerms(clipped, MAX_RANK_TERMS);
+  if (terms.length < AXIS_MIN_HITS) return null;
+  const candidates = store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 });
+  if (!candidates.length) return null;
+  const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, clipped)).sort((a, b) => b.hits.length - a.hits.length);
+  if (!scored.length) return null;
+  const guard = guardFor();
+  const seen = new Set(guard.output_axis ?? []);
+  const fresh = scored.filter((x) => !seen.has(x.record.id));
+  if (!fresh.length) return null;
+  const shown = fresh.slice(0, OUTPUT_AXIS_POINTER_CAP);
+  const remainder = fresh.length - shown.length;
+  const header = "ADVISORY (not an error) \u2014 STERLING OUTPUT-AXIS DELIVERY (H23): the tool output you just consumed matches a recorded hazard. Pointer only, never a block: follow the read below before assuming the answer, never treat this line as the ruling itself.";
+  const pointerLines = shown.map((x) => {
+    const r = x.record;
+    return { id: r.id, hazard: true, line: `  \u2192 HAZARD anti_pattern '${clipTitle(r.title)}' \xB7 knowledge_get ${r.id}` };
+  });
+  const tail = remainder > 0 ? `  (+${remainder} more matched)` : "";
+  return { text: joinPointerBlock({ header, lines: pointerLines, tail }), guard, seen, shown };
+}
+
+// scripts/hooks/h23-output-axis.mjs
 try {
   const input = readStdin();
   const toolName = input.tool_name;
@@ -8088,38 +8123,13 @@ try {
   if (toolName !== "Read" && isListingCommand(input.tool_input?.command)) allow();
   const store = openStore(input.cwd);
   if (!store) allow();
-  if (toolName === "Read") {
-    const rel = repoRel(input.tool_input?.file_path, input.cwd);
-    if (rel === ".git" || rel?.startsWith(".git/")) allow();
-    if (rel?.startsWith(".sterling/")) allow();
-    if (rel) {
-      const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, input.cwd));
-      if (owners.length) allow();
-    }
-  }
+  if (toolName === "Read" && outputAxisReadGated(store, repoRel(input.tool_input?.file_path, input.cwd), input.cwd)) allow();
   const content = typeof rawResponse === "string" ? rawResponse : JSON.stringify(rawResponse);
-  const clipped = content.slice(0, OUTPUT_AXIS_CLIP);
-  const terms = extractAxisTerms(clipped, MAX_RANK_TERMS);
-  if (terms.length < AXIS_MIN_HITS) allow();
-  const candidates = store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 });
-  if (!candidates.length) allow();
-  const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, clipped)).sort((a, b) => b.hits.length - a.hits.length);
-  if (!scored.length) allow();
   const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
-  const guard = readGuard(gPath);
-  const seen = new Set(guard.output_axis ?? []);
-  const fresh = scored.filter((x) => !seen.has(x.record.id));
-  if (!fresh.length) allow();
-  const shown = fresh.slice(0, OUTPUT_AXIS_POINTER_CAP);
-  const remainder = fresh.length - shown.length;
-  const header = "ADVISORY (not an error) \u2014 STERLING OUTPUT-AXIS DELIVERY (H23): the tool output you just consumed matches a recorded hazard. Pointer only, never a block: follow the read below before assuming the answer, never treat this line as the ruling itself.";
-  const pointerLines = shown.map((x) => {
-    const r = x.record;
-    return { id: r.id, hazard: true, line: `  \u2192 HAZARD anti_pattern '${clipTitle(r.title)}' \xB7 knowledge_get ${r.id}` };
-  });
-  const tail = remainder > 0 ? `  (+${remainder} more matched)` : "";
+  const composed = composeOutputAxis(store, { content, guardFor: () => readGuard(gPath) });
+  if (!composed) allow();
+  const { text: payload, guard, seen, shown } = composed;
   recordAdvisoryFire(input.cwd, "h23", input.session_id);
-  const payload = joinPointerBlock({ header, lines: pointerLines, tail });
   exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }), 0, {
     onWritten: () => {
       guard.output_axis = [...seen, ...shown.map((x) => x.record.id)];
