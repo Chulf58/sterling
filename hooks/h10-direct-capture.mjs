@@ -9900,6 +9900,8 @@ try {
       if (!prior || prior.at === null || at !== null && at >= prior.at) byTarget.set(target, { detail, at });
     }
     for (const [target, { detail }] of byTarget) {
+      const targetPrefix = `${target} \u2014 `;
+      const reason = detail.startsWith(targetPrefix) && detail.length > targetPrefix.length ? detail.slice(targetPrefix.length).trim() : "";
       store.enqueueSystemTodo({
         id: randomUUID4(),
         type: "todo",
@@ -9911,7 +9913,7 @@ try {
         links: [],
         scope: "project",
         stack_tags: [],
-        text: `capture owed: declared pending (${detail}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close${clipped} [target ${JSON.stringify(target)}]`,
+        text: `capture owed: declared pending (${reason || "no separate reason recorded"}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close${clipped} [target ${JSON.stringify(target)}]`,
         source: "system",
         system_reason: "capture_owed",
         file_keys: owedKeys

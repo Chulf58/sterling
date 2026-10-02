@@ -1558,7 +1558,13 @@ test('H10 capture-pending: covers later work, defers one Stop with registers PRE
     assert.equal(second.code, 0, 'still pending on the next Stop — released, not trapped (P1)');
     const items = owed(store, 'capture_owed');
     assert.equal(items.length, 1, 'the debt lands on the queue exactly once');
-    assert.match(items[0].text, /declared pending \(commit wave-3 — decisions drafted, riding the gated commit\)/, 'the owed item cites the pending target, so the drain can verify it landed');
+    // Legacy event shape (no `target` field): the whole detail is the target, so it appears ONCE, in the
+    // trailer; the head says no separate reason was recorded rather than repeating it (board f003082d residual 5).
+    assert.equal(
+      items[0].text,
+      'capture owed: declared pending (no separate reason recorded) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close [target "commit wave-3 — decisions drafted, riding the gated commit"]',
+      'the owed item cites the pending target exactly once, so the drain can verify it landed',
+    );
     assert.equal(existsSync(join(dir, '.sterling', 'transient', 'touches.json')), false, 'conversion IS terminal — registers clear together (P4)');
     assert.equal(existsSync(eventsPath(dir)), false);
   } finally {

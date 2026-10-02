@@ -1732,8 +1732,12 @@ try {
   // enqueue PER DECLARED TARGET, each keyed by that target through
   // enqueueSystemTodo: the trimmed target is repeated as a JSON-quoted
   // ` [target "…"]` trailer, and packages/store declaredCaptureTarget recovers
-  // it byte-exact from that literal — keep the two in step. (The readable
-  // `declared pending (…)` head is unchanged; hooks-full.test.mjs pins it.)
+  // it byte-exact from that literal — keep the two in step. The readable
+  // `declared pending (…)` head carries only the REASON, so the target appears
+  // once, in the trailer (board f003082d residual 5: the declaration showed
+  // twice). A legacy event with no `target` field has no separable reason: its
+  // whole detail is the target, and the head says so instead of repeating it.
+  // hooks-full.test.mjs and h10-capture-pending-grace.test.mjs pin the full text.
   // The target is the event's own `target` field (board f003082d), so the same
   // target declared with a different reason is one item whose head shows the
   // latest declaration: the greatest valid `at` (clock skew can reorder the
@@ -1754,6 +1758,8 @@ try {
       if (!prior || prior.at === null || (at !== null && at >= prior.at)) byTarget.set(target, { detail, at });
     }
     for (const [target, { detail }] of byTarget) {
+      const targetPrefix = `${target} — `;
+      const reason = detail.startsWith(targetPrefix) && detail.length > targetPrefix.length ? detail.slice(targetPrefix.length).trim() : '';
       store.enqueueSystemTodo({
         id: randomUUID(),
         type: 'todo',
@@ -1765,7 +1771,7 @@ try {
         links: [],
         scope: 'project',
         stack_tags: [],
-        text: `capture owed: declared pending (${detail}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close${clipped} [target ${JSON.stringify(target)}]`,
+        text: `capture owed: declared pending (${reason || 'no separate reason recorded'}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close${clipped} [target ${JSON.stringify(target)}]`,
         source: 'system',
         system_reason: 'capture_owed',
         file_keys: owedKeys,
