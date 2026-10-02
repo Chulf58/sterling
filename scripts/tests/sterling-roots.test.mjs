@@ -60,6 +60,33 @@ test('compareSterlingVersions: numeric semver, a pre-release sorts below its rel
   assert.equal(compareSterlingVersions('0.18.51', '0.18.51'), 0);
 });
 
+// One comparator for both hosts' code: post-update-sync's compareVersions delegates here, so
+// the resolver, the shims and the sync order versions the same way (SemVer 2.0.0 precedence).
+test('compareSterlingVersions: SemVer 2.0.0 precedence for prerelease identifiers, build metadata ignored, non-semver throws', () => {
+  const cases = [
+    ['1.0.0-alpha', '1.0.0-alpha.1', -1],
+    ['1.0.0-alpha.1', '1.0.0-alpha.beta', -1],
+    ['1.0.0-beta.2', '1.0.0-beta.11', -1],
+    ['1.0.0-rc.1', '1.0.0-beta.11', 1],
+    ['1.0.0+abc', '1.0.0', 0],
+  ];
+  for (const [a, b, want] of cases) {
+    assert.equal(Math.sign(compareSterlingVersions(a, b)), want, `${a} vs ${b}`);
+    assert.equal(Math.sign(compareSterlingVersions(b, a)), -want || 0, `${b} vs ${a}`);
+  }
+  for (const bad of ['01.0.0', 'v1.0.0', '1.0', 'dev', ' 1.0.0']) {
+    assert.throws(() => compareSterlingVersions(bad, '1.0.0'), /not a semver version/, bad);
+  }
+});
+
+test('post-update-sync orders versions with the resolver comparator', async () => {
+  const sync = await import('../lib/post-update-sync.mjs');
+  for (const [a, b] of [['1.0.0-beta.2', '1.0.0-beta.11'], ['0.18.9', '0.18.10'], ['1.0.0-rc.1', '1.0.0']]) {
+    assert.equal(sync.compareVersions(a, b), Math.sign(compareSterlingVersions(a, b)), `${a} vs ${b}`);
+  }
+  assert.equal(sync.compareVersions('v1.0.0', '1.0.0'), null, 'the stricter grammar: no v prefix');
+});
+
 test('newest wins across hosts: an OpenCode 0.19.0 beats Claude Code 0.18.51 and an older OpenCode timestamp', () => {
   const home = tmp('sr-home-');
   try {

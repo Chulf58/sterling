@@ -19,6 +19,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isInstalledCopy } from './installed-copy.mjs';
+import { compareSterlingVersions, parseSterlingVersion } from './sterling-roots.mjs';
 
 // Each step is bounded well inside H1's hooks.json timeout (180s): two steps at
 // 60s leave room for the rest of SessionStart.
@@ -74,38 +75,17 @@ export function readPluginVersion(root) {
   return null;
 }
 
-const SEMVER = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
-
 /** { core: [major, minor, patch], pre: [identifiers] } or null for a string that is not semver. */
-export function parseVersion(v) {
-  const m = typeof v === 'string' ? SEMVER.exec(v.trim()) : null;
-  if (!m) return null;
-  return { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : [] };
-}
+export const parseVersion = parseSterlingVersion;
 
 /**
- * Semver precedence: -1, 0 or 1, or null when either side is not a version.
- * Build metadata is ignored; a prerelease sorts below its release.
+ * Semver precedence: -1, 0 or 1, or null when either side is not a version. The order is
+ * the resolver's compareSterlingVersions (sterling-roots.mjs), the one comparator both hosts
+ * use; this wrapper only turns its throw on a non-version into null.
  */
 export function compareVersions(a, b) {
-  const x = parseVersion(a);
-  const y = parseVersion(b);
-  if (!x || !y) return null;
-  for (let i = 0; i < 3; i++) if (x.core[i] !== y.core[i]) return x.core[i] < y.core[i] ? -1 : 1;
-  if (!x.pre.length || !y.pre.length) return x.pre.length === y.pre.length ? 0 : x.pre.length ? -1 : 1;
-  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
-    if (i >= x.pre.length) return -1;
-    if (i >= y.pre.length) return 1;
-    const p = x.pre[i];
-    const q = y.pre[i];
-    if (p === q) continue;
-    const pn = /^\d+$/.test(p);
-    const qn = /^\d+$/.test(q);
-    if (pn && qn) return Number(p) < Number(q) ? -1 : 1;
-    if (pn !== qn) return pn ? -1 : 1;
-    return p < q ? -1 : 1;
-  }
-  return 0;
+  if (!parseVersion(a) || !parseVersion(b)) return null;
+  return compareSterlingVersions(a, b);
 }
 
 function stepResult({ error, status, stdout, stderr }) {

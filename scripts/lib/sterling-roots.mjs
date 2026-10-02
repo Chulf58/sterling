@@ -14,8 +14,8 @@
 //   copy reads .claude-plugin/plugin.json first, an opencode copy package.json first; the
 //   other file is the fallback. A copy with neither, or with an unparsable one, is skipped
 //   and its reason is reported.
-// NEWEST: the highest semver (numeric major.minor.patch; a pre-release sorts below its
-//   release). TIE: the claude-code copy wins over the opencode copy (the long-standing
+// NEWEST: the highest version by compareSterlingVersions (SemVer 2.0.0 precedence; a
+//   pre-release sorts below its release). TIE: the claude-code copy wins over the opencode copy (the long-standing
 //   install path); within one host the lexically greater root wins, which for OpenCode
 //   is the later timestamp directory.
 //
@@ -73,24 +73,42 @@ function readCopyVersion(root, host) {
     } catch (err) {
       return { reason: rel + ' is not valid JSON (' + err.message + ')' };
     }
-    if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) return { version };
+    if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) && parseSterlingVersion(version)) return { version };
     return { reason: rel + ' has no semver version (got ' + JSON.stringify(version) + ')' };
   }
   return { reason: 'no .claude-plugin/plugin.json or package.json' };
 }
 
+// The one semver order for both hosts (post-update-sync.mjs delegates here): SemVer 2.0.0
+// precedence. Strict grammar: major.minor.patch with no leading zeros and no v prefix,
+// dot-separated prerelease identifiers, build metadata accepted and ignored. A prerelease
+// sorts below its release; prerelease identifiers compare one by one, numeric ones
+// numerically and below alphanumeric ones, and a longer list wins when all shared ones match.
+function parseSterlingVersion(v) {
+  const m = typeof v === 'string' ? /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(v) : null;
+  if (!m) return null;
+  return { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : [] };
+}
+
 function compareSterlingVersions(a, b) {
-  const pa = /^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/.exec(a);
-  const pb = /^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/.exec(b);
-  if (!pa || !pb) throw new Error('compareSterlingVersions: not a semver version: ' + JSON.stringify(pa ? b : a));
-  for (let i = 1; i <= 3; i++) {
-    const d = Number(pa[i]) - Number(pb[i]);
-    if (d) return d;
+  const x = parseSterlingVersion(a);
+  const y = parseSterlingVersion(b);
+  if (!x || !y) throw new Error('compareSterlingVersions: not a semver version: ' + JSON.stringify(x ? b : a));
+  for (let i = 0; i < 3; i++) if (x.core[i] !== y.core[i]) return x.core[i] < y.core[i] ? -1 : 1;
+  if (!x.pre.length || !y.pre.length) return x.pre.length === y.pre.length ? 0 : x.pre.length ? -1 : 1;
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    if (i >= x.pre.length) return -1;
+    if (i >= y.pre.length) return 1;
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === q) continue;
+    const pn = /^\d+$/.test(p);
+    const qn = /^\d+$/.test(q);
+    if (pn && qn) return Number(p) < Number(q) ? -1 : 1;
+    if (pn !== qn) return pn ? -1 : 1;
+    return p < q ? -1 : 1;
   }
-  if (pa[4] === pb[4]) return 0;
-  if (pa[4] === undefined) return 1;
-  if (pb[4] === undefined) return -1;
-  return pa[4] < pb[4] ? -1 : 1;
+  return 0;
 }
 
 function scanInstalledSterling(env = process.env, home = homedir()) {
@@ -158,14 +176,16 @@ const api = new Function(
   'readdirSync',
   'join',
   'homedir',
-  `${RESOLVER_SOURCE}\nreturn { installRoots, readCopyVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`,
+  `${RESOLVER_SOURCE}\nreturn { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`,
 )(existsSync, readFileSync, readdirSync, join, homedir);
 
 /** (env = process.env, home = homedir()) -> [{host: 'claude-code'|'opencode', dir}] */
 export const installRoots = api.installRoots;
 /** (root, host) -> {version} | {reason} */
 export const readCopyVersion = api.readCopyVersion;
-/** (a, b) -> negative | 0 | positive, semver order; throws on a non-semver input. */
+/** (v) -> {core: [major, minor, patch], pre: [identifiers]} | null when v is not a semver version (strict grammar, above). */
+export const parseSterlingVersion = api.parseSterlingVersion;
+/** (a, b) -> -1 | 0 | 1, SemVer 2.0.0 precedence; throws on a non-semver input. */
 export const compareSterlingVersions = api.compareSterlingVersions;
 /** (env, home) -> {roots, copies: [{root, version, host}], skipped: [{root, host, reason}]} */
 export const scanInstalledSterling = api.scanInstalledSterling;
