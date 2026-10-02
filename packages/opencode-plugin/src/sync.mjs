@@ -53,7 +53,7 @@ export function createSessionSync(deps = {}) {
 
   async function run(root, pluginRoot) {
     try {
-      const result = await postUpdateSync({ root: pluginRoot, project: root, host: 'opencode', runStep: (r, name, args) => runStepAsync(r, name, args, { nodeBin }) });
+      const result = await postUpdateSync({ root: pluginRoot, project: root, host: 'opencode', env, home, runStep: (r, name, args) => runStepAsync(r, name, args, { nodeBin }) });
       if (!result) return;
       logLine(root, `post-update sync: ${result.outcome}`);
       const tui = result.outcome === 'synced' || result.outcome === 'failed' ? dashboardLines(root, pluginRoot) : [];

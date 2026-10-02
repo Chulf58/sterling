@@ -11,7 +11,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -400,7 +400,7 @@ test('OpenCode sync: the sync runs in the background, so the context request doe
   await syncOnce.idle();
 });
 
-test('OpenCode sync: an older copy leaves the refusal notice naming /sterling:update and writes nothing', async () => {
+test('OpenCode sync: an older copy leaves the refusal notice naming the update route and writes nothing', async () => {
   const plugin = makePluginRoot();
   const project = makeProject({ marker: '10.0.0', store: false });
   const syncOnce = ocSync(plugin, sessionStub({ ses_root: {} }));
@@ -410,7 +410,29 @@ test('OpenCode sync: an older copy leaves the refusal notice naming /sterling:up
   const texts = noticeTexts(project);
   assert.equal(texts.length, 1);
   assert.match(texts[0], /^POST-UPDATE SYNC REFUSED \(OpenCode plugin\): this Sterling copy is 9\.9\.9-fixture, older than this project's sync marker 10\.0\.0/);
-  assert.match(texts[0], /run \/sterling:update in OpenCode/);
+  // The old expectation pinned "run /sterling:update in OpenCode", which cannot update an
+  // installed copy: the npm copy's route is `opencode plugin update` (decision 66d04413).
+  assert.match(texts[0], /update it with `opencode plugin update @chulf58\/sterling`/);
+  assert.doesNotMatch(texts[0], /\/sterling:update/);
+});
+
+// The refusal names the route of the host that INSTALLED the copy, not the host asking:
+// on a dual-host machine OpenCode can run a Claude-cache copy and H1 an npm copy.
+test('older copy: the refusal names the installing host\'s update route, whichever host asks', async () => {
+  const home = tmp('sterling-pus-home-');
+  const place = (rel) => {
+    const src = makePluginRoot();
+    const dest = join(home, rel);
+    mkdirSync(dirname(dest), { recursive: true });
+    cpSync(src, dest, { recursive: true });
+    return dest;
+  };
+  const claudeCopy = place(join('.claude', 'plugins', 'cache', 'sterling', 'sterling', VERSION));
+  const npmCopy = place(join('.cache', 'opencode', 'npm', '@chulf58', 'sterling@latest', '1759500000000', 'node_modules', '@chulf58', 'sterling'));
+  const refusal = async (root, host) => (await postUpdateSync({ root, project: makeProject({ marker: '10.0.0', store: false }), host, env: {}, home })).context;
+  assert.match(await refusal(claudeCopy, 'opencode'), /update this host's Sterling: update it through \/plugin \(Installed tab → Update\)\./);
+  assert.match(await refusal(npmCopy, 'claude'), /update this host's Sterling: update it with `opencode plugin update @chulf58\/sterling`\./);
+  assert.match(await refusal(npmCopy, 'opencode'), /`opencode plugin update @chulf58\/sterling`/);
 });
 
 test('OpenCode sync: equal versions add no notice and touch nothing', async () => {

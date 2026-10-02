@@ -17,9 +17,10 @@
 // Builtins only: hooks and the OpenCode server bundle vendor this module.
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { isInstalledCopy } from './installed-copy.mjs';
-import { compareSterlingVersions, parseSterlingVersion } from './sterling-roots.mjs';
+import { compareSterlingVersions, installHostOf, parseSterlingVersion } from './sterling-roots.mjs';
 
 // Each step is bounded well inside H1's hooks.json timeout (180s): two steps at
 // 60s leave room for the rest of SessionStart.
@@ -34,7 +35,6 @@ const HOST_TEXT = {
     restartLong: 'RESTART REQUIRED — project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent.',
     retry: 'retries at the next session start',
     rerun: 're-runs every session',
-    update: 'update it through /plugin (Installed tab → Update)',
   },
   opencode: {
     label: 'OpenCode plugin',
@@ -42,9 +42,19 @@ const HOST_TEXT = {
     restartLong: 'RESTART REQUIRED — agents load when OpenCode starts: EXIT AND RELAUNCH OpenCode before dispatching any agent.',
     retry: 'retries the next time OpenCode starts',
     rerun: 're-runs at every OpenCode start',
-    update: 'run /sterling:update in OpenCode',
   },
 };
+
+// How to update an installed copy, by the host that INSTALLED it (installHostOf), not the
+// host asking: on a dual-host machine OpenCode can run a Claude-cache copy and H1 an npm
+// copy. The npm copy updates through `opencode plugin update` (decision 66d04413).
+const UPDATE_ROUTE = {
+  'claude-code': 'update it through /plugin (Installed tab → Update)',
+  opencode: 'update it with `opencode plugin update @chulf58/sterling`',
+};
+// A copy under neither install root (installed, so not a git clone, but somewhere the
+// resolver does not scan) takes the asking host's own install route.
+const ASKING_HOST_INSTALL = { claude: 'claude-code', opencode: 'opencode' };
 
 function hostText(host) {
   const text = HOST_TEXT[host];
@@ -169,7 +179,7 @@ export function postUpdateApplies(root, project) {
  * 'synced'; `warning` is the one-line banner text and `context` the model-facing
  * paragraph (both carry H1's exact spacing). A throw is the caller's to report.
  */
-export async function postUpdateSync({ root, project, host = 'claude', runStep = runStepSync }) {
+export async function postUpdateSync({ root, project, host = 'claude', runStep = runStepSync, env = process.env, home = homedir() }) {
   const t = hostText(host);
   if (!postUpdateApplies(root, project)) return null;
   const current = readPluginVersion(root);
@@ -199,10 +209,11 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
   const order = previous === null ? 1 : compareVersions(current, previous) ?? 1;
   if (order === 0) return null;
   if (order < 0) {
+    const update = UPDATE_ROUTE[installHostOf(root, { env, home }) ?? ASKING_HOST_INSTALL[host]];
     return {
       outcome: 'refused-older',
-      warning: `✗ Sterling ${current} is OLDER than this project's sync marker ${previous}: post-update sync REFUSED, nothing downgraded — ${t.update}. `,
-      context: `\n\nPOST-UPDATE SYNC REFUSED (${t.label}): this Sterling copy is ${current}, older than this project's sync marker ${previous} (${markerPath}), which a newer Sterling on another host wrote. Nothing was synced, so agents and templates are not downgraded. Tell the user to update this host's Sterling: ${t.update}.`,
+      warning: `✗ Sterling ${current} is OLDER than this project's sync marker ${previous}: post-update sync REFUSED, nothing downgraded — ${update}. `,
+      context: `\n\nPOST-UPDATE SYNC REFUSED (${t.label}): this Sterling copy is ${current}, older than this project's sync marker ${previous} (${markerPath}), which a newer Sterling on another host wrote. Nothing was synced, so agents and templates are not downgraded. Tell the user to update this host's Sterling: ${update}.`,
     };
   }
   const hop = `Sterling ${previous ?? '(never synced)'}→${current}`;
