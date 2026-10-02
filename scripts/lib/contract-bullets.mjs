@@ -8,6 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { contractHistorySnapshot } from './contract-history.mjs';
+import { renderClaudeText } from './agent-fences.mjs';
 
 // AGENTS.md/CLAUDE.md split (decision agents-md-is-the-instructions-file-claude-md-is-a-one-line-import,
 // 161e2972): each TARGET_LEADS bullet lives in whichever template currently contains it, and
@@ -134,6 +135,14 @@ export function extractBlock(text, lead) {
   return { start, end, block: lines.slice(start, end).join('\n') };
 }
 
+// A template's bullets are read from its CLAUDE render (decision
+// sterling-layer-is-one-source-with-host-blocks): siblings receive what init writes to
+// CLAUDE.md, never a fence marker or an opencode-only line. A sibling's own text is never
+// rendered, because its line indexes are where stamp-contract writes.
+export function extractTemplateBlock(text, lead) {
+  return extractBlock(renderClaudeText(text, 'template'), lead);
+}
+
 /**
  * Read both working-tree templates under repoRoot and locate every TARGET_LEADS bullet.
  * Throws when a lead is in neither template (P5).
@@ -145,10 +154,10 @@ export function readTemplateBullets(repoRoot) {
   const leadLayer = new Map();
   const current = new Map();
   for (const lead of TARGET_LEADS) {
-    const home = TEMPLATE_RELS.find((rel) => extractBlock(templates.get(rel), lead));
+    const home = TEMPLATE_RELS.find((rel) => extractTemplateBlock(templates.get(rel), lead));
     if (!home) throw new Error(`stamp-contract: no template carries target bullet '${lead}' — refusing (P5)`);
     leadLayer.set(lead, home);
-    current.set(lead, extractBlock(templates.get(home), lead).block);
+    current.set(lead, extractTemplateBlock(templates.get(home), lead).block);
   }
   return { templates, leadLayer, current };
 }
@@ -159,7 +168,7 @@ export function contractHistoryJson(repoRoot) {
     repoRoot,
     templateRels: TEMPLATE_RELS,
     leads: HISTORY_LEADS,
-    extractBlock,
+    extractBlock: extractTemplateBlock,
     currentBlocks: readTemplateBullets(repoRoot).current,
   });
 }
