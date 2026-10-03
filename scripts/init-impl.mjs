@@ -45,7 +45,7 @@ import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launche
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, userScopeCodexServer, codexUserScopeLine } from './lib/codex-mcp.mjs';
 import { renderTmuxLauncher } from './lib/launcher-tmux.mjs';
-import { historicalLauncherTemplates, olderGeneratedLauncher } from './lib/launcher-history.mjs';
+import { historicalLauncherTemplates, olderGeneratedLauncher, replayFailureLine } from './lib/launcher-history.mjs';
 import { isInstalledCopy } from './lib/installed-copy.mjs';
 import { cloneLauncherTarget, marketplaceAutoUpdate, autoUpdateWarning, cloneCleanupLines } from './lib/consumer-cutover.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
@@ -749,7 +749,12 @@ if (claudeHost) {
   // scripts/lib/launcher-history.mjs) are read only once a launcher differs.
   let launcherHistory = null;
   const olderGenerated = (text, templateName) => {
-    launcherHistory ??= historicalLauncherTemplates({ repoRoot: pluginRoot });
+    if (!launcherHistory) {
+      launcherHistory = historicalLauncherTemplates({ repoRoot: pluginRoot });
+      if (launcherHistory.replayFailures.length) {
+        warns.push(`\n⚠ ${replayFailureLine(launcherHistory.replayFailures, 'a launcher rendered by one of them is left untouched as if hand-edited. Fix or report the renderer commit named above.')}`);
+      }
+    }
     return olderGeneratedLauncher(text, templateName, launcherHistory);
   };
   const refreshedDetail = (oldPath, newPath) =>
