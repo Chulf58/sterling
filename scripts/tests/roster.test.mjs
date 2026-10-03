@@ -166,6 +166,7 @@ test('skills ship with live file references and pass the skill linter', () => {
     'design-research/SKILL.md',
     'drain/SKILL.md',
     'grill/SKILL.md',
+    'mounting-domains/SKILL.md',
     'pr-review-loop/SKILL.md',
     'record-audit/SKILL.md',
     'review-brief/SKILL.md',

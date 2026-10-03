@@ -180,6 +180,17 @@ function releaseVersion({ target, into, headSha, version, pkgText, remoteGit, lo
       log(`${prefix}: opencode release ${tag} is already on origin at ${short(commit)}; nothing to push.`);
       return { status: 'published', version, commit, reason: null };
     }
+    // Origin's branch already holds this release commit (equal to its tip or an
+    // ancestor of it) and only the tag is missing there, for example because the tag
+    // was deleted on origin. Re-tag the existing commit: rebuilding the tree as a new
+    // commit would leave two commits with one tree on the branch, and the branch
+    // itself needs no push.
+    if (!remoteTag && remoteBranch && (remoteBranch === commit || isAncestor(target, commit, remoteBranch))) {
+      const tagPush = remoteGit(['push', 'origin', `refs/tags/${tag}:refs/tags/${tag}`], { cwd: target, log, prefix });
+      if (tagPush.status !== 0) return failed(`git push origin ${tag} failed (the local tag is kept for the re-run):\n${output(tagPush)}`, commit);
+      log(`${prefix}: ${tag} (${short(commit)}) is already on origin's ${RELEASE_BRANCH}; pushed only the tag.`);
+      return { status: 'published', version, commit, reason: null };
+    }
     // A release kept after a failed push is pushed as a fast-forward of origin's
     // branch. Once that branch has moved (another clone released meanwhile), the kept
     // commit is no longer a descendant of its tip and every re-run would be rejected
