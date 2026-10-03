@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore, MountedStores } from '../index.js';
+import { seedLegacySupersedesEdge } from './legacy-supersedes-edge.js';
 
 const NOW = '2026-10-03T12:00:00.000Z';
 
@@ -150,7 +151,7 @@ test('an existing raw supersedes edge (seeded through the legacy fixture path) i
   try {
     const target = store.create(decision({ statement: 'old' }));
     const holder = store.create(decision({ statement: 'new' }));
-    store.addLegacySupersedesEdge(holder.id, target.id);
+    seedLegacySupersedesEdge(store, holder.id, target.id);
     assert.equal(relations(store, holder.id, 'supersedes', target.id).length, 1);
     assert.equal(store.get(target.id)?.status, 'active', 'the legacy shape leaves the target active');
     const current = store.get(holder.id)!;

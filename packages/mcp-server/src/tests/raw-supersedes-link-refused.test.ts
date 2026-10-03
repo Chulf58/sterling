@@ -67,6 +67,26 @@ test('knowledge_update adding a supersedes link is refused and nothing is writte
   }
 });
 
+test('knowledge_update on an attestation (the branch that reaches store.supersede) refuses a supersedes link too', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const old = mkDecision(tools, 'old ruling');
+    const att = tools.knowledgeCreate('attestation', {
+      artifact_key: 'part-0042',
+      verdict: 'approved',
+      inspector: 'jane.doe',
+      inspected_at: NOW,
+    }).record as unknown as Loose;
+    const before = store.query({ types: ['attestation'], cap: 100 }).length;
+    assert.throws(() => tools.knowledgeUpdate(att.id as string, { links: [{ rel: 'supersedes', target_id: old.id }] }), REFUSAL);
+    assert.equal(store.get(att.id as string)?.status, 'active', 'the attestation was not replaced');
+    assert.equal(store.query({ types: ['attestation'], cap: 100 }).length, before, 'no replacement attestation was minted');
+    assert.deepEqual(store.inboundSupersedes(old.id as string), []);
+  } finally {
+    cleanup();
+  }
+});
+
 test('knowledge_supersede still writes the edge and retires the old record', () => {
   const { store, tools, cleanup } = harness();
   try {

@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { SterlingStore } from '@sterling/store';
 import { buildDashboardState, initialUi, nodesFor } from '../state.js';
 import * as viewmodel from '../viewmodel.js';
+import { seedLegacySupersedesEdge } from '../../../store/dist/tests/legacy-supersedes-edge.js';
 
 // ===========================================================================
 // SPEC PIN (board c6e3561f arm 2, lane A2 fixer pass) — the Knowledge tab must
@@ -34,7 +35,8 @@ import * as viewmodel from '../viewmodel.js';
 // SterlingStore.inboundSupersedes(target) returns its holder. Since decision
 // a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede,
 // create refuses that link, so fixtures here seed the existing-edge shape with
-// store.addLegacySupersedesEdge(holder, target) and NEVER call supersede().
+// seedLegacySupersedesEdge (packages/store/src/tests/legacy-supersedes-edge.ts)
+// and NEVER call supersede().
 //
 // RENDER SURFACE (verified): the disclosure is appended to `card.body`, which
 // becomes the wrapped kind:'body' lines of an expanded knowledge card. The
@@ -124,7 +126,7 @@ function activeInboundEdge(store: SterlingStore, targetOver: Record<string, unkn
   // create refuses a supersedes link since decision
   // a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede;
   // the existing-edge shape is seeded through the legacy fixture path.
-  store.addLegacySupersedesEdge(holder.id, target.id);
+  seedLegacySupersedesEdge(store, holder.id, target.id);
   return { target, holder };
 }
 
@@ -394,7 +396,7 @@ test('FINDING 2 (d): an expanded card hidden behind a COLLAPSED sub-category cos
         title: 'holder pointing at the TUI article',
       }),
     ) as { id: string };
-    store.addLegacySupersedesEdge(holder.id, tui.id);
+    seedLegacySupersedesEdge(store, holder.id, tui.id);
 
     const calls: string[] = [];
     const real = store.inboundSupersedes.bind(store);

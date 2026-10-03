@@ -52,6 +52,7 @@ import { join } from 'node:path';
 import { SterlingStore, MountedStores, createDomain } from '@sterling/store';
 import { parseConfig } from '@sterling/schemas';
 import { SterlingTools } from '../tools.js';
+import { seedLegacySupersedesEdge } from '../../../store/dist/tests/legacy-supersedes-edge.js';
 
 const NOW = '2026-08-26T12:00:00.000Z';
 
@@ -75,14 +76,14 @@ function harness() {
 // is seeded through the store's legacy fixture path.
 function createLegacySuperseder(
   tools: SterlingTools,
-  store: { addLegacySupersedesEdge(sourceId: string, targetId: string): unknown; get(id: string): unknown },
+  store: SterlingStore | MountedStores,
   type: string,
   fields: Loose
 ): { record: unknown } {
   const { links, ...rest } = fields as Loose & { links: { rel: string; target_id: string }[] };
   const res = tools.knowledgeCreate(type, rest);
   const id = (res.record as unknown as Loose).id as string;
-  for (const l of links) store.addLegacySupersedesEdge(id, l.target_id);
+  for (const l of links) seedLegacySupersedesEdge(store, id, l.target_id);
   return { ...res, record: store.get(id) };
 }
 
@@ -403,42 +404,28 @@ test("PIN 6: a holder (B) that is later itself RETIRED still surfaces on A's inb
 // array can hold a real, persisted, knowledge_get-readable outbound edge
 // targeting a PROJECT-scoped record's id (`out.promoted.links` holds
 // {rel:'informed_by', target_id: ref.id} where ref is project-scoped) — so
-// the pair this pin needs is not invented. What is NOT independently
-// verified (no execution available) is whether passing `links` directly at
-// knowledge_create time (rather than through knowledge_promote's own
-// internal write) is validated against the TARGET existing in a specific
-// store. Per the review instruction, this is handled by ATTEMPTING the
-// construction and, if knowledge_create itself refuses it, SKIPPING with the
-// refusing message quoted verbatim — never faking reachability.
+// the pair this pin needs is not invented. The holder is created without the
+// link and the edge is seeded in the domain store (createLegacySuperseder);
+// a fixture failure fails this pin, it never skips.
 // ===========================================================================
 
-test("PIN 7: a DOMAIN-scoped holder's inbound rel:'supersedes' edge onto a PROJECT-scoped target surfaces on knowledge_get of the target, fanning across MountedStores", (t) => {
+test("PIN 7: a DOMAIN-scoped holder's inbound rel:'supersedes' edge onto a PROJECT-scoped target surfaces on knowledge_get of the target, fanning across MountedStores", () => {
   const { store, tools, cleanup } = domainHarness();
   try {
     const a = mkDecision(tools, 'pin7-project-old-record', 'project-scoped old clause-bearing statement');
     assert.equal(a.scope, 'project', 'sanity: A is project-scoped by default');
 
-    let b: Loose;
-    try {
-      b = createLegacySuperseder(tools, store, 'reference_material', {
-        scope: 'domain:genesys',
-        title: 'pin7-domain-holder',
-        kind: 'doc',
-        location: 'docs/pin7-domain-holder.md',
-        summary: 'domain-scoped record overriding one clause of the project-scoped A',
-        source_date: '2026-08-26',
-        capture_date: '2026-08-26',
-        basis: 'platform',
-        links: [{ rel: 'supersedes', target_id: a.id }],
-      }).record as unknown as Loose;
-    } catch (err) {
-      t.skip(
-        `harness cannot express a domain-scoped holder linking directly to a project-scoped target at create time — ` +
-          `knowledge_create refused with: "${(err as Error).message}". Pin left unreachable per review instruction ` +
-          `("check, don't assume"), not faked. The reachable half (PIN 1-6, same-store) still exercises the core fix.`
-      );
-      return;
-    }
+    const b = createLegacySuperseder(tools, store, 'reference_material', {
+      scope: 'domain:genesys',
+      title: 'pin7-domain-holder',
+      kind: 'doc',
+      location: 'docs/pin7-domain-holder.md',
+      summary: 'domain-scoped record overriding one clause of the project-scoped A',
+      source_date: '2026-08-26',
+      capture_date: '2026-08-26',
+      basis: 'platform',
+      links: [{ rel: 'supersedes', target_id: a.id }],
+    }).record as unknown as Loose;
     assert.equal(b.scope, 'domain:genesys', 'sanity: B really landed domain-scoped');
 
     const pinnedA = get(tools, a.id as string);

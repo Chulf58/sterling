@@ -48,6 +48,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
+import { seedLegacySupersedesEdge } from '../../../store/dist/tests/legacy-supersedes-edge.js';
 
 const NOW = '2026-08-26T12:00:00.000Z';
 
@@ -86,7 +87,8 @@ function mkSuperseder(tools: SterlingTools, store: SterlingStore, title: string,
     alternatives_rejected: [],
     rationale: 'r',
   }).record as unknown as Loose;
-  return store.addLegacySupersedesEdge(created.id as string, targetId) as unknown as Loose;
+  seedLegacySupersedesEdge(store, created.id as string, targetId);
+  return store.get(created.id as string) as unknown as Loose;
 }
 
 // Same absent-is-empty tolerance the part-(a) test uses for its membership

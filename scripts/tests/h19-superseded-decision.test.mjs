@@ -19,8 +19,10 @@ const NOW = '2026-10-02T12:00:00.000Z';
 const FILE = 'game/sim/day_clock.gd';
 
 let SterlingStore;
+let seedLegacySupersedesEdge;
 before(async () => {
   ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+  ({ seedLegacySupersedesEdge } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'tests', 'legacy-supersedes-edge.js')).href));
 });
 
 function runHook(input, cwd) {
@@ -116,8 +118,8 @@ test('H19 file touch: a decision another record supersedes is never labelled [st
       decision(NEW_SLUG, 'One day is 900 seconds and peacetime is about 2 days.')
     );
     // create refuses a supersedes link since decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede;
-    // the incident's existing edge is seeded through the store's legacy fixture path.
-    store.addLegacySupersedesEdge(newRec.id, oldRec.id);
+    // the incident's existing edge is seeded with a raw relation row (test helper).
+    seedLegacySupersedesEdge(store, newRec.id, oldRec.id);
     assert.equal(store.get(oldRec.id).status, 'active', 'precondition: the incident shape leaves the old record active');
     const ctx = ctxOf(runHook(postRead(dir), dir));
     const oldLine = lineOf(ctx, oldRec);
@@ -205,8 +207,8 @@ for (const [channel, prompt, fileKeys, oldStatement, newStatement] of [
         decision(NEW_SLUG, newStatement, { file_keys: fileKeys })
       );
       // create refuses a supersedes link since decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede;
-      // the incident's existing edge is seeded through the store's legacy fixture path.
-      store.addLegacySupersedesEdge(newRec.id, oldRec.id);
+      // the incident's existing edge is seeded with a raw relation row (test helper).
+      seedLegacySupersedesEdge(store, newRec.id, oldRec.id);
       const ctx = ctxOf(stage(dir, prompt));
       const oldLine = lineOf(ctx, oldRec);
       assert.ok(oldLine, `the superseded decision is staged:\n${ctx}`);
@@ -262,8 +264,8 @@ test('OpenCode file touch: a superseded decision is never labelled [standing] an
       decision(NEW_SLUG, 'One day is 900 seconds and peacetime is about 2 days.')
     );
     // create refuses a supersedes link since decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede;
-    // the incident's existing edge is seeded through the store's legacy fixture path.
-    store.addLegacySupersedesEdge(newRec.id, oldRec.id);
+    // the incident's existing edge is seeded with a raw relation row (test helper).
+    seedLegacySupersedesEdge(store, newRec.id, oldRec.id);
     const ctx = stubCtx(dir);
     teardown = await server.createSterlingServer({ claudeOnPath: () => false }).setup(ctx);
     const call = { tool: 'read', sessionID: 'ses_1', id: 'c1', input: { path: FILE } };

@@ -1743,7 +1743,6 @@ export class SterlingStore {
     return rows.map((r) => SterlingStore.decodeLiveRecord(op, r));
   }
 
-  /** Typed edge write — record_relations is the authoritative home (contract 6). */
   /**
    * Decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede:
    * a links entry with rel 'supersedes' that is not already an edge of the
@@ -1769,6 +1768,7 @@ export class SterlingStore {
     );
   }
 
+  /** Typed edge write — record_relations is the authoritative home (contract 6). */
   private insertRelation(sourceId: string, rel: string, targetId: string, at: string): void {
     if (sourceId === targetId) {
       throw new Error(
@@ -3680,26 +3680,6 @@ export class SterlingStore {
           `Use supersede(oldId, newRecord) for concept replacement, or retireInFavorOf(id, survivor) for duplicate consolidation. Nothing was written.`
       );
     }
-    return this.writeLink(sourceId, source, parsedRel, targetId);
-  }
-
-  /**
-   * FIXTURE AND LEGACY ONLY. Writes the pre-ruling raw supersedes edge that
-   * knowledge_create/knowledge_update admitted before decision
-   * a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede:
-   * the edge lands and the target stays ACTIVE. Stores still hold such edges
-   * (they are left as they are), so tests of how they are read and delivered
-   * need a way to build one. No tool and no hook calls this.
-   */
-  addLegacySupersedesEdge(sourceId: string, targetId: string, targetValidated = false): DurableRecord {
-    this.assertWritable('addLegacySupersedesEdge');
-    const source = this.get(sourceId);
-    if (!source) throw new Error(`addLegacySupersedesEdge: no record '${sourceId}'`);
-    if (!targetValidated && !this.get(targetId)) throw new Error(`addLegacySupersedesEdge: no target record '${targetId}'`);
-    return this.writeLink(sourceId, source, 'supersedes', targetId);
-  }
-
-  private writeLink(sourceId: string, source: DurableRecord, parsedRel: DurableRecord['links'][number]['rel'], targetId: string): DurableRecord {
     if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) return source;
     const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] } as DurableRecord;
     const at = new Date().toISOString();
