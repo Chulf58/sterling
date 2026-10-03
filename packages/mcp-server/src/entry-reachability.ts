@@ -26,8 +26,18 @@
  *             package.json "scripts" run it.
  *  - agent    agent-templates/<x>.md: agent-templates/registry.json lists it.
  *
- * Any other path (a library file under packages/ or scripts/lib/, a consumer
- * project's own source) is not judged: judge() returns null.
+ * Any other path (a library file under packages/ or scripts/lib/) is not
+ * judged: judge() returns null.
+ *
+ * ONLY A STERLING CLONE IS JUDGED. These registries are Sterling's own, so in
+ * any other tree (a consumer project, which has its own scripts/, hooks/ or
+ * agent-templates/ that mean something else) every entry is not judged and
+ * judge() returns null. A tree counts as a Sterling clone by the predicate
+ * isSterlingClone in scripts/lib/handoff-projection.mjs uses:
+ * .claude-plugin/plugin.json names "sterling" and
+ * scripts/architecture-projection.mjs exists. It is restated here because the
+ * MCP server imports nothing from scripts/. A plugin.json that does not parse
+ * reads as not a clone, since its name cannot be read.
  *
  * WHAT THIS DOES NOT CATCH:
  *  - library entries: a module that is only imported is never judged, so an
@@ -42,9 +52,10 @@
  *  - a tool role that names a registered tool in passing counts as reached.
  *
  * Every registry is read lazily, once per instance; the caller keeps one
- * instance per knowledge_query call and tree root. A missing or unparseable
- * registry is reported in the verdict's detail as not reached, so the state
- * check says what it could not read instead of passing silently.
+ * instance per knowledge_query call and tree root. Inside a Sterling clone, a
+ * missing or unparseable registry is reported in the verdict's detail as not
+ * reached, so the state check says what it could not read instead of passing
+ * silently.
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -76,11 +87,16 @@ export class EntryReachability {
   private agentFiles?: Loaded<Set<string>>;
   private npmScripts?: Loaded<string[]>;
   private referenceCorpus?: Map<string, string>;
+  private sterlingClone?: boolean;
 
   constructor(private readonly root: string) {}
 
-  /** The verdict for one entry file, or null when no registry covers its kind. */
+  /**
+   * The verdict for one entry file, or null when no registry covers its kind
+   * or the tree is not a Sterling clone.
+   */
   judge(path: string, role: string): EntryVerdict | null {
+    if (!(this.sterlingClone ??= this.isSterlingClone())) return null;
     let m: RegExpExecArray | null;
     if ((m = /^(?:scripts\/)?hooks\/([^/]+\.mjs)$/.exec(path))) return this.judgeHook(path, m[1]);
     if (/^commands\/[^/]+\.md$/.test(path)) return this.judgePresent(path, 'command');
@@ -217,6 +233,13 @@ export class EntryReachability {
     for (const file of BIN_REFERENCE_FILES) add(file);
     this.referenceCorpus = out;
     return out;
+  }
+
+  /** Same predicate as isSterlingClone in scripts/lib/handoff-projection.mjs (see the header). */
+  private isSterlingClone(): boolean {
+    if (!existsSync(join(this.root, 'scripts/architecture-projection.mjs'))) return false;
+    const manifest = this.load('.claude-plugin/plugin.json', (text) => (JSON.parse(text) as { name?: unknown }).name);
+    return manifest.ok && manifest.value === 'sterling';
   }
 
   private readNpmScripts(): Loaded<string[]> {

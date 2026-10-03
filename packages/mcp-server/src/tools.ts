@@ -4346,7 +4346,8 @@ export class SterlingTools {
         //  - wired_in/active with an entry no registry reaches;
         //  - wired_in/active with no entry marked;
         //  - built with an entry a registry DOES reach (it looks wired_in).
-        // An entry of a kind no registry covers (a library) is not judged. All
+        // An entry of a kind no registry covers (a library), and every entry outside a
+        // Sterling clone, is not judged. All
         // findings go into the ONE state_review item per article: the lane's
         // identity is the article (enqueueSystemTodo), and a changed text
         // updates that item rather than minting a second.

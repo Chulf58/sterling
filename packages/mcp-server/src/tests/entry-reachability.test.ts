@@ -43,10 +43,17 @@ function write(root: string, rel: string, body: string) {
   writeFileSync(join(root, rel), body);
 }
 
-/** A project tree holding one of each registry Sterling's own repo has. */
+/** The two files isSterlingClone (scripts/lib/handoff-projection.mjs) looks for. */
+function markSterlingClone(root: string) {
+  write(root, '.claude-plugin/plugin.json', JSON.stringify({ name: 'sterling', version: '0.0.0' }));
+  write(root, 'scripts/architecture-projection.mjs', '// projection\n');
+}
+
+/** A Sterling clone holding one of each registry Sterling's own repo has. */
 function project() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-entry-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
+  markSterlingClone(dir);
   write(dir, 'hooks/hooks.json', HOOKS_JSON);
   write(dir, 'scripts/hooks/h1-session-start.mjs', '// hook source\n');
   write(dir, 'scripts/hooks/h9-unregistered.mjs', '// hook source nothing registers\n');
@@ -181,9 +188,10 @@ test('an entry of a kind no registry covers (a library file) is not judged', () 
   }
 });
 
-test('a missing registry file reads as not reached and says so, never as a silent pass', () => {
+test('inside a Sterling clone, a missing registry file reads as not reached and says so, never as a silent pass', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-entry-bare-'));
   try {
+    markSterlingClone(dir);
     const r = new EntryReachability(dir);
     const hook = r.judge('hooks/h1-session-start.mjs', '');
     assert.equal(hook?.reached, false);
@@ -329,7 +337,66 @@ test('knowledge_edit still refuses an absent sub-field the schema does not decla
   const { tools, cleanup } = project();
   try {
     const art = mkArticle(tools, 'active', [{ path: 'skills/drain/SKILL.md', role: 'the SOP' }]);
-    assert.throws(() => tools.knowledgeEdit(art.id, 'files[path=skills/drain/SKILL.md].nonsense', 'false', 'true'));
+    assert.throws(
+      () => tools.knowledgeEdit(art.id, 'files[path=skills/drain/SKILL.md].nonsense', 'false', 'true'),
+      /'nonsense' on the selected files element is absent, not a string/
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('a consumer project (not a Sterling clone) is not judged: its own scripts/, hooks/ and agent-templates/ entries mint no "not reached" item', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-entry-consumer-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  write(dir, 'scripts/deploy.mjs', '// deploy\n');
+  write(dir, 'hooks/pre-commit.mjs', '// git hook\n');
+  write(dir, 'agent-templates/foo.md', '# foo\n');
+  write(dir, '.claude-plugin/plugin.json', JSON.stringify({ name: 'not-sterling' }));
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  try {
+    const r = new EntryReachability(dir);
+    for (const p of ['scripts/deploy.mjs', 'hooks/pre-commit.mjs', 'agent-templates/foo.md']) {
+      assert.equal(r.judge(p, ''), null, `${p} is not judged outside a Sterling clone`);
+    }
+    mkArticle(tools, 'active', [
+      { path: 'scripts/deploy.mjs', role: 'deploys', entry: true },
+      { path: 'hooks/pre-commit.mjs', role: 'pre-commit hook', entry: true },
+      { path: 'agent-templates/foo.md', role: 'an agent', entry: true },
+    ], 'consumer');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.deepEqual(stateReviews(tools), [], 'no state_review item at all: the entries are marked and none is judged');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('when the finding changes between reads, the ONE state_review item updates its text and file_keys and no second item appears', () => {
+  const { dir, tools, cleanup } = project();
+  try {
+    const art = mkArticle(tools, 'active', [
+      { path: 'scripts/hooks/h9-unregistered.mjs', role: 'the hook', entry: true },
+      { path: 'agent-templates/ghost.md', role: 'the agent', entry: true },
+    ], 'shifting');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const [first] = stateReviews(tools);
+    assert.ok(first, 'precondition: one item');
+    assert.match(first.text, /agent-templates\/ghost\.md is not reached/);
+    assert.deepEqual([...(first.file_keys ?? [])].sort(), ['agent-templates/ghost.md', 'scripts/hooks/h9-unregistered.mjs']);
+
+    // The agent gets registered on disk; the next read (a new call, so a fresh
+    // registry read) finds only the hook unreached.
+    write(dir, 'agent-templates/registry.json', JSON.stringify({ version: 1, agents: [{ name: 'scout', file: 'scout.md' }, { name: 'ghost', file: 'ghost.md' }] }));
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const items = stateReviews(tools);
+    assert.equal(items.length, 1, 'no second item');
+    assert.equal(items[0].id, first.id, 'the same item, updated in place');
+    assert.equal(items[0].feature_link, art.id);
+    assert.doesNotMatch(items[0].text, /ghost\.md/, 'the text no longer names the now-reached agent');
+    assert.match(items[0].text, /scripts\/hooks\/h9-unregistered\.mjs is not reached/);
+    assert.deepEqual(items[0].file_keys, ['scripts/hooks/h9-unregistered.mjs'], 'file_keys follow the finding');
   } finally {
     cleanup();
   }

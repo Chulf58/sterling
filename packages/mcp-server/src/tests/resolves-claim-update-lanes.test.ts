@@ -103,7 +103,8 @@ test('AC-EXT2: the wire_in_dormant lane is gone — an enqueue naming it is refu
         text: `'thing-wid' has a dormant wiring gap`,
         file_keys: ['src/thing-wid.ts'],
         feature_link: article.id,
-      })
+      }),
+      /system_reason: received 'wire_in_dormant', expected one of: (?![^\n]*wire_in_dormant)/
     );
     assert.equal(openIds(tools).length, 0, 'nothing was queued');
   } finally {
