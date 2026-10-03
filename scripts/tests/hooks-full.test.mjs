@@ -185,16 +185,19 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
     // DEEP: cross the configured threshold and the CONDUCTOR is told, because the
     // human seeing a number never drained anything — a consuming project reached
     // 63 items, most already-finished work never closed (reported 2026-07-29).
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ maintenance_queue: { deep_threshold: 5 } }));
+    // Threshold 2 (was 5) with board 27c87783: reconcile_needed is the background
+    // worker's lane and no longer counts toward the conductor's depth, so the
+    // conductor's 2 article_missing items are what cross it.
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ maintenance_queue: { deep_threshold: 2 } }));
     for (let i = 0; i < 2; i++) {
       store.create({ ...envelope('todo'), text: `a${i}`, source: 'system', system_reason: 'article_missing' });
     }
     const deep = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
     const ctx = deep.hookSpecificOutput.additionalContext;
-    assert.match(ctx, /MAINTENANCE QUEUE IS DEEP — 5 drainable items/);
+    assert.match(ctx, /MAINTENANCE QUEUE IS DEEP — 2 drainable items/);
     // Lane phrasing changed with board 18a22b56: "N item(s) in lane <reason>" —
     // the "×N" form collided with h1-accuracy's truncation-artifact guard.
-    assert.match(ctx, /3 items in lane reconcile_needed/, 'the lane split says WHAT is owed, not just how much');
+    assert.match(ctx, /3 items in lane reconcile_needed are drained by the background worker/, 'the lane split says WHAT is owed and who drains it');
     assert.match(ctx, /2 items in lane article_missing/);
     assert.match(ctx, /\/sterling:drain/, 'and names the remedy');
     assert.match(ctx, /ALREADY DONE/, 'and warns that queue items are detected debt, not necessarily owed debt');
@@ -221,8 +224,10 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
       );
       // With drainable items past the threshold, parked items are disclosed but
       // not counted, and never appear as a drainable lane.
+      // Lane changed with board 27c87783: drainable items that count toward the
+      // threshold are the conductor's lanes, not the worker's reconcile_needed.
       for (let i = 0; i < 5; i++) {
-        parkedStore.create({ ...envelope('todo'), text: `r${i}`, source: 'system', system_reason: 'reconcile_needed' });
+        parkedStore.create({ ...envelope('todo'), text: `r${i}`, source: 'system', system_reason: 'article_missing' });
       }
       const mixed = JSON.parse(runHook('h1-session-start.mjs', hookInput(parkedDir, { hook_event_name: 'SessionStart' }), parkedDir, { NO_COLOR: '1' }).stdout);
       const mixedCtx = mixed.hookSpecificOutput.additionalContext;

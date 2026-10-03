@@ -58,7 +58,9 @@ test('H1 prints the reconcile count and the OLDEST item age on the banner and to
     // 'owes prose' lives in the worker's JSONL, keyed by id + current file_keys (never on the item).
     writeFileSync(join(p.dir, '.sterling', 'maintenance-worker.jsonl'), JSON.stringify({ kind: 'verdict', item_id: judged.id, verdict: 'owes_prose', file_keys: ['src/a.mjs'], reason: 'new flag', evidence: true }) + '\n');
     const out = h1(p.dir);
-    assert.match(out.systemMessage, /3 maintenance items pending · 3 items in lane reconcile_needed, oldest 3d 2h, worker not running$/);
+    // Old wording "worker not running" replaced by the worker's real state (board 27c87783):
+    // 2 of the 3 items are unjudged and the oldest waited far past 30 minutes, so a launch is due.
+    assert.match(out.systemMessage, /3 maintenance items pending · 3 items in lane reconcile_needed, oldest 3d 2h, worker due to launch at the next Stop or git commit \(2 unjudged, oldest 3d 2h\)$/);
     const ctx = out.hookSpecificOutput.additionalContext;
     assert.match(ctx, new RegExp(`RECONCILE BACKLOG: 3 items in lane reconcile_needed, the oldest open since ${oldest.replace(/[.]/g, '\\.')} \\(3d 2h\\)`));
     assert.match(ctx, /Of these, 1 item in lane reconcile_needed are judged 'owes prose' by the background worker/);
@@ -108,8 +110,10 @@ for (const [kind, error] of BREAKAGE) {
       const at = new Date(Date.now() - 60_000).toISOString();
       writeFileSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify({ last_run: { ok: false, at, error } }));
       const out = h1(p.dir);
+      // Old wording "worker not running" replaced (board 27c87783): a failed run a minute ago is a back-off.
+      assert.match(out.systemMessage, /worker backing off after a failed run \(next launch in \d+m\); /);
       assert.ok(
-        out.systemMessage.endsWith(`worker not running; last worker run FAILED at ${at}: ${error} (log: .sterling/maintenance-worker.log)`),
+        out.systemMessage.endsWith(`; last worker run FAILED at ${at}: ${error} (log: .sterling/maintenance-worker.log)`),
         out.systemMessage
       );
       assert.equal(out.systemMessage.split('\n').filter((l) => /last worker run/.test(l)).length, 1, 'one line');
@@ -119,13 +123,14 @@ for (const [kind, error] of BREAKAGE) {
   });
 }
 
+const DUE = 'worker due to launch at the next Stop or git commit \\(1 unjudged, oldest 2h\\)';
 const ROUTINE = [
-  ['a no-progress run', { ok: true, no_progress: true, error: null }],
-  ['a run that closed items', { ok: true, no_progress: false, error: null, closes_ok: 2 }],
-  ['no run recorded yet', null],
+  ['a no-progress run', { ok: true, no_progress: true, error: null }, 'worker backing off after a run that made no progress \\(next launch in \\d+m\\)'],
+  ['a run that closed items', { ok: true, no_progress: false, error: null, closes_ok: 2 }, DUE],
+  ['no run recorded yet', null, DUE],
 ];
 
-for (const [name, lastRun] of ROUTINE) {
+for (const [name, lastRun, expectedState] of ROUTINE) {
   test(`H1 stays quiet about the worker's last run for a routine state: ${name}`, () => {
     const p = makeProject();
     try {
@@ -133,7 +138,8 @@ for (const [name, lastRun] of ROUTINE) {
       const at = new Date(Date.now() - 60_000).toISOString();
       writeFileSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify(lastRun ? { last_run: { at, ...lastRun } } : {}));
       const out = h1(p.dir);
-      assert.match(out.systemMessage, /1 item in lane reconcile_needed, oldest 2h, worker not running$/, 'the line ends at the worker state: no clause');
+      // Old wording "worker not running" replaced (board 27c87783): the line ends at the worker state, no clause.
+      assert.match(out.systemMessage, new RegExp(`1 item in lane reconcile_needed, oldest 2h, ${expectedState}$`), 'the line ends at the worker state: no clause');
       assert.doesNotMatch(out.hookSpecificOutput.additionalContext, /last worker run|NO PROGRESS|FAILED|spend today/);
     } finally {
       p.cleanup();
@@ -148,7 +154,7 @@ test('H1 shows no worker spend even when a legacy state file still carries a spe
     const today = new Date().toISOString().slice(0, 10);
     writeFileSync(join(p.dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify({ spend: { [today]: 50 } }));
     const out = h1(p.dir);
-    assert.match(out.systemMessage, /worker not running$/);
+    assert.match(out.systemMessage, /worker due to launch at the next Stop or git commit \(1 unjudged, oldest 2h\)$/);
     assert.doesNotMatch(out.systemMessage, /spend/);
   } finally {
     p.cleanup();
@@ -166,7 +172,7 @@ test('H1 names a failure to START the worker (the launcher recorded it as a fail
     });
     assert.equal(r.reason, 'git_failed');
     const out = h1(p.dir);
-    assert.match(out.systemMessage, /worker not running; last worker run FAILED at .*: git could not report HEAD .*\(log: \.sterling\/maintenance-worker\.log\)$/);
+    assert.match(out.systemMessage, /worker backing off after a failed run \(next launch in \d+m\); last worker run FAILED at .*: git could not report HEAD .*\(log: \.sterling\/maintenance-worker\.log\)$/);
   } finally {
     p.cleanup();
   }

@@ -5,7 +5,23 @@
 // not part of it: it carries the maintenance-worker lib (lockfile and journal
 // reads, which both hosts share), which the dispatch-staging bundles must not pull in.
 // Each line function returns the bare text, or '' when nothing is stated.
-import { ageText, isJudgedOwesProse, owesProseVerdicts, workerBreakage, workerStatus } from './maintenance-worker.mjs';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  BACKOFF_MS,
+  BATCH_MAX_WAIT_MS,
+  BATCH_MIN_ITEMS,
+  WORKER_DISABLE_ENV,
+  ageText,
+  isJudgedOwesProse,
+  owesProseVerdicts,
+  workerBreakage,
+  workerStatus,
+} from './maintenance-worker.mjs';
+
+// The lane the background worker drains (maintenance-worker.mjs openReconcileItems);
+// every other drainable lane is the conductor's, drained with /sterling:drain.
+const WORKER_LANE = 'reconcile_needed';
 
 /**
  * The system-todo summary: the TRUE total (store.count, never a capped read), the
@@ -13,7 +29,11 @@ import { ageText, isJudgedOwesProse, owesProseVerdicts, workerBreakage, workerSt
  * parked counts and the per-lane breakdown.
  */
 export function readMaintenanceState(store, cwd) {
-  const reconcile = { count: 0, owesProse: 0, oldest: null };
+  // unjudged / oldestUnjudged: what the worker still has to look at, i.e. the open
+  // items not judged 'owes prose' for their current file_keys. H1 cannot see a
+  // 'refused' verdict (that needs HEAD) or a dirty-file exclusion (that needs git,
+  // and H1 never spawns), so this can over-count what the launcher finds eligible.
+  const reconcile = { count: 0, owesProse: 0, oldest: null, unjudged: 0, oldestUnjudged: null };
   let queueReasonEntries = [];
   let queueReasons = [];
   let drainable = 0;
@@ -30,15 +50,20 @@ export function readMaintenanceState(store, cwd) {
   // RECONCILE BACKLOG AGE (decision maintenance-queue-background-haiku-worker-
   // simple-redesign point (5)): the count and the oldest created_at, so a
   // backlog nobody drains shows its age instead of only its size.
-  const reconcileItems = system.filter((t) => t.system_reason === 'reconcile_needed');
+  const reconcileItems = system.filter((t) => t.system_reason === WORKER_LANE);
   reconcile.count = reconcileItems.length;
   // 'owes prose' is judged per (item id, current file_keys) in the worker's
   // JSONL, never marked on the item itself.
   try {
     const verdicts = owesProseVerdicts(cwd);
-    reconcile.owesProse = reconcileItems.filter((t) => isJudgedOwesProse(t, verdicts)).length;
+    const unjudged = reconcileItems.filter((t) => !isJudgedOwesProse(t, verdicts));
+    reconcile.owesProse = reconcileItems.length - unjudged.length;
+    reconcile.unjudged = unjudged.length;
+    reconcile.oldestUnjudged = unjudged.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
   } catch {
-    reconcile.owesProse = null; // unreadable journal: say so below, never a confident 0
+    // unreadable journal: say so below, never a confident 0
+    reconcile.owesProse = null;
+    reconcile.unjudged = null;
   }
   reconcile.oldest = reconcileItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
   const drainableItems = system.filter((t) => t.system_reason !== 'file_parked');
@@ -88,27 +113,45 @@ export function queueDepthLine({ drainable, parked, queueReasons, queueReasonEnt
   // would throw OUTSIDE this try/finally, crashing H1 non-zero and losing the
   // whole injection (including an already-consumed rotation note — unrecoverable).
   const deepThreshold = Math.max(1, rawThreshold ?? 15);
-  if (drainable >= deepThreshold) {
+  // WHO DRAINS WHAT (board 27c87783; the user asked on 2026-10-03 why the conductor
+  // drained by hand when a background worker exists): reconcile_needed is the
+  // worker's lane, so it is named as the worker's and kept out of the depth that
+  // asks the conductor to drain. Counting it made the line fire, and tell the
+  // conductor to drain, on debt that was only the worker's. The threshold now
+  // counts the conductor's lanes alone; the worker's backlog has its own line.
+  const workerEntry = queueReasonEntries.find(([r]) => r === WORKER_LANE);
+  const workerCount = workerEntry ? workerEntry[1] : 0;
+  const conductorEntries = queueReasonEntries.filter(([r]) => r !== WORKER_LANE);
+  const conductorLanes = queueReasonEntries.length
+    ? queueReasons.filter((_, i) => queueReasonEntries[i][0] !== WORKER_LANE)
+    : queueReasons;
+  // A caller that passes no lane breakdown has nothing to separate: its total stands.
+  const conductorCount = queueReasonEntries.length ? conductorEntries.reduce((s, [, n]) => s + n, 0) : drainable;
+  const workerNote = workerCount
+    ? `The ${workerCount} item${workerCount === 1 ? '' : 's'} in lane ${WORKER_LANE} ${workerCount === 1 ? 'is' : 'are'} drained by the background worker, not by you (its state is on the RECONCILE BACKLOG line). `
+    : '';
+  if (conductorCount >= deepThreshold) {
     const parkedNote =
       parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain — excluded from this count)` : '';
     // Second guard (reviewer F1, belt-and-suspenders alongside the clamp above):
     // never take the very-deep branch with an empty lane breakdown — fall back
     // to the modest-tier wording instead of destructuring an undefined entry.
-    if (drainable >= deepThreshold * TOO_DEEP_MULTIPLIER && queueReasonEntries.length) {
+    if (conductorCount >= deepThreshold * TOO_DEEP_MULTIPLIER && conductorEntries.length) {
       // Every count named below stays in the "N item(s) in lane X" shape (never a
       // bare number) — the same phrasing the moderate tier already uses — so a
       // lane count can never be misread as a truncated/capped total.
-      const topLanes = queueReasons.slice(0, 3);
-      const [topReason, topCount] = queueReasonEntries[0];
+      const topLanes = conductorLanes.slice(0, 3);
+      const [topReason, topCount] = conductorEntries[0];
       const topPhrase = `${topCount} item${topCount === 1 ? '' : 's'} in lane ${topReason}`;
       // "too many to name in full" is only true past the top-3 we actually show
       // (reviewer cosmetic note: it read as false with exactly 2 lanes).
       const laneLead =
-        queueReasonEntries.length > topLanes.length
+        conductorEntries.length > topLanes.length
           ? `Too many lanes to name in full, and "drain it all before new work" is not a workable ask at this size. The biggest lanes: ${topLanes.join(', ')}. `
           : `"Drain it all before new work" is not a workable ask at this size. The lane split: ${topLanes.join(', ')}. `;
       queueContext =
-        `\n\nMAINTENANCE QUEUE IS VERY DEEP — ${drainable} drainable items across ${queueReasonEntries.length} lane(s)${parkedNote}.\n` +
+        `\n\nMAINTENANCE QUEUE IS VERY DEEP — ${conductorCount} drainable items across ${conductorEntries.length} lane(s)${parkedNote}.\n` +
+        workerNote +
         laneLead +
         `Drain the biggest lane now (${topPhrase}), or board a dedicated drain slice for the rest — don't try to clear the whole queue in one pass. ` +
         `Expect much of it to be ALREADY DONE work never closed, so verify each item against HEAD before writing anything back ` +
@@ -116,8 +159,9 @@ export function queueDepthLine({ drainable, parked, queueReasons, queueReasonEnt
         `A queue this deep is itself a signal: items are arriving faster than anyone is closing them.`;
     } else {
       queueContext =
-        `\n\nMAINTENANCE QUEUE IS DEEP — ${drainable} drainable items (${queueReasons.join(', ')})${parkedNote}.\n` +
-        `Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: ` +
+        `\n\nMAINTENANCE QUEUE IS DEEP — ${conductorCount} drainable items (${conductorLanes.join(', ')})${parkedNote}.\n` +
+        workerNote +
+        `Drain the lanes listed above with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: ` +
         `the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first ` +
         `(an already-paid item closes with board_remove and NO knowledge_update — a version bump claiming a reconcile that added nothing is itself drift). ` +
         `A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
@@ -133,11 +177,60 @@ export function queueDepthLine({ drainable, parked, queueReasons, queueReasonEnt
   return queueContext.replace(/^\n\n/, '');
 }
 
+function readProjectConfig(cwd) {
+  try {
+    return JSON.parse(readFileSync(join(cwd, '.sterling', 'config.json'), 'utf8'));
+  } catch (e) {
+    if (e?.code === 'ENOENT') return null; // no config file: the defaults, worker enabled
+    throw new Error(`config.json unreadable: ${e?.message ?? e}`);
+  }
+}
+
+/**
+ * What the background worker is doing right now, as one phrase for the RECONCILE
+ * BACKLOG line (board 27c87783). It replaces a bare "worker not running", which
+ * read as "the worker is broken" and sent the conductor to drain by hand. The
+ * states follow the launcher's own order (maintenance-worker.mjs launchWorker:
+ * disabled, back-off, lock, batching) and use only what H1 can read without
+ * spawning: the config, the lock and state files and the verdict journal. A
+ * state that cannot be determined says so (P5).
+ */
+function workerStateText({ ws, reconcile, cwd, config, nowMs, env }) {
+  try {
+    if (ws.running) return `worker running (pid ${ws.pid}, since ${ws.since})`;
+    const cfg = config === undefined ? readProjectConfig(cwd) : config;
+    const byHand = 'reconcile items wait for /sterling:drain';
+    if (cfg?.maintenance_worker?.enabled === false) return `worker disabled by config (${byHand})`;
+    if (env[WORKER_DISABLE_ENV] === '1') return `worker disabled by ${WORKER_DISABLE_ENV} (${byHand})`;
+    const last = ws.lastRun;
+    const stalledAt = last && (last.ok === false || last.no_progress === true) ? Date.parse(last.at ?? '') : NaN;
+    if (Number.isFinite(stalledAt) && nowMs - stalledAt < BACKOFF_MS) {
+      const mins = Math.ceil((BACKOFF_MS - (nowMs - stalledAt)) / 60_000);
+      return `worker backing off after ${last.ok === false ? 'a failed run' : 'a run that made no progress'} (next launch in ${mins}m)`;
+    }
+    if (reconcile.unjudged === null || reconcile.unjudged === undefined) return 'worker state unknown (verdict journal unreadable)';
+    if (reconcile.unjudged === 0) return "worker idle, nothing to judge (every open item is already judged 'owes prose')";
+    // The launcher dates the wait from created_at and counts an undatable item as
+    // already waited, so the batch check can never strand work it cannot date.
+    const created = Date.parse(reconcile.oldestUnjudged ?? '');
+    const waitedMs = Number.isFinite(created) ? nowMs - created : Infinity;
+    const waited = ageText(reconcile.oldestUnjudged, nowMs);
+    if (reconcile.unjudged < BATCH_MIN_ITEMS && waitedMs < BATCH_MAX_WAIT_MS) {
+      return `worker waiting to batch: ${reconcile.unjudged} of ${BATCH_MIN_ITEMS} unjudged, oldest ${waited} of ${Math.round(BATCH_MAX_WAIT_MS / 60_000)}m`;
+    }
+    return `worker due to launch at the next Stop or git commit (${reconcile.unjudged} unjudged, oldest ${waited})`;
+  } catch (e) {
+    return `worker state unknown (${e?.message ?? e})`;
+  }
+}
+
 /**
  * The reconcile backlog: `banner` is the human banner segment (' · ...', or ''),
  * `line` the bare conductor line (or '').
+ *   config  the parsed .sterling/config.json when the caller holds it, else read here
+ *   nowMs / env  overrides for tests
  */
-export function reconcileBacklog({ reconcile, cwd }) {
+export function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), env = process.env }) {
   // RECONCILE BACKLOG LINE: one '·' segment on the human banner (after the
   // maintenance clause, so that clause's text is unchanged) and one line for the
   // conductor, who drafts the prose the worker leaves owed. Silent when there
@@ -150,17 +243,17 @@ export function reconcileBacklog({ reconcile, cwd }) {
   let reconcileBanner = '';
   let reconcileContext = '';
   if (reconcile.count > 0) {
-    let worker = 'worker not running';
+    let worker;
     let lastRunNote = '';
     try {
-      const ws = workerStatus(cwd);
-      if (ws.running) worker = `worker running (pid ${ws.pid}, since ${ws.since})`;
+      const ws = workerStatus(cwd, nowMs);
+      worker = workerStateText({ ws, reconcile, cwd, config, nowMs, env });
       const broken = workerBreakage(ws.lastRun);
       if (broken) lastRunNote = `; last worker run FAILED at ${broken.at}: ${broken.reason} (log: .sterling/maintenance-worker.log)`;
     } catch (e) {
-      worker = `worker state unreadable (${e?.message ?? e})`;
+      worker = `worker state unknown (${e?.message ?? e})`;
     }
-    const age = ageText(reconcile.oldest);
+    const age = ageText(reconcile.oldest, nowMs);
     // Counts keep H1's "N item(s) in lane <reason>" shape, so a round number
     // can never read as a truncated cap (h1-accuracy AC1).
     const inLane = (n) => `${n} item${n === 1 ? '' : 's'} in lane reconcile_needed`;
