@@ -28,7 +28,9 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // codex-reaching-around-the-store-guard-is-documented-and-codex-lanes-stay-narrow).
 // Moved 2026-10-03 (from 1a96cf4e…): one bullet added to Reconcile-always, "Author records to be
 // found" (decision make-records-findable-authoring-rule-disclosure-lint-then-blind-experiment).
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'e5c7614018d7a984eda42a6aaac2a9ebfdd9a8e96cb2e01f0bd44270f42ac41c';
+// Moved 2026-10-03 (from e5c76140…): the "Solve, don't board" bullet gains one sentence, a multi-area
+// ask is split into one-area mergeable items (decision board-asks-split-at-intake-into-mergeable-one-area-items).
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'e027f80991dde2ad09a7651d8448d2144fe741435de595279dbbf46416513c22';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);
@@ -101,7 +103,7 @@ test('every mapping the old phrase map carried has its OpenCode text in the rend
       'de-ai-skill': `Run the de-ai-writing skill (\`${root}/skills/de-ai-writing/SKILL.md\`)`,
       'de-ai-scanner': `node "${root}/skills/de-ai-writing/scripts/check-ai-signs.mjs" <file>`,
       'review-territory-h22': 'OpenCode has no H22; the line is still required',
-      'store-guard-h15': 'a shell deny on any command that names `sterling.db`',
+      'store-guard-h15': "the Sterling plugin's evaluate hook denies a shell command with a write shape aimed at the store while letting reads through",
       'platform-mechanics': "OpenCode's plugin hooks, agent files and config move between versions",
       'codex-availability': 'only when a `codex` MCP server is configured for it',
       'codex-background': 'How OpenCode handles a long Codex call is unmeasured',
