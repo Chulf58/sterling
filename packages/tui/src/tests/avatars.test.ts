@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { assign, mulberry32, cells, quadrantCell, QUADRANTS, tileCells, frameAt, phaseFor, POOL_SIZE, SPRITE_ROWS, SPRITE_COLS, TILE_BG, TILE_COLS } from '../avatars/index.js';
+import { ANIMATION_MS, SEQUENCE } from '../avatars/sprite.js';
 import pool from '../avatars/pool.json' with { type: 'json' };
 
 const ids = (n: number, p = 's'): string[] => Array.from({ length: n }, (_, i) => `${p}${i}`);
@@ -224,16 +225,41 @@ test('frameAt: idle is always frame 0', () => {
   for (let tick = 0; tick < 32; tick++) for (const phase of [0, 1, 5]) assert.equal(frameAt(tick, phase, false), 0);
 });
 
-test('frameAt: running walks 0,0,1,0,2,0,3,0 and repeats', () => {
-  const seq = Array.from({ length: 16 }, (_, t) => frameAt(t, 0, true));
-  assert.deepEqual(seq, [0, 0, 1, 0, 2, 0, 3, 0, 0, 0, 1, 0, 2, 0, 3, 0]);
-  assert.equal(frameAt(-1, 0, true), 0);
+test('frameAt: running walks SEQUENCE and repeats, resting on frame 0 between poses', () => {
+  const n = SEQUENCE.length;
+  const seq = Array.from({ length: 2 * n }, (_, t) => frameAt(t, 0, true));
+  assert.deepEqual(seq, [...SEQUENCE, ...SEQUENCE]);
+  assert.equal(frameAt(-1, 0, true), SEQUENCE[n - 1]);
+  assert.deepEqual([...new Set(SEQUENCE)].sort(), [0, 1, 2, 3], 'every pose still plays');
+  assert.equal(SEQUENCE[0], 0, 'the cycle starts at rest');
+  assert.ok(SEQUENCE.every((f, i) => f === 0 || SEQUENCE[(i + 1) % n] === 0), 'every move returns to the rest pose');
+});
+
+test('motion: a running avatar changes frame under once per second (issue #9)', () => {
+  const n = SEQUENCE.length;
+  let changes = 0;
+  for (let t = 0; t < n; t++) if (frameAt(t, 0, true) !== frameAt(t + 1, 0, true)) changes++;
+  const perSecond = changes / ((n * ANIMATION_MS) / 1000);
+  assert.ok(changes > 0, 'the avatar still moves');
+  assert.ok(perSecond < 1, `${perSecond.toFixed(3)} frame changes per second`);
 });
 
 test('frameAt: per-avatar phase offsets differ so avatars do not blink in unison', () => {
+  const n = SEQUENCE.length;
   const phases = Array.from({ length: 8 }, (_, a) => phaseFor(a));
   assert.equal(new Set(phases).size, 8);
-  const at = (a: number) => Array.from({ length: 8 }, (_, t) => frameAt(t, phaseFor(a), true));
+  const at = (a: number) => Array.from({ length: n }, (_, t) => frameAt(t, phaseFor(a), true));
   assert.notDeepEqual(at(0), at(1));
   assert.notDeepEqual(at(1), at(2));
+});
+
+test('frameAt: index-adjacent avatars are never mid-move on the same tick', () => {
+  const n = SEQUENCE.length;
+  for (let a = 0; a < 7; a++) {
+    assert.notEqual(phaseFor(a), phaseFor(a + 1));
+    for (let t = 0; t < n; t++) {
+      const both = frameAt(t, phaseFor(a), true) !== 0 && frameAt(t, phaseFor(a + 1), true) !== 0;
+      assert.equal(both, false, `avatars ${a} and ${a + 1} both pose at tick ${t}`);
+    }
+  }
 });
