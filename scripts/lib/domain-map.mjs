@@ -18,6 +18,10 @@
 //        two share no subject domain: each adds the domain named like itself,
 //        so both mount both. Only the current project's side can be applied
 //        here; the sibling's side is a step to run in that project.
+// Names are matched without regard to case, and stores are not: 'Salesforce' and
+// 'salesforce' are two stores. So a domain the project already mounts in another
+// spelling is never offered as an add; the two spellings are listed in
+// near_names instead, for a person to settle.
 // 'sterling' is mounted by every project, so it never counts as a shared
 // subject and is never proposed.
 // What the rule does NOT do: it does not guess a subject from a project's
@@ -70,9 +74,13 @@ export function buildDomainMap({ stores, projects, current, notes = [] }) {
     return { name: p.name, path: p.path, mounts: p.mounts, shared, shared_subjects: shared.filter((t) => t !== UNIVERSAL_DOMAIN).sort() };
   });
 
+  const spellings = new Map();
+  for (const d of domains) spellings.set(lower(d.name), [...(spellings.get(lower(d.name)) ?? []), { name: d.name, has_store: d.has_store, mounted_by: d.mounted_by }]);
+
   return {
     current: me ? { ...me, registered } : null,
     domains,
+    near_names: [...spellings.values()].filter((group) => group.length > 1),
     unmounted: domains.filter((d) => d.has_store && d.mounted_by.length === 0).map((d) => d.name),
     tags_without_store: domains.filter((d) => !d.has_store).map((d) => ({ tag: d.name, projects: d.mounted_by })),
     undescribed: domains.filter((d) => d.has_store && !d.unreadable && d.format === 'current' && !d.description).map((d) => d.name),
@@ -88,6 +96,7 @@ export function buildDomainMap({ stores, projects, current, notes = [] }) {
 
 function propose(me, siblings, domains) {
   const mine = namesOf(me);
+  const mountedAnyCase = (p, tag) => p.mounts.some((t) => lower(t) === lower(tag));
   const add = new Map();
   const sibling_steps = [];
   const hasStore = (name) => domains.some((d) => d.name === name && d.has_store);
@@ -96,7 +105,7 @@ function propose(me, siblings, domains) {
   };
 
   for (const d of domains) {
-    if (d.name === UNIVERSAL_DOMAIN || !mine.has(lower(d.name)) || me.mounts.includes(d.name)) continue;
+    if (d.name === UNIVERSAL_DOMAIN || !mine.has(lower(d.name)) || mountedAnyCase(me, d.name)) continue;
     const users = d.mounted_by.filter((n) => n !== me.name);
     offer(
       d.name,
@@ -111,10 +120,11 @@ function propose(me, siblings, domains) {
     const namedLikeMe = s.mounts.filter((t) => t !== UNIVERSAL_DOMAIN && mine.has(lower(t)));
     const namedLikeThem = me.mounts.filter((t) => t !== UNIVERSAL_DOMAIN && theirs.has(lower(t)));
     if (!namedLikeMe.length || !namedLikeThem.length) continue;
-    for (const t of namedLikeMe) {
+    for (const t of namedLikeMe.filter((t) => !mountedAnyCase(me, t))) {
       offer(t, `'${t}' is this project's own subject and ${s.name} mounts it, but this project does not, so the two projects share no subject domain.`);
     }
-    sibling_steps.push({ project: s.name, path: s.path, add: namedLikeThem });
+    const theirAdds = namedLikeThem.filter((t) => !mountedAnyCase(s, t));
+    if (theirAdds.length) sibling_steps.push({ project: s.name, path: s.path, add: theirAdds });
   }
   return { add: [...add.values()], sibling_steps };
 }
@@ -157,7 +167,11 @@ export function renderDomainMap(map, { applyCommand = '/sterling:domains' } = {}
   }
   out.push(`Stores in the old format: ${list(map.old_format)}`);
   if (map.old_format.length) {
-    out.push('  In a project that mounts an old-format store, knowledge_query and knowledge_get fail. This command does not migrate a store; the defect is tracked on the Sterling board as item 06f72a10.');
+    out.push('  In a project that mounts an old-format store, knowledge_query and knowledge_get fail until Sterling is updated to a version that isolates it. This command does not migrate a store. If it persists after /sterling:update, report it with /sterling:report-issue.');
+  }
+  for (const group of map.near_names) {
+    out.push(`Names that differ only by case: ${group.map((g) => `'${g.name}' (${g.has_store ? 'store' : 'no store'}; ${list(g.mounted_by)})`).join(' and ')}`);
+    out.push('  These are separate domains, so the projects share nothing through them. Settle on one spelling: this command adds a tag but never renames or removes one, so the other spelling is changed by hand in the stack_tags of the projects that use it.');
   }
   if (map.unreadable.length) out.push(`Stores that could not be read: ${map.unreadable.map((u) => `${u.name} (${u.error})`).join(', ')}`);
 

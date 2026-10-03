@@ -20,8 +20,8 @@ The mistake this SOP exists to prevent, in the user's words: "i have a project c
 Run the map: `node "${CLAUDE_PLUGIN_ROOT}/bin/domains.mjs"` (add `--json` for data).
 
 Check before moving on:
-- Read the whole "Domains" list, not only this project's mounts. If a store for the subject already exists under the same or a near name (different case, plural, hyphen: `Salesforce`, `sales-force`, `genesys-cloud`), mount that one. Never create a second store for one subject: two stores split the knowledge the same way the Salesforce and Genesys case did.
-- Read the "Note:" lines. One says when this project was missing from the project registry and has now been added.
+- Read the whole "Domains" list, not only this project's mounts. If a store for the subject already exists under the same or a near name (different case, plural, hyphen: `Salesforce`, `sales-force`, `genesys-cloud`), mount that one. The map lists names that differ only by case, and `--apply` refuses to add one; a plural or a hyphen it cannot see, so read for those. Never create a second store for one subject: two stores split the knowledge the same way the Salesforce and Genesys case did.
+- Read the "Note:" lines. One says when this project was missing from the project registry and has now been added by this run (only a project with a `.sterling/sterling.db` is added).
 
 ## 3. Decide the list with the user
 
@@ -44,7 +44,7 @@ Run it once, with one `--add` per domain and one `--description` per domain that
 
 `node "${CLAUDE_PLUGIN_ROOT}/bin/domains.mjs" --apply --add <domain> --description "<domain>=<text>"`
 
-It adds the tags to this project's `stack_tags`, creates each missing store with its description and refreshes this project's entry in the project registry. Exit 2 is a refusal that names its reason and has written nothing; report it as printed.
+It adds the tags to this project's `stack_tags`, creates each missing store with its description and refreshes this project's entry in the project registry. Exit 2 is a refusal that names its reason; report it as printed. A refusal before the first store is created has written nothing. Stores are created before `stack_tags` is written and are not rolled back, so a failure after that point names the stores it already created and says that `stack_tags` was not changed; run the same command again once the cause is fixed.
 
 Check before moving on: the output lists each domain as created, already having a store, or already mounted, and prints the new `stack_tags`.
 
@@ -71,7 +71,7 @@ Records already written in the project about the subject stay project-scoped. Do
 ## 9. What can be wrong after an upgrade
 
 - **A store with no description** ("Stores with no description"): from a project that mounts it, set one with the `domain_describe` tool, using the user's words as in step 4.
-- **A store in the old format** ("Stores in the old format"): in a project that mounts it, `knowledge_query` and `knowledge_get` fail. Do not repair or migrate it here. Report it to the user; the defect is Sterling board item 06f72a10, and `/sterling:report-issue` files it from a consumer project.
+- **A store in the old format** ("Stores in the old format"): in a project that mounts it, `knowledge_query` and `knowledge_get` fail until Sterling is updated to a version that isolates the store. Do not repair or migrate it here. Tell the user, run `/sterling:update`, and if it persists report it with `/sterling:report-issue`.
 - **A tag with no store** ("Tags that name no store"): the tag is not mounted, so nothing is read from it and writes to it are refused. First check step 2 for a near name. If the subject is real and has no store, run step 5 for that tag with a description: the CLI creates the store and leaves the tag as it is.
 
 ## 10. Before saying done

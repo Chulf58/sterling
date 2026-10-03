@@ -156,3 +156,40 @@ test('the text names every finding and states the limits', () => {
   assert.equal(MAP_LIMITS.length, 3);
   assert.doesNotMatch(text, /—/, 'plain text, no em dashes');
 });
+
+test('a domain the project mounts under another case is never proposed; the two spellings are reported as a near-name mismatch', () => {
+  const map = buildDomainMap({
+    stores: [store('salesforce'), store('genesys'), store('sterling')],
+    projects: [project('Salesforce', ['salesforce', 'genesys', 'sterling']), project('Genesys', ['Salesforce', 'genesys', 'sterling'])],
+    current: current('Salesforce', ['salesforce', 'genesys', 'sterling']),
+  });
+  assert.deepEqual(map.proposal.add, [], "'Salesforce' is the mounted 'salesforce' in another case, not a domain to add");
+  assert.deepEqual(map.near_names, [
+    [
+      { name: 'Salesforce', has_store: false, mounted_by: ['Genesys'] },
+      { name: 'salesforce', has_store: true, mounted_by: ['Salesforce'] },
+    ],
+  ]);
+  const text = renderDomainMap(map);
+  assert.match(text, /^Names that differ only by case: 'Salesforce' \(no store; Genesys\) and 'salesforce' \(store; Salesforce\)$/m);
+  assert.doesNotMatch(text, /add 'Salesforce'/);
+
+  // The crossed case with a case difference: the sibling's tag for this project's subject is
+  // offered only when the project mounts no spelling of it.
+  const crossed = buildDomainMap({
+    stores: [store('sterling')],
+    projects: [project('Salesforce', ['genesys', 'SalesForce', 'sterling']), project('Genesys', ['salesforce', 'sterling'])],
+    current: current('Salesforce', ['genesys', 'SalesForce', 'sterling']),
+  });
+  assert.deepEqual(crossed.proposal.add, []);
+  assert.deepEqual(crossed.proposal.sibling_steps, [{ project: 'Genesys', path: '/work/Genesys', add: ['genesys'] }]);
+  assert.equal(buildDomainMap({ stores: [store('node')], projects: [], current: current('alpha', ['node']) }).near_names.length, 0);
+});
+
+test('the old-format text names no board id', () => {
+  const map = buildDomainMap({ stores: [store('legacy', { description: null, format: 'old' })], projects: [], current: current('alpha', ['legacy']) });
+  const text = renderDomainMap(map);
+  assert.match(text, /until Sterling is updated to a version that isolates it/);
+  assert.match(text, /\/sterling:report-issue/);
+  assert.doesNotMatch(text, /06f72a10|board/);
+});

@@ -104,3 +104,18 @@ test('list spans multiple projects name-ordered; remove is by repo_path (human-g
     cleanup();
   }
 });
+
+test('updateStackTags: changes only stack_tags of an existing row; never creates one', () => {
+  const { reg, cleanup } = harness();
+  try {
+    reg.register(base());
+    reg.touchLastSeen('C:/Users/x/ProjA', '2026-06-18T09:00:00.000Z');
+    const before = reg.list()[0];
+    assert.equal(reg.updateStackTags('C:/Users/x/ProjA', ['node', 'typescript', 'python']), true);
+    assert.deepEqual(reg.list()[0], { ...before, stack_tags: ['node', 'typescript', 'python'] });
+    assert.equal(reg.updateStackTags('C:/Users/x/Unknown', ['node']), false);
+    assert.equal(reg.list().length, 1);
+  } finally {
+    cleanup();
+  }
+});

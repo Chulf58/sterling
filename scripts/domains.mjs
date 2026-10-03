@@ -11,19 +11,20 @@
 // The map is computed on each run from two sources and stored nowhere: the
 // domain store folders (~/.sterling/domains/<name>/sterling.db, plus the current
 // project's config.domain_paths) and the shared project registry
-// (~/.sterling/registry.db). Domain stores are opened read-only and never
-// changed by the report.
+// (~/.sterling/registry.db). Domain stores are opened read-only, so a report
+// never changes a store's database file (SQLite may create -shm and -wal files
+// beside a WAL-mode store while it is read).
 //
-// WHAT A RUN WRITES. A report run writes one thing: when the current project is
-// initialized but missing from the registry (init is the only other writer of a
-// registry row), it registers it, and says so. --apply writes three: a new
+// WHAT A RUN WRITES. A report run writes one thing: when the current project has
+// a config and a project store but no registry row (init is the only other
+// writer of a row), it registers it, and says so. --apply writes three: a new
 // domain store through createDomain (which needs a description), the current
-// project's stack_tags in .sterling/config.json, and its registry row. It never
-// removes a tag, never moves a record and never writes to another project.
-import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync } from 'node:fs';
+// project's stack_tags in .sterling/config.json, and the tags of its registry
+// row. It never removes a tag, never moves a record and never writes to another
+// project: --apply refuses a --target outside the project it runs in.
+import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { parseConfig, sameLocationAnyHost } from '@sterling/schemas';
 import { ProjectRegistry, registryPath, createDomain, resolveDomainMounts, DOMAIN_DESCRIPTION_KEY, SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
@@ -32,7 +33,6 @@ import { resolveStoreWritePath } from './lib/store-path.mjs';
 import { DEFAULT_DOMAIN_DESCRIPTIONS } from './lib/domain-defaults.mjs';
 import { buildDomainMap, renderDomainMap, UNIVERSAL_DOMAIN } from './lib/domain-map.mjs';
 
-const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fwd = (p) => p.replace(/\\/g, '/');
 const USAGE = 'usage: domains.mjs [--target <dir>] [--json] | --apply --add <domain> [--add <domain> ...] [--description <domain>=<text> ...]';
 
@@ -74,8 +74,27 @@ if (opts.apply && opts.json) refuse('--json prints the map; it cannot be combine
 // ---- the current project ----
 // A linked git worktree has no .sterling/ of its own (it is gitignored), so the
 // project is the main checkout.
-const startDir = resolve(opts.target ?? process.cwd());
-const projectDir = resolveLinkedWorktree(startDir)?.mainRoot ?? startDir;
+const projectRootOf = (dir) => resolveLinkedWorktree(dir)?.mainRoot ?? dir;
+const projectDir = projectRootOf(resolve(opts.target ?? process.cwd()));
+const hasConfig = (dir) => existsSync(join(dir, '.sterling', 'config.json'));
+
+// The nearest folder at or above `dir` that holds a .sterling/config.json, or null.
+function enclosingProject(dir) {
+  for (let d = dir; ; d = dirname(d)) {
+    if (hasConfig(d)) return d;
+    if (dirname(d) === d) return null;
+  }
+}
+const real = (p) => (existsSync(p) ? realpathSync(p) : p);
+
+// --apply changes the project the session is working in. With --target it could
+// reach any project on the machine, so a target outside that project refuses.
+if (opts.apply && opts.target !== undefined) {
+  const here = enclosingProject(projectRootOf(process.cwd()));
+  if (!here || !sameLocationAnyHost(real(here), real(projectDir))) {
+    refuse(`--apply changes only the project the command runs in (${here ? fwd(here) : `${fwd(process.cwd())}, which is in no Sterling project`}), and --target names ${fwd(projectDir)}. Run the command from that project instead. --target is for report runs. Nothing was written.`);
+  }
+}
 
 function readProject(dir) {
   const configPath = resolveStoreWritePath(dir, '.sterling', 'config.json');
@@ -133,44 +152,40 @@ function listStores() {
 }
 
 // ---- the registry ----
-function pluginVersion() {
-  try {
-    const v = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
-    return typeof v === 'string' ? v : null;
-  } catch (e) {
-    if (e?.code === 'ENOENT') return null;
-    throw e;
-  }
-}
-
-function registerCurrent(registry, repoPath, name) {
-  registry.register({
-    repo_path: repoPath,
-    name,
-    stack_tags: project.config.stack_tags,
-    toolchains: project.config.toolchains.map((t) => t.adapter),
-    sterling_version: pluginVersion(),
-    at: new Date().toISOString(),
-  });
-}
-
 const notes = [];
 const projectName = project ? (project.config.project_name ?? basename(projectDir)) : null;
-let currentPath = fwd(projectDir);
+const currentPath = fwd(projectDir);
+const isCurrent = (row) => Boolean(project) && sameLocationAnyHost(row.repo_path, currentPath);
+if (!project) {
+  const parent = enclosingProject(dirname(projectDir));
+  if (parent) notes.push(`this folder is inside the Sterling project at ${fwd(parent)}. Run the command from there, or pass --target "${fwd(parent)}" for a report on it.`);
+}
+
 let rows = [];
-// The registry file is created only for an initialized project: a report run
-// from any other folder reads it when it exists and writes nothing.
-if (project || existsSync(registryPath())) {
+// The registry file is read when it exists. It is created only to register an
+// initialized project: a report run from any other folder writes nothing.
+const hasStore = project ? existsSync(join(projectDir, '.sterling', 'sterling.db')) : false;
+if (existsSync(registryPath()) || hasStore) {
   const registry = new ProjectRegistry(registryPath());
   try {
     rows = registry.list();
-    if (project) {
-      const mine = rows.find((p) => sameLocationAnyHost(p.repo_path, currentPath));
-      if (mine) currentPath = mine.repo_path;
-      else {
-        registerCurrent(registry, currentPath, projectName);
+    if (project && !rows.some(isCurrent)) {
+      if (hasStore) {
+        // register is the only way to make a row. No init ran here, so the row
+        // carries no Sterling version; the schema requires both init dates,
+        // which are therefore the time of this registration.
+        registry.register({
+          repo_path: currentPath,
+          name: projectName,
+          stack_tags: project.config.stack_tags,
+          toolchains: project.config.toolchains.map((t) => t.adapter),
+          sterling_version: null,
+          at: new Date().toISOString(),
+        });
         rows = registry.list();
-        notes.push(`${projectName} was not in the project registry (it was initialized by a Sterling version from before the registry, or on another machine or user). It is now registered, so other projects' maps list it.`);
+        notes.push(`${projectName} was not in the project registry (it was initialized by a Sterling version from before the registry, or on another machine or user). It is now registered by this command, so other projects' maps list it; its init dates in /sterling:projects are the time of this registration.`);
+      } else {
+        notes.push(`${projectName} is not registered: it has no .sterling/sterling.db, so it is not an initialized project. Run /sterling:init here to register it.`);
       }
     }
   } finally {
@@ -178,24 +193,29 @@ if (project || existsSync(registryPath())) {
   }
 }
 
-// A sibling's tags are read from its config as it is now. The registry holds the
-// tags recorded at its last init, which are used only when the config cannot be read.
+// Every row's path is forward-slashed before it is compared, checked on disk or
+// printed, and the row of the current project takes the current project's path,
+// however the registry spelled it. A sibling's tags are read from its config as
+// it is now. The registry holds the tags recorded at its last init or mount
+// change, which are used only when the config cannot be read.
 const projects = rows.map((p) => {
-  const exists = existsSync(p.repo_path);
+  if (isCurrent(p)) return { name: p.name, path: currentPath, stack_tags: project.config.stack_tags, exists: true };
+  const path = fwd(p.repo_path);
+  const exists = existsSync(path);
   let stack_tags = p.stack_tags;
-  if (exists && p.repo_path !== currentPath) {
+  if (exists) {
     try {
-      const sibling = readProject(p.repo_path);
+      const sibling = readProject(path);
       if (sibling) {
         stack_tags = sibling.config.stack_tags;
         const overrides = Object.keys(sibling.config.domain_paths);
         if (overrides.length) notes.push(`${p.name} sets its own store path for ${overrides.join(', ')}; this map shows the store at the default location.`);
-      } else notes.push(`${p.name} has no .sterling/config.json; its mounts are the tags the registry recorded at its last init.`);
+      } else notes.push(`${p.name} has no .sterling/config.json; its mounts are the tags the registry recorded.`);
     } catch (e) {
-      notes.push(`${p.name}: its config could not be read (${e.message}); its mounts are the tags the registry recorded at its last init.`);
+      notes.push(`${p.name}: its config could not be read (${e.message}); its mounts are the tags the registry recorded.`);
     }
   }
-  return { name: p.name, path: fwd(p.repo_path), stack_tags, exists };
+  return { name: p.name, path, stack_tags, exists };
 });
 const current = project ? { name: projectName, path: currentPath, stack_tags: project.config.stack_tags } : null;
 
@@ -210,8 +230,15 @@ if (!opts.apply) {
   process.exit(0);
 }
 
-// ---- --apply: add mounts to the current project, all or nothing ----
-if (!project) refuse(`${fwd(projectDir)} is not an initialized Sterling project (no .sterling/config.json). Run /sterling:init there first.`);
+// ---- --apply: add mounts to the current project ----
+// Every refusal below this line and above the first createDomain happens before
+// anything is written. From there the order is stores, then config, then the
+// registry row, with no rollback: a failure part-way says what was already done.
+if (!project) {
+  const parent = enclosingProject(dirname(projectDir));
+  if (parent) refuse(`${fwd(projectDir)} is inside the Sterling project at ${fwd(parent)}. Run the command from there. Nothing was written.`);
+  refuse(`${fwd(projectDir)} is not an initialized Sterling project (no .sterling/config.json). Run /sterling:init there first.`);
+}
 for (const name of opts.add) {
   if (!name.trim() || name !== name.trim() || /[\\/]/.test(name) || name === '.' || name === '..') {
     refuse(`'${name}' is not a domain name: a domain name is one folder name under ~/.sterling/domains/, with no slash`);
@@ -222,6 +249,22 @@ for (const name of opts.descriptions.keys()) {
 }
 
 const mounted = project.config.stack_tags;
+// One subject, one store: a name that matches an existing store or tag in all
+// but case would make a second store beside it.
+{
+  const stores = listStores().map((st) => st.name);
+  for (const name of opts.add) {
+    const differs = (other) => other !== name && other.toLowerCase() === name.toLowerCase();
+    const exact = stores.includes(name) || projects.some((p) => p.exists && p.stack_tags.includes(name));
+    if (exact) continue;
+    const store = stores.find(differs);
+    const user = projects.filter((p) => p.exists).map((p) => ({ p, tag: p.stack_tags.find(differs) })).find((x) => x.tag);
+    if (store || user) {
+      const existing = store ? `a store named '${store}' exists` : `${user.p.name} mounts '${user.tag}'`;
+      refuse(`'${name}' differs only by case from an existing domain: ${existing}. Use that spelling (--add ${store ?? user.tag}) so there is one store for the subject. Nothing was written.`);
+    }
+  }
+}
 const wanted = [...new Set(opts.add)];
 const toAdd = wanted.filter((name) => !mounted.includes(name));
 // Every named domain is planned, a tag the project already lists included: such a
@@ -242,9 +285,16 @@ if (undescribed.length) {
 
 const done = [];
 let created = 0;
+const createdNames = [];
+const partial = () => `${createdNames.length ? `Already created in this run: ${createdNames.map((n) => `'${n}'`).join(', ')} (the stores stay, with their descriptions).` : 'No store was created in this run.'}`;
 for (const m of plan) {
   if (!m.exists) {
-    createDomain(m.name, m.description, m.dbPath);
+    try {
+      createDomain(m.name, m.description, m.dbPath);
+    } catch (e) {
+      refuse(`the domain store '${m.name}' could not be created at ${fwd(m.dbPath)} (${e?.message ?? e}). ${partial()} stack_tags was not changed.`);
+    }
+    createdNames.push(m.name);
     created++;
     done.push(`created the domain store '${m.name}' at ${fwd(m.dbPath)}: ${m.description}`);
     if (m.listed) done.push(`'${m.name}' was already in stack_tags; it had no store until now`);
@@ -262,18 +312,26 @@ if (toAdd.length) {
   const next = universalLast ? [...tags.slice(0, -1), ...toAdd, UNIVERSAL_DOMAIN] : [...tags, ...toAdd];
   const nextRaw = { ...project.raw, stack_tags: next };
   project.config = parseConfig(nextRaw);
-  const tmpPath = resolveStoreWritePath(project.dir, '.sterling', `config.json.tmp-${process.pid}`);
-  writeFileSync(tmpPath, JSON.stringify(nextRaw, null, 2) + (project.text.endsWith('\n') ? '\n' : ''));
-  renameSync(tmpPath, project.configPath);
+  try {
+    const tmpPath = resolveStoreWritePath(project.dir, '.sterling', `config.json.tmp-${process.pid}`);
+    writeFileSync(tmpPath, JSON.stringify(nextRaw, null, 2) + (project.text.endsWith('\n') ? '\n' : ''));
+    renameSync(tmpPath, project.configPath);
+  } catch (e) {
+    refuse(`.sterling/config.json could not be written (${e?.message ?? e}). ${partial()} stack_tags was not changed.`);
+  }
   done.push(`stack_tags in .sterling/config.json: ${next.join(', ')}`);
 
-  const registry = new ProjectRegistry(registryPath());
-  try {
-    registerCurrent(registry, currentPath, projectName);
-  } finally {
-    registry.close();
-  }
-  done.push('refreshed this project in the project registry');
+  // Tags only: the row's init dates and version are init's to write.
+  const mine = rows.filter(isCurrent);
+  if (mine.length) {
+    const registry = new ProjectRegistry(registryPath());
+    try {
+      for (const row of mine) registry.updateStackTags(row.repo_path, next);
+    } finally {
+      registry.close();
+    }
+    done.push('updated this project\'s tags in the project registry');
+  } else done.push('this project has no registry row, so the registry was not changed (run /sterling:init to register it)');
 }
 
 console.log(`Applied to ${projectName} (${currentPath}):`);
