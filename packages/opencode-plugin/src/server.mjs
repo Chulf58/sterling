@@ -58,6 +58,7 @@ import { createSettle, liveDispatch } from './settle.mjs';
 import { BUSY_TIMEOUT_MS, openProjectStore } from './store.mjs';
 import { createSessionSync } from './sync.mjs';
 import { createWorkerLaunch, inWorkerChild } from './worker.mjs';
+import { resolve } from 'node:path';
 import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
 
 export { BUSY_TIMEOUT_MS, LOG_REL, NOTICES_REL, addNotice, liveDispatch, openProjectStore };
@@ -77,17 +78,27 @@ export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 
  * claudeOnPath(), launchWorker(opts), sterlingRoot (a path), renderRestore(note, opts),
  * configure(ctx), bootstrap(ctx) and syncSession(root, sessionID) (replace the config.mjs and sync.mjs handlers),
  * and env (process.env for the worker-child check and sync.mjs).
+ *
+ * OpenCode 2 imports the plugin module once per process and calls the one exported
+ * object's setup once per location (a directory the service serves), each with that
+ * location's ctx; the session and tool hook inputs carry no directory. So each
+ * location gets its own instance, bound to ctx.location.directory and kept across a
+ * re-setup of the same directory, and nothing reads process.cwd(), which is only the
+ * directory the service was started in (board item
+ * opencode-plugin-acted-on-the-wrong-project-measured-2026-10). The startup sweep and
+ * the post-update sync run once per project per process, whichever location reaches
+ * the project first.
  */
 export function createSterlingServer(deps = {}) {
   const openStore = deps.openStore ?? openProjectStore;
   const now = deps.now ?? (() => new Date().toISOString());
-  let session = null;
-  let directory = process.cwd();
-  let chain = Promise.resolve();
-  // Each session's parentID, shared by the context handler and the settlement gate (bounded, bounded.mjs).
-  const parents = new Map();
-
-  const rootOf = () => projectRoot(directory);
+  const env = deps.env ?? process.env;
+  // Process-wide, keyed by project root: the roots whose startup sweep ran, and whose post-update sync started.
+  const swept = new Set();
+  const syncStarted = new Set();
+  // One instance per location directory; `last` is the latest set up, which `handlers` exposes to tests.
+  const locations = new Map();
+  let last = null;
 
   /** Run fn inside the handler fence: budgeted, and a throw is logged and becomes a notice. */
   async function fenced(name, root, fn) {
@@ -115,83 +126,87 @@ export function createSterlingServer(deps = {}) {
     }
   }
 
-  const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env: deps.env ?? process.env });
-  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, env: deps.env ?? process.env, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
-  const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
-  const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
-  const dispatch = createDispatchHandlers({ rootOf, fenced });
-  const recordResearch = createResearchRecorder({ rootOf, fenced, now });
-  // Every handler is fenced, so none of them throws: Sterling never denies a tool call.
-  async function onBefore(input) {
-    await delivery.onBefore(input);
-    await axis.onBefore(input);
-    await dispatch.onBefore(input);
-  }
-  // H23 matches only the tool's own output, taken before anything is appended,
-  // and runs after the file delivery has written the session guard.
-  async function onAfter(input) {
-    const output = axis.outputOf(input);
-    await delivery.onAfter(input);
-    await axis.onOutput(input, output);
-    await axis.onAfter(input);
-    await dispatch.onAfter(input);
-    await recordResearch(input);
-  }
   const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker });
   const settle = createSettle({ openStore, now, launchWorkerFor });
   const prLoopNotice = createPrLoopNotice({ now, pluginRoot: deps.sterlingRoot });
-  const onPrompt = createPromptHandler({ openStore, rootOf, fenced, env: deps.env ?? process.env });
-  const onCompaction = createCompactionHandler({ rootOf, fenced });
   const configure = deps.configure ?? createConfigHandler(deps);
   const bootstrap = deps.bootstrap ?? createBootstrapHandler(deps);
 
-  async function onEvent(ev) {
-    if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
-    // Inside the maintenance worker's own `opencode run` child (the runner sets
-    // the flag), this globally installed plugin must not settle or launch a
-    // worker: it would race the parent's settlement on the same store.
-    if (inWorkerChild(deps.env ?? process.env)) return;
-    const root = rootOf();
-    if (!root) return;
-    const sessionID = ev.data?.sessionID;
-    // Noted before the gate reads the register, so a background child that ends
-    // before its subagent call binds it is ended at that bind (dispatch.mjs).
-    dispatch.noteExecutionEnd(sessionID);
-    // Any execution end of a child ends its background dispatch; only a root
-    // session's successful end settles (dispatch.mjs rootSessionGate): a child's
-    // execution end is not the end of the user's turn.
-    const succeeded = ev.type === 'session.execution.succeeded';
-    let gate = { settle: false };
-    await fenced(succeeded ? 'settle' : 'dispatch', root, async () => {
-      gate = await rootSessionGate(root, { session, sessionID, parents });
-      if (!gate.why) return;
-      if (!succeeded) {
-        logLine(root, `dispatch end skipped on ${ev.type}: could not check whether session ${sessionID} is a child (${gate.why})`);
-        return;
-      }
-      // Inside the fence: a torn notices file must not reject onEvent and end the subscription loop.
-      logLine(root, `settle skipped: could not check whether session ${sessionID} is a child (${gate.why})`);
-      addNotice(root, `Sterling settlement skipped: could not check whether session ${sessionID} is a child session (${gate.why}); only a root session settles, and the next root settlement covers this range.`, now());
-    });
-    if (!gate.settle || !succeeded) return;
-    resetStatus(root);
-    await fenced('settle', root, () => settle(root));
-    await fenced('settle', root, () => prLoopNotice(root));
-  }
+  /** The handlers of one location: each resolves the project root from `directory`, the location's own. */
+  function createLocation(directory) {
+    let session = null;
+    let chain = Promise.resolve();
+    // Each session's parentID, shared by the context handler and the settlement gate (bounded, bounded.mjs).
+    const parents = new Map();
+    const rootOf = () => projectRoot(directory);
 
-  const handlers = { context: onContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };
+    const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
+    const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
+    const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
+    const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
+    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
+    const dispatch = createDispatchHandlers({ rootOf, fenced });
+    const recordResearch = createResearchRecorder({ rootOf, fenced, now });
+    // Every handler is fenced, so none of them throws: Sterling never denies a tool call.
+    async function onBefore(input) {
+      await delivery.onBefore(input);
+      await axis.onBefore(input);
+      await dispatch.onBefore(input);
+    }
+    // H23 matches only the tool's own output, taken before anything is appended,
+    // and runs after the file delivery has written the session guard.
+    async function onAfter(input) {
+      const output = axis.outputOf(input);
+      await delivery.onAfter(input);
+      await axis.onOutput(input, output);
+      await axis.onAfter(input);
+      await dispatch.onAfter(input);
+      await recordResearch(input);
+    }
+    const onPrompt = createPromptHandler({ openStore, rootOf, fenced, env });
+    const onCompaction = createCompactionHandler({ rootOf, fenced });
 
-  return {
-    id: PLUGIN_ID,
-    handlers,
-    /** Resolves once every event received so far has been handled (tests). */
-    async idle() {
-      await new Promise((r) => setImmediate(r));
-      await new Promise((r) => setImmediate(r));
-      await chain;
-    },
-    async setup(ctx) {
-      directory = ctx?.location?.directory ?? process.cwd();
+    async function onEvent(ev) {
+      if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
+      // An event that names another location's directory is that location's to handle.
+      const evDir = ev.location?.directory;
+      if (evDir !== undefined && resolve(String(evDir)) !== resolve(directory)) return;
+      // Inside the maintenance worker's own `opencode run` child (the runner sets
+      // the flag), this globally installed plugin must not settle or launch a
+      // worker: it would race the parent's settlement on the same store.
+      if (inWorkerChild(env)) return;
+      const root = rootOf();
+      if (!root) return;
+      const sessionID = ev.data?.sessionID;
+      // Noted before the gate reads the register, so a background child that ends
+      // before its subagent call binds it is ended at that bind (dispatch.mjs).
+      dispatch.noteExecutionEnd(sessionID);
+      // Any execution end of a child ends its background dispatch; only a root
+      // session's successful end settles (dispatch.mjs rootSessionGate): a child's
+      // execution end is not the end of the user's turn.
+      const succeeded = ev.type === 'session.execution.succeeded';
+      let gate = { settle: false };
+      await fenced(succeeded ? 'settle' : 'dispatch', root, async () => {
+        gate = await rootSessionGate(root, { session, sessionID, parents });
+        if (!gate.why) return;
+        if (!succeeded) {
+          logLine(root, `dispatch end skipped on ${ev.type}: could not check whether session ${sessionID} is a child (${gate.why})`);
+          return;
+        }
+        // Inside the fence: a torn notices file must not reject onEvent and end the subscription loop.
+        logLine(root, `settle skipped: could not check whether session ${sessionID} is a child (${gate.why})`);
+        addNotice(root, `Sterling settlement skipped: could not check whether session ${sessionID} is a child session (${gate.why}); only a root session settles, and the next root settlement covers this range.`, now());
+      });
+      if (!gate.settle || !succeeded) return;
+      resetStatus(root);
+      await fenced('settle', root, () => settle(root));
+      await fenced('settle', root, () => prLoopNotice(root));
+    }
+
+    const handlers = { context: onContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };
+
+    /** Registers this location's hooks on its ctx and starts its event subscription; returns the cleanup. */
+    async function bind(ctx) {
       session = ctx.session;
       const root = rootOf();
       if (root) await fenced('config', root, () => configure(ctx));
@@ -217,11 +232,11 @@ export function createSterlingServer(deps = {}) {
             await chain;
           }
         } catch (e) {
-          const root = rootOf();
-          if (root && !abort.signal.aborted) {
+          const subRoot = rootOf();
+          if (subRoot && !abort.signal.aborted) {
             try {
-              logLine(root, `event subscription ended: ${errText(e)}`);
-              addNotice(root, `Sterling plugin: the event subscription ended (${errText(e)}); settlement stops until OpenCode restarts.`);
+              logLine(subRoot, `event subscription ended: ${errText(e)}`);
+              addNotice(subRoot, `Sterling plugin: the event subscription ended (${errText(e)}); settlement stops until OpenCode restarts.`);
             } catch (reportError) {
               process.stderr.write(`[sterling] event subscription ended (${errText(e)}) and could not be reported (${errText(reportError)})\n`);
             }
@@ -229,6 +244,39 @@ export function createSterlingServer(deps = {}) {
         }
       })();
       return () => abort.abort();
+    }
+
+    return { handlers, bind, idle: () => chain };
+  }
+
+  return {
+    id: PLUGIN_ID,
+    /** The handlers of the latest location set up; tests drive a single location through it. */
+    get handlers() {
+      return last?.handlers;
+    },
+    /** Resolves once every event received so far, at every location, has been handled (tests). */
+    async idle() {
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      await Promise.all([...locations.values()].map((l) => l.idle()));
+    },
+    async setup(ctx) {
+      const directory = ctx?.location?.directory;
+      if (typeof directory !== 'string' || !directory) {
+        // No handler could tell which project it is in. The service cwd is not the
+        // session's project, so nothing is registered rather than guessed.
+        process.stderr.write('[sterling] setup received no ctx.location.directory, so this location cannot be tied to a project; no Sterling hook is registered for it\n');
+        return undefined;
+      }
+      const key = resolve(directory);
+      let loc = locations.get(key);
+      if (!loc) {
+        loc = createLocation(directory);
+        locations.set(key, loc);
+      }
+      last = loc;
+      return loc.bind(ctx);
     },
   };
 }
