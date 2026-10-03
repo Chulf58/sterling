@@ -94,7 +94,8 @@ export const SEQUENCE: readonly number[] = [
 
 // Per-avatar offset into SEQUENCE so a row of avatars does not blink in unison. The step of 5 is
 // coprime with the sequence length (24) and not a multiple of its 8-tick pose spacing, so
-// neighbouring avatars never pose on the same tick.
+// avatars whose pool indices are adjacent never pose on the same tick. Indices are assigned at random,
+// so two cards shown side by side can still share a pose tick (indices 8 apart) or a phase (24 apart).
 export function phaseFor(avatarIndex: number): number {
   return (((avatarIndex * 5) % SEQUENCE.length) + SEQUENCE.length) % SEQUENCE.length;
 }

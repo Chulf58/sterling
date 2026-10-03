@@ -253,7 +253,7 @@ test('frameAt: per-avatar phase offsets differ so avatars do not blink in unison
   assert.notDeepEqual(at(1), at(2));
 });
 
-test('frameAt: neighbouring avatars are never mid-move on the same tick', () => {
+test('frameAt: index-adjacent avatars are never mid-move on the same tick', () => {
   const n = SEQUENCE.length;
   for (let a = 0; a < 7; a++) {
     assert.notEqual(phaseFor(a), phaseFor(a + 1));
