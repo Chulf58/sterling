@@ -15,4 +15,6 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/report-issue.mjs" --title "<what broke, max 120 
 
 The script prints the body before and after it sends. It searches the repo for the report's fingerprint first: an open match gets a comment, a closed match gets a new issue that says which one it recurs after, and no match gets a new issue. Relay the issue URL it prints.
 
-When gh is missing or not logged in, the script exits 1, says so in one line, and queues the report in `.sterling/pending-issue-reports.jsonl`; session start then states the pending count. `node "${CLAUDE_PLUGIN_ROOT}/bin/report-issue.mjs" --flush` sends the queue once gh works, and every new report flushes it first. `--list` prints the open `sterling-report` issues and the local pending count.
+When gh is missing or not logged in, the script exits 1, says so in one line, and queues the report in `.sterling/pending-issue-reports.jsonl`; session start then states the pending count. `node "${CLAUDE_PLUGIN_ROOT}/bin/report-issue.mjs" --flush` sends the queue once gh works, and every new report flushes it first. `--list` prints the open reports, found by the fingerprint line in their body, and the local pending count.
+
+Labels are applied when the filer's account may set them on the repo. Otherwise GitHub drops or refuses them, the script files the report without labels and says so, and the report body carries a `Labels:` line instead. A maintainer of Chulf58/sterling runs `node "${CLAUDE_PLUGIN_ROOT}/bin/report-issue.mjs" --apply-labels` to turn those lines into real labels; it never edits an issue body.

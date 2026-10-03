@@ -167,6 +167,35 @@ export function fingerprint(component, title) {
 /** The visible body line the dedup search matches. */
 export const fingerprintLine = (fp) => `Fingerprint: sterling-fp-${fp}`;
 
+/** The visible body line that carries the labels, so the classification
+ * survives when GitHub refuses or drops them for an account that may not set labels. */
+export const labelsLine = (labels) => `Labels: ${labels.join(', ')}`;
+
+/** The three label shapes a report ever carries. --apply-labels creates and sets
+ * only these, because the body it reads is text anyone could have written. */
+const LABEL_SHAPE = /^(?:sterling-report|severity:(?:blocked|workaround|friction)|project:[a-z0-9._-]{1,40})$/;
+
+/** The labels named by the body's `Labels:` line that have a known shape, or null when there is no such line. */
+export function parseLabelsLine(body) {
+  const m = String(body).match(/^Labels: (.*)$/m);
+  if (!m) return null;
+  return m[1].split(',').map((l) => l.trim()).filter((l) => LABEL_SHAPE.test(l));
+}
+
+/** `body` with a `Labels:` line, added just above its fingerprint line (or at
+ * the end when it has none) if it lacks one. For queued reports written before
+ * the line existed; the fingerprint is untouched. */
+export function withLabelsLine(body, labels, fp) {
+  if (/^Labels: /m.test(body)) return body;
+  const line = labelsLine(labels);
+  const fpLine = fingerprintLine(fp);
+  const lines = body.split('\n');
+  const at = lines.findIndex((l) => l.trim() === fpLine);
+  if (at < 0) return `${body}\n\n${line}`;
+  lines.splice(at, 0, line);
+  return lines.join('\n');
+}
+
 /** A body for a new issue whose fingerprint matched closed issue #n. */
 export const withRecurrence = (body, n) => `Recurs after #${n}.\n\n${body}`;
 
@@ -207,6 +236,7 @@ export function renderBody(report, stamps, { recursAfter } = {}) {
     '### Evidence',
     fence(report.evidence.join('\n')),
     '',
+    labelsLine(labelsFor(report.severity, stamps.project)),
     fingerprintLine(fingerprint(report.component, report.title)),
   ].join('\n');
   return recursAfter ? withRecurrence(body, recursAfter) : body;

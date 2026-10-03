@@ -18,6 +18,8 @@ import {
   fingerprint,
   labelsFor,
   normalizeTitle,
+  parseLabelsLine,
+  withLabelsLine,
   renderBody,
   scrub,
   validateReport,
@@ -206,6 +208,11 @@ test('labels: sterling-report, severity band and a sanitized project name', () =
 //   append_on_create   one JSON line, appended to $FAKE_GH_QUEUE after the next create (then deleted):
 //                      a concurrent report landing while a flush is mid-send
 //   kill_on_search     N => the Nth search SIGKILLs report-issue (the gh's parent): a flush killed mid-run
+//   labels_refused     N => a create that carries labels[] exits 1 with 'gh: ... (HTTP N)'; one without labels succeeds
+//   create_refused     N => every create exits 1 with 'gh: ... (HTTP N)'
+//   drop_labels        present => a create succeeds but GitHub drops the labels (the issue and the response carry none)
+//   labels.json        [name] the labels that exist in the repo
+//   label_write_refused N => creating a label or setting labels on an issue exits 1 with 'gh: ... (HTTP N)'
 const FAKE_GH_IMPL = `
 import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -233,23 +240,53 @@ const bump = (name) => { const f = join(state, name); const n = (existsSync(f) ?
 if (method === 'GET' && path === 'search/issues') {
   const searches = bump('search_count');
   if (existsSync(join(state, 'kill_on_search')) && searches === Number(readFileSync(join(state, 'kill_on_search'), 'utf8'))) { process.kill(process.ppid, 'SIGKILL'); process.exit(1); }
-  const fp = (one('q').match(/sterling-fp-[0-9a-f]{12}/) ?? [])[0];
-  if (!fp || !/repo:Chulf58\\/sterling/.test(one('q'))) { console.error('fake gh: bad search ' + one('q')); process.exit(3); }
-  const items = issues.filter((i) => i.body.includes(fp)).map((i) => ({ number: i.number, state: i.state, html_url: url(i.number), body: i.body }));
+  const q = one('q');
+  if (!/repo:Chulf58\\/sterling/.test(q)) { console.error('fake gh: bad search ' + q); process.exit(3); }
+  const fp = (q.match(/sterling-fp-[0-9a-f]{12}/) ?? [])[0];
+  if (!fp && !q.includes('"sterling-fp-"')) { console.error('fake gh: bad search ' + q); process.exit(3); }
+  const items = issues
+    .filter((i) => i.body.includes(fp ?? 'sterling-fp-') && (!/\\bis:open\\b/.test(q) || i.state === 'open'))
+    .map((i) => ({ number: i.number, state: i.state, title: i.title, html_url: url(i.number), body: i.body, labels: i.labels.map((name) => ({ name })) }));
   console.log(JSON.stringify({ total_count: items.length, items })); process.exit(0);
 }
 if (method === 'GET' && path === 'repos/Chulf58/sterling/issues') {
   const hits = issues.filter((i) => i.state === one('state') && i.labels.includes(one('labels')));
   console.log(JSON.stringify(hits.map((i) => ({ number: i.number, title: i.title, html_url: url(i.number), labels: i.labels.map((name) => ({ name })) })))); process.exit(0);
 }
+const refuse = (status) => { console.log(JSON.stringify({ message: 'refused', status: String(status) })); console.error('gh: refused (HTTP ' + status + ')'); process.exit(1); };
+const labelsFile = join(state, 'labels.json');
+const known = () => (existsSync(labelsFile) ? JSON.parse(readFileSync(labelsFile, 'utf8')) : []);
 if (method === 'POST' && path === 'repos/Chulf58/sterling/issues') {
   if (existsSync(join(state, 'fail_create_after')) && issues.length >= Number(readFileSync(join(state, 'fail_create_after'), 'utf8'))) { console.error('HTTP 502: Bad Gateway'); process.exit(1); }
+  if (existsSync(join(state, 'create_refused'))) refuse(readFileSync(join(state, 'create_refused'), 'utf8'));
+  if (existsSync(join(state, 'labels_refused')) && fields['labels[]']) refuse(readFileSync(join(state, 'labels_refused'), 'utf8'));
   const number = 100 + issues.length;
-  issues.push({ number, state: 'open', title: one('title'), body: one('body'), labels: fields['labels[]'] ?? [], comments: [] });
+  const labels = existsSync(join(state, 'drop_labels')) ? [] : fields['labels[]'] ?? [];
+  issues.push({ number, state: 'open', title: one('title'), body: one('body'), labels, comments: [] });
   writeFileSync(file, JSON.stringify(issues));
   const append = join(state, 'append_on_create');
   if (existsSync(append)) { appendFileSync(process.env.FAKE_GH_QUEUE, readFileSync(append, 'utf8')); rmSync(append); }
-  console.log(JSON.stringify({ number, html_url: url(number) })); process.exit(0);
+  console.log(JSON.stringify({ number, html_url: url(number), labels: labels.map((name) => ({ name })) })); process.exit(0);
+}
+const lab = (path ?? '').match(/^repos\\/Chulf58\\/sterling\\/labels\\/(.+)$/);
+if (method === 'GET' && lab) {
+  const name = decodeURIComponent(lab[1]);
+  if (!known().includes(name)) { console.log(JSON.stringify({ message: 'Not Found', status: '404' })); console.error('gh: Not Found (HTTP 404)'); process.exit(1); }
+  console.log(JSON.stringify({ name })); process.exit(0);
+}
+if (method === 'POST' && path === 'repos/Chulf58/sterling/labels') {
+  if (existsSync(join(state, 'label_write_refused'))) refuse(readFileSync(join(state, 'label_write_refused'), 'utf8'));
+  writeFileSync(labelsFile, JSON.stringify([...known(), one('name')]));
+  console.log(JSON.stringify({ name: one('name') })); process.exit(0);
+}
+const setl = method === 'POST' && (path ?? '').match(/^repos\\/Chulf58\\/sterling\\/issues\\/(\\d+)\\/labels$/);
+if (setl) {
+  if (existsSync(join(state, 'label_write_refused'))) refuse(readFileSync(join(state, 'label_write_refused'), 'utf8'));
+  const issue = issues.find((i) => i.number === Number(setl[1]));
+  for (const l of fields['labels[]'] ?? []) if (!known().includes(l)) { console.log(JSON.stringify({ message: 'Validation Failed', status: '422' })); console.error('gh: Validation Failed (HTTP 422)'); process.exit(1); }
+  issue.labels = [...new Set([...issue.labels, ...(fields['labels[]'] ?? [])])];
+  writeFileSync(file, JSON.stringify(issues));
+  console.log(JSON.stringify(issue.labels.map((name) => ({ name })))); process.exit(0);
 }
 const m = method === 'POST' && (path ?? '').match(/^repos\\/Chulf58\\/sterling\\/issues\\/(\\d+)\\/comments$/);
 if (m) {
@@ -447,13 +484,230 @@ test('cli --flush: a malformed queue line refuses with exit 2 and leaves the fil
 test('cli --list: prints the open sterling-report issues', () =>
   withSetup((p) => {
     seed(p, [
-      { number: 3, state: 'open', title: 'Open one', body: '', labels: ['sterling-report', 'severity:blocked'], comments: [] },
-      { number: 4, state: 'closed', title: 'Closed one', body: '', labels: ['sterling-report'], comments: [] },
+      { number: 3, state: 'open', title: 'Open one', body: 'Fingerprint: sterling-fp-0123456789ab', labels: ['sterling-report', 'severity:blocked'], comments: [] },
+      { number: 4, state: 'closed', title: 'Closed one', body: 'Fingerprint: sterling-fp-0123456789ac', labels: ['sterling-report'], comments: [] },
     ]);
     const r = run(p, ['--list']);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /#3 .*Open one/);
     assert.ok(!r.stdout.includes('Closed one'));
+  }));
+
+// ---------- labels the filer cannot set ----------
+
+const LABELS = 'Labels: sterling-report, severity:friction, project:acme';
+const creates = (p) => ghLog(p).filter((c) => c[0] === 'api' && c.includes('POST') && c.includes('repos/Chulf58/sterling/issues'));
+const hasLabelField = (call) => call.some((x) => x.startsWith('labels[]='));
+const NOT_ACCEPTED =
+  'report-issue: filed without labels: GitHub did not accept the labels (sterling-report, severity:friction, project:acme); they are in the issue body as the Labels line. A maintainer can apply them with report-issue --apply-labels.';
+
+test('render: a visible Labels line sits just above the fingerprint line, so the classification survives a refused label', () => {
+  const r = validateReport(good(), ctx);
+  const body = renderBody(r, { version: '1', head: null, host: 'claude-code', project: 'acme' });
+  assert.ok(body.endsWith(`\n${LABELS}\nFingerprint: sterling-fp-${fingerprint(r.component, r.title)}`), body);
+});
+
+test('labels line: parseLabelsLine keeps only Sterling-shaped labels, withLabelsLine adds a missing line without touching the fingerprint', () => {
+  assert.deepEqual(parseLabelsLine(`x\n${LABELS}\nFingerprint: sterling-fp-0123456789ab`), ['sterling-report', 'severity:friction', 'project:acme']);
+  assert.deepEqual(parseLabelsLine('Labels: sterling-report, bug, severity:urgent, project:a b, project:ok.1'), ['sterling-report', 'project:ok.1'], 'a label outside the three shapes is dropped');
+  assert.equal(parseLabelsLine('no line here'), null);
+  const fp = 'Fingerprint: sterling-fp-0123456789ab';
+  const labels = ['sterling-report', 'severity:blocked'];
+  assert.equal(withLabelsLine(`Body\n\n${fp}`, labels, '0123456789ab'), `Body\n\nLabels: sterling-report, severity:blocked\n${fp}`);
+  const has = `Body\n${LABELS}\n${fp}`;
+  assert.equal(withLabelsLine(has, labels, '0123456789ab'), has, 'an existing Labels line is left alone');
+  assert.equal(withLabelsLine('plain', labels, '0123456789ab'), 'plain\n\nLabels: sterling-report, severity:blocked', 'no fingerprint line: the Labels line is appended');
+});
+
+test('cli --dry-run: the printed body carries the Labels line', () =>
+  withSetup((p) => {
+    const r = run(p, ['--dry-run', ...reportArgs()]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(`${LABELS}\nFingerprint: sterling-fp-`), r.stdout);
+  }));
+
+test('cli: a project named like a UUID cannot put the UUID in the Labels or Project line', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.project, '.sterling', 'config.json'), JSON.stringify({ project_name: '630e54e6-8c61-4b73-beee-de569a5ec852' }));
+    const r = run(p, ['--dry-run', ...reportArgs()]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!r.stdout.includes('630e54e6-8c61'), r.stdout);
+  }));
+
+test('cli: a labelled create that GitHub accepts is one create with the Labels line in the body and no note', () =>
+  withSetup((p) => {
+    const r = run(p, reportArgs());
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(creates(p).length, 1);
+    assert.ok(hasLabelField(creates(p)[0]));
+    assert.ok(issues(p)[0].body.includes(`${LABELS}\nFingerprint:`));
+    assert.ok(!r.stdout.includes('filed without labels'));
+  }));
+
+for (const status of [403, 404, 422]) {
+  test(`cli: HTTP ${status} on the labelled create is retried once without labels and reported as filed`, () =>
+    withSetup((p) => {
+      writeFileSync(join(p.state, 'labels_refused'), String(status));
+      const r = run(p, reportArgs());
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      const calls = creates(p);
+      assert.equal(calls.length, 2, 'one labelled try, one unlabelled retry');
+      assert.ok(hasLabelField(calls[0]) && !hasLabelField(calls[1]));
+      const [issue] = issues(p);
+      assert.deepEqual(issue.labels, []);
+      assert.ok(issue.body.includes(`${LABELS}\nFingerprint:`), 'the classification is in the body');
+      assert.match(r.stdout, /issues\/100/);
+      assert.deepEqual(r.stdout.split('\n').filter((l) => l.includes('filed without labels')), [NOT_ACCEPTED]);
+      assert.ok(!existsSync(p.queue));
+    }));
+}
+
+test('cli: a labelled create that succeeds with its labels dropped is not followed by a second create; one note is printed', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.state, 'drop_labels'), '');
+    const r = run(p, reportArgs());
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(creates(p).length, 1, 'never post twice');
+    assert.equal(issues(p).length, 1);
+    assert.deepEqual(r.stdout.split('\n').filter((l) => l.includes('filed without labels')), [NOT_ACCEPTED]);
+    assert.ok(!existsSync(p.queue));
+  }));
+
+test('cli: HTTP 401 on the create is an auth failure, not retried unlabelled; the report is queued', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.state, 'create_refused'), '401');
+    const r = run(p, reportArgs());
+    assert.equal(r.status, 1);
+    assert.equal(creates(p).length, 1);
+    assert.match(r.stderr, /report-issue: QUEUED.*401/);
+    assert.equal(queued(p).length, 1);
+    assert.deepEqual(queued(p)[0].labels, ['sterling-report', 'severity:friction', 'project:acme']);
+  }));
+
+test('cli: a 5xx on the labelled create is not retried unlabelled; the report is queued', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.state, 'labels_refused'), '503');
+    const r = run(p, reportArgs());
+    assert.equal(r.status, 1);
+    assert.equal(creates(p).length, 1);
+    assert.match(r.stderr, /report-issue: QUEUED.*503/);
+    assert.equal(queued(p).length, 1);
+  }));
+
+test('cli: when the unlabelled retry is refused too, the report is queued and exits 1', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.state, 'create_refused'), '422');
+    const r = run(p, reportArgs());
+    assert.equal(r.status, 1);
+    assert.equal(creates(p).length, 2);
+    assert.match(r.stderr, /report-issue: QUEUED.*422/);
+    assert.equal(queued(p).length, 1);
+    assert.deepEqual(issues(p), []);
+  }));
+
+test('cli: a network failure on the create is not retried unlabelled', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.state, 'fail_create_after'), '0');
+    const r = run(p, reportArgs());
+    assert.equal(r.status, 1);
+    assert.equal(creates(p).length, 1);
+    assert.equal(queued(p).length, 1);
+  }));
+
+test('cli queue compatibility: a queued entry with no Labels line is sent with one added above its fingerprint, fingerprint unchanged', () =>
+  withSetup((p) => {
+    const fp = fingerprint('H19', 'Old queued report');
+    const old = { v: 1, queued_at: '2026-10-01T00:00:00.000Z', fingerprint: fp, title: 'Old queued report', labels: ['sterling-report', 'severity:blocked', 'project:old'], body: `Component: \`H19\`\n\nFingerprint: sterling-fp-${fp}` };
+    writeFileSync(p.queue, `${JSON.stringify(old)}\n`);
+    const r = run(p, ['--flush']);
+    assert.equal(r.status, 0, r.stderr);
+    const [issue] = issues(p);
+    assert.equal(issue.body, `Component: \`H19\`\n\nLabels: sterling-report, severity:blocked, project:old\nFingerprint: sterling-fp-${fp}`);
+    assert.deepEqual(issue.labels, old.labels);
+    assert.ok(!existsSync(p.queue));
+  }));
+
+test('cli queue compatibility: a queued entry that already has a Labels line is not given a second one', () =>
+  withSetup((p) => {
+    const fp = '0123456789ab';
+    const entry = { v: 1, fingerprint: fp, title: 'New queued', labels: ['sterling-report'], body: `x\nLabels: sterling-report\nFingerprint: sterling-fp-${fp}` };
+    writeFileSync(p.queue, `${JSON.stringify(entry)}\n`);
+    assert.equal(run(p, ['--flush']).status, 0);
+    assert.equal(issues(p)[0].body.match(/^Labels: /gm).length, 1);
+  }));
+
+test('cli dedup: an open report that GitHub stored without labels is still found by its fingerprint and commented on', () =>
+  withSetup((p) => {
+    const fp = fingerprint(good().component, good().title);
+    seed(p, [{ number: 1, state: 'open', title: 'x', body: `old\n${LABELS}\nFingerprint: sterling-fp-${fp}`, labels: [], comments: [] }]);
+    const r = run(p, reportArgs());
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(issues(p).length, 1, 'no duplicate');
+    assert.equal(issues(p)[0].comments.length, 1);
+    assert.deepEqual(creates(p), []);
+    const search = ghLog(p).find((c) => c.includes('search/issues'));
+    assert.ok(search.includes(`q=repo:Chulf58/sterling is:issue "sterling-fp-${fp}" in:body`), JSON.stringify(search));
+  }));
+
+test('cli --list: finds reports by the fingerprint marker, labelled or not, and shows the body labels for an unlabelled one', () =>
+  withSetup((p) => {
+    seed(p, [
+      { number: 1, state: 'open', title: 'Unlabelled', body: `x\n${LABELS}\nFingerprint: sterling-fp-0123456789ab`, labels: [], comments: [] },
+      { number: 2, state: 'open', title: 'Labelled', body: 'x\nFingerprint: sterling-fp-0123456789ac', labels: ['sterling-report', 'severity:blocked'], comments: [] },
+      { number: 3, state: 'open', title: 'Only mentions it', body: 'see sterling-fp-0123456789ab in passing', labels: [], comments: [] },
+      { number: 4, state: 'closed', title: 'Closed one', body: 'Fingerprint: sterling-fp-0123456789ad', labels: [], comments: [] },
+    ]);
+    const r = run(p, ['--list']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /2 open sterling-report issue\(s\)/);
+    assert.match(r.stdout, /#1 \[labels in body, not applied: sterling-report, severity:friction, project:acme\] Unlabelled/);
+    assert.match(r.stdout, /#2 \[sterling-report, severity:blocked\] Labelled/);
+    assert.ok(!r.stdout.includes('Only mentions it') && !r.stdout.includes('Closed one'));
+    const search = ghLog(p).find((c) => c.includes('search/issues'));
+    assert.ok(search.includes('q=repo:Chulf58/sterling is:issue is:open "sterling-fp-" in:body'), JSON.stringify(search));
+    assert.ok(!search.some((x) => x.includes('labels')), 'the list does not filter by label');
+  }));
+
+// ---------- --apply-labels (maintainer mode) ----------
+
+const unlabelled = (n, labelsLine = LABELS) => ({ number: n, state: 'open', title: `Report ${n}`, body: `x\n${labelsLine}\nFingerprint: sterling-fp-01234567890${n}`, labels: [], comments: [] });
+
+test('cli --apply-labels: creates the missing labels, sets them on each unlabelled report, never edits a body', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.state, 'labels.json'), JSON.stringify(['bug', 'sterling-report']));
+    const done = { ...unlabelled(2), labels: ['sterling-report', 'severity:friction', 'project:acme'] };
+    seed(p, [unlabelled(1), done, unlabelled(3, 'Labels: sterling-report, bug, severity:blocked')]);
+    const before = issues(p).map((i) => i.body);
+    const r = run(p, ['--apply-labels']);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const after = issues(p);
+    assert.deepEqual(after[0].labels, ['sterling-report', 'severity:friction', 'project:acme']);
+    assert.deepEqual(after[1].labels, done.labels, 'an already-labelled report is skipped');
+    assert.deepEqual(after[2].labels, ['sterling-report', 'severity:blocked'], 'a label outside the three shapes is not applied');
+    assert.deepEqual(after.map((i) => i.body), before, 'the body is never edited');
+    assert.deepEqual(JSON.parse(readFileSync(join(p.state, 'labels.json'), 'utf8')).sort(), ['bug', 'project:acme', 'severity:blocked', 'severity:friction', 'sterling-report']);
+    assert.ok(!ghLog(p).some((c) => c.includes('PATCH')));
+    assert.match(r.stdout, /#1/);
+    assert.match(r.stdout, /#3/);
+  }));
+
+for (const status of [403, 404]) {
+  test(`cli --apply-labels: HTTP ${status} refuses loudly, names the status and says a maintainer must run it`, () =>
+    withSetup((p) => {
+      seed(p, [unlabelled(1)]);
+      writeFileSync(join(p.state, 'label_write_refused'), String(status));
+      const r = run(p, ['--apply-labels']);
+      assert.equal(r.status, 2, r.stdout + r.stderr);
+      assert.match(r.stderr, new RegExp(`report-issue: --apply-labels refused: GitHub answered HTTP ${status} .*account cannot change labels on Chulf58/sterling\\. A maintainer of the repo must run report-issue --apply-labels\\.`));
+      assert.deepEqual(issues(p)[0].labels, []);
+    }));
+}
+
+test('cli --apply-labels: takes no report fields and does not combine with another mode', () =>
+  withSetup((p) => {
+    assert.equal(run(p, ['--apply-labels', '--title', 'x']).status, 2);
+    assert.equal(run(p, ['--apply-labels', '--list']).status, 2);
+    assert.deepEqual(ghLog(p), []);
   }));
 
 // ---------- queue lock ----------
