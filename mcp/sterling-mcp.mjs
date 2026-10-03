@@ -21103,8 +21103,8 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // packages/mcp-server/dist/server.js
-import { readFileSync as readFileSync2, existsSync as existsSync4 } from "node:fs";
-import { join as join5, dirname as dirname5 } from "node:path";
+import { readFileSync as readFileSync3, existsSync as existsSync5 } from "node:fs";
+import { join as join6, dirname as dirname5 } from "node:path";
 
 // packages/schemas/dist/paths.js
 function normalizeRepoPath(input) {
@@ -21285,7 +21285,11 @@ var featureArticleSchema = base.extend({
   // while a flag is QUERYABLE and the read-time state check can surface it. Set
   // it when creating an article ahead of the code; clear it by rewriting the
   // role from the file.
-  files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional() })),
+  // `entry` marks the file a registry reaches: the hooks.json command, the
+  // command or skill file, the registerTool site, the bin or the agent
+  // template (decision feature-article-states-follow-the-spec-meaning). The
+  // read-time state check looks it up to tell built from wired_in.
+  files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional(), entry: external_exports.boolean().optional() })),
   // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
   // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
   // drift check confirms a content change against this before flagging, so a
@@ -21323,6 +21327,11 @@ var featureArticleSchema = base.extend({
   // supersession, record ids do not (decision foreign_474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
+  // Meanings (decision feature-article-states-follow-the-spec-meaning):
+  // planned = not started; built = code exists but nothing reaches it;
+  // wired_in = reachable from a registry, not yet proven in use; active = in
+  // use; dormant = reachable but switched off; deprecated = retired.
+  // wiring_todo_id points a built article at the board item that wires it in.
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
   state_reason: external_exports.string().optional(),
   wiring_todo_id: external_exports.string().uuid().optional(),
@@ -21534,7 +21543,6 @@ var SYSTEM_REASONS = [
   "deletion_candidate",
   "capture_owed",
   "promotion_review",
-  "wire_in_dormant",
   "refresh_reference",
   // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
   "article_missing",
@@ -21556,7 +21564,10 @@ var SYSTEM_REASONS = [
   // hashes — so an article sat at `planned` over a shipped, wired, probe-verified
   // feature, and anyone querying it would have concluded the feature did not
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
-  // reader trusts first.
+  // reader trusts first. It also carries the wiring check (decision
+  // feature-article-states-follow-the-spec-meaning): a wired_in or active article
+  // whose files[] entry no registry reaches or that marks no entry, and a built
+  // article whose entry is reached.
   "state_review",
   // A feature_article's NON-HISTORY serialized size crossed
   // config.article_oversize_chars on a knowledge_update/append/edit — the
@@ -26077,8 +26088,8 @@ var SterlingStore = class _SterlingStore {
 // packages/mcp-server/dist/tools.js
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
-import { chmodSync, existsSync as existsSync3, lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync, realpathSync as realpathSync2, renameSync, statSync as statSync2, unlinkSync, writeFileSync } from "node:fs";
-import { dirname as dirname4, isAbsolute, join as join4, relative, sep } from "node:path";
+import { chmodSync, existsSync as existsSync4, lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, realpathSync as realpathSync2, renameSync, statSync as statSync2, unlinkSync, writeFileSync } from "node:fs";
+import { dirname as dirname4, isAbsolute, join as join5, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 // packages/mcp-server/dist/attestation-proof.js
@@ -26275,6 +26286,208 @@ function readHeadFile(root, key) {
   return { head_commit: head, blob, text };
 }
 
+// packages/mcp-server/dist/entry-reachability.js
+import { existsSync as existsSync3, readdirSync, readFileSync } from "node:fs";
+import { join as join4 } from "node:path";
+var MCP_TOOL_FILES = /* @__PURE__ */ new Set(["packages/mcp-server/src/server.ts", "packages/mcp-server/src/tools.ts"]);
+var TOOL_NAME_TOKEN = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
+var BIN_REFERENCE_DIRS = ["commands", "agent-templates", "templates", "scripts", "scripts/lib", "scripts/hooks", "scripts/hooks/lib"];
+var BIN_REFERENCE_FILES = ["hooks/hooks.json"];
+var BIN_REGISTRY_FILE = "scripts/lib/bundled-artifacts.mjs";
+var EntryReachability = class {
+  root;
+  hookCommands;
+  toolNames;
+  binEntries;
+  agentFiles;
+  npmScripts;
+  referenceCorpus;
+  sterlingClone;
+  constructor(root) {
+    this.root = root;
+  }
+  /**
+   * The verdict for one entry file, or null when no registry covers its kind
+   * or the tree is not a Sterling clone.
+   */
+  judge(path, role) {
+    if (!(this.sterlingClone ??= this.isSterlingClone()))
+      return null;
+    let m;
+    if (m = /^(?:scripts\/)?hooks\/([^/]+\.mjs)$/.exec(path))
+      return this.judgeHook(path, m[1]);
+    if (/^commands\/[^/]+\.md$/.test(path))
+      return this.judgePresent(path, "command");
+    if (/^skills\/[^/]+\/SKILL\.md$/.test(path))
+      return this.judgePresent(path, "skill");
+    if (MCP_TOOL_FILES.has(path))
+      return this.judgeTool(path, role);
+    if (m = /^agent-templates\/([^/]+\.md)$/.exec(path))
+      return this.judgeAgent(path, m[1]);
+    if (/^scripts\/[^/]+\.mjs$/.test(path) || /^bin\/[^/]+\.mjs$/.test(path))
+      return this.judgeScript(path);
+    return null;
+  }
+  judgeHook(path, bundle) {
+    const commands = this.hookCommands ??= this.load("hooks/hooks.json", (text) => {
+      const out = [];
+      const walk = (node) => {
+        if (Array.isArray(node))
+          node.forEach(walk);
+        else if (node && typeof node === "object") {
+          for (const [k, v] of Object.entries(node)) {
+            if (k === "command" && typeof v === "string")
+              out.push(v);
+            else
+              walk(v);
+          }
+        }
+      };
+      walk(JSON.parse(text));
+      return out;
+    });
+    if (!commands.ok)
+      return { path, kind: "hook", reached: false, detail: commands.why };
+    const target = `hooks/${bundle}`;
+    const hit = commands.value.some((c) => c === target || c.includes(`/${target}`) || c.includes(` ${target}`));
+    return hit ? { path, kind: "hook", reached: true, detail: `hooks/hooks.json runs ${target}` } : { path, kind: "hook", reached: false, detail: `no hooks/hooks.json command runs ${target}` };
+  }
+  judgePresent(path, kind) {
+    return existsSync3(join4(this.root, path)) ? { path, kind, reached: true, detail: `${kind} file present` } : { path, kind, reached: false, detail: `${path} does not exist, so nothing discovers it` };
+  }
+  judgeTool(path, role) {
+    const names = this.toolNames ??= this.load("packages/mcp-server/src/server.ts", (text) => {
+      const out = /* @__PURE__ */ new Set();
+      for (const hit of text.matchAll(/registerTool\(\s*['"]([a-z][a-z0-9_]*)['"]/g))
+        out.add(hit[1]);
+      return out;
+    });
+    if (!names.ok)
+      return { path, kind: "tool", reached: false, detail: names.why };
+    const named = [...new Set(role.match(TOOL_NAME_TOKEN) ?? [])];
+    const registered = named.filter((n) => names.value.has(n));
+    if (registered.length)
+      return { path, kind: "tool", reached: true, detail: `server.ts registers ${registered.join(", ")}` };
+    return {
+      path,
+      kind: "tool",
+      reached: false,
+      detail: named.length ? `its role names ${named.join(", ")}, and server.ts registers none of them` : `its role names no tool; a tool entry names its registerTool name in the files[] role`
+    };
+  }
+  judgeAgent(path, file) {
+    const files = this.agentFiles ??= this.load("agent-templates/registry.json", (text) => {
+      const parsed = JSON.parse(text);
+      return new Set((parsed.agents ?? []).map((a) => a.file).filter((f) => typeof f === "string"));
+    });
+    if (!files.ok)
+      return { path, kind: "agent", reached: false, detail: files.why };
+    return files.value.has(file) ? { path, kind: "agent", reached: true, detail: `agent-templates/registry.json lists ${file}` } : { path, kind: "agent", reached: false, detail: `agent-templates/registry.json does not list ${file}` };
+  }
+  judgeScript(path) {
+    const npm = this.npmScripts ??= this.readNpmScripts();
+    if (path.startsWith("scripts/") && npm.ok && npm.value.some((s2) => s2.includes(path))) {
+      return { path, kind: "script", reached: true, detail: "a package.json script runs it" };
+    }
+    const bins = this.binEntries ??= this.load(BIN_REGISTRY_FILE, (text) => {
+      const block = /export const BIN_ENTRIES\s*=\s*\{([\s\S]*?)\n\};/.exec(text);
+      if (!block)
+        throw new Error("no BIN_ENTRIES object found");
+      const out = /* @__PURE__ */ new Map();
+      for (const hit of block[1].matchAll(/^\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_$][\w$]*))\s*:\s*['"]([^'"]+)['"]/gm)) {
+        out.set(hit[1] ?? hit[2] ?? hit[3], hit[4]);
+      }
+      return out;
+    });
+    if (!bins.ok)
+      return { path, kind: "script", reached: false, detail: bins.why };
+    let name;
+    let source;
+    const binPath = /^bin\/([^/]+)\.mjs$/.exec(path);
+    if (binPath) {
+      name = bins.value.has(binPath[1]) ? binPath[1] : void 0;
+      source = name ? bins.value.get(name) : void 0;
+    } else {
+      for (const [n, src] of bins.value)
+        if (src === path)
+          [name, source] = [n, src];
+    }
+    if (!name) {
+      const npmNote = npm.ok ? "no package.json script runs it" : npm.why;
+      return { path, kind: "script", reached: false, detail: `${BIN_REGISTRY_FILE} BIN_ENTRIES does not list it and ${npmNote}` };
+    }
+    const tokens = [`bin/${name}.mjs`, `'${name}.mjs'`, `"${name}.mjs"`];
+    for (const [file, text] of this.corpus()) {
+      if (file === source || file === path)
+        continue;
+      if (tokens.some((t) => text.includes(t)))
+        return { path, kind: "script", reached: true, detail: `BIN_ENTRIES lists ${name} and ${file} references it` };
+    }
+    return { path, kind: "script", reached: false, detail: `BIN_ENTRIES lists ${name} but no command, skill or script references bin/${name}.mjs` };
+  }
+  corpus() {
+    if (this.referenceCorpus)
+      return this.referenceCorpus;
+    const out = /* @__PURE__ */ new Map();
+    const add = (rel) => {
+      try {
+        out.set(rel, readFileSync(join4(this.root, rel), "utf8"));
+      } catch (err) {
+        const code = err.code;
+        if (code !== "ENOENT" && code !== "EISDIR")
+          throw err;
+      }
+    };
+    const list = (dir) => {
+      try {
+        return readdirSync(join4(this.root, dir));
+      } catch (err) {
+        if (err.code === "ENOENT")
+          return [];
+        throw err;
+      }
+    };
+    for (const dir of BIN_REFERENCE_DIRS) {
+      for (const name of list(dir)) {
+        const rel = `${dir}/${name}`;
+        if (rel !== BIN_REGISTRY_FILE)
+          add(rel);
+      }
+    }
+    for (const skill of list("skills"))
+      add(`skills/${skill}/SKILL.md`);
+    for (const file of BIN_REFERENCE_FILES)
+      add(file);
+    this.referenceCorpus = out;
+    return out;
+  }
+  /** Same predicate as isSterlingClone in scripts/lib/handoff-projection.mjs (see the header). */
+  isSterlingClone() {
+    if (!existsSync3(join4(this.root, "scripts/architecture-projection.mjs")))
+      return false;
+    const manifest = this.load(".claude-plugin/plugin.json", (text) => JSON.parse(text).name);
+    return manifest.ok && manifest.value === "sterling";
+  }
+  readNpmScripts() {
+    if (!existsSync3(join4(this.root, "package.json")))
+      return { ok: true, value: [] };
+    return this.load("package.json", (text) => {
+      const scripts = JSON.parse(text).scripts ?? {};
+      return Object.values(scripts).filter((v) => typeof v === "string");
+    });
+  }
+  load(rel, parse3) {
+    const abs = join4(this.root, rel);
+    if (!existsSync3(abs))
+      return { ok: false, why: `${rel} is missing` };
+    try {
+      return { ok: true, value: parse3(readFileSync(abs, "utf8")) };
+    } catch (err) {
+      return { ok: false, why: `${rel} could not be parsed (${err.message})` };
+    }
+  }
+};
+
 // packages/mcp-server/dist/tools.js
 var BOARD_TEXT_CLIP = 240;
 var BOARD_TEXT_FIELDS = ["id", "slug", "objective", "source", "system_reason", "status", "priority", "feature_link", "blocked_by", "updated_at"];
@@ -26441,8 +26654,8 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
   if (path.split(".").some((seg) => CONFIG_SET_FORBIDDEN_SEGMENTS.has(seg))) {
     throw new Error(`config_set: '${path}' contains a forbidden path segment \u2014 __proto__ / constructor / prototype are refused anywhere in a dotted path (prototype-pollution guard). Nothing was written.`);
   }
-  const configDir = join4(repoRoot, ".sterling");
-  const configPath = join4(configDir, "config.json");
+  const configDir = join5(repoRoot, ".sterling");
+  const configPath = join5(configDir, "config.json");
   let dirLst;
   try {
     dirLst = lstatSync2(configDir);
@@ -26481,7 +26694,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (!fileLst.isFile()) {
       throw new Error(`config_set: .sterling/config.json is not a regular file \u2014 refusing. Nothing was written.`);
     }
-    currentBytes = readFileSync(configPath);
+    currentBytes = readFileSync2(configPath);
   } else {
     currentBytes = Buffer.alloc(0);
   }
@@ -26538,7 +26751,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 ${issues}. Nothing was written.`);
   }
   const serialized = JSON.stringify(mutated, null, 2) + "\n";
-  const tmpPath = join4(configDir, `config.json.tmp-${randomUUID2()}`);
+  const tmpPath = join5(configDir, `config.json.tmp-${randomUUID2()}`);
   writeFileSync(tmpPath, serialized);
   let renamed = false;
   try {
@@ -26550,7 +26763,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     }
     let raceBytes;
     try {
-      raceBytes = readFileSync(configPath);
+      raceBytes = readFileSync2(configPath);
     } catch {
       raceBytes = Buffer.alloc(0);
     }
@@ -26700,7 +26913,7 @@ var SterlingTools = class _SterlingTools {
     for (const rel of _SterlingTools.baselineablePaths(record2)) {
       if (only && !only.has(rel))
         continue;
-      const shape = lstatSync2(join4(root, rel), { throwIfNoEntry: false });
+      const shape = lstatSync2(join5(root, rel), { throwIfNoEntry: false });
       if (!shape || !shape.isFile())
         continue;
       const hash = this.hashFile(rel, root);
@@ -26833,7 +27046,7 @@ var SterlingTools = class _SterlingTools {
       return { root: mapped, unresolved: false };
     if (!this.repoRoot)
       return { root: void 0, unresolved: true };
-    return { root: join4(this.repoRoot, mapped), unresolved: false };
+    return { root: join5(this.repoRoot, mapped), unresolved: false };
   }
   /**
    * Does a record's working_tree name a tree OTHER than this project? A
@@ -27442,7 +27655,7 @@ var SterlingTools = class _SterlingTools {
     if (!root)
       return void 0;
     try {
-      return createHash2("sha256").update(readFileSync(join4(root, rel))).digest("hex");
+      return createHash2("sha256").update(readFileSync2(join5(root, rel))).digest("hex");
     } catch {
       return void 0;
     }
@@ -27506,7 +27719,7 @@ var SterlingTools = class _SterlingTools {
     const baseline = ctx.baselines?.[rel];
     let stat;
     try {
-      stat = statSync2(join4(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
+      stat = statSync2(join5(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
     } catch (err) {
       const code = err?.code;
       return { verdict: { kind: "unavailable", reason: `stat_failed_${String(code ?? "unknown").toLowerCase()}` } };
@@ -28366,6 +28579,13 @@ var SterlingTools = class _SterlingTools {
   knowledgeQuery(opts) {
     const nowMs = Date.parse(this.now());
     const ageDays = (iso) => Math.floor((nowMs - Date.parse(iso)) / DAY_MS);
+    const reachability = /* @__PURE__ */ new Map();
+    const reachabilityFor = (root) => {
+      let r = reachability.get(root);
+      if (!r)
+        reachability.set(root, r = new EntryReachability(root));
+      return r;
+    };
     return this.store.query(opts).map((record2) => {
       if (record2.type === "research_finding") {
         const r = record2;
@@ -28395,7 +28615,7 @@ var SterlingTools = class _SterlingTools {
           rel = void 0;
         }
         if (rel && tree.root) {
-          const stat = statSync2(join4(tree.root, rel), { throwIfNoEntry: false });
+          const stat = statSync2(join5(tree.root, rel), { throwIfNoEntry: false });
           if (stat && stat.mtimeMs > Date.parse(r.source_date) && !this.isGeneratedProjection(rel) && this.contentChanged(rel, r.file_baselines, tree.root)) {
             this.maintenanceEnqueue({
               reason: "refresh_reference",
@@ -28487,20 +28707,45 @@ var SterlingTools = class _SterlingTools {
           });
         }
         const state = record2.state;
-        const unverifiedPaths = (a.files ?? []).filter((f) => f.unverified).map((f) => f.path);
+        const files = a.files ?? [];
+        const unverifiedPaths = files.filter((f) => f.unverified).map((f) => f.path);
         const overStated = (state === "planned" || state === "dormant") && liveBytes > PLANNED_CREDIBLE_BYTES;
-        if (overStated || unverifiedPaths.length) {
+        const claimsReach = state === "wired_in" || state === "active";
+        const entries = files.filter((f) => f.entry);
+        const verdicts = claimsReach || state === "built" ? entries.map((f) => reachabilityFor(treeRoot).judge(f.path, f.role ?? "")).filter((v) => v !== null) : [];
+        const unreached = claimsReach ? verdicts.filter((v) => !v.reached) : [];
+        const missingEntry = claimsReach && entries.length === 0;
+        const looksWired = state === "built" ? verdicts.filter((v) => v.reached) : [];
+        if (overStated || unverifiedPaths.length || unreached.length || missingEntry || looksWired.length) {
           const reasons = [];
           if (overStated) {
             reasons.push(`it declares state '${state}' while the files it owns hold ${liveBytes} bytes of code on disk \u2014 'planned' over written code reads as "this does not exist yet" to everyone who queries it`);
           }
+          for (const v of unreached) {
+            reasons.push(`it declares state '${state}' but its entry ${v.path} is not reached (${v.detail})`);
+          }
+          if (missingEntry) {
+            reasons.push(`it declares state '${state}' but marks no files[] entry, so nothing can check that a registry reaches it`);
+          }
+          for (const v of looksWired) {
+            reasons.push(`it declares state 'built' but its entry ${v.path} is reached (${v.detail}) \u2014 it looks wired_in`);
+          }
           if (unverifiedPaths.length) {
             reasons.push(`its files[] roles for ${unverifiedPaths.join(", ")} are still flagged unverified \u2014 the role was never written from the source, so the article does not yet describe what those files do`);
           }
+          const steps = [];
+          if (overStated || looksWired.length)
+            steps.push("knowledge_update the state");
+          if (unreached.length)
+            steps.push(`for ${unreached.map((v) => v.path).join(", ")}: wire it in, or knowledge_update the state to 'built'`);
+          if (missingEntry) {
+            steps.push(`mark the file a registry reaches as the entry, one targeted call: knowledge_edit(id: '${a.id}', field: 'files[path=<entry path>].entry', find: 'false', replace: 'true') \u2014 a tool entry is server.ts or tools.ts with the tool name in its role`);
+          }
+          const flagged = [.../* @__PURE__ */ new Set([...unverifiedPaths, ...unreached.map((v) => v.path), ...looksWired.map((v) => v.path)])];
           this.maintenanceEnqueue({
             reason: "state_review",
-            text: `review article '${a.slug}' metadata against reality: ${reasons.join("; and ")}. Check the prose against the code before changing anything \u2014 in the reported case every acceptance criterion HELD and only the metadata was wrong, so the fix was a state change and a files[] role pass, not a rewrite. Then knowledge_update the state` + (unverifiedPaths.length ? `, and clear each unverified flag once its role is written from the file \u2014 one targeted call per path, never a whole-array files[] update: ` + unverifiedPaths.map((p) => `knowledge_edit(id: '${a.id}', field: 'files[path=${p}].unverified', find: 'true', replace: 'false')`).join("; ") : "") + `.`,
-            file_keys: unverifiedPaths.length ? unverifiedPaths : (a.files ?? []).map((f) => f.path).slice(0, DRIFT_ITEMS_PER_READ),
+            text: `review article '${a.slug}' metadata against reality: ${reasons.join("; and ")}. Check the prose against the code before changing anything \u2014 in the reported case every acceptance criterion HELD and only the metadata was wrong, so the fix was a state change and a files[] role pass, not a rewrite. Then ${steps.length ? steps.join("; then ") : "knowledge_update the state"}` + (unverifiedPaths.length ? `, and clear each unverified flag once its role is written from the file \u2014 one targeted call per path, never a whole-array files[] update: ` + unverifiedPaths.map((p) => `knowledge_edit(id: '${a.id}', field: 'files[path=${p}].unverified', find: 'true', replace: 'false')`).join("; ") : "") + `.`,
+            file_keys: flagged.length ? flagged : files.map((f) => f.path).slice(0, DRIFT_ITEMS_PER_READ),
             feature_link: a.id
           });
         }
@@ -28722,7 +28967,8 @@ var SterlingTools = class _SterlingTools {
         throw new Error(`knowledge_edit: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base2} \u2014 exactly one is required, nothing was written. ` + (hits.length === 0 ? `Confirm the ${key} value against the live array.` : `Select on a key whose value is unique in the array.`));
       }
       const el = hits[0];
-      const cur = el[sub];
+      const declaredBoolean = el[sub] === void 0 && !!schemaFor(old.type)?.fields.find((f) => f.name === base2)?.element_fields?.some((f) => f.name === sub && f.type === "boolean");
+      const cur = declaredBoolean ? false : el[sub];
       if (typeof cur === "boolean") {
         if (find !== String(cur)) {
           throw new Error(`knowledge_edit: '${sub}' on the selected ${base2} element is ${cur}, not '${find}' \u2014 for a boolean sub-field 'find' must be its current value ('${cur}'); nothing was written.`);
@@ -30472,7 +30718,6 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     "reconcile_needed",
     "refresh_reference",
     "stale_research",
-    "wire_in_dormant",
     "state_review"
   ]);
   /** The one lane closeable ONLY by the files[]-append join described above. */
@@ -31644,12 +31889,12 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     if (!this.repoRoot) {
       throw new Error("session-event write: no project root is known to this server, so the transient register location cannot be resolved \u2014 use the script fallback (bin/no-capture.mjs / bin/concept-designed.mjs in the Sterling install root)");
     }
-    const eventsPath = join4(this.repoRoot, ".sterling", "transient", "session-events.json");
+    const eventsPath = join5(this.repoRoot, ".sterling", "transient", "session-events.json");
     mkdirSync3(dirname4(eventsPath), { recursive: true });
     let events = [];
-    if (existsSync3(eventsPath)) {
+    if (existsSync4(eventsPath)) {
       try {
-        const parsed = JSON.parse(readFileSync(eventsPath, "utf8"));
+        const parsed = JSON.parse(readFileSync2(eventsPath, "utf8"));
         if (Array.isArray(parsed))
           events = parsed;
       } catch {
@@ -33423,8 +33668,8 @@ if (KNOWLEDGE_CREATE_FIELD_VARIANTS.length < 2) {
 var knowledgeCreateFieldsSchema = external_exports.discriminatedUnion("type", KNOWLEDGE_CREATE_FIELD_VARIANTS);
 var strict = (shape) => external_exports.object(shape).strict();
 function createSterlingServer(storePath2) {
-  const configPath = join5(dirname5(storePath2), "config.json");
-  const config2 = parseConfig(existsSync4(configPath) ? JSON.parse(readFileSync2(configPath, "utf8")) : {});
+  const configPath = join6(dirname5(storePath2), "config.json");
+  const config2 = parseConfig(existsSync5(configPath) ? JSON.parse(readFileSync3(configPath, "utf8")) : {});
   const store = new MountedStores(storePath2, resolveDomainMounts(config2), { skipMissing: true });
   for (const m of store.missingDomains)
     process.stderr.write(missingDomainWarning(m) + "\n");
@@ -33531,33 +33776,33 @@ function createSterlingServer(storePath2) {
     inputSchema: strict({ old_id: external_exports.string(), fields: passthrough, orphans_acknowledged: external_exports.boolean().optional() })
   }, ({ old_id, fields, orphans_acknowledged }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged)));
   server2.registerTool("knowledge_update", {
-    description: "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body \u2014 pass only changed mutable fields; omitted fields are kept (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
+    description: "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body \u2014 pass only changed mutable fields; omitted fields are kept (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
     inputSchema: strict({
       id: external_exports.string(),
       body: passthrough,
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review item ids keyed to this record's chain that this write discharges \u2014 full ids, validated before the write"),
+      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full ids, validated before the write"),
       expected_version: external_exports.number().int().positive().optional().describe("CAS token: the version you read. A stale value refuses naming both versions, with nothing written"),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, body, resolves, expected_version, projection }) => json(tools.writeProjected(tools.knowledgeUpdateResult(id, body, resolves, expected_version), projection)));
   server2.registerTool("knowledge_append", {
-    description: `Append entries to an array field (history, files, current_ac, live_test_refs, \u2026) without retransmitting it; same versioned write path as knowledge_update. \`field\` may be an array-element selector 'arr[key=value].sub' to append inside ONE element's array (e.g. field "live_test_refs[ac_id=AC4].test_paths", entries ["tests/x.test.mjs"]); the selector must match exactly one element and sub must already be an array on it. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review items keyed to this record's chain, plus an article_missing item when an appended files[] entry's path is one of that item's file_keys (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.`,
+    description: `Append entries to an array field (history, files, current_ac, live_test_refs, \u2026) without retransmitting it; same versioned write path as knowledge_update. \`field\` may be an array-element selector 'arr[key=value].sub' to append inside ONE element's array (e.g. field "live_test_refs[ac_id=AC4].test_paths", entries ["tests/x.test.mjs"]); the selector must match exactly one element and sub must already be an array on it. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain, plus an article_missing item when an appended files[] entry's path is one of that item's file_keys (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.`,
     inputSchema: strict({
       id: external_exports.string(),
       field: external_exports.string(),
       entries: external_exports.array(external_exports.unknown()),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review item ids keyed to this record's chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges \u2014 full ids, validated before the write"),
+      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges \u2014 full ids, validated before the write"),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, field, entries, resolves, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries, resolves), projection)));
   server2.registerTool("knowledge_edit", {
-    description: `Replace one passage inside a string field without retransmitting it. \`find\` must match EXACTLY ONCE \u2014 zero or multiple matches are refused with the count; extend find to disambiguate. \`field\` may be an array-element selector 'arr[key=value].sub' (e.g. "files[path=scripts/prep.mjs].role"), which must match exactly one element. A BOOLEAN sub-field is set by value: find is its current value ('true'/'false'), replace the new one (e.g. field "files[path=scripts/prep.mjs].unverified", find 'true', replace 'false' clears the flag). Same versioned write path as knowledge_update. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt with chars_before/chars_after; projection:"full" returns the whole stored record.`,
+    description: `Replace one passage inside a string field without retransmitting it. \`find\` must match EXACTLY ONCE \u2014 zero or multiple matches are refused with the count; extend find to disambiguate. \`field\` may be an array-element selector 'arr[key=value].sub' (e.g. "files[path=scripts/prep.mjs].role"), which must match exactly one element. A BOOLEAN sub-field is set by value: find is its current value ('true'/'false'), replace the new one (e.g. field "files[path=scripts/prep.mjs].unverified", find 'true', replace 'false' clears the flag); an absent optional boolean such as files[].entry reads as 'false', so field "files[path=skills/drain/SKILL.md].entry", find 'false', replace 'true' sets it. Same versioned write path as knowledge_update. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt with chars_before/chars_after; projection:"full" returns the whole stored record.`,
     inputSchema: strict({
       id: external_exports.string(),
       field: external_exports.string(),
       find: external_exports.string(),
       replace: external_exports.string(),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review item ids keyed to this record's chain that this write discharges \u2014 full ids, validated before the write"),
+      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full ids, validated before the write"),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, field, find, replace, resolves, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace, resolves), projection)));
@@ -33573,12 +33818,12 @@ function createSterlingServer(storePath2) {
     })
   }, ({ id, field, find, replace, anchor, projection }) => json(tools.writeProjected(tools.knowledgeLineRefFix(id, field, find, replace, anchor), projection)));
   server2.registerTool("knowledge_array_remove", {
-    description: `Remove ONE element from an array field by selector 'arr[key=value]' (no trailing .sub), e.g. "files[path=scripts/prep.mjs]". Zero matches are refused with the count, and so are multiple matches that differ in any field; when every matched element is deep-equal (an identical duplicate) exactly one is removed and removed.note says "removed 1 of N identical elements". A selector only matches elements that have the key. Destructive, so: id must be the EXACT FULL UUID (no slug or prefix), and expected_version is REQUIRED \u2014 a stale token is refused naming both versions; a non-positive token is refused as invalid; a record with no stored version is refused. Refused: removing a feature_article's last files[] entry, or the last history entry. current_ac and live_test_refs may be emptied. Surviving elements keep order and bytes. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt carrying the removed element; projection:"full" returns the whole stored record.`,
+    description: `Remove ONE element from an array field by selector 'arr[key=value]' (no trailing .sub), e.g. "files[path=scripts/prep.mjs]". Zero matches are refused with the count, and so are multiple matches that differ in any field; when every matched element is deep-equal (an identical duplicate) exactly one is removed and removed.note says "removed 1 of N identical elements". A selector only matches elements that have the key. Destructive, so: id must be the EXACT FULL UUID (no slug or prefix), and expected_version is REQUIRED \u2014 a stale token is refused naming both versions; a non-positive token is refused as invalid; a record with no stored version is refused. Refused: removing a feature_article's last files[] entry, or the last history entry. current_ac and live_test_refs may be emptied. Surviving elements keep order and bytes. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt carrying the removed element; projection:"full" returns the whole stored record.`,
     inputSchema: strict({
       id: external_exports.string().describe("the EXACT full uuid \u2014 this call destroys, so no slug and no 8-char prefix is accepted"),
       selector: external_exports.string().describe("arr[key=value] \u2014 knowledge_edit's grammar with NO trailing '.sub'; the whole matched element is removed"),
       expected_version: external_exports.number().int().positive().describe("REQUIRED: the version you read \u2014 a stale token refuses naming both versions, with nothing written"),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review item ids keyed to this record's chain that this write discharges \u2014 full ids, validated before the write"),
+      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full ids, validated before the write"),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, selector, expected_version, resolves, projection }) => json(tools.writeProjected(tools.knowledgeArrayRemove(id, selector, expected_version, resolves), projection)));
@@ -33698,13 +33943,13 @@ function createSterlingServer(storePath2) {
 }
 
 // packages/mcp-server/dist/runtime.js
-import { readFileSync as readFileSync3, mkdirSync as mkdirSync4, writeFileSync as writeFileSync2 } from "node:fs";
+import { readFileSync as readFileSync4, mkdirSync as mkdirSync4, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname as dirname6 } from "node:path";
 function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */ new Date()).toISOString()) {
   try {
     let buildId = "unknown";
     try {
-      const raw = readFileSync3(buildIdPath(serverDir), "utf8").trim();
+      const raw = readFileSync4(buildIdPath(serverDir), "utf8").trim();
       if (raw)
         buildId = raw;
     } catch {

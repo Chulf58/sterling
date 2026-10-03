@@ -43282,7 +43282,11 @@ var featureArticleSchema = base.extend({
   // while a flag is QUERYABLE and the read-time state check can surface it. Set
   // it when creating an article ahead of the code; clear it by rewriting the
   // role from the file.
-  files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional() })),
+  // `entry` marks the file a registry reaches: the hooks.json command, the
+  // command or skill file, the registerTool site, the bin or the agent
+  // template (decision feature-article-states-follow-the-spec-meaning). The
+  // read-time state check looks it up to tell built from wired_in.
+  files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional(), entry: external_exports.boolean().optional() })),
   // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
   // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
   // drift check confirms a content change against this before flagging, so a
@@ -43320,6 +43324,11 @@ var featureArticleSchema = base.extend({
   // supersession, record ids do not (decision foreign_474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
+  // Meanings (decision feature-article-states-follow-the-spec-meaning):
+  // planned = not started; built = code exists but nothing reaches it;
+  // wired_in = reachable from a registry, not yet proven in use; active = in
+  // use; dormant = reachable but switched off; deprecated = retired.
+  // wiring_todo_id points a built article at the board item that wires it in.
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
   state_reason: external_exports.string().optional(),
   wiring_todo_id: external_exports.string().uuid().optional(),
@@ -43531,7 +43540,6 @@ var SYSTEM_REASONS = [
   "deletion_candidate",
   "capture_owed",
   "promotion_review",
-  "wire_in_dormant",
   "refresh_reference",
   // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
   "article_missing",
@@ -43553,7 +43561,10 @@ var SYSTEM_REASONS = [
   // hashes — so an article sat at `planned` over a shipped, wired, probe-verified
   // feature, and anyone querying it would have concluded the feature did not
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
-  // reader trusts first.
+  // reader trusts first. It also carries the wiring check (decision
+  // feature-article-states-follow-the-spec-meaning): a wired_in or active article
+  // whose files[] entry no registry reaches or that marks no entry, and a built
+  // article whose entry is reached.
   "state_review",
   // A feature_article's NON-HISTORY serialized size crossed
   // config.article_oversize_chars on a knowledge_update/append/edit — the
@@ -43581,7 +43592,6 @@ var DRAIN_VERBS = {
   deletion_candidate: "deleted",
   capture_owed: "captured",
   promotion_review: "reviewed",
-  wire_in_dormant: "wired",
   refresh_reference: "refreshed",
   article_missing: "created",
   research_owed: "captured",
@@ -48648,7 +48658,7 @@ function userScopeCodexServer({ env = process.env, home = homedir2(), readFile =
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6, readdirSync as readdirSync4, rmSync as rmSync2, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync3, rmSync as rmSync2, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname3, isAbsolute, join as join6, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48893,6 +48903,9 @@ function git(projectDir, args2) {
   if (r.error) throw new Error(`git ${args2.join(" ")} could not run in ${fwd(projectDir)}: ${r.error.message}`);
   return r;
 }
+var EDIT_FAMILY = ["edit", "write", "patch"];
+var SHELL_FAMILY = ["shell", "bash"];
+var GUARDED_KEYS = /* @__PURE__ */ new Set(["*", ...EDIT_FAMILY, ...SHELL_FAMILY]);
 var CONDUCTOR_OPENCODE_DESCRIPTION = `Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Activated by default_agent "sterling/conductor" in the project's .opencode/opencode.json (written by /sterling:init and /sterling:update); never dispatched as a subagent.`;
 var FULL_PERMISSIONS = {
   reviewer: { edit: "deny", webfetch: "deny", task: "deny" },
@@ -49402,7 +49415,7 @@ import { homedir as homedir4 } from "node:os";
 import { join as join9 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync5, rmSync as rmSync3, rmdirSync, renameSync as renameSync2, existsSync as existsSync7, lstatSync as lstatSync3, readdirSync as readdirSync5, realpathSync as realpathSync3, chmodSync } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync5, rmSync as rmSync3, rmdirSync, renameSync as renameSync2, existsSync as existsSync7, lstatSync as lstatSync3, readdirSync as readdirSync5, realpathSync as realpathSync4, chmodSync } from "node:fs";
 import { join as join8, resolve as resolve3, dirname as dirname5, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash as createHash2 } from "node:crypto";
