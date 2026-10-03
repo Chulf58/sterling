@@ -8871,6 +8871,13 @@ Release of ${headSha} (${into2}): the merged tree with a package.json that insta
       log(`${prefix}: opencode release ${tag} is already on origin at ${short(commit)}; nothing to push.`);
       return { status: "published", version, commit, reason: null };
     }
+    if (!remoteTag && remoteBranch && (remoteBranch === commit || isAncestor(target2, commit, remoteBranch))) {
+      const tagPush = remoteGit(["push", "origin", `refs/tags/${tag}:refs/tags/${tag}`], { cwd: target2, log, prefix });
+      if (tagPush.status !== 0) return failed(`git push origin ${tag} failed (the local tag is kept for the re-run):
+${output(tagPush)}`, commit);
+      log(`${prefix}: ${tag} (${short(commit)}) is already on origin's ${RELEASE_BRANCH}; pushed only the tag.`);
+      return { status: "published", version, commit, reason: null };
+    }
     if (!remoteTag && remoteBranch && remoteBranch !== commit && !isAncestor(target2, remoteBranch, commit)) {
       const made = commitOn(remoteBranch);
       if (made.status !== 0) return failed(`git commit-tree failed: ${output(made)}`);
