@@ -37,6 +37,7 @@ import { isInstalledCopy } from '../lib/installed-copy.mjs';
 import { pluginScript, postUpdateSync, samePath } from '../lib/post-update-sync.mjs';
 import { machineStores, probeSchemaVersion } from '../lib/update.mjs';
 import { queueDepthLine, readMaintenanceState, reconcileBacklog } from './lib/maintenance-state.mjs';
+import { laneCeiling, liveLanes, renderBoardReadiness } from './lib/board-ready.mjs';
 
 // IN-FLIGHT DISPATCH REGISTER DELETION — COOPERATING WRITER (decision
 // register-writers-cooperating-lock, 1e0ba0d0). H1 is a register writer like
@@ -929,6 +930,8 @@ let queueReasonEntries = [];
 let drainable = 0;
 let parked = 0;
 let reconcile = { count: 0, owesProse: 0, oldest: null };
+let boardReadiness = [];
+let boardReadinessError = null;
 try {
   // TRUE totals (AC1): store.count() runs the same §3.4 base filter as
   // query() with no rank/cap applied — it is the count-capable surface, never
@@ -955,9 +958,25 @@ try {
   parked = m.parked;
   queueReasonEntries = m.queueReasonEntries;
   queueReasons = m.queueReasons;
+  // READY / READY FOR RESEARCH / WAITING ON YOU (decision
+  // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+  // the store's one readiness function; a failure is its own loud line below,
+  // never a silently missing list.
+  try {
+    boardReadiness = store.boardReadiness();
+  } catch (e) {
+    boardReadinessError = (e && e.message) || String(e);
+  }
 } finally {
   store.close();
 }
+
+// The board readiness block: what the conductor fills free lanes from, up to the
+// existing delegation.max_concurrent ceiling (lib/board-ready.mjs).
+const boardReadinessText = boardReadinessError
+  ? `BOARD READINESS UNAVAILABLE (${boardReadinessError}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this session; read the board with board_query.`
+  : renderBoardReadiness({ readiness: boardReadiness, live: liveLanes(input.cwd, input.session_id), ceiling: laneCeiling(config) });
+const boardReadinessContext = boardReadinessText ? `\n\n${boardReadinessText}` : '';
 
 // DEEP-QUEUE SIGNAL TO THE CONDUCTOR (config.maintenance_queue.deep_threshold): the
 // two-tier text and its rationale live in lib/maintenance-state.mjs queueDepthLine.
@@ -1419,7 +1438,7 @@ const output = {
   systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the

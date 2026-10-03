@@ -4480,6 +4480,7 @@ var attestationSchema = base.extend({
   notes: external_exports.string().optional(),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
+var BOARD_NEEDS = ["user", "grill", "investigation"];
 var SYSTEM_REASONS = [
   "reconcile_needed",
   "stale_research",
@@ -4573,7 +4574,13 @@ var todoSchema = base.extend({
   // like every other todo field, so it needs no migration. Existence of each
   // blocker is checked at the tool layer when written; a blocker removed later
   // reads as closed, it is never rewritten out of this list.
-  blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+  blocked_by: external_exports.array(external_exports.string().min(1)).optional(),
+  // What a user item waits on besides its blockers (decision
+  // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+  // 'investigation' still auto-starts, as a researcher lane; 'user' and
+  // 'grill' wait for the user. Not a progress status: `status` keeps meaning
+  // supersession only. Absent means nothing beyond the blockers.
+  needs: external_exports.enum(BOARD_NEEDS).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -4584,6 +4591,13 @@ var todoSchema = base.extend({
       code: external_exports.ZodIssueCode.custom,
       path: ["blocked_by"],
       message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+    });
+  }
+  if (rec.needs !== void 0 && rec.source === "system") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      path: ["needs"],
+      message: "needs marks source:'user' board tasks only \u2014 maintenance-queue items never carry it"
     });
   }
   if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
@@ -5536,10 +5550,14 @@ function probeDirtyPaths(projectDir, files, fileEntries = []) {
   }
   return { verified: true, dirty };
 }
-function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) {
+function formatResidueLine(entry, paths, { verified = true, reason = "", stopSeen = true, registeredAgo = "" } = {}) {
   const identity = `${entry?.agent_type ?? "unknown"}:${entry?.agent_id ?? "unknown"}`;
   const list = (Array.isArray(paths) && paths.length ? paths : ["<no declared files>"]).join(", ");
   const marker = verified ? "" : ` [tree-state-unverified${reason ? `: ${reason}` : ""}]`;
+  if (!stopSeen) {
+    const since = registeredAgo ? `registered ${registeredAgo} ago with` : "registered with";
+    return `dispatch ${identity} holds uncommitted edits to ${list}${marker}; ${since} no SubagentStop seen, it may still be running (check ListAgents) \u2014 if it has stopped, its gates did not complete.`;
+  }
   return `dispatch ${identity} stopped holding uncommitted edits to ${list}${marker}; its gates did not complete.`;
 }
 function claimedResources(promptText, configuredNames) {
@@ -6805,8 +6823,32 @@ function loadExclusiveResourceNames(cwd) {
     return [];
   }
 }
-function candidatesFromBlocks(blocks) {
-  return [...new Set(blocks.flatMap((b) => extractPathCandidatesRooted(b.prompt)))];
+function candidatesFromBlocks(blocks, { skipNegated = false } = {}) {
+  const found = blocks.flatMap(
+    (b) => extractPathCandidatesRooted(b.prompt).filter((c) => !(skipNegated && isOnlyProhibited(b.prompt, c)))
+  );
+  return [...new Set(found)];
+}
+function isOnlyProhibited(prompt, candidate) {
+  const pattern = new RegExp(escapeRe(candidate));
+  return pattern.test(prompt) && !hasUnsuppressedMatch(prompt, pattern, { checkSubjectVerb: false }) && !namedByException(prompt, pattern);
+}
+var PROHIBITION_MARKER_RE = new RegExp(`${PROHIBITION_RE}|${BARE_NEGATOR_RE}`, "gi");
+var EXCEPTION_BEFORE_PATH_RE = /(?:except|other\s+than|outside|besides|apart\s+from)\s+(?:[^\s,;:]+\s+){0,2}$/i;
+function namedByException(prompt, pattern) {
+  const global = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`);
+  for (const { text } of scanClauses(prompt)) {
+    global.lastIndex = 0;
+    let m;
+    while (m = global.exec(text)) {
+      const before = text.slice(0, m.index);
+      let markerEnd = -1;
+      for (const mk of before.matchAll(PROHIBITION_MARKER_RE)) markerEnd = mk.index + mk[0].length;
+      if (markerEnd >= 0 && EXCEPTION_BEFORE_PATH_RE.test(before.slice(markerEnd))) return true;
+      if (m.index === global.lastIndex) global.lastIndex++;
+    }
+  }
+  return false;
 }
 function normalizeRegisterPaths(cands, cwd) {
   return [...new Set(cands.map((c) => repoRel(c, cwd)).filter(Boolean))].filter(
@@ -6981,7 +7023,7 @@ try {
           files = normalizeRegisterPaths(territory.files, input.cwd);
           filesSource = "review-territory";
         } else {
-          files = normalizeRegisterPaths(candidatesFromBlocks(matchedBlocks), input.cwd);
+          files = normalizeRegisterPaths(candidatesFromBlocks(matchedBlocks, { skipNegated: territory.present }), input.cwd);
           filesSource = territory.present ? "free-prose-malformed-territory" : "free-prose-fallback";
           if (territory.present) {
             lines.push(
@@ -6989,7 +7031,7 @@ try {
                 disclosure(
                   "territory_declaration_malformed",
                   { line: territory.raw, reason: territory.reason },
-                  `H22: malformed REVIEW-TERRITORY declaration ignored (${territory.reason}), so dispatch '${input.agent_id}' (${input.agent_type}) owns its free-prose paths instead, including any it was told not to write: ${territory.raw}`
+                  `H22: malformed REVIEW-TERRITORY declaration ignored (${territory.reason}), so dispatch '${input.agent_id}' (${input.agent_type}) owns its free-prose paths instead, except those named only under a prohibition marker ('NEVER write', 'do not touch'): ${territory.raw}`
                 )
               )
             );

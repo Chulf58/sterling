@@ -43,10 +43,11 @@ export {
   clipName,
   displayHandle,
   boardDisplayLabel,
+  BOARD_NEEDS,
   AGENT_MODEL_KEY,
   REVIEWER_ROLES,
 } from './records.js';
-export type { RecordType, RecordTypeEntry, DurableRecord, FieldShape } from './records.js';
+export type { RecordType, RecordTypeEntry, DurableRecord, FieldShape, BoardNeeds } from './records.js';
 export { sessionEventSchema, NO_CAPTURE_LANES, noCaptureLaneSchema } from './transient.js';
 export type { SessionEvent, NoCaptureLane } from './transient.js';
 export { configSchema, parseConfig, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, unreadConfigKeys, describeUnreadConfigKeys } from './config.js';

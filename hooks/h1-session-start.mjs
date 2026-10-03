@@ -4236,6 +4236,11 @@ var init_envelope = __esm({
 });
 
 // packages/schemas/dist/records.js
+function boardDisplayLabel(text, slug) {
+  const line = s(text).split("\n").find((l) => l.trim().length > 0);
+  const normalized = line ? line.trim().replace(/\s+/g, " ") : "";
+  return normalized || s(slug).trim();
+}
 function validateRecord(input2) {
   if (typeof input2 !== "object" || input2 === null || typeof input2.type !== "string") {
     throw new Error("validateRecord: input has no record type");
@@ -4247,7 +4252,7 @@ function validateRecord(input2) {
   }
   return entry.schema.parse(input2);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, openQuestionSchema, attestationSchema, SYSTEM_REASONS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4586,6 +4591,7 @@ var init_records = __esm({
       notes: external_exports.string().optional(),
       file_keys: external_exports.array(repoPath).optional()
     }).superRefine(refineSupersession);
+    BOARD_NEEDS = ["user", "grill", "investigation"];
     SYSTEM_REASONS = [
       "reconcile_needed",
       "stale_research",
@@ -4679,7 +4685,13 @@ var init_records = __esm({
       // like every other todo field, so it needs no migration. Existence of each
       // blocker is checked at the tool layer when written; a blocker removed later
       // reads as closed, it is never rewritten out of this list.
-      blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+      blocked_by: external_exports.array(external_exports.string().min(1)).optional(),
+      // What a user item waits on besides its blockers (decision
+      // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+      // 'investigation' still auto-starts, as a researcher lane; 'user' and
+      // 'grill' wait for the user. Not a progress status: `status` keeps meaning
+      // supersession only. Absent means nothing beyond the blockers.
+      needs: external_exports.enum(BOARD_NEEDS).optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       if (rec.source === "system" && !rec.system_reason) {
@@ -4690,6 +4702,13 @@ var init_records = __esm({
           code: external_exports.ZodIssueCode.custom,
           path: ["blocked_by"],
           message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+        });
+      }
+      if (rec.needs !== void 0 && rec.source === "system") {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["needs"],
+          message: "needs marks source:'user' board tasks only \u2014 maintenance-queue items never carry it"
         });
       }
       if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
@@ -4889,6 +4908,9 @@ var init_records = __esm({
         digest: { slug: "plain", title: "plain", problem: "clip" }
       }
     };
+    NAME_CLIP = 48;
+    clipName = (name) => name.length <= NAME_CLIP ? name : `${name.slice(0, NAME_CLIP - 1)}\u2026`;
+    displayHandle = (name, id) => `${clipName(name)} (${id.slice(0, 8)})`;
   }
 });
 
@@ -5588,6 +5610,19 @@ function deepReplaceString(value, from, to) {
   }
   return value;
 }
+function compareBoardReadiness(a, b) {
+  const pa = PRIORITY_RANK[a.priority ?? "normal"] ?? 1;
+  const pb = PRIORITY_RANK[b.priority ?? "normal"] ?? 1;
+  if (pa !== pb)
+    return pa - pb;
+  if (a.updated_at !== b.updated_at)
+    return a.updated_at < b.updated_at ? 1 : -1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+function boardItemHandle(rec) {
+  const label = boardDisplayLabel(rec.text, rec.slug);
+  return label ? displayHandle(label, rec.id) : `(unnamed board item) (${rec.id.slice(0, 8)})`;
+}
 function rankTermDedupeKey(term) {
   const isPrefix = term.endsWith("*") && term.length > 1;
   const base2 = isPrefix ? term.slice(0, -1) : term;
@@ -5764,7 +5799,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var DDL, SUPPORTED_SCHEMA_VERSION, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, JournalDemotionRefusedError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var DDL, SUPPORTED_SCHEMA_VERSION, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, JournalDemotionRefusedError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -5921,6 +5956,7 @@ CREATE TABLE IF NOT EXISTS store_meta (
         this.db_path = dbPath;
       }
     };
+    PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
     MAX_RANK_TERMS = 16;
     rankTerms = external_exports.array(external_exports.string().regex(new RegExp(`^\\S{1,${AXIS_MAX_TERM_LEN}}$`), `rank_terms must be single keywords (no whitespace, \u2264${AXIS_MAX_TERM_LEN} chars)`)).transform((terms) => {
       const seen = /* @__PURE__ */ new Set();
@@ -7175,6 +7211,64 @@ CREATE TABLE IF NOT EXISTS store_meta (
         return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
       }
       /**
+       * THE ONE READINESS FUNCTION (decision
+       * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start,
+       * AMENDED (a)). board_get/board_query's blocked_by_state, H1's three groups,
+       * H20's ready line, the TUI cards and the OpenCode plugin all read this, so
+       * "open blocker" and "ready" have one definition.
+       *
+       * `items` defaults to every live user board item (a system item is never
+       * returned). Passed explicitly, each user todo given is judged against the
+       * LIVE board: a blocker is open while a live todo carries its slug, and
+       * `unblocks` lists live user items whose blocked_by names the item. Read
+       * only; the stored blocked_by is never rewritten. No cycle detection.
+       */
+      boardReadiness(items) {
+        const total = this.count({ types: ["todo"], source: "user" });
+        const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+        const bySlug = /* @__PURE__ */ new Map();
+        for (const t of live)
+          if (t.slug)
+            bySlug.set(t.slug, t);
+        const dependents = /* @__PURE__ */ new Map();
+        for (const t of live) {
+          for (const slug of new Set(t.blocked_by ?? [])) {
+            const list = dependents.get(slug);
+            if (list)
+              list.push(t);
+            else
+              dependents.set(slug, [t]);
+          }
+        }
+        const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
+        const targets = items ?? live;
+        return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+          const blockers = [];
+          const blockersOpen = [];
+          for (const slug of t.blocked_by ?? []) {
+            const holder = openBlocker(slug);
+            blockers.push({ slug, state: holder ? "open" : "closed" });
+            if (holder)
+              blockersOpen.push(boardItemHandle(holder));
+          }
+          const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+          const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+          return {
+            id: t.id,
+            ...t.slug ? { slug: t.slug } : {},
+            name: boardItemHandle(t),
+            ...t.priority ? { priority: t.priority } : {},
+            updated_at: t.updated_at,
+            file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+            ...t.needs ? { needs: t.needs } : {},
+            blockers,
+            blockers_open: blockersOpen,
+            unblocks,
+            state
+          };
+        });
+      }
+      /**
        * Every SUPERSEDED record carrying this exact slug, newest first — the
        * dead-slug counterpart of recordsBySlug (decision foreign_df361a0f, board 2b9f2f1a
        * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
@@ -8366,10 +8460,14 @@ function probeDirtyPaths(projectDir, files, fileEntries = []) {
   }
   return { verified: true, dirty };
 }
-function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) {
+function formatResidueLine(entry, paths, { verified = true, reason = "", stopSeen = true, registeredAgo = "" } = {}) {
   const identity = `${entry?.agent_type ?? "unknown"}:${entry?.agent_id ?? "unknown"}`;
   const list = (Array.isArray(paths) && paths.length ? paths : ["<no declared files>"]).join(", ");
   const marker = verified ? "" : ` [tree-state-unverified${reason ? `: ${reason}` : ""}]`;
+  if (!stopSeen) {
+    const since = registeredAgo ? `registered ${registeredAgo} ago with` : "registered with";
+    return `dispatch ${identity} holds uncommitted edits to ${list}${marker}; ${since} no SubagentStop seen, it may still be running (check ListAgents) \u2014 if it has stopped, its gates did not complete.`;
+  }
   return `dispatch ${identity} stopped holding uncommitted edits to ${list}${marker}; its gates did not complete.`;
 }
 
@@ -8501,6 +8599,18 @@ function registerPath(root) {
 }
 function legacyRegisterLockDir(root) {
   return join8(root, ".sterling", "transient", "dispatch-register.lock");
+}
+function configPath(root) {
+  return join8(root, ".sterling", "config.json");
+}
+function readStaleMinutesDefault(root) {
+  try {
+    const cfg = JSON.parse(readFileSync2(configPath(root), "utf8"));
+    const v = cfg?.dispatch_register?.stale_minutes;
+    return typeof v === "number" && v > 0 ? v : 60;
+  } catch {
+    return 60;
+  }
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -8701,6 +8811,41 @@ async function withRegisterLock(root, fn, opts = {}) {
     db.close();
   }
 }
+function statusReason(entry, ctx) {
+  if (!entry) return "clock-unreadable";
+  const t = Date.parse(entry.at);
+  if (Number.isNaN(t)) return "clock-unreadable";
+  if (ctx.sessionId !== null && entry.session_id !== ctx.sessionId) return "other-session";
+  const age = ctx.now - t;
+  const lease = ctx.staleMinutes * 6e4;
+  if (age >= 0 && age < lease) return null;
+  return "lease-expired";
+}
+function dispatchStatus(entry, ctx) {
+  if (entry?.ended) return "inactive-confirmed";
+  return statusReason(entry, ctx) === null ? "presumed-active" : "unknown";
+}
+function classifyRegister(root, ctx) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return { availability, entries: [] };
+  const rows = entries.map((entry) => {
+    const status = dispatchStatus(entry, ctx);
+    const reason = statusReason(entry, ctx);
+    const t = Date.parse(entry.at);
+    const ageMs = Number.isNaN(t) ? null : ctx.now - t;
+    return { entry, status, reason, ageMs };
+  });
+  return { availability: "ok", entries: rows };
+}
+function presumedActiveEntries(root, ctx) {
+  const classified = classifyRegister(root, {
+    now: ctx.now ?? Date.now(),
+    sessionId: ctx.sessionId,
+    staleMinutes: ctx.staleMinutes ?? readStaleMinutesDefault(root)
+  });
+  if (classified.availability !== "ok") return { availability: classified.availability, entries: [] };
+  return { availability: "ok", entries: classified.entries.filter((r) => r.status === "presumed-active").map((r) => r.entry) };
+}
 var MAX_PROMPT_BYTES = 512 * 1024;
 var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
 var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
@@ -8890,6 +9035,16 @@ function rewriteTerminalRecord(root, fileName, key, record) {
   if (fileName !== expected && fileName !== liveFileName(key)) throw new Error(`dispatch-state: rewriting ${fileName} would change its agent ids (expected ${expected})`);
   writeRecordAtomic(root, fileName, record);
 }
+function listStateDir(root) {
+  const containment = checkDispatchStateContainment(root, { create: false });
+  if (!containment.ok) return { availability: "unavailable", reason: "containment", names: [] };
+  if (containment.availability === "absent") return { availability: "absent", names: [] };
+  try {
+    return { availability: "ok", names: readdirSync(dispatchStateDir(root)) };
+  } catch (e) {
+    return { availability: "unavailable", reason: "unlistable", code: e?.code, names: [] };
+  }
+}
 function validateNamedRecord(dir, name, parsed) {
   const classified = classifyRecordFile(join8(dir, name));
   if (!classified.exists || classified.poisoned) return classified;
@@ -8900,6 +9055,68 @@ function validateNamedRecord(dir, name, parsed) {
     if (terminalFileName(parsed.key, record) !== name) return { exists: true, poisoned: true, reason: "ids-mismatch" };
   }
   return classified;
+}
+function readDispatchState(root) {
+  return scanLiveState(root, { repair: false });
+}
+function scanLiveState(root, { repair }) {
+  const dir = dispatchStateDir(root);
+  const listing = listStateDir(root);
+  if (listing.availability !== "ok") return { availability: listing.availability, ...listing.reason ? { reason: listing.reason } : {}, records: [], poisoned: [], done: [] };
+  const records = [];
+  const poisoned = [];
+  const done = [];
+  for (const name of listing.names) {
+    const parsed = parseStateFileName(name);
+    if (parsed.kind === "other") continue;
+    if (parsed.kind === "tmp") {
+      poisoned.push({ file: name, reason: "orphan-tmp-file" });
+      continue;
+    }
+    if (parsed.kind === "legacy") {
+      poisoned.push({ file: name, reason: "legacy-unmigrated" });
+      continue;
+    }
+    if (parsed.kind === "malformed-live") {
+      poisoned.push({ file: name, reason: "malformed-filename" });
+      continue;
+    }
+    if (parsed.kind === "malformed-done" || parsed.kind === "unknown-json") {
+      warnStateFile(name, `dispatch-state: '${name}' is not a live-<key>.json or done-<key>~<ids>.json name \u2014 ignored by the live scan, never read as a record`);
+      continue;
+    }
+    if (parsed.kind === "done") {
+      done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
+      continue;
+    }
+    const classified = classifyRecordFile(join8(dir, name));
+    if (!classified.exists) continue;
+    if (classified.poisoned) {
+      poisoned.push({ file: name, reason: classified.reason });
+      continue;
+    }
+    if (dispatchStateKey(classified.record.tool_use_id) !== parsed.key) {
+      poisoned.push({ file: name, reason: "key-mismatch" });
+      continue;
+    }
+    records.push({ key: parsed.key, file: name, record: classified.record });
+  }
+  const doneKeys = new Set(done.map((d) => d.key));
+  const kept = [];
+  for (const entry of records) {
+    if (doneKeys.has(entry.key)) {
+      if (!entry.record.terminal) {
+        poisoned.push({ file: entry.file, reason: "duplicate-key" });
+        continue;
+      }
+      warnStateFile(entry.file, `dispatch-state: terminal record ${entry.file} cannot be renamed: a done- file for the same key already exists \u2014 left under its live name for an operator, never renamed over it`);
+      kept.push(entry);
+      continue;
+    }
+    if (repair && entry.record.terminal) entry.file = finishTerminalRename(root, entry.key, entry.record);
+    kept.push(entry);
+  }
+  return { availability: "ok", records: kept, poisoned, done };
 }
 function sessionBoundarySweep(root, opts = {}) {
   const now = typeof opts.now === "number" ? opts.now : Date.now();
@@ -10357,6 +10574,84 @@ RECONCILE BACKLOG: ${inLane(reconcile2.count)}, the oldest open since ${reconcil
   return { banner: reconcileBanner2, line: reconcileContext2.replace(/^\n\n/, "") };
 }
 
+// scripts/hooks/lib/board-ready.mjs
+init_dist2();
+init_dist();
+
+// scripts/hooks/lib/delivery.mjs
+init_dist2();
+var GAP_EVIDENCE_CHAR_CAP = 400;
+var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
+
+// scripts/hooks/lib/board-ready.mjs
+var BOARD_GROUP_CAP = 8;
+var DECISION = "decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start";
+function boardGroups(readiness) {
+  const sorted = [...readiness].sort(compareBoardReadiness);
+  return {
+    ready: sorted.filter((r) => r.state === "ready"),
+    research: sorted.filter((r) => r.state === "research"),
+    waiting: sorted.filter((r) => r.state === "waiting"),
+    blocked: sorted.filter((r) => r.state === "blocked").length
+  };
+}
+function laneCeiling(config2) {
+  const parsed = configSchema.shape.delegation.safeParse(config2?.delegation ?? {});
+  if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join("; ") };
+  return { value: parsed.data.max_concurrent };
+}
+function liveLanes(root, sessionId) {
+  const { availability, entries } = presumedActiveEntries(root, { sessionId });
+  if (availability === "absent") return { availability: "ok", count: 0, descriptions: [] };
+  const toolUseIds = new Set(entries.map((e) => e.tool_use_id).filter((t) => typeof t === "string" && t));
+  const descriptions = [];
+  if (toolUseIds.size) {
+    for (const { record } of readDispatchState(root).records) {
+      if (!toolUseIds.has(record.tool_use_id)) continue;
+      for (const text of [record.description, record.prompt]) if (typeof text === "string" && text) descriptions.push(text);
+    }
+  }
+  return { availability, count: entries.length, descriptions };
+}
+function lanesText(live, ceiling) {
+  const k = live.availability === "ok" ? String(live.count) : `? (dispatch register ${live.availability})`;
+  const n = ceiling.error ? `? (delegation.max_concurrent unreadable: ${ceiling.error})` : String(ceiling.value);
+  return `live lanes ${k}/${n}`;
+}
+function overlapMarks(ready) {
+  const marks = /* @__PURE__ */ new Map();
+  for (const a of ready) {
+    const keys = new Set(a.file_keys);
+    const others = ready.filter((b) => b.id !== a.id && b.file_keys.some((k) => keys.has(k))).map((b) => b.name);
+    if (others.length) marks.set(a.id, others);
+  }
+  return marks;
+}
+function groupLines(title, items, cap, render2) {
+  if (!items.length) return [];
+  const out = [`${title.replace("{n}", String(items.length))}:`, ...items.slice(0, cap).map(render2)];
+  if (items.length > cap) out.push(`  \u2026 ${items.length - cap} more ${title.split(" (")[0]} (board_query)`);
+  return out;
+}
+function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP }) {
+  const g = boardGroups(readiness);
+  if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked) return "";
+  const marks = overlapMarks(g.ready);
+  const blockedNote = g.blocked ? `; ${g.blocked} blocked` : "";
+  const header = `BOARD READINESS (${DECISION}) \u2014 ${lanesText(live, ceiling)}${blockedNote}. At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill). Items marked \u26A0 share a write path: their implementation lanes run one at a time.`;
+  const lines = [
+    header,
+    ...groupLines("READY ({n})", g.ready, cap, (r) => {
+      const pri = r.priority && r.priority !== "normal" ? ` [${r.priority}]` : "";
+      const mark = marks.get(r.id);
+      return `- ${r.name}${pri}${mark ? ` \u26A0 shares a write path with ${mark.join(", ")}` : ""}`;
+    }),
+    ...groupLines("READY FOR RESEARCH ({n}, researcher lanes only)", g.research, cap, (r) => `- ${r.name}${r.priority && r.priority !== "normal" ? ` [${r.priority}]` : ""}`),
+    ...groupLines("WAITING ON YOU ({n})", g.waiting, cap, (r) => `- ${r.name} \u2014 needs ${r.needs}${r.blockers_open?.length ? ` (also blocked by ${r.blockers_open.join(", ")})` : ""}`)
+  ];
+  return lines.join("\n");
+}
+
 // scripts/hooks/h1-session-start.mjs
 async function deleteRegisterUnderLock(cwd) {
   const transientDir = join17(cwd, ".sterling", "transient");
@@ -10842,6 +11137,8 @@ var queueReasonEntries = [];
 var drainable = 0;
 var parked = 0;
 var reconcile = { count: 0, owesProse: 0, oldest: null };
+var boardReadiness = [];
+var boardReadinessError = null;
 try {
   const userTotal = store.count({ types: ["todo"], source: "user" });
   counts.todos = userTotal;
@@ -10856,9 +11153,18 @@ try {
   parked = m.parked;
   queueReasonEntries = m.queueReasonEntries;
   queueReasons = m.queueReasons;
+  try {
+    boardReadiness = store.boardReadiness();
+  } catch (e) {
+    boardReadinessError = e && e.message || String(e);
+  }
 } finally {
   store.close();
 }
+var boardReadinessText = boardReadinessError ? `BOARD READINESS UNAVAILABLE (${boardReadinessError}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this session; read the board with board_query.` : renderBoardReadiness({ readiness: boardReadiness, live: liveLanes(input.cwd, input.session_id), ceiling: laneCeiling(config) });
+var boardReadinessContext = boardReadinessText ? `
+
+${boardReadinessText}` : "";
 var queueLine = queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: config?.maintenance_queue?.deep_threshold });
 var queueContext = queueLine ? `
 
@@ -11121,6 +11427,6 @@ var output = {
   systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + undeclaredSourceContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext }
 };
 exitAfterWrite(JSON.stringify(output), 0);

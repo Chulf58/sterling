@@ -4270,6 +4270,11 @@ var init_envelope = __esm({
 });
 
 // packages/schemas/dist/records.js
+function boardDisplayLabel(text, slug) {
+  const line = s(text).split("\n").find((l) => l.trim().length > 0);
+  const normalized = line ? line.trim().replace(/\s+/g, " ") : "";
+  return normalized || s(slug).trim();
+}
 function validateRecord(input) {
   if (typeof input !== "object" || input === null || typeof input.type !== "string") {
     throw new Error("validateRecord: input has no record type");
@@ -4281,7 +4286,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, openQuestionSchema, attestationSchema, SYSTEM_REASONS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4620,6 +4625,7 @@ var init_records = __esm({
       notes: external_exports.string().optional(),
       file_keys: external_exports.array(repoPath).optional()
     }).superRefine(refineSupersession);
+    BOARD_NEEDS = ["user", "grill", "investigation"];
     SYSTEM_REASONS = [
       "reconcile_needed",
       "stale_research",
@@ -4713,7 +4719,13 @@ var init_records = __esm({
       // like every other todo field, so it needs no migration. Existence of each
       // blocker is checked at the tool layer when written; a blocker removed later
       // reads as closed, it is never rewritten out of this list.
-      blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+      blocked_by: external_exports.array(external_exports.string().min(1)).optional(),
+      // What a user item waits on besides its blockers (decision
+      // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+      // 'investigation' still auto-starts, as a researcher lane; 'user' and
+      // 'grill' wait for the user. Not a progress status: `status` keeps meaning
+      // supersession only. Absent means nothing beyond the blockers.
+      needs: external_exports.enum(BOARD_NEEDS).optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       if (rec.source === "system" && !rec.system_reason) {
@@ -4724,6 +4736,13 @@ var init_records = __esm({
           code: external_exports.ZodIssueCode.custom,
           path: ["blocked_by"],
           message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+        });
+      }
+      if (rec.needs !== void 0 && rec.source === "system") {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["needs"],
+          message: "needs marks source:'user' board tasks only \u2014 maintenance-queue items never carry it"
         });
       }
       if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
@@ -4923,6 +4942,9 @@ var init_records = __esm({
         digest: { slug: "plain", title: "plain", problem: "clip" }
       }
     };
+    NAME_CLIP = 48;
+    clipName = (name) => name.length <= NAME_CLIP ? name : `${name.slice(0, NAME_CLIP - 1)}\u2026`;
+    displayHandle = (name, id) => `${clipName(name)} (${id.slice(0, 8)})`;
   }
 });
 
@@ -5860,6 +5882,19 @@ function deepReplaceString(value, from, to) {
   }
   return value;
 }
+function compareBoardReadiness(a, b) {
+  const pa = PRIORITY_RANK[a.priority ?? "normal"] ?? 1;
+  const pb = PRIORITY_RANK[b.priority ?? "normal"] ?? 1;
+  if (pa !== pb)
+    return pa - pb;
+  if (a.updated_at !== b.updated_at)
+    return a.updated_at < b.updated_at ? 1 : -1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+function boardItemHandle(rec) {
+  const label = boardDisplayLabel(rec.text, rec.slug);
+  return label ? displayHandle(label, rec.id) : `(unnamed board item) (${rec.id.slice(0, 8)})`;
+}
 function rankTermDedupeKey(term) {
   const isPrefix = term.endsWith("*") && term.length > 1;
   const base2 = isPrefix ? term.slice(0, -1) : term;
@@ -6036,7 +6071,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var DDL, SUPPORTED_SCHEMA_VERSION, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, JournalDemotionRefusedError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var DDL, SUPPORTED_SCHEMA_VERSION, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, JournalDemotionRefusedError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -6193,6 +6228,7 @@ CREATE TABLE IF NOT EXISTS store_meta (
         this.db_path = dbPath;
       }
     };
+    PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
     MAX_RANK_TERMS = 16;
     rankTerms = external_exports.array(external_exports.string().regex(new RegExp(`^\\S{1,${AXIS_MAX_TERM_LEN}}$`), `rank_terms must be single keywords (no whitespace, \u2264${AXIS_MAX_TERM_LEN} chars)`)).transform((terms) => {
       const seen = /* @__PURE__ */ new Set();
@@ -7445,6 +7481,64 @@ CREATE TABLE IF NOT EXISTS store_meta (
           WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
         return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
+      }
+      /**
+       * THE ONE READINESS FUNCTION (decision
+       * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start,
+       * AMENDED (a)). board_get/board_query's blocked_by_state, H1's three groups,
+       * H20's ready line, the TUI cards and the OpenCode plugin all read this, so
+       * "open blocker" and "ready" have one definition.
+       *
+       * `items` defaults to every live user board item (a system item is never
+       * returned). Passed explicitly, each user todo given is judged against the
+       * LIVE board: a blocker is open while a live todo carries its slug, and
+       * `unblocks` lists live user items whose blocked_by names the item. Read
+       * only; the stored blocked_by is never rewritten. No cycle detection.
+       */
+      boardReadiness(items) {
+        const total = this.count({ types: ["todo"], source: "user" });
+        const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+        const bySlug = /* @__PURE__ */ new Map();
+        for (const t of live)
+          if (t.slug)
+            bySlug.set(t.slug, t);
+        const dependents = /* @__PURE__ */ new Map();
+        for (const t of live) {
+          for (const slug of new Set(t.blocked_by ?? [])) {
+            const list = dependents.get(slug);
+            if (list)
+              list.push(t);
+            else
+              dependents.set(slug, [t]);
+          }
+        }
+        const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
+        const targets = items ?? live;
+        return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+          const blockers = [];
+          const blockersOpen = [];
+          for (const slug of t.blocked_by ?? []) {
+            const holder = openBlocker(slug);
+            blockers.push({ slug, state: holder ? "open" : "closed" });
+            if (holder)
+              blockersOpen.push(boardItemHandle(holder));
+          }
+          const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+          const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+          return {
+            id: t.id,
+            ...t.slug ? { slug: t.slug } : {},
+            name: boardItemHandle(t),
+            ...t.priority ? { priority: t.priority } : {},
+            updated_at: t.updated_at,
+            file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+            ...t.needs ? { needs: t.needs } : {},
+            blockers,
+            blockers_open: blockersOpen,
+            unblocks,
+            state
+          };
+        });
       }
       /**
        * Every SUPERSEDED record carrying this exact slug, newest first — the
@@ -13401,6 +13495,77 @@ RECONCILE BACKLOG: ${inLane(reconcile.count)}, the oldest open since ${reconcile
   return { banner: reconcileBanner, line: reconcileContext.replace(/^\n\n/, "") };
 }
 
+// scripts/hooks/lib/board-ready.mjs
+init_dist2();
+init_dist();
+var BOARD_GROUP_CAP = 8;
+var DECISION = "decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start";
+function boardGroups(readiness) {
+  const sorted = [...readiness].sort(compareBoardReadiness);
+  return {
+    ready: sorted.filter((r) => r.state === "ready"),
+    research: sorted.filter((r) => r.state === "research"),
+    waiting: sorted.filter((r) => r.state === "waiting"),
+    blocked: sorted.filter((r) => r.state === "blocked").length
+  };
+}
+function laneCeiling(config) {
+  const parsed = configSchema.shape.delegation.safeParse(config?.delegation ?? {});
+  if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join("; ") };
+  return { value: parsed.data.max_concurrent };
+}
+function liveLanes(root, sessionId) {
+  const { availability, entries } = presumedActiveEntries(root, { sessionId });
+  if (availability === "absent") return { availability: "ok", count: 0, descriptions: [] };
+  const toolUseIds = new Set(entries.map((e) => e.tool_use_id).filter((t) => typeof t === "string" && t));
+  const descriptions = [];
+  if (toolUseIds.size) {
+    for (const { record } of readDispatchState(root).records) {
+      if (!toolUseIds.has(record.tool_use_id)) continue;
+      for (const text of [record.description, record.prompt]) if (typeof text === "string" && text) descriptions.push(text);
+    }
+  }
+  return { availability, count: entries.length, descriptions };
+}
+function lanesText(live, ceiling) {
+  const k = live.availability === "ok" ? String(live.count) : `? (dispatch register ${live.availability})`;
+  const n = ceiling.error ? `? (delegation.max_concurrent unreadable: ${ceiling.error})` : String(ceiling.value);
+  return `live lanes ${k}/${n}`;
+}
+function overlapMarks(ready) {
+  const marks = /* @__PURE__ */ new Map();
+  for (const a of ready) {
+    const keys = new Set(a.file_keys);
+    const others = ready.filter((b) => b.id !== a.id && b.file_keys.some((k) => keys.has(k))).map((b) => b.name);
+    if (others.length) marks.set(a.id, others);
+  }
+  return marks;
+}
+function groupLines(title, items, cap, render3) {
+  if (!items.length) return [];
+  const out = [`${title.replace("{n}", String(items.length))}:`, ...items.slice(0, cap).map(render3)];
+  if (items.length > cap) out.push(`  \u2026 ${items.length - cap} more ${title.split(" (")[0]} (board_query)`);
+  return out;
+}
+function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP }) {
+  const g = boardGroups(readiness);
+  if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked) return "";
+  const marks = overlapMarks(g.ready);
+  const blockedNote = g.blocked ? `; ${g.blocked} blocked` : "";
+  const header = `BOARD READINESS (${DECISION}) \u2014 ${lanesText(live, ceiling)}${blockedNote}. At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill). Items marked \u26A0 share a write path: their implementation lanes run one at a time.`;
+  const lines = [
+    header,
+    ...groupLines("READY ({n})", g.ready, cap, (r) => {
+      const pri = r.priority && r.priority !== "normal" ? ` [${r.priority}]` : "";
+      const mark = marks.get(r.id);
+      return `- ${r.name}${pri}${mark ? ` \u26A0 shares a write path with ${mark.join(", ")}` : ""}`;
+    }),
+    ...groupLines("READY FOR RESEARCH ({n}, researcher lanes only)", g.research, cap, (r) => `- ${r.name}${r.priority && r.priority !== "normal" ? ` [${r.priority}]` : ""}`),
+    ...groupLines("WAITING ON YOU ({n})", g.waiting, cap, (r) => `- ${r.name} \u2014 needs ${r.needs}${r.blockers_open?.length ? ` (also blocked by ${r.blockers_open.join(", ")})` : ""}`)
+  ];
+  return lines.join("\n");
+}
+
 // scripts/hooks/lib/undeclared-source-scan.mjs
 init_dist();
 import { spawnSync as spawnSync2 } from "node:child_process";
@@ -14487,6 +14652,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   const undeclaredCache = /* @__PURE__ */ new Map();
   const maintenanceCache = /* @__PURE__ */ new Map();
   const stagedCache = /* @__PURE__ */ new Map();
+  const boardCache = /* @__PURE__ */ new Map();
   function statusLine(root) {
     const hit = statusCache.get(root);
     if (hit && Date.now() - hit.at < STATUS_TTL_MS) return hit.text;
@@ -14561,6 +14727,35 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     if (hit.error) return [`MAINTENANCE QUEUE UNREADABLE (${hit.error}) \u2014 the deep-queue signal and the reconcile backlog are not stated this turn.`];
     return hit.state ? maintenanceLines(hit.state, config, root) : [];
   }
+  function boardBlock(root, config, sessionID) {
+    let hit = boardCache.get(root);
+    if (!hit || Date.now() - hit.at >= STATUS_TTL_MS) {
+      try {
+        const store = openStore(join26(root, ".sterling", "sterling.db"));
+        let readiness;
+        try {
+          readiness = store.boardReadiness();
+        } finally {
+          store.close();
+        }
+        hit = { at: Date.now(), readiness };
+      } catch (e) {
+        logLine(root, `context: board readiness unreadable: ${errText(e)}`);
+        hit = {
+          at: Date.now(),
+          unavailable: `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`
+        };
+      }
+      boardCache.set(root, hit);
+    }
+    if (hit.unavailable) return hit.unavailable;
+    try {
+      return renderBoardReadiness({ readiness: hit.readiness, live: liveLanes(root, sessionID), ceiling: laneCeiling(config) });
+    } catch (e) {
+      logLine(root, `context: board readiness unreadable: ${errText(e)}`);
+      return `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
+    }
+  }
   async function onContext(input) {
     const root = rootOf();
     if (!root) return;
@@ -14602,6 +14797,10 @@ ${opencodeHostTail(pluginRoot)}`;
         }
         const undeclared = undeclaredBlock(root, state.config);
         if (undeclared) blocks.push(undeclared);
+        if (!inWorkerChild(env)) {
+          const board = boardBlock(root, state.config, input.sessionID);
+          if (board) blocks.push(board);
+        }
       } else {
         const staged = await childStaging(root, input);
         if (staged) blocks.push(staged);
@@ -14613,7 +14812,7 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
       input.system.push({ type: "text", text: blocks.join("\n\n") });
     });
   }
-  return { onContext, resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root)) };
+  return { onContext, resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root), boardCache.delete(root)) };
 }
 
 // packages/opencode-plugin/src/pr-loop.mjs

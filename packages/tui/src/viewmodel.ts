@@ -16,8 +16,10 @@ export interface Card {
   source?: string;
   /** indentation depth for grouped rows (objective children sit at 1); absent = 0 */
   depth?: number;
-  /** board item's open blockers as one line ('blocked by: a, b'); absent when none is open */
+  /** board item's open blockers as one line ('blocked by: name (id8), ...'); absent when none is open */
   blocked?: string;
+  /** the live board items waiting on this one as one line ('unblocks: name (id8), ...'); absent when none */
+  unblocks?: string;
   /** feature_article lifecycle state (planned … deprecated); absent on every other card type */
   state?: string;
 }
@@ -399,18 +401,23 @@ export function knowledgeSubgroups(records: unknown[]): { key: string; label: st
 /**
  * The card's one blocked-by line (decision
  * every-user-ask-is-boarded-at-intake-with-slim-blocked-by, rule 6), given the
- * blockers that are still open. No open blocker, no line: a blocker that was
- * removed counts as closed and is left off.
+ * names of the blockers that are still open. No open blocker, no line: a
+ * blocker that was removed counts as closed and is left off.
  */
-export function blockedByLine(openSlugs: readonly string[]): string | undefined {
-  return openSlugs.length ? `blocked by: ${openSlugs.join(', ')}` : undefined;
+export function blockedByLine(openNames: readonly string[]): string | undefined {
+  return openNames.length ? `blocked by: ${openNames.join(', ')}` : undefined;
 }
 
 export function todoCards(store: SterlingStore, expanded: string[] = []): Card[] {
   const groups = new Map<string, Card[]>();
   const flat: Card[] = [];
-  for (const t of store.query({ types: ['todo'], source: 'user', cap: 500 })) {
-    const todo = t as unknown as { id: string; text: string; slug?: string; priority?: string; file_keys?: string[]; objective?: string; blocked_by?: string[] };
+  const todos = store.query({ types: ['todo'], source: 'user', cap: 500 });
+  // Open blockers and unblocks come from the store's one readiness function
+  // (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start),
+  // as item names, never bare slugs (decision 11b8b08c).
+  const readiness = new Map(store.boardReadiness(todos).map((r) => [r.id, r]));
+  for (const t of todos) {
+    const todo = t as unknown as { id: string; text: string; slug?: string; priority?: string; file_keys?: string[]; objective?: string; needs?: string };
     // `name (id8)` where a LABEL EXISTS (decision foreign_2e8c30e4; board 081508d0
     // review round 2). Gated on the derived LABEL, NOT on whether a slug was
     // ever minted (review round 2, HIGH finding): a legacy pre-mint item has
@@ -431,13 +438,14 @@ export function todoCards(store: SterlingStore, expanded: string[] = []): Card[]
       // and selection effects plus every destroying call need the whole thing.
       title: label ? displayHandle(label, todo.id) : todo.text.split('\n')[0],
       body: todo.text,
-      detail: [todo.priority && `priority: ${todo.priority}`, todo.file_keys?.length && `files: ${todo.file_keys.join(', ')}`]
+      detail: [todo.priority && `priority: ${todo.priority}`, todo.needs && `needs: ${todo.needs}`, todo.file_keys?.length && `files: ${todo.file_keys.join(', ')}`]
         .filter(Boolean)
         .join(' · '),
     };
-    // A blocker is open while a live board item still carries its slug.
-    const blocked = blockedByLine((todo.blocked_by ?? []).filter((slug) => store.recordsBySlug(slug).some((r) => r.type === 'todo')));
+    const ready = readiness.get(todo.id);
+    const blocked = blockedByLine(ready?.blockers_open ?? []);
     if (blocked) card.blocked = blocked;
+    if (ready?.unblocks.length) card.unblocks = `unblocks: ${ready.unblocks.join(', ')}`;
     if (todo.objective) {
       const list = groups.get(todo.objective) ?? [];
       list.push(card);

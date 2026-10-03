@@ -4500,6 +4500,7 @@ var attestationSchema = base.extend({
   notes: external_exports.string().optional(),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
+var BOARD_NEEDS = ["user", "grill", "investigation"];
 var SYSTEM_REASONS = [
   "reconcile_needed",
   "stale_research",
@@ -4593,7 +4594,13 @@ var todoSchema = base.extend({
   // like every other todo field, so it needs no migration. Existence of each
   // blocker is checked at the tool layer when written; a blocker removed later
   // reads as closed, it is never rewritten out of this list.
-  blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+  blocked_by: external_exports.array(external_exports.string().min(1)).optional(),
+  // What a user item waits on besides its blockers (decision
+  // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+  // 'investigation' still auto-starts, as a researcher lane; 'user' and
+  // 'grill' wait for the user. Not a progress status: `status` keeps meaning
+  // supersession only. Absent means nothing beyond the blockers.
+  needs: external_exports.enum(BOARD_NEEDS).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -4604,6 +4611,13 @@ var todoSchema = base.extend({
       code: external_exports.ZodIssueCode.custom,
       path: ["blocked_by"],
       message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+    });
+  }
+  if (rec.needs !== void 0 && rec.source === "system") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      path: ["needs"],
+      message: "needs marks source:'user' board tasks only \u2014 maintenance-queue items never carry it"
     });
   }
   if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
@@ -4803,6 +4817,14 @@ var RECORD_TYPES = {
     digest: { slug: "plain", title: "plain", problem: "clip" }
   }
 };
+var NAME_CLIP = 48;
+var clipName = (name) => name.length <= NAME_CLIP ? name : `${name.slice(0, NAME_CLIP - 1)}\u2026`;
+var displayHandle = (name, id) => `${clipName(name)} (${id.slice(0, 8)})`;
+function boardDisplayLabel(text, slug) {
+  const line = s(text).split("\n").find((l) => l.trim().length > 0);
+  const normalized = line ? line.trim().replace(/\s+/g, " ") : "";
+  return normalized || s(slug).trim();
+}
 function validateRecord(input2) {
   if (typeof input2 !== "object" || input2 === null || typeof input2.type !== "string") {
     throw new Error("validateRecord: input has no record type");
@@ -5483,6 +5505,10 @@ function deepReplaceString(value, from, to) {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
   }
   return value;
+}
+function boardItemHandle(rec) {
+  const label = boardDisplayLabel(rec.text, rec.slug);
+  return label ? displayHandle(label, rec.id) : `(unnamed board item) (${rec.id.slice(0, 8)})`;
 }
 var MAX_RANK_TERMS = 16;
 function rankTermDedupeKey(term) {
@@ -6912,6 +6938,64 @@ var SterlingStore = class _SterlingStore {
           WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
     return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
+  }
+  /**
+   * THE ONE READINESS FUNCTION (decision
+   * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start,
+   * AMENDED (a)). board_get/board_query's blocked_by_state, H1's three groups,
+   * H20's ready line, the TUI cards and the OpenCode plugin all read this, so
+   * "open blocker" and "ready" have one definition.
+   *
+   * `items` defaults to every live user board item (a system item is never
+   * returned). Passed explicitly, each user todo given is judged against the
+   * LIVE board: a blocker is open while a live todo carries its slug, and
+   * `unblocks` lists live user items whose blocked_by names the item. Read
+   * only; the stored blocked_by is never rewritten. No cycle detection.
+   */
+  boardReadiness(items) {
+    const total = this.count({ types: ["todo"], source: "user" });
+    const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+    const bySlug = /* @__PURE__ */ new Map();
+    for (const t of live)
+      if (t.slug)
+        bySlug.set(t.slug, t);
+    const dependents = /* @__PURE__ */ new Map();
+    for (const t of live) {
+      for (const slug of new Set(t.blocked_by ?? [])) {
+        const list = dependents.get(slug);
+        if (list)
+          list.push(t);
+        else
+          dependents.set(slug, [t]);
+      }
+    }
+    const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
+    const targets = items ?? live;
+    return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+      const blockers = [];
+      const blockersOpen = [];
+      for (const slug of t.blocked_by ?? []) {
+        const holder = openBlocker(slug);
+        blockers.push({ slug, state: holder ? "open" : "closed" });
+        if (holder)
+          blockersOpen.push(boardItemHandle(holder));
+      }
+      const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+      const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+      return {
+        id: t.id,
+        ...t.slug ? { slug: t.slug } : {},
+        name: boardItemHandle(t),
+        ...t.priority ? { priority: t.priority } : {},
+        updated_at: t.updated_at,
+        file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+        ...t.needs ? { needs: t.needs } : {},
+        blockers,
+        blockers_open: blockersOpen,
+        unblocks,
+        state
+      };
+    });
   }
   /**
    * Every SUPERSEDED record carrying this exact slug, newest first — the

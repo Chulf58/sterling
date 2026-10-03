@@ -34,7 +34,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, writeSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { readStdin, deny, allow, exitAfterWrite, openStore, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
-import { withRegisterLock, classifyRegister, readRegister, formatDispatchRef, registerPath as ownerRegisterPath } from '../lib/dispatch-register.mjs';
+import { withRegisterLock, classifyRegister, readRegister, formatDispatchRef, formatAge, registerPath as ownerRegisterPath } from '../lib/dispatch-register.mjs';
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { mintSettlementReconcile, withFileLock, parseTouchesContent, gitTouches, gitTrackedSubset, writeGitSettled, loadGeneratedProjections } from './lib/settlement.mjs';
 import { VERSION_ONLY_CANDIDATES, isVersionOnlyInWorkingTree } from '../lib/version-only.mjs';
@@ -89,6 +89,25 @@ import {
  * existing "H10 never mutates the register" deferral pin (a LIVE entry, never
  * an orphan) stays true.
  */
+/**
+ * LANE LIVENESS FROM RECENT TOUCHES (decision h10-lane-liveness-from-recent-
+ * touches-past-the-lease, board 526710de). The register's `at` is set at
+ * registration and never refreshed, so a lane running past
+ * dispatch_register.stale_minutes would read as expired while it is still
+ * writing. H7 stamps every subagent touch with its agent_id, so a touch newer
+ * than the lease proves that agent_id is running. Returns the set of such
+ * agent_ids; a lane that stopped writing is absent and still ages out.
+ */
+function recentlyWritingAgentIds(touchList, nowMs, staleMinutes) {
+  const ids = new Set();
+  for (const t of Array.isArray(touchList) ? touchList : []) {
+    if (typeof t?.agent_id !== 'string' || t.agent_id === '') continue;
+    const at = Date.parse(t.at ?? '');
+    if (!Number.isNaN(at) && at <= nowMs && nowMs - at < staleMinutes * 60_000) ids.add(t.agent_id);
+  }
+  return ids;
+}
+
 async function computeDeadDispatchResidue(cwd, sessionId) {
   const registerPath = ownerRegisterPath(cwd);
   const nowIso = new Date().toISOString();
@@ -108,8 +127,22 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
   const nowMs = Date.parse(nowIso);
   const lines = [];
   const stampIds = new Set();
+  // The touch register and a claim left by a Stop that has not released it: a
+  // read that fails here only loses the liveness evidence, and the entry is
+  // then judged by its age alone, as before.
+  const touchesFile = join(cwd, '.sterling', 'transient', 'touches.json');
+  const recentTouches = [];
+  for (const f of [touchesFile, `${touchesFile}.claim`]) {
+    try {
+      if (existsSync(f)) recentTouches.push(...parseTouchesContent(readFileSync(f, 'utf8')));
+    } catch {
+      // unreadable touches: no liveness evidence from this file
+    }
+  }
+  const writing = recentlyWritingAgentIds(recentTouches, nowMs, staleMinutes);
   for (const entry of registerEntries) {
     if (!entry || entry.session_id !== sessionId) continue;
+    if (writing.has(entry.agent_id)) continue; // still writing: running, not residue
     // A1: Stop MARKS `ended` rather than deleting — an ended entry's Stop DID
     // fire, so it is inactive-confirmed, never "stopped by timeout" residue,
     // however stale its `at` reads.
@@ -119,7 +152,12 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
     const probe = probeDirtyPaths(cwd, entry.files, [...fileEntriesOf(entry)]);
     const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
     if (probe.verified && dirty.length === 0) continue; // clean — nothing to report
-    lines.push(render(disclosure('dispatch_residue', {}, formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }))));
+    lines.push(render(disclosure('dispatch_residue', {}, formatResidueLine(entry, dirty, {
+      verified: probe.verified,
+      reason: probe.reason,
+      stopSeen: false,
+      registeredAgo: Number.isNaN(Date.parse(entry.at ?? '')) ? '' : formatAge(nowMs - Date.parse(entry.at)),
+    }))));
     stampIds.add(entry.agent_id);
   }
   if (stampIds.size) {
@@ -679,6 +717,11 @@ try {
   // Stop until writeGitSettled (runSettlement, below) advances the snapshot,
   // so the claim file still carries exactly what H7 wrote. No git degrades
   // loud to the register alone (the pre-slice behaviour).
+  // Lane liveness is read from the claimed touches BEFORE this filter: a lane
+  // whose recent writes were committed has no touch left after it, but it is
+  // still running (decision h10-lane-liveness-from-recent-touches-past-the-
+  // lease).
+  const writingAgentIds = recentlyWritingAgentIds(touches, Date.parse(now), config.dispatch_register.stale_minutes);
   const git = gitTouches(input.cwd, now);
   let lostSettlementMessage = '';
   if (!git.ok) {
@@ -792,7 +835,18 @@ try {
   // corrupt register excludes nothing and is disclosed once with
   // [register_unavailable]; an ABSENT register stays silent — H10 never
   // enumerates a register that plainly does not exist.
-  const classified = classifyRegister(input.cwd, { now: nowMs, sessionId: input.session_id, staleMinutes });
+  const classifiedByAge = classifyRegister(input.cwd, { now: nowMs, sessionId: input.session_id, staleMinutes });
+  // A row past its lease whose agent_id has a recent H7 touch (writingAgentIds,
+  // computed before the git filter) is running: it counts as presumed-active
+  // for everything below.
+  const classified = {
+    ...classifiedByAge,
+    entries: classifiedByAge.entries.map((row) =>
+      row.status === 'unknown' && row.reason === 'lease-expired' && writingAgentIds.has(row.entry.agent_id)
+        ? { ...row, status: 'presumed-active', reason: null }
+        : row
+    ),
+  };
   // Flat presumed-active entry list — consumed further down by the
   // capture_pending hold (pendingHeld: is ANY dispatch live), a SEPARATE
   // question from the file-deferral join above (who owns THIS touched path).

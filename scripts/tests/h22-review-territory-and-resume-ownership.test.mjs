@@ -174,6 +174,72 @@ test('a MALFORMED REVIEW-TERRITORY falls back to free-prose extraction, and says
   }
 });
 
+// Decision malformed-review-territory-fallback-skips-negated-paths (board
+// 24ece4e7 residual 4): the fallback still owns its free-prose paths, except
+// those that sit only under a prohibition marker.
+test('a MALFORMED REVIEW-TERRITORY fallback drops a path that sits under NEVER write and keeps the normal one', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const prompt = ['Lane H.', 'REVIEW-TERRITORY: ["src/a.mjs", src/b.mjs]', 'NEVER write src/x.mjs.', 'Edit src/y.mjs.'].join('\n');
+    const s = dispatch(dir, { tool_use_id: 'toolu_laneH', agent_id: 'lane-h', prompt });
+    const [entry] = roundsFor(dir, 'lane-h');
+    assert.equal(entry.files_source, 'free-prose-malformed-territory');
+    assert.ok(!entry.files.includes('src/x.mjs'), `src/x.mjs is named only under NEVER write: ${JSON.stringify(entry.files)}`);
+    assert.ok(entry.files.includes('src/y.mjs'), `src/y.mjs is a normal free-prose path: ${JSON.stringify(entry.files)}`);
+    assert.match(s.stderr, /\[territory_declaration_malformed\]/, `still disclosed: ${s.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// An exception phrasing ("except", "outside", "other than") sitting between the
+// prohibition marker and the path NAMES the lane's own files: the prohibition
+// covers everything else.
+test('a MALFORMED REVIEW-TERRITORY fallback keeps a path named by an exception phrasing under a prohibition', () => {
+  const cases = [
+    ['Do not touch anything except src/a.mjs.', ['src/a.mjs']],
+    ['Never write outside src/a.mjs.', ['src/a.mjs']],
+    ['Do not edit files other than src/a.mjs and src/b.mjs.', ['src/a.mjs', 'src/b.mjs']],
+  ];
+  for (const [sentence, want] of cases) {
+    const { dir, cleanup } = makeProject();
+    try {
+      const prompt = ['Lane E.', 'REVIEW-TERRITORY: ["/abs/game"]', sentence, 'NEVER write src/x.mjs.'].join('\n');
+      dispatch(dir, { tool_use_id: 'toolu_laneE', agent_id: 'lane-e', prompt });
+      const [entry] = roundsFor(dir, 'lane-e');
+      assert.equal(entry.files_source, 'free-prose-malformed-territory');
+      assert.deepEqual(entry.files, want, `${sentence} keeps its own files and src/x.mjs is still dropped: ${JSON.stringify(entry.files)}`);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+// The exception word has to sit directly before the path: "only" is not an
+// exception word, and an exception phrase in a different object ("outside your
+// territory such as src/x.mjs") does not name src/x.mjs as the lane's own.
+test('a MALFORMED REVIEW-TERRITORY fallback still drops a path under a prohibition when no exception word sits directly before it', () => {
+  const cases = [
+    'Do not edit, only read, src/x.mjs.',
+    'Do not modify the only copy of src/x.mjs.',
+    'Do not write files outside your territory such as src/x.mjs or src/z.mjs.',
+    'NEVER write outside the worktree: src/x.mjs belongs to lane B.',
+  ];
+  for (const sentence of cases) {
+    const { dir, cleanup } = makeProject();
+    try {
+      const prompt = ['Lane D.', 'REVIEW-TERRITORY: ["/abs/game"]', sentence, 'Edit src/y.mjs.'].join('\n');
+      dispatch(dir, { tool_use_id: 'toolu_laneD', agent_id: 'lane-d', prompt });
+      const [entry] = roundsFor(dir, 'lane-d');
+      assert.equal(entry.files_source, 'free-prose-malformed-territory');
+      assert.ok(!entry.files.includes('src/x.mjs'), `${sentence} must drop src/x.mjs: ${JSON.stringify(entry.files)}`);
+      assert.ok(entry.files.includes('src/y.mjs'), `${sentence} keeps the normal path: ${JSON.stringify(entry.files)}`);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
 test('REVIEW-TERRITORY entries that are not canonical repo-relative paths (absolute, parent escape, glob, doubled trailing slash) are malformed, never partially honoured', () => {
   for (const bad of ['["/abs/game"]', '["../game"]', '["game/**"]', '["game/farm//"]', '{"files":["game"]}', '["game", 3]']) {
     const { dir, cleanup } = makeProject();
