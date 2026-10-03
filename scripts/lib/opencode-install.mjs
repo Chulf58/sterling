@@ -72,6 +72,8 @@ export const ROSTER = ['conductor', 'implementor', 'researcher', 'scout', 'revie
 export const STERLING_NPM_PACKAGE = '@chulf58/sterling';
 export const STORE_GUARD_PATTERNS =['**/.sterling/sterling.db*', '.sterling/sterling.db*'];
 export const SHELL_STORE_GUARD_PATTERN = '*sterling.db*';
+/** The store named by path inside a shell command, for a "*" block that also matches read, grep, webfetch and edit. */
+export const SHELL_STORE_PATH_PATTERN = '*.sterling/sterling.db*';
 const PACKAGE_MARKER = 'sterling-generated';
 const EXCLUDE_BEGIN = '# >>> sterling opencode (managed by Sterling init/update; per-user files, never committed)';
 const EXCLUDE_END = '# <<< sterling opencode';
@@ -640,14 +642,22 @@ function withGuard(value, patterns) {
  * order with their rules, every block that can match edit or shell ends with the guard,
  * and edit, shell and bash are appended holding only the guard when absent. No "*"
  * rule is added, so every verdict for a path or command that is not the store stands.
+ * The shell guard is the broad *sterling.db*, because 2.0.22 checks each simple command
+ * of a shell line on its own (`cd .sterling && sqlite3 sterling.db` reaches the matcher
+ * as `sqlite3 sterling.db`); it also denies shell commands that only name such a file.
+ * A user's "*" block matches read, grep, webfetch and edit too, so it gets the store by
+ * path, and keeps the broad pattern only when no shell-family block follows it (the user
+ * wrote shell and bash before "*"), where its rules are the last a shell command meets.
  * Returns { value } or { bad: <the malformed key> }.
  */
 export function guardPermission(permission) {
   let perm = permission ?? {};
   if (typeof perm === 'string') perm = { '*': perm };
   if (typeof perm !== 'object' || perm === null || Array.isArray(perm)) return { bad: '' };
+  const keys = Object.keys(perm);
+  const shellAfterStar = SHELL_FAMILY.some((k) => !keys.includes(k) || keys.indexOf(k) > keys.indexOf('*'));
   const patternsFor = (key) => {
-    if (key === '*') return [...STORE_GUARD_PATTERNS, SHELL_STORE_GUARD_PATTERN];
+    if (key === '*') return [...STORE_GUARD_PATTERNS, shellAfterStar ? SHELL_STORE_PATH_PATTERN : SHELL_STORE_GUARD_PATTERN];
     if (EDIT_FAMILY.includes(key)) return STORE_GUARD_PATTERNS;
     if (SHELL_FAMILY.includes(key)) return [SHELL_STORE_GUARD_PATTERN];
     return null;
@@ -704,21 +714,33 @@ function agentFileNames(dir, { flat = false, prefix = '' } = {}) {
 /**
  * The agents OpenCode 2.0.22 can see besides the project's .opencode/opencode.json
  * entries. Read from the binary and probed (each in a fresh directory): in every config
- * directory (the global one, which OPENCODE_CONFIG_DIR replaces, and <project>/.opencode)
- * the files {agent,agents}/**\/*.md and {mode,modes}/*.md; the `agent` entries of the
- * global opencode.json and opencode.jsonc, the project-root opencode.json and
- * opencode.jsonc, .opencode/opencode.jsonc, the OPENCODE_CONFIG file and
- * OPENCODE_CONFIG_CONTENT. The environment read is this process's. A config Sterling
- * cannot read is a `skipped` row and sets `incomplete`; a source whose rules can come
- * after .opencode/opencode.json is a row too, so no gap is silent.
+ * directory (the global one, which OPENCODE_CONFIG_DIR replaces, <project>/.opencode and
+ * the .opencode of every ancestor up to /) the files {agent,agents}/**\/*.md and
+ * {mode,modes}/*.md; the `agent` entries of the global opencode.json and opencode.jsonc,
+ * the opencode.json and opencode.jsonc of the project and of every ancestor, the
+ * ancestors' .opencode/opencode.json, .opencode/opencode.jsonc, the OPENCODE_CONFIG file
+ * and OPENCODE_CONFIG_CONTENT. `opencode debug config` lists the ancestor sources and the
+ * project-root opencode.json before the project's .opencode/opencode.json. The
+ * environment read is this process's; `envOnly` names the agents seen only through it. A
+ * config Sterling cannot read is a `skipped` row and sets `incomplete`; a source whose
+ * rules can come after .opencode/opencode.json is a row too, so no gap is silent.
  */
 export function visibleAgents({ projectDir, env = process.env, home = homedir() }) {
   const globalDir = env.OPENCODE_CONFIG_DIR || opencodeConfigDir({ env, home });
   const dotDir = join(projectDir, '.opencode');
+  const ancestors = [];
+  for (let d = dirname(resolve(projectDir)); ; d = dirname(d)) {
+    ancestors.push(d);
+    if (dirname(d) === d) break;
+  }
   const names = new Set();
-  for (const dir of [globalDir, dotDir]) {
-    for (const sub of ['agent', 'agents']) for (const n of agentFileNames(join(dir, sub))) names.add(n);
-    for (const sub of ['mode', 'modes']) for (const n of agentFileNames(join(dir, sub), { flat: true })) names.add(n);
+  const envNames = new Set();
+  const fileNames = (dir) => [
+    ...['agent', 'agents'].flatMap((sub) => agentFileNames(join(dir, sub))),
+    ...['mode', 'modes'].flatMap((sub) => agentFileNames(join(dir, sub), { flat: true })),
+  ];
+  for (const dir of [globalDir, dotDir, ...ancestors.map((a) => join(a, '.opencode'))]) {
+    for (const n of fileNames(dir)) (dir === env.OPENCODE_CONFIG_DIR ? envNames : names).add(n);
   }
   const problems = [];
   let incomplete = false;
@@ -726,9 +748,11 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir() 
     ...['opencode.json', 'opencode.jsonc'].map((f) => join(globalDir, f)),
     ...['opencode.json', 'opencode.jsonc'].map((f) => join(projectDir, f)),
     join(dotDir, 'opencode.jsonc'),
+    ...ancestors.flatMap((a) => ['opencode.json', 'opencode.jsonc', '.opencode/opencode.json', '.opencode/opencode.jsonc'].map((f) => join(a, f))),
     ...(env.OPENCODE_CONFIG ? [env.OPENCODE_CONFIG] : []),
   ].map((path) => ({ label: fwd(path), read: () => (existsSync(path) ? readFileSync(path, 'utf8') : null) }));
   if (env.OPENCODE_CONFIG_CONTENT) docs.push({ label: 'OPENCODE_CONFIG_CONTENT', read: () => env.OPENCODE_CONFIG_CONTENT });
+  const fromEnv = new Set([...(env.OPENCODE_CONFIG_DIR ? ['opencode.json', 'opencode.jsonc'].map((f) => fwd(join(globalDir, f))) : []), ...(env.OPENCODE_CONFIG ? [fwd(env.OPENCODE_CONFIG)] : []), 'OPENCODE_CONFIG_CONTENT']);
   const late = new Set([fwd(join(dotDir, 'opencode.jsonc')), ...(env.OPENCODE_CONFIG ? [fwd(env.OPENCODE_CONFIG)] : []), 'OPENCODE_CONFIG_CONTENT']);
   for (const doc of docs) {
     const text = doc.read();
@@ -743,13 +767,14 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir() 
     }
     const agents = config?.agent;
     const hasAgents = agents && typeof agents === 'object' && !Array.isArray(agents);
-    if (hasAgents) for (const name of Object.keys(agents)) names.add(name);
+    if (hasAgents) for (const name of Object.keys(agents)) (fromEnv.has(doc.label) ? envNames : names).add(name);
     const setsRules = config?.permission !== undefined || (hasAgents && Object.values(agents).some((a) => a?.permission !== undefined));
     if (late.has(doc.label) && setsRules) {
       problems.push({ item: doc.label, status: 'skipped', detail: `sets permission rules and is read after (or in an unmeasured order with) ${PROJECT_CONFIG_REL}, so its rules can override the store guard; move them into ${PROJECT_CONFIG_REL}` });
     }
   }
-  return { names: [...names].sort(), problems, incomplete };
+  const envOnly = [...envNames].filter((n) => !names.has(n)).sort();
+  return { names: [...new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete };
 }
 
 /**
@@ -826,9 +851,15 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
     nextAgents[name] = { ...entry, permission: perm.value };
   }
   for (const name of [...names].sort()) if (!nextAgents[name]) nextAgents[name] = JSON.parse(guardOnly);
+  // An entry for an agent seen only through this run's environment is written, so the
+  // agent is guarded whenever OpenCode runs with that environment; OpenCode started
+  // without it shows the entry as an agent with no prompt, so the row names it.
+  const envOnly = visible.envOnly.filter((name) => JSON.stringify(nextAgents[name]) === guardOnly);
   if (Object.keys(nextAgents).length) config.agent = nextAgents;
   else delete config.agent;
   notes.push(`per-agent store guard on ${names.size} agents (agent files in the global config dir and ${fwd('.opencode')}, and the config "agent" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
+  if (envOnly.length) notes.push(`guard entries for agents seen only through this run's OPENCODE_CONFIG_DIR, OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT: ${envOnly.join(', ')}; OpenCode started without that environment lists each as an agent with no prompt, and a rerun of /sterling:update without it removes them`);
+  if (env.OPENCODE_CONFIG_DIR) notes.push(`OPENCODE_CONFIG_DIR replaced the global config dir for this run, so agents in ${fwd(opencodeConfigDir({ env, home }))} were not checked`);
   if (!conductorOk) {
     if (config.default_agent === undefined) notes.push(`default_agent not set: the ${CONDUCTOR_AGENT} agent file was refused`);
   } else if (config.default_agent === undefined) config.default_agent = CONDUCTOR_AGENT;
