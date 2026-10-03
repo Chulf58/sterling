@@ -6730,7 +6730,108 @@ function git(projectDir, args2) {
 function mcpCommand({ home = homedir3() } = {}) {
   return ["node", "--disable-warning=ExperimentalWarning", fwd2(mcpLauncherPath({ home })), "--store", ".sterling/sterling.db"];
 }
-function ensureProjectConfig({ projectDir, home = homedir3(), tracked, conductorOk = true }) {
+var EDIT_FAMILY = ["edit", "write", "patch"];
+var SHELL_FAMILY = ["shell", "bash"];
+function withGuard(value, patterns) {
+  if (typeof value === "string") value = { "*": value };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const out = Object.fromEntries(Object.entries(value).filter(([k]) => !patterns.includes(k)));
+  for (const p of patterns) out[p] = "deny";
+  return out;
+}
+function guardPermission(permission) {
+  let perm = permission ?? {};
+  if (typeof perm === "string") perm = { "*": perm };
+  if (typeof perm !== "object" || perm === null || Array.isArray(perm)) return { bad: "" };
+  const patternsFor = (key) => {
+    if (key === "*") return [...STORE_GUARD_PATTERNS, SHELL_STORE_GUARD_PATTERN];
+    if (EDIT_FAMILY.includes(key)) return STORE_GUARD_PATTERNS;
+    if (SHELL_FAMILY.includes(key)) return [SHELL_STORE_GUARD_PATTERN];
+    return null;
+  };
+  const out = {};
+  for (const [key, value] of Object.entries(perm)) {
+    const patterns = patternsFor(key);
+    if (!patterns) {
+      out[key] = value;
+      continue;
+    }
+    out[key] = withGuard(value, patterns);
+    if (out[key] === null) return { bad: key };
+  }
+  for (const key of ["edit", "shell", "bash"]) if (out[key] === void 0) out[key] = withGuard({}, patternsFor(key));
+  return { value: out };
+}
+function parseJsonc(text) {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j;
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+      out += "\n";
+    } else if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end === -1) throw new Error("unterminated /* comment");
+      i = end + 1;
+    } else if (c === "," && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, " ")))) {
+    } else out += c;
+  }
+  return JSON.parse(out);
+}
+function agentFileNames(dir, { flat = false, prefix = "" } = {}) {
+  if (!existsSync4(dir)) return [];
+  const names = [];
+  for (const d of readdirSync4(dir, { withFileTypes: true })) {
+    if (d.isDirectory() && !flat) names.push(...agentFileNames(join8(dir, d.name), { prefix: `${prefix}${d.name}/` }));
+    else if (d.isFile() && d.name.endsWith(".md")) names.push(`${prefix}${d.name.slice(0, -3)}`);
+  }
+  return names;
+}
+function visibleAgents({ projectDir, env = process.env, home = homedir3() }) {
+  const globalDir = env.OPENCODE_CONFIG_DIR || opencodeConfigDir({ env, home });
+  const dotDir = join8(projectDir, ".opencode");
+  const names = /* @__PURE__ */ new Set();
+  for (const dir of [globalDir, dotDir]) {
+    for (const sub of ["agent", "agents"]) for (const n of agentFileNames(join8(dir, sub))) names.add(n);
+    for (const sub of ["mode", "modes"]) for (const n of agentFileNames(join8(dir, sub), { flat: true })) names.add(n);
+  }
+  const problems = [];
+  let incomplete = false;
+  const docs = [
+    ...["opencode.json", "opencode.jsonc"].map((f) => join8(globalDir, f)),
+    ...["opencode.json", "opencode.jsonc"].map((f) => join8(projectDir, f)),
+    join8(dotDir, "opencode.jsonc"),
+    ...env.OPENCODE_CONFIG ? [env.OPENCODE_CONFIG] : []
+  ].map((path) => ({ label: fwd2(path), read: () => existsSync4(path) ? readFileSync5(path, "utf8") : null }));
+  if (env.OPENCODE_CONFIG_CONTENT) docs.push({ label: "OPENCODE_CONFIG_CONTENT", read: () => env.OPENCODE_CONFIG_CONTENT });
+  const late2 = /* @__PURE__ */ new Set([fwd2(join8(dotDir, "opencode.jsonc")), ...env.OPENCODE_CONFIG ? [fwd2(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
+  for (const doc of docs) {
+    const text = doc.read();
+    if (text === null) continue;
+    let config2;
+    try {
+      config2 = parseJsonc(text);
+    } catch (err) {
+      incomplete = true;
+      problems.push({ item: doc.label, status: "skipped", detail: `not valid JSONC (${err.message}), so the agents it defines are NOT checked and get no new per-agent guard; earlier per-agent guard entries are kept; fix it, then rerun /sterling:update` });
+      continue;
+    }
+    const agents = config2?.agent;
+    const hasAgents = agents && typeof agents === "object" && !Array.isArray(agents);
+    if (hasAgents) for (const name of Object.keys(agents)) names.add(name);
+    const setsRules = config2?.permission !== void 0 || hasAgents && Object.values(agents).some((a) => a?.permission !== void 0);
+    if (late2.has(doc.label) && setsRules) {
+      problems.push({ item: doc.label, status: "skipped", detail: `sets permission rules and is read after (or in an unmeasured order with) ${PROJECT_CONFIG_REL}, so its rules can override the store guard; move them into ${PROJECT_CONFIG_REL}` });
+    }
+  }
+  return { names: [...names].sort(), problems, incomplete };
+}
+function ensureProjectConfig({ projectDir, env = process.env, home = homedir3(), tracked, conductorOk = true }) {
   const rel = PROJECT_CONFIG_REL;
   const path = join8(projectDir, rel);
   if (tracked.includes(rel)) {
@@ -6765,35 +6866,41 @@ function ensureProjectConfig({ projectDir, home = homedir3(), tracked, conductor
     }
   }
   const permission = config2.permission ?? {};
-  if (typeof permission !== "object" || Array.isArray(permission)) return [refusal(rel, `${rel}: "permission" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
-  let edit = permission.edit ?? { "*": "allow" };
-  if (typeof edit === "string") edit = { "*": edit };
-  if (typeof edit !== "object" || Array.isArray(edit)) return [refusal(rel, `${rel}: "permission.edit" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
-  const guarded = { "*": "allow", ...Object.fromEntries(Object.entries(edit).filter(([k]) => !STORE_GUARD_PATTERNS.includes(k))) };
-  for (const p of STORE_GUARD_PATTERNS) guarded[p] = "deny";
-  let shell = permission.shell;
-  if (shell === void 0) {
-    const bash = permission.bash;
-    if (bash === void 0) shell = { "*": "allow" };
-    else if (typeof bash === "string") shell = { "*": bash };
-    else if (typeof bash === "object" && bash !== null && !Array.isArray(bash)) shell = bash["*"] === void 0 ? { "*": "allow" } : { "*": bash["*"] };
-    else return [refusal(rel, `${rel}: "permission.bash" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
+  if (typeof permission !== "object" || permission === null || Array.isArray(permission)) return [refusal(rel, `${rel}: "permission" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+  const top = guardPermission(permission);
+  if (top.bad !== void 0) return [refusal(rel, `${rel}: "permission.${top.bad}" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
+  config2.permission = top.value;
+  const agents = config2.agent ?? {};
+  if (typeof agents !== "object" || agents === null || Array.isArray(agents)) return [refusal(rel, `${rel}: "agent" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+  const visible = visibleAgents({ projectDir, env, home });
+  extraRows.push(...visible.problems);
+  const guardOnly = JSON.stringify({ permission: guardPermission(void 0).value });
+  const names = new Set(visible.names);
+  for (const [name, entry] of Object.entries(agents)) {
+    if (visible.incomplete || JSON.stringify(entry) !== guardOnly) names.add(name);
   }
-  if (typeof shell === "string") shell = { "*": shell };
-  if (typeof shell !== "object" || shell === null || Array.isArray(shell)) return [refusal(rel, `${rel}: "permission.shell" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
-  const shellGuarded = { "*": "allow", ...Object.fromEntries(Object.entries(shell).filter(([k]) => k !== SHELL_STORE_GUARD_PATTERN)) };
-  shellGuarded[SHELL_STORE_GUARD_PATTERN] = "deny";
-  config2.permission = { ...permission, edit: guarded, shell: shellGuarded };
+  const nextAgents = {};
+  for (const [name, entry] of Object.entries(agents)) {
+    if (!names.has(name)) continue;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [refusal(rel, `${rel}: "agent.${name}" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+    const perm = guardPermission(entry.permission);
+    if (perm.bad !== void 0) return [refusal(rel, `${rel}: "agent.${name}.permission${perm.bad ? `.${perm.bad}` : ""}" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
+    nextAgents[name] = { ...entry, permission: perm.value };
+  }
+  for (const name of [...names].sort()) if (!nextAgents[name]) nextAgents[name] = JSON.parse(guardOnly);
+  if (Object.keys(nextAgents).length) config2.agent = nextAgents;
+  else delete config2.agent;
+  notes.push(`per-agent store guard on ${names.size} agents (agent files in the global config dir and ${fwd2(".opencode")}, and the config "agent" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
   if (!conductorOk) {
     if (config2.default_agent === void 0) notes.push(`default_agent not set: the ${CONDUCTOR_AGENT} agent file was refused`);
   } else if (config2.default_agent === void 0) config2.default_agent = CONDUCTOR_AGENT;
   else if (config2.default_agent !== CONDUCTOR_AGENT) notes.push(`default_agent kept as ${JSON.stringify(config2.default_agent)} (yours), so OpenCode does not start in ${CONDUCTOR_AGENT}`);
   const after = `${JSON.stringify(config2, null, 2)}
 `;
-  if (after === before) return [{ item: rel, status: "matches", detail: notes.join("; ") || void 0 }, ...extraRows];
+  if (after === before) return [{ item: rel, status: "matches", detail: notes.join("; ") }, ...extraRows];
   mkdirSync3(dirname(path), { recursive: true });
   writeFileSync2(path, after);
-  return [{ item: rel, status: before === null ? "created" : "refreshed", detail: notes.join("; ") || "store-guard edit and shell deny, default_agent" }, ...extraRows];
+  return [{ item: rel, status: before === null ? "created" : "refreshed", detail: ["store-guard edit and shell deny, default_agent", ...notes].join("; ") }, ...extraRows];
 }
 function excludeLines(wholeDir) {
   return wholeDir ? ["/.opencode/"] : [`/${PROJECT_CONFIG_REL}`, `/${STERLING_AGENTS_SUBDIR}/`];
@@ -6932,7 +7039,7 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
   const agentRows = ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked });
   const conductorRow = agentRows.find((r) => r.item === `${STERLING_AGENTS_SUBDIR}/conductor.md`);
   const conductorOk = ["created", "matches", "refreshed"].includes(conductorRow?.status);
-  rows.push(...ensureProjectConfig({ projectDir, home, tracked, conductorOk }));
+  rows.push(...ensureProjectConfig({ projectDir, env, home, tracked, conductorOk }));
   rows.push(...agentRows);
   return { rows };
 }

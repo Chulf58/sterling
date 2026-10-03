@@ -12700,6 +12700,37 @@ function commandText(body, args) {
 
 ARGUMENTS: ${a}` : body;
 }
+function registerCommands(ctx, commands) {
+  return ctx.command.transform((editor) => {
+    for (const c of commands) {
+      editor.add({
+        name: c.name,
+        description: c.description,
+        execute: (inv) => ctx.session.prompt({ ...inv.prompt, sessionID: inv.sessionID, text: commandText(c.body, inv.prompt?.text), delivery: inv.delivery }).then(() => {
+        })
+      });
+    }
+  });
+}
+var BOOTSTRAP_COMMANDS = [`${COMMAND_PREFIX}init`, `${COMMAND_PREFIX}projects`];
+function createBootstrapHandler(deps = {}) {
+  const stderr = deps.stderr ?? ((s2) => process.stderr.write(s2));
+  return async function bootstrap(ctx) {
+    const root = deps.sterlingRoot ?? sterlingRoot();
+    const commands = [];
+    for (const name of BOOTSTRAP_COMMANDS) {
+      const file = `${name.slice(COMMAND_PREFIX.length)}.md`;
+      try {
+        const { description, body } = renderSource(join18(root, "commands", file), root, `commands/${file}`);
+        commands.push({ name, description, body });
+      } catch (e) {
+        stderr(`[sterling] /${name} not registered on OpenCode: ${errText(e)}
+`);
+      }
+    }
+    await registerCommands(ctx, commands);
+  };
+}
 function createConfigHandler(deps = {}) {
   const now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
   return async function configure(ctx) {
@@ -12711,16 +12742,7 @@ function createConfigHandler(deps = {}) {
       logLine(project, `config: ${f.kind} ${f.name} not registered: ${f.error}`);
       addNotice(project, `Sterling plugin: the ${f.kind} ${f.kind === "command" ? `/${f.name}` : f.name} is not registered on OpenCode (${f.error}). See ${LOG_REL}.`, now());
     }
-    await ctx.command.transform((editor) => {
-      for (const c of commands) {
-        editor.add({
-          name: c.name,
-          description: c.description,
-          execute: (inv) => ctx.session.prompt({ ...inv.prompt, sessionID: inv.sessionID, text: commandText(c.body, inv.prompt?.text), delivery: inv.delivery }).then(() => {
-          })
-        });
-      }
-    });
+    await registerCommands(ctx, commands);
     await ctx.skill.transform((editor) => {
       for (const s2 of skills) {
         if (editor.get(s2.id)) editor.remove(s2.id);
@@ -12792,12 +12814,7 @@ import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
 var SERVER = "sterling";
-var OPENCODE_DENIED_MCP = [
-  ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => `${SERVER}_knowledge_${v}`),
-  ...["add", "remove", "update", "edit"].map((v) => `${SERVER}_board_${v}`),
-  `${SERVER}_config_set`,
-  `${SERVER}_domain_describe`
-];
+var OPENCODE_ALLOWED_TOOLS = ["execute", "mcp", "read", "grep", ...["maintenance_query", "knowledge_get", "maintenance_remove", "knowledge_line_ref_fix"].map((v) => `${SERVER}_${v}`)];
 
 // scripts/hooks/lib/maintenance-worker.mjs
 var WORKER_RUN_BUDGET_USD = 2;
@@ -15447,6 +15464,7 @@ function createSterlingServer(deps = {}) {
   const onPrompt = createPromptHandler({ openStore, rootOf, fenced, env: deps.env ?? process.env });
   const onCompaction = createCompactionHandler({ rootOf, fenced });
   const configure = deps.configure ?? createConfigHandler(deps);
+  const bootstrap = deps.bootstrap ?? createBootstrapHandler(deps);
   async function onEvent(ev) {
     if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
     if (inWorkerChild(deps.env ?? process.env)) return;
@@ -15486,6 +15504,14 @@ function createSterlingServer(deps = {}) {
       session = ctx.session;
       const root = rootOf();
       if (root) await fenced("config", root, () => configure(ctx));
+      else {
+        try {
+          await bootstrap(ctx);
+        } catch (e) {
+          process.stderr.write(`[sterling] the bootstrap commands could not be registered (${errText(e)})
+`);
+        }
+      }
       await ctx.session.hook("context", onContext);
       await ctx.session.hook("prompt", onPrompt);
       await ctx.session.hook("compaction", onCompaction);

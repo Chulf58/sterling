@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { judgedVerdicts, maybeLaunchMaintenanceWorker, runWorker, workerPaths } from '../hooks/lib/maintenance-worker.mjs';
-import { OPENCODE_DENIED_MCP, opencodeStreamJournal } from '../hooks/lib/maintenance-worker-opencode.mjs';
+import { CLAUDE_TOOLS_LINE, OPENCODE_ALLOWED_TOOLS, OPENCODE_PROMPT_NOTE, OPENCODE_WORKER_AGENT, OPENCODE_TOOLS_LINE, opencodePrompt, opencodeStreamJournal } from '../hooks/lib/maintenance-worker-opencode.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -31,7 +31,8 @@ function fixture() {
     join(plugin, '.claude-plugin', 'sterling-mcp.json'),
     JSON.stringify({ mcpServers: { sterling: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/mcp/sterling-mcp.mjs', '--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db'] } } })
   );
-  writeFileSync(join(plugin, 'templates', 'maintenance-worker-prompt.md'), 'PROMPT BODY');
+  // The shipped tools line is in the stub: the OpenCode runner rewrites it and refuses a prompt without it.
+  writeFileSync(join(plugin, 'templates', 'maintenance-worker-prompt.md'), `PROMPT BODY\n${CLAUDE_TOOLS_LINE}\n`);
   writeFileSync(join(plugin, 'scripts', 'maintenance-worker-run.mjs'), '// runner stub, never executed by these tests\n');
   mkdirSync(join(project, '.sterling', 'transient'), { recursive: true });
   return { base, plugin, project, paths: workerPaths(project), cleanup: () => rmSync(base, { recursive: true, force: true }) };
@@ -111,20 +112,32 @@ test('[gate] an OpenCode run with knowledge_get on the article and a read of its
     assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 0);
     const [call] = child.calls;
     assert.equal(call.cmd, '/opt/oc/opencode.exe');
-    assert.deepEqual(call.args.slice(0, 7), ['run', '--standalone', '--format', 'json', '--auto', '--model', 'anthropic/claude-sonnet-5-5']);
-    assert.match(call.args[7], /^PROMPT BODY/);
-    assert.match(call.args[7], /HOST NOTE \(OpenCode\)/);
-    assert.match(call.args[7], /item-a/, 'the eligible list reaches the prompt');
+    assert.deepEqual(call.args.slice(0, 9), ['run', '--standalone', '--format', 'json', '--auto', '--agent', OPENCODE_WORKER_AGENT, '--model', 'anthropic/claude-sonnet-5-5']);
+    assert.match(call.args[9], /^PROMPT BODY/);
+    assert.match(call.args[9], /HOST NOTE \(OpenCode\)/);
+    assert.ok(call.args[9].includes(OPENCODE_TOOLS_LINE), 'the OpenCode tools line replaces the shipped one');
+    assert.ok(!call.args[9].includes(CLAUDE_TOOLS_LINE), 'the claude tools line does not reach the OpenCode run');
+    assert.match(call.args[9], /item-a/, 'the eligible list reaches the prompt');
     assert.equal(call.opts.env.PWD, fx.project, 'the session directory follows PWD (measured)');
     assert.equal(call.opts.env.STERLING_MAINTENANCE_WORKER, '1');
     assert.equal(call.opts.env.OPENCODE_DISABLE_PROJECT_CONFIG, '1');
     const config = JSON.parse(call.opts.env.OPENCODE_CONFIG_CONTENT);
     assert.equal(config.model, 'anthropic/claude-sonnet-5-5');
     assert.deepEqual(config.mcp.sterling, { type: 'local', command: ['node', join(fx.plugin, 'mcp', 'sterling-mcp.mjs'), '--store', join(fx.project, '.sterling', 'sterling.db')], enabled: true });
-    for (const k of ['shell', 'edit', 'write', 'patch', 'subagent', ...OPENCODE_DENIED_MCP]) assert.equal(config.permission[k], 'deny', k);
-    // Domains D2: domain_describe writes a domain's description, so the worker is denied it.
-    assert.equal(config.permission.sterling_domain_describe, 'deny', 'sterling_domain_describe');
-    for (const k of ['sterling_maintenance_remove', 'sterling_knowledge_get', 'sterling_knowledge_line_ref_fix', 'read', 'grep', 'execute']) assert.equal(config.permission[k], undefined, `${k} stays allowed`);
+    // board item d1149d0e, measured on 2.0.22: a top-level deny is overridden by the
+    // default agent's own rules (last match wins), so the child runs as its own
+    // agent whose permission is an allow-list: '*' denied FIRST, then the
+    // worker's tools allowed, as the claude host's --allowedTools.
+    const allowList = { '*': 'deny', execute: 'allow', mcp: 'allow', read: 'allow', grep: 'allow', sterling_maintenance_query: 'allow', sterling_knowledge_get: 'allow', sterling_maintenance_remove: 'allow', sterling_knowledge_line_ref_fix: 'allow' };
+    const agent = config.agent[OPENCODE_WORKER_AGENT];
+    assert.deepEqual(Object.entries(agent.permission), Object.entries(allowList), 'the agent allow-list, in this order');
+    assert.deepEqual(Object.entries(config.permission), Object.entries(allowList), 'the top-level permission is the same allow-list');
+    assert.equal(agent.mode, 'primary');
+    assert.equal(agent.model, 'anthropic/claude-sonnet-5-5');
+    assert.deepEqual(OPENCODE_ALLOWED_TOOLS, Object.keys(allowList).slice(1));
+    for (const k of ['shell', 'bash', 'edit', 'write', 'patch', 'subagent', 'task', 'glob', 'webfetch', 'sterling_no_capture', 'sterling_capture_pending', 'sterling_concept_designed', 'sterling_knowledge_update', 'sterling_domain_describe', 'codex_codex']) {
+      assert.equal(agent.permission[k], undefined, `${k} falls to the '*' deny`);
+    }
 
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
     assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict, v.evidence ?? null]), [['item-a', 'owes_prose', true]]);
@@ -411,6 +424,55 @@ test('--dry-run with an unknown host or no recorded opencode binary prints a ref
       assert.equal(dry.dry_run, true);
       assert.match(dry.refused, re);
     }
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// ------------------------------------------------------------ prompt (board item d1149d0e)
+
+const shippedPrompt = () => readFileSync(join(repo, 'templates', 'maintenance-worker-prompt.md'), 'utf8');
+
+test('[d1149d0e] on the OpenCode host the shipped tools line says up front that the Sterling tools are reached only through execute, as tools.sterling.<name>; the rest of the prompt is unchanged', () => {
+  const shipped = shippedPrompt();
+  assert.equal(shipped.split(CLAUDE_TOOLS_LINE).length, 2, 'the shipped prompt holds the claude tools line exactly once');
+  const p = opencodePrompt(shipped);
+  assert.ok(!p.includes(CLAUDE_TOOLS_LINE));
+  const toolsLine = p.split('\n').find((l) => l.startsWith('Tools you may use:'));
+  assert.ok(toolsLine.startsWith(OPENCODE_TOOLS_LINE));
+  assert.match(toolsLine, /^Tools you may use: OpenCode's `execute` tool/, 'execute is named first');
+  assert.match(toolsLine, /one permitted way to reach the Sterling tools/);
+  assert.match(toolsLine, /load a few seconds after the session starts/, 'the measured catalog start-up gap is named, with what to do');
+  for (const name of ['maintenance_query', 'knowledge_get', 'maintenance_remove', 'knowledge_line_ref_fix']) assert.ok(toolsLine.includes(`tools.sterling.${name}`), name);
+  assert.equal(p, shipped.replace(CLAUDE_TOOLS_LINE, () => OPENCODE_TOOLS_LINE) + OPENCODE_PROMPT_NOTE, 'only the tools line changes, and the host note is appended');
+});
+
+test('[d1149d0e] a prompt without the shipped tools line is refused on the OpenCode host: nothing spawned, a failed run naming the line', async () => {
+  const fx = fixture();
+  try {
+    assert.throws(() => opencodePrompt('PROMPT BODY'), /tools line/);
+    writeFileSync(join(fx.plugin, 'templates', 'maintenance-worker-prompt.md'), 'PROMPT BODY');
+    const child = fakeOpencode([text(owes())]);
+    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 1);
+    assert.equal(child.calls.length, 0, 'no opencode run starts with a prompt that would mislead it');
+    assert.equal(lastRun(fx).ok, false);
+    assert.match(lastRun(fx).error, /tools line/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[d1149d0e] the claude host prompt is byte-identical to the shipped prompt file: the OpenCode rewrite never reaches it', async () => {
+  const fx = fixture();
+  try {
+    const shipped = shippedPrompt();
+    writeFileSync(join(fx.plugin, 'templates', 'maintenance-worker-prompt.md'), shipped);
+    const printed = [];
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, dryRun: true, spawn: () => assert.fail('dry run must not spawn'), out: (s) => printed.push(s) }), 0);
+    const dry = JSON.parse(printed[0]);
+    assert.equal(dry.host, 'claude');
+    assert.equal(dry.argv[0], '-p');
+    assert.equal(dry.argv[1], shipped);
   } finally {
     fx.cleanup();
   }

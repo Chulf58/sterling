@@ -7835,12 +7835,7 @@ import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
 var SERVER = "sterling";
-var OPENCODE_DENIED_MCP = [
-  ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => `${SERVER}_knowledge_${v}`),
-  ...["add", "remove", "update", "edit"].map((v) => `${SERVER}_board_${v}`),
-  `${SERVER}_config_set`,
-  `${SERVER}_domain_describe`
-];
+var OPENCODE_ALLOWED_TOOLS = ["execute", "mcp", "read", "grep", ...["maintenance_query", "knowledge_get", "maintenance_remove", "knowledge_line_ref_fix"].map((v) => `${SERVER}_${v}`)];
 
 // scripts/hooks/lib/maintenance-worker.mjs
 var WORKER_RUN_BUDGET_USD = 2;

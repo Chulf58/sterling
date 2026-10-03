@@ -144,6 +144,28 @@ test('outside a Sterling project every handler is silent', async () => {
   }
 });
 
+test('outside a Sterling project setup runs the bootstrap registration, not configure, and writes nothing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-oc-none-'));
+  try {
+    const configured = [];
+    const bootstrapped = [];
+    const { ctx, cleanup } = await setupPlugin(dir, { configure: async (c) => void configured.push(c), bootstrap: async (c) => void bootstrapped.push(c) });
+    assert.deepEqual(configured, [], 'configure needs a store and is not called');
+    assert.deepEqual(bootstrapped, [ctx], 'the bootstrap registration ran once, at setup');
+    await cleanup?.();
+    const plain = await setupPlugin(dir);
+    const t = plain.ctx.hooks.transforms;
+    assert.deepEqual([t.command.length, t.skill.length, t.mcp.length], [1, 0, 0], 'the default bootstrap registers commands only');
+    const names = [];
+    t.command[0]({ add: (d) => names.push(d.name) });
+    assert.deepEqual(names.sort(), ['sterling:init', 'sterling:projects'], '/sterling:init exists before init');
+    assert.equal(existsSync(join(dir, '.sterling')), false, 'nothing written outside a Sterling project');
+    await plain.cleanup?.();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('session context injects the Sterling layer, the OpenCode host tail, a status line and pending notices', async () => {
   const p = makeProject();
   try {

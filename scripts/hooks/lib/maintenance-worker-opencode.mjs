@@ -24,54 +24,90 @@
 //   cwd, so the runner sets PWD to the project root.
 // - permission {"sterling_<tool>": "deny"} removes that MCP tool from the code-mode
 //   catalog ("Unknown tool 'sterling.<tool>'").
-// NOT MEASURED: denying built-in tools on a paid model. On the free model
-// opencode/big-pickle, any built-in deny made the provider answer 403
-// FreeTierError, so a free-tier worker run fails loudly instead of running
-// with write tools.
+// - On 2.0.22 a top-level permission does not bind the run: the default
+//   agent's own rules win (see OPENCODE_WORKER_AGENT), so the run uses its own
+//   agent with an allow-list.
+// On the free model opencode/big-pickle, any built-in deny made the provider
+// answer 403 FreeTierError, so a free-tier worker run fails loudly instead of
+// running with write tools.
 //
 // DEPENDENCY-FREE (node builtins only), like maintenance-worker.mjs.
 
 const SERVER = 'sterling';
 
-/** Built-in OpenCode tools the worker must not use. execute (the MCP code-mode
- *  tool), read, grep and glob stay allowed. The names come from ctx.tool.list
- *  on 2.0.21 (domain finding opencode-2-0-21-plugin-hook-capabilities-spike,
- *  knowledge_get 4ec729f4, item f): subagent, websearch, skill and question
- *  were measured only that way; shell, edit, write and patch were also seen
- *  denied or called in live runs (finding
- *  opencode-2-0-21-tool-shapes-execpath-and-shell-store-guard-october-2026). */
-export const OPENCODE_DENIED_BUILTINS = ['shell', 'edit', 'write', 'patch', 'subagent', 'webfetch', 'websearch', 'skill', 'question'];
-/** The sterling write tools the claude runner denies, under OpenCode's
- *  permission key for an MCP tool (<server>_<tool>). knowledge_line_ref_fix and
- *  maintenance_remove stay allowed, as on the claude runner. */
-export const OPENCODE_DENIED_MCP = [
-  ...['create', 'update', 'append', 'edit', 'array_remove', 'retire', 'supersede', 'split', 'extract', 'promote', 'link'].map((v) => `${SERVER}_knowledge_${v}`),
-  ...['add', 'remove', 'update', 'edit'].map((v) => `${SERVER}_board_${v}`),
-  `${SERVER}_config_set`,
-  `${SERVER}_domain_describe`,
-];
+/** The worker's own agent. MEASURED on 2.0.22 (board item d1149d0e): a
+ *  top-level permission deny does not hold, because the child runs as the
+ *  user's default agent (default_agent in the global config, here a conductor
+ *  with shell and subagent allowed) and that agent's rules come later, and the
+ *  last matching rule wins. With the deny list at the top level, shell ran and
+ *  wrote a file; under `--agent build` the same config removed shell and
+ *  subagent. So the run names this agent, defined in OPENCODE_CONFIG_CONTENT. */
+export const OPENCODE_WORKER_AGENT = 'sterling-maintenance-worker';
+/** Everything the worker may call, as OpenCode permission keys: execute (the
+ *  MCP code-mode tool), mcp (measured on 2.0.22: under '*' deny, no MCP tool
+ *  reaches the code-mode catalog without it, even one allowed by its own key;
+ *  it does not allow the tools themselves), read and grep, and the four
+ *  sterling tools the claude host's --allowedTools grants (an MCP tool's key is
+ *  <server>_<tool>). */
+export const OPENCODE_ALLOWED_TOOLS = ['execute', 'mcp', 'read', 'grep', ...['maintenance_query', 'knowledge_get', 'maintenance_remove', 'knowledge_line_ref_fix'].map((v) => `${SERVER}_${v}`)];
+/** The allow-list: '*' denied first, then each allowed key (last match wins),
+ *  so a tool OpenCode adds later is denied by default. */
+const workerPermission = () => ({ '*': 'deny', ...Object.fromEntries(OPENCODE_ALLOWED_TOOLS.map((k) => [k, 'allow'])) });
 
 /** Appended to the shipped prompt on this host: the prompt names the claude
  *  tool names, and per-call result text needs one sterling call per execute. */
 export const OPENCODE_PROMPT_NOTE =
   '\nHOST NOTE (OpenCode): the sterling tools named above are called inside the execute tool as tools.sterling.<name>, for example tools.sterling.knowledge_get({ id }). Make exactly ONE sterling call per execute call, so the runner can pair each call with its own result. Read is the read tool ({ path }) and Grep is the grep tool ({ pattern, path }).\n';
 
+/** The tools sentence of templates/maintenance-worker-prompt.md, which the
+ *  claude host sends unchanged. */
+export const CLAUDE_TOOLS_LINE =
+  'Tools you may use: mcp__sterling__maintenance_query, mcp__sterling__knowledge_get, mcp__sterling__maintenance_remove, mcp__sterling__knowledge_line_ref_fix, Read and Grep. Nothing else is granted, so do not try other tools.';
+/** Its OpenCode replacement. The model sees no mcp__sterling__* tool here, only
+ *  `execute`: told "nothing else is granted" with the execute route mentioned
+ *  only in the trailing note, openai/gpt-6-luna made no tool call in 2 of 2 live
+ *  runs (board item d1149d0e), so the route comes first. MEASURED on 2.0.22:
+ *  the code-mode catalog is empty when the session starts (execute's own
+ *  description says no Code Mode tools) and holds the sterling tools a few
+ *  seconds later, with or without the worker agent; a model that trusts the
+ *  first view reports the tools missing, so the line says to retry. */
+export const OPENCODE_TOOLS_LINE =
+  "Tools you may use: OpenCode's `execute` tool, which is the one permitted way to reach the Sterling tools. Inside execute, call them as tools.sterling.maintenance_query, tools.sterling.knowledge_get, tools.sterling.maintenance_remove and tools.sterling.knowledge_line_ref_fix, one Sterling call per execute call; the mcp__sterling__<name> names below are these same tools. The Sterling tools load a few seconds after the session starts, so if execute reports no Code Mode tools, read one of the item's file_keys first and then call execute again; never conclude they are unavailable before that. Read is the read tool ({ path }) and Grep is the grep tool ({ pattern, path }). Nothing else is granted, so do not try other tools.";
+
+/** The OpenCode prompt: the shipped prompt with its tools line rewritten for
+ *  this host, plus the host note. A prompt without the shipped tools line is
+ *  refused rather than sent with only the note. */
+export function opencodePrompt(prompt) {
+  const parts = String(prompt).split(CLAUDE_TOOLS_LINE);
+  if (parts.length !== 2) {
+    throw new Error(`the worker prompt must hold the shipped tools line exactly once for the OpenCode runner to rewrite it (found ${parts.length - 1}): "${CLAUDE_TOOLS_LINE}"`);
+  }
+  return parts.join(OPENCODE_TOOLS_LINE) + OPENCODE_PROMPT_NOTE;
+}
+
 /** The OpenCode config for the child (passed as OPENCODE_CONFIG_CONTENT):
  *  the sterling MCP server from the plugin's wiring (`mcpConfig` is the JSON
- *  resolveMcpConfig returns), the deny list, and the model. runWorker refuses
+ *  resolveMcpConfig returns), the worker agent with its allow-list (also set
+ *  at the top level), and the model. runWorker refuses
  *  before this without a model (decision
  *  opencode-maintenance-worker-refuses-without-a-configured-model). */
 export function buildOpencodeConfig({ mcpConfig, model = null }) {
   const entry = JSON.parse(mcpConfig).mcpServers[SERVER];
-  const permission = Object.fromEntries([...OPENCODE_DENIED_BUILTINS, ...OPENCODE_DENIED_MCP].map((k) => [k, 'deny']));
-  return { mcp: { [SERVER]: { type: 'local', command: [entry.command, ...entry.args], enabled: true } }, permission, ...(model ? { model } : {}) };
+  const agent = { mode: 'primary', description: 'Sterling background maintenance worker (unattended, allow-listed tools)', permission: workerPermission(), ...(model ? { model } : {}) };
+  return {
+    mcp: { [SERVER]: { type: 'local', command: [entry.command, ...entry.args], enabled: true } },
+    agent: { [OPENCODE_WORKER_AGENT]: agent },
+    permission: workerPermission(),
+    ...(model ? { model } : {}),
+  };
 }
 
 /** `opencode run` argv. --standalone runs a private server (no background
  *  service, no port); --auto approves what is not explicitly denied, so the
- *  run never waits on a prompt nobody will answer. */
+ *  run never waits on a prompt nobody will answer; --agent picks the worker
+ *  agent, so the user's default agent's rules never apply. */
 export function buildOpencodeArgs({ prompt, model = null }) {
-  return ['run', '--standalone', '--format', 'json', '--auto', ...(model ? ['--model', model] : []), prompt];
+  return ['run', '--standalone', '--format', 'json', '--auto', '--agent', OPENCODE_WORKER_AGENT, ...(model ? ['--model', model] : []), prompt];
 }
 
 /** The child's environment additions. PWD picks the session directory
