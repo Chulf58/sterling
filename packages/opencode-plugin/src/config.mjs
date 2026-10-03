@@ -173,7 +173,7 @@ export function createBootstrapHandler(deps = {}) {
 export function createConfigHandler(deps = {}) {
   const now = deps.now ?? (() => new Date().toISOString());
   return async function configure(ctx) {
-    const project = projectRoot(ctx?.location?.directory ?? process.cwd());
+    const project = projectRoot(ctx?.location?.directory);
     if (!project) throw new Error('configure ran outside a Sterling project');
     const root = deps.sterlingRoot ?? defaultSterlingRoot();
     const { commands, skills, failures } = renderRegistrations(root);

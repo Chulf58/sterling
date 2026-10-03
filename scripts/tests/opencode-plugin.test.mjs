@@ -6,7 +6,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -163,6 +163,155 @@ test('outside a Sterling project setup runs the bootstrap registration, not conf
     await plain.cleanup?.();
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** Every file under dir (but .git), as relative path -> content hash: a write anywhere changes it. */
+function treeSnapshot(dir) {
+  const out = {};
+  const walk = (d, rel) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (e.name === '.git') continue;
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(join(d, e.name), r);
+      else out[r] = sha(readFileSync(join(d, e.name), 'latin1'));
+    }
+  };
+  walk(dir, '');
+  return out;
+}
+
+/** Project A seeded so any sweep, settlement or notice read would change its tree: a register file and a pending notice. */
+function seedBoundaryState(dir, marker) {
+  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'transient', 'dispatch-register.json'), '[]');
+  writeFileSync(join(dir, server.NOTICES_REL), JSON.stringify([{ id: `n-${marker}`, at: NOW, text: `NOTICE-${marker}` }]));
+}
+
+// Board item opencode-plugin-acted-on-the-wrong-project-measured-2026-10: OpenCode 2 loads the plugin
+// module once per process and calls the one exported object's setup once per location (directory).
+// The service's own location (its cwd) was set up after the session's, and every handler then
+// acted on the service cwd's project.
+test('a service whose cwd is project A acts only on the session\'s project B: nothing is written under A', async () => {
+  const a = makeProject();
+  const b = makeProject();
+  const cwd = process.cwd();
+  try {
+    seedBoundaryState(a.dir, 'A');
+    seedBoundaryState(b.dir, 'B');
+    process.chdir(a.dir);
+    const synced = [];
+    const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async (root, sid) => void synced.push([root, sid]) });
+    const ctxB = stubCtx(b.dir, { ses_b: {} });
+    const ctxA = stubCtx(a.dir, { ses_a: {} });
+    const before = treeSnapshot(a.dir);
+    // The session's location is set up first, the service cwd's location after it (the measured order).
+    const cleanB = await plugin.setup(ctxB);
+    const cleanA = await plugin.setup(ctxA);
+
+    const ci = { ...contextInput(), sessionID: 'ses_b' };
+    await ctxB.hooks.session.context(ci);
+    await ctxB.hooks.tool['execute.before']({ tool: 'edit', sessionID: 'ses_b', id: 'c1', input: { path: 'src/a.mjs' } });
+    await ctxB.hooks.tool['execute.after']({ tool: 'edit', sessionID: 'ses_b', id: 'c1', input: { path: 'src/a.mjs' }, status: 'completed', result: { content: [{ type: 'text', text: 'ok' }] } });
+    // The event names its location; a location-wide or process-wide subscription delivers it to both.
+    const ended = { type: 'session.execution.succeeded', location: { directory: b.dir }, data: { sessionID: 'ses_b' } };
+    ctxA.emit(ended);
+    ctxB.emit(ended);
+    await plugin.idle();
+
+    assert.deepEqual(treeSnapshot(a.dir), before, 'nothing under the service cwd project A is written');
+    assert.match(systemText(ci), /NOTICE-B/, 'the session context shows B\'s notices');
+    assert.doesNotMatch(systemText(ci), /NOTICE-A/, 'and never A\'s');
+    assert.deepEqual(synced, [[b.dir.replace(/\\/g, '/'), 'ses_b']], 'the post-update sync runs for B only');
+    assert.equal(existsSync(join(b.dir, '.sterling', 'transient', 'dispatch-register.json')), false, 'B\'s startup sweep ran');
+    assert.ok(existsSync(settledPath(b.dir)), 'B\'s session end settled B');
+    await cleanA?.();
+    await cleanB?.();
+  } finally {
+    process.chdir(cwd);
+    a.cleanup();
+    b.cleanup();
+  }
+});
+
+test('a session in a non-Sterling directory writes nothing anywhere, even with a Sterling project as the service cwd', async () => {
+  const a = makeProject();
+  const none = mkdtempSync(join(tmpdir(), 'sterling-oc-none-'));
+  const cwd = process.cwd();
+  try {
+    seedBoundaryState(a.dir, 'A');
+    process.chdir(a.dir);
+    const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, bootstrap: async () => {} });
+    const ctxN = stubCtx(none, { ses_n: {} });
+    const ctxA = stubCtx(a.dir, { ses_a: {} });
+    const before = treeSnapshot(a.dir);
+    const cleanN = await plugin.setup(ctxN);
+    const cleanA = await plugin.setup(ctxA);
+    const ci = { ...contextInput(), sessionID: 'ses_n' };
+    await ctxN.hooks.session.context(ci);
+    await ctxN.hooks.tool['execute.before']({ tool: 'edit', sessionID: 'ses_n', id: 'c1', input: { path: join(none, 'x.mjs') } });
+    const ended = { type: 'session.execution.succeeded', location: { directory: none }, data: { sessionID: 'ses_n' } };
+    ctxA.emit(ended);
+    ctxN.emit(ended);
+    await plugin.idle();
+    assert.deepEqual(ci.system, [{ type: 'text', text: 'base system' }], 'the non-Sterling session gets no Sterling context');
+    assert.deepEqual(treeSnapshot(a.dir), before, 'nothing under the service cwd project is written');
+    assert.deepEqual(treeSnapshot(none), {}, 'nothing is written into the non-Sterling directory');
+    await cleanA?.();
+    await cleanN?.();
+  } finally {
+    process.chdir(cwd);
+    a.cleanup();
+    rmSync(none, { recursive: true, force: true });
+  }
+});
+
+test('a setup without ctx.location.directory registers nothing and says so on stderr; it never falls back to the cwd', async () => {
+  const a = makeProject();
+  const cwd = process.cwd();
+  const writes = [];
+  const realWrite = process.stderr.write;
+  try {
+    seedBoundaryState(a.dir, 'A');
+    process.chdir(a.dir);
+    const before = treeSnapshot(a.dir);
+    const configured = [];
+    const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async (c) => void configured.push(c), bootstrap: async (c) => void configured.push(c) });
+    const ctx = stubCtx(undefined, { ses_1: {} });
+    process.stderr.write = (s) => (writes.push(String(s)), true);
+    try {
+      await plugin.setup({ ...ctx, location: undefined });
+    } finally {
+      process.stderr.write = realWrite;
+    }
+    assert.deepEqual(ctx.hooks.session, {}, 'no session hook is registered');
+    assert.deepEqual(ctx.hooks.tool, {}, 'no tool hook is registered');
+    assert.deepEqual(configured, [], 'neither configure nor bootstrap runs');
+    assert.ok(writes.some((w) => /ctx\.location\.directory/.test(w)), 'the skip is reported on stderr');
+    assert.deepEqual(treeSnapshot(a.dir), before, 'the cwd project is untouched');
+  } finally {
+    process.stderr.write = realWrite;
+    process.chdir(cwd);
+    a.cleanup();
+  }
+});
+
+test('the startup sweep runs once per project per process, across locations of the same project', async () => {
+  const a = makeProject();
+  try {
+    const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async () => {} });
+    const ctx1 = stubCtx(a.dir, { ses_1: {} });
+    mkdirSync(join(a.dir, 'src', 'sub'), { recursive: true });
+    const ctx2 = stubCtx(join(a.dir, 'src', 'sub'), { ses_2: {} });
+    await plugin.setup(ctx1);
+    await plugin.setup(ctx2);
+    await ctx1.hooks.session.context({ ...contextInput(), sessionID: 'ses_1' });
+    // A dispatch armed after the first sweep must survive the second location's first root context.
+    seedBoundaryState(a.dir, 'A');
+    await ctx2.hooks.session.context({ ...contextInput(), sessionID: 'ses_2' });
+    assert.ok(existsSync(join(a.dir, '.sterling', 'transient', 'dispatch-register.json')), 'the second location does not sweep the same project again');
+  } finally {
+    a.cleanup();
   }
 });
 

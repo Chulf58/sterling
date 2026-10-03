@@ -389,6 +389,31 @@ test('OpenCode sync: a child session does nothing; the first ROOT session syncs 
   }
 });
 
+test('OpenCode sync: the latch is per project, so one process syncs each project it serves once', async () => {
+  const plugin = makePluginRoot();
+  const first = makeProject({ marker: '0.0.1', store: false });
+  const second = makeProject({ marker: '0.0.1', store: false });
+  const session = sessionStub({ ses_1: {}, ses_2: {}, ses_3: {} });
+  process.env.FIXTURE_LOG = join(tmp('sterling-pus-log-'), 'calls.log');
+  try {
+    const started = new Set();
+    // Two locations of one process: each builds its own sync, both share the per-project latch.
+    const syncA = ocSync(plugin, session, { started });
+    const syncB = ocSync(plugin, session, { started });
+    await syncA(first, 'ses_1');
+    await syncB(second, 'ses_2');
+    await syncB(first, 'ses_3');
+    await syncA.idle();
+    await syncB.idle();
+    assert.equal(markerOf(first), `${VERSION}\n`, 'the first project synced');
+    assert.equal(markerOf(second), `${VERSION}\n`, 'the second project synced too, not latched out by the first');
+    assert.equal(noticeTexts(first).length, 1, 'the first project synced once, though two locations reached it');
+    assert.equal(readFileSync(process.env.FIXTURE_LOG, 'utf8').trim().split('\n').length, 4, 'the steps ran once per project');
+  } finally {
+    delete process.env.FIXTURE_LOG;
+  }
+});
+
 test('OpenCode sync: inside the maintenance worker child (STERLING_MAINTENANCE_WORKER=1) the sync never runs and looks nothing up', async () => {
   const plugin = makePluginRoot();
   const project = makeProject({ marker: '0.0.1', store: false });
