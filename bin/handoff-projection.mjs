@@ -8101,8 +8101,12 @@ function renderRecord(r) {
   const sections = [];
   if (r.type === "feature_article") {
     sections.push(section("What it does", r.what_it_does), section("Intended behavior", r.intended_behavior));
-    const acs = (r.current_ac ?? []).map((ac) => `**${ac.ac_id}** \u2014 ${ac.text}`);
-    if (acs.length) sections.push(section("Acceptance criteria", bullets(acs)));
+    if (Array.isArray(r.current_ac)) {
+      const acs = r.current_ac.map((ac) => `**${ac.ac_id}** \u2014 ${ac.text}`);
+      if (acs.length) sections.push(section("Acceptance criteria", bullets(acs)));
+    } else if (r.current_ac?.not_applicable) {
+      sections.push(section("Acceptance criteria", `Not applicable: ${oneLine(r.current_ac.not_applicable.reason)}`));
+    }
     const files2 = (r.files ?? []).map((f) => `\`${f.path}\` \u2014 ${f.role}`);
     sections.push(section("Files", files2.length ? bullets(files2) : "_none_"));
   } else if (r.type === "decision") {

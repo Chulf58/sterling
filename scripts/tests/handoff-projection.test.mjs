@@ -516,3 +516,22 @@ test('a plain path argument still selects the target project', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// GitHub issue #1: current_ac is a union in the schema (packages/schemas/src/records.ts),
+// an array of criteria or { not_applicable: { reason } }. The article renderer mapped
+// over it as an array, so one exempt article made the projection throw and init exit 1.
+test('an article whose current_ac is the not_applicable exemption renders one line with the reason and no criteria list; an array renders as before', () => {
+  const exempt = {
+    ...ARTICLE, id: 'aaaaaaaa-0000-4000-8000-000000000009', // not-a-citation: fixture id
+    slug: 'probe-notes', title: 'Probe notes', article_kind: 'probe',
+    current_ac: { not_applicable: { reason: 'a probe article describes a measurement, not a behavior' } },
+    live_test_refs: { not_applicable: { reason: 'a probe article describes a measurement, not a behavior' } },
+  };
+  let files;
+  assert.doesNotThrow(() => { ({ files } = buildHandoffFiles([ARTICLE, exempt])); });
+  const textOf = (slug) => [...files].find(([rel]) => rel.startsWith(`docs/sterling/articles/${slug}`))[1];
+  const exemptText = textOf('probe-notes');
+  assert.match(exemptText, /^## Acceptance criteria\n\nNot applicable: a probe article describes a measurement, not a behavior\n/m);
+  assert.doesNotMatch(exemptText, /\*\*AC\d+\*\*|undefined/);
+  assert.match(textOf('order-import'), /^## Acceptance criteria\n\n- \*\*AC1\*\* — a redelivered order is not duplicated\n/m);
+});
