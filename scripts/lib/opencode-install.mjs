@@ -29,6 +29,7 @@
 //    Also once per machine: a `codex` entry under mcp.servers in <config dir>/opencode.json,
 //    written only for a Codex whose `mcp-server --help` prints mcp-server help.
 // 2. PER PROJECT: <project>/.opencode/opencode.json gets the store-guard edit and shell deny rules
+//    (repeated under the bash, write and patch aliases, and placed last, since the last match wins)
 //    and default_agent, merged into whatever else the file holds. It gets no `sterling`
 //    MCP entry: the server plugin adds that itself (decision
 //    sterling-opencode-plugin-injects-its-own-mcp-entry), and an entry an earlier init
@@ -681,7 +682,31 @@ export function ensureProjectConfig({ projectDir, home = homedir(), tracked, con
   if (typeof shell !== 'object' || shell === null || Array.isArray(shell)) return [refusal(rel, `${rel}: "permission.shell" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
   const shellGuarded = { '*': 'allow', ...Object.fromEntries(Object.entries(shell).filter(([k]) => k !== SHELL_STORE_GUARD_PATTERN)) };
   shellGuarded[SHELL_STORE_GUARD_PATTERN] = 'deny';
-  config.permission = { ...permission, edit: guarded, shell: shellGuarded };
+  // OpenCode 2.0.22 flattens the permission object into one rule list in key order,
+  // with bash an alias of shell and write and patch aliases of edit, and the last
+  // matching rule wins (finding opencode-only-machine-live-acceptance-p7-october-2026:
+  // a bash block after shell re-allowed `ls -la .sterling/sterling.db`). So each alias
+  // block keeps the user's rules and ends with the guard too, bash is always written
+  // (holding only the guard when the user has none, so it changes no other verdict),
+  // and the guarded families go after every other key, the shell family last.
+  const aliasGuarded = (value, patterns) => {
+    if (typeof value === 'string') value = { '*': value };
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+    const out = Object.fromEntries(Object.entries(value).filter(([k]) => !patterns.includes(k)));
+    for (const p of patterns) out[p] = 'deny';
+    return out;
+  };
+  const rest = Object.fromEntries(Object.entries(permission).filter(([k]) => !['edit', 'write', 'patch', 'shell', 'bash'].includes(k)));
+  const next = { ...rest, edit: guarded };
+  for (const key of ['write', 'patch']) {
+    if (permission[key] === undefined) continue;
+    next[key] = aliasGuarded(permission[key], STORE_GUARD_PATTERNS);
+    if (next[key] === null) return [refusal(rel, `${rel}: "permission.${key}" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
+  }
+  next.shell = shellGuarded;
+  next.bash = aliasGuarded(permission.bash ?? {}, [SHELL_STORE_GUARD_PATTERN]);
+  if (next.bash === null) return [refusal(rel, `${rel}: "permission.bash" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
+  config.permission = next;
   if (!conductorOk) {
     if (config.default_agent === undefined) notes.push(`default_agent not set: the ${CONDUCTOR_AGENT} agent file was refused`);
   } else if (config.default_agent === undefined) config.default_agent = CONDUCTOR_AGENT;

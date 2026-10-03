@@ -133,7 +133,7 @@ test('project config: merged into an existing .opencode/opencode.json without cl
   assert.equal(got.theme, 'dark');
   assert.deepEqual(got.mcp.other, { type: 'local', command: ['x'] });
   assert.equal(got.mcp.sterling, undefined, 'no per-project sterling MCP entry: the plugin injects it (decision sterling-opencode-plugin-injects-its-own-mcp-entry)');
-  assert.equal(got.permission.bash, 'ask');
+  assert.deepEqual(got.permission.bash, { '*': 'ask', '*sterling.db*': 'deny' }, 'a string bash value becomes its "*" rule, with the guard after it');
   assert.deepEqual(got.permission.edit, { '*': 'ask', '**/.sterling/sterling.db*': 'deny', '.sterling/sterling.db*': 'deny' });
   assert.equal(got.default_agent, 'build', "the user's default_agent is kept");
   assert.match(r.rows.find((x) => x.item.endsWith('opencode.json')).detail, /default_agent kept as "build"/);
@@ -189,7 +189,7 @@ test('project config: with no permission.shell, the shell "*" rule is seeded fro
   };
   let r = shellAfter({ bash: 'ask' });
   assert.deepEqual(r.shell, [['*', 'ask'], ['*sterling.db*', 'deny']], 'a string bash value seeds "*"');
-  assert.equal(r.bash, 'ask', 'the bash key itself is left alone');
+  assert.deepEqual(r.bash, { '*': 'ask', '*sterling.db*': 'deny' }, 'the bash value keeps its meaning and gets the guard last');
   r = shellAfter({ bash: { '*': 'deny', 'ls*': 'allow' } });
   assert.deepEqual(r.shell, [['*', 'deny'], ['*sterling.db*', 'deny']], 'an object bash value seeds "*" from its "*" rule');
   r = shellAfter({ bash: { 'ls*': 'allow' } });
@@ -198,6 +198,67 @@ test('project config: with no permission.shell, the shell "*" rule is seeded fro
   assert.deepEqual(r.shell, [['*', 'allow'], ['*sterling.db*', 'deny']], 'an existing shell block wins over bash');
   writeFileSync(cfg, JSON.stringify({ permission: { bash: 7 } }));
   assert.equal(statusOf(run(dir, home), 'opencode.json'), 'refused', 'a bash value that is neither a string nor an object is refused');
+});
+
+// OpenCode 2.0.22 flattens the permission object into one rule list in key order,
+// mapping bash to shell and write and patch to edit, and the last matching rule wins
+// (measured with `opencode debug config` and `opencode debug agents`, finding
+// opencode-only-machine-live-acceptance-p7-october-2026). This is that evaluation.
+const ACTION_ALIAS = { bash: 'shell', write: 'edit', patch: 'edit' };
+function effectOf(permission, action, resource) {
+  const glob = (p) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+  let effect;
+  for (const [key, value] of Object.entries(permission)) {
+    const act = ACTION_ALIAS[key] ?? key;
+    if (act !== action && act !== '*') continue;
+    const rules = typeof value === 'string' ? { '*': value } : value;
+    for (const [pattern, e] of Object.entries(rules)) if (glob(pattern).test(resource)) effect = e;
+  }
+  return effect;
+}
+
+test('project config: a user bash block cannot re-allow the store after the shell guard (bash maps to shell, last match wins)', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  mkdirSync(join(dir, '.opencode'));
+  const cfg = join(dir, '.opencode', 'opencode.json');
+  const after = (permission) => {
+    writeFileSync(cfg, JSON.stringify({ permission }));
+    run(dir, home);
+    return JSON.parse(readFileSync(cfg, 'utf8')).permission;
+  };
+  const cases = [
+    // The measured P7 failure: the bash block allowed *sterling.db* and came after shell.
+    { shell: { '*': 'allow', '*sterling.db*': 'deny' }, bash: { '*': 'allow', '*sterling.db*': 'allow' } },
+    { bash: { '*': 'allow' } },
+    { bash: 'allow' },
+    { bash: { '*': 'ask', 'ls *': 'allow' } },
+    { '*': 'allow' },
+    { edit: 'allow', write: { '*': 'allow', '*sterling.db*': 'allow' }, patch: 'allow' },
+    {},
+  ];
+  for (const c of cases) {
+    const got = after(c);
+    const label = JSON.stringify(c);
+    for (const cmd of ['ls -la .sterling/sterling.db', 'sqlite3 .sterling/sterling.db .tables', 'cat .sterling/sterling.db-wal']) {
+      assert.equal(effectOf(got, 'shell', cmd), 'deny', `${label}: ${cmd}`);
+    }
+    for (const path of ['.sterling/sterling.db', 'sub/.sterling/sterling.db-wal']) assert.equal(effectOf(got, 'edit', path), 'deny', `${label}: edit ${path}`);
+    assert.deepEqual(Object.entries(got.bash).at(-1), ['*sterling.db*', 'deny'], `${label}: bash ends with the guard`);
+    assert.deepEqual(Object.keys(got).slice(-2), ['shell', 'bash'], `${label}: the shell family comes after every other key`);
+    assert.equal(statusOf(run(dir, home), 'opencode.json'), 'matches', `${label}: idempotent`);
+  }
+  // The user's own verdicts for other commands and paths are kept.
+  let got = after({ bash: { '*': 'ask', 'ls *': 'allow', 'npm publish*': 'deny' } });
+  assert.equal(effectOf(got, 'shell', 'ls src'), 'allow', 'a user bash allow still applies');
+  assert.equal(effectOf(got, 'shell', 'npm publish --tag x'), 'deny', 'a user bash deny still applies');
+  assert.equal(effectOf(got, 'shell', 'rm x'), 'ask', 'the user bash "*" still applies');
+  got = after({ shell: { '*': 'ask', 'npm publish*': 'deny' } });
+  assert.equal(effectOf(got, 'shell', 'npm publish --tag x'), 'deny', 'a user shell rule is not overridden by the bash guard block');
+  assert.deepEqual(got.bash, { '*sterling.db*': 'deny' }, 'with no user bash block, bash holds only the guard, so it changes nothing else');
+  got = after({ edit: { '*': 'ask' }, write: { 'docs/*': 'allow' } });
+  assert.equal(effectOf(got, 'edit', 'docs/a.md'), 'allow', 'a user write rule still applies');
+  assert.deepEqual(Object.entries(got.write).at(-1), ['.sterling/sterling.db*', 'deny'], 'a user write block ends with the edit guard');
 });
 
 test('project config: invalid JSON or a tracked opencode.json is refused and not touched', () => {
