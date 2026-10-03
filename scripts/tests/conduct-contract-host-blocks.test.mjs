@@ -30,7 +30,12 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // found" (decision make-records-findable-authoring-rule-disclosure-lint-then-blind-experiment).
 // Moved 2026-10-03 (from e5c76140…): the "Solve, don't board" bullet gains one sentence, a multi-area
 // ask is split into one-area mergeable items (decision board-asks-split-at-intake-into-mergeable-one-area-items).
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'e027f80991dde2ad09a7651d8448d2144fe741435de595279dbbf46416513c22';
+// Moved 2026-10-03 (from e027f809…): the instruction audit fixes (finding
+// instruction-file-audit-against-code-and-rulings-october-2026). The "Dispatch briefs declare
+// territory" bullet cites the live decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round
+// in place of a slug no store holds, and "Knowledge is born structured" says the background worker
+// closes already-paid reconcile_needed items and /sterling:drain works the rest.
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'ca88355fd97b098b66275f4a2cd4cc37869663f92a415e76b4470b0fc1c97c32';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);
