@@ -80,12 +80,23 @@ export function tileCells(avatarIndex: number, frame: number): Cell[][] {
   });
 }
 
-// Animation sequence while running: rest, rest, blink, rest, bob, rest, tilt, rest.
-export const SEQUENCE: readonly number[] = [0, 0, 1, 0, 2, 0, 3, 0];
+// Milliseconds per animation tick, while a subagent is running. The Agents tab redraws on this beat.
+export const ANIMATION_MS = 333;
 
-// Per-avatar offset into SEQUENCE so a row of avatars does not blink in unison.
+// Animation sequence while running, one entry per tick: blink, bob and tilt each held for one tick
+// and followed by a long rest. 6 frame changes per 24 ticks (about 8 s) is 0.75 per second; the
+// earlier 8-tick cycle changed frame 2.25 times a second, which read as distracting (issue #9).
+export const SEQUENCE: readonly number[] = [
+  0, 0, 0, 0, 1, 0, 0, 0,
+  0, 0, 0, 0, 2, 0, 0, 0,
+  0, 0, 0, 0, 3, 0, 0, 0,
+];
+
+// Per-avatar offset into SEQUENCE so a row of avatars does not blink in unison. The step of 5 is
+// coprime with the sequence length (24) and not a multiple of its 8-tick pose spacing, so
+// neighbouring avatars never pose on the same tick.
 export function phaseFor(avatarIndex: number): number {
-  return (((avatarIndex * 3) % SEQUENCE.length) + SEQUENCE.length) % SEQUENCE.length;
+  return (((avatarIndex * 5) % SEQUENCE.length) + SEQUENCE.length) % SEQUENCE.length;
 }
 
 export function frameAt(tick: number, phase: number, running: boolean): number {
