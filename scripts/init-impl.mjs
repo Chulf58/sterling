@@ -39,7 +39,7 @@ import { DEFAULT_DOMAIN_DESCRIPTIONS } from './lib/domain-defaults.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
-import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL, portableAgentsTracked, PROJECT_MODES } from './lib/handoff-projection.mjs';
+import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL, trackedHandoffFiles, PROJECT_MODES } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -221,6 +221,7 @@ const eff = recorded
 const UNIVERSAL_DOMAIN = 'sterling';
 eff.stackTags = [...eff.stackTags.filter((t) => t !== UNIVERSAL_DOMAIN), UNIVERSAL_DOMAIN];
 
+const freshTracked = recorded ? null : trackedHandoffFiles(target);
 const expectedConfig = parseConfig({
   ...JSON.parse(readFileSync(join(pluginRoot, 'templates', 'default-config.json'), 'utf8')),
   toolchains: baked,
@@ -239,10 +240,12 @@ const expectedConfig = parseConfig({
   // the handoff setting (decision
   // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) is
   // a recorded declaration too, switched in the TUI System tab. A fresh config
-  // starts with it off, unless the project already has portable agents tracked
+  // starts with it off, unless the project already has handoff files tracked
   // in git (a clone of a project that commits them): then it starts on, so the
-  // first init on a new machine does not stop maintaining committed files.
-  handoff: recorded ? recorded.handoff : { enabled: portableAgentsTracked(target) },
+  // first init on a new machine does not stop maintaining committed files. When
+  // git cannot say what is tracked the key is left out of the written config
+  // (below), never recorded as off from a failed read.
+  handoff: recorded ? recorded.handoff : { enabled: freshTracked.files.length > 0 },
 });
 if (eff.splitRatio === undefined) eff.splitRatio = expectedConfig.tui_split_ratio;
 
@@ -357,7 +360,14 @@ for (const m of domainsExisting) {
 // config: created from declarations | matches defaults+declarations | tuned/hand-edited → left
 const backupDetail = eff.backupPath ? eff.backupPath : 'OPTED OUT (recorded; snapshots will skip loudly)';
 if (!recorded) {
-  writeFileSync(configPath, JSON.stringify(expectedConfig, null, 2));
+  if (freshTracked.unknown === null) {
+    writeFileSync(configPath, JSON.stringify(expectedConfig, null, 2));
+  } else {
+    const withoutHandoff = { ...expectedConfig };
+    delete withoutHandoff.handoff;
+    writeFileSync(configPath, JSON.stringify(withoutHandoff, null, 2));
+    notes.push(`note: config.handoff.enabled was left out of the new .sterling/config.json — git could not say whether handoff files are committed (${freshTracked.unknown}); once git answers, the setting follows what is tracked, or set it in the TUI System tab`);
+  }
   items.push({ item: '.sterling/config.json', status: 'created', detail: `${baked.map((t) => t.adapter).join(', ')} toolchain(s); stack tags [${eff.stackTags.join(', ')}]; backup ${backupDetail}` });
   for (const tc of baked) {
     for (const [cap, present] of Object.entries(tc.capabilities ?? {})) {

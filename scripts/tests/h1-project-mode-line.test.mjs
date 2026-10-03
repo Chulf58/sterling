@@ -52,6 +52,7 @@ const HOBBY_LINE = 'Project mode: HOBBY (config.mode — TUI System tab) — wor
 const handoffLines = (ctx) => ctx.split('\n').filter((l) => l.startsWith('Handoff files:'));
 const HANDOFF_ON_LINE = 'Handoff files: ON (config.handoff.enabled — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are written and maintained.';
 const HANDOFF_OFF_LINE = 'Handoff files: OFF (config.handoff.enabled — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.';
+const HANDOFF_NOT_SET_LINE = 'Handoff files: OFF (not set: config.handoff.enabled is absent and no handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.';
 
 for (const [mode, modeLine] of [['hobby', HOBBY_LINE], ['work', WORK_LINE]]) {
   for (const [on, handoffLine] of [[true, HANDOFF_ON_LINE], [false, HANDOFF_OFF_LINE]]) {
@@ -70,12 +71,15 @@ for (const [mode, modeLine] of [['hobby', HOBBY_LINE], ['work', WORK_LINE]]) {
   }
 }
 
-test('H1 reads a missing handoff key as OFF, a non-boolean as INVALID and an unreadable config as UNKNOWN', () => {
+test('H1 reads a missing handoff key as OFF (not set), a non-boolean as INVALID and an unreadable config as UNKNOWN', () => {
   const missing = project({ ...BASE_CONFIG, mode: 'work' });
   const invalid = project({ ...BASE_CONFIG, mode: 'work', handoff: { enabled: 'yes' } });
   const broken = project('{ not json');
   try {
-    assert.deepEqual(handoffLines(context(missing)), [HANDOFF_OFF_LINE], 'work mode does not turn the handoff files on');
+    // CHANGED (review round 2): an absent key used to print the same line as an explicit
+    // false. It now says the key is not set, so the two are told apart.
+    assert.deepEqual(handoffLines(context(missing)), [HANDOFF_NOT_SET_LINE], 'work mode does not turn the handoff files on');
+    assert.notEqual(HANDOFF_NOT_SET_LINE, HANDOFF_OFF_LINE);
     assert.deepEqual(handoffLines(context(invalid)), ["Handoff files: INVALID ('yes') — config.handoff.enabled must be true or false; init, sync-agents, /sterling:update and the handoff projection refuse to act on it until it is fixed (TUI System tab)."]);
     assert.deepEqual(handoffLines(context(broken)), ['Handoff files: UNKNOWN — the project config could not be read, so config.handoff.enabled could not be determined. This is NOT the off default: repair the config.']);
   } finally {
@@ -131,6 +135,25 @@ test('the project-mode line sits right after the TDD posture line', () => {
     const mode = ctx.indexOf('Project mode:');
     assert.ok(tdd !== -1 && mode > tdd, 'the mode line follows the TDD posture line');
     assert.equal(ctx.slice(tdd, mode).split('\n\n').length, 2, 'nothing sits between the two lines');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('H1: no handoff key and a git failure reads UNKNOWN with the git error, never OFF', () => {
+  const dir = project({ ...BASE_CONFIG, mode: 'work' });
+  const git = (args) => assert.equal(spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...args], { cwd: dir, encoding: 'utf8' }).status, 0, `git ${args.join(' ')}`);
+  try {
+    git(['init', '-q']);
+    mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
+    writeFileSync(join(dir, '.opencode', 'agents', 'scout.md'), 'portable\n');
+    git(['add', '.opencode/agents/scout.md']);
+    git(['commit', '-qm', 'portable']);
+    writeFileSync(join(dir, '.git', 'index'), 'not an index');
+    const lines = handoffLines(context(dir));
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /^Handoff files: UNKNOWN — config\.handoff\.enabled is not set and git could not say whether handoff files are committed \(git ls-files exited 128: [^)]+\)\. This is NOT the off default: /);
+    assert.doesNotMatch(lines[0], /Handoff files: (ON|OFF)\b/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

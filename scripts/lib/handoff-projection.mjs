@@ -19,6 +19,7 @@
 // store reproduces the same bytes and the CLI writes nothing.
 
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { existsContained, readContained, readdirContained } from './contained-fs.mjs';
 
@@ -84,37 +85,121 @@ export function readProjectMode(root) {
 // that writes those files (init, sync-agents, the /sterling:update fan-out, the
 // projection CLI, the git exclude block) reads the TARGET's own config through
 // readHandoffEnabled.
-// An absent key is off, with one exception: when a portable agent is already
+// An absent key is off, with one exception: when handoff files are already
 // tracked in git the answer is on, so a project that committed these files
 // before the setting existed keeps having them maintained. An explicit false
-// always wins. A value that is not a boolean throws: it is never guessed.
+// always wins. A value that is not a boolean throws: it is never guessed. An
+// absent key with a git that could not say what is tracked throws too
+// (HandoffGitError): a failed git read is never read as "nothing tracked".
 export const PORTABLE_AGENT_PATHS = ['.opencode/agents/implementor.md', '.opencode/agents/researcher.md', '.opencode/agents/scout.md'];
 export const HANDOFF_OFF_DETAIL = 'handoff files are off (config.handoff.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted)';
 export class HandoffSettingError extends Error {}
-// True when git tracks at least one portable agent in `root`. Outside a git work
-// tree, or without git, nothing is tracked.
-export function portableAgentsTracked(root) {
-  const r = spawnSync('git', ['ls-files', '--', ...PORTABLE_AGENT_PATHS], { cwd: root, encoding: 'utf8' });
-  return r.status === 0 && r.stdout.trim() !== '';
+// The key is absent and git could not answer. A HandoffSettingError, so every
+// writer that refuses an invalid setting refuses this too; `reason` is the git
+// error alone, for the banner and the System tab row.
+export class HandoffGitError extends HandoffSettingError {
+  constructor(message, reason) {
+    super(message);
+    this.reason = reason;
+  }
+}
+// The same timeout gitIgnored (scripts/hooks/lib/common.mjs) gives git.
+const GIT_TIMEOUT_MS = 30_000;
+// The handoff files git tracks in `root`, three-state like gitIgnored:
+// { files, unknown }. `files` holds the tracked portable agents, anything under
+// docs/sterling/, and a root architecture.md or rulings.md that carries the
+// handoff marker (a project's own hand-written root file is not a handoff file).
+// `unknown` is null when git answered, and "not a git work tree" is an answer:
+// nothing is tracked. Any other failure (no git binary, a timeout, a corrupt
+// index, a dubious-ownership refusal, a .git that git cannot use, a tracked root
+// file that cannot be read) is `unknown: <reason>` with no files. The caller
+// owns the degrade and must never read it as "nothing tracked".
+export function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
+  const run = (args) => {
+    // LC_ALL=C: the "not a git repository" test below reads git's own message.
+    const r = spawn('git', args, { cwd: root, encoding: 'utf8', timeout: GIT_TIMEOUT_MS, env: { ...process.env, LC_ALL: 'C' } });
+    const name = `git ${args[0]}`;
+    if (r.error) return { failed: r.error.code === 'ETIMEDOUT' ? `${name} timed out after ${GIT_TIMEOUT_MS / 1000}s` : `${name} did not run (${r.error.message})` };
+    if (r.status !== 0) {
+      const stderr = (r.stderr || '').trim().split('\n')[0];
+      return { failed: `${name} exited ${r.status ?? `on signal ${r.signal}`}: ${stderr || 'no error output'}`, notARepo: r.status === 128 && /not a git repository/i.test(stderr) };
+    }
+    return { stdout: r.stdout || '' };
+  };
+  // A directory that does not exist holds nothing; asked there, git fails to
+  // start with the same ENOENT a missing git binary gives.
+  if (!existsSync(root)) return { files: [], unknown: null };
+  const inside = run(['rev-parse', '--is-inside-work-tree']);
+  if (inside.failed) {
+    // "No repository" is trusted only when there is no .git here to be broken.
+    if (inside.notARepo && !existsSync(join(root, '.git'))) return { files: [], unknown: null };
+    return { files: [], unknown: inside.failed };
+  }
+  if (inside.stdout.trim() !== 'true') return { files: [], unknown: null };
+  const ls = run(['ls-files', '-z', '--', ...PORTABLE_AGENT_PATHS, HANDOFF_DOCS_DIR, ...HANDOFF_ROOT_FILES]);
+  if (ls.failed) return { files: [], unknown: ls.failed };
+  const files = [];
+  for (const rel of ls.stdout.split('\0').filter(Boolean)) {
+    if (!HANDOFF_ROOT_FILES.includes(rel)) {
+      files.push(rel);
+      continue;
+    }
+    try {
+      if (existsContained(root, rel, 'file') && readContained(root, rel).startsWith(HANDOFF_MARKER)) files.push(rel);
+    } catch (err) {
+      return { files: [], unknown: `${rel} is tracked but could not be read (${err.message})` };
+    }
+  }
+  return { files, unknown: null };
+}
+// The handoff files present on disk in `root`, tracked or not: the portable
+// agents, docs/sterling/ (named as the directory) and a marked root index.
+export function handoffFilesOnDisk(root) {
+  const found = PORTABLE_AGENT_PATHS.filter((rel) => existsContained(root, rel, 'file'));
+  if (existsContained(root, HANDOFF_DOCS_DIR, 'dir')) found.push(`${HANDOFF_DOCS_DIR}/`);
+  for (const rel of HANDOFF_ROOT_FILES) {
+    if (existsContained(root, rel, 'file') && readContained(root, rel).startsWith(HANDOFF_MARKER)) found.push(rel);
+  }
+  return found;
 }
 // The setting for an already-parsed raw config object (undefined or null when
 // the project has none): { enabled, source }. source is 'config' (the key is
-// set), 'tracked' (no key, portable agents tracked) or 'default' (no key).
+// set), 'tracked' (no key, handoff files tracked in git) or 'default' (no key,
+// nothing tracked).
 export function handoffSettingOf(parsed, root, where = CONFIG_REL) {
   const block = parsed?.handoff;
   if (block !== undefined && (block === null || typeof block !== 'object' || Array.isArray(block))) {
     throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} — it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
   }
   const value = block?.enabled;
-  if (value === undefined) return portableAgentsTracked(root) ? { enabled: true, source: 'tracked' } : { enabled: false, source: 'default' };
+  if (value === undefined) {
+    const tracked = trackedHandoffFiles(root);
+    if (tracked.unknown !== null) {
+      throw new HandoffGitError(`config.handoff.enabled is not set in ${where} and git could not say whether handoff files are committed (${tracked.unknown}) — the setting is not guessed; repair the repository, or set config.handoff.enabled to true or false (TUI System tab)`, tracked.unknown);
+    }
+    return tracked.files.length ? { enabled: true, source: 'tracked' } : { enabled: false, source: 'default' };
+  }
   if (typeof value !== 'boolean') {
     throw new HandoffSettingError(`config.handoff.enabled is ${JSON.stringify(value)} in ${where} — it must be true or false; switch it in the TUI System tab or fix the file`);
   }
   return { enabled: value, source: 'config' };
 }
-export function readHandoffEnabled(root) {
+// The strict read of the TARGET's own config: { enabled, source, unmaintained }.
+// `unmaintained` lists the handoff files on disk that nothing maintains any
+// more: the key is absent and git tracks none of them, so the setting reads off
+// while the files a previous version wrote are still there. Empty in every
+// other state. Writers say so in one line (handoffUnmaintainedNotice) instead
+// of dropping maintenance silently.
+export function readHandoffSetting(root) {
   const { where, parsed } = readRawConfig(root, HandoffSettingError, 'the handoff setting');
-  return handoffSettingOf(parsed, root, where).enabled;
+  const setting = handoffSettingOf(parsed, root, where);
+  return { ...setting, unmaintained: setting.source === 'default' ? handoffFilesOnDisk(root) : [] };
+}
+export function readHandoffEnabled(root) {
+  return readHandoffSetting(root).enabled;
+}
+export function handoffUnmaintainedNotice(files) {
+  return `handoff files NOT MAINTAINED — ${files.join(', ')} ${files.length === 1 ? 'exists' : 'exist'} on disk, not tracked in git, and config.handoff.enabled is not set: Sterling no longer maintains them and deletes nothing. Turn on the Handoff files row in the TUI System tab to keep them maintained.`;
 }
 
 export const HANDOFF_DOCS_DIR = 'docs/sterling';

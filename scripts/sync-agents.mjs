@@ -16,7 +16,7 @@ import { parseConfig } from '@sterling/schemas';
 import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
-import { isSterlingClone, readProjectMode, ProjectModeError, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
+import { isSterlingClone, readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { probeClaudeWithOverride } from './lib/claude-probe.mjs';
 
@@ -42,11 +42,13 @@ try {
 }
 // The handoff setting (decision
 // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting)
-// gates the portable copies below. A value that is not true or false is refused
-// the same way, before anything is written.
+// gates the portable copies below. A value that is not true or false, or an
+// absent key with a git that could not say what is tracked, is refused the same
+// way, before anything is written.
 let handoffEnabled;
+let handoffUnmaintained;
 try {
-  handoffEnabled = readHandoffEnabled(targetDir);
+  ({ enabled: handoffEnabled, unmaintained: handoffUnmaintained } = readHandoffSetting(targetDir));
 } catch (err) {
   if (!(err instanceof HandoffSettingError) && !(err instanceof ContainmentError)) throw err;
   console.log(`refused_handoff_setting: ${err.message}; nothing synced`);
@@ -149,6 +151,9 @@ try {
 if (cloneTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED — the target is a Sterling clone, not a handoff target`);
 const handoffTarget = cloneTarget === false && handoffEnabled;
 if (cloneTarget === false && !handoffTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED — ${HANDOFF_OFF_DETAIL}`);
+// An absent key with handoff files on disk that git does not track: a project
+// from before the setting existed stops being maintained, so say which files.
+if (cloneTarget === false && handoffUnmaintained.length) console.log(handoffUnmaintainedNotice(handoffUnmaintained));
 const { report: opencodeReport } = !handoffTarget
   ? { report: [] }
   : syncOpenCodeAgents({

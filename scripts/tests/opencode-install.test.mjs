@@ -624,6 +624,27 @@ test('a project that already ignores .opencode/ gets no exclude block', () => {
   assert.doesNotMatch(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), /sterling opencode/);
 });
 
+test('no handoff key and UNTRACKED portable agents on disk: the block stays narrow, so git status still shows them', () => {
+  const home = tmp('oc-home-');
+  const dir = project('work');
+  mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
+  writeFileSync(join(dir, '.opencode', 'agents', 'scout.md'), 'portable\n');
+  run(dir, home);
+  assert.doesNotMatch(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), /^\/\.opencode\/$/m);
+  assert.deepEqual(untracked(dir), ['?? .opencode/agents/scout.md'], 'the file Sterling stopped maintaining is not hidden');
+});
+
+test('no handoff key and git cannot say what is tracked: a skipped row names the git error and only Sterling paths are excluded', () => {
+  const home = tmp('oc-home-');
+  const dir = project('work');
+  writeFileSync(join(dir, '.git', 'index'), 'not an index');
+  const r = run(dir, home);
+  const row = r.rows.find((x) => x.item === '.sterling/config.json handoff');
+  assert.equal(row?.status, 'skipped');
+  assert.match(row.detail, /git ls-files exited 128.*excluding only Sterling's own \.opencode paths/);
+  assert.doesNotMatch(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), /^\/\.opencode\/$/m);
+});
+
 test('project with COMMITTED portable agents and no handoff key: only Sterling paths are excluded, the committed copies are untouched', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');

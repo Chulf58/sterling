@@ -23,6 +23,8 @@ import { evaluatePrLoop } from '../hooks/lib/pr-loop-duty.mjs';
 import { operatingStateLines } from '../../packages/opencode-plugin/src/operating-state.mjs';
 
 const { readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL } = handoffLib;
+// Read off the namespace so a missing export fails the test that needs it, not the whole file.
+const { HandoffGitError, trackedHandoffFiles, handoffFilesOnDisk, HANDOFF_MARKER } = handoffLib;
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const { SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href);
@@ -388,7 +390,7 @@ test('OpenCode banner: tracked portable agents with no key read ON and say why; 
     git(tracked, ['add', '.opencode']);
     git(tracked, ['commit', '-qm', 'portable']);
     assert.deepEqual(lineOf(operatingStateLines(tracked, null).lines, 'Handoff files:'), [
-      'Handoff files: ON (config.handoff.enabled is not set; portable agents are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are written and maintained.',
+      'Handoff files: ON (config.handoff.enabled is not set; handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are written and maintained.',
     ]);
     assert.deepEqual(lineOf(operatingStateLines(bad, null).lines, 'Handoff files:'), [
       "Handoff files: INVALID ('yes') — config.handoff.enabled must be true or false; init, sync-agents, /sterling:update and the handoff projection refuse to act on it until it is fixed (TUI System tab).",
@@ -399,5 +401,235 @@ test('OpenCode banner: tracked portable agents with no key read ON and say why; 
     ]);
   } finally {
     [tracked, bad, broken].forEach(cleanup);
+  }
+});
+
+// ---------------------------------------------------------------- git could not answer (review round 2)
+//
+// An absent key asks git whether handoff files are committed. "Not a git work
+// tree" is an answer (nothing tracked). Any other git failure is NOT: the reader
+// throws, the writers refuse naming the git error, and the banner reads UNKNOWN.
+
+const NOT_SET_OFF = 'Handoff files: OFF (not set: config.handoff.enabled is absent and no handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.';
+const UNKNOWN_GIT = /^Handoff files: UNKNOWN — config\.handoff\.enabled is not set and git could not say whether handoff files are committed \(git ls-files exited 128: [^)]+\)\. This is NOT the off default: init, sync-agents, \/sterling:update and the handoff projection refuse to act until git answers or the setting is set \(TUI System tab\)\.$/;
+
+function commitFile(dir, rel, content) {
+  mkdirSync(dirname(join(dir, rel)), { recursive: true });
+  writeFileSync(join(dir, rel), content);
+  git(dir, ['add', '--', rel]);
+  git(dir, ['commit', '-qm', `add ${rel}`]);
+}
+// A repo with a committed portable agent, no handoff key, and an index git cannot read.
+function corruptIndexProject(extra = {}) {
+  const dir = project({ mode: 'work', repo: true, ...extra });
+  commitFile(dir, '.opencode/agents/scout.md', 'portable\n');
+  writeFileSync(join(dir, '.git', 'index'), 'not an index');
+  return dir;
+}
+
+test('git failure: a corrupt index with a committed portable agent and no key throws HandoffGitError naming the git error; an explicit key never asks git', () => {
+  const dir = corruptIndexProject({ store: false });
+  try {
+    assert.equal(typeof HandoffGitError, 'function');
+    assert.throws(() => readHandoffEnabled(dir), (err) => {
+      assert.ok(err instanceof HandoffGitError, `HandoffGitError, got ${err?.constructor?.name}: ${err?.message}`);
+      assert.ok(err instanceof HandoffSettingError, 'a subclass, so every writer that refuses an invalid setting refuses this too');
+      assert.match(err.message, /config\.handoff\.enabled is not set/);
+      assert.match(err.message, /git ls-files exited 128/);
+      return true;
+    });
+    writeConfig(dir, { mode: 'work', handoff: { enabled: false } });
+    assert.equal(readHandoffEnabled(dir), false);
+    writeConfig(dir, { mode: 'work', handoff: { enabled: true } });
+    assert.equal(readHandoffEnabled(dir), true);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('trackedHandoffFiles is three-state: outside a work tree nothing is tracked; a missing git, a timeout or a broken .git is unknown with the reason', () => {
+  const noRepo = project({ store: false });
+  const brokenGit = project({ store: false });
+  try {
+    assert.equal(typeof trackedHandoffFiles, 'function');
+    assert.deepEqual(trackedHandoffFiles(noRepo), { files: [], unknown: null });
+    assert.deepEqual(trackedHandoffFiles(join(noRepo, 'gone')), { files: [], unknown: null }, 'a directory that does not exist holds nothing; that is not a missing git');
+    const seen = [];
+    const timedOut = trackedHandoffFiles(noRepo, { spawn: (cmd, args, opts) => { seen.push(opts); return { status: null, signal: 'SIGTERM', stdout: '', stderr: '', error: Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' }) }; } });
+    assert.deepEqual(timedOut.files, []);
+    assert.match(timedOut.unknown, /^git rev-parse timed out after 30s$/);
+    assert.equal(seen[0].timeout, 30_000, 'the same timeout gitIgnored uses');
+    const missing = trackedHandoffFiles(noRepo, { spawn: () => ({ status: null, stdout: '', stderr: '', error: Object.assign(new Error('spawnSync git ENOENT'), { code: 'ENOENT' }) }) });
+    assert.match(missing.unknown, /^git rev-parse did not run \(spawnSync git ENOENT\)$/);
+    mkdirSync(join(brokenGit, '.git'));
+    assert.match(trackedHandoffFiles(brokenGit).unknown, /^git rev-parse exited 128: .*not a git repository/, 'a .git that git cannot use is not "no repository"');
+    assert.throws(() => readHandoffEnabled(brokenGit), HandoffGitError);
+  } finally {
+    [noRepo, brokenGit].forEach(cleanup);
+  }
+});
+
+test('readHandoffEnabled: with no key, a committed handoff projection counts as on without any portable agent — docs/sterling/ files and marked root indexes; an unmarked root file does not', () => {
+  const marked = `${HANDOFF_MARKER} from this project's knowledge store — DO NOT EDIT. -->\n# Architecture\n`;
+  const cases = [
+    ['docs/sterling/articles/a-12345678.md', '# A\n', true],
+    ['architecture.md', marked, true],
+    ['rulings.md', marked, true],
+    ['architecture.md', '# our own architecture notes\n', false],
+    ['docs/other/notes.md', '# notes\n', false],
+  ];
+  for (const [rel, content, expected] of cases) {
+    const dir = project({ mode: 'hobby', store: false, repo: true });
+    try {
+      commitFile(dir, rel, content);
+      assert.equal(readHandoffEnabled(dir), expected, `${rel} (${expected ? 'handoff already committed' : 'not a handoff file'})`);
+      assert.deepEqual(trackedHandoffFiles(dir), { files: expected ? [rel] : [], unknown: null });
+    } finally {
+      cleanup(dir);
+    }
+  }
+});
+
+test('git failure: sync-agents refuses (exit 2) and the handoff CLI refuses (exit 3), each naming the git error; nothing is written', () => {
+  const dir = corruptIndexProject();
+  try {
+    const s = syncAgents(dir);
+    assert.equal(s.status, 2, s.stdout + s.stderr);
+    assert.match(s.stdout, /^refused_handoff_setting: .*git ls-files exited 128.*nothing synced/m);
+    assert.ok(!existsSync(join(dir, '.claude', 'agents')), 'nothing synced');
+    const c = handoffCli(dir);
+    assert.equal(c.status, 3, c.stdout + c.stderr);
+    assert.match(c.stdout + c.stderr, /git ls-files exited 128/);
+    assert.deepEqual(handoffFiles(dir), []);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('git failure: the update fan-out refuses that project naming the git error and the others proceed', async () => {
+  const bad = corruptIndexProject();
+  const fine = combo('hobby', true);
+  try {
+    const { report, log, syncCalls, handoffCalls } = await update([bad, fine]);
+    assert.equal(report.exit, 2, log);
+    assert.match(log, /✗ .*REFUSED — handoff setting: .*git ls-files exited 128/);
+    assert.deepEqual(report.projects.map((p) => p.handoff), ['refused_handoff_setting', 0]);
+    assert.deepEqual([syncCalls.length, handoffCalls.length], [1, 1]);
+  } finally {
+    [bad, fine].forEach(cleanup);
+  }
+});
+
+test('OpenCode banner: a git failure with no key reads UNKNOWN with the reason, never OFF; an absent key with nothing tracked reads OFF (not set), distinct from an explicit false', () => {
+  const bad = corruptIndexProject({ store: false });
+  const notSet = project({ mode: 'work', store: false });
+  const explicit = combo('work', false, { store: false });
+  try {
+    const badLines = lineOf(operatingStateLines(bad, null).lines, 'Handoff files:');
+    assert.equal(badLines.length, 1);
+    assert.match(badLines[0], UNKNOWN_GIT);
+    assert.doesNotMatch(badLines[0], /Handoff files: (ON|OFF)\b/);
+    assert.deepEqual(lineOf(operatingStateLines(notSet, null).lines, 'Handoff files:'), [NOT_SET_OFF]);
+    assert.deepEqual(lineOf(operatingStateLines(explicit, null).lines, 'Handoff files:'), [HANDOFF_TEXT.false]);
+  } finally {
+    [bad, notSet, explicit].forEach(cleanup);
+  }
+});
+
+// ---------------------------------------------------------------- files on disk that nothing maintains
+
+const UNMAINTAINED = /handoff files NOT MAINTAINED — \.opencode\/agents\/scout\.md, docs\/sterling\/ (exist|exists) on disk, not tracked in git, and config\.handoff\.enabled is not set: Sterling no longer maintains them and deletes nothing\. Turn on the Handoff files row in the TUI System tab to keep them maintained\./;
+function untrackedHandoffProject(extra = {}) {
+  const dir = project({ mode: 'work', repo: true, ...extra });
+  mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
+  writeFileSync(join(dir, '.opencode', 'agents', 'scout.md'), 'portable\n');
+  mkdirSync(join(dir, 'docs', 'sterling', 'articles'), { recursive: true });
+  writeFileSync(join(dir, 'docs', 'sterling', 'articles', 'a.md'), '# A\n');
+  return dir;
+}
+
+test('handoffFilesOnDisk lists the portable agents, docs/sterling/ and marked root indexes present on disk', () => {
+  const dir = untrackedHandoffProject({ store: false });
+  try {
+    assert.equal(typeof handoffFilesOnDisk, 'function');
+    writeFileSync(join(dir, 'architecture.md'), `${HANDOFF_MARKER} -->\n`);
+    writeFileSync(join(dir, 'rulings.md'), '# hand-written\n');
+    assert.deepEqual(handoffFilesOnDisk(dir), ['.opencode/agents/scout.md', 'docs/sterling/', 'architecture.md']);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('no key, untracked handoff files on disk: sync-agents and the update fan-out each print one line naming them; an explicit false or a clean project prints none', async () => {
+  const dir = untrackedHandoffProject();
+  const explicit = untrackedHandoffProject({ handoff: { enabled: false } });
+  const clean = project({ mode: 'work', repo: true });
+  try {
+    const s = syncAgents(dir);
+    assert.equal(s.status, 0, s.stdout + s.stderr);
+    assert.equal(s.stdout.match(new RegExp(UNMAINTAINED, 'g'))?.length, 1, s.stdout);
+    assert.doesNotMatch(s.stdout, /^[a-z_]+: .*NOT MAINTAINED/m, "never shaped like an agent status line, which the update fan-out would count as a change");
+    for (const other of [explicit, clean]) assert.doesNotMatch(syncAgents(other).stdout, /NOT MAINTAINED/);
+    const { report, log } = await update([dir, explicit, clean]);
+    assert.equal(report.exit, 0, log);
+    assert.equal(log.match(new RegExp(UNMAINTAINED, 'g'))?.length, 1, log);
+    assert.equal(readFileSync(join(dir, '.opencode', 'agents', 'scout.md'), 'utf8'), 'portable\n', 'nothing is rewritten or deleted');
+  } finally {
+    [dir, explicit, clean].forEach(cleanup);
+  }
+});
+
+test('exclude block: untracked portable agents on disk with no key keep the block narrow, so git status still shows them', () => {
+  const dir = untrackedHandoffProject({ store: false });
+  try {
+    ensureExcluded({ projectDir: dir, handoff: false, tracked: [], unmaintained: ['.opencode/agents/scout.md'] });
+    assert.doesNotMatch(excludeOf(dir), /^\/\.opencode\/$/m);
+    assert.match(git(dir, ['status', '--short', '--untracked-files=all']), /\.opencode\/agents\/scout\.md/);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// ---------------------------------------------------------------- upgrade: { mode: 'work' }, no key, portable agents committed
+
+// A project from before the setting existed: real portable agents written by
+// sync-agents and committed, then the handoff key removed from the config.
+function upgradedProject() {
+  const dir = project({ mode: 'work', handoff: { enabled: true }, repo: true });
+  const first = syncAgents(dir);
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+  git(dir, ['add', '.opencode/agents/implementor.md', '.opencode/agents/researcher.md', '.opencode/agents/scout.md']);
+  git(dir, ['commit', '-qm', 'portable agents']);
+  writeConfig(dir, { mode: 'work' });
+  rmSync(join(dir, '.opencode', 'agents', 'researcher.md'));
+  return dir;
+}
+
+test('upgrade through sync-agents: { mode: work }, no handoff key, portable agents committed — they are still maintained', () => {
+  const dir = upgradedProject();
+  try {
+    const r = syncAgents(dir);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^installed: \.opencode\/agents\/researcher\.md$/m);
+    assert.match(r.stdout, /^up_to_date: \.opencode\/agents\/scout\.md$/m);
+    assert.doesNotMatch(r.stdout, /SKIPPED — handoff files are off|NOT MAINTAINED/);
+    assert.deepEqual(opencodeFiles(dir).filter((f) => f.endsWith('.md')), PORTABLE.map((n) => `${n}.md`));
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('upgrade through /sterling:update: { mode: work }, no handoff key, portable agents committed — the agents and the projection are written', async () => {
+  const dir = upgradedProject();
+  try {
+    const { report, log, handoffCalls } = await update([dir]);
+    assert.equal(report.exit, 0, log);
+    assert.deepEqual(report.projects.map((p) => p.handoff), [0]);
+    assert.equal(handoffCalls.length, 1);
+    assert.doesNotMatch(log, /handoff files are off|NOT MAINTAINED/);
+    assert.ok(existsSync(join(dir, '.opencode', 'agents', 'researcher.md')), 'the missing portable agent is rewritten');
+    assert.deepEqual(handoffFiles(dir), HANDOFF_FILES);
+  } finally {
+    cleanup(dir);
   }
 });

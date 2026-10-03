@@ -1420,6 +1420,61 @@ test('handoff setting: a fresh init of a project whose portable agents are alrea
   }
 });
 
+test('handoff setting: a fresh init where git cannot say what is tracked leaves the handoff key OUT of the new config and says so; nothing handoff-related is written', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-handoff-init-gitfail-'));
+  const git = (args) => assert.equal(spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...args], { cwd: dir, encoding: 'utf8' }).status, 0, `git ${args.join(' ')}`);
+  try {
+    git(['init', '-q']);
+    mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
+    writeFileSync(join(dir, '.opencode', 'agents', 'scout.md'), 'portable\n');
+    git(['add', '.opencode/agents/scout.md']);
+    git(['commit', '-qm', 'portable']);
+    writeFileSync(join(dir, '.git', 'index'), 'not an index');
+    const r = init(dir, FRESH_FLAGS);
+    const cfg = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
+    assert.ok(!('handoff' in cfg), `no explicit handoff value is recorded from a failed git read: ${JSON.stringify(cfg.handoff)}`);
+    assert.match(r.stdout, /^note: config\.handoff\.enabled was left out of the new \.sterling\/config\.json — git could not say whether handoff files are committed \(git ls-files exited 128: /m, r.stdout + r.stderr);
+    assert.match(r.stdout, /^\.opencode\/agents\/ \+ handoff projection\s+refused\s+.*git ls-files exited 128/m);
+    assert.doesNotMatch(r.stdout, HANDOFF_OFF_ROW);
+    assert.equal(readFileSync(join(dir, '.opencode', 'agents', 'scout.md'), 'utf8'), 'portable\n');
+    assert.ok(!existsSync(join(dir, 'architecture.md')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('upgrade through the init ensure pass: { mode: work }, no handoff key, portable agents committed — a re-run still maintains them', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-handoff-init-upgrade-'));
+  const git = (args) => assert.equal(spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...args], { cwd: dir, encoding: 'utf8' }).status, 0, `git ${args.join(' ')}`);
+  const configPath = join(dir, '.sterling', 'config.json');
+  try {
+    git(['init', '-q']);
+    assert.equal(init(dir, [...FRESH_FLAGS, '--mode', 'work']).code, 0);
+    setHandoff(dir, true);
+    assert.equal(init(dir).code, 0);
+    git(['add', '.opencode/agents/implementor.md', '.opencode/agents/researcher.md', '.opencode/agents/scout.md']);
+    git(['commit', '-qm', 'portable']);
+    // the config from before the setting existed: work mode, no handoff key
+    const { handoff, ...before } = JSON.parse(readFileSync(configPath, 'utf8'));
+    assert.deepEqual(handoff, { enabled: true });
+    writeFileSync(configPath, JSON.stringify(before, null, 2));
+    rmSync(join(dir, '.opencode', 'agents', 'researcher.md'));
+    rmSync(join(dir, 'architecture.md'));
+    for (const args of [[], ['--update-ensure']]) {
+      const r = init(dir, args);
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      assert.doesNotMatch(r.stdout, HANDOFF_OFF_ROW, `init ${args.join(' ')}`);
+      assert.ok(existsSync(join(dir, '.opencode', 'agents', 'researcher.md')), 'the missing portable agent is rewritten');
+      assert.ok(existsSync(join(dir, 'architecture.md')), 'the projection is rewritten');
+      assert.ok(!('handoff' in JSON.parse(readFileSync(configPath, 'utf8'))), 'the recorded config is left as it was');
+      rmSync(join(dir, '.opencode', 'agents', 'researcher.md'));
+      rmSync(join(dir, 'architecture.md'));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
 // /sterling:init asks work-or-hobby on a NEW project (user-stated 2026-09-28: "When a
 // new proj ct is sterling inited, it should ask if it is a work or hobby project") and
 // passes the answer as --mode. CHANGED: the two tests below pinned that --mode work

@@ -32,7 +32,7 @@ import { fileURLToPath } from 'node:url';
 // bootstrap-independence note in scripts/update.mjs).
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
-import { readProjectMode, ProjectModeError, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL } from './handoff-projection.mjs';
+import { readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './handoff-projection.mjs';
 import { ContainmentError } from './contained-fs.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { installHostOf, sterlingUpdateRemedy } from './sterling-roots.mjs';
@@ -628,11 +628,12 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         continue;
       }
       let handoffEnabled;
+      let handoffUnmaintained;
       try {
-        handoffEnabled = readHandoffEnabled(p.repo_path);
+        ({ enabled: handoffEnabled, unmaintained: handoffUnmaintained } = readHandoffSetting(p.repo_path));
       } catch (err) {
         if (!isProjectReadRefusal(err)) throw err;
-        log(`  ✗ ${p.name}: REFUSED — handoff setting: ${err.message}. Nothing was synced or projected for this project; fix config.handoff.enabled (true or false, TUI System tab) and rerun /sterling:update.`);
+        log(`  ✗ ${p.name}: REFUSED — handoff setting: ${err.message}. Nothing was synced or projected for this project; set config.handoff.enabled to true or false (TUI System tab) and rerun /sterling:update.`);
         entry.handoff = 'refused_handoff_setting';
         fail(2);
         failures++;
@@ -664,6 +665,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         for (const line of driftedAgents) log(`      ⚠ ${line}`);
         for (const line of autoMemoryNotices) log(`      ⚠ ${line}`);
       }
+      // An absent handoff key with handoff files on disk that git does not track:
+      // they stopped being maintained, so the run names them (sync-agents prints
+      // the same line, but its output is relayed only on a failure).
+      if (handoffUnmaintained.length) log(`      ⚠ ${handoffUnmaintainedNotice(handoffUnmaintained)}`);
       // Handoff projection (decision
       // init-prepares-opencode-portable-agents-and-target-handoff-projections):
       // refresh the project's committed architecture.md / rulings.md /

@@ -63,7 +63,7 @@ import { sha256, loadRegistry } from './agent-distribution.mjs';
 import { renderOpenCodeFullText } from './agent-fences.mjs';
 import { renderOpenCodeAgent, parseOpenCodeHeader } from './opencode-agents.mjs';
 import { ignoredPaths } from './git-ignore-check.mjs';
-import { readHandoffEnabled } from './handoff-projection.mjs';
+import { readHandoffSetting, PORTABLE_AGENT_PATHS } from './handoff-projection.mjs';
 
 export const STERLING_AGENTS_SUBDIR = '.opencode/agents/sterling';
 export const PROJECT_CONFIG_REL = '.opencode/opencode.json';
@@ -962,10 +962,12 @@ function excludeLines(wholeDir) {
 /** Keep Sterling's .opencode files out of git via a managed block in .git/info/exclude.
  *  `handoff` is the project's handoff setting: false excludes the whole directory when
  *  nothing is tracked there; true, or null for a setting that could not be read, excludes
- *  only Sterling's own paths, so portable agents stay visible to git. */
-export function ensureExcluded({ projectDir, handoff, tracked }) {
+ *  only Sterling's own paths, so portable agents stay visible to git. `unmaintained` is
+ *  the portable agents on disk of a project with no handoff key: while any exist the
+ *  block stays narrow, so the files Sterling stopped maintaining still show in git status. */
+export function ensureExcluded({ projectDir, handoff, tracked, unmaintained = [] }) {
   const label = '.git/info/exclude';
-  const wholeDir = handoff === false && tracked.length === 0;
+  const wholeDir = handoff === false && tracked.length === 0 && unmaintained.length === 0;
   const want = [EXCLUDE_BEGIN, ...excludeLines(wholeDir), EXCLUDE_END].join('\n');
   const gp = git(projectDir, ['rev-parse', '--git-path', 'info/exclude']);
   if (gp.status !== 0) return { item: label, status: 'skipped', detail: `not a git work tree (${(gp.stderr || '').trim().split('\n')[0]}) — nothing to keep untracked` };
@@ -1146,15 +1148,18 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   const ls = git(projectDir, ['ls-files', '--', '.opencode']);
   const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
   let handoff;
+  let unmaintained = [];
   try {
-    handoff = readHandoffEnabled(projectDir);
+    const setting = readHandoffSetting(projectDir);
+    handoff = setting.enabled;
+    unmaintained = setting.unmaintained.filter((rel) => PORTABLE_AGENT_PATHS.includes(rel));
   } catch (err) {
     // Unknown setting: exclude only Sterling's own paths, the choice that can never hide
     // committed portable agents. Said, not silent.
     handoff = null;
     rows.push({ item: '.sterling/config.json handoff', status: 'skipped', detail: `${err.message} — excluding only Sterling's own .opencode paths` });
   }
-  rows.push(ensureExcluded({ projectDir, handoff, tracked }));
+  rows.push(ensureExcluded({ projectDir, handoff, tracked, unmaintained }));
   // The agents render first so default_agent is set only when the conductor file is Sterling's.
   const agentRows = ensureFullAgents({ projectDir, pluginRoot, tracked });
   const conductorRow = agentRows.find((r) => r.item === `${STERLING_AGENTS_SUBDIR}/conductor.md`);

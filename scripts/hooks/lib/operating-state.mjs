@@ -10,7 +10,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { missingDomainWarning } from '@sterling/store';
 import { loadConfig } from './common.mjs';
-import { handoffSettingOf, HandoffSettingError } from '../../lib/handoff-projection.mjs';
+import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../lib/handoff-projection.mjs';
 import { describeMountedDomains } from './subject-fan.mjs';
 
 /**
@@ -131,8 +131,10 @@ const HANDOFF_SET = 'the portable OpenCode agents and the handoff projection for
  * project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
  * informational only. States the EFFECTIVE setting, through the same resolver
  * the writers use (handoffSettingOf): config.handoff.enabled when it is set;
- * otherwise ON when portable agents are already tracked in git in `root`, else
- * OFF. An unreadable config is UNKNOWN, never the default; a value that is not a
+ * otherwise ON when handoff files are already tracked in git in `root`, else
+ * OFF (not set), worded apart from an explicit false. An unreadable config is
+ * UNKNOWN, never the default, and so is an absent key when git could not say
+ * what is tracked (the line carries the git error); a value that is not a
  * boolean reads INVALID, never as on or off.
  */
 export function handoffFilesLine({ config, configUnreadable, root }) {
@@ -146,6 +148,12 @@ export function handoffFilesLine({ config, configUnreadable, root }) {
   try {
     setting = handoffSettingOf(config, root);
   } catch (err) {
+    if (err instanceof HandoffGitError) {
+      return (
+        `Handoff files: UNKNOWN — config.handoff.enabled is not set and git could not say whether handoff files are committed (${err.reason}). ` +
+        'This is NOT the off default: init, sync-agents, /sterling:update and the handoff projection refuse to act until git answers or the setting is set (TUI System tab).'
+      );
+    }
     if (!(err instanceof HandoffSettingError)) throw err;
     const block = config.handoff;
     const raw = block !== null && typeof block === 'object' && !Array.isArray(block) ? block.enabled : block;
@@ -154,7 +162,11 @@ export function handoffFilesLine({ config, configUnreadable, root }) {
       'init, sync-agents, /sterling:update and the handoff projection refuse to act on it until it is fixed (TUI System tab).'
     );
   }
-  const where = setting.source === 'tracked' ? 'config.handoff.enabled is not set; portable agents are tracked in git' : 'config.handoff.enabled';
+  const where = {
+    config: 'config.handoff.enabled',
+    tracked: 'config.handoff.enabled is not set; handoff files are tracked in git',
+    default: 'not set: config.handoff.enabled is absent and no handoff files are tracked in git',
+  }[setting.source];
   return (
     `Handoff files: ${setting.enabled ? 'ON' : 'OFF'} (${where} — TUI System tab) — ` +
     (setting.enabled ? `${HANDOFF_SET} are written and maintained.` : `${HANDOFF_SET} are not written; existing ones are left in place.`)

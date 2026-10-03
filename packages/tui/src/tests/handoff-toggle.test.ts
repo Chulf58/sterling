@@ -19,6 +19,9 @@ import * as stateMod from '../state.js';
 //   • the AgentRosterSnapshot carries `handoff?: boolean | string | null`: the
 //     EFFECTIVE setting (true/false), a string for a raw value that is not a
 //     boolean (INVALID), null for an unreadable config (UNKNOWN). Absent → OFF.
+//   • `handoffDetail?: string` says why, in brackets after the value: 'not set'
+//     for an absent key, the tracked-files note for ON without a key, and the git
+//     error for UNKNOWN when git could not say what is tracked.
 //   • cursor index: configModels-key-count + 4 (after the project mode row); it
 //     is the tab's last row, so DOWN clamps there.
 //   • ENTER/SPACE emit { type: 'handoff_toggle', enabled } with the NEW value:
@@ -104,6 +107,17 @@ test('handoff row: renders ON, OFF, OFF for an absent value, INVALID for a non-b
   assert.doesNotMatch(invalid, /\bON\b|\bOFF\b/, 'an invalid value never reads as on or off');
   const unknown = handoffRowText(buildSystemTab!(snapshot({ handoff: null }), st({ tab: SYS_TAB }), 120));
   assert.match(unknown, /Handoff files: UNKNOWN \(config unreadable\)/, 'an unreadable config is UNKNOWN, never the off default');
+});
+
+test('handoff row: says why — OFF (not set) for an absent key, ON by tracked files, UNKNOWN with the git reason — and a plain ON or OFF for an explicit key', () => {
+  const row = (over: Record<string, unknown>) => handoffRowText(buildSystemTab!(snapshot(over), st({ tab: SYS_TAB }), 160));
+  assert.match(row({ handoff: false, handoffDetail: 'not set' }), /Handoff files: OFF \(not set\)$/);
+  assert.match(row({ handoff: true, handoffDetail: 'not set; handoff files are tracked in git' }), /Handoff files: ON \(not set; handoff files are tracked in git\)$/);
+  const unknown = row({ handoff: null, handoffDetail: 'git ls-files exited 128: fatal: index file corrupt' });
+  assert.match(unknown, /Handoff files: UNKNOWN \(git ls-files exited 128: fatal: index file corrupt\)$/);
+  assert.doesNotMatch(unknown, /\bON\b|\bOFF\b|config unreadable/, 'a git failure never reads as on, off or a bad config');
+  assert.match(row({ handoff: false }), /Handoff files: OFF$/);
+  assert.match(row({ handoff: true }), /Handoff files: ON$/);
 });
 
 test('handoff row: DOWN from the project mode row lands on it; it is the last row (DOWN clamps); UP returns to the mode row', () => {

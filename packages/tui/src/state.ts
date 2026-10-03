@@ -185,10 +185,16 @@ export interface AgentRosterSnapshot {
    *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
    *  true or false is the EFFECTIVE setting as the writers read it
    *  (readHandoffEnabled: config.handoff.enabled, or on when the key is absent
-   *  and portable agents are tracked in git). A string is a raw value that is
-   *  not a boolean (INVALID). Absent → off; null → the config could not be read
-   *  (UNKNOWN, never the default). */
+   *  and handoff files are tracked in git). A string is a raw value that is
+   *  not a boolean (INVALID). Absent → off; null → the setting could not be
+   *  determined (UNKNOWN, never the default): the config could not be read, or
+   *  the key is absent and git could not say what is tracked. */
   handoff?: boolean | string | null;
+  /** Why the handoff row reads as it does, shown in brackets after the value:
+   *  'not set' for an absent key, the tracked-files note for ON without a key,
+   *  and the git error for UNKNOWN. Absent for an explicit key; an UNKNOWN
+   *  without it is an unreadable config. */
+  handoffDetail?: string;
 }
 
 /** A projected System-tab line (renderer prints text verbatim; kind styles it). */
@@ -873,14 +879,17 @@ function modeToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cu
 /** handoff files row (decision
  *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting): ON or
  *  OFF from the effective setting (absent → OFF), UNKNOWN for an unreadable
- *  config, and INVALID for a raw value that is not a boolean — never shown as on
- *  or off. Mirrors modeToggleRow's shape. */
+ *  config or a git failure, and INVALID for a raw value that is not a boolean —
+ *  never shown as on or off. handoffDetail follows the value in brackets, so an
+ *  absent key reads OFF (not set) and an explicit false reads OFF. Mirrors
+ *  modeToggleRow's shape. */
 function handoffToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorIndex: number): SystemRow {
   const clip = (s: string): string => clipEllipsis(s, width);
   const handoff = snap.handoff === undefined ? false : snap.handoff;
   const selected = ui.cursor === cursorIndex;
   const marker = selected ? '› ' : '  ';
-  const shown = handoff === null ? 'UNKNOWN (config unreadable)' : handoff === true ? 'ON' : handoff === false ? 'OFF' : `INVALID (${handoff})`;
+  const why = snap.handoffDetail === undefined ? '' : ` (${snap.handoffDetail})`;
+  const shown = handoff === null ? `UNKNOWN (${snap.handoffDetail ?? 'config unreadable'})` : handoff === true ? `ON${why}` : handoff === false ? `OFF${why}` : `INVALID (${handoff})`;
   return { id: 'sys:handoff_files', lines: [{ text: clip(`${marker}Handoff files: ${shown}`), kind: 'title', selected }] };
 }
 

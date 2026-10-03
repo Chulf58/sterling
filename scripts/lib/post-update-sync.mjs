@@ -149,7 +149,7 @@ export function runStepAsync(root, name, args, { nodeBin = process.execPath } = 
 export async function runPostUpdateSteps(root, project, runStep) {
   const sync = await runStep(root, 'sync-agents.mjs', ['--target', project]);
   if (sync.error) return { ok: false, detail: `sync-agents did not run (${sync.error})` };
-  if (sync.status === 2) return { ok: false, detail: `sync-agents REFUSED (exit 2 — a locally modified agent, an unsafe path, or a foreign or malformed .claude/settings.json): ${sync.tail}` };
+  if (sync.status === 2) return { ok: false, detail: `sync-agents REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
   if (sync.status !== 0) return { ok: false, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
   // From here sync-agents has already run: a later failure still carries `restart`,

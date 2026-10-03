@@ -16,7 +16,7 @@ import { applyHandoffToggle, applyModeToggle, applySparringToggle, applyTddToggl
 // SOURCE (which imports @sterling/schemas) cannot load there.
 import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/lib/agent-distribution.mjs';
 import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
-import { handoffSettingOf, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
+import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
 import { sterlingRootFrom, swapFullAgentModel } from '../../../scripts/lib/opencode-install.mjs';
 
 /** Effect types a host may decline to execute. A string value is the notice
@@ -143,22 +143,27 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
    *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting),
    *  resolved from the RAW config by the same function the writers use, so the
    *  row shows what init and /sterling:update will act on: config.handoff.enabled,
-   *  or on when the key is absent and portable agents are tracked in git. A value
-   *  that is not a boolean comes back as its JSON text, which the row shows as
-   *  INVALID; an unreadable config → null (UNKNOWN; readRawMode states the error). */
-  function readHandoff(): boolean | string | null {
+   *  or on when the key is absent and handoff files are tracked in git. `detail`
+   *  says why when the key is absent. A value that is not a boolean comes back as
+   *  its JSON text, which the row shows as INVALID. null is UNKNOWN: an unreadable
+   *  config (no detail; readRawMode states the error), or an absent key with a
+   *  git failure (detail is the git error), never the off default. */
+  function readHandoff(): { handoff: boolean | string | null; handoffDetail?: string } {
     let raw: { handoff?: unknown } | null;
     try {
       raw = JSON.parse(readFileSync(configPath, 'utf8')) as { handoff?: unknown } | null;
     } catch {
-      return null;
+      return { handoff: null };
     }
     try {
-      return handoffSettingOf(raw, projectRoot).enabled;
+      const setting = handoffSettingOf(raw, projectRoot);
+      if (setting.source === 'config') return { handoff: setting.enabled };
+      return { handoff: setting.enabled, handoffDetail: setting.source === 'tracked' ? 'not set; handoff files are tracked in git' : 'not set' };
     } catch (err) {
+      if (err instanceof HandoffGitError) return { handoff: null, handoffDetail: err.reason };
       if (!(err instanceof HandoffSettingError)) throw err;
       const block = raw?.handoff;
-      return JSON.stringify(block !== null && typeof block === 'object' && !Array.isArray(block) ? (block as { enabled?: unknown }).enabled : block);
+      return { handoff: JSON.stringify(block !== null && typeof block === 'object' && !Array.isArray(block) ? (block as { enabled?: unknown }).enabled : block) };
     }
   }
 
@@ -210,7 +215,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // finding 41/43) — surface it as a visible System-tab notice instead.
       ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, handoff };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, ...handoff };
   }
 
   /** Execute a sparring_model effect: config.sparring_partner.model write. An
