@@ -123,8 +123,9 @@ export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_
     });
   }
   rows.sort((a, b) => {
-    if (a.status !== b.status) return a.status === 'running' ? -1 : 1;
-    return a.status === 'running' ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0);
+    const [aRun, bRun] = [a.status === 'running', b.status === 'running'];
+    if (aRun !== bRun) return aRun ? -1 : 1;
+    return aRun ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0);
   });
   return { availability: 'ok', rows };
 }
@@ -340,10 +341,11 @@ export function createSubagentTracker(
     avatars = assign(source.rows.map((r) => r.agentId), avatars.current, rng, { poolSize: POOL_SIZE, freed: avatars.freed });
     models = new Map();
     for (const r of source.rows) {
-      if (r.toolUseId && !descriptions.has(r.toolUseId)) {
-        // a null is final only for a done row: a running row's record may not have its new name yet
+      // a cached miss is final for an ended row; a running row's record may not have its new name yet,
+      // and a resumed agent running again drops the miss cached while it was resumable
+      if (r.toolUseId && (!descriptions.has(r.toolUseId) || (r.status === 'running' && descriptions.get(r.toolUseId) === null))) {
         const d = readDispatchDescription(projectRoot, r.toolUseId);
-        if (d !== null || r.status === 'done') descriptions.set(r.toolUseId, d);
+        if (d !== null || r.status !== 'running') descriptions.set(r.toolUseId, d);
       }
       if (r.agentType && !models.has(r.agentType)) models.set(r.agentType, readAgentModel(projectRoot, r.agentType));
     }

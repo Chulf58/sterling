@@ -555,6 +555,52 @@ test('tracker: a missing description is retried while the row runs, so the live-
   }
 });
 
+test('tracker: a resumable row with no dispatch-state record is read once, not on every refresh; resumed and running, it is retried', () => {
+  const root = project();
+  try {
+    writeSession(root, 's1');
+    writeRegister(root, [row('a1', 'implementor', 600_000, { ended: { at: iso(400_000), event: 'subagent-stop' } })]);
+    const tracker = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: join(root, 'none') });
+    assert.equal(tracker.view(NOW).agents[0]!.description, null);
+    // the record appearing later is not seen: the miss was final, so no read happens again for this row
+    writeState(root, 'done-raw-toolu_a1~none.json', { tool_use_id: 'toolu_a1', subagent_type: 'implementor', description: 'Fix the parser' });
+    assert.equal(tracker.view(NOW + 1000).agents[0]!.description, null, 'the cached miss of a resumable row is not re-read');
+    assert.equal(tracker.view(NOW + 2000).agents[0]!.description, null);
+    // resumed: the row runs again, the cached miss is dropped and the record is found
+    writeRegister(root, [
+      row('a1', 'implementor', 600_000, { ended: { at: iso(400_000), event: 'subagent-stop' } }),
+      row('a1', 'implementor', 5_000, { round: 2, tool_use_id: null }),
+    ]);
+    const v = tracker.view(NOW + 3000);
+    assert.equal(v.agents[0]!.status, 'running');
+    assert.equal(v.agents[0]!.description, 'Fix the parser');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('register: rows come out in one order whatever the register order: running by start, then done and resumable together by end, newest first', () => {
+  const root = project();
+  try {
+    writeSession(root, 's1');
+    const rows = [
+      row('r1', 'implementor', 50_000),
+      row('r2', 'implementor', 90_000),
+      row('d1', 'scout', 600_000, { residue_reported_at: iso(30_000) }),
+      row('u1', 'reviewer', 600_000, { ended: { at: iso(100_000), event: 'subagent-stop' } }),
+      row('u2', 'reviewer', 600_000, { ended: { at: iso(10_000), event: 'subagent-stop' } }),
+      row('d2', 'scout', 600_000, { residue_reported_at: iso(200_000) }),
+    ];
+    const expected = ['r2', 'r1', 'u2', 'd1', 'u1', 'd2'];
+    for (const order of [rows, [...rows].reverse(), [rows[3]!, rows[5]!, rows[0]!, rows[2]!, rows[4]!, rows[1]!]]) {
+      writeRegister(root, order);
+      assert.deepEqual(readSubagents(root, NOW).rows.map((r) => r.agentId), expected);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('tracker: a missing transcript is not searched again within the retry interval, and an agent that left the register is forgotten', () => {
   const root = project();
   try {
