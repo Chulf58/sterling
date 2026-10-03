@@ -9,6 +9,7 @@ import {
   contextWindowFor,
   createSubagentTracker,
   formatElapsed,
+  formatIdle,
   readContextUsage,
   readSubagents,
   subagentTranscriptPath,
@@ -38,6 +39,10 @@ function row(agent_id: string, agent_type: string, atMsBefore: number, extra: Re
   return { agent_id, agent_type, session_id: 's1', files: [], at: iso(atMsBefore), round: 1, tool_use_id: `toolu_${agent_id}`, ...extra };
 }
 
+function writeSession(root: string, sessionId: string): void {
+  writeFileSync(join(root, '.sterling', 'transient', 'session.json'), JSON.stringify({ session_id: sessionId, source: 'startup', at: iso(0) }));
+}
+
 function writeState(root: string, name: string, record: Record<string, unknown>): void {
   writeFileSync(join(root, '.sterling', 'transient', 'dispatch-state', name), JSON.stringify(record));
 }
@@ -53,9 +58,10 @@ test('register: an absent register is "absent" with no rows', () => {
   }
 });
 
-test('register: rows with no ended are running; a recent ended row is done; an old ended row is left out', () => {
+test('register: in the current session a row with no ended is running and an ended row is resumable however long ago it ended', () => {
   const root = project();
   try {
+    writeSession(root, 's1');
     writeRegister(root, [
       row('a1', 'implementor', 65_000),
       row('a2', 'implementor', 5_000),
@@ -64,20 +70,61 @@ test('register: rows with no ended are running; a recent ended row is done; an o
     ]);
     const src = readSubagents(root, NOW);
     assert.equal(src.availability, 'ok');
-    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status]), [['a1', 'running'], ['a2', 'running'], ['a3', 'done']]);
+    // running first (oldest start first), then resumable, newest ended first
+    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status]), [['a1', 'running'], ['a2', 'running'], ['a3', 'resumable'], ['a4', 'resumable']]);
     const a1 = src.rows[0]!;
     assert.equal(a1.agentType, 'implementor');
     assert.equal(a1.elapsedMs, 65_000);
-    // a done row's elapsed time is its round's run time, not time since it ended
+    // a resumable row's elapsed time is its round's run time, not time since it ended
     assert.equal(src.rows[2]!.elapsedMs, 90_000);
+    assert.equal(src.rows[3]!.endedAt, NOW - 3_000_000, 'the 3,000 s old row is kept, with its end time for the idle figure');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('register: a row H10 stamped residue_reported_at is done at that stamp, never running, and lingers out like an ended one', () => {
+test('register: a row from another session is not listed, running or ended', () => {
   const root = project();
   try {
+    writeSession(root, 's2');
+    writeRegister(root, [
+      row('a1', 'implementor', 65_000),
+      row('a2', 'reviewer', 120_000, { ended: { at: iso(30_000), event: 'subagent-stop' } }),
+      row('a3', 'scout', 60_000, { session_id: 's2' }),
+      row('a4', 'scout', 3_600_000, { session_id: 's2', ended: { at: iso(3_000_000), event: 'subagent-stop' } }),
+    ]);
+    assert.deepEqual(readSubagents(root, NOW).rows.map((r) => [r.agentId, r.status]), [['a3', 'running'], ['a4', 'resumable']]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('register: without a readable session.json the old rule holds: running rows listed, ended rows linger DONE_LINGER_MS as done, nothing is resumable', () => {
+  const root = project();
+  try {
+    const body = [
+      row('a1', 'implementor', 65_000),
+      row('a2', 'implementor', 5_000, { session_id: 'other' }),
+      row('a3', 'reviewer', 120_000, { ended: { at: iso(30_000), event: 'subagent-stop' } }),
+      row('a4', 'scout', 3_600_000, { ended: { at: iso(3_000_000), event: 'subagent-stop' } }),
+    ];
+    writeRegister(root, body);
+    const expected = [['a1', 'running'], ['a2', 'running'], ['a3', 'done']];
+    assert.deepEqual(readSubagents(root, NOW).rows.map((r) => [r.agentId, r.status]), expected, 'session.json missing');
+    writeFileSync(join(root, '.sterling', 'transient', 'session.json'), '{"session_id": ');
+    assert.deepEqual(readSubagents(root, NOW).rows.map((r) => [r.agentId, r.status]), expected, 'session.json unparseable');
+    writeFileSync(join(root, '.sterling', 'transient', 'session.json'), JSON.stringify({ session_id: '' }));
+    assert.deepEqual(readSubagents(root, NOW).rows.map((r) => [r.agentId, r.status]), expected, 'session.json without a session id');
+    assert.deepEqual(readSubagents(root, NOW, 4_000_000).rows.map((r) => r.agentId), ['a1', 'a2', 'a3', 'a4'], 'the linger window is still the fallback cutoff');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('register: a row H10 stamped residue_reported_at is ended at that stamp, never running, and is resumable in the current session', () => {
+  const root = project();
+  try {
+    writeSession(root, 's1');
     writeRegister(root, [
       row('a1', 'implementor', 600_000, { residue_reported_at: iso(30_000) }),
       row('a2', 'implementor', 600_000, { residue_reported_at: iso(3_000_000) }),
@@ -85,7 +132,7 @@ test('register: a row H10 stamped residue_reported_at is done at that stamp, nev
       row('a4', 'reviewer', 600_000, { ended: { at: iso(100_000), event: 'subagent-stop' }, residue_reported_at: iso(20_000) }),
     ]);
     const src = readSubagents(root, NOW);
-    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status]), [['a3', 'running'], ['a1', 'done'], ['a4', 'done']]);
+    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status]), [['a3', 'running'], ['a1', 'resumable'], ['a4', 'resumable'], ['a2', 'resumable']]);
     const a1 = src.rows.find((r) => r.agentId === 'a1')!;
     assert.equal(a1.endedAt, NOW - 30_000);
     assert.equal(a1.elapsedMs, 570_000);
@@ -94,7 +141,7 @@ test('register: a row H10 stamped residue_reported_at is done at that stamp, nev
     writeRegister(root, [row('a1', 'implementor', 600_000, { residue_reported_at: iso(30_000) })]);
     const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: join(root, 'none') }).view(NOW);
     assert.equal(v.active, 0);
-    assert.equal(v.agents[0]!.status, 'done');
+    assert.equal(v.agents[0]!.status, 'resumable');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -103,6 +150,7 @@ test('register: a row H10 stamped residue_reported_at is done at that stamp, nev
 test('register: a resumed agent is one row, keyed by its agent_id, with the latest round deciding its status', () => {
   const root = project();
   try {
+    writeSession(root, 's1');
     writeRegister(root, [
       row('a1', 'implementor', 600_000, { ended: { at: iso(400_000), event: 'subagent-stop' } }),
       row('a1', 'implementor', 20_000, { round: 2, tool_use_id: null, files_source: 'resume-inherited' }),
@@ -190,8 +238,9 @@ function view(agents: SubagentView['agents'], availability: SubagentView['availa
   return { availability, active: agents.filter((a) => a.status === 'running').length, agents };
 }
 
-const AGENT = (agentId: string, avatar: number, status: 'running' | 'done' = 'running') => ({
+const AGENT = (agentId: string, avatar: number, status: 'running' | 'done' | 'resumable' = 'running') => ({
   agentId, avatar, type: 'implementor', description: 'Build the reader', model: 'claude-sonnet-5-5' as string | null, status, elapsedMs: 65_000, contextPct: 42 as number | null,
+  idleMs: null as number | null, contextTokens: null as number | null,
 });
 
 test('block: no agents draws one dim line, a readable register is never blank; no room draws nothing', () => {
@@ -306,6 +355,50 @@ test('block: a done card is dimmed, a running one is not; the same portrait is f
   assert.equal(coloured(done).length, coloured(running).length);
   assert.notDeepEqual(coloured(done).map((p) => p.fg), coloured(running).map((p) => p.fg), 'the done portrait is faded');
   assert.ok(done.pixels.every((p) => /^#[0-9a-f]{6}$/.test(p.bg ?? '')), 'faded colours stay valid hex');
+});
+
+const RESUMABLE = (agentId: string, avatar: number, idleMs: number | null, contextTokens: number | null, contextPct: number | null = 39) => ({
+  ...AGENT(agentId, avatar, 'resumable'), idleMs, contextTokens, contextPct,
+});
+
+test('block: a resumable card is dimmed and faded like a done one, rests on frame 0, and is not counted as running', () => {
+  const v = view([RESUMABLE('a1', 5, 720_000, 78_400)]);
+  assert.equal(v.active, 0);
+  const b = composeSubagentBlock(v, 160, 30, 0);
+  assert.ok(b.puts.every((p) => p.attr.dim), 'every text line is dim');
+  assert.ok(!b.puts.some((p) => p.attr.color === 'green'));
+  const done = composeSubagentBlock(view([AGENT('a1', 5, 'done')]), 160, 30, 0);
+  assert.deepEqual(b.pixels, done.pixels, 'the portrait is the faded done portrait');
+  for (const t of [1, 2, 5]) assert.deepEqual(composeSubagentBlock(v, 160, 30, t).pixels, b.pixels);
+});
+
+test('block: the resumable status line is "resumable · idle <t> · <n>k ctx", shortened to fit the text block', () => {
+  const status = (a: ReturnType<typeof RESUMABLE>, width: number) => composeSubagentBlock(view([a]), width, 30, 0).puts.filter((p) => p.text.startsWith('resumable')).map((p) => p.text);
+  const a = RESUMABLE('a1', 3, 720_000, 78_400);
+  // side by side on 160 columns there is room for the percent as well
+  assert.deepEqual(status(a, 160), ['resumable · idle 12m · 78k ctx (39%)']);
+  // 80 columns hold two cards of 30 text columns each: the percent is dropped, the rest is whole
+  const two = composeSubagentBlock(view([a, RESUMABLE('a2', 4, 5_000, 1_000)]), 80, 30, 0).puts.filter((p) => p.text.startsWith('resumable')).map((p) => p.text);
+  assert.deepEqual(two, ['resumable · idle 12m · 78k ctx', 'resumable · idle 5s · 1k ctx']);
+  // the stacked card is 24 columns: "idle" and the first separator go
+  assert.deepEqual(status(a, 30), ['resumable 12m · 78k ctx']);
+  assert.deepEqual(status(RESUMABLE('a1', 3, 7_500_000, 178_400), 30), ['resumable 2h 05m · 178k'], 'a long idle time drops the word ctx before it clips the figure');
+  // an unknown token count says so, like the unknown percent of a running card
+  assert.deepEqual(status(RESUMABLE('a1', 3, 45_000, null, null), 160), ['resumable · idle 45s · ? ctx']);
+  // under a thousand tokens is not rounded to 0k
+  assert.deepEqual(status(RESUMABLE('a1', 3, 45_000, 640, null), 160), ['resumable · idle 45s · 640 ctx']);
+});
+
+test('formatIdle: compact idle time', () => {
+  assert.equal(formatIdle(45_000), '45s');
+  assert.equal(formatIdle(0), '0s');
+  assert.equal(formatIdle(-5), '0s');
+  assert.equal(formatIdle(59_999), '59s');
+  assert.equal(formatIdle(60_000), '1m');
+  assert.equal(formatIdle(12 * 60_000 + 40_000), '12m');
+  assert.equal(formatIdle(3_599_000), '59m');
+  assert.equal(formatIdle(3_600_000), '1h 00m');
+  assert.equal(formatIdle(2 * 3_600_000 + 5 * 60_000), '2h 05m');
 });
 
 test('block: the model is shown whole unless longer than the text block, and an unknown model says so', () => {
@@ -479,6 +572,57 @@ test('tracker: a missing transcript is not searched again within the retry inter
     claudeHome(root, 's2', 'a1', [transcriptLine('assistant', { input_tokens: 200_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })]);
     writeRegister(root, [row('a1', 'implementor', 10_000, { session_id: 's2' })]);
     assert.equal(tracker.view(NOW + 62_000).agents[0]!.contextPct, 50, 'no stale path or usage survives the gap');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('tracker: a resumable agent carries its idle time and the tokens its transcript would re-send, and the tab count stays the running agents', () => {
+  const root = project();
+  try {
+    writeSession(root, 's1');
+    writeFileSync(join(root, '.sterling', 'config.json'), JSON.stringify({ context_watch: { windows: { 'claude-opus-5-5': 400_000 } } }));
+    const home = claudeHome(root, 's1', 'a2', [transcriptLine('assistant', { input_tokens: 78_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })]);
+    writeRegister(root, [
+      row('a1', 'implementor', 4_000_000, { ended: { at: iso(3_000_000), event: 'subagent-stop' } }),
+      row('a2', 'reviewer', 900_000, { ended: { at: iso(720_000), event: 'subagent-stop' } }),
+      row('a3', 'scout', 20_000),
+      row('a4', 'scout', 600_000, { session_id: 'older', ended: { at: iso(60_000), event: 'subagent-stop' } }),
+    ]);
+    const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home }).view(NOW);
+    assert.equal(v.active, 1, 'active counts running agents only; it is the number in "Agents (N)"');
+    assert.deepEqual(v.agents.map((a) => [a.agentId, a.status]), [['a3', 'running'], ['a2', 'resumable'], ['a1', 'resumable']], 'running first, then resumable newest ended first; the other session is absent');
+    const a2 = v.agents[1]!;
+    assert.equal(a2.idleMs, 720_000);
+    assert.equal(a2.contextTokens, 78_000);
+    assert.equal(a2.contextPct, 20);
+    assert.equal(v.agents[0]!.idleMs, null);
+    assert.equal(v.agents[2]!.contextTokens, null, 'no transcript: unknown, not zero');
+    // idle time keeps growing with the clock between register reads
+    const tracker = createSubagentTracker(root, { readIntervalMs: 60_000, claudeConfigDir: home });
+    assert.equal(tracker.view(NOW).agents[1]!.idleMs, 720_000);
+    assert.equal(tracker.view(NOW + 30_000).agents[1]!.idleMs, 750_000);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('tracker: a resumed agent (round 2, no ended) is running again with the same portrait, and an agent that ended stays listed', () => {
+  const root = project();
+  try {
+    writeSession(root, 's1');
+    writeRegister(root, [row('a1', 'implementor', 600_000, { ended: { at: iso(400_000), event: 'subagent-stop' } })]);
+    const tracker = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: join(root, 'none') });
+    const before = tracker.view(NOW);
+    assert.deepEqual(before.agents.map((a) => a.status), ['resumable']);
+    writeRegister(root, [
+      row('a1', 'implementor', 600_000, { ended: { at: iso(400_000), event: 'subagent-stop' } }),
+      row('a1', 'implementor', 5_000, { round: 2, tool_use_id: null }),
+    ]);
+    const after = tracker.view(NOW + 1000);
+    assert.deepEqual(after.agents.map((a) => [a.status, a.idleMs]), [['running', null]]);
+    assert.equal(after.active, 1);
+    assert.equal(after.agents[0]!.avatar, before.agents[0]!.avatar);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
