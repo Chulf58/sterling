@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { MountedStores } from '../index.js';
+import { dirname, join } from 'node:path';
+import { MountedStores, SterlingStore, createDomain, missingDomainWarning } from '../index.js';
 import type { QueryOptions } from '../index.js';
 
 const NOW = '2026-06-16T12:00:00.000Z';
@@ -17,6 +17,7 @@ const ref = (scope: string) => ({ ...env('reference_material', scope), title: 't
 function harness(domains: string[] = ['genesys']) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-mounted-'));
   const mounts = domains.map((name) => ({ name, dbPath: join(dir, 'domains', name, 'sterling.db') }));
+  for (const m of mounts) createDomain(m.name, `test domain ${m.name}`, m.dbPath);
   const stores = new MountedStores(join(dir, '.sterling', 'sterling.db'), mounts);
   return { dir, stores, cleanup: () => { stores.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
@@ -220,9 +221,8 @@ test('AC7 skip-missing: an EXISTING sibling domain is still mounted while a miss
   const dir = mkdtempSync(join(tmpdir(), 'sterling-skipmissing-sibling-'));
   const presentDb = join(dir, 'domains', 'present', 'sterling.db');
   const missingDb = join(dir, 'domains', 'absent', 'sterling.db');
-  // bring 'present' into existence first via a normal (creating) mount, then close it
-  const seed = new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: 'present', dbPath: presentDb }]);
-  seed.close();
+  // bring 'present' into existence first through createDomain
+  createDomain('present', 'present domain', presentDb);
   assert.ok(existsSync(presentDb), 'precondition: the present domain db exists on disk');
 
   const stores = new MountedStoresX(
@@ -248,8 +248,8 @@ test('MountedStores: routes writes by scope, fans query project-first, get spans
     const dec = stores.create({ ...env('decision'), title: 'project dec', statement: 's', alternatives_rejected: [], rationale: 'r' });
     const r = stores.create(ref('domain:genesys'));
 
-    // §2.3 lazy creation: the domain store file came into being on mount
-    assert.ok(existsSync(join(dir, 'domains', 'genesys', 'sterling.db')), 'domain store created on mount');
+    // the domain store file was created by createDomain in the harness
+    assert.ok(existsSync(join(dir, 'domains', 'genesys', 'sterling.db')), 'domain store exists');
     // routing: project-scoped → project store; domain-scoped → NOT the project store
     assert.ok(stores.project.get(dec.id), 'project-scoped record lives in the project store');
     assert.equal(stores.project.get(r.id), undefined, 'domain-scoped record does not live in the project store');
@@ -300,19 +300,217 @@ test('MountedStores: a write to an unmounted domain is rejected loudly', () => {
   }
 });
 
-test('MountedStores: the existing default mount mode STILL lazily creates a missing domain db on mount (regression guard for AC7)', () => {
-  // AC7 adds an OPT-IN skip-missing mode; the default (no options arg) must keep
-  // the §2.3 lazy-create behaviour mounted.test relies on — pin it so the new
-  // mode can never silently become the default.
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-default-lazy-'));
+test('MountedStores: the default mount mode REFUSES a missing domain, naming createDomain, and creates no file (board 675daf9d (c))', () => {
+  // Lazy creation of a domain on first mount is gone: a new domain store needs a
+  // description, so it is made only by createDomain(name, description, dbPath).
+  // skipMissing (AC7) is still the opt-in way to mount only what exists.
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-default-refuse-'));
   const freshDb = join(dir, 'domains', 'fresh', 'sterling.db');
-  const stores = new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: 'fresh', dbPath: freshDb }]);
   try {
-    assert.ok(existsSync(freshDb), 'default mode lazily creates the domain db on mount (§2.3)');
-    assert.deepEqual(stores.domainNames(), ['fresh'], 'the lazily-created domain is mounted');
+    assert.throws(
+      () => new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: 'fresh', dbPath: freshDb }]),
+      (e: Error) => /createDomain/.test(e.message) && /'fresh'/.test(e.message) && e.message.includes(freshDb)
+    );
+    assert.equal(existsSync(freshDb), false, 'no domain db is created by a refused mount');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('MountedStores skipMissing records each skipped domain in missingDomains, and the warning names the domain, path and fix', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-missing-list-'));
+  const presentDb = join(dir, 'domains', 'present', 'sterling.db');
+  const ghostDb = join(dir, 'domains', 'ghost', 'sterling.db');
+  createDomain('present', 'present domain', presentDb);
+  const stores = new MountedStores(
+    join(dir, '.sterling', 'sterling.db'),
+    [{ name: 'present', dbPath: presentDb }, { name: 'ghost', dbPath: ghostDb }],
+    { skipMissing: true }
+  );
+  try {
+    assert.deepEqual(stores.domainNames(), ['present']);
+    assert.deepEqual(stores.missingDomains, [{ name: 'ghost', dbPath: ghostDb }]);
+    const line = missingDomainWarning(stores.missingDomains[0]);
+    assert.ok(line.includes("'ghost'") && line.includes(ghostDb), line);
+    assert.match(line, /createDomain/);
+    assert.match(line, /init/);
+    assert.ok(!line.includes('\n'), 'one line');
   } finally {
     stores.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('MountedStores: with every domain present, missingDomains is empty', () => {
+  const { stores, cleanup } = harness(['genesys']);
+  try {
+    assert.deepEqual(stores.missingDomains, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('createDomain: writes the description as the store_meta description key; the domain then mounts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-create-domain-'));
+  const db = join(dir, 'domains', 'genesys', 'sterling.db');
+  try {
+    createDomain('genesys', '  Genesys Cloud: routing, flows, APIs  ', db);
+    assert.ok(existsSync(db), 'the domain db exists');
+    const stores = new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: 'genesys', dbPath: db }]);
+    try {
+      assert.deepEqual(stores.domainNames(), ['genesys']);
+      assert.equal(stores.domainDescription('genesys'), 'Genesys Cloud: routing, flows, APIs', 'stored trimmed');
+    } finally {
+      stores.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('createDomain: a missing or blank description fails loud and creates no file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-create-domain-blank-'));
+  const db = join(dir, 'domains', 'genesys', 'sterling.db');
+  try {
+    for (const bad of ['', '   ', undefined as unknown as string]) {
+      assert.throws(() => createDomain('genesys', bad, db), /description/);
+      assert.equal(existsSync(db), false, `no file after a refused create (${JSON.stringify(bad)})`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('createDomain: refuses a domain whose store already exists, and leaves it untouched', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-create-domain-exists-'));
+  const db = join(dir, 'domains', 'genesys', 'sterling.db');
+  try {
+    createDomain('genesys', 'first', db);
+    assert.throws(() => createDomain('genesys', 'second', db), /already exists/);
+    const stores = new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: 'genesys', dbPath: db }]);
+    try {
+      assert.equal(stores.domainDescription('genesys'), 'first');
+    } finally {
+      stores.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('MountedStores: an EXISTING domain store with no description still mounts and is readable', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-domain-nodesc-'));
+  const db = join(dir, 'domains', 'legacy', 'sterling.db');
+  try {
+    // a domain made before descriptions existed: a plain store, no meta row
+    mkdirSync(dirname(db), { recursive: true });
+    const seed = new SterlingStore(db);
+    const r = seed.create(ref('domain:legacy'));
+    seed.close();
+
+    const stores = new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: 'legacy', dbPath: db }]);
+    try {
+      assert.deepEqual(stores.domainNames(), ['legacy']);
+      assert.equal(stores.domainDescription('legacy'), undefined, 'no description recorded');
+      assert.equal(stores.get(r.id)?.id, r.id, 'its records are readable');
+    } finally {
+      stores.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('MountedStores.domainDescription: an unmounted domain is refused, never answered as undefined', () => {
+  const { stores, cleanup } = harness(['genesys']);
+  try {
+    assert.throws(() => stores.domainDescription('nope'), /not mounted/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('MountedStores.setDomainDescription: sets the trimmed description on that domain store, durably, and touches no other store', () => {
+  const { dir, stores, cleanup } = harness(['genesys', 'salesforce']);
+  try {
+    stores.setDomainDescription('genesys', '  Genesys Cloud: queues and call routing  ');
+    assert.equal(stores.domainDescription('genesys'), 'Genesys Cloud: queues and call routing', 'stored trimmed, read back through the same handle');
+    assert.equal(stores.domainDescription('salesforce'), 'test domain salesforce', 'a sibling domain is untouched');
+    assert.equal(stores.project.getMeta('description'), undefined, 'the project store gains no description');
+    const reopened = new SterlingStore(join(dir, 'domains', 'genesys', 'sterling.db'));
+    try {
+      assert.equal(reopened.getMeta('description'), 'Genesys Cloud: queues and call routing', 'durable in the domain database');
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('MountedStores.setDomainDescription: an unmounted domain and a blank description are refused, nothing written', () => {
+  const { stores, cleanup } = harness(['genesys']);
+  try {
+    assert.throws(() => stores.setDomainDescription('nope', 'x'), /'nope' is not mounted/);
+    assert.throws(() => stores.setDomainDescription('genesys', '   '), /blank/);
+    assert.equal(stores.domainDescription('genesys'), 'test domain genesys');
+  } finally {
+    cleanup();
+  }
+});
+
+test('MountedStores.setDomainDescription: refused inside a transaction open on the project mount (mount affinity)', () => {
+  const { stores, cleanup } = harness(['genesys']);
+  try {
+    assert.throws(() => stores.withTransaction(() => stores.setDomainDescription('genesys', 'inside')), /setDomainDescription/);
+    assert.equal(stores.domainDescription('genesys'), 'test domain genesys');
+  } finally {
+    cleanup();
+  }
+});
+
+// -- read shares (board 675daf9d (b)) ------------------------------------------
+
+const shareDec = (title: string, scope = 'project') => ({ ...env('decision', scope), title, statement: 'shareterm', alternatives_rejected: [], rationale: 'r' });
+
+test('MountedStores.query read shares: the project gets ceil(0.6 x cap) when a domain matches; each store keeps its own order', () => {
+  const { stores, cleanup } = harness(['alpha']);
+  try {
+    for (let i = 0; i < 15; i++) stores.create(shareDec(`p${i}`));
+    for (let i = 0; i < 15; i++) stores.create(shareDec(`a${i}`, 'domain:alpha'));
+    const got = stores.query({ rank_terms: ['shareterm'], cap: 10 });
+    assert.equal(got.length, 10);
+    assert.deepEqual(got.map((r) => r.scope), [...Array(6).fill('project'), ...Array(4).fill('domain:alpha')], 'project first, 6 + 4');
+    const projectOwn = stores.project.query({ rank_terms: ['shareterm'], cap: 10 }).map((r) => r.id);
+    assert.deepEqual(got.slice(0, 6).map((r) => r.id), projectOwn.slice(0, 6), "the project slice is the project store's own top 6");
+    const alphaOwn = stores.querySource('alpha', { rank_terms: ['shareterm'], cap: 10 }).map((r) => r.id);
+    assert.deepEqual(got.slice(6).map((r) => r.id), alphaOwn.slice(0, 4), "the domain slice is the domain store's own top 4");
+  } finally {
+    cleanup();
+  }
+});
+
+test('MountedStores.query read shares: unused domain share spills back to the project', () => {
+  const { stores, cleanup } = harness(['alpha', 'beta']);
+  try {
+    for (let i = 0; i < 15; i++) stores.create(shareDec(`p${i}`));
+    stores.create(shareDec('a0', 'domain:alpha'));
+    const got = stores.query({ rank_terms: ['shareterm'], cap: 10 });
+    assert.deepEqual(got.map((r) => r.scope), [...Array(9).fill('project'), 'domain:alpha']);
+  } finally {
+    cleanup();
+  }
+});
+
+test('MountedStores.query read shares: when only the project matches, the result is unchanged (the project fills the cap)', () => {
+  const { stores, cleanup } = harness(['alpha']);
+  try {
+    for (let i = 0; i < 15; i++) stores.create(shareDec(`p${i}`));
+    stores.create({ ...ref('domain:alpha') });
+    const got = stores.query({ rank_terms: ['shareterm'], cap: 10 });
+    assert.deepEqual(got.map((r) => r.id), stores.project.query({ rank_terms: ['shareterm'], cap: 10 }).map((r) => r.id));
+  } finally {
+    cleanup();
   }
 });
 
@@ -323,6 +521,7 @@ test('MountedStores: a domain record written through one project mount is read b
   // knowledge between sibling projects (the path the stale-server incident hid).
   const dir = mkdtempSync(join(tmpdir(), 'sterling-xmount-'));
   const sharedDomainDb = join(dir, 'shared-domains', 'genesys', 'sterling.db');
+  createDomain('genesys', 'shared genesys domain', sharedDomainDb);
   // both servers open the shared file up front (as concurrent project servers do)
   const projA = new MountedStores(join(dir, 'projA', '.sterling', 'sterling.db'), [{ name: 'genesys', dbPath: sharedDomainDb }]);
   const projB = new MountedStores(join(dir, 'projB', '.sterling', 'sterling.db'), [{ name: 'genesys', dbPath: sharedDomainDb }]);
@@ -429,3 +628,41 @@ test('withTransaction (pre-existing, project-only) still works unchanged — reg
 // the staged-pipeline run/handoff protocol (decision
 // sterling-claude-code-scale-down-boundary, 2ad87dd1) — setRunReviewMandatory
 // no longer exists on SterlingStore or MountedStores.
+
+test('createDomain: a setMeta that throws leaves no db, -wal, -shm or -journal file behind (task-end review 2026-10-03)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-createdomain-fail-'));
+  const dbPath = join(dir, 'domains', 'broken', 'sterling.db');
+  const real = SterlingStore.prototype.setMeta;
+  try {
+    SterlingStore.prototype.setMeta = function (this: SterlingStore) {
+      // A rollback journal can be left mid-write in DELETE mode; plant one so its cleanup is pinned too.
+      writeFileSync(`${dbPath}-journal`, 'partial');
+      throw new Error('disk I/O error');
+    };
+    assert.throws(() => createDomain('broken', 'a description', dbPath), /disk I\/O error/);
+  } finally {
+    SterlingStore.prototype.setMeta = real;
+  }
+  try {
+    for (const suffix of ['', '-wal', '-shm', '-journal']) assert.equal(existsSync(dbPath + suffix), false, `${dbPath}${suffix} was removed`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('createDomain: the create is exclusive, so a store that appears at the path is never adopted or deleted', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-createdomain-race-'));
+  const dbPath = join(dir, 'domains', 'raced', 'sterling.db');
+  try {
+    createDomain('raced', 'first description', dbPath);
+    assert.throws(() => createDomain('raced', 'second description', dbPath), /already exists/);
+    const s = new SterlingStore(dbPath);
+    try {
+      assert.equal(s.getMeta('description'), 'first description', 'the existing store keeps its description');
+    } finally {
+      s.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

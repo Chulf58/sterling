@@ -318,6 +318,7 @@ test('[finding 4] --disallowedTools names every store, board and config write pl
     ...['create', 'update', 'append', 'edit', 'array_remove', 'retire', 'supersede', 'split', 'extract', 'promote', 'link'].map((v) => `mcp__sterling__knowledge_${v}`),
     ...['add', 'remove', 'update', 'edit'].map((v) => `mcp__sterling__board_${v}`),
     'mcp__sterling__config_set',
+    'mcp__sterling__domain_describe',
     'Write',
     'Edit',
     'Bash',

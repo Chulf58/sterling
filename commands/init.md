@@ -9,11 +9,15 @@ Run the setup questions, ONE question at a time (ask, don't guess; recommend whe
 3. Backup path (recommended: a synced folder OUTSIDE the repo) — or an explicit opt-out the user states themselves.
 4. Project mode, NEW projects only (no `.sterling/config.json` yet): ask ONE AskUserQuestion form, header "Mode", with exactly two options — "Hobby": direct merge to main, no OpenCode or handoff files; "Work": PRs with a Sol then Copilot review loop, plus OpenCode agents and handoff docs. Pass the answer as `--mode hobby` or `--mode work`. On a re-init or ensure of an existing project, do NOT ask and pass no `--mode`: the recorded mode is kept (init never overwrites it; switching is done in the TUI System tab).
 
+5. Domain descriptions. Every declared domain (each stack tag, plus the `sterling` domain init always adds) gets a knowledge store, and a store that does not exist yet is created with a description saying which knowledge belongs in it. For each stack tag whose store is missing (`~/.sterling/domains/<tag>/sterling.db`, or the `domain_paths` override), ask ONE question for its description, with a short suggested wording drawn from the tag. A domain whose store already exists is not asked about: init leaves it untouched. The `sterling` domain ships a default description (Sterling plugin behaviour, Claude Code and OpenCode host facts, and workflow knowledge that applies to every project using Sterling); ask only if the user wants to change it. Pass each answer as `--domain-description <domain>=<text>`.
+
 Then execute the manifest:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/init.mjs" --target "<project dir>" --project-name "<name>" --stack-tags <a,b> --toolchain <adapter>:<glob,glob> (--backup-path <p> | --backup-opt-out) [--mode <hobby|work>]
+node "${CLAUDE_PLUGIN_ROOT}/bin/init.mjs" --target "<project dir>" --project-name "<name>" --stack-tags <a,b> --toolchain <adapter>:<glob,glob> (--backup-path <p> | --backup-opt-out) [--mode <hobby|work>] [--domain-description <domain>=<text>]...
 ```
+
+`--domain-description` is repeatable, one per new domain, and the text is everything after the first `=`. Init refuses before writing anything when a new domain has no description, and the refusal names the flag to pass. A description given for a domain whose store already exists is not applied (the report row says so); an existing store's description is changed in the store itself. On a re-init no description is needed unless a recorded domain's store has gone missing.
 
 `--mode` is for NEW projects only: pass the Mode answer on a first init, and never on a re-init or ensure.
 

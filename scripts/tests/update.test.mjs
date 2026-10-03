@@ -1053,6 +1053,7 @@ test('the init ensure pass runs only when the clone is itself initialized', asyn
     const a = fakeExec({ behind: 1 });
     await runUpdate({ cwd: withConfig, exec: a.exec, log: () => {}, projects: [], opts: {} });
     assert.ok(a.calls.some((c) => c.includes('init.mjs')), 'an initialized clone re-bakes its machine artifacts');
+    assert.ok(a.calls.some((c) => c.includes('init.mjs') && c.includes('--update-ensure')), 'the re-bake runs init as the update ensure pass');
 
     const b = fakeExec({ behind: 1 });
     await runUpdate({ cwd: without, exec: b.exec, log: () => {}, projects: [], opts: {} });

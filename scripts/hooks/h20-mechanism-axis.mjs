@@ -55,7 +55,8 @@
 // clear on its own.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, exitAfterWrite } from './lib/common.mjs';
+import { openSubjectFan, warnFanDegraded } from './lib/subject-fan.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import {
   guardPath,
@@ -215,7 +216,7 @@ function main(input) {
   try {
     // BOTH OF THESE SIT INSIDE THE TRY (2026-09-05), where
     // they were not before: outgoingProposalText reads an arbitrary tool_input and
-    // openStore THROWS on a corrupt or locked db (it returns null only for an
+    // openSubjectFan THROWS on a corrupt or locked db (it returns null only for an
     // ABSENT one — anti-pattern foreign_e13f0fb5 pins that distinction). An uncaught throw
     // exits 1, and an exit-1 hook's stdout is not the envelope Claude Code reads
     // updatedInput from, so the consult would silently lose its model pin — the
@@ -224,7 +225,8 @@ function main(input) {
     // pin still ships.
     const outgoing = outgoingProposalText(input.tool_input);
     if (!outgoing) return finish(); // nothing readable on this surface — the model pin still ships
-    const store = openStore(input.cwd);
+    // The subject fan (lib/subject-fan.mjs): the project store plus the mounted domains.
+    const store = openSubjectFan(input.cwd);
     if (!store) return finish(); // no store — no relevance carriage possible, pin unaffected
 
     // THE COMPOSITION IS SHARED (scripts/hooks/lib/axis-compose.mjs, also called
@@ -242,6 +244,9 @@ function main(input) {
       overlap: overlapNotice(),
       host: 'claude',
     });
+    // A domain or config.json the fan could not read is one loud stderr line; the
+    // project store's delivery above is unaffected.
+    warnFanDegraded(store, 'H20');
     if (!composed) return finish();
     const { assembled, guard } = composed;
     const pin = modelPin();

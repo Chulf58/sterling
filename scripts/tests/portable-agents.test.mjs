@@ -24,7 +24,7 @@ import {
 } from '../lib/opencode-agents.mjs';
 import { lintAgentFences } from '../lib/checks.mjs';
 import { isSterlingClone } from '../lib/handoff-projection.mjs';
-import { applyConductorWordingEdits } from './conductor-wording-edits.mjs';
+import { applyConductorWordingEdits, applyImplementorWordingEdits } from './conductor-wording-edits.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const templatesDir = join(root, 'agent-templates');
@@ -150,8 +150,10 @@ for (const entry of loadRegistry(registryPath).agents) {
   test(`Claude render of ${entry.file} is byte-identical to the ${baseline} render (header aside)`, () => {
     const shown = spawnSync('git', ['show', `${baseline}:agent-templates/${entry.file}`], { cwd: root, encoding: 'utf8' });
     assert.equal(shown.status, 0, `git show ${baseline} failed: ${shown.stderr}`);
-    // conductor.md: the baseline plus the deliberate wording edits listed in conductor-wording-edits.mjs.
-    const baselineText = entry.file === 'conductor.md' ? applyConductorWordingEdits(shown.stdout) : shown.stdout;
+    // conductor.md and implementor.md: the baseline plus the deliberate edits listed in conductor-wording-edits.mjs.
+    const baselineText = entry.file === 'conductor.md' ? applyConductorWordingEdits(shown.stdout)
+      : entry.file === 'implementor.md' ? applyImplementorWordingEdits(shown.stdout)
+      : shown.stdout;
     const before = renderInstalledAgent(baselineText, entry.file, renderOpts).installedContent;
     const after = renderInstalledAgent(template(entry.name), entry.file, renderOpts).installedContent;
     assert.equal(withoutHeader(after), withoutHeader(before));

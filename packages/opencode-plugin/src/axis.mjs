@@ -26,7 +26,7 @@
 // name inside execute.before is unmeasured: permission keys are `<server>_<tool>`
 // (finding opencode-2-0-21-mcp-permission-key-is-server-underscore-tool) and the
 // displayed name is `<server>.<tool>`, so both spellings are accepted.
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { repoRel } from '../../../scripts/hooks/lib/common.mjs';
 import { recordAdvisoryFire } from '../../../scripts/hooks/lib/advisory-counter.mjs';
 import { codexModelPin, composeMechanismAxis, composeOutputAxis, outputAxisReadGated } from '../../../scripts/hooks/lib/axis-compose.mjs';
@@ -35,6 +35,7 @@ import { agentRole } from './agent-name.mjs';
 import { isListingCommand } from '../../../scripts/hooks/lib/listing-command.mjs';
 import { guardPath, markDiscoveryDelivered, markSubstanceDelivered, outgoingProposalText, readGuard, writeGuard } from '../../../scripts/hooks/lib/delivery.mjs';
 import { appendToResult } from './delivery.mjs';
+import { openSubjectFan, warnFanDegraded } from '../../../scripts/hooks/lib/subject-fan.mjs';
 
 const CODEX_OPENERS = new Set(['codex_codex', 'codex.codex']);
 const CODEX_TOOL = /^codex[._]/;
@@ -119,7 +120,9 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced }) {
       const outgoing = outgoingProposalText(args);
       if (!outgoing) return;
       const gPath = guardPath(root, undefined, input.sessionID);
-      const store = openStore(join(root, '.sterling', 'sterling.db'));
+      // The subject fan: the project store plus the mounted domains, each opened with this plugin's opener.
+      const store = openSubjectFan(root, { opener: openStore });
+      if (!store) return;
       try {
         const composed = composeMechanismAxis(store, {
           root,
@@ -147,6 +150,7 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced }) {
         }
       } finally {
         store.close();
+        warnFanDegraded(store, 'H20');
       }
     });
     if (!built) {
@@ -181,12 +185,14 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced }) {
     const root = rootOf();
     if (!root) return;
     await fenced('axis', root, () => {
-      const store = openStore(join(root, '.sterling', 'sterling.db'));
+      const store = openSubjectFan(root, { opener: openStore });
+      if (!store) return;
       let block;
       try {
         block = buildOutputAxis(store, root, { tool: input.tool, args: input.input ?? {}, content, sessionID: input.sessionID, directory: directory() });
       } finally {
         store.close();
+        warnFanDegraded(store, 'H23');
       }
       if (!block) return;
       appendToResult(input.result, block.text);

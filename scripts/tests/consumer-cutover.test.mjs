@@ -259,12 +259,13 @@ function installedConfigDir(settings) {
 
 function runInit(target, claudeConfigDir) {
   const r = spawnSync(process.execPath, [join(REPO, 'scripts', 'init.mjs'), '--target', target,
-    '--project-name', 'cut-target', '--stack-tags', 'node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups'], {
+    '--project-name', 'cut-target', '--stack-tags', 'node', '--domain-description', 'node=test domain node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups'], {
     encoding: 'utf8',
     cwd: target,
     timeout: 180_000,
     env: {
       ...process.env,
+      HOME: tmp('sterling-cut-home-'), // init creates the declared domain stores under HOME
       STERLING_REGISTRY_DB: join(target, 'registry.db'),
       STERLING_PLUGIN_ROOT_MATCH: tmp('sterling-cut-prm-'),
       STERLING_CODEX_PROBE: 'absent',

@@ -4816,10 +4816,11 @@ var init_config = __esm({
       // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
       // with opt-out, disposal skips the snapshot LOUDLY (check_skipped).
       backup_opt_out: external_exports.boolean().default(false),
-      // §3.3: the project's stack_tags, declared at init, ARE the domain mount
-      // manifest — the SAME list that filters retrieval (§3.4) mounts the shared
-      // domain stores, so the mounted set and the filter align by construction. Each
-      // tag mounts a store at ~/.sterling/domains/<tag>/sterling.db (lazily created).
+      // §3.3: the project's stack_tags, declared at init, are the domain mount
+      // manifest and nothing else; they do not filter retrieval (a query's own
+      // stack_tags option is a separate, caller-supplied filter). Each tag mounts an
+      // EXISTING store at ~/.sterling/domains/<tag>/sterling.db; a new domain store
+      // is made only by createDomain in @sterling/store, which requires a description.
       stack_tags: external_exports.array(external_exports.string()).default([]),
       // §3.3 (spec line 94 — path configurable per domain): per-tag store-path
       // override; default is the per-user root above. tag → absolute db path (POSIX).
@@ -5629,12 +5630,12 @@ init_dist();
 // packages/store/dist/mounted.js
 init_dist();
 
+// packages/store/dist/axis.js
+var AXIS_MAX_TERM_LEN = 64;
+
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 init_dist();
-
-// packages/store/dist/axis.js
-var AXIS_MAX_TERM_LEN = 64;
 
 // packages/store/dist/index.js
 var MAX_RANK_TERMS = 16;

@@ -7,8 +7,8 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { z } from 'zod';
 import { parseConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor } from '@sterling/schemas';
-import { MountedStores, resolveDomainMounts } from '@sterling/store';
-import { SterlingTools, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS } from './tools.js';
+import { MountedStores, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
+import { SterlingTools, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS, mountedDomainSurface } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
 
@@ -178,12 +178,33 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   // Read before opening the store: config.stack_tags is the §3.3 mount manifest.
   const configPath = join(dirname(storePath), 'config.json');
   const config = parseConfig(existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {});
-  // §3.3: mount one shared domain store per stack tag (resolveDomainMounts) — the
-  // mounted set equals the §3.4 filter set by construction.
-  const store = new MountedStores(storePath, resolveDomainMounts(config));
+  // §3.3: mount one shared domain store per stack tag (resolveDomainMounts). The
+  // stack tags are only the mount manifest; they do not filter retrieval. Boot
+  // never fails on a configured domain whose store is missing (board 675daf9d
+  // (c) ruling): it is skipped and announced on stderr, one line per domain, and
+  // stays on store.missingDomains. Creating it is an explicit createDomain call.
+  const store = new MountedStores(storePath, resolveDomainMounts(config), { skipMissing: true });
+  for (const m of store.missingDomains) process.stderr.write(missingDomainWarning(m) + '\n');
   // store lives at <project>/.sterling/sterling.db (§2.3) — project root is two up;
   // §3.2.5 repo-located doc mtime checks resolve against it
-  const tools = new SterlingTools({ store, config, repoRoot: dirname(dirname(storePath)) });
+  const tools = new SterlingTools({ store, config, repoRoot: dirname(dirname(storePath)), domains: mountedDomainSurface(store) });
+  // knowledge_create's description names the domains mounted at boot (Domains
+  // D2). Each create receipt lists them live as mounted_domains, so a
+  // description changed later through domain_describe shows there. A
+  // description that cannot be read (a pre-v2 domain store, any other read
+  // failure) is named in the note; it never fails boot.
+  const bootDomains = store.domainNames().map((name) => {
+    let description: string | undefined;
+    try {
+      description = store.domainDescription(name);
+    } catch (e) {
+      return `${name} (description unreadable: ${(e as Error)?.message ?? String(e)})`;
+    }
+    return description ? `${name} ("${description}")` : `${name} (no description)`;
+  });
+  const createDomainsNote = bootDomains.length
+    ? ` Mounted domains: ${bootDomains.join('; ')}. A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.`
+    : '';
   const server = new McpServer({ name: 'sterling', version: '0.1.0' });
 
   const json = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
@@ -192,7 +213,8 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_create',
     {
       description:
-        "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
+        "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." +
+        createDomainsNote,
       inputSchema: strict({ type: z.string(), fields: knowledgeCreateFieldsSchema, projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ type, fields, projection }) => {
@@ -223,7 +245,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_query',
     {
       description:
-        "Retrieve knowledge: filter (types, stack_tags) → file_keys join → rank (rank_terms: single keywords, never prose) → cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW — raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: \"full\" (default), \"digest\" (one headline line per record — scan wide, then knowledge_get the few you need), or \"count\". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (score = -bm25, higher is more relevant, unbounded).",
+        "Retrieve knowledge: filter (types, stack_tags) → file_keys join → rank (rank_terms: single keywords, never prose) → cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW — raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: \"full\" (default), \"digest\" (one headline line per record — scan wide, then knowledge_get the few you need), or \"count\". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (score = -bm25, higher is more relevant, unbounded). Each record carries `source` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched.",
       inputSchema: strict({
         types: z.array(z.string()).optional(),
         stack_tags: z.array(z.string()).optional(),
@@ -478,7 +500,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_promote',
     {
       description:
-        "Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article and todo never promote; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The echo (`promoted`) defaults to a digest; projection:\"full\" returns the whole record.",
+        "Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article and todo never promote; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The receipt carries domain_description, the target domain's description. The echo (`promoted`) defaults to a digest; projection:\"full\" returns the whole record.",
       inputSchema: strict({ id: z.string(), domain: z.string(), projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection))
@@ -631,6 +653,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     ({ path, value, expected_digest }) => json(tools.configSet({ path, value, expected_digest }))
   );
 
+  server.registerTool(
+    'domain_describe',
+    {
+      description:
+        "Read or set a mounted domain's description: the one line that says which knowledge belongs in that shared domain store. knowledge_create lists it, and the promotion_review mint matches project records against it. Promotion proposals go only to project records with no file_keys (an article's files count; a reference_material's location does not). Omit `description` to read it ({domain, description}, null when unset); pass it to set it ({domain, description, previous_description, updated:true}). An unmounted domain and a blank description are refused with nothing written.",
+      inputSchema: strict({ domain: z.string(), description: z.string().optional() }),
+    },
+    ({ domain, description }) => json(tools.domainDescribe({ domain, description }))
+  );
+
   // run_state / agent_exit / run_signal — the staged pipeline's run protocol
   // — were removed (decision sterling-claude-code-scale-down-boundary,
   // 2ad87dd1). See tools.ts.
@@ -649,7 +681,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_preflight',
     {
       description:
-        "Pre-write conflict check: does the store already govern this subject? Run it before dispatching, designing, asking the user, or drafting a new record. Pass `text` (one subject) or `texts` (an agenda, one verdict per entry, in order). Matches anti_pattern, decision, feature_article, research_finding, disconfirmed_hypothesis and open_question records. Verdicts: \"verify_targets\" — the store governs this; open the named matches before proceeding (a match is a pointer, not the source); \"ungoverned\" — nothing governs it; \"insufficient\" — too little vocabulary to judge; the verdict and matched_total are decided from the centrality-passing candidate set only, not the capped `matches` window. Returns {terms, matched_total, capped (present/true only when `matches` was truncated), matches:[{id,type,title,matched_on,central}], answerability} or {verdicts:[…]}. `matches` is capped at 20, sorted centrality-first (a central match always outranks a merely-hitting one), then by raw hit count. `matches` may include records with `central:[]` (non-central) — record-centrality is no longer required to LIST a candidate, only to decide the verdict and matched_total. matched_total counts centrality-passing, qualifying records among the candidates evaluated (each record type's own query is itself capped at 40), not a true/exact/full count.",
+        "Pre-write conflict check: does the store already govern this subject? Run it before dispatching, designing, asking the user, or drafting a new record. Pass `text` (one subject) or `texts` (an agenda, one verdict per entry, in order). Matches anti_pattern, decision, feature_article, research_finding, disconfirmed_hypothesis and open_question records. Verdicts: \"verify_targets\" — the store governs this; open the named matches before proceeding (a match is a pointer, not the source); \"ungoverned\" — nothing governs it; \"insufficient\" — too little vocabulary to judge; the verdict and matched_total are decided from the centrality-passing candidate set only, not the capped `matches` window. Returns {terms, matched_total, capped (present/true only when `matches` was truncated), matches:[{id,type,title,matched_on,central,source}], answerability, missing_domains (only when a configured domain has no store)} or {verdicts:[…]}. `matches` is capped at 20, sorted centrality-first (a central match always outranks a merely-hitting one), then by raw hit count. `matches` may include records with `central:[]` (non-central) — record-centrality is no longer required to LIST a candidate, only to decide the verdict and matched_total. matched_total counts centrality-passing, qualifying records among the candidates evaluated (each record type's own query is itself capped at 40), not a true/exact/full count.",
       inputSchema: strict({ text: z.string().optional(), texts: z.array(z.string()).optional() }),
     },
     ({ text, texts }) => {

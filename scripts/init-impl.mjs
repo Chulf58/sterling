@@ -17,16 +17,25 @@
 //   node scripts/init.mjs --target <dir> [--project-name <name>]
 //     [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
 //     [--backup-path <p> | --backup-opt-out] [--mode hobby|work]
+//     [--domain-description <domain>=<text>]...   (repeatable; one per NEW domain store)
+//     [--update-ensure]   (set only by /sterling:update's re-bake step)
 //   (stack tags ARE the domain mount manifest — §3.3; no separate domains flag)
+//   (init creates each declared domain's store that does not exist yet, with a
+//   description: --domain-description <domain>=<text>, split at the first '='. The
+//   forced 'sterling' domain ships a default. A domain with no description refuses
+//   before any write. An existing store is never touched. On the update ensure
+//   pass (--update-ensure) a recorded domain with no store and no description is
+//   skipped with a loud line instead, so it cannot fail the whole re-bake.)
 //   (declaration flags are required only when no recorded config exists)
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, unlinkSync, renameSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseConfig, unreadConfigKeys, describeUnreadConfigKeys } from '@sterling/schemas';
-import { ProjectRegistry, registryPath } from '@sterling/store';
+import { ProjectRegistry, registryPath, createDomain, resolveDomainMounts } from '@sterling/store';
 import { arg, argAll, hasFlag, fail } from './lib/project.mjs';
 import { backupPathForRuntime } from './lib/wsl-path.mjs';
+import { DEFAULT_DOMAIN_DESCRIPTIONS } from './lib/domain-defaults.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
@@ -78,6 +87,26 @@ const declaredToolchains = argAll('--toolchain').map((spec) => {
   const [adapter, globs] = spec.split(':');
   return { adapter, path_globs: (globs ?? '').split(',').filter(Boolean) };
 });
+
+// --domain-description <domain>=<text>, repeatable: the description a NEW domain store is
+// created with (split at the first '='). A flag with no value, a malformed pair or a repeated
+// domain refuses (exit 2) rather than being dropped or silently resolved.
+const DOMAIN_DESCRIPTION_FLAG = '--domain-description';
+const domainDescriptionFlags = argAll(DOMAIN_DESCRIPTION_FLAG);
+if (process.argv.filter((a) => a === DOMAIN_DESCRIPTION_FLAG).length !== domainDescriptionFlags.length) {
+  fail(`init REFUSED: ${DOMAIN_DESCRIPTION_FLAG} needs a value of the form <domain>=<description>`, 2);
+}
+const domainDescriptions = new Map();
+for (const spec of domainDescriptionFlags) {
+  const eq = spec.indexOf('=');
+  const name = eq === -1 ? '' : spec.slice(0, eq).trim();
+  const text = eq === -1 ? '' : spec.slice(eq + 1).trim();
+  if (!name || !text) {
+    fail(`init REFUSED: ${DOMAIN_DESCRIPTION_FLAG} ${JSON.stringify(spec)} must be <domain>=<description> with a non-blank description`, 2);
+  }
+  if (domainDescriptions.has(name)) fail(`init REFUSED: ${DOMAIN_DESCRIPTION_FLAG} was given twice for domain '${name}'`, 2);
+  domainDescriptions.set(name, text);
+}
 
 const fwd = (p) => p.replace(/\\/g, '/');
 const normalize = (s) => s.replace(/\r\n/g, '\n');
@@ -209,6 +238,50 @@ const expectedConfig = parseConfig({
 });
 if (eff.splitRatio === undefined) eff.splitRatio = expectedConfig.tui_split_ratio;
 
+// DOMAIN STORES: each declared domain (stack tags plus the forced 'sterling') whose store
+// does not exist is created with a description; one with none refuses HERE, before any write.
+// An existing store is never touched, and a description offered for one is reported, not applied.
+const domainMounts = resolveDomainMounts({ stack_tags: eff.stackTags, domain_paths: eff.domainPaths });
+const domainsToCreate = [];
+const domainsExisting = [];
+for (const m of domainMounts) {
+  if (existsSync(m.dbPath)) domainsExisting.push(m);
+  else domainsToCreate.push({ ...m, description: domainDescriptions.get(m.name) ?? DEFAULT_DOMAIN_DESCRIPTIONS[m.name] });
+}
+for (const name of domainDescriptions.keys()) {
+  if (!domainMounts.some((m) => m.name === name)) {
+    fail(`init REFUSED: ${DOMAIN_DESCRIPTION_FLAG} names '${name}', which is not a declared domain (declared: ${domainMounts.map((m) => m.name).join(', ')})`, 2);
+  }
+}
+let undescribed = domainsToCreate.filter((d) => !d.description);
+// THE UPDATE ENSURE PASS (/sterling:update re-bakes with --update-ensure, tolerate
+// mode) never refuses on a recorded domain whose store is gone: nothing can be
+// asked there, and a refusal would skip every other ensure item. The domain is
+// not created and not mounted, and one stderr line per domain says so and names
+// the remedy. An interactive init still refuses below.
+const skippedDomains = [];
+if (hasFlag('--update-ensure') && recorded) {
+  for (const d of undescribed) {
+    if (!recorded.stack_tags.includes(d.name)) continue;
+    skippedDomains.push(d);
+    process.stderr.write(
+      `init: domain '${d.name}' is recorded but has no store at '${d.dbPath}' and no description; SKIPPED on the update ensure pass ` +
+        `(not created, not mounted). Run /sterling:init with ${DOMAIN_DESCRIPTION_FLAG} ${d.name}=<description> to create it.\n`
+    );
+  }
+  undescribed = undescribed.filter((d) => !skippedDomains.includes(d));
+  domainsToCreate.splice(0, domainsToCreate.length, ...domainsToCreate.filter((d) => !skippedDomains.includes(d)));
+}
+if (undescribed.length) {
+  fail(
+    `init REFUSED: ${undescribed.length === 1 ? 'domain' : 'domains'} ${undescribed.map((d) => `'${d.name}'`).join(', ')} ` +
+      `${undescribed.length === 1 ? 'has' : 'have'} no store yet and no description. A new domain is created with a description of which knowledge belongs in it; pass ` +
+      undescribed.map((d) => `${DOMAIN_DESCRIPTION_FLAG} ${d.name}=<description>`).join(' ') +
+      '. Nothing was written.',
+    2
+  );
+}
+
 // flags passed on a re-run that contradict the recorded config are reported,
 // never silently applied — the config may be tuned; editing it is the owner's act
 const notes = [];
@@ -259,6 +332,18 @@ for (const [label, leaf] of [['.sterling/ (+runs/)', '.sterling/runs'], ['docs/b
   const existed = existsSync(join(target, leaf));
   mkdirSync(join(target, leaf), { recursive: true });
   items.push({ item: label, status: existed ? 'exists' : 'created', detail: '' });
+}
+
+// domain stores: created with their description | left alone when they already exist
+for (const d of domainsToCreate) {
+  createDomain(d.name, d.description, d.dbPath);
+  items.push({ item: `domain '${d.name}'`, status: 'created', detail: `${d.dbPath} — ${d.description}` });
+}
+for (const d of skippedDomains) {
+  items.push({ item: `domain '${d.name}'`, status: 'skipped', detail: `${d.dbPath} — no store and no description; not created on the update ensure pass` });
+}
+for (const m of domainsExisting) {
+  items.push({ item: `domain '${m.name}'`, status: 'exists', detail: `${m.dbPath} — already has a store; its description is untouched${domainDescriptions.has(m.name) ? ` (the --domain-description given for it was NOT applied)` : ''}` });
 }
 
 // config: created from declarations | matches defaults+declarations | tuned/hand-edited → left
@@ -344,7 +429,7 @@ const agentsMdTemplateRaw = readFileSync(join(pluginRoot, 'templates', 'target-a
   .replaceAll('{{STACK_TAGS}}', eff.stackTags.join(', '))
   .replaceAll('{{TOOLCHAINS}}', baked.map((t) => `${t.adapter} (${t.path_globs.join(', ')})`).join('; '))
   .replaceAll('{{DOMAINS}}', eff.stackTags.length
-    ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(', ') + ' — created lazily on first need (§2.3)'
+    ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(', ') + ' — each created by init with a description of what belongs in it (§2.3)'
     : '(none — declare stack tags to mount domain stores)')
   // WHETHER backups are on is a project fact; WHERE they go is a machine fact, and this file
   // is tracked — see the CLAUDE.md-era comment this carries forward (`update.mjs` refuses on a

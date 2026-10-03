@@ -43926,10 +43926,11 @@ var configSchema = external_exports.object({
   // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
   // with opt-out, disposal skips the snapshot LOUDLY (check_skipped).
   backup_opt_out: external_exports.boolean().default(false),
-  // §3.3: the project's stack_tags, declared at init, ARE the domain mount
-  // manifest — the SAME list that filters retrieval (§3.4) mounts the shared
-  // domain stores, so the mounted set and the filter align by construction. Each
-  // tag mounts a store at ~/.sterling/domains/<tag>/sterling.db (lazily created).
+  // §3.3: the project's stack_tags, declared at init, are the domain mount
+  // manifest and nothing else; they do not filter retrieval (a query's own
+  // stack_tags option is a separate, caller-supplied filter). Each tag mounts an
+  // EXISTING store at ~/.sterling/domains/<tag>/sterling.db; a new domain store
+  // is made only by createDomain in @sterling/store, which requires a description.
   stack_tags: external_exports.array(external_exports.string()).default([]),
   // §3.3 (spec line 94 — path configurable per domain): per-tag store-path
   // override; default is the per-user root above. tag → absolute db path (POSIX).
@@ -44350,9 +44351,50 @@ var runtimeMarkerSchema = external_exports.object({
 }).strict();
 
 // packages/store/dist/mounted.js
-import { mkdirSync, existsSync } from "node:fs";
+import { mkdirSync, existsSync, rmSync, openSync, closeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+
+// packages/store/dist/shares.js
+var DEFAULT_PROJECT_SHARE = 0.6;
+function allocateShares(perSourceCounts, cap, projectShare = DEFAULT_PROJECT_SHARE) {
+  if (!Array.isArray(perSourceCounts) || perSourceCounts.length === 0) {
+    throw new Error("allocateShares: perSourceCounts must contain at least the project count (index 0)");
+  }
+  if (!Number.isInteger(cap) || cap < 1)
+    throw new Error(`allocateShares: cap must be a positive integer, got ${cap}`);
+  for (const c of perSourceCounts) {
+    if (!Number.isInteger(c) || c < 0)
+      throw new Error(`allocateShares: every count must be a non-negative integer, got ${c}`);
+  }
+  if (typeof projectShare !== "number" || !(projectShare >= 0 && projectShare <= 1)) {
+    throw new Error(`allocateShares: projectShare must be between 0 and 1, got ${projectShare}`);
+  }
+  const domainCount = perSourceCounts.length - 1;
+  const projectQuota = domainCount === 0 ? cap : Math.min(cap, Math.ceil(projectShare * cap - 1e-9));
+  const quotas = [projectQuota];
+  const rest = cap - projectQuota;
+  for (let i = 0; i < domainCount; i++) {
+    quotas.push(Math.floor(rest / domainCount) + (i < rest % domainCount ? 1 : 0));
+  }
+  const alloc = perSourceCounts.map((count, i) => Math.min(count, quotas[i]));
+  let left = cap - alloc.reduce((a, b) => a + b, 0);
+  while (left > 0) {
+    let gave = false;
+    for (let i = 0; i < alloc.length && left > 0; i++) {
+      if (alloc[i] < perSourceCounts[i]) {
+        alloc[i]++;
+        left--;
+        gave = true;
+      }
+    }
+    if (!gave)
+      break;
+  }
+  return alloc;
+}
+
+// packages/store/dist/mounted.js
 function resolveDomainMounts(config) {
   return config.stack_tags.map((name) => ({
     name,
@@ -44363,6 +44405,17 @@ function open(dbPath) {
   mkdirSync(dirname(dbPath), { recursive: true });
   return new SterlingStore(dbPath);
 }
+var DOMAIN_DESCRIPTION_KEY = "description";
+var DomainNotCreatedError = class extends Error {
+  domain;
+  db_path;
+  constructor(domain, dbPath) {
+    super(`domain '${domain}' has no store at '${dbPath}'. Domain stores are not created on first mount: create it with createDomain('${domain}', <description>, <dbPath>), where the description says which knowledge belongs in this domain. To mount only the domains that already exist, pass { skipMissing: true }.`);
+    this.name = "DomainNotCreatedError";
+    this.domain = domain;
+    this.db_path = dbPath;
+  }
+};
 var MountedStores = class {
   /** The project store — also the home of the board/maintenance queue and
    *  other project-local transient state (the run/handoff protocol this
@@ -44398,19 +44451,58 @@ var MountedStores = class {
    */
   project;
   domains = /* @__PURE__ */ new Map();
-  /** Opening a store creates its file + schema (§2.3 lazy creation): a domain
-   *  store comes into being the first time a project's manifest mounts it.
-   *  When options.skipMissing is true, domain mounts whose db file does NOT
-   *  already exist on disk are SKIPPED — never created. Existing siblings that
-   *  DO exist are still mounted. The default (no options / skipMissing false)
-   *  always lazily creates missing stores (§2.3 backward-compatible default). */
+  /** Configured domains skipped under skipMissing because their store does not
+   *  exist, in manifest order. Kept so a caller (boot, a tool response, H1) can
+   *  disclose the skip instead of the domain silently vanishing. */
+  missingDomains = [];
+  /** The project store is opened, and created when absent. A domain store is
+   *  only ever OPENED here, never created: a mount whose db file does not exist
+   *  throws DomainNotCreatedError naming createDomain (board 675daf9d (c)), with
+   *  every handle opened so far closed and no file written for the missing
+   *  domain. When options.skipMissing is true such a mount is skipped instead,
+   *  and the existing siblings are still mounted. An existing domain store opens
+   *  as it is, whether or not it has a description. */
   constructor(projectDbPath, mounts = [], options) {
     this.project = open(projectDbPath);
-    for (const m of mounts) {
-      if (options?.skipMissing && !existsSync(m.dbPath))
-        continue;
-      this.domains.set(m.name, open(m.dbPath));
+    try {
+      for (const m of mounts) {
+        if (!existsSync(m.dbPath)) {
+          if (options?.skipMissing) {
+            this.missingDomains.push({ name: m.name, dbPath: m.dbPath });
+            continue;
+          }
+          throw new DomainNotCreatedError(m.name, m.dbPath);
+        }
+        this.domains.set(m.name, new SterlingStore(m.dbPath));
+      }
+    } catch (e) {
+      this.close();
+      throw e;
     }
+  }
+  /** A mounted domain's description (store_meta 'description'), or undefined
+   *  when that existing store has none. An unmounted name is refused. */
+  domainDescription(name) {
+    const store = this.domains.get(name);
+    if (!store)
+      throw new Error(`domainDescription: domain '${name}' is not mounted`);
+    return store.getMeta(DOMAIN_DESCRIPTION_KEY);
+  }
+  /** Set a mounted domain's description (store_meta 'description'), trimmed,
+   *  on that domain's own store. The write path for an existing domain;
+   *  createDomain sets it for a new one. An unmounted name and a blank
+   *  description are refused with nothing written, and so is a call inside a
+   *  transaction open on another mount (the same affinity rule as every write
+   *  through this class). */
+  setDomainDescription(name, description) {
+    const store = this.domains.get(name);
+    if (!store)
+      throw new Error(`setDomainDescription: domain '${name}' is not mounted`);
+    if (typeof description !== "string" || description.trim().length === 0) {
+      throw new Error(`setDomainDescription: the description for domain '${name}' is blank; nothing was written`);
+    }
+    this.assertMountAffinity("setDomainDescription", store, `domain '${name}'`);
+    store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
   }
   /** Scope-routed write (§3.3): project → the project store; domain:<name> → that
    *  domain store. Routing is MECHANICAL here; the tool layer owns the policy
@@ -44453,14 +44545,18 @@ var MountedStores = class {
     }
     throw new Error(`unroutable scope '${scope}'`);
   }
-  /** Cross-store retrieval (§3.4): every mounted store runs the full
-   *  filter→join→rank→cap; results concatenate PROJECT-FIRST then domains (each
-   *  internally bm25-ranked — §3.3 project-store-first bias) and the overall cap
-   *  re-applies. A unified cross-store bm25 re-rank is a later refinement. */
+  /** Cross-store retrieval (§3.4) with read shares (board 675daf9d (b)): every
+   *  mounted store runs the full filter→join→rank→cap on its own, allocateShares
+   *  decides how many of each store's results make the cap (the project up to
+   *  ceil(0.6 x cap) when a domain has matches, the rest split across domains,
+   *  unused share spilling over), and each store's top-N is concatenated project
+   *  first, then domains in manifest order. Scores are never compared across
+   *  databases. When only the project matches it fills the cap, as before. */
   query(opts = {}) {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-    const merged = this.all().flatMap((s2) => s2.query(opts));
-    return merged.slice(0, cap);
+    const perStore = this.all().map((s2) => s2.query({ ...opts, cap }));
+    const shares = allocateShares(perStore.map((r) => r.length), cap);
+    return perStore.flatMap((records, i) => records.slice(0, shares[i]));
   }
   /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
    *  query(), summed project-first across every mounted store (countBySource is
@@ -44866,11 +44962,11 @@ var MountedStores = class {
   }
 };
 
-// packages/store/dist/registry.js
-import { DatabaseSync } from "node:sqlite";
-
 // packages/store/dist/axis.js
 var AXIS_MAX_TERM_LEN = 64;
+
+// packages/store/dist/registry.js
+import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
 function decodeLiveRecordRow(op, row) {
@@ -44986,6 +45082,15 @@ CREATE TABLE IF NOT EXISTS activity_log (
   type TEXT NOT NULL,
   record_id TEXT NOT NULL,
   title TEXT NOT NULL
+);
+-- Store-level key/value metadata (board 675daf9d, decision
+-- projects-mount-domains-and-sibling-projects): a domain store's description is
+-- its 'description' key. Additive: CREATE IF NOT EXISTS on every v2 open, so no
+-- user_version bump; a pre-v2 store opens read-only before this DDL runs.
+CREATE TABLE IF NOT EXISTS store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 `;
 var SUPPORTED_SCHEMA_VERSION = 2;
@@ -46842,6 +46947,28 @@ var SterlingStore = class _SterlingStore {
       this.db.prepare("INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at").run(type, recordId, at);
     });
   }
+  /**
+   * Store-level metadata read (store_meta). undefined when the key was never
+   * set. A pre-v2 store has no store_meta table (it opens read-only before the
+   * DDL runs), so this refuses there with the migration error rather than
+   * answering "unset" for a question the store cannot answer.
+   */
+  getMeta(key) {
+    this.assertV2Surface("getMeta");
+    const row = this.db.prepare("SELECT value FROM store_meta WHERE key = ?").get(key);
+    return row?.value;
+  }
+  /** Store-level metadata write (store_meta): upsert, one row per key, stamped updated_at. */
+  setMeta(key, value) {
+    this.assertWritable("setMeta");
+    if (typeof key !== "string" || key.length === 0)
+      throw new Error("setMeta: key must be a non-empty string");
+    if (typeof value !== "string")
+      throw new Error(`setMeta: value for key '${key}' must be a string`);
+    this.tx(() => {
+      this.db.prepare("INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(key, value, (/* @__PURE__ */ new Date()).toISOString());
+    });
+  }
   takeSelection() {
     let row;
     this.tx(() => {
@@ -48483,7 +48610,7 @@ function userScopeCodexServer({ env = process.env, home = homedir2(), readFile =
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6, readdirSync as readdirSync4, rmSync, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6, readdirSync as readdirSync4, rmSync as rmSync2, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname3, isAbsolute, join as join6, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48645,7 +48772,7 @@ var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync2, readFileSync as readFileSync5, readdirSync as readdirSync3, mkdirSync as mkdirSync4, openSync, writeSync, closeSync, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { lstatSync as lstatSync2, readFileSync as readFileSync5, readdirSync as readdirSync3, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/opencode-agents.mjs
@@ -49235,7 +49362,7 @@ import { homedir as homedir4 } from "node:os";
 import { join as join9 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync5, rmSync as rmSync2, rmdirSync, renameSync as renameSync2, existsSync as existsSync7, lstatSync as lstatSync3, readdirSync as readdirSync5, realpathSync as realpathSync3, chmodSync } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync5, rmSync as rmSync3, rmdirSync, renameSync as renameSync2, existsSync as existsSync7, lstatSync as lstatSync3, readdirSync as readdirSync5, realpathSync as realpathSync3, chmodSync } from "node:fs";
 import { join as join8, resolve as resolve3, dirname as dirname5, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash as createHash2 } from "node:crypto";
@@ -49302,7 +49429,7 @@ function dispatchStateKey(toolUseId) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync2, readSync, closeSync as closeSync2, fstatSync, existsSync as existsSync8, statSync as statSync4, readdirSync as readdirSync6 } from "node:fs";
+import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync8, statSync as statSync4, readdirSync as readdirSync6 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
@@ -49320,7 +49447,7 @@ function deriveAgentTranscript(parentTranscriptPath, agentId) {
 }
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync8(path)) return null;
-  const fd = openSync2(path, "r");
+  const fd = openSync3(path, "r");
   try {
     const size = fstatSync(fd).size;
     const len = Math.min(size, bytes);
@@ -49328,7 +49455,7 @@ function readTail(path, bytes = TAIL_BYTES) {
     readSync(fd, buf, 0, len, size - len);
     return buf.toString("utf8");
   } finally {
-    closeSync2(fd);
+    closeSync3(fd);
   }
 }
 function latestUsage(path) {
@@ -51985,7 +52112,7 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
 }
 
 // packages/tui/dist/lock.js
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync10, rmSync as rmSync3, writeFileSync as writeFileSync6 } from "node:fs";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync10, rmSync as rmSync4, writeFileSync as writeFileSync6 } from "node:fs";
 import { dirname as dirname6 } from "node:path";
 function pidIsAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0)
@@ -52038,7 +52165,7 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
     try {
       const cur = readFileSync10(lockPath2, "utf8").trim().split(/\s+/)[0];
       if (cur === ownerRaw)
-        rmSync3(lockPath2, { force: true });
+        rmSync4(lockPath2, { force: true });
     } catch {
     }
   }
@@ -52058,7 +52185,7 @@ function releaseTuiLock(lockPath2, pid) {
   try {
     const owner2 = Number(readFileSync10(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 === pid)
-      rmSync3(lockPath2, { force: true });
+      rmSync4(lockPath2, { force: true });
   } catch {
   }
 }
