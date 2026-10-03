@@ -8,7 +8,7 @@ var __export = (target2, all) => {
 
 // scripts/cleanup-plan.mjs
 import { lstatSync as lstatSync2, readFileSync as readFileSync2, realpathSync as realpathSync4 } from "node:fs";
-import { basename as basename3, join as join4 } from "node:path";
+import { basename as basename3, join as join4, posix } from "node:path";
 import { spawnSync } from "node:child_process";
 
 // scripts/lib/project.mjs
@@ -5317,8 +5317,21 @@ var AXIS_MAX_TERM_LEN = 64;
 import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
+var StoreRowDecodeError = class extends Error {
+  op;
+  constructor(op, cause) {
+    super(`${op}: a record row's body is not valid JSON (${cause?.message ?? String(cause)})`);
+    this.name = "StoreRowDecodeError";
+    this.op = op;
+  }
+};
 function decodeLiveRecordRow(op, row) {
-  const record = JSON.parse(row.body);
+  let record;
+  try {
+    record = JSON.parse(row.body);
+  } catch (e) {
+    throw new StoreRowDecodeError(op, e);
+  }
   if (typeof row.scope !== "string" || row.scope.length === 0) {
     throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
   }
@@ -7911,6 +7924,8 @@ function openProjectReadOnly(cwd = process.cwd()) {
 var ARTICLE_CAP = 1e4;
 var GIT_MAX_BUFFER = 64 * 1024 * 1024;
 var LIST_LIMIT = 5;
+var GENERIC_STEMS = /* @__PURE__ */ new Set(["readme", "changelog", "license", "contributing"]);
+var DIRECTORY_NAMED_STEMS = /* @__PURE__ */ new Set(["index", "mod", "__init__"]);
 var target = arg("--target") ?? process.cwd();
 var firstLine = (s2) => (s2 ?? "").trim().split("\n")[0] || "no output";
 var listed = (items) => items.length > LIST_LIMIT ? `${items.slice(0, LIST_LIMIT).join(", ")} and ${items.length - LIST_LIMIT} more` : items.join(", ");
@@ -7930,10 +7945,27 @@ function needlesFor(path) {
   const base2 = basename3(path);
   const dot = base2.lastIndexOf(".");
   const stem = dot > 0 ? base2.slice(0, dot) : base2;
-  const words = stem.split(/[^A-Za-z0-9]+/).filter(Boolean);
-  const pascal = words.map((w) => w[0].toUpperCase() + w.slice(1)).join("");
-  const camel = pascal ? pascal[0].toLowerCase() + pascal.slice(1) : "";
-  const needles = [base2, stem, pascal, camel];
+  const dirPath = posix.dirname(path);
+  const inRoot = dirPath === ".";
+  const dirSegment = inRoot ? "" : basename3(dirPath);
+  const lower = stem.toLowerCase();
+  let needles;
+  let local = [];
+  let what = "its filename, stem or declared class";
+  if (GENERIC_STEMS.has(lower) && !inRoot) {
+    needles = [path, `${dirSegment}/${base2}`, `${dirSegment}/${stem}`];
+    local = [base2, stem];
+    what = `its path (a generic document name, so searched path-qualified everywhere and by bare name or stem only in its own directory ${dirPath}/)`;
+  } else {
+    const words = stem.split(/[^A-Za-z0-9]+/).filter(Boolean);
+    const pascal = words.map((w) => w[0].toUpperCase() + w.slice(1)).join("");
+    const camel = pascal ? pascal[0].toLowerCase() + pascal.slice(1) : "";
+    needles = [base2, stem, pascal, camel];
+  }
+  if (DIRECTORY_NAMED_STEMS.has(lower) && dirSegment) {
+    needles.push(dirSegment);
+    what = local.length ? `${what}, and by its directory name` : "its filename, stem, declared class or directory name";
+  }
   if (base2.endsWith(".gd")) {
     let text;
     try {
@@ -7943,24 +7975,33 @@ function needlesFor(path) {
     }
     for (const m of text.matchAll(/^\s*class_name\s+([A-Za-z_][A-Za-z0-9_]*)/gm)) needles.push(m[1]);
   }
-  return { needles: [...new Set(needles.filter(Boolean))] };
+  return { needles: [...new Set(needles.filter(Boolean))], local: [...new Set(local)], localDir: dirPath, what };
 }
 function referencesTo(path) {
   const n = needlesFor(path);
   if (n.error) return { error: n.error };
-  const refs = /* @__PURE__ */ new Set();
-  const matched = [];
+  const refs = /* @__PURE__ */ new Map();
+  const search = (needle, pathspec) => {
+    const r = runGit(["grep", "-l", "-z", "--untracked", "--fixed-strings", "-e", needle, "--", ...pathspec]);
+    if (r.error) return `git grep could not be run (${r.error.message})`;
+    if (r.status === 1) return null;
+    if (r.status !== 0) return `git grep failed (exit ${r.status}): ${firstLine(r.stderr)}`;
+    for (const f of r.stdout.split("\0")) {
+      if (!f || f === path) continue;
+      if (!refs.has(f)) refs.set(f, /* @__PURE__ */ new Set());
+      refs.get(f).add(needle);
+    }
+    return null;
+  };
   for (const needle of n.needles) {
-    const r = runGit(["grep", "-l", "-z", "--untracked", "--fixed-strings", "-e", needle, "--"]);
-    if (r.error) return { error: `git grep could not be run (${r.error.message})` };
-    if (r.status === 1) continue;
-    if (r.status !== 0) return { error: `git grep failed (exit ${r.status}): ${firstLine(r.stderr)}` };
-    const hits = r.stdout.split("\0").filter((f) => f && f !== path);
-    if (!hits.length) continue;
-    matched.push(needle);
-    for (const f of hits) refs.add(f);
+    const error = search(needle, []);
+    if (error) return { error };
   }
-  return { refs: [...refs], matched };
+  for (const needle of n.local) {
+    const error = search(needle, [`:(literal)${n.localDir}/`]);
+    if (error) return { error };
+  }
+  return { refs, what: n.what };
 }
 function buildPlan(store2) {
   const articles = store2.query({ types: ["feature_article"], cap: ARTICLE_CAP });
@@ -7986,7 +8027,7 @@ function buildPlan(store2) {
     }
   };
   let gitWhy;
-  const classify = (a, path) => {
+  const preliminary = (a, path) => {
     const owners = (liveOwners.get(path) ?? []).filter((o) => o.id !== a.id).map((o) => o.slug);
     if (owners.length) return ["release", `also owned by live article(s) ${listed(owners)}; only this article's ownership goes`];
     let st;
@@ -7999,10 +8040,34 @@ function buildPlan(store2) {
     if (!st.isFile()) return ["keep", "not a regular file (a directory or a link); fs-remove deletes files only"];
     if (gitWhy === void 0) gitWhy = gitUnavailable();
     if (gitWhy) return ["keep", `reference check could not run: ${gitWhy}`];
-    const { refs, matched, error } = referencesTo(path);
+    const { refs, what, error } = referencesTo(path);
     if (error) return ["keep", `reference check could not run: ${error}`];
-    if (refs.length) return ["keep", `referenced by ${refs.length} other file(s): ${listed(refs)} (matched ${listed(matched)})`];
-    return ["delete", "on disk, no live owner, and no other tracked file references its filename, stem or declared class"];
+    return { refs, what };
+  };
+  const classifyArticle = (a) => {
+    const verdicts = /* @__PURE__ */ new Map();
+    const group = /* @__PURE__ */ new Map();
+    for (const path of new Set(a.files.map((f) => f.path))) {
+      const r = preliminary(a, path);
+      if (Array.isArray(r)) verdicts.set(path, r);
+      else group.set(path, r);
+    }
+    for (let changed = true; changed; ) {
+      changed = false;
+      for (const [path, { refs }] of group) {
+        const outside = [...refs.keys()].filter((f) => !group.has(f));
+        if (!outside.length) continue;
+        const matched = [...new Set(outside.flatMap((f) => [...refs.get(f)]))];
+        verdicts.set(path, ["keep", `referenced by ${outside.length} other file(s): ${listed(outside)} (matched ${listed(matched)})`]);
+        group.delete(path);
+        changed = true;
+      }
+    }
+    for (const [path, { refs, what }] of group) {
+      const ownDeleted = refs.size ? "; references from this article's own deleted files do not count" : "";
+      verdicts.set(path, ["delete", `on disk, no live owner, and no other tracked file references ${what}${ownDeleted}`]);
+    }
+    return verdicts;
   };
   const candidates = articles.filter((a) => (a.state === "deprecated" || a.state === "dormant") && !a.files.every((f) => isGone(f.path))).map((a) => {
     const active_dependents = articles.filter((other) => other.id !== a.id && isActive(other) && (other.dependencies.relies_on.includes(a.slug) || other.dependencies.relies_on.includes(a.id))).map((d) => ({ id: d.id, slug: d.slug }));
@@ -8011,8 +8076,9 @@ function buildPlan(store2) {
     let buckets = null;
     if (deletable) {
       buckets = { delete: [], release: [], absent: [], keep: [] };
+      const verdicts = classifyArticle(a);
       for (const path of new Set(a.files.map((f) => f.path))) {
-        const [bucket, reason] = classify(a, path);
+        const [bucket, reason] = verdicts.get(path);
         buckets[bucket].push({ path, reason });
       }
     }

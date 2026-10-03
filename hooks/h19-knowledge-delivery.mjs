@@ -4096,19 +4096,23 @@ function isAbsolutePathAnyHost(p) {
   return /^[A-Za-z]:[\\/]/.test(s2) || s2.startsWith("/") || s2.startsWith("\\");
 }
 function sameLocationAnyHost(a, b) {
-  const drvfs = (p) => {
-    const s2 = String(p ?? "").replace(/\\/g, "/");
-    if (!isAbsolutePathAnyHost(s2))
-      return void 0;
-    const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
-    return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
-  };
-  const x = drvfs(a);
-  const y = drvfs(b);
+  const x = drvfsForm(a);
+  const y = drvfsForm(b);
   if (x === void 0 || y === void 0)
     return false;
+  const [fx, fy] = foldDrvfs(x, y);
+  return fx === fy;
+}
+function drvfsForm(p) {
+  const s2 = String(p ?? "").replace(/\\/g, "/");
+  if (!isAbsolutePathAnyHost(s2))
+    return void 0;
+  const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
+  return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
+}
+function foldDrvfs(x, y) {
   const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
-  return onDrvfs(x) && onDrvfs(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
+  return onDrvfs(x) && onDrvfs(y) ? [x.toLowerCase(), y.toLowerCase()] : [x, y];
 }
 function toRepoRelative(absolutePath, repoRoot) {
   const abs = normSep(absolutePath);
@@ -5344,8 +5348,21 @@ var AXIS_MAX_TERM_LEN = 64;
 import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
+var StoreRowDecodeError = class extends Error {
+  op;
+  constructor(op, cause) {
+    super(`${op}: a record row's body is not valid JSON (${cause?.message ?? String(cause)})`);
+    this.name = "StoreRowDecodeError";
+    this.op = op;
+  }
+};
 function decodeLiveRecordRow(op, row) {
-  const record = JSON.parse(row.body);
+  let record;
+  try {
+    record = JSON.parse(row.body);
+  } catch (e) {
+    throw new StoreRowDecodeError(op, e);
+  }
   if (typeof row.scope !== "string" || row.scope.length === 0) {
     throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
   }
