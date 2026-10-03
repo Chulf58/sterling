@@ -214,14 +214,42 @@ export const GENERIC_DEV_TERMS = new Set([
  *  default of hasDiscriminatingHit, because the caller asked. */
 export const AXIS_MIN_DISCRIMINATING_HITS = 2;
 
-/** True once at least `minDiscriminating` distinct matched terms (default 1;
+/** Candidate bases of a lowercase term: the term itself, plus, for each recognised
+ *  suffix it ends with (ing, ed, es, s; plain s only when the word does not end in
+ *  ss), the remainder and the remainder plus 'e' ('resolved' -> resolv, resolve).
+ *  A bare word has one candidate, itself, so nothing is ever stripped from it
+ *  ('stat' stays apart from 'state'). Candidates under 3 characters are dropped. */
+function candidateBases(term: string): Set<string> {
+  const bases = new Set<string>([term]);
+  for (const suffix of ['ing', 'ed', 'es', 's']) {
+    if (!term.endsWith(suffix) || (suffix === 's' && term.endsWith('ss'))) continue;
+    const rest = term.slice(0, -suffix.length);
+    for (const base of [rest, `${rest}e`]) if (base.length >= 3) bases.add(base);
+  }
+  return bases;
+}
+
+/** True once at least `minDiscriminating` distinct matched words (default 1;
  *  push deliveries pass AXIS_MIN_DISCRIMINATING_HITS) escape GENERIC_DEV_TERMS. Two hits of
  *  pure universal vocabulary ("test", "check") describe every dispatch ever
  *  written — a real match needs at least one term that actually says something
- *  about THIS prompt's subject. */
+ *  about THIS prompt's subject. Two terms are one word when their candidate
+ *  bases overlap, so 'resolve', 'resolved' and 'resolving' count once. Groups
+ *  chain: 'states' alongside 'stat' and 'state' joins all three (accepted). */
 export function hasDiscriminatingHit(hits: string[], minDiscriminating = 1): boolean {
-  const distinct = new Set(hits.map((t) => String(t).toLowerCase()).filter((t) => !GENERIC_DEV_TERMS.has(t)));
-  return distinct.size >= minDiscriminating;
+  const terms = [...new Set(hits.map((t) => String(t).toLowerCase()).filter((t) => !GENERIC_DEV_TERMS.has(t)))];
+  const groups: Set<string>[] = [];
+  for (const term of terms) {
+    const merged = candidateBases(term);
+    for (let i = groups.length - 1; i >= 0; i--) {
+      if ([...groups[i]].some((b) => merged.has(b))) {
+        for (const b of groups[i]) merged.add(b);
+        groups.splice(i, 1);
+      }
+    }
+    groups.push(merged);
+  }
+  return groups.length >= minDiscriminating;
 }
 
 /** RECORD CENTRALITY — the third stage-2 floor (decision foreign_599a28ed). The first
