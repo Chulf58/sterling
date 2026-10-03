@@ -167,6 +167,7 @@ test('skills ship with live file references and pass the skill linter', () => {
     'drain/SKILL.md',
     'grill/SKILL.md',
     'pr-review-loop/SKILL.md',
+    'record-audit/SKILL.md',
     'review-brief/SKILL.md',
   ]);
   for (const s of skills) assert.deepEqual(lintSkill(s.content, s.file, root), []);
