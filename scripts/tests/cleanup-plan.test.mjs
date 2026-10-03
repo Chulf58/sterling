@@ -317,3 +317,123 @@ test('cleanup-plan: a .gd file that cannot be read for its class_name fails clos
     cleanup();
   }
 });
+
+// Group references: the candidate paths of one deletable article die together,
+// so a reference between two of them is not a reason to keep either.
+test('cleanup-plan: two candidates of one article that name each other and nothing else does are both delete', () => {
+  const { dir, store, cleanup } = makeProject({
+    'scripts/alpha_feature.mjs': 'export const alpha = 1; // exercised by alpha_feature.test.mjs\n',
+    'scripts/tests/alpha_feature.test.mjs': "import { alpha } from '../alpha_feature.mjs';\n",
+    'src/other.mjs': 'export const o = 1;\n',
+  });
+  try {
+    const dead = store.create(articleRec('alpha-feat', ['scripts/alpha_feature.mjs', 'scripts/tests/alpha_feature.test.mjs'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const c = p.candidates.find((x) => x.article === dead.id);
+    assert.equal(bucketOf(c, 'scripts/alpha_feature.mjs').bucket, 'delete');
+    assert.equal(bucketOf(c, 'scripts/tests/alpha_feature.test.mjs').bucket, 'delete');
+    assert.deepEqual(p.delete_paths, ['scripts/alpha_feature.mjs', 'scripts/tests/alpha_feature.test.mjs']);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a reference from a file outside the group keeps the referenced candidate, and what it keeps alive stays too', () => {
+  const { dir, store, cleanup } = makeProject({
+    'scripts/alpha_feature.mjs': 'export const alpha = 1; // exercised by alpha_feature.test.mjs\n',
+    'scripts/tests/alpha_feature.test.mjs': "import { alpha } from '../alpha_feature.mjs';\n",
+    'src/consumer.mjs': "import { alpha } from '../scripts/alpha_feature.mjs';\n",
+  });
+  try {
+    const dead = store.create(articleRec('alpha-feat', ['scripts/alpha_feature.mjs', 'scripts/tests/alpha_feature.test.mjs'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const c = p.candidates.find((x) => x.article === dead.id);
+    const script = bucketOf(c, 'scripts/alpha_feature.mjs');
+    assert.equal(script.bucket, 'keep');
+    assert.match(script.reason, /src\/consumer\.mjs/, 'the reason names the outside referrer');
+    const spec = bucketOf(c, 'scripts/tests/alpha_feature.test.mjs');
+    assert.equal(spec.bucket, 'keep', 'the kept script still names the test, so the test survives with it');
+    assert.match(spec.reason, /scripts\/alpha_feature\.mjs/, 'the reason names the kept candidate that references it');
+    assert.deepEqual(p.delete_paths, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a group member that a live co-owned host file references is keep; the host stays release', () => {
+  const { dir, store, cleanup } = makeProject({
+    'game/main.gd': 'extends Node\nvar h = preload("res://game/old_hud.gd")\n',
+    'game/old_hud.gd': 'extends Node\n',
+  });
+  try {
+    const dead = store.create(articleRec('old-hud', ['game/main.gd', 'game/old_hud.gd'], { state: 'deprecated' }));
+    store.create(articleRec('farm-loop', ['game/main.gd']));
+    const p = plan(dir);
+    const c = p.candidates.find((x) => x.article === dead.id);
+    assert.equal(bucketOf(c, 'game/main.gd').bucket, 'release', 'a co-owned host is released, never deleted');
+    const hud = bucketOf(c, 'game/old_hud.gd');
+    assert.equal(hud.bucket, 'keep', 'the surviving host references it, so it is outside the dying group');
+    assert.match(hud.reason, /game\/main\.gd/);
+    assert.deepEqual(p.delete_paths, []);
+  } finally {
+    cleanup();
+  }
+});
+
+// Generic basenames: a bare README.md, index.js or main.gd names every such
+// file in the repo, so only the path-qualified form counts as a reference.
+test('cleanup-plan: a candidate README.md is delete when other files only say "README.md" without its path', () => {
+  const { dir, store, cleanup } = makeProject({
+    'docs/old_feature/README.md': '# Old feature\n',
+    'README.md': 'See the README.md in each package.\n',
+    'packages/a/README.md': 'Read this README.md first.\n',
+    'packages/b/notes.md': 'The README and README.md describe it.\n',
+  });
+  try {
+    const dead = store.create(articleRec('old-feature', ['docs/old_feature/README.md'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const r = bucketOf(p.candidates.find((x) => x.article === dead.id), 'docs/old_feature/README.md');
+    assert.equal(r.bucket, 'delete', r.reason);
+    assert.deepEqual(p.delete_paths, ['docs/old_feature/README.md']);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a candidate README.md is keep when another file names its directory and basename, or its full path', () => {
+  const { dir, store, cleanup } = makeProject({
+    'docs/old_feature/README.md': '# Old feature\n',
+    'docs/linked/README.md': '# Linked\n',
+    'docs/toc.md': 'See [the old feature](old_feature/README.md).\n',
+    'docs/links.md': 'Also docs/linked/README.md.\n',
+  });
+  try {
+    const dead = store.create(articleRec('old-feature', ['docs/old_feature/README.md', 'docs/linked/README.md'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const c = p.candidates.find((x) => x.article === dead.id);
+    const viaDir = bucketOf(c, 'docs/old_feature/README.md');
+    assert.equal(viaDir.bucket, 'keep');
+    assert.match(viaDir.reason, /docs\/toc\.md/);
+    const viaPath = bucketOf(c, 'docs/linked/README.md');
+    assert.equal(viaPath.bucket, 'keep');
+    assert.match(viaPath.reason, /docs\/links\.md/);
+    assert.deepEqual(p.delete_paths, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: a generic stem such as index is not matched by the bare stem or its PascalCase form either', () => {
+  const { dir, store, cleanup } = makeProject({
+    'src/legacy/index.mjs': 'export const legacy = 1;\n',
+    'src/app.mjs': "import { x } from './index';\nconst Index = 1;\nconst index = 2;\n",
+  });
+  try {
+    const dead = store.create(articleRec('legacy-feat', ['src/legacy/index.mjs'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const i = bucketOf(p.candidates.find((x) => x.article === dead.id), 'src/legacy/index.mjs');
+    assert.equal(i.bucket, 'delete', i.reason);
+  } finally {
+    cleanup();
+  }
+});

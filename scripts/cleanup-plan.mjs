@@ -13,7 +13,13 @@
 //            check could not run. Fails closed: unmeasured means kept.
 //   delete   on disk, no live owner, no reference from any other file.
 // A reference is a mention of the filename, the stem, the stem's PascalCase or
-// camelCase form, or (for a .gd file) the class_name the file declares.
+// camelCase form, or (for a .gd file) the class_name the file declares. A
+// generic basename (README, index, main) names every such file in the repo, so
+// only a path-qualified mention counts for it.
+// The paths of one deletable article die together: a reference from another
+// path of the same article that is itself being deleted does not keep a path.
+// A reference from any other file does, and a path that stays (keep, release)
+// is such a file, so what a kept path names stays with it.
 // Only `delete` paths reach the top-level delete_paths list. An article whose
 // every path is absent is not a candidate at all (decision
 // cleanup-plan-skips-deprecated-articles-whose-files-are-all-gone): its files
@@ -21,7 +27,7 @@
 // plan. A path that cannot be statted for any reason but ENOENT counts as
 // present. The planner opens a read-only copy of the store and never writes to it.
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, join, posix } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { arg, openProjectReadOnly } from './lib/project.mjs';
 
@@ -30,6 +36,9 @@ import { arg, openProjectReadOnly } from './lib/project.mjs';
 const ARTICLE_CAP = 10000;
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 const LIST_LIMIT = 5;
+// Stems (compared case-insensitively) that name a role, not a feature: a
+// mention of the bare name says nothing about one particular file.
+const GENERIC_STEMS = new Set(['readme', 'index', 'main', 'mod', '__init__', 'changelog', 'license', 'contributing']);
 
 const target = arg('--target') ?? process.cwd();
 
@@ -56,16 +65,25 @@ function gitUnavailable() {
 // What a reference to the path looks like: its basename, the basename without
 // the extension, that stem in PascalCase and camelCase (foo_bar -> FooBar,
 // fooBar), and for a .gd file every `class_name` it declares, which is the name
-// other scripts use and `extends`. Returns { needles } or { error } when the
-// file cannot be read for its class_name.
+// other scripts use and `extends`. A generic basename (GENERIC_STEMS) gets the
+// path-qualified forms instead: the full repo-relative path, and its last
+// directory segment plus the basename and plus the stem. Returns { needles } or
+// { error } when the file cannot be read for its class_name.
 function needlesFor(path) {
   const base = basename(path);
   const dot = base.lastIndexOf('.');
   const stem = dot > 0 ? base.slice(0, dot) : base;
-  const words = stem.split(/[^A-Za-z0-9]+/).filter(Boolean);
-  const pascal = words.map((w) => w[0].toUpperCase() + w.slice(1)).join('');
-  const camel = pascal ? pascal[0].toLowerCase() + pascal.slice(1) : '';
-  const needles = [base, stem, pascal, camel];
+  let needles;
+  if (GENERIC_STEMS.has(stem.toLowerCase())) {
+    const dirSegment = basename(posix.dirname(path));
+    needles = [path];
+    if (dirSegment && dirSegment !== '.') needles.push(`${dirSegment}/${base}`, `${dirSegment}/${stem}`);
+  } else {
+    const words = stem.split(/[^A-Za-z0-9]+/).filter(Boolean);
+    const pascal = words.map((w) => w[0].toUpperCase() + w.slice(1)).join('');
+    const camel = pascal ? pascal[0].toLowerCase() + pascal.slice(1) : '';
+    needles = [base, stem, pascal, camel];
+  }
   if (base.endsWith('.gd')) {
     let text;
     try {
@@ -129,7 +147,9 @@ function buildPlan(store) {
   };
 
   let gitWhy;
-  const classify = (a, path) => {
+  // The verdict that needs no reference comparison, or { refs, matched } when
+  // the path is on disk, unowned and has to be weighed against its referrers.
+  const preliminary = (a, path) => {
     const owners = (liveOwners.get(path) ?? []).filter((o) => o.id !== a.id).map((o) => o.slug);
     if (owners.length) return ['release', `also owned by live article(s) ${listed(owners)}; only this article's ownership goes`];
     let st;
@@ -144,8 +164,36 @@ function buildPlan(store) {
     if (gitWhy) return ['keep', `reference check could not run: ${gitWhy}`];
     const { refs, matched, error } = referencesTo(path);
     if (error) return ['keep', `reference check could not run: ${error}`];
-    if (refs.length) return ['keep', `referenced by ${refs.length} other file(s): ${listed(refs)} (matched ${listed(matched)})`];
-    return ['delete', 'on disk, no live owner, and no other tracked file references its filename, stem or declared class'];
+    return { refs, matched };
+  };
+
+  // Every path of one deletable article, to its [bucket, reason]. The paths that
+  // are only waiting on their referrers form the dying group; a path with a
+  // referrer outside the group is kept and leaves the group, which can put a
+  // referrer of another path outside it, so this runs until nothing changes.
+  const classifyArticle = (a) => {
+    const verdicts = new Map();
+    const group = new Map();
+    for (const path of new Set(a.files.map((f) => f.path))) {
+      const r = preliminary(a, path);
+      if (Array.isArray(r)) verdicts.set(path, r);
+      else group.set(path, r);
+    }
+    for (let changed = true; changed; ) {
+      changed = false;
+      for (const [path, { refs, matched }] of group) {
+        const outside = refs.filter((f) => !group.has(f));
+        if (!outside.length) continue;
+        verdicts.set(path, ['keep', `referenced by ${outside.length} other file(s): ${listed(outside)} (matched ${listed(matched)})`]);
+        group.delete(path);
+        changed = true;
+      }
+    }
+    for (const [path, { refs }] of group) {
+      const ownDeleted = refs.length ? '; references from this article\'s own deleted files do not count' : '';
+      verdicts.set(path, ['delete', `on disk, no live owner, and no other tracked file references its filename, stem or declared class${ownDeleted}`]);
+    }
+    return verdicts;
   };
 
   const candidates = articles
@@ -164,8 +212,9 @@ function buildPlan(store) {
       let buckets = null;
       if (deletable) {
         buckets = { delete: [], release: [], absent: [], keep: [] };
+        const verdicts = classifyArticle(a);
         for (const path of new Set(a.files.map((f) => f.path))) {
-          const [bucket, reason] = classify(a, path);
+          const [bucket, reason] = verdicts.get(path);
           buckets[bucket].push({ path, reason });
         }
       }
