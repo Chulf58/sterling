@@ -71,9 +71,10 @@ export const CONDUCTOR_AGENT = 'sterling/conductor';
 export const ROSTER = ['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'librarian'];
 export { STERLING_NPM_PACKAGE, parseJsonc };
 export const STORE_GUARD_PATTERNS =['**/.sterling/sterling.db*', '.sterling/sterling.db*'];
-export const SHELL_STORE_GUARD_PATTERN = '*sterling.db*';
-/** The store named by path inside a shell command, for a "*" block that also matches read, grep, webfetch and edit. */
-export const SHELL_STORE_PATH_PATTERN = '*.sterling/sterling.db*';
+// The shell denies an earlier Sterling wrote into shell, bash and "*" blocks. They are no longer
+// written, and guardPermission removes them (decision
+// opencode-store-guard-allows-read-only-shell-commands-like-h15): they refused reads too.
+const LEGACY_SHELL_DENIES = ['*sterling.db*', '*.sterling/sterling.db*'];
 const PACKAGE_MARKER = 'sterling-generated';
 const EXCLUDE_BEGIN = '# >>> sterling opencode (managed by Sterling init/update; per-user files, never committed)';
 const EXCLUDE_END = '# <<< sterling opencode';
@@ -625,47 +626,60 @@ function withGuard(value, patterns) {
   return out;
 }
 
+/** A rule object without the shell denies an earlier Sterling wrote; a rule on the same pattern with another effect is the user's and stays. An identical deny the user wrote is removed too: it cannot be told from Sterling's. */
+function withoutLegacyShellDenies(rules) {
+  return Object.fromEntries(Object.entries(rules).filter(([k, v]) => !(LEGACY_SHELL_DENIES.includes(k) && v === 'deny')));
+}
+
 /**
  * A permission block with the store guard, for the top level and for an agent alike.
  * OpenCode 2.0.22 flattens the block into one rule list in key order (bash is shell,
  * write and patch are edit, "*" is every action) and the last matching rule wins
- * (finding opencode-only-machine-live-acceptance-p7-october-2026: a bash block after
- * shell re-allowed `ls -la .sterling/sterling.db`). So the user's keys stay in their
- * order with their rules, every block that can match edit or shell ends with the guard,
- * and edit, shell and bash are appended holding only the guard when absent. No "*"
- * rule is added, so every verdict for a path or command that is not the store stands.
- * The shell guard is the broad *sterling.db*, because 2.0.22 checks each simple command
- * of a shell line on its own (`cd .sterling && sqlite3 sterling.db` reaches the matcher
- * as `sqlite3 sterling.db`); it also denies shell commands that only name such a file.
- * A user's "*" block matches read, grep, webfetch and edit too, so it gets the store by
- * path, and keeps the broad pattern only when no shell-family block follows it (the user
- * wrote shell and bash before "*"), where its rules are the last a shell command meets.
- * Returns { value } or { bad: <the malformed key> }.
+ * (finding opencode-only-machine-live-acceptance-p7-october-2026). So the user's keys
+ * stay in their order with their rules, every block that can match edit ends with the
+ * guard, and edit is appended holding only the guard when absent. No "*" rule is added,
+ * so every verdict for a path that is not the store stands. A user's "*" block matches
+ * read, grep, webfetch and shell too, so the store paths denied there also refuse the
+ * read tool on the store and a shell command that names it behind a directory prefix.
+ * Shell commands get no rule here: the server plugin's evaluate hook is the one shell
+ * guard (store-guard.mjs), because a config pattern cannot tell a read from a write
+ * (decision opencode-store-guard-allows-read-only-shell-commands-like-h15). The shell
+ * denies an earlier Sterling wrote (LEGACY_SHELL_DENIES) are removed from shell, bash
+ * and "*" blocks, and a shell or bash block left empty by that is dropped; a string
+ * shell or bash value is the user's and is left as written.
+ * Returns { value, removedShellDeny } or { bad: <the malformed key> }.
  */
 export function guardPermission(permission) {
   let perm = permission ?? {};
   if (typeof perm === 'string') perm = { '*': perm };
   if (typeof perm !== 'object' || perm === null || Array.isArray(perm)) return { bad: '' };
-  const keys = Object.keys(perm);
-  const shellAfterStar = SHELL_FAMILY.some((k) => !keys.includes(k) || keys.indexOf(k) > keys.indexOf('*'));
-  const patternsFor = (key) => {
-    if (key === '*') return [...STORE_GUARD_PATTERNS, shellAfterStar ? SHELL_STORE_PATH_PATTERN : SHELL_STORE_GUARD_PATTERN];
-    if (EDIT_FAMILY.includes(key)) return STORE_GUARD_PATTERNS;
-    if (SHELL_FAMILY.includes(key)) return [SHELL_STORE_GUARD_PATTERN];
-    return null;
-  };
   const out = {};
+  let removedShellDeny = false;
+  const strip = (rules) => {
+    const kept = withoutLegacyShellDenies(rules);
+    if (Object.keys(kept).length !== Object.keys(rules).length) removedShellDeny = true;
+    return kept;
+  };
   for (const [key, value] of Object.entries(perm)) {
-    const patterns = patternsFor(key);
-    if (!patterns) {
+    if (SHELL_FAMILY.includes(key)) {
+      if (typeof value === 'string') out[key] = value;
+      else if (typeof value !== 'object' || value === null || Array.isArray(value)) return { bad: key };
+      else {
+        const kept = strip(value);
+        if (Object.keys(kept).length || !Object.keys(value).length) out[key] = kept;
+      }
+      continue;
+    }
+    if (key !== '*' && !EDIT_FAMILY.includes(key)) {
       out[key] = value;
       continue;
     }
-    out[key] = withGuard(value, patterns);
-    if (out[key] === null) return { bad: key };
+    const guarded = withGuard(value, STORE_GUARD_PATTERNS);
+    if (guarded === null) return { bad: key };
+    out[key] = key === '*' ? strip(guarded) : guarded;
   }
-  for (const key of ['edit', 'shell', 'bash']) if (out[key] === undefined) out[key] = withGuard({}, patternsFor(key));
-  return { value: out };
+  if (out.edit === undefined) out.edit = withGuard({}, STORE_GUARD_PATTERNS);
+  return { value: out, removedShellDeny };
 }
 
 /**
@@ -695,9 +709,9 @@ function agentFiles(dir, { flat = false, prefix = '', seen = new Set() } = {}) {
   return files;
 }
 
-const GUARDED_KEYS = new Set(['*', ...EDIT_FAMILY, ...SHELL_FAMILY]);
+const GUARDED_KEYS = new Set(['*', ...EDIT_FAMILY]);
 
-/** True when an agent file's frontmatter has permission rules that can allow edit or shell (any value but deny for "*", edit, write, patch, shell or bash). */
+/** True when an agent file's frontmatter has permission rules that can allow edit (any value but deny for "*", edit, write or patch). */
 function agentFileLoosensGuard(text) {
   const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1];
   if (!fm) return false;
@@ -721,7 +735,7 @@ function agentFileLoosensGuard(text) {
 
 // The first OpenCode with the plugin permission evaluate hook the server plugin's store
 // guard uses (store-guard.mjs; measured on 2.0.22). Below it, a project agent file's own
-// edit or shell rules override the config guard and nothing else denies the store.
+// edit rules override the config guard, and no shell command is guarded at all.
 export const EVALUATE_HOOK_MIN_VERSION = '2.0.22';
 
 /** True when OpenCode `version` (x.y.z) has the permission evaluate hook; false when below it or unreadable. */
@@ -789,7 +803,7 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir(),
           continue;
         }
         if (agentFileLoosensGuard(text)) {
-          problems.push({ item: fwd(path), status: 'skipped', detail: `its permission rules can allow edit or shell, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name}" on this OpenCode (the plugin store guard needs ${EVALUATE_HOOK_MIN_VERSION} or later); upgrade OpenCode, or move its edit, write, patch, shell, bash and "*" rules into agent.${JSON.stringify(name)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
+          problems.push({ item: fwd(path), status: 'skipped', detail: `its permission rules can allow edit, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name}" on this OpenCode (the plugin store guard needs ${EVALUATE_HOOK_MIN_VERSION} or later); upgrade OpenCode, or move its edit, write, patch and "*" rules into agent.${JSON.stringify(name)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
         }
       }
     }
@@ -875,14 +889,16 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
       extraRows.push({ item: `${rel} mcp.sterling`, status: 'skipped', detail: `KEPT: ${rel} has an mcp.sterling entry that differs from the entry Sterling wrote, so it is yours and stays; the Sterling plugin now adds its own sterling MCP entry, so remove yours unless you mean it to replace Sterling's` });
     }
   }
-  // Store guard (guardPermission): the edit deny alone did not cover the shell tool
-  // (`printf >> .sterling/sterling.db` got through, finding
-  // opencode-2-0-21-tool-shapes-execpath-and-shell-store-guard-october-2026).
+  // Store guard (guardPermission): the edit family only. The edit deny does not cover the
+  // shell tool (`printf >> .sterling/sterling.db` got through, finding
+  // opencode-2-0-21-tool-shapes-execpath-and-shell-store-guard-october-2026); the server
+  // plugin's evaluate hook guards shell commands, from OpenCode 2.0.22.
   const permission = config.permission ?? {};
   if (typeof permission !== 'object' || permission === null || Array.isArray(permission)) return [refusal(rel, `${rel}: "permission" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
   const top = guardPermission(permission);
   if (top.bad !== undefined) return [refusal(rel, `${rel}: "permission.${top.bad}" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
   config.permission = top.value;
+  let removedShellDeny = top.removedShellDeny;
   // Per-agent guard. An agent's own rules (its file's permission block) are evaluated
   // after the top-level block, so a user agent that allows bash re-allowed the store;
   // agent.<name>.permission in this file is evaluated after the rules of an agent file in
@@ -890,7 +906,7 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   // agents`, and a live shell call denied), but BEFORE those of a project agent file in
   // .opencode/ (measured: GET /api/agent/<name>, and a live call that ran); for those
   // the server plugin's permission evaluate hook holds the guard from 2.0.22 (store-guard.mjs),
-  // and below that visibleAgents reports such a file whose rules can allow edit or shell. An entry
+  // and below that visibleAgents reports such a file whose rules can allow edit. An entry
   // for a name OpenCode does not otherwise know creates an agent (measured), so a
   // guard-only entry is written only for a visible agent and dropped when it is gone.
   const agents = config.agent ?? {};
@@ -898,10 +914,15 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   const visible = visibleAgents({ projectDir, env, home, checkAgentFiles: !hasEvaluateHook(opencodeVersion) });
   extraRows.push(...visible.problems);
   const guardOnly = JSON.stringify({ permission: guardPermission(undefined).value });
+  // The guard-only entry an earlier Sterling wrote, with its shell and bash denies.
+  const legacyDeny = { [LEGACY_SHELL_DENIES[0]]: 'deny' };
+  const legacyGuardOnly = JSON.stringify({ permission: { ...guardPermission(undefined).value, shell: legacyDeny, bash: legacyDeny } });
   const names = new Set(visible.names);
   for (const [name, entry] of Object.entries(agents)) {
     // While a config is unreadable, its agents are unknown: keep every earlier entry.
-    if (visible.incomplete || JSON.stringify(entry) !== guardOnly) names.add(name);
+    const text = JSON.stringify(entry);
+    if (visible.incomplete || (text !== guardOnly && text !== legacyGuardOnly)) names.add(name);
+    else if (text === legacyGuardOnly) removedShellDeny = true;
   }
   const nextAgents = {};
   for (const [name, entry] of Object.entries(agents)) {
@@ -910,6 +931,7 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
     const perm = guardPermission(entry.permission);
     if (perm.bad !== undefined) return [refusal(rel, `${rel}: "agent.${name}.permission${perm.bad ? `.${perm.bad}` : ''}" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
     nextAgents[name] = { ...entry, permission: perm.value };
+    if (perm.removedShellDeny) removedShellDeny = true;
   }
   for (const name of [...names].sort()) if (!nextAgents[name]) nextAgents[name] = JSON.parse(guardOnly);
   // An entry for an agent seen only through this run's environment is written, so the
@@ -918,6 +940,7 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   const envOnly = visible.envOnly.filter((name) => JSON.stringify(nextAgents[name]) === guardOnly);
   if (Object.keys(nextAgents).length) config.agent = nextAgents;
   else delete config.agent;
+  if (removedShellDeny) notes.push('removed the shell deny on *sterling.db* an earlier init wrote, and an identical rule of your own if you had one, since the two cannot be told apart (the Sterling plugin now guards shell commands, and a command that only reads the store passes)');
   notes.push(`per-agent store guard on ${names.size} agents (agent files in the global config dir and ${fwd('.opencode')}, and the config "agent" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
   if (envOnly.length) notes.push(`guard entries for agents seen only through this run's OPENCODE_CONFIG_DIR, OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT: ${envOnly.join(', ')}; OpenCode started without that environment lists each as an agent with no prompt, and a rerun of /sterling:update without it removes them`);
   if (env.OPENCODE_CONFIG_DIR) notes.push(`OPENCODE_CONFIG_DIR replaced the global config dir for this run, so agents in ${fwd(opencodeConfigDir({ env, home }))} were not checked`);
@@ -929,7 +952,7 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   if (after === before) return [{ item: rel, status: 'matches', detail: notes.join('; ') }, ...extraRows];
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, after);
-  return [{ item: rel, status: before === null ? 'created' : 'refreshed', detail: ['store-guard edit and shell deny, default_agent', ...notes].join('; ') }, ...extraRows];
+  return [{ item: rel, status: before === null ? 'created' : 'refreshed', detail: ['store-guard edit deny, default_agent', ...notes].join('; ') }, ...extraRows];
 }
 
 function excludeLines(wholeDir) {

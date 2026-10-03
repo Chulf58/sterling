@@ -977,3 +977,50 @@ test('nine fresh decisions: only the eight rendered pointers are guard-credited;
 // SABOTAGE: attaching every fresh decision's identity to the block (the
 // pre-fix h19-dispatch-staging.mjs:411) credits the ninth — the
 // `!credited.has(ninth)` assertion goes red.
+
+// Board 56d571a3: a decision block the delivery cap cut to an excerpt credited
+// none of the pointers it showed, so the same decisions staged again on every
+// dispatch. A pointer whose lines all rendered earns its discovery mark; one
+// cut part-way, or not shown, earns none.
+test('clipped decision block: the fully rendered pointers are guard-credited and do not stage again; the cut ones do', () => {
+  const { dir, store, cleanup } = makeProject({ delivery: { total_cap_bytes: 1500 } });
+  try {
+    const ids = [];
+    for (let i = 0; i < 6; i += 1) {
+      const rec = decisionRecord(`clipped choice ${i} ${'w'.repeat(90)}`, ['src/a.mjs'], {
+        updated_at: `2026-09-0${i + 1}T12:00:00.000Z`,
+        alternatives_rejected: [{ option: `rejected alternative ${i} ${'v'.repeat(90)}`, reason: 'r' }],
+      });
+      store.create(rec);
+      ids.push(rec.id);
+    }
+    // A decision's pointer is two lines here; it is whole only with both.
+    const wholeIn = (ctx) => {
+      const lines = ctx.split('\n');
+      return ids.filter((id) => {
+        const at = lines.findIndex((l) => l.includes(`(knowledge_get ${id})`) && /^ {2}→ /.test(l));
+        return at >= 0 && /^ {4}✗ ALREADY REJECTED: /.test(lines[at + 1] ?? '');
+      });
+    };
+
+    const transcript = stageDispatch(dir, 'Go read src/a.mjs and fix the bug there.');
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /the rest held back by the delivery cap/, `control: the block is clipped to an excerpt:\n${ctx}`);
+    const whole = wholeIn(ctx);
+    assert.ok(whole.length >= 1 && whole.length < ids.length, `control: some pointers rendered whole, not all (${whole.length} of ${ids.length})`);
+
+    const credited = guardOf(dir, 'agent-1').discovery.map((e) => e.id).filter((id) => ids.includes(id));
+    assert.deepEqual([...credited].sort(), [...whole].sort(), 'exactly the fully rendered decisions earn a discovery mark');
+
+    const transcript2 = stageDispatch(dir, 'Go read src/a.mjs again and finish the fix.');
+    const again = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript2), dir);
+    assert.equal(again.code, 0, again.stderr);
+    const againCtx = JSON.parse(again.stdout).hookSpecificOutput.additionalContext;
+    for (const id of whole) assert.ok(!againCtx.includes(id), `decision ${id} was fully rendered and must not stage again`);
+    assert.ok(ids.some((id) => !whole.includes(id) && againCtx.includes(id)), 'a decision the first payload cut stages on the next dispatch');
+  } finally {
+    cleanup();
+  }
+});

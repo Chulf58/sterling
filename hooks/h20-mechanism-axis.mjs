@@ -8961,6 +8961,12 @@ function renderArticlePointers(articles, cap = ARTICLE_POINTER_CAP, { remedy } =
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
+function decisionPointerLines(d) {
+  const lines = [`  \u2192 ${authorityMarker(d)}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`];
+  const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
+  if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
+  return lines;
+}
 function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed, matchLabel = "for this path" } = {}) {
   const shown = decisions.slice(0, cap);
   const fullTotal = total ?? decisions.length;
@@ -8968,11 +8974,7 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
   const lines = [
     `\u25B8 DECISIONS ${matchLabel} (${fullTotal}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
-  for (const d of shown) {
-    lines.push(`  \u2192 ${authorityMarker(d)}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`);
-    const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
-    if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
-  }
+  for (const d of shown) lines.push(...decisionPointerLines(d));
   if (dropped > 0) {
     const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${fullTotal}`;
     lines.push(`  \u2026 ${dropped} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
@@ -9047,13 +9049,27 @@ function assembleOnce(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}, re
     }
     return out;
   };
-  const creditsFor = (survivors2) => {
+  const creditedEntries = (part, { full, keptLines }) => {
+    if (full) return idsOf(part);
+    if (part.contentClass !== "discovery" || !Number.isInteger(keptLines)) return [];
+    if (!Number.isInteger(part.headingLines) || part.headingLines < 0) return [];
+    const credited = [];
+    let used = part.headingLines;
+    for (const entry of idsOf(part)) {
+      if (!Number.isInteger(entry?.lines) || entry.lines < 1) break;
+      used += entry.lines;
+      if (used > keptLines) break;
+      credited.push(entry);
+    }
+    return credited;
+  };
+  const creditsFor = (rendered2) => {
     const emittedSubstance2 = [];
     const emittedDiscovery2 = [];
-    for (const part of survivors2) {
+    for (const [part, selection] of rendered2) {
       if (part.contentClass !== "substance" && part.contentClass !== "discovery") continue;
       const bucket = part.contentClass === "substance" ? emittedSubstance2 : emittedDiscovery2;
-      for (const entry of idsOf(part)) {
+      for (const entry of creditedEntries(part, selection)) {
         if (entry?.identity) bucket.push({ identity: entry.identity, revision: entry.revision });
       }
     }
@@ -9104,7 +9120,7 @@ ${line}` : line;
         return;
       }
       if (best) {
-        selected.set(part, { text: best, full: false });
+        selected.set(part, { text: best, full: false, keptLines: bestLines });
         return;
       }
       selected.delete(part);
@@ -9172,15 +9188,15 @@ ${line}` : line;
     omitted.length = 0;
     omitted.push(...baseOmitted);
     reserved.clear();
-    let rendered = selected.size;
+    let rendered2 = selected.size;
     let room = Math.min(ordinaryCeiling - ordinaryBytesUsed(), DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes());
     for (const part of ordinaryParts) {
       const ptr = pointerFor(part);
       if (!ptr) continue;
-      const cost = bytes(ptr) + sepCost(rendered);
+      const cost = bytes(ptr) + sepCost(rendered2);
       if (cost > room) continue;
       reserved.set(part, cost);
-      rendered += 1;
+      rendered2 += 1;
       room -= cost;
     }
     const roomFor = (size) => size > 0 ? Math.max(0, Math.min(room, size + bytes(sep))) : 0;
@@ -9263,8 +9279,8 @@ ${line}` : line;
       break;
     }
   }
-  const survivors = items.filter((part) => selected.has(part) && selected.get(part).full);
-  const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
+  const rendered = items.filter((part) => selected.has(part)).map((part) => [part, selected.get(part)]);
+  const { emittedSubstance, emittedDiscovery } = creditsFor(rendered);
   const omittedEntries = dedupeEntries(omitted.flatMap(disclosureIdsOf));
   const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
   const result = {
@@ -9288,7 +9304,8 @@ function decisionPointerPart(rel, decisions, { widen, cap = DECISION_POINTER_CAP
   return {
     kind: "ordinary",
     contentClass: "discovery",
-    identities: shown.map(entry),
+    headingLines: 1,
+    identities: shown.map((d) => ({ ...entry(d), lines: decisionPointerLines(d).join("\n").split("\n").length })),
     // Every decision the block represents: if the whole block is omitted, its
     // '+N more' disclosure counts and names all of them, not only the slice.
     disclosureIdentities: decisions.map(entry),
@@ -9888,6 +9905,19 @@ var HOST_TEXT = {
   opencode: { correction: "by continuing it through the subagent tool with its sessionID (or re-dispatch)", timing: "" }
 };
 var MAX_DECISIONS = 5;
+function shareWindow(items, cap, recordOf, rank = (group) => group) {
+  const groups = /* @__PURE__ */ new Map([["project", []]]);
+  for (const item of items) {
+    const source = recordOf(item).source_store ?? "project";
+    if (!groups.has(source)) groups.set(source, []);
+    groups.get(source).push(item);
+  }
+  const lists = [...groups.values()].filter((group, i) => i === 0 || group.length).map(rank);
+  const shares = allocateShares(lists.map((list) => list.length), cap);
+  const shown = lists.flatMap((list, i) => list.slice(0, shares[i]));
+  const kept = new Set(shown);
+  return { shown, rest: items.filter((item) => !kept.has(item)) };
+}
 var QUESTION_WORDS_RE = /\b(where|what|which|who|whom|whose|when|why|how|does|do|did|is|are|was|were|can|could|would|will|should)\b/i;
 function isQuestionShapedPrompt(text) {
   const t = String(text ?? "");
@@ -10004,8 +10034,9 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
   });
   if (!fresh.length) return null;
   const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
-  const decisions = fresh.filter((x) => x.record.type === "decision").map((x) => ({ ...x, record: withInboundSupersedes(store, x.record) }));
-  const articles = fresh.filter((x) => x.record.type === "feature_article");
+  const hazardWindow = shareWindow(hazards.map((x) => x.record), HAZARD_CAP, (r) => r, (group) => cappedHazards(group, group.length));
+  const decisions = ((w) => [...w.shown, ...w.rest])(shareWindow(fresh.filter((x) => x.record.type === "decision"), MAX_DECISIONS, (x) => x.record)).map((x) => ({ ...x, record: withInboundSupersedes(store, x.record) }));
+  const articles = ((w) => [...w.shown, ...w.rest])(shareWindow(fresh.filter((x) => x.record.type === "feature_article"), ARTICLE_POINTER_CAP, (x) => x.record));
   const priorAnswers = fresh.filter(
     (x) => x.record.type === "research_finding" || x.record.type === "disconfirmed_hypothesis" || x.record.type === "open_question"
   );
@@ -10027,14 +10058,15 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
     return t.length <= n ? t : `${t.slice(0, n)}\u2026`;
   };
   const pointerHead = (r, name) => `  \u2192 ${clip2(name, 80)} (${String(r.id).slice(0, 8)})`;
+  const questionDecisionLine = (d) => {
+    const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
+    return `${pointerHead(d, d.slug || d.title || d.statement)} \u2014 ${authorityMarker(d)}${clip2(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` + (rejected ? ` \u2014 rejected: ${clip2(rejected, DECISION_REJECTED_CLIP)}` : "");
+  };
   const questionDecisionText = (records, remedy) => {
     const shown = records.slice(0, MAX_DECISIONS);
     return [
       `\u25B8 DECISIONS for this subject (${records.length}) \u2014 one may already settle the question you just put; the user's pick must not silently contradict it. One line each, knowledge_get the id for the full ruling:`,
-      ...shown.map((d) => {
-        const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
-        return `${pointerHead(d, d.slug || d.title || d.statement)} \u2014 ${authorityMarker(d)}${clip2(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` + (rejected ? ` \u2014 rejected: ${clip2(rejected, DECISION_REJECTED_CLIP)}` : "");
-      }),
+      ...shown.map(questionDecisionLine),
       ...records.length > shown.length ? [`  \u2026 ${records.length - shown.length} more NOT shown (cap ${MAX_DECISIONS}) \u2014 ${remedy} for the full set`] : []
     ].join("\n");
   };
@@ -10050,7 +10082,11 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
   };
   const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
   const hazardBlocks = [
-    ...hazardParts(hazards.map((x) => x.record), {
+    // Only the read-share slice is handed over; `total` and `suppressed`
+    // restate the true counts so the '+N more' line still names every match.
+    ...hazardParts(hazardWindow.shown, {
+      total: hazards.length,
+      suppressed: hazardWindow.rest.length,
       remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
       // Matched on the prompt's SUBJECT, not a file path (the H19 label).
       matchLabel: "for this subject",
@@ -10058,9 +10094,14 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
       mode: isQuestion2 ? "question" : isDispatch ? "lead" : "whole"
     })
   ];
+  const asQuestionPart = (part) => ({
+    ...part,
+    text: questionDecisionText(decisions.map((x) => x.record), decisionRemedy),
+    identities: part.identities.map((e, i) => ({ ...e, lines: questionDecisionLine(decisions[i].record).split("\n").length }))
+  });
   const decisionBlocks = [
     ...decisions.length ? [
-      ((part) => isQuestion2 ? { ...part, text: questionDecisionText(decisions.map((x) => x.record), decisionRemedy) } : part)(
+      ((part) => isQuestion2 ? asQuestionPart(part) : part)(
         decisionPointerPart("(subject match)", decisions.map((x) => x.record), {
           widen: decisionRemedy,
           cap: MAX_DECISIONS,

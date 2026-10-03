@@ -25,12 +25,13 @@
 //      the store and appended to the next prompt, as H2 does on Claude Code;
 //   5. the compaction hook: the session's delivery receipts are removed, so
 //      delivery fires again after compaction drops context.
-//   6. the store guard: a permission evaluate hook that denies shell, edit, write and
-//      patch requests on .sterling/sterling.db whatever the agent's rules say
-//      (store-guard.mjs). It is registered at every location, outside a Sterling
+//   6. the store guard: a permission evaluate hook that denies edit, write and patch
+//      requests on .sterling/sterling.db, and shell requests with a write shape aimed
+//      at it, whatever the agent's rules say (store-guard.mjs). It is registered at every location, outside a Sterling
 //      project too (a project init'd while OpenCode runs is guarded at once) and in
 //      the maintenance worker's child. The installer's config guard in
-//      .opencode/opencode.json (scripts/lib/opencode-install.mjs) stays as a second layer.
+//      .opencode/opencode.json (scripts/lib/opencode-install.mjs) stays as a second layer
+//      for edit, write and patch; it carries no shell rule.
 // Every handler is fenced: a throw is logged to .sterling/transient and turned
 // into a notice, never raised into OpenCode. Outside a Sterling project (no
 // .sterling/sterling.db above the session directory) every handler is a no-op, and
@@ -291,7 +292,7 @@ export function createSterlingServer(deps = {}) {
       session = ctx.session;
       const root = rootOf();
       if (!guarded) {
-        const why = `this OpenCode has no ctx.permission.hook (it needs 2.0.22 or later), so the Sterling store guard (deny on .sterling/sterling.db) is NOT registered at ${directory}; only the config guard in .opencode/opencode.json holds, and project agent files in .opencode/agents/ with their own shell or edit rules are unguarded`;
+        const why = `this OpenCode has no ctx.permission.hook (it needs 2.0.22 or later), so the Sterling store guard (deny on .sterling/sterling.db) is NOT registered at ${directory}; shell commands are NOT guarded at all, only the edit, write and patch deny in .opencode/opencode.json holds, and project agent files in .opencode/agents/ with their own edit rules are unguarded`;
         process.stderr.write(`[sterling] ${why}\n`);
         if (root) {
           logLine(root, `store guard: ${why}`);

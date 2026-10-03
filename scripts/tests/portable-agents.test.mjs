@@ -355,13 +355,19 @@ test('sync refuses a foreign same-named file and leaves it untouched', () => {
   }
 });
 
+// The spawned CLI also runs setupOpenCode, which on a machine with OpenCode 2 writes
+// the user's real ~/.config/opencode and the target's .opencode/agents/sterling/.
+// `npm test` switches it off through the lock-root-isolation preload; a targeted
+// `node --test` of this file has no preload, so the spawn sets it itself.
+const cliEnv = { ...process.env, STERLING_OPENCODE_SETUP_DISABLE: '1' };
+
 test('the sync-agents CLI (the /sterling:update fan-out) writes the portable set and exits 2 on a portable refusal', () => {
   const dir = tempTarget();
   try {
     // the portable set is work-only (decision project-mode-hobby-work-toggle-decides-flow)
     mkdirSync(join(dir, '.sterling'), { recursive: true });
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'work' }));
-    const cli = () => spawnSync(process.execPath, [join(root, 'scripts', 'sync-agents.mjs'), '--target', dir], { encoding: 'utf8', cwd: dir });
+    const cli = () => spawnSync(process.execPath, [join(root, 'scripts', 'sync-agents.mjs'), '--target', dir], { encoding: 'utf8', cwd: dir, env: cliEnv });
     const first = cli();
     assert.equal(first.status, 0, first.stdout + first.stderr);
     for (const name of PORTABLE) assert.match(first.stdout, new RegExp(`^installed: \\.opencode/agents/${name}\\.md$`, 'm'));
@@ -442,7 +448,7 @@ test('the sync-agents CLI refuses (exit 2) when a symlinked plugin.json would sp
     mkdirSync(join(dir, 'scripts'), { recursive: true });
     writeFileSync(join(dir, 'scripts', 'architecture-projection.mjs'), '// project file\n');
     symlinkSync(join(outside, 'plugin.json'), join(dir, '.claude-plugin', 'plugin.json'));
-    const r = spawnSync(process.execPath, [join(root, 'scripts', 'sync-agents.mjs'), '--target', dir], { encoding: 'utf8', cwd: dir });
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'sync-agents.mjs'), '--target', dir], { encoding: 'utf8', cwd: dir, env: cliEnv });
     assert.equal(r.status, 2, r.stdout + r.stderr);
     assert.match(r.stdout, /^refused_unsafe_path: \.opencode\/agents\/ — .*plugin\.json is a symlink/m);
     assert.doesNotMatch(r.stdout, /SKIPPED — the target is a Sterling clone/);
