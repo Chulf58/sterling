@@ -27,6 +27,7 @@ import {
   type ToolStore,
 } from '@sterling/store';
 import { AttestationRefusal, collectAttestationEvidence, readHeadFile, type AttestationEvidence } from './attestation-proof.js';
+import { EntryReachability, type EntryVerdict } from './entry-reachability.js';
 
 export interface SkippedCheck {
   check: string;
@@ -4057,6 +4058,14 @@ export class SterlingTools {
   knowledgeQuery(opts: QueryOptions): (DurableRecord & { staleness?: object; verify_before_use?: boolean })[] {
     const nowMs = Date.parse(this.now());
     const ageDays = (iso: string) => Math.floor((nowMs - Date.parse(iso)) / DAY_MS);
+    // One registry reader per tree root for this call, so the state check below
+    // reads hooks.json, server.ts, BIN_ENTRIES and the agent registry at most once.
+    const reachability = new Map<string, EntryReachability>();
+    const reachabilityFor = (root: string) => {
+      let r = reachability.get(root);
+      if (!r) reachability.set(root, (r = new EntryReachability(root)));
+      return r;
+    };
     return this.store.query(opts).map((record) => {
       if (record.type === 'research_finding') {
         const r = record as unknown as { source_date: string; capture_date: string; volatility_hint?: 'fast' | 'medium' | 'stable'; status: string };
@@ -4329,33 +4338,75 @@ export class SterlingTools {
         // The report asks for it, but the deletion arm above already mints an item
         // naming the missing file, and a second lane on the same fact is the
         // double-reporting this batch exists to reduce.
+        //
+        // THE WIRING TRIGGERS (decision feature-article-states-follow-the-spec-meaning):
+        // built = code exists but nothing reaches it; wired_in = reachable from a
+        // registry; active = in use. The article marks its entry with
+        // files[].entry and EntryReachability looks it up (see that module for
+        // the per-kind registries and what the lookup does not catch):
+        //  - wired_in/active with an entry no registry reaches;
+        //  - wired_in/active with no entry marked;
+        //  - built with an entry a registry DOES reach (it looks wired_in).
+        // An entry of a kind no registry covers (a library), and every entry outside a
+        // Sterling clone, is not judged. All
+        // findings go into the ONE state_review item per article: the lane's
+        // identity is the article (enqueueSystemTodo), and a changed text
+        // updates that item rather than minting a second.
         const state = (record as unknown as { state?: string }).state;
-        const unverifiedPaths = (a.files ?? []).filter((f) => (f as { unverified?: boolean }).unverified).map((f) => f.path);
+        const files = (a.files ?? []) as { path: string; role?: string; unverified?: boolean; entry?: boolean }[];
+        const unverifiedPaths = files.filter((f) => f.unverified).map((f) => f.path);
         const overStated = (state === 'planned' || state === 'dormant') && liveBytes > PLANNED_CREDIBLE_BYTES;
-        if (overStated || unverifiedPaths.length) {
+        const claimsReach = state === 'wired_in' || state === 'active';
+        const entries = files.filter((f) => f.entry);
+        const verdicts: EntryVerdict[] =
+          claimsReach || state === 'built'
+            ? entries.map((f) => reachabilityFor(treeRoot).judge(f.path, f.role ?? '')).filter((v): v is EntryVerdict => v !== null)
+            : [];
+        const unreached = claimsReach ? verdicts.filter((v) => !v.reached) : [];
+        const missingEntry = claimsReach && entries.length === 0;
+        const looksWired = state === 'built' ? verdicts.filter((v) => v.reached) : [];
+        if (overStated || unverifiedPaths.length || unreached.length || missingEntry || looksWired.length) {
           const reasons: string[] = [];
           if (overStated) {
             reasons.push(
               `it declares state '${state}' while the files it owns hold ${liveBytes} bytes of code on disk — 'planned' over written code reads as "this does not exist yet" to everyone who queries it`
             );
           }
+          for (const v of unreached) {
+            reasons.push(`it declares state '${state}' but its entry ${v.path} is not reached (${v.detail})`);
+          }
+          if (missingEntry) {
+            reasons.push(`it declares state '${state}' but marks no files[] entry, so nothing can check that a registry reaches it`);
+          }
+          for (const v of looksWired) {
+            reasons.push(`it declares state 'built' but its entry ${v.path} is reached (${v.detail}) — it looks wired_in`);
+          }
           if (unverifiedPaths.length) {
             reasons.push(
               `its files[] roles for ${unverifiedPaths.join(', ')} are still flagged unverified — the role was never written from the source, so the article does not yet describe what those files do`
             );
           }
+          const steps: string[] = [];
+          if (overStated || looksWired.length) steps.push('knowledge_update the state');
+          if (unreached.length) steps.push(`for ${unreached.map((v) => v.path).join(', ')}: wire it in, or knowledge_update the state to 'built'`);
+          if (missingEntry) {
+            steps.push(
+              `mark the file a registry reaches as the entry, one targeted call: knowledge_edit(id: '${a.id}', field: 'files[path=<entry path>].entry', find: 'false', replace: 'true') — a tool entry is server.ts or tools.ts with the tool name in its role`
+            );
+          }
+          const flagged = [...new Set([...unverifiedPaths, ...unreached.map((v) => v.path), ...looksWired.map((v) => v.path)])];
           this.maintenanceEnqueue({
             reason: 'state_review',
             text:
               `review article '${a.slug}' metadata against reality: ${reasons.join('; and ')}. ` +
               `Check the prose against the code before changing anything — in the reported case every acceptance criterion HELD and only the metadata was wrong, so the fix was a state change and a files[] role pass, not a rewrite. ` +
-              `Then knowledge_update the state` +
+              `Then ${steps.length ? steps.join('; then ') : 'knowledge_update the state'}` +
               (unverifiedPaths.length
                 ? `, and clear each unverified flag once its role is written from the file — one targeted call per path, never a whole-array files[] update: ` +
                   unverifiedPaths.map((p) => `knowledge_edit(id: '${a.id}', field: 'files[path=${p}].unverified', find: 'true', replace: 'false')`).join('; ')
                 : '') +
               `.`,
-            file_keys: unverifiedPaths.length ? unverifiedPaths : (a.files ?? []).map((f) => f.path).slice(0, DRIFT_ITEMS_PER_READ),
+            file_keys: flagged.length ? flagged : files.map((f) => f.path).slice(0, DRIFT_ITEMS_PER_READ),
             feature_link: a.id,
           });
         }
@@ -4678,7 +4729,15 @@ export class SterlingTools {
         );
       }
       const el = hits[0] as Record<string, unknown>;
-      const cur = el[sub];
+      // An ABSENT optional boolean the schema declares (files[].entry,
+      // files[].unverified) reads as false, so a flag that was never set can
+      // be set with find 'false' (decision feature-article-states-follow-the-spec-meaning).
+      const declaredBoolean =
+        el[sub] === undefined &&
+        !!schemaFor(old.type)
+          ?.fields.find((f) => f.name === base)
+          ?.element_fields?.some((f) => f.name === sub && f.type === 'boolean');
+      const cur = declaredBoolean ? false : el[sub];
       // BOOLEAN SUB-FIELD (Dome Farmer issue #48): a state_review item directs
       // clearing files[].unverified, and refusing every non-string left only a
       // whole-array knowledge_update. The exactly-once contract maps onto the
@@ -7104,7 +7163,6 @@ export class SterlingTools {
     'reconcile_needed',
     'refresh_reference',
     'stale_research',
-    'wire_in_dormant',
     'state_review',
   ]);
 

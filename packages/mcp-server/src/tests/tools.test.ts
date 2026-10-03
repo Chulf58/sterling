@@ -2506,7 +2506,10 @@ test("an 'active' article over real code raises nothing — the metadata is hone
   const { dir, tools, cleanup } = stateProject();
   try {
     writeFileSync(join(dir, 'src', 'housing.ts'), 'export const x = 1;\n'.repeat(300));
-    shippedArticle(tools, { state: 'active' });
+    // An active article marks its entry (decision
+    // feature-article-states-follow-the-spec-meaning); src/ is a kind the wiring
+    // check does not judge, so only the planned-over-code arm is in play here.
+    shippedArticle(tools, { state: 'active', files: [{ path: 'src/housing.ts', role: 'impl', entry: true }] });
     tools.knowledgeQuery({ types: ['feature_article'] });
     assert.equal(stateReviews(tools).length, 0);
   } finally {

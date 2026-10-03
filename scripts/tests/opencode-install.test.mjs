@@ -3,7 +3,7 @@
 // Every test runs against a temp HOME and temp git projects, with OpenCode stubbed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, cpSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, cpSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -27,8 +27,8 @@ function git(dir, args) {
   return r.stdout;
 }
 
-function project(mode) {
-  const dir = tmp('oc-proj-');
+function project(mode, parent = tmpdir()) {
+  const dir = mkdtempSync(join(parent, 'oc-proj-'));
   git(dir, ['init', '-q']);
   git(dir, ['config', 'user.email', 't@example.com']);
   git(dir, ['config', 'user.name', 't']);
@@ -46,6 +46,7 @@ function run(dir, home, extra = {}) {
   return setupOpenCode({ projectDir: dir, pluginRoot: repoRoot, env: { HOME: home }, home, installed: false, probe: OC2, ...extra });
 }
 
+const fwdPath = (p) => p.replaceAll('\\', '/');
 const statusOf = (result, suffix) => result.rows.find((r) => r.item.endsWith(suffix))?.status;
 const untracked = (dir) => git(dir, ['status', '--porcelain', '--untracked-files=all']).split('\n').filter(Boolean);
 
@@ -201,10 +202,20 @@ test('project config: a user bash block keeps its rules and meaning, in place, w
 // OpenCode 2.0.22 flattens the permission object into one rule list in key order,
 // mapping bash to shell and write and patch to edit, and the last matching rule wins
 // (measured with `opencode debug config` and `opencode debug agents`, finding
-// opencode-only-machine-live-acceptance-p7-october-2026). This is that evaluation.
+// opencode-only-machine-live-acceptance-p7-october-2026). This is that evaluation; glob
+// is the 2.0.22 binary's matcher: * is any run of characters (slashes included), ? is
+// one character, a trailing " *" also matches the bare command, backslashes are slashes.
+// A shell command reaches it split into its simple commands (`cd .sterling && sqlite3
+// sterling.db` is checked as `cd .sterling` and `sqlite3 sterling.db`); read and edit
+// get the path relative to the session directory, or absolute outside the project.
+const STORE_PATHS = ['.sterling/sterling.db', '.sterling/sterling.db-wal', '.sterling/sterling.db-shm', '.sterling/sterling.db-journal', 'sub/.sterling/sterling.db-wal', '../.sterling/sterling.db', '/home/u/p/.sterling/sterling.db-shm', 'C:\\p\\.sterling\\sterling.db'];
 const ACTION_ALIAS = { bash: 'shell', write: 'edit', patch: 'edit' };
 function effectOf(permission, action, resource) {
-  const glob = (p) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+  const glob = (p) => {
+    let re = p.replaceAll('\\', '/').replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+    if (re.endsWith(' .*')) re = `${re.slice(0, -3)}( .*)?`;
+    return { test: (r) => new RegExp(`^${re}$`, 's').test(r.replaceAll('\\', '/')) };
+  };
   let effect;
   for (const [key, value] of Object.entries(permission)) {
     const act = ACTION_ALIAS[key] ?? key;
@@ -248,10 +259,10 @@ test('project config: a user bash block cannot re-allow the store after the shel
   for (const c of cases) {
     const got = after(c);
     const label = JSON.stringify(c);
-    for (const cmd of ['ls -la .sterling/sterling.db', 'sqlite3 .sterling/sterling.db .tables', 'cat .sterling/sterling.db-wal']) {
+    for (const cmd of ['ls -la .sterling/sterling.db', 'sqlite3 .sterling/sterling.db .tables', 'cat .sterling/sterling.db-wal', 'sqlite3 sterling.db', 'cat /p/.sterling/sterling.db-shm']) {
       assert.equal(effectOf(got, 'shell', cmd), 'deny', `${label}: ${cmd}`);
     }
-    for (const path of ['.sterling/sterling.db', 'sub/.sterling/sterling.db-wal']) assert.equal(effectOf(got, 'edit', path), 'deny', `${label}: edit ${path}`);
+    for (const path of STORE_PATHS) for (const action of ['edit', ...('*' in c ? ['read'] : [])]) assert.equal(effectOf(got, action, path), 'deny', `${label}: ${action} ${path}`);
     for (const [action, resource] of probes) assert.equal(effectOf(got, action, resource), effectOf(c, action, resource), `${label}: ${action} ${resource} keeps the user's verdict`);
     assert.deepEqual(Object.entries(got.bash).at(-1), ['*sterling.db*', 'deny'], `${label}: bash ends with the guard`);
     assert.deepEqual(Object.keys(got).slice(0, Object.keys(c).length), Object.keys(c), `${label}: the user's keys keep their order`);
@@ -268,6 +279,32 @@ test('project config: a user bash block cannot re-allow the store after the shel
   got = after({ edit: { '*': 'ask' }, write: { 'docs/*': 'allow' } });
   assert.equal(effectOf(got, 'edit', 'docs/a.md'), 'allow', 'a user write rule still applies');
   assert.deepEqual(Object.entries(got.write).at(-1), ['.sterling/sterling.db*', 'deny'], 'a user write block ends with the edit guard');
+});
+
+test('project config: the guard in a user "*" block denies the store by path, so other names keep the user\'s verdict for every tool', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  mkdirSync(join(dir, '.opencode'));
+  const cfg = join(dir, '.opencode', 'opencode.json');
+  const after = (permission) => {
+    writeFileSync(cfg, JSON.stringify({ permission }));
+    run(dir, home);
+    return JSON.parse(readFileSync(cfg, 'utf8')).permission;
+  };
+  const others = [['read', 'docs/sterling.db-layout.md'], ['edit', 'docs/sterling.db-layout.md'], ['grep', 'sterling.db'], ['webfetch', 'https://example.com/sterling.db-layout'], ['read', '.sterling/config.json']];
+  // A shell-family block follows "*" here (one written by the user, or one Sterling appends), and it carries the shell guard.
+  for (const c of [{ '*': 'allow' }, { '*': { '*': 'allow', '*sterling.db*': 'allow' } }, { edit: 'allow', '*': 'ask' }, { shell: 'allow', '*': 'allow' }, { '*': 'allow', shell: 'allow', bash: 'allow' }]) {
+    const got = after(c);
+    const label = JSON.stringify(c);
+    for (const [action, resource] of others) assert.equal(effectOf(got, action, resource), effectOf(c, action, resource), `${label}: ${action} ${resource} keeps the user's verdict`);
+    for (const path of STORE_PATHS) for (const action of ['read', 'edit']) assert.equal(effectOf(got, action, path), 'deny', `${label}: ${action} ${path}`);
+    for (const cmd of ['sqlite3 sterling.db', 'cat .sterling/sterling.db-journal']) assert.equal(effectOf(got, 'shell', cmd), 'deny', `${label}: shell ${cmd}`);
+  }
+  // shell and bash both before "*": the "*" block is the last that can match a shell
+  // command, so it keeps the broad shell pattern and the non-store names stay denied.
+  const got = after({ shell: 'allow', bash: 'allow', '*': 'allow' });
+  assert.equal(effectOf(got, 'shell', 'sqlite3 sterling.db'), 'deny');
+  assert.equal(effectOf(got, 'read', 'docs/sterling.db-layout.md'), 'deny', 'the over-block stays only in this layout');
 });
 
 // An agent's own rules come after the top-level block, and the project config's
@@ -375,6 +412,86 @@ test('project config: the per-agent guard reads every agent source OpenCode 2.0.
   const late = r.rows.find((x) => x.item.endsWith('.opencode/opencode.jsonc'));
   assert.equal(late?.status, 'skipped');
   assert.match(late.detail, /read after .*can override the store guard/);
+  const main = r.rows.find((x) => x.item === '.opencode/opencode.json');
+  assert.match(main.detail, /seen only through this run's OPENCODE_CONFIG_DIR, OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT: fromcontent, fromenvdir, fromenvfile;/, 'the env-only guard entries are named in the row');
+  assert.doesNotMatch(main.detail.match(/seen only through[^;]*/)[0], /singular|rootjson/, 'agents from files OpenCode always reads are not named');
+  run(dir, home);
+  const rerun = Object.keys(JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).agent);
+  for (const gone of ['fromenvdir', 'fromenvfile', 'fromcontent']) assert.ok(!rerun.includes(gone), `${gone}: a rerun without the environment drops its guard-only entry`);
+});
+
+test('project config: agents in an ancestor directory\'s .opencode and opencode.json get the per-agent guard (2.0.22 reads every ancestor up to /)', () => {
+  const home = tmp('oc-home-');
+  const parent = tmp('oc-anc-');
+  const dir = project('hobby', parent);
+  mkdirSync(join(parent, '.opencode', 'agents'), { recursive: true });
+  writeFileSync(join(parent, '.opencode', 'agents', 'ancfile.md'), '---\ndescription: d\nmode: subagent\n---\n\nbody\n');
+  writeFileSync(join(parent, '.opencode', 'opencode.json'), JSON.stringify({ agent: { ancdot: { permission: { bash: 'allow' } } } }));
+  writeFileSync(join(parent, 'opencode.jsonc'), '{ "agent": { "ancroot": {} } }');
+  const r = run(dir, home);
+  const agents = JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).agent;
+  for (const want of ['ancfile', 'ancdot', 'ancroot']) assert.ok(agents[want], `${want} is guarded (got ${Object.keys(agents).join(', ')})`);
+  assert.ok(!r.rows.some((x) => x.item.startsWith(parent.replaceAll('\\', '/')) && x.status === 'skipped'), 'ancestor sources are read before the project config, so their rules raise no row');
+});
+
+test('project config: an ancestor source that cannot be read is a skipped row and keeps earlier guard entries, never a crash', () => {
+  const home = tmp('oc-home-');
+  const parent = tmp('oc-anc-');
+  const dir = project('hobby', parent);
+  mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
+  writeFileSync(join(dir, '.opencode', 'agents', 'mine.md'), '---\ndescription: d\n---\n\nbody\n');
+  writeFileSync(join(parent, 'opencode.jsonc'), '{ "agent": { "ancold": {} } }');
+  run(dir, home);
+  rmSync(join(parent, 'opencode.jsonc'));
+  mkdirSync(join(parent, 'opencode.json'));
+  mkdirSync(join(parent, 'opencode.jsonc'));
+  const r = run(dir, home);
+  const rows = r.rows.filter((x) => x.item.startsWith(fwdPath(parent)) && x.status === 'skipped');
+  assert.deepEqual(rows.map((x) => x.item).sort(), [`${fwdPath(parent)}/opencode.json`, `${fwdPath(parent)}/opencode.jsonc`]);
+  assert.match(rows[0].detail, /cannot be read \(EISDIR\).*NOT checked.*earlier per-agent guard entries are kept/);
+  const agents = JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).agent;
+  assert.ok(agents.mine && agents.ancold, 'the guard entries stay while a source is unreadable');
+});
+
+test('project config: symlinked agent files and directories count as agents, and a symlink loop ends', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  const elsewhere = tmp('oc-agents-src-');
+  const md = '---\ndescription: d\n---\n\nbody\n';
+  writeFileSync(join(elsewhere, 'linkedfile.md'), md);
+  mkdirSync(join(elsewhere, 'team'));
+  writeFileSync(join(elsewhere, 'team', 'member.md'), md);
+  const agentsDir = join(dir, '.opencode', 'agents');
+  mkdirSync(agentsDir, { recursive: true });
+  symlinkSync(join(elsewhere, 'linkedfile.md'), join(agentsDir, 'linkedfile.md'));
+  symlinkSync(join(elsewhere, 'team'), join(agentsDir, 'team'));
+  symlinkSync(agentsDir, join(agentsDir, 'team', 'loop'));
+  symlinkSync(join(elsewhere, 'missing.md'), join(agentsDir, 'dangling.md'));
+  run(dir, home);
+  const names = Object.keys(JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).agent);
+  for (const want of ['linkedfile', 'team/member']) assert.ok(names.includes(want), `${want} is guarded (got ${names.join(', ')})`);
+  assert.ok(!names.includes('dangling'), 'a dangling link is not an agent');
+  assert.ok(!names.some((n) => n.includes('loop/')), 'the loop is walked once');
+});
+
+test('project config: a project agent file whose rules can allow edit or shell gets a row, because its rules come after the per-agent guard', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  const put = (rel, text) => {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    writeFileSync(join(dir, rel), text);
+  };
+  put('.opencode/agents/loose.md', '---\ndescription: d\nmode: primary\npermission:\n  bash:\n    "*": allow\n---\n\nbody\n');
+  put('.opencode/agents/star.md', '---\ndescription: d\npermission:\n  "*": ask\n---\n\nbody\n');
+  put('.opencode/agents/scalar.md', '---\ndescription: d\npermission: allow\n---\n\nbody\n');
+  put('.opencode/agents/denies.md', '---\ndescription: d\npermission:\n  edit: deny\n  bash: deny\n  webfetch: allow\n  sterling_board_add: deny\n---\n\nbody\n');
+  put('.opencode/agents/plain.md', '---\ndescription: d\n---\n\npermission: allow in the body is not frontmatter\n');
+  mkdirSync(join(home, '.config', 'opencode', 'agents'), { recursive: true });
+  writeFileSync(join(home, '.config', 'opencode', 'agents', 'globalloose.md'), '---\ndescription: d\npermission:\n  bash: allow\n---\n\nbody\n');
+  const r = run(dir, home);
+  const flagged = r.rows.filter((x) => x.status === 'skipped' && /store guard does NOT hold/.test(x.detail)).map((x) => x.item.split('/').pop()).sort();
+  assert.deepEqual(flagged, ['loose.md', 'scalar.md', 'star.md'], 'only project agent files that can allow edit or shell; a global agent file comes before the guard');
+  assert.match(r.rows.find((x) => x.item.endsWith('loose.md')).detail, /move its .* rules into agent\."loose"\.permission in \.opencode\/opencode\.json/);
 });
 
 test('parseJsonc: comments and trailing commas go only outside strings', async () => {

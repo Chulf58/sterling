@@ -1,6 +1,6 @@
-// Post-update sync on OpenCode: the first ROOT session of the plugin process runs
-// the shared post-update sync (scripts/lib/post-update-sync.mjs, shared with H1)
-// for this project, under the newest-copy-wins rule (decision
+// Post-update sync on OpenCode: the first ROOT session of each project in the plugin
+// process runs the shared post-update sync (scripts/lib/post-update-sync.mjs, shared
+// with H1) for that project, under the newest-copy-wins rule (decision
 // dual-host-post-update-sync-newest-copy-wins). The result reaches the model as a
 // notice: synced, refused-older or failed; equal versions say nothing. The sync
 // runs in the background, so the context request that starts it never waits for
@@ -8,8 +8,8 @@
 //
 // A root session has no parentID key in ctx.session.get's result (finding
 // opencode-2-0-21-session-get-shape-and-rotation-restore-live-october-2026). The
-// verdict is cached per session id, and once the sync has started nothing is
-// looked up again. On a clone the sync does not apply, and no session is looked up.
+// verdict is cached per session id, and once the sync has started for a project
+// nothing is looked up again for it. On a clone the sync does not apply, and no session is looked up.
 //
 // When the Sterling in use is the npm copy (`opencode plugin add`), a sync for a
 // newer copy also copies that copy's dashboard out of node_modules (materializeTui,
@@ -31,7 +31,9 @@ import { installHostOf } from '../../../scripts/lib/sterling-roots.mjs';
  * node used to run the steps (default 'node' on PATH, as the installer's MCP
  * launcher assumes: the plugin runs inside the compiled OpenCode binary,
  * @opencode/cli's bin/opencode.exe, so process.execPath is not known to be node);
- * env and home locate the npm cache and the materialized dashboard (tests).
+ * env and home locate the npm cache and the materialized dashboard (tests). started is
+ * the set of project roots whose sync has started or been ruled out; the server passes
+ * one set to every location's sync, so a project reached from two locations syncs once.
  */
 export function createSessionSync(deps = {}) {
   const getSession = deps.getSession ?? (() => null);
@@ -40,8 +42,8 @@ export function createSessionSync(deps = {}) {
   const env = deps.env ?? process.env;
   const home = deps.home ?? homedir();
   const verdicts = new Map();
-  let started = false;
-  let running = null;
+  const started = deps.started ?? new Set();
+  const runs = [];
 
   function report(root, text) {
     try {
@@ -95,26 +97,26 @@ export function createSessionSync(deps = {}) {
 
   async function syncOnce(root, sessionID) {
     // The maintenance worker child leaves the sync to the user's process (worker.mjs inWorkerChild).
-    if (started || inWorkerChild(env)) return;
+    if (started.has(root) || inWorkerChild(env)) return;
     const pluginRoot = deps.sterlingRoot ?? sterlingRoot();
     let applies;
     try {
       applies = postUpdateApplies(pluginRoot, root);
     } catch (e) {
       // Latched first, so a predicate that throws is reported once (by the fence), not per request.
-      started = true;
+      started.add(root);
       throw e;
     }
     if (!applies) {
-      started = true;
+      started.add(root);
       return;
     }
     if (!verdicts.has(sessionID)) verdicts.set(sessionID, isRootSession(root, sessionID));
-    if (!(await verdicts.get(sessionID)) || started) return;
-    started = true;
-    running = run(root, pluginRoot);
+    if (!(await verdicts.get(sessionID)) || started.has(root)) return;
+    started.add(root);
+    runs.push(run(root, pluginRoot));
   }
 
-  syncOnce.idle = () => running ?? Promise.resolve();
+  syncOnce.idle = () => Promise.all(runs).then(() => undefined);
   return syncOnce;
 }

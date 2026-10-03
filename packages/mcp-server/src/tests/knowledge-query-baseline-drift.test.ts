@@ -73,7 +73,11 @@ const article = (tools: SterlingTools, slug: string, paths: string[]): Loose =>
     title: slug,
     what_it_does: 'x',
     intended_behavior: 'x',
-    files: paths.map((path) => ({ path, role: 'impl' })),
+    // The first file is marked as the entry: an 'active' article with no entry
+    // gets a state_review item (decision feature-article-states-follow-the-spec-meaning),
+    // and src/ is a kind the wiring check does not judge, so these fixtures
+    // queue nothing beyond what the drift wire itself mints.
+    files: paths.map((path, i) => ({ path, role: 'impl', ...(i === 0 ? { entry: true } : {}) })),
     current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
     dependencies: { relies_on: [], relied_by: [] },
     state: 'active',

@@ -20,7 +20,7 @@
 //     item's lane, and the lane-qualified remedy: "perform the write WITHOUT
 //     resolves; verify it paid this lane; then close the item with
 //     maintenance_remove <id>" (for refresh_reference, stale_research,
-//     wire_in_dormant, state_review — the lanes this file exercises);
+//     state_review — the lanes this file exercises);
 //   - the write WITHOUT resolves succeeds; maintenance_remove then closes it
 //     explicitly — a two-step, never a single atomic discharge, for a
 //     domain-held target;

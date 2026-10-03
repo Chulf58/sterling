@@ -23,13 +23,13 @@ const UNDECLARED_TTL_MS = 5 * 60_000;
 /**
  * `getSession()` returns the plugin context's session domain, as restore.mjs and sync.mjs take it; a session it cannot classify gets the loud not-staged line.
  * `parents` is the session-to-parentID cache shared with the settlement gate. `sweepStale(root)` (dispatch.mjs sweepStaleDispatches)
- * runs once per process at the first root request and returns a line to show, or ''; never when `env` (process.env) carries the
- * maintenance worker flag.
+ * runs once per project root per process at the first root request and returns a line to show, or ''; never when `env` (process.env)
+ * carries the maintenance worker flag. `swept` holds the roots already swept; the server passes one set to every location's handler.
  * `rotationRestore(root, sessionID)` is restore.mjs's gate; `sessionSync(root, sessionID)` is sync.mjs's once-per-process step; `pluginRoot` is the
  * test override for the resolved Sterling root. Returns the handler and
  * `resetStatus(root)`, which drops the cached status line and maintenance summary.
  */
-export function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = new Map(), sweepStale, env = process.env }) {
+export function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = new Map(), sweepStale, swept = new Set(), env = process.env }) {
   const statusCache = new Map();
   // The undeclared-source scan, per project root: root sessions only, refreshed on UNDECLARED_TTL_MS.
   const undeclaredCache = new Map();
@@ -37,8 +37,6 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   const maintenanceCache = new Map();
   // A child session's staged text, kept for its later requests (bounded, bounded.mjs).
   const stagedCache = new Map();
-  // Project roots whose process-start dispatch sweep has run.
-  const swept = new Set();
 
   function statusLine(root) {
     const hit = statusCache.get(root);
