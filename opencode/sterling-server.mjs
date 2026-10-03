@@ -4368,7 +4368,11 @@ var init_records = __esm({
       // while a flag is QUERYABLE and the read-time state check can surface it. Set
       // it when creating an article ahead of the code; clear it by rewriting the
       // role from the file.
-      files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional() })),
+      // `entry` marks the file a registry reaches: the hooks.json command, the
+      // command or skill file, the registerTool site, the bin or the agent
+      // template (decision feature-article-states-follow-the-spec-meaning). The
+      // read-time state check looks it up to tell built from wired_in.
+      files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional(), entry: external_exports.boolean().optional() })),
       // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
       // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
       // drift check confirms a content change against this before flagging, so a
@@ -4406,6 +4410,11 @@ var init_records = __esm({
       // supersession, record ids do not (decision foreign_474b1c71).
       dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
       steps_runbook: external_exports.string().optional(),
+      // Meanings (decision feature-article-states-follow-the-spec-meaning):
+      // planned = not started; built = code exists but nothing reaches it;
+      // wired_in = reachable from a registry, not yet proven in use; active = in
+      // use; dormant = reachable but switched off; deprecated = retired.
+      // wiring_todo_id points a built article at the board item that wires it in.
       state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
       state_reason: external_exports.string().optional(),
       wiring_todo_id: external_exports.string().uuid().optional(),
@@ -4617,7 +4626,6 @@ var init_records = __esm({
       "deletion_candidate",
       "capture_owed",
       "promotion_review",
-      "wire_in_dormant",
       "refresh_reference",
       // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
       "article_missing",
@@ -4639,7 +4647,10 @@ var init_records = __esm({
       // hashes — so an article sat at `planned` over a shipped, wired, probe-verified
       // feature, and anyone querying it would have concluded the feature did not
       // exist. The PROSE was right; the metadata was the lie, and metadata is what a
-      // reader trusts first.
+      // reader trusts first. It also carries the wiring check (decision
+      // feature-article-states-follow-the-spec-meaning): a wired_in or active article
+      // whose files[] entry no registry reaches or that marks no entry, and a built
+      // article whose entry is reached.
       "state_review",
       // A feature_article's NON-HISTORY serialized size crossed
       // config.article_oversize_chars on a knowledge_update/append/edit — the
@@ -10033,7 +10044,7 @@ function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve11) => setTimeout(resolve11, ms));
+  return new Promise((resolve12) => setTimeout(resolve12, ms));
 }
 var heldConnections = /* @__PURE__ */ new Set();
 var warnedLegacyDirs = /* @__PURE__ */ new Set();
@@ -11935,7 +11946,7 @@ import { basename as basename2, join as join15 } from "node:path";
 
 // scripts/lib/opencode-install.mjs
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync9, mkdirSync as mkdirSync6, readFileSync as readFileSync7, readdirSync as readdirSync4, rmSync as rmSync3, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync6, readFileSync as readFileSync7, readdirSync as readdirSync4, realpathSync as realpathSync5, rmSync as rmSync3, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { dirname as dirname6, isAbsolute as isAbsolute4, join as join14, resolve as resolve9 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12441,6 +12452,9 @@ function materializeTui({ pluginRoot, env = process.env, home = homedir4() }) {
   }
   return rows;
 }
+var EDIT_FAMILY = ["edit", "write", "patch"];
+var SHELL_FAMILY = ["shell", "bash"];
+var GUARDED_KEYS = /* @__PURE__ */ new Set(["*", ...EDIT_FAMILY, ...SHELL_FAMILY]);
 function sterlingRootFrom(moduleUrl = import.meta.url) {
   const start = dirname6(fileURLToPath(moduleUrl));
   for (let dir = start; ; dir = dirname6(dir)) {
@@ -12754,7 +12768,7 @@ function createBootstrapHandler(deps = {}) {
 function createConfigHandler(deps = {}) {
   const now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
   return async function configure(ctx) {
-    const project = projectRoot(ctx?.location?.directory ?? process.cwd());
+    const project = projectRoot(ctx?.location?.directory);
     if (!project) throw new Error("configure ran outside a Sterling project");
     const root = deps.sterlingRoot ?? sterlingRoot();
     const { commands, skills, failures } = renderRegistrations(root);
@@ -13674,7 +13688,7 @@ function runStepSync(root, name, args, { nodeBin = process.execPath } = {}) {
   return stepResult({ error: r.error ? r.error.message : r.signal ? `killed by ${r.signal}` : null, status: r.status, stdout: r.stdout, stderr: r.stderr });
 }
 function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
-  return new Promise((resolve11) => {
+  return new Promise((resolve12) => {
     let stdout = "";
     let stderr = "";
     let spawnError = null;
@@ -13682,7 +13696,7 @@ function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
     const finish = (r) => {
       if (settled) return;
       settled = true;
-      resolve11(stepResult(r));
+      resolve12(stepResult(r));
     };
     let child;
     try {
@@ -14355,12 +14369,11 @@ function createWorkerLaunch({
 // packages/opencode-plugin/src/context.mjs
 var STATUS_TTL_MS = 1e4;
 var UNDECLARED_TTL_MS = 5 * 6e4;
-function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = /* @__PURE__ */ new Map(), sweepStale, env = process.env }) {
+function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = /* @__PURE__ */ new Map(), sweepStale, swept = /* @__PURE__ */ new Set(), env = process.env }) {
   const statusCache = /* @__PURE__ */ new Map();
   const undeclaredCache = /* @__PURE__ */ new Map();
   const maintenanceCache = /* @__PURE__ */ new Map();
   const stagedCache = /* @__PURE__ */ new Map();
-  const swept = /* @__PURE__ */ new Set();
   function statusLine(root) {
     const hit = statusCache.get(root);
     if (hit && Date.now() - hit.at < STATUS_TTL_MS) return hit.text;
@@ -15353,8 +15366,8 @@ function createSessionSync(deps = {}) {
   const env = deps.env ?? process.env;
   const home = deps.home ?? homedir6();
   const verdicts = /* @__PURE__ */ new Map();
-  let started = false;
-  let running = null;
+  const started = deps.started ?? /* @__PURE__ */ new Set();
+  const runs = [];
   function report(root, text) {
     try {
       addNotice(root, text, now());
@@ -15401,40 +15414,41 @@ function createSessionSync(deps = {}) {
     }
   }
   async function syncOnce(root, sessionID) {
-    if (started || inWorkerChild(env)) return;
+    if (started.has(root) || inWorkerChild(env)) return;
     const pluginRoot = deps.sterlingRoot ?? sterlingRoot();
     let applies;
     try {
       applies = postUpdateApplies(pluginRoot, root);
     } catch (e) {
-      started = true;
+      started.add(root);
       throw e;
     }
     if (!applies) {
-      started = true;
+      started.add(root);
       return;
     }
     if (!verdicts.has(sessionID)) verdicts.set(sessionID, isRootSession(root, sessionID));
-    if (!await verdicts.get(sessionID) || started) return;
-    started = true;
-    running = run(root, pluginRoot);
+    if (!await verdicts.get(sessionID) || started.has(root)) return;
+    started.add(root);
+    runs.push(run(root, pluginRoot));
   }
-  syncOnce.idle = () => running ?? Promise.resolve();
+  syncOnce.idle = () => Promise.all(runs).then(() => void 0);
   return syncOnce;
 }
 
 // packages/opencode-plugin/src/server.mjs
+import { resolve as resolve11 } from "node:path";
 var PLUGIN_ID = "sterling.server";
 var EXECUTION_END_EVENTS = /* @__PURE__ */ new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"]);
 var BUDGET_MS = { context: 4e3, delivery: 4e3, axis: 4e3, dispatch: 1e4, research: 4e3, settle: 3e4, prompt: 4e3, compaction: 4e3, config: 4e3 };
 function createSterlingServer(deps = {}) {
   const openStore = deps.openStore ?? openProjectStore;
   const now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
-  let session = null;
-  let directory = process.cwd();
-  let chain = Promise.resolve();
-  const parents = /* @__PURE__ */ new Map();
-  const rootOf = () => projectRoot(directory);
+  const env = deps.env ?? process.env;
+  const swept = /* @__PURE__ */ new Set();
+  const syncStarted = /* @__PURE__ */ new Set();
+  const locations = /* @__PURE__ */ new Map();
+  let last = null;
   async function fenced(name, root, fn) {
     const started = Date.now();
     let timer;
@@ -15459,68 +15473,66 @@ function createSterlingServer(deps = {}) {
       clearTimeout(timer);
     }
   }
-  const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env: deps.env ?? process.env });
-  const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, env: deps.env ?? process.env, sessionSync: deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now }), pluginRoot: deps.sterlingRoot });
-  const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
-  const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
-  const dispatch = createDispatchHandlers({ rootOf, fenced });
-  const recordResearch = createResearchRecorder({ rootOf, fenced, now });
-  async function onBefore(input) {
-    await delivery.onBefore(input);
-    await axis.onBefore(input);
-    await dispatch.onBefore(input);
-  }
-  async function onAfter(input) {
-    const output = axis.outputOf(input);
-    await delivery.onAfter(input);
-    await axis.onOutput(input, output);
-    await axis.onAfter(input);
-    await dispatch.onAfter(input);
-    await recordResearch(input);
-  }
   const launchWorkerFor = createWorkerLaunch({ openStore, claudeOnPath: deps.claudeOnPath, launchWorker: deps.launchWorker });
   const settle = createSettle({ openStore, now, launchWorkerFor });
   const prLoopNotice = createPrLoopNotice({ now, pluginRoot: deps.sterlingRoot });
-  const onPrompt = createPromptHandler({ openStore, rootOf, fenced, env: deps.env ?? process.env });
-  const onCompaction = createCompactionHandler({ rootOf, fenced });
   const configure = deps.configure ?? createConfigHandler(deps);
   const bootstrap = deps.bootstrap ?? createBootstrapHandler(deps);
-  async function onEvent(ev) {
-    if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
-    if (inWorkerChild(deps.env ?? process.env)) return;
-    const root = rootOf();
-    if (!root) return;
-    const sessionID = ev.data?.sessionID;
-    dispatch.noteExecutionEnd(sessionID);
-    const succeeded = ev.type === "session.execution.succeeded";
-    let gate = { settle: false };
-    await fenced(succeeded ? "settle" : "dispatch", root, async () => {
-      gate = await rootSessionGate(root, { session, sessionID, parents });
-      if (!gate.why) return;
-      if (!succeeded) {
-        logLine(root, `dispatch end skipped on ${ev.type}: could not check whether session ${sessionID} is a child (${gate.why})`);
-        return;
-      }
-      logLine(root, `settle skipped: could not check whether session ${sessionID} is a child (${gate.why})`);
-      addNotice(root, `Sterling settlement skipped: could not check whether session ${sessionID} is a child session (${gate.why}); only a root session settles, and the next root settlement covers this range.`, now());
-    });
-    if (!gate.settle || !succeeded) return;
-    resetStatus(root);
-    await fenced("settle", root, () => settle(root));
-    await fenced("settle", root, () => prLoopNotice(root));
-  }
-  const handlers = { context: onContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };
-  return {
-    id: PLUGIN_ID,
-    handlers,
-    /** Resolves once every event received so far has been handled (tests). */
-    async idle() {
-      await new Promise((r) => setImmediate(r));
-      await new Promise((r) => setImmediate(r));
-      await chain;
-    },
-    async setup(ctx) {
-      directory = ctx?.location?.directory ?? process.cwd();
+  function createLocation(directory) {
+    let session = null;
+    let chain = Promise.resolve();
+    const parents = /* @__PURE__ */ new Map();
+    const rootOf = () => projectRoot(directory);
+    const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
+    const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
+    const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
+    const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
+    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
+    const dispatch = createDispatchHandlers({ rootOf, fenced });
+    const recordResearch = createResearchRecorder({ rootOf, fenced, now });
+    async function onBefore(input) {
+      await delivery.onBefore(input);
+      await axis.onBefore(input);
+      await dispatch.onBefore(input);
+    }
+    async function onAfter(input) {
+      const output = axis.outputOf(input);
+      await delivery.onAfter(input);
+      await axis.onOutput(input, output);
+      await axis.onAfter(input);
+      await dispatch.onAfter(input);
+      await recordResearch(input);
+    }
+    const onPrompt = createPromptHandler({ openStore, rootOf, fenced, env });
+    const onCompaction = createCompactionHandler({ rootOf, fenced });
+    async function onEvent(ev) {
+      if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
+      const evDir = ev.location?.directory;
+      if (evDir !== void 0 && resolve11(String(evDir)) !== resolve11(directory)) return;
+      if (inWorkerChild(env)) return;
+      const root = rootOf();
+      if (!root) return;
+      const sessionID = ev.data?.sessionID;
+      dispatch.noteExecutionEnd(sessionID);
+      const succeeded = ev.type === "session.execution.succeeded";
+      let gate = { settle: false };
+      await fenced(succeeded ? "settle" : "dispatch", root, async () => {
+        gate = await rootSessionGate(root, { session, sessionID, parents });
+        if (!gate.why) return;
+        if (!succeeded) {
+          logLine(root, `dispatch end skipped on ${ev.type}: could not check whether session ${sessionID} is a child (${gate.why})`);
+          return;
+        }
+        logLine(root, `settle skipped: could not check whether session ${sessionID} is a child (${gate.why})`);
+        addNotice(root, `Sterling settlement skipped: could not check whether session ${sessionID} is a child session (${gate.why}); only a root session settles, and the next root settlement covers this range.`, now());
+      });
+      if (!gate.settle || !succeeded) return;
+      resetStatus(root);
+      await fenced("settle", root, () => settle(root));
+      await fenced("settle", root, () => prLoopNotice(root));
+    }
+    const handlers = { context: onContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };
+    async function bind(ctx) {
       session = ctx.session;
       const root = rootOf();
       if (root) await fenced("config", root, () => configure(ctx));
@@ -15545,11 +15557,11 @@ function createSterlingServer(deps = {}) {
             await chain;
           }
         } catch (e) {
-          const root2 = rootOf();
-          if (root2 && !abort.signal.aborted) {
+          const subRoot = rootOf();
+          if (subRoot && !abort.signal.aborted) {
             try {
-              logLine(root2, `event subscription ended: ${errText(e)}`);
-              addNotice(root2, `Sterling plugin: the event subscription ended (${errText(e)}); settlement stops until OpenCode restarts.`);
+              logLine(subRoot, `event subscription ended: ${errText(e)}`);
+              addNotice(subRoot, `Sterling plugin: the event subscription ended (${errText(e)}); settlement stops until OpenCode restarts.`);
             } catch (reportError) {
               process.stderr.write(`[sterling] event subscription ended (${errText(e)}) and could not be reported (${errText(reportError)})
 `);
@@ -15558,6 +15570,35 @@ function createSterlingServer(deps = {}) {
         }
       })();
       return () => abort.abort();
+    }
+    return { handlers, bind, idle: () => chain };
+  }
+  return {
+    id: PLUGIN_ID,
+    /** The handlers of the latest location set up; tests drive a single location through it. */
+    get handlers() {
+      return last?.handlers;
+    },
+    /** Resolves once every event received so far, at every location, has been handled (tests). */
+    async idle() {
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      await Promise.all([...locations.values()].map((l) => l.idle()));
+    },
+    async setup(ctx) {
+      const directory = ctx?.location?.directory;
+      if (typeof directory !== "string" || !directory) {
+        process.stderr.write("[sterling] setup received no ctx.location.directory, so this location cannot be tied to a project; no Sterling hook is registered for it\n");
+        return void 0;
+      }
+      const key = resolve11(directory);
+      let loc = locations.get(key);
+      if (!loc) {
+        loc = createLocation(directory);
+        locations.set(key, loc);
+      }
+      last = loc;
+      return loc.bind(ctx);
     }
   };
 }

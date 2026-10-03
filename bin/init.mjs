@@ -4340,7 +4340,11 @@ var init_records = __esm({
       // while a flag is QUERYABLE and the read-time state check can surface it. Set
       // it when creating an article ahead of the code; clear it by rewriting the
       // role from the file.
-      files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional() })),
+      // `entry` marks the file a registry reaches: the hooks.json command, the
+      // command or skill file, the registerTool site, the bin or the agent
+      // template (decision feature-article-states-follow-the-spec-meaning). The
+      // read-time state check looks it up to tell built from wired_in.
+      files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional(), entry: external_exports.boolean().optional() })),
       // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
       // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
       // drift check confirms a content change against this before flagging, so a
@@ -4378,6 +4382,11 @@ var init_records = __esm({
       // supersession, record ids do not (decision foreign_474b1c71).
       dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
       steps_runbook: external_exports.string().optional(),
+      // Meanings (decision feature-article-states-follow-the-spec-meaning):
+      // planned = not started; built = code exists but nothing reaches it;
+      // wired_in = reachable from a registry, not yet proven in use; active = in
+      // use; dormant = reachable but switched off; deprecated = retired.
+      // wiring_todo_id points a built article at the board item that wires it in.
       state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
       state_reason: external_exports.string().optional(),
       wiring_todo_id: external_exports.string().uuid().optional(),
@@ -4589,7 +4598,6 @@ var init_records = __esm({
       "deletion_candidate",
       "capture_owed",
       "promotion_review",
-      "wire_in_dormant",
       "refresh_reference",
       // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
       "article_missing",
@@ -4611,7 +4619,10 @@ var init_records = __esm({
       // hashes — so an article sat at `planned` over a shipped, wired, probe-verified
       // feature, and anyone querying it would have concluded the feature did not
       // exist. The PROSE was right; the metadata was the lie, and metadata is what a
-      // reader trusts first.
+      // reader trusts first. It also carries the wiring check (decision
+      // feature-article-states-follow-the-spec-meaning): a wired_in or active article
+      // whose files[] entry no registry reaches or that marks no entry, and a built
+      // article whose entry is reached.
       "state_review",
       // A feature_article's NON-HISTORY serialized size crossed
       // config.article_oversize_chars on a knowledge_update/append/edit — the
@@ -11186,7 +11197,7 @@ function renderUnavailable(reason) {
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync6 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync10, mkdirSync as mkdirSync7, readFileSync as readFileSync13, readdirSync as readdirSync5, rmSync as rmSync3, statSync as statSync4, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync10, mkdirSync as mkdirSync7, readFileSync as readFileSync13, readdirSync as readdirSync5, realpathSync as realpathSync4, rmSync as rmSync3, statSync as statSync4, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
 import { dirname as dirname8, isAbsolute, join as join20, resolve as resolve5 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -11197,6 +11208,7 @@ var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "li
 var STERLING_NPM_PACKAGE = "@chulf58/sterling";
 var STORE_GUARD_PATTERNS = ["**/.sterling/sterling.db*", ".sterling/sterling.db*"];
 var SHELL_STORE_GUARD_PATTERN = "*sterling.db*";
+var SHELL_STORE_PATH_PATTERN = "*.sterling/sterling.db*";
 var PACKAGE_MARKER = "sterling-generated";
 var EXCLUDE_BEGIN = "# >>> sterling opencode (managed by Sterling init/update; per-user files, never committed)";
 var EXCLUDE_END = "# <<< sterling opencode";
@@ -11644,8 +11656,10 @@ function guardPermission(permission) {
   let perm = permission ?? {};
   if (typeof perm === "string") perm = { "*": perm };
   if (typeof perm !== "object" || perm === null || Array.isArray(perm)) return { bad: "" };
+  const keys = Object.keys(perm);
+  const shellAfterStar = SHELL_FAMILY.some((k) => !keys.includes(k) || keys.indexOf(k) > keys.indexOf("*"));
   const patternsFor = (key) => {
-    if (key === "*") return [...STORE_GUARD_PATTERNS, SHELL_STORE_GUARD_PATTERN];
+    if (key === "*") return [...STORE_GUARD_PATTERNS, shellAfterStar ? SHELL_STORE_PATH_PATTERN : SHELL_STORE_GUARD_PATTERN];
     if (EDIT_FAMILY.includes(key)) return STORE_GUARD_PATTERNS;
     if (SHELL_FAMILY.includes(key)) return [SHELL_STORE_GUARD_PATTERN];
     return null;
@@ -11684,35 +11698,106 @@ function parseJsonc(text) {
   }
   return JSON.parse(out);
 }
-function agentFileNames(dir, { flat = false, prefix = "" } = {}) {
+function agentFiles(dir, { flat = false, prefix = "", seen = /* @__PURE__ */ new Set() } = {}) {
   if (!existsSync10(dir)) return [];
-  const names = [];
-  for (const d of readdirSync5(dir, { withFileTypes: true })) {
-    if (d.isDirectory() && !flat) names.push(...agentFileNames(join20(dir, d.name), { prefix: `${prefix}${d.name}/` }));
-    else if (d.isFile() && d.name.endsWith(".md")) names.push(`${prefix}${d.name.slice(0, -3)}`);
+  const real = realpathSync4(dir);
+  if (seen.has(real)) return [];
+  seen.add(real);
+  const files = [];
+  for (const name4 of readdirSync5(dir)) {
+    const path = join20(dir, name4);
+    let st;
+    try {
+      st = statSync4(path);
+    } catch (err) {
+      if (err.code === "ENOENT") continue;
+      throw err;
+    }
+    if (st.isDirectory() && !flat) files.push(...agentFiles(path, { prefix: `${prefix}${name4}/`, seen }));
+    else if (st.isFile() && name4.endsWith(".md")) files.push({ name: `${prefix}${name4.slice(0, -3)}`, path });
   }
-  return names;
+  return files;
+}
+var GUARDED_KEYS = /* @__PURE__ */ new Set(["*", ...EDIT_FAMILY, ...SHELL_FAMILY]);
+function agentFileLoosensGuard(text) {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1];
+  if (!fm) return false;
+  const lines = fm.split(/\r?\n/);
+  const at = lines.findIndex((l) => /^permission:/.test(l));
+  if (at === -1) return false;
+  const scalar = lines[at].slice("permission:".length).trim();
+  if (scalar) return scalar !== "deny";
+  const block = [];
+  for (const l of lines.slice(at + 1)) {
+    if (l.trim() && !/^\s/.test(l)) break;
+    if (l.trim()) block.push(l);
+  }
+  const indent = Math.min(...block.map((l) => l.length - l.trimStart().length));
+  return block.some((l) => {
+    if (l.length - l.trimStart().length !== indent) return false;
+    const m = /^\s*(["']?)([^"':]+)\1\s*:\s*(.*)$/.exec(l);
+    return m !== null && GUARDED_KEYS.has(m[2].trim()) && m[3].trim() !== "deny";
+  });
 }
 function visibleAgents({ projectDir, env = process.env, home = homedir7() }) {
   const globalDir = env.OPENCODE_CONFIG_DIR || opencodeConfigDir({ env, home });
   const dotDir = join20(projectDir, ".opencode");
-  const names = /* @__PURE__ */ new Set();
-  for (const dir of [globalDir, dotDir]) {
-    for (const sub of ["agent", "agents"]) for (const n of agentFileNames(join20(dir, sub))) names.add(n);
-    for (const sub of ["mode", "modes"]) for (const n of agentFileNames(join20(dir, sub), { flat: true })) names.add(n);
+  const ancestors = [];
+  for (let d = dirname8(resolve5(projectDir)); ; d = dirname8(d)) {
+    ancestors.push(d);
+    if (dirname8(d) === d) break;
   }
+  const names = /* @__PURE__ */ new Set();
+  const envNames = /* @__PURE__ */ new Set();
   const problems = [];
   let incomplete = false;
+  const unreadable = (label, err) => {
+    incomplete = true;
+    problems.push({ item: label, status: "skipped", detail: `cannot be read (${err.code ?? err.message}), so the agents it defines are NOT checked and get no new per-agent guard; earlier per-agent guard entries are kept; fix it, then rerun /sterling:update` });
+  };
+  for (const dir of [globalDir, dotDir, ...ancestors.map((a) => join20(a, ".opencode"))]) {
+    for (const [sub, flat] of [["agent", false], ["agents", false], ["mode", true], ["modes", true]]) {
+      let files;
+      try {
+        files = agentFiles(join20(dir, sub), { flat });
+      } catch (err) {
+        unreadable(fwd5(join20(dir, sub)), err);
+        continue;
+      }
+      for (const { name: name4, path } of files) {
+        (dir === env.OPENCODE_CONFIG_DIR ? envNames : names).add(name4);
+        if (dir !== dotDir) continue;
+        let text;
+        try {
+          text = readFileSync13(path, "utf8");
+        } catch (err) {
+          unreadable(fwd5(path), err);
+          continue;
+        }
+        if (agentFileLoosensGuard(text)) {
+          problems.push({ item: fwd5(path), status: "skipped", detail: `its permission rules can allow edit or shell, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name4}"; move its edit, write, patch, shell, bash and "*" rules into agent.${JSON.stringify(name4)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
+        }
+      }
+    }
+  }
   const docs = [
     ...["opencode.json", "opencode.jsonc"].map((f) => join20(globalDir, f)),
     ...["opencode.json", "opencode.jsonc"].map((f) => join20(projectDir, f)),
     join20(dotDir, "opencode.jsonc"),
+    ...ancestors.flatMap((a) => ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"].map((f) => join20(a, f))),
     ...env.OPENCODE_CONFIG ? [env.OPENCODE_CONFIG] : []
   ].map((path) => ({ label: fwd5(path), read: () => existsSync10(path) ? readFileSync13(path, "utf8") : null }));
   if (env.OPENCODE_CONFIG_CONTENT) docs.push({ label: "OPENCODE_CONFIG_CONTENT", read: () => env.OPENCODE_CONFIG_CONTENT });
+  const fromEnv = /* @__PURE__ */ new Set([...env.OPENCODE_CONFIG_DIR ? ["opencode.json", "opencode.jsonc"].map((f) => fwd5(join20(globalDir, f))) : [], ...env.OPENCODE_CONFIG ? [fwd5(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
   const late2 = /* @__PURE__ */ new Set([fwd5(join20(dotDir, "opencode.jsonc")), ...env.OPENCODE_CONFIG ? [fwd5(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
   for (const doc of docs) {
-    const text = doc.read();
+    let text;
+    try {
+      text = doc.read();
+    } catch (err) {
+      unreadable(doc.label, err);
+      continue;
+    }
     if (text === null) continue;
     let config;
     try {
@@ -11724,13 +11809,14 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7() }) {
     }
     const agents = config?.agent;
     const hasAgents = agents && typeof agents === "object" && !Array.isArray(agents);
-    if (hasAgents) for (const name4 of Object.keys(agents)) names.add(name4);
+    if (hasAgents) for (const name4 of Object.keys(agents)) (fromEnv.has(doc.label) ? envNames : names).add(name4);
     const setsRules = config?.permission !== void 0 || hasAgents && Object.values(agents).some((a) => a?.permission !== void 0);
     if (late2.has(doc.label) && setsRules) {
       problems.push({ item: doc.label, status: "skipped", detail: `sets permission rules and is read after (or in an unmeasured order with) ${PROJECT_CONFIG_REL}, so its rules can override the store guard; move them into ${PROJECT_CONFIG_REL}` });
     }
   }
-  return { names: [...names].sort(), problems, incomplete };
+  const envOnly = [...envNames].filter((n) => !names.has(n)).sort();
+  return { names: [.../* @__PURE__ */ new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete };
 }
 function ensureProjectConfig({ projectDir, env = process.env, home = homedir7(), tracked, conductorOk = true }) {
   const rel = PROJECT_CONFIG_REL;
@@ -11789,9 +11875,12 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir7(),
     nextAgents[name4] = { ...entry, permission: perm.value };
   }
   for (const name4 of [...names].sort()) if (!nextAgents[name4]) nextAgents[name4] = JSON.parse(guardOnly);
+  const envOnly = visible.envOnly.filter((name4) => JSON.stringify(nextAgents[name4]) === guardOnly);
   if (Object.keys(nextAgents).length) config.agent = nextAgents;
   else delete config.agent;
   notes2.push(`per-agent store guard on ${names.size} agents (agent files in the global config dir and ${fwd5(".opencode")}, and the config "agent" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
+  if (envOnly.length) notes2.push(`guard entries for agents seen only through this run's OPENCODE_CONFIG_DIR, OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT: ${envOnly.join(", ")}; OpenCode started without that environment lists each as an agent with no prompt, and a rerun of /sterling:update without it removes them`);
+  if (env.OPENCODE_CONFIG_DIR) notes2.push(`OPENCODE_CONFIG_DIR replaced the global config dir for this run, so agents in ${fwd5(opencodeConfigDir({ env, home }))} were not checked`);
   if (!conductorOk) {
     if (config.default_agent === void 0) notes2.push(`default_agent not set: the ${CONDUCTOR_AGENT} agent file was refused`);
   } else if (config.default_agent === void 0) config.default_agent = CONDUCTOR_AGENT;

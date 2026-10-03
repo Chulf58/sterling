@@ -4392,7 +4392,11 @@ var featureArticleSchema = base.extend({
   // while a flag is QUERYABLE and the read-time state check can surface it. Set
   // it when creating an article ahead of the code; clear it by rewriting the
   // role from the file.
-  files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional() })),
+  // `entry` marks the file a registry reaches: the hooks.json command, the
+  // command or skill file, the registerTool site, the bin or the agent
+  // template (decision feature-article-states-follow-the-spec-meaning). The
+  // read-time state check looks it up to tell built from wired_in.
+  files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional(), entry: external_exports.boolean().optional() })),
   // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
   // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
   // drift check confirms a content change against this before flagging, so a
@@ -4430,6 +4434,11 @@ var featureArticleSchema = base.extend({
   // supersession, record ids do not (decision foreign_474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
+  // Meanings (decision feature-article-states-follow-the-spec-meaning):
+  // planned = not started; built = code exists but nothing reaches it;
+  // wired_in = reachable from a registry, not yet proven in use; active = in
+  // use; dormant = reachable but switched off; deprecated = retired.
+  // wiring_todo_id points a built article at the board item that wires it in.
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
   state_reason: external_exports.string().optional(),
   wiring_todo_id: external_exports.string().uuid().optional(),
@@ -4641,7 +4650,6 @@ var SYSTEM_REASONS = [
   "deletion_candidate",
   "capture_owed",
   "promotion_review",
-  "wire_in_dormant",
   "refresh_reference",
   // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
   "article_missing",
@@ -4663,7 +4671,10 @@ var SYSTEM_REASONS = [
   // hashes — so an article sat at `planned` over a shipped, wired, probe-verified
   // feature, and anyone querying it would have concluded the feature did not
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
-  // reader trusts first.
+  // reader trusts first. It also carries the wiring check (decision
+  // feature-article-states-follow-the-spec-meaning): a wired_in or active article
+  // whose files[] entry no registry reaches or that marks no entry, and a built
+  // article whose entry is reached.
   "state_review",
   // A feature_article's NON-HISTORY serialized size crossed
   // config.article_oversize_chars on a knowledge_update/append/edit — the

@@ -204,7 +204,11 @@ export const featureArticleSchema = base
     // while a flag is QUERYABLE and the read-time state check can surface it. Set
     // it when creating an article ahead of the code; clear it by rewriting the
     // role from the file.
-    files: z.array(z.object({ path: repoPath, role: z.string().min(1), unverified: z.boolean().optional() })),
+    // `entry` marks the file a registry reaches: the hooks.json command, the
+    // command or skill file, the registerTool site, the bin or the agent
+    // template (decision feature-article-states-follow-the-spec-meaning). The
+    // read-time state check looks it up to tell built from wired_in.
+    files: z.array(z.object({ path: repoPath, role: z.string().min(1), unverified: z.boolean().optional(), entry: z.boolean().optional() })),
     // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
     // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
     // drift check confirms a content change against this before flagging, so a
@@ -242,6 +246,11 @@ export const featureArticleSchema = base
     // supersession, record ids do not (decision foreign_474b1c71).
     dependencies: z.object({ relies_on: z.array(z.string()), relied_by: z.array(z.string()) }),
     steps_runbook: z.string().optional(),
+    // Meanings (decision feature-article-states-follow-the-spec-meaning):
+    // planned = not started; built = code exists but nothing reaches it;
+    // wired_in = reachable from a registry, not yet proven in use; active = in
+    // use; dormant = reachable but switched off; deprecated = retired.
+    // wiring_todo_id points a built article at the board item that wires it in.
     state: z.enum(['planned', 'built', 'wired_in', 'active', 'dormant', 'deprecated']),
     state_reason: z.string().optional(),
     wiring_todo_id: z.string().uuid().optional(),
@@ -535,7 +544,6 @@ export const SYSTEM_REASONS = [
   'deletion_candidate',
   'capture_owed',
   'promotion_review',
-  'wire_in_dormant',
   'refresh_reference', // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
   'article_missing', // §6 H10: direct-mode work in unowned territory ended without its owning article
   'research_owed', // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
@@ -553,7 +561,10 @@ export const SYSTEM_REASONS = [
   // hashes — so an article sat at `planned` over a shipped, wired, probe-verified
   // feature, and anyone querying it would have concluded the feature did not
   // exist. The PROSE was right; the metadata was the lie, and metadata is what a
-  // reader trusts first.
+  // reader trusts first. It also carries the wiring check (decision
+  // feature-article-states-follow-the-spec-meaning): a wired_in or active article
+  // whose files[] entry no registry reaches or that marks no entry, and a built
+  // article whose entry is reached.
   'state_review',
   // A feature_article's NON-HISTORY serialized size crossed
   // config.article_oversize_chars on a knowledge_update/append/edit — the
@@ -585,7 +596,6 @@ export const DRAIN_VERBS = {
   deletion_candidate: 'deleted',
   capture_owed: 'captured',
   promotion_review: 'reviewed',
-  wire_in_dormant: 'wired',
   refresh_reference: 'refreshed',
   article_missing: 'created',
   research_owed: 'captured',
