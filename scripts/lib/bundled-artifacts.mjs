@@ -31,6 +31,7 @@ import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { contractHistoryJson } from './contract-bullets.mjs';
+import { launcherHistorySnapshot } from './launcher-history.mjs';
 
 // Banner for bundles that inline CommonJS dependencies: esbuild's ESM output
 // has no `require`, so a bundled CJS module's require() of a node builtin
@@ -286,6 +287,8 @@ export const BIN_ENTRIES = {
 // It also writes outDir/contract-history.json, the stamp-contract bullet history an installed
 // copy (no git) reads in place of the templates' git log (scripts/lib/contract-history.mjs);
 // it leaves out the current template blocks, so a template commit does not make bin/ stale.
+// outDir/launcher-history.json is the same for the launcher templates: the earlier versions
+// init matches an existing launcher against (scripts/lib/launcher-history.mjs).
 // Returns the emitted absolute paths.
 export async function buildBins({ root, outDir }) {
   const emitted = [];
@@ -309,6 +312,9 @@ export async function buildBins({ root, outDir }) {
   const historyFile = join(outDir, 'contract-history.json');
   writeFileSync(historyFile, contractHistoryJson(root));
   emitted.push(historyFile);
+  const launcherHistoryFile = join(outDir, 'launcher-history.json');
+  writeFileSync(launcherHistoryFile, launcherHistorySnapshot({ repoRoot: root }));
+  emitted.push(launcherHistoryFile);
   return emitted;
 }
 

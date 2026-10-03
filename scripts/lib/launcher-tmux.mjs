@@ -43,6 +43,19 @@ const INSTALLED_PATHS = [
 ].join('\n');
 
 /**
+ * True when `block` is a {{PLUGIN_PATHS}} value this module renders: the authoring
+ * two-line PLUGIN_DIR / TUI_BUNDLE pair (any paths), or an installed-copy block (its
+ * fixed first line through the closing STERLING_RESOLVER heredoc; the resolver source
+ * between them changes between versions). Used to recognise an older generated
+ * launcher (scripts/lib/launcher-history.mjs).
+ * @param {string} block LF text, no trailing newline
+ */
+export function isPluginPathsBlock(block) {
+  if (/^PLUGIN_DIR="[^"\n]*"\nTUI_BUNDLE="[^"\n]*"$/.test(block)) return true;
+  return block.startsWith(`${INSTALLED_PATHS.split('\n')[0]}\n`) && block.endsWith('\nSTERLING_RESOLVER\n)"');
+}
+
+/**
  * @param {string} pluginRoot
  * @param {{session: string, splitPercent: number, installed?: boolean}} opts
  *   `installed` defaults to isInstalledCopy(pluginRoot); tests pass it explicitly.

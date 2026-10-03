@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BIN_ENTRIES } from '../lib/bundled-artifacts.mjs';
+import { launcherHistorySnapshot } from '../lib/launcher-history.mjs';
 import { checkAdapterRegistry } from '../adapters/resolve.mjs';
 import { ProjectRegistry, SterlingStore } from '@sterling/store';
 
@@ -81,8 +82,10 @@ test('bin bundles: one per BIN_ENTRIES member, node: imports only, source identi
   try {
     const binDir = join(tmp, 'bin');
     buildInto('build-bin.mjs', binDir);
-    // plus the stamp-contract bullet history an installed copy reads in place of git (buildBins)
-    assert.deepEqual(readdirSync(binDir).sort(), [...Object.keys(BIN_ENTRIES).map((n) => `${n}.mjs`), 'contract-history.json'].sort());
+    // plus the stamp-contract bullet history and the launcher template history an installed
+    // copy reads in place of git (buildBins)
+    assert.deepEqual(readdirSync(binDir).sort(), [...Object.keys(BIN_ENTRIES).map((n) => `${n}.mjs`), 'contract-history.json', 'launcher-history.json'].sort());
+    assert.deepEqual(JSON.parse(readFileSync(join(binDir, 'launcher-history.json'), 'utf8')), JSON.parse(launcherHistorySnapshot({ repoRoot: root })));
     for (const file of readdirSync(binDir)) {
       const src = readFileSync(join(binDir, file), 'utf8');
       assert.deepEqual(nonBuiltinImports(src), [], `${file} imports only node: builtins`);

@@ -45,6 +45,7 @@ import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launche
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, userScopeCodexServer, codexUserScopeLine } from './lib/codex-mcp.mjs';
 import { renderTmuxLauncher } from './lib/launcher-tmux.mjs';
+import { historicalLauncherTemplates, isOlderGeneratedLauncher } from './lib/launcher-history.mjs';
 import { isInstalledCopy } from './lib/installed-copy.mjs';
 import { cloneLauncherTarget, marketplaceAutoUpdate, autoUpdateWarning, cloneCleanupLines } from './lib/consumer-cutover.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
@@ -740,6 +741,37 @@ if (claudeHost) {
   // are ALWAYS CRLF (cmd.exe misparses LF-only batch files), regardless of eol config
   const lf = (s) => s.replace(/\r\n/g, '\n');
   const crlf = (s) => s.replace(/\r?\n/g, '\r\n');
+  // Older generated launchers (decision init-and-update-refresh-an-older-generated-
+  // launcher): a launcher that is a pristine render of an EARLIER template version is
+  // rewritten and reported `refreshed`; one matching no version is a hand edit, left
+  // untouched with a loud line. The /sterling:update ensure pass runs this same code.
+  // The versions (git log on a clone, bin/launcher-history.json on an installed copy;
+  // scripts/lib/launcher-history.mjs) are read only once a launcher differs.
+  let launcherHistory = null;
+  const olderGenerated = (text, templateName) => {
+    launcherHistory ??= historicalLauncherTemplates({ repoRoot: pluginRoot, warn: (line) => warns.push(`\n${line}`) });
+    return isOlderGeneratedLauncher(text, templateName, launcherHistory);
+  };
+  const REFRESHED_DETAIL = 'an earlier generated version of the template; rewritten from the current one';
+  const handEdited = (file) => {
+    warns.push(`\n⚠ ${file} differs from the current render and matches no earlier version of its template (hand-edited, or rendered for another path), so it was left untouched. To refresh it, delete it and re-run /sterling:init.`);
+    return { item: file, status: 'differs', detail: 'left untouched (matches no generated version: hand-edited or another path) — delete it and re-run /sterling:init to regenerate' };
+  };
+  // sterling.bat and tui.bat: created, matches, refreshed or (hand-edited) differs
+  const ensureBat = (file, path, expected, templateName, createdDetail) => {
+    const existing = existsSync(path) ? readFileSync(path, 'utf8') : null;
+    if (existing === null) {
+      writeFileSync(path, expected);
+      items.push({ item: file, status: 'created', detail: createdDetail });
+    } else if (normalize(existing) === normalize(expected)) {
+      items.push({ item: file, status: 'matches', detail: 'unchanged' });
+    } else if (olderGenerated(existing, templateName)) {
+      writeFileSync(path, expected);
+      items.push({ item: file, status: 'refreshed', detail: REFRESHED_DETAIL });
+    } else {
+      items.push(handEdited(file));
+    }
+  };
 
   // (1) the tmux launcher — the actual split lives here; both .bat files call it
   // (an installed plugin copy gets NO --plugin-dir and resolves the TUI at run time;
@@ -760,8 +792,11 @@ if (claudeHost) {
     if (cloneLauncher.clonePath) oldClonePaths.push(cloneLauncher.clonePath);
     const from = cloneLauncher.clonePath ? `the clone ${cloneLauncher.clonePath}` : 'a clone (the old launcher does not record its path)';
     items.push({ item: 'sterling-launch.sh', status: 'replaced', detail: `the old launcher started claude with --plugin-dir pointing at ${from}, which overrides the installed plugin; regenerated in the installed-copy shape` });
+  } else if (olderGenerated(existingTmuxLauncher, 'launcher-tmux.sh')) {
+    writeFileSync(tmuxLauncherPath, expectedTmuxLauncher);
+    items.push({ item: 'sterling-launch.sh', status: 'refreshed', detail: REFRESHED_DETAIL });
   } else {
-    items.push({ item: 'sterling-launch.sh', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
+    items.push(handEdited('sterling-launch.sh'));
   }
 
   // (2) the double-click Windows entry: Windows Terminal -> WSL -> the tmux launcher
@@ -769,30 +804,14 @@ if (claudeHost) {
     readFileSync(join(pluginRoot, 'templates', 'launcher-win.bat'), 'utf8')
       .replaceAll('{{WIN_PROJECT_DIR}}', winProjectDir)
   ));
-  const launcherPath = join(target, 'sterling.bat');
-  if (!existsSync(launcherPath)) {
-    writeFileSync(launcherPath, expectedLauncher);
-    items.push({ item: 'sterling.bat', status: 'created', detail: `double-click -> wsl ${winProjectDir}` });
-  } else if (normalize(readFileSync(launcherPath, 'utf8')) === normalize(expectedLauncher)) {
-    items.push({ item: 'sterling.bat', status: 'matches', detail: 'unchanged' });
-  } else {
-    items.push({ item: 'sterling.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
-  }
+  ensureBat('sterling.bat', join(target, 'sterling.bat'), expectedLauncher, 'launcher-win.bat', `double-click -> wsl ${winProjectDir}`);
 
   // (3) the §13 dashboard re-opener: re-adds the TUI pane to the running session
   const expectedTuiLauncher = assertNoDeadTerms('tui.bat', crlf(
     readFileSync(join(pluginRoot, 'templates', 'tui-win.bat'), 'utf8')
       .replaceAll('{{WIN_PROJECT_DIR}}', winProjectDir)
   ));
-  const tuiLauncherPath = join(target, 'tui.bat');
-  if (!existsSync(tuiLauncherPath)) {
-    writeFileSync(tuiLauncherPath, expectedTuiLauncher);
-    items.push({ item: 'tui.bat', status: 'created', detail: 'double-click -> ./sterling-launch.sh tui' });
-  } else if (normalize(readFileSync(tuiLauncherPath, 'utf8')) === normalize(expectedTuiLauncher)) {
-    items.push({ item: 'tui.bat', status: 'matches', detail: 'unchanged' });
-  } else {
-    items.push({ item: 'tui.bat', status: 'differs', detail: 'left untouched (hand-edited or other machine) — delete and re-run init to regenerate' });
-  }
+  ensureBat('tui.bat', join(target, 'tui.bat'), expectedTuiLauncher, 'tui-win.bat', 'double-click -> ./sterling-launch.sh tui');
 }
 
 // (4) the native-Windows launcher (sterling-windows.bat) is RETIRED — decision
