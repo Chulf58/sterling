@@ -256,6 +256,8 @@ export const BIN_ENTRIES = {
   'check-agents-visible': 'scripts/check-agents-visible.mjs',
   // the two checks templates/check-consumer.mjs (the sterling-check.mjs launcher) spawns
   'check-record-citations': 'scripts/check-record-citations.mjs',
+  // the report arm skills/record-audit/SKILL.md runs first, against the invoking project
+  'check-record-hygiene': 'scripts/check-record-hygiene.mjs',
   'check-stale-claims': 'scripts/check-stale-claims.mjs',
   'cleanup-plan': 'scripts/cleanup-plan.mjs',
   // the concept_designed no-server fallback templates/target-claude-md.md names

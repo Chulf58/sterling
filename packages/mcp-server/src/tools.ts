@@ -11634,13 +11634,42 @@ export class SterlingTools {
    *  analog), and the orphan-coverage check below is ruling-prose-shaped. */
   private static readonly SUPERSEDE_ALLOWED_TYPES = ['decision', 'anti_pattern', 'research_finding'];
 
-  /** The types that may CLOSE a reference_material whose subject is gone
-   *  (decision record-audit-dead-records-superseded-stale-findings-by-age-
-   *  report-arm-plus-sampled-audit: "superseded by a short record saying what
-   *  happened"). A reference's body is a pointer at a location, so a dead one
-   *  has no same-type successor to offer; the closing record is a note of one
-   *  of these types, named by the caller. */
-  private static readonly REFERENCE_CLOSING_TYPES = ['decision', 'research_finding'];
+  /** The types that may CLOSE a record whose subject is gone (decision
+   *  record-audit-dead-records-superseded-stale-findings-by-age-report-arm-
+   *  plus-sampled-audit: "superseded by a short record saying what happened").
+   *  The old types in CLOSED_BY_NOTE have no same-type successor to offer once
+   *  dead; the closing record is a note of one of these types, named by the
+   *  caller. */
+  private static readonly CLOSING_NOTE_TYPES = ['decision', 'research_finding'];
+
+  /** The old-record types a closing note of another type may close, each with
+   *  the sentence its refusal prints for the record that is NOT dead (its
+   *  in-place path and its duplicate path). reference_material came first
+   *  (decision a-dead-reference-material-is-superseded-by-a-closing-note-of-
+   *  another-type): its body is a pointer at a location. open_question and
+   *  disconfirmed_hypothesis joined by user ruling 2026-10-03 (board bdd80e1a,
+   *  "Supersede for the two small types, articles stay as today"): a question
+   *  or a refuted trail about code that no longer exists has nothing of its
+   *  own type to be replaced by. feature_article is deliberately absent — it
+   *  keeps its own lifecycle. */
+  private static readonly CLOSED_BY_NOTE: Readonly<Partial<Record<DurableRecord['type'], string>>> = {
+    reference_material:
+      `one whose subject still exists evolves in place via knowledge_update ` +
+      `(fix-forward, same lineage; repoint its location), and a genuine duplicate goes through knowledge_retire(id, in_favor_of).`,
+    open_question:
+      `one that is still open evolves in place via knowledge_update (fix-forward, same lineage; an answered one sets resolution_status ` +
+      `'closed' with closed_into), and a genuine duplicate goes through knowledge_retire(id, in_favor_of).`,
+    disconfirmed_hypothesis:
+      `one whose refuted trail still applies is corrected in place via knowledge_update (fix-forward, same lineage), ` +
+      `and a genuine duplicate goes through knowledge_retire(id, in_favor_of).`,
+  };
+
+  /** The refusal sentence for an old-record type a closing note may close, or
+   *  undefined when the type is not one of them. Own-key check, so an
+   *  inherited Object.prototype name never reads as a member. */
+  private static closedByNoteSentence(type: DurableRecord['type']): string | undefined {
+    return Object.hasOwn(SterlingTools.CLOSED_BY_NOTE, type) ? SterlingTools.CLOSED_BY_NOTE[type] : undefined;
+  }
 
   /** ruling-write types whose create/update receipts surface SAME-SUBJECT
    *  records (decision foreign_7e3c66c5). Superset of SUPERSEDE_ALLOWED_TYPES since
@@ -11752,14 +11781,17 @@ export class SterlingTools {
    * discloses which candidates were accepted. Fewer than 2 units is ordinary
    * single-ruling supersession — no check.
    *
-   * A DEAD reference_material IS THE ONE CROSS-TYPE CASE (board 3b5c6877,
+   * A DEAD reference_material WAS THE FIRST CROSS-TYPE CASE (board 3b5c6877,
    * decision record-audit-dead-records-superseded-stale-findings-by-age-
    * report-arm-plus-sampled-audit). A reference whose location is gone had no
    * exit: knowledge_update can only repoint it, knowledge_retire needs a
    * surviving duplicate, and the deletion arm of the refresh_reference mint
-   * fires on every read while it stays active. `opts.type` names the closing
-   * record's type (REFERENCE_CLOSING_TYPES); the note is created and the
-   * reference retired in favour of it in one transaction. store.supersede is
+   * fires on every read while it stays active. A dead open_question and a dead
+   * disconfirmed_hypothesis take the same path (board bdd80e1a); the set is
+   * CLOSED_BY_NOTE. `opts.type` names the closing record's type
+   * (CLOSING_NOTE_TYPES); the note is created and the old record retired in
+   * favour of it in one transaction. An open_question's slug passes to its
+   * closing note like any superseded record's. store.supersede is
    * same-type by contract, so this branch composes the two store primitives
    * that already exist for it: create, then retireInFavorOf, which writes the
    * same (new supersedes old) edge and the same retired lifecycle.
@@ -11799,13 +11831,13 @@ export class SterlingTools {
           `duplicate, knowledge_retire(id, in_favor_of). knowledge_supersede replaces decision / anti_pattern / research_finding only.`
       );
     }
-    const closesReference = old.type === 'reference_material';
-    if (closesReference) {
-      if (opts.type === undefined || !SterlingTools.REFERENCE_CLOSING_TYPES.includes(opts.type)) {
-        const allowed = SterlingTools.REFERENCE_CLOSING_TYPES.join(' or ');
+    const closedByNoteSentence = SterlingTools.closedByNoteSentence(old.type);
+    const closedByNote = closedByNoteSentence !== undefined;
+    if (closedByNote) {
+      if (opts.type === undefined || !SterlingTools.CLOSING_NOTE_TYPES.includes(opts.type)) {
+        const allowed = SterlingTools.CLOSING_NOTE_TYPES.join(' or ');
         throw new Error(
-          `knowledge_supersede: '${oldId}' is a reference_material — one whose subject still exists evolves in place via knowledge_update ` +
-            `(fix-forward, same lineage; repoint its location), and a genuine duplicate goes through knowledge_retire(id, in_favor_of). ` +
+          `knowledge_supersede: '${oldId}' is ${/^[aeiou]/.test(old.type) ? 'an' : 'a'} ${old.type} — ${closedByNoteSentence} ` +
             `One whose subject is GONE is closed by a short record saying what happened: pass type (${allowed}) with that record's complete fields` +
             (opts.type === undefined ? `; no type was given.` : `; type '${opts.type}' is not one of them.`) +
             ` Nothing was written.`
@@ -11820,7 +11852,7 @@ export class SterlingTools {
       if (opts.type !== undefined && opts.type !== old.type) {
         throw new Error(
           `knowledge_supersede: '${oldId}' is a ${old.type} and is replaced by a ${old.type} only — type '${opts.type}' is refused. ` +
-            `A different closing type is accepted only when the old record is a reference_material. Nothing was written.`
+            `A different closing type is accepted only when the old record is one of ${Object.keys(SterlingTools.CLOSED_BY_NOTE).join(', ')}. Nothing was written.`
         );
       }
     }
@@ -11829,7 +11861,7 @@ export class SterlingTools {
     }
 
     this.refuseServerOwnedFields(fields, 'knowledge_supersede');
-    const type = closesReference ? (opts.type as string) : old.type;
+    const type = closedByNote ? (opts.type as string) : old.type;
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, ...body } = fields;
 
     // Slug continuity (decision foreign_de1a7329): fields with no slug inherit the old
@@ -12014,7 +12046,7 @@ export class SterlingTools {
     const resolvedItems: { id: string; system_reason?: string; file_keys?: string[] }[] = [];
     const updated = this.store.withTransactionForRecord(old.id, () => {
       let head: DurableRecord;
-      if (closesReference) {
+      if (closedByNote) {
         // retireInFavorOf writes the supersedes edge itself, so a copy of it in
         // the caller's links is dropped rather than written twice.
         const links = (parsed.links as { rel: string; target_id: string }[]).filter((l) => !(l.rel === 'supersedes' && l.target_id === old.id));
@@ -12034,7 +12066,7 @@ export class SterlingTools {
 
     // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): the new record is
     // always one of the three ruling types (SUPERSEDE_ALLOWED_TYPES, of which
-    // REFERENCE_CLOSING_TYPES is a subset), so this always applies here. Excludes the old,
+    // CLOSING_NOTE_TYPES is a subset), so this always applies here. Excludes the old,
     // just-superseded record and its own supersede chain, plus the new
     // record's own id — never the write's own lineage.
     const sameSubjectExclude = new Set(chain);

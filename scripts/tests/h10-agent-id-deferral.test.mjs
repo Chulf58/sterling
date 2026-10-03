@@ -338,3 +338,52 @@ test('(4b) touches without agent_id still defer through the row\'s files, as bef
     cleanup();
   }
 });
+
+// Fan-out of the same agent type, both lanes writing outside what they declared
+// (finding h10-article-demand-misses-live-lanes-same-type-fanout-and-out-of-
+// territory-files-october-2026, 79e20118; board item 7e4850cf, REMAINING (1)).
+// Two live implementor rows each declare one path that no touch matches. LANE
+// writes ALPHA and BETA; LANE_B writes GAMMA; three conductor-written files
+// (DELTA and two more) meet the threshold, so the article demand runs and is
+// shown not to ask for the lanes' files. Every deferral here comes from the
+// agent_id join, since no register row's files covers a touched path. Three
+// deferred paths, because a blocking Stop's `deferred:` line names at most 3
+// paths and then "+K more" (deferralLine(cap), by design).
+test('(5) two live same-type lanes writing outside their declared files: their paths are not demanded, and the deferred line names both lanes and every written path', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const LANE_B = 'b3c1d9e47f20a6581';
+    const EPSILON = 'src/main/epsilon.mjs';
+    const EPSILON_2 = 'src/main/epsilon-two.mjs';
+    writeTouches(dir, [
+      { path: ALPHA, agent_id: LANE },
+      { path: BETA, agent_id: LANE },
+      { path: GAMMA, agent_id: LANE_B },
+      { path: DELTA },
+      { path: EPSILON },
+      { path: EPSILON_2 },
+    ]);
+    const reg = [
+      row(LANE, { files: ['src/declared/lane-one.mjs'] }),
+      row(LANE_B, { files: ['src/declared/lane-two.mjs'] }),
+    ];
+    writeRegister(dir, reg);
+
+    const r = stopOnce(dir);
+    assert.equal(r.code, 2, `the three conductor-written files meet the threshold, so the demand fires; stderr: ${r.stderr}`);
+    const s = demandSection(r);
+    for (const p of [DELTA, EPSILON, EPSILON_2]) assert.match(s, re(p), `${p} is demanded`);
+    for (const p of [ALPHA, BETA, GAMMA]) assert.doesNotMatch(s, re(p), `${p} is written by a live lane and is not demanded`);
+
+    const deferredLine = disclosed(r, dir).split('\n').find((l) => l.includes('deferred:'));
+    assert.ok(deferredLine, `a deferred: line must be disclosed; output: ${out(r)}`);
+    assert.match(deferredLine, /deferred: 3 file\(s\)/, 'all three lane-written paths are deferred');
+    assert.match(deferredLine, new RegExp(LANE), 'the first lane is named');
+    assert.match(deferredLine, new RegExp(LANE_B), 'the second lane is named');
+    for (const p of [ALPHA, BETA, GAMMA]) assert.match(deferredLine, re(p), `${p} is named in the deferred line`);
+    for (const p of [DELTA, EPSILON, EPSILON_2]) assert.doesNotMatch(deferredLine, re(p), `${p} is the conductor's and is not deferred`);
+    assert.deepEqual(JSON.parse(readFileSync(registerPath(dir), 'utf8')), reg, 'H10 never mutates the dispatch register');
+  } finally {
+    cleanup();
+  }
+});
