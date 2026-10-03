@@ -6,7 +6,8 @@
 //                --observed O --expected E --evidence L [--evidence L ...] [--dry-run]
 //   report-issue --flush     send the reports queued in .sterling/pending-issue-reports.jsonl
 //   report-issue --list      the open reports, found by their fingerprint marker (authoring-side intake)
-//   report-issue --apply-labels   a repo maintainer: create and set the labels each open report's Labels line names
+//   report-issue --apply-labels [--yes]   a repo maintainer: turn each open report's Labels line into real labels;
+//                            a dry run unless --yes, at most 10 new labels per run
 //
 // Default mode: validate and scrub (scripts/lib/issue-report.mjs), print the
 // body, flush the queue, then search the repo for the report's fingerprint. An
@@ -52,9 +53,9 @@ import {
   fingerprint,
   fingerprintLine,
   labelsFor,
-  parseLabelsLine,
   projectSlug,
   renderBody,
+  reportLabels,
   scrub,
   validateReport,
   withLabelsLine,
@@ -79,17 +80,19 @@ const MODE_FLAGS = ['dry-run', 'flush', 'list', 'apply-labels'];
 function parseArgs(argv) {
   const values = { evidence: [] };
   const modes = new Set();
+  let yes = false;
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     const m = tok.match(/^--([a-z-]+)(?:=([\s\S]*))?$/);
     if (!m) refuse(`report-issue: unexpected argument '${tok}'. Every value follows its flag, e.g. --title "<text>".`);
     const [, name, inline] = m;
-    if (MODE_FLAGS.includes(name)) {
+    if (MODE_FLAGS.includes(name) || name === 'yes') {
       if (inline !== undefined) refuse(`report-issue: --${name} takes no value.`);
-      modes.add(name);
+      if (name === 'yes') yes = true;
+      else modes.add(name);
       continue;
     }
-    if (!VALUE_FLAGS.includes(name)) refuse(`report-issue: unknown flag --${name}. Flags: ${[...VALUE_FLAGS, ...MODE_FLAGS].map((f) => `--${f}`).join(' ')}`);
+    if (!VALUE_FLAGS.includes(name)) refuse(`report-issue: unknown flag --${name}. Flags: ${[...VALUE_FLAGS, ...MODE_FLAGS, 'yes'].map((f) => `--${f}`).join(' ')}`);
     const value = inline ?? argv[++i];
     if (value === undefined) refuse(`report-issue: --${name} needs a value.`);
     if (name === 'evidence') values.evidence.push(value);
@@ -100,7 +103,8 @@ function parseArgs(argv) {
   const mode = [...modes][0] ?? 'file';
   const given = Object.keys(values).filter((k) => (k === 'evidence' ? values.evidence.length > 0 : true));
   if ((mode === 'flush' || mode === 'list' || mode === 'apply-labels') && given.length > 0) refuse(`report-issue: --${mode} takes no report fields (got --${given.join(', --')}).`);
-  return { mode, values };
+  if (yes && mode !== 'apply-labels') refuse('report-issue: --yes belongs to --apply-labels only.');
+  return { mode, values, yes };
 }
 
 // ---------- gh ----------
@@ -209,7 +213,7 @@ function stamps() {
     const r = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: root, encoding: 'utf8', timeout: 30_000 });
     head = r.status === 0 && r.stdout.trim() ? r.stdout.trim() : 'unknown (git rev-parse failed)';
   }
-  return { root, version, head, host: detectHost(process.env), project: projectSlug(projectName()) };
+  return { root, version, head, host: detectHost(process.env), projectName: projectName() };
 }
 
 // ---------- queue ----------
@@ -310,9 +314,10 @@ function enqueue(entry, reason) {
 
 // ---------- send ----------
 
-/** A 4xx an unlabelled create might get past: 403 and 404 for an account that may not set labels, 422 for labels that do not
- * exist. 401 is an auth failure and 408 and 429 are timing; none of those is retried unlabelled. */
-const labelRefusal = (status) => Number.isInteger(status) && status >= 400 && status < 500 && ![401, 408, 429].includes(status);
+/** A refusal an unlabelled create might get past: 403 and 404 for an account that may not set labels, 422 for labels that do not
+ * exist. Every other status is not retried (401 is auth, 408 and 429 are timing, 400 is a bad request), and neither is a 403
+ * whose text names a rate limit or abuse detection: the retry would only add to the pressure. */
+const labelRefusal = (e) => [403, 404, 422].includes(e.status) && !/rate limit|abuse/i.test(e.message);
 
 /** Create the issue with its labels; when GitHub rejects that with such a client
  * error, retry ONCE without them. A rejected create made no issue, so the retry
@@ -323,7 +328,7 @@ function createIssue(gh, entry, body) {
   try {
     return gh.api('POST', createPath, [...plain, ...entry.labels.map((l) => ['labels[]', l])]);
   } catch (e) {
-    if (!(e instanceof TransportError) || !labelRefusal(e.status) || entry.labels.length === 0) throw e;
+    if (!(e instanceof TransportError) || !labelRefusal(e) || entry.labels.length === 0) throw e;
     console.error(`report-issue: GitHub refused the create with labels (HTTP ${e.status}); retrying once without them.`);
     try {
       return gh.api('POST', createPath, plain);
@@ -397,19 +402,40 @@ function flush(gh) {
 
 // ---------- modes ----------
 
-const { mode, values } = parseArgs(process.argv.slice(2));
+const { mode, values, yes } = parseArgs(process.argv.slice(2));
 
 const FINGERPRINT_LINE_RE = /^Fingerprint: sterling-fp-[0-9a-f]{12}$/m;
+
+const SEARCH_PAGE_SIZE = 100;
+const SEARCH_MAX_PAGES = 5;
 
 /** The open reports on the repo, found by the fingerprint marker in the body and
  * not by label (an account that cannot set labels files reports with none). The
  * search is a loose match on the marker text; the Fingerprint line is checked
- * here, so an issue that only mentions a fingerprint is left out. Throws TransportError. */
+ * here, so an issue that only mentions a fingerprint is left out. Reads up to
+ * SEARCH_MAX_PAGES pages and reports what it did not reach. Throws TransportError. */
 function openReports(gh) {
-  const found = gh.api('GET', 'search/issues', [['q', `repo:${STERLING_ISSUE_REPO} is:issue is:open "sterling-fp-" in:body`], ['per_page', '100']]);
-  if (!Array.isArray(found?.items)) throw new TransportError(`gh at ${gh.path}: search/issues returned no items array`);
-  const reports = found.items.filter((i) => !i?.pull_request && Number.isInteger(i?.number) && typeof i?.body === 'string' && FINGERPRINT_LINE_RE.test(i.body.replace(/\r/g, '')));
-  return { reports: reports.sort((a, b) => a.number - b.number), more: found.total_count > found.items.length };
+  const items = [];
+  let matched = 0;
+  let incomplete = false;
+  for (let page = 1; page <= SEARCH_MAX_PAGES; page++) {
+    const found = gh.api('GET', 'search/issues', [['q', `repo:${STERLING_ISSUE_REPO} is:issue is:open "sterling-fp-" in:body`], ['per_page', String(SEARCH_PAGE_SIZE)], ['page', String(page)]]);
+    if (!Array.isArray(found?.items)) throw new TransportError(`gh at ${gh.path}: search/issues returned no items array`);
+    items.push(...found.items);
+    matched = Number.isInteger(found.total_count) ? found.total_count : items.length;
+    incomplete = incomplete || found.incomplete_results === true;
+    if (found.items.length < SEARCH_PAGE_SIZE) break;
+  }
+  const reports = items.filter((i) => !i?.pull_request && Number.isInteger(i?.number) && typeof i?.body === 'string' && FINGERPRINT_LINE_RE.test(i.body.replace(/\r/g, '')));
+  return { reports: reports.sort((a, b) => a.number - b.number), matched, read: items.length, incomplete };
+}
+
+/** Say plainly what a search did not cover. */
+function printSearchNotes(found) {
+  if (found.matched > found.read) {
+    console.log(`report-issue: ${found.matched} reports match but only the first ${found.read} were read (${SEARCH_MAX_PAGES} pages of ${SEARCH_PAGE_SIZE}); ${found.matched - found.read} were not reached.`);
+  }
+  if (found.incomplete) console.log('report-issue: GitHub marked the search results incomplete; some reports may be missing from this list.');
 }
 
 const labelNames = (issue) => (issue.labels ?? []).map((l) => String(l?.name ?? l));
@@ -432,19 +458,19 @@ if (mode === 'list') {
   console.log(`report-issue: ${found.reports.length} open sterling-report issue(s) on ${STERLING_ISSUE_REPO}:`);
   for (const i of found.reports) {
     const real = labelNames(i);
-    const inBody = real.length === 0 ? parseLabelsLine(i.body) : null;
-    const shown = real.length > 0 ? real.join(', ') : inBody?.length ? `labels in body, not applied: ${inBody.join(', ')}` : 'no labels';
+    const inBody = real.length === 0 ? reportLabels(i.body) : null;
+    const shown = real.length > 0 ? real.join(', ') : inBody ? `labels in body, not applied: ${inBody.join(', ')}` : 'no labels';
     console.log(`#${i.number} [${shown}] ${i.title}  ${i.html_url}`);
   }
-  if (found.more) console.log('report-issue: the search returned more than one page; only the first 100 are shown.');
+  printSearchNotes(found);
   console.log(`report-issue: ${readQueue().length} report(s) pending locally in .sterling/${QUEUE_NAME}`);
   process.exit(0);
 }
 
 const LABEL_COLORS = { 'sterling-report': '5319e7', 'severity:blocked': 'd73a4a', 'severity:workaround': 'fbca04', 'severity:friction': 'c5def5' };
 
-/** Whether this status means the account may not change labels on the repo. */
-const noPermission = (status) => [401, 403, 404].includes(status);
+/** New labels one --apply-labels --yes run may create. A report body is text anyone can write, so a run is bounded. */
+const MAX_NEW_LABELS = 10;
 
 if (mode === 'apply-labels') {
   const gh = makeGh();
@@ -454,52 +480,105 @@ if (mode === 'apply-labels') {
     process.exit(1);
   }
   const repoLabels = `repos/${STERLING_ISSUE_REPO}/labels`;
-  const known = new Set();
-  const attempt = (what, fn) => {
-    try {
-      return fn();
-    } catch (e) {
-      if (!(e instanceof TransportError)) throw e;
-      if (noPermission(e.status)) {
-        refuse(
-          `report-issue: --apply-labels refused: GitHub answered HTTP ${e.status} when ${what}. This account cannot change labels on ${STERLING_ISSUE_REPO}. A maintainer of the repo must run report-issue --apply-labels. Nothing in any issue body was edited.`
-        );
-      }
-      console.error(`report-issue: --apply-labels failed ${what}: ${e.message}.`);
-      process.exit(1);
-    }
+  const done = [];
+  const doneNote = () => (done.length ? ` Already applied before this stop: ${done.map((n) => `#${n}`).join(', ')}.` : '');
+  /** Only the label create and label set calls can mean "this account may not change labels". */
+  const refusedWrite = (e, what) =>
+    refuse(
+      `report-issue: --apply-labels refused: GitHub answered HTTP ${e.status} when ${what}. This account cannot change labels on ${STERLING_ISSUE_REPO}. A maintainer of the repo must run report-issue --apply-labels --yes. Nothing in any issue body was edited.${doneNote()}`
+    );
+  const failed = (what, e) => {
+    console.error(`report-issue: --apply-labels ${what}: ${e.message}.${doneNote()}`);
+    process.exit(1);
   };
+  const known = new Set();
   const labelExists = (name) => {
     if (known.has(name)) return true;
     try {
       gh.api('GET', `${repoLabels}/${encodeURIComponent(name)}`);
     } catch (e) {
-      if (e instanceof TransportError && e.status === 404) return false;
-      throw e;
+      if (!(e instanceof TransportError)) throw e;
+      if (e.status === 404) return false;
+      failed(`could not check label '${name}'`, e);
     }
     known.add(name);
     return true;
   };
-  const found = attempt('listing the reports', () => openReports(gh));
-  let applied = 0;
+  let found;
+  try {
+    found = openReports(gh);
+  } catch (e) {
+    if (!(e instanceof TransportError)) throw e;
+    failed('could not read the reports', e);
+  }
+  console.log(yes ? 'report-issue: --apply-labels --yes: creating and setting labels.' : 'report-issue: --apply-labels DRY RUN: nothing was changed. Run it with --yes to create and set the labels below.');
+  // Only a Labels line that is exactly sterling-report, one severity and one project label is acted on.
+  const work = [];
   for (const issue of found.reports) {
-    const wanted = parseLabelsLine(issue.body) ?? [];
+    const wanted = reportLabels(issue.body);
+    if (!wanted) {
+      console.error(`report-issue: #${issue.number} skipped: its Labels line is not exactly sterling-report, one severity and one project label; nothing was created or set for it.`);
+      continue;
+    }
     const have = new Set(labelNames(issue).map((l) => l.toLowerCase()));
     const missing = wanted.filter((l) => !have.has(l.toLowerCase()));
-    if (missing.length === 0) continue;
-    for (const name of missing) {
-      if (attempt(`checking label '${name}'`, () => labelExists(name))) continue;
-      attempt(`creating label '${name}'`, () => gh.api('POST', repoLabels, [['name', name], ['color', LABEL_COLORS[name] ?? 'ededed']]));
-      known.add(name);
-      console.log(`report-issue: created label '${name}'.`);
-    }
-    attempt(`setting labels on #${issue.number}`, () => gh.api('POST', `repos/${STERLING_ISSUE_REPO}/issues/${issue.number}/labels`, missing.map((l) => ['labels[]', l])));
-    console.log(`report-issue: #${issue.number}: set ${missing.join(', ')}.`);
-    applied++;
+    if (missing.length > 0) work.push({ number: issue.number, missing });
   }
-  if (found.more) console.log('report-issue: the search returned more than one page; only the first 100 were handled. Run it again after labelling.');
-  console.log(`report-issue: labels applied to ${applied} of ${found.reports.length} open report(s).`);
-  process.exit(0);
+  let created = 0;
+  let labelled = 0;
+  let notLabelled = 0;
+  let capped = null;
+  for (let w = 0; w < work.length; w++) {
+    const { number, missing } = work[w];
+    const fresh = missing.filter((name) => !labelExists(name));
+    if (created + fresh.length > MAX_NEW_LABELS) {
+      capped = work.slice(w).map((x) => `#${x.number}`).join(', ');
+      break;
+    }
+    for (const name of fresh) {
+      if (yes) {
+        try {
+          gh.api('POST', repoLabels, [['name', name], ['color', LABEL_COLORS[name] ?? 'ededed']]);
+        } catch (e) {
+          if (!(e instanceof TransportError)) throw e;
+          if ([401, 403, 404].includes(e.status)) refusedWrite(e, `creating label '${name}'`);
+          failed(`could not create label '${name}'`, e);
+        }
+        console.log(`report-issue: created label '${name}'.`);
+      } else {
+        console.log(`report-issue: would create label '${name}'.`);
+      }
+      known.add(name);
+      created++;
+    }
+    if (!yes) {
+      console.log(`report-issue: would set ${missing.join(', ')} on #${number}.`);
+      labelled++;
+      continue;
+    }
+    try {
+      gh.api('POST', `repos/${STERLING_ISSUE_REPO}/issues/${number}/labels`, missing.map((l) => ['labels[]', l]));
+    } catch (e) {
+      if (!(e instanceof TransportError)) throw e;
+      if ([401, 403].includes(e.status)) refusedWrite(e, `setting labels on #${number}`);
+      if (e.status === 404) {
+        console.error(`report-issue: #${number} not labelled: GitHub answered HTTP 404 setting its labels; the issue may have been deleted or moved.`);
+        notLabelled++;
+        continue;
+      }
+      failed(`could not set labels on #${number}`, e);
+    }
+    console.log(`report-issue: #${number}: set ${missing.join(', ')}.`);
+    done.push(number);
+    labelled++;
+  }
+  printSearchNotes(found);
+  if (capped) {
+    if (yes) console.error(`report-issue: stopped at the cap of ${MAX_NEW_LABELS} new labels per run; ${capped} were not handled. Review them, then run report-issue --apply-labels --yes again.`);
+    else console.log(`report-issue: the cap of ${MAX_NEW_LABELS} new labels per run is reached; ${capped} would not be handled in one run.`);
+  }
+  console.log(yes ? `report-issue: labels applied to ${labelled} of ${found.reports.length} open report(s).` : `report-issue: DRY RUN: would create ${created} label(s) and set labels on ${labelled} of ${found.reports.length} open report(s).`);
+  process.exit((capped && yes) || notLabelled > 0 ? 1 : 0);
 }
 
 if (mode === 'flush') {
@@ -533,8 +612,9 @@ try {
   if (e instanceof ReportRefusal) refuse(e.message);
   throw e;
 }
-// The project name feeds the Project and Labels lines, so it takes the same scrub as the report fields.
-const stamped = { ...st, project: scrub(st.project, scrubCtx) };
+// The project name feeds the Project line and the project label. It takes the same scrub as the report fields BEFORE it is
+// slugged: slugging first would turn a path into words and cut a UUID short enough to escape the scrub.
+const stamped = { ...st, project: projectSlug(scrub(st.projectName, scrubCtx)) };
 const entry = {
   v: 1,
   queued_at: new Date().toISOString(),

@@ -19,6 +19,7 @@ import {
   labelsFor,
   normalizeTitle,
   parseLabelsLine,
+  reportLabels,
   withLabelsLine,
   renderBody,
   scrub,
@@ -208,8 +209,11 @@ test('labels: sterling-report, severity band and a sanitized project name', () =
 //   append_on_create   one JSON line, appended to $FAKE_GH_QUEUE after the next create (then deleted):
 //                      a concurrent report landing while a flush is mid-send
 //   kill_on_search     N => the Nth search SIGKILLs report-issue (the gh's parent): a flush killed mid-run
-//   labels_refused     N => a create that carries labels[] exits 1 with 'gh: ... (HTTP N)'; one without labels succeeds
-//   create_refused     N => every create exits 1 with 'gh: ... (HTTP N)'
+//   labels_refused     'N [words]' => a create that carries labels[] exits 1 with 'gh: words (HTTP N)'; one without labels succeeds
+//   create_refused     'N [words]' => every create exits 1 with 'gh: words (HTTP N)'
+//   status_in_json_only present => a refusal prints no '(HTTP N)' on stderr, only the JSON status on stdout
+//   set_refused_for    'ISSUE N [words]' => setting labels on that issue only is refused as above
+//   incomplete_results present => searches report incomplete_results: true (searches page by per_page and page)
 //   drop_labels        present => a create succeeds but GitHub drops the labels (the issue and the response carry none)
 //   labels.json        [name] the labels that exist in the repo
 //   label_write_refused N => creating a label or setting labels on an issue exits 1 with 'gh: ... (HTTP N)'
@@ -225,6 +229,7 @@ const flag = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : u
 const fields = {};
 argv.forEach((x, i) => { if (x === '-f' || x === '-F') { const kv = argv[i + 1]; const k = kv.indexOf('='); (fields[kv.slice(0, k)] ??= []).push(kv.slice(k + 1)); } });
 const one = (k) => (fields[k] ?? [])[0];
+const flagField = one;
 const [a, b] = argv;
 if (a === '--version') { console.log('gh version 9.9.9 (fake)'); process.exit(0); }
 if (a === 'auth' && b === 'status') {
@@ -247,13 +252,18 @@ if (method === 'GET' && path === 'search/issues') {
   const items = issues
     .filter((i) => i.body.includes(fp ?? 'sterling-fp-') && (!/\\bis:open\\b/.test(q) || i.state === 'open'))
     .map((i) => ({ number: i.number, state: i.state, title: i.title, html_url: url(i.number), body: i.body, labels: i.labels.map((name) => ({ name })) }));
-  console.log(JSON.stringify({ total_count: items.length, items })); process.exit(0);
+  const perPage = Number(flagField('per_page') ?? 100);
+  const page = Number(flagField('page') ?? 1);
+  console.log(JSON.stringify({ total_count: items.length, incomplete_results: existsSync(join(state, 'incomplete_results')), items: items.slice((page - 1) * perPage, page * perPage) })); process.exit(0);
 }
-if (method === 'GET' && path === 'repos/Chulf58/sterling/issues') {
-  const hits = issues.filter((i) => i.state === one('state') && i.labels.includes(one('labels')));
-  console.log(JSON.stringify(hits.map((i) => ({ number: i.number, title: i.title, html_url: url(i.number), labels: i.labels.map((name) => ({ name })) })))); process.exit(0);
-}
-const refuse = (status) => { console.log(JSON.stringify({ message: 'refused', status: String(status) })); console.error('gh: refused (HTTP ' + status + ')'); process.exit(1); };
+// A refusal spec is 'STATUS [message words]'. gh prints the message and '(HTTP STATUS)' on stderr and the body on stdout;
+// status_in_json_only drops the '(HTTP n)' text so only the JSON status says it.
+const refuse = (spec) => {
+  const [status, ...words] = spec.trim().split(' ');
+  console.log(JSON.stringify({ message: words.join(' ') || 'refused', status: String(status) }));
+  console.error(existsSync(join(state, 'status_in_json_only')) ? 'gh: ' + (words.join(' ') || 'refused') : 'gh: ' + (words.join(' ') || 'refused') + ' (HTTP ' + status + ')');
+  process.exit(1);
+};
 const labelsFile = join(state, 'labels.json');
 const known = () => (existsSync(labelsFile) ? JSON.parse(readFileSync(labelsFile, 'utf8')) : []);
 if (method === 'POST' && path === 'repos/Chulf58/sterling/issues') {
@@ -282,6 +292,7 @@ if (method === 'POST' && path === 'repos/Chulf58/sterling/labels') {
 const setl = method === 'POST' && (path ?? '').match(/^repos\\/Chulf58\\/sterling\\/issues\\/(\\d+)\\/labels$/);
 if (setl) {
   if (existsSync(join(state, 'label_write_refused'))) refuse(readFileSync(join(state, 'label_write_refused'), 'utf8'));
+  if (existsSync(join(state, 'set_refused_for'))) { const [n, ...spec] = readFileSync(join(state, 'set_refused_for'), 'utf8').split(' '); if (Number(n) === Number(setl[1])) refuse(spec.join(' ')); }
   const issue = issues.find((i) => i.number === Number(setl[1]));
   for (const l of fields['labels[]'] ?? []) if (!known().includes(l)) { console.log(JSON.stringify({ message: 'Validation Failed', status: '422' })); console.error('gh: Validation Failed (HTTP 422)'); process.exit(1); }
   issue.labels = [...new Set([...issue.labels, ...(fields['labels[]'] ?? [])])];
@@ -507,11 +518,49 @@ test('render: a visible Labels line sits just above the fingerprint line, so the
   assert.ok(body.endsWith(`\n${LABELS}\nFingerprint: sterling-fp-${fingerprint(r.component, r.title)}`), body);
 });
 
-test('labels line: parseLabelsLine keeps only Sterling-shaped labels, withLabelsLine adds a missing line without touching the fingerprint', () => {
-  assert.deepEqual(parseLabelsLine(`x\n${LABELS}\nFingerprint: sterling-fp-0123456789ab`), ['sterling-report', 'severity:friction', 'project:acme']);
-  assert.deepEqual(parseLabelsLine('Labels: sterling-report, bug, severity:urgent, project:a b, project:ok.1'), ['sterling-report', 'project:ok.1'], 'a label outside the three shapes is dropped');
+const FP = 'Fingerprint: sterling-fp-0123456789ab';
+
+test('labels line: parseLabelsLine reads the line directly above the fingerprint line, as written', () => {
+  assert.deepEqual(parseLabelsLine(`x\n${LABELS}\n${FP}`), ['sterling-report', 'severity:friction', 'project:acme']);
+  assert.deepEqual(parseLabelsLine(`Labels: sterling-report, bug\n${FP}`), ['sterling-report', 'bug'], 'no filtering here: reportLabels judges the line');
   assert.equal(parseLabelsLine('no line here'), null);
-  const fp = 'Fingerprint: sterling-fp-0123456789ab';
+  assert.equal(parseLabelsLine(`${LABELS}\nsomething between\n${FP}`), null, 'a Labels line that is not directly above the fingerprint is not the report line');
+  assert.equal(parseLabelsLine(`Labels: sterling-report\n${LABELS}`), null, 'no fingerprint line, no report line');
+});
+
+test('labels line: user text starting "Labels: " neither hides the real line nor passes for it', () => {
+  const user = 'Labels: sterling-report, severity:blocked, project:evil';
+  const body = `Observed\n${user}\n\n${LABELS}\n${FP}`;
+  assert.deepEqual(parseLabelsLine(body), ['sterling-report', 'severity:friction', 'project:acme']);
+  assert.equal(parseLabelsLine(`Observed\n${user}\n\n${FP}`), null, 'user text higher up is not the report line');
+  const labels = ['sterling-report', 'severity:blocked', 'project:old'];
+  assert.equal(withLabelsLine(`Observed\n${user}\n\n${FP}`, labels, '0123456789ab'), `Observed\n${user}\n\nLabels: sterling-report, severity:blocked, project:old\n${FP}`, 'a queued entry whose text has such a line still gets its own');
+  assert.equal(withLabelsLine(body, labels, '0123456789ab'), body, 'a body with the line above the fingerprint is left alone');
+  const rendered = renderBody(validateReport({ ...good(), observed: 'Labels: sterling-report, project:evil' }, ctx), { version: '1', head: null, host: 'claude-code', project: 'acme' });
+  assert.deepEqual(reportLabels(rendered), ['sterling-report', 'severity:friction', 'project:acme']);
+});
+
+test('labels line: reportLabels accepts exactly sterling-report, one severity and one project', () => {
+  const ok = (line) => reportLabels(`${line}\n${FP}`);
+  assert.deepEqual(ok(LABELS), ['sterling-report', 'severity:friction', 'project:acme']);
+  assert.deepEqual(ok('Labels: project:acme, severity:blocked, sterling-report'), ['sterling-report', 'severity:blocked', 'project:acme'], 'order does not matter');
+  const many = `Labels: sterling-report, severity:friction, ${Array.from({ length: 150 }, (_, i) => `project:spam-${i}`).join(', ')}`;
+  assert.equal(ok(many), null, 'many project labels');
+  for (const bad of [
+    'Labels: sterling-report, severity:friction, severity:blocked, project:a',
+    'Labels: sterling-report, severity:friction, project:a, project:b',
+    'Labels: sterling-report, sterling-report, severity:friction, project:a',
+    'Labels: severity:friction, project:a',
+    'Labels: sterling-report, severity:friction',
+    'Labels: sterling-report, severity:friction, project:a, bug',
+    'Labels: sterling-report, severity:urgent, project:a',
+    'Labels: sterling-report, severity:friction, project:a b',
+  ]) assert.equal(ok(bad), null, bad);
+  assert.equal(reportLabels('no line'), null);
+});
+
+test('labels line: withLabelsLine adds a missing line without touching the fingerprint', () => {
+  const fp = FP;
   const labels = ['sterling-report', 'severity:blocked'];
   assert.equal(withLabelsLine(`Body\n\n${fp}`, labels, '0123456789ab'), `Body\n\nLabels: sterling-report, severity:blocked\n${fp}`);
   const has = `Body\n${LABELS}\n${fp}`;
@@ -532,6 +581,26 @@ test('cli: a project named like a UUID cannot put the UUID in the Labels or Proj
     const r = run(p, ['--dry-run', ...reportArgs()]);
     assert.equal(r.status, 0, r.stderr);
     assert.ok(!r.stdout.includes('630e54e6-8c61'), r.stdout);
+  }));
+
+test('cli: a path-shaped project name is scrubbed before it is slugged, in the Project line and the label', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.project, '.sterling', 'config.json'), JSON.stringify({ project_name: '/home/alice/clients/acme-billing' }));
+    const r = run(p, ['--dry-run', ...reportArgs()]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!/alice|clients|billing/.test(r.stdout), r.stdout);
+    assert.match(r.stdout, /^Project: project-path$/m);
+    assert.match(r.stdout, /^Labels: sterling-report, severity:friction, project:project-path$/m);
+  }));
+
+test('cli: a long UUID-bearing project name does not leave a cut UUID in the Project line or the label', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.project, '.sterling', 'config.json'), JSON.stringify({ project_name: 'client-acme-billing-630e54e6-8c61-4b73-beee-de569a5ec852' }));
+    const r = run(p, ['--dry-run', ...reportArgs()]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!/630e54e6|8c61|4b73|beee|de569a5/.test(r.stdout), r.stdout);
+    assert.match(r.stdout, /^Project: client-acme-billing--id$/m);
+    assert.match(r.stdout, /^Labels: sterling-report, severity:friction, project:client-acme-billing--id$/m);
   }));
 
 test('cli: a labelled create that GitHub accepts is one create with the Labels line in the body and no note', () =>
@@ -592,6 +661,32 @@ test('cli: a 5xx on the labelled create is not retried unlabelled; the report is
     assert.equal(creates(p).length, 1);
     assert.match(r.stderr, /report-issue: QUEUED.*503/);
     assert.equal(queued(p).length, 1);
+  }));
+
+for (const [spec, why] of [['400', 'a bad request'], ['408', 'a timeout'], ['429', 'too many requests'], ['403 You have exceeded a secondary rate limit', 'a secondary rate limit'], ['403 abuse detection mechanism triggered', 'abuse detection']]) {
+  test(`cli: ${why} (${spec.slice(0, 3)}) on the labelled create is not retried unlabelled; the report is queued`, () =>
+    withSetup((p) => {
+      writeFileSync(join(p.state, 'labels_refused'), spec);
+      const r = run(p, reportArgs());
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.equal(creates(p).length, 1);
+      assert.match(r.stderr, /report-issue: QUEUED/);
+      assert.equal(queued(p).length, 1);
+      assert.deepEqual(issues(p), []);
+    }));
+}
+
+test('cli: the HTTP status is also read from the JSON body when gh prints no "(HTTP n)" text', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.state, 'status_in_json_only'), '');
+    writeFileSync(join(p.state, 'labels_refused'), '422 Validation Failed');
+    const r = run(p, reportArgs());
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(creates(p).length, 2, 'the 422 from the JSON body is retried unlabelled');
+    writeFileSync(join(p.state, 'labels_refused'), '503');
+    const again = run(p, reportArgs({ title: 'A different defect' }));
+    assert.equal(again.status, 1);
+    assert.equal(creates(p).length, 3, 'a 503 read from the JSON body is still not retried');
   }));
 
 test('cli: when the unlabelled retry is refused too, the report is queued and exits 1', () =>
@@ -670,44 +765,194 @@ test('cli --list: finds reports by the fingerprint marker, labelled or not, and 
 
 // ---------- --apply-labels (maintainer mode) ----------
 
-const unlabelled = (n, labelsLine = LABELS) => ({ number: n, state: 'open', title: `Report ${n}`, body: `x\n${labelsLine}\nFingerprint: sterling-fp-01234567890${n}`, labels: [], comments: [] });
+const unlabelled = (n, labelsLine = LABELS) => ({ number: n, state: 'open', title: `Report ${n}`, body: `x\n${labelsLine}\nFingerprint: sterling-fp-${n.toString(16).padStart(12, '0')}`, labels: [], comments: [] });
+const labelWrites = (p) => ghLog(p).filter((c) => c.includes('POST') && c.some((x) => /\/labels$/.test(x)));
+const setRepoLabels = (p, names) => writeFileSync(join(p.state, 'labels.json'), JSON.stringify(names));
+const repoLabels = (p) => (existsSync(join(p.state, 'labels.json')) ? JSON.parse(readFileSync(join(p.state, 'labels.json'), 'utf8')) : []);
+const ALL = ['sterling-report', 'severity:friction', 'project:acme'];
 
-test('cli --apply-labels: creates the missing labels, sets them on each unlabelled report, never edits a body', () =>
+test('cli --apply-labels: by default it prints what it would do and writes nothing', () =>
   withSetup((p) => {
-    writeFileSync(join(p.state, 'labels.json'), JSON.stringify(['bug', 'sterling-report']));
-    const done = { ...unlabelled(2), labels: ['sterling-report', 'severity:friction', 'project:acme'] };
-    seed(p, [unlabelled(1), done, unlabelled(3, 'Labels: sterling-report, bug, severity:blocked')]);
-    const before = issues(p).map((i) => i.body);
+    setRepoLabels(p, ['sterling-report']);
+    seed(p, [unlabelled(1), unlabelled(2, 'Labels: sterling-report, severity:blocked, project:other')]);
+    const before = JSON.stringify(issues(p));
     const r = run(p, ['--apply-labels']);
     assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(labelWrites(p), [], 'no label create and no label set');
+    assert.equal(JSON.stringify(issues(p)), before);
+    assert.deepEqual(repoLabels(p), ['sterling-report']);
+    assert.match(r.stdout, /report-issue: --apply-labels DRY RUN: nothing was changed\. Run it with --yes to create and set the labels below\./);
+    assert.match(r.stdout, /report-issue: would create label 'project:acme'\./);
+    assert.match(r.stdout, /report-issue: would set sterling-report, severity:friction, project:acme on #1\./);
+    assert.match(r.stdout, /report-issue: DRY RUN: would create 4 label\(s\) and set labels on 2 of 2 open report\(s\)\./);
+  }));
+
+test('cli --apply-labels --yes: creates the missing labels, sets them on each unlabelled report, never edits a body', () =>
+  withSetup((p) => {
+    setRepoLabels(p, ['bug', 'sterling-report']);
+    const done = { ...unlabelled(2), labels: ALL };
+    seed(p, [unlabelled(1), done, unlabelled(3, 'Labels: sterling-report, severity:blocked, project:acme')]);
+    const before = issues(p).map((i) => i.body);
+    const r = run(p, ['--apply-labels', '--yes']);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
     const after = issues(p);
-    assert.deepEqual(after[0].labels, ['sterling-report', 'severity:friction', 'project:acme']);
-    assert.deepEqual(after[1].labels, done.labels, 'an already-labelled report is skipped');
-    assert.deepEqual(after[2].labels, ['sterling-report', 'severity:blocked'], 'a label outside the three shapes is not applied');
+    assert.deepEqual(after[0].labels, ALL);
+    assert.deepEqual(after[1].labels, ALL, 'an already-labelled report is skipped');
+    assert.deepEqual(after[2].labels, ['sterling-report', 'severity:blocked', 'project:acme']);
     assert.deepEqual(after.map((i) => i.body), before, 'the body is never edited');
-    assert.deepEqual(JSON.parse(readFileSync(join(p.state, 'labels.json'), 'utf8')).sort(), ['bug', 'project:acme', 'severity:blocked', 'severity:friction', 'sterling-report']);
+    assert.deepEqual(repoLabels(p).sort(), ['bug', 'project:acme', 'severity:blocked', 'severity:friction', 'sterling-report']);
     assert.ok(!ghLog(p).some((c) => c.includes('PATCH')));
-    assert.match(r.stdout, /#1/);
-    assert.match(r.stdout, /#3/);
+    assert.match(r.stdout, /report-issue: created label 'project:acme'\./);
+    assert.match(r.stdout, /report-issue: #1: set sterling-report, severity:friction, project:acme\./);
+    assert.match(r.stdout, /report-issue: labels applied to 2 of 3 open report\(s\)\./);
+  }));
+
+test('cli --apply-labels: a body naming many labels is skipped loudly and nothing is created, with or without --yes', () =>
+  withSetup((p) => {
+    const spam = unlabelled(1, `Labels: sterling-report, severity:friction, ${Array.from({ length: 150 }, (_, i) => `project:spam-${i}`).join(', ')}`);
+    seed(p, [spam, unlabelled(2)]);
+    for (const args of [['--apply-labels'], ['--apply-labels', '--yes']]) {
+      const r = run(p, args);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.match(r.stderr, /report-issue: #1 skipped: its Labels line is not exactly sterling-report, one severity and one project label; nothing was created or set for it\./);
+      assert.ok(!r.stdout.includes('spam') && !r.stderr.includes('spam'));
+    }
+    assert.deepEqual(repoLabels(p).sort(), ALL.slice().sort(), 'only the valid report labels exist');
+    assert.deepEqual(issues(p)[0].labels, []);
+    assert.deepEqual(issues(p)[1].labels, ALL);
+    assert.ok(!labelWrites(p).some((c) => c.some((x) => x.includes('spam'))));
+  }));
+
+test('cli --apply-labels --yes: a Labels line with two labels of one kind, or a kind missing, is skipped', () =>
+  withSetup((p) => {
+    seed(p, [
+      unlabelled(1, 'Labels: sterling-report, severity:friction, severity:blocked, project:a'),
+      unlabelled(2, 'Labels: sterling-report, severity:friction, project:a, project:b'),
+      unlabelled(3, 'Labels: sterling-report, severity:friction'),
+    ]);
+    const r = run(p, ['--apply-labels', '--yes']);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    for (const n of [1, 2, 3]) assert.match(r.stderr, new RegExp(`report-issue: #${n} skipped:`));
+    assert.deepEqual(labelWrites(p), []);
+    assert.deepEqual(repoLabels(p), []);
+  }));
+
+test('cli --apply-labels --yes: a run creates at most 10 new labels, stops loudly at the cap and names the reports it did not handle', () =>
+  withSetup((p) => {
+    setRepoLabels(p, ['sterling-report', 'severity:friction']);
+    seed(p, Array.from({ length: 12 }, (_, i) => unlabelled(i + 1, `Labels: sterling-report, severity:friction, project:p${i + 1}`)));
+    const r = run(p, ['--apply-labels', '--yes']);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.equal(repoLabels(p).filter((l) => l.startsWith('project:')).length, 10);
+    assert.deepEqual(issues(p).map((i) => i.labels.length > 0), [...Array(10).fill(true), false, false]);
+    assert.match(r.stderr, /report-issue: stopped at the cap of 10 new labels per run; #11, #12 were not handled\. Review them, then run report-issue --apply-labels --yes again\./);
+  }));
+
+test('cli --apply-labels: the default run reports the cap too and still writes nothing', () =>
+  withSetup((p) => {
+    setRepoLabels(p, ['sterling-report', 'severity:friction']);
+    seed(p, Array.from({ length: 12 }, (_, i) => unlabelled(i + 1, `Labels: sterling-report, severity:friction, project:p${i + 1}`)));
+    const r = run(p, ['--apply-labels']);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(labelWrites(p), []);
+    assert.match(r.stdout, /report-issue: the cap of 10 new labels per run is reached; #11, #12 would not be handled in one run\./);
+    assert.match(r.stdout, /would create 10 label\(s\) and set labels on 10 of 12/);
   }));
 
 for (const status of [403, 404]) {
-  test(`cli --apply-labels: HTTP ${status} refuses loudly, names the status and says a maintainer must run it`, () =>
+  test(`cli --apply-labels --yes: HTTP ${status} on creating a label refuses loudly, names the status and says a maintainer must run it`, () =>
     withSetup((p) => {
       seed(p, [unlabelled(1)]);
       writeFileSync(join(p.state, 'label_write_refused'), String(status));
-      const r = run(p, ['--apply-labels']);
+      const r = run(p, ['--apply-labels', '--yes']);
       assert.equal(r.status, 2, r.stdout + r.stderr);
-      assert.match(r.stderr, new RegExp(`report-issue: --apply-labels refused: GitHub answered HTTP ${status} .*account cannot change labels on Chulf58/sterling\\. A maintainer of the repo must run report-issue --apply-labels\\.`));
+      assert.match(r.stderr, new RegExp(`report-issue: --apply-labels refused: GitHub answered HTTP ${status} when creating label 'sterling-report'\\. This account cannot change labels on Chulf58/sterling\\. A maintainer of the repo must run report-issue --apply-labels --yes\\.`));
       assert.deepEqual(issues(p)[0].labels, []);
     }));
 }
 
-test('cli --apply-labels: takes no report fields and does not combine with another mode', () =>
+test('cli --apply-labels: the default run never writes, so an account that cannot change labels can still read the plan', () =>
+  withSetup((p) => {
+    seed(p, [unlabelled(1)]);
+    writeFileSync(join(p.state, 'label_write_refused'), '403');
+    const r = run(p, ['--apply-labels']);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(labelWrites(p), []);
+  }));
+
+test('cli --apply-labels --yes: a refusal part-way through says what was already applied', () =>
+  withSetup((p) => {
+    setRepoLabels(p, ALL);
+    seed(p, [unlabelled(1), unlabelled(2), unlabelled(3)]);
+    writeFileSync(join(p.state, 'set_refused_for'), '2 403');
+    const r = run(p, ['--apply-labels', '--yes']);
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stderr, /refused: GitHub answered HTTP 403 when setting labels on #2\./);
+    assert.match(r.stderr, /Already applied before this stop: #1\./);
+    assert.deepEqual(issues(p).map((i) => i.labels.length), [3, 0, 0]);
+  }));
+
+test('cli --apply-labels --yes: a 404 on one issue is a plain per-issue message, the others are still labelled, exit 1', () =>
+  withSetup((p) => {
+    setRepoLabels(p, ALL);
+    seed(p, [unlabelled(1), unlabelled(2), unlabelled(3)]);
+    writeFileSync(join(p.state, 'set_refused_for'), '2 404');
+    const r = run(p, ['--apply-labels', '--yes']);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /report-issue: #2 not labelled: GitHub answered HTTP 404 setting its labels; the issue may have been deleted or moved\./);
+    assert.ok(!/cannot change labels/.test(r.stderr));
+    assert.deepEqual(issues(p).map((i) => i.labels.length), [3, 0, 3]);
+  }));
+
+test('cli --apply-labels: a failing search is reported plainly, not as a permission problem', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.state, 'api_fail'), '');
+    const r = run(p, ['--apply-labels', '--yes']);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /report-issue: --apply-labels could not read the reports: /);
+    assert.ok(!/cannot change labels|maintainer/.test(r.stderr));
+  }));
+
+test('cli --apply-labels: takes no report fields and does not combine with another mode; --yes belongs to --apply-labels only', () =>
   withSetup((p) => {
     assert.equal(run(p, ['--apply-labels', '--title', 'x']).status, 2);
     assert.equal(run(p, ['--apply-labels', '--list']).status, 2);
+    assert.equal(run(p, ['--yes']).status, 2);
+    assert.equal(run(p, ['--list', '--yes']).status, 2);
     assert.deepEqual(ghLog(p), []);
+  }));
+
+// ---------- searches page up to a bound ----------
+
+const manyReports = (count) => Array.from({ length: count }, (_, i) => ({ number: i + 1, state: 'open', title: `R${i + 1}`, body: `Fingerprint: sterling-fp-${(i + 1).toString(16).padStart(12, '0')}`, labels: ['sterling-report'], comments: [] }));
+
+test('cli --list: reads at most 5 pages of 100 and says plainly how many reports it did not reach', () =>
+  withSetup((p) => {
+    seed(p, manyReports(520));
+    const r = run(p, ['--list']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.split('\n').filter((l) => /^#\d+ /.test(l)).length, 500);
+    assert.match(r.stdout, /report-issue: 520 reports match but only the first 500 were read \(5 pages of 100\); 20 were not reached\./);
+    const pages = ghLog(p).filter((c) => c.includes('search/issues')).map((c) => c.find((x) => x.startsWith('page=')));
+    assert.deepEqual(pages, ['page=1', 'page=2', 'page=3', 'page=4', 'page=5']);
+  }));
+
+test('cli --list: a result set that fits on one page is one search call and no note', () =>
+  withSetup((p) => {
+    seed(p, manyReports(3));
+    const r = run(p, ['--list']);
+    assert.equal(ghLog(p).filter((c) => c.includes('search/issues')).length, 1);
+    assert.ok(!/not reached|incomplete/.test(r.stdout));
+  }));
+
+test('cli --list and --apply-labels: GitHub marking the search incomplete is said plainly', () =>
+  withSetup((p) => {
+    seed(p, manyReports(2));
+    writeFileSync(join(p.state, 'incomplete_results'), '');
+    const list = run(p, ['--list']);
+    assert.match(list.stdout, /report-issue: GitHub marked the search results incomplete; some reports may be missing from this list\./);
+    const apply = run(p, ['--apply-labels']);
+    assert.match(apply.stdout, /report-issue: GitHub marked the search results incomplete; some reports may be missing from this list\./);
   }));
 
 // ---------- queue lock ----------
