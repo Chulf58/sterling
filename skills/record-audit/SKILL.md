@@ -14,10 +14,10 @@ On demand only (user-ruled 2026-10-03, through the question form). Run it when t
 ## 1. Run the report arm first
 
 ```
-node scripts/check-record-hygiene.mjs --all
+node "${CLAUDE_PLUGIN_ROOT}/bin/check-record-hygiene.mjs" . --all
 ```
 
-It reads a snapshot of the store and lists every dead path, missing test ref and findability problem. Those records are already known. Work them as ordinary fixes (step 4) and keep them out of the sample, so the audit spends its attention on defects code cannot find.
+Run it from the project root. The `.` names the project to audit; without it the script audits the plugin's own directory. It reads a snapshot of the store and lists every dead path, missing test ref and findability problem. Those records are already known. Work them as ordinary fixes (step 4) and keep them out of the sample, so the audit spends its attention on defects code cannot find.
 
 ## 2. Draw the sample
 
