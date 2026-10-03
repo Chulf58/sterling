@@ -5485,6 +5485,11 @@ var MountedStores = class {
     this.assertMountAffinity("enqueueSystemTodo", target, `todo '${record.id}' (scope '${record.scope}')`);
     return target.enqueueSystemTodo(record);
   }
+  /** Read-only twin of enqueueSystemTodo: queue items are project-local, so the
+   *  precheck asks the project store only (same reasoning as the enqueue above). */
+  enqueueWouldBeNoop(input) {
+    return this.project.enqueueWouldBeNoop(input);
+  }
   storeFor(scope) {
     if (scope === "project")
       return this.project;
@@ -6299,6 +6304,20 @@ function declaredCaptureTarget(text) {
     return null;
   }
   return typeof target === "string" && target.length > 0 ? target : null;
+}
+function systemTodoKey(t) {
+  const declaredTarget = t.system_reason === "capture_owed" ? declaredCaptureTarget(t.text) : null;
+  if (declaredTarget !== null)
+    return JSON.stringify(["capture_owed", t.feature_link ?? "", [], `declared-target:${declaredTarget}`]);
+  const files = t.system_reason === "state_review" ? [] : [...t.file_keys ?? []].sort();
+  const identified = !!t.feature_link || files.length > 0;
+  return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
+}
+function systemTodoTextsEquivalent(reason, a, b) {
+  if (reason !== "state_review")
+    return a === b;
+  const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
+  return strip(a) === strip(b);
 }
 function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
@@ -7136,6 +7155,35 @@ var SterlingStore = class _SterlingStore {
     }
   }
   /**
+   * READ-ONLY PRECHECK for enqueueSystemTodo: true only when an enqueue of
+   * `input` would change nothing — an open system item with the same identity
+   * key, equivalent text and the same file_keys already exists. A read-time
+   * minter calls this first and takes the write path (a transaction, a git
+   * probe) only on false, so re-reading N overdue records costs N cheap scans
+   * instead of N write transactions. It shares systemTodoKey and
+   * systemTodoTextsEquivalent with the write, so the dedupe rule has one home.
+   *
+   * Conservative by construction: false is "take the write path", never "an
+   * item is absent". The reconcile_needed fold lane always answers false
+   * (its union-and-fold rule lives only in the write), and an input the
+   * write would refuse is not validated here, the write path refuses it.
+   */
+  enqueueWouldBeNoop(input) {
+    if (input.system_reason === "reconcile_needed" && input.feature_link)
+      return false;
+    const wantKey = systemTodoKey(input);
+    const rows = input.feature_link ? this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0").all(input.feature_link) : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+    for (const r of rows) {
+      const t = _SterlingStore.decodeLiveRecord("enqueueWouldBeNoop", r);
+      if (t.source !== "system" || systemTodoKey(t) !== wantKey)
+        continue;
+      const priorFiles = [...t.file_keys ?? []].sort();
+      const nextFiles = [...input.file_keys ?? []].sort();
+      return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? "", input.text);
+    }
+    return false;
+  }
+  /**
    * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
    * definition, replacing four hand-rolled copies (board 2ded3b4b).
    *
@@ -7198,21 +7246,9 @@ var SterlingStore = class _SterlingStore {
     if (candidate.system_reason === "state_review" && !candidate.feature_link) {
       throw new Error(`enqueueSystemTodo: a state_review item requires feature_link \u2014 this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`);
     }
-    const keyOf = (t) => {
-      const declaredTarget = t.system_reason === "capture_owed" ? declaredCaptureTarget(t.text) : null;
-      if (declaredTarget !== null)
-        return JSON.stringify(["capture_owed", t.feature_link ?? "", [], `declared-target:${declaredTarget}`]);
-      const files = t.system_reason === "state_review" ? [] : [...t.file_keys ?? []].sort();
-      const identified = !!t.feature_link || files.length > 0;
-      return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
-    };
+    const keyOf = systemTodoKey;
     const wantKey = keyOf(candidate);
-    const textsEquivalent = (a, b) => {
-      if (candidate.system_reason !== "state_review")
-        return a === b;
-      const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
-      return strip(a) === strip(b);
-    };
+    const textsEquivalent = (a, b) => systemTodoTextsEquivalent(candidate.system_reason, a, b);
     const isReconcileFold = candidate.system_reason === "reconcile_needed" && !!candidate.feature_link;
     let existing;
     let textUpdated = false;
