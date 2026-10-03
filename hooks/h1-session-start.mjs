@@ -5351,22 +5351,40 @@ var init_config = __esm({
       tdd: external_exports.object({
         enabled: external_exports.boolean().default(true)
       }).default({}),
-      // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-      // per-project switch that decides the flow. 'hobby' (the default, today's
-      // behaviour) skips the OpenCode agents and the handoff projection; 'work'
-      // writes and maintains them. Toggled in the TUI System tab. A missing key
-      // means hobby.
+      // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed
+      // by project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+      // the per-project switch that decides how work ships. 'hobby' (the default)
+      // merges directly through /sterling:merge; 'work' opens a pull request and
+      // runs the review loop. It decides nothing else: whether the handoff files
+      // are written is `handoff` below. Toggled in the TUI System tab. A missing
+      // key means hobby.
       // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
       // S1): any other value is PRESERVED raw, never coerced to hobby and never
       // thrown on — a typo here must not turn every parseConfig reader (the MCP
       // server's boot included) into a startup failure. The strict judge is
       // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
-      // surface that ACTS on the mode (init, sync-agents, /sterling:update, the
-      // handoff-projection CLI) uses, and which refuses an invalid value loudly.
+      // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
+      // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
       // Consumers of the PARSED config must narrow this field themselves.
       // The default lives twice (anti_pattern 85d15143): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       mode: external_exports.unknown().default("hobby"),
+      // Handoff files (decision
+      // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+      // `enabled` says whether Sterling writes the files for colleagues who do not
+      // have Sterling, the portable OpenCode agents (.opencode/agents/) and the
+      // handoff projection (architecture.md, rulings.md, docs/sterling/). Off by
+      // default, independent of `mode`. Toggled in the TUI System tab.
+      // PERMISSIVE for the same reason as `mode`: the value is preserved raw. The
+      // strict judge is readHandoffEnabled() in scripts/lib/handoff-projection.mjs,
+      // which init, sync-agents, /sterling:update, the handoff-projection CLI and
+      // the git exclude block use. It refuses a value that is not a boolean, and it
+      // reads a config with NO key as on when portable agents are already tracked
+      // in git, which this default cannot express: read the setting through it,
+      // never from the parsed config.
+      // The default lives twice (anti_pattern 85d15143): here and in
+      // templates/default-config.json; config.test.ts pins that they agree.
+      handoff: external_exports.unknown().default({ enabled: false }),
       // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
       // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
       // first use; empty means unpinned (any Bot login matching /copilot/i, with
@@ -8009,7 +8027,7 @@ var init_checks = __esm({
 
 // scripts/lib/agent-distribution.mjs
 import { createHash as createHash3, randomUUID as randomUUID3 } from "node:crypto";
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync3, readdirSync as readdirSync2, existsSync as existsSync9, mkdirSync as mkdirSync5, statSync as statSync2, lstatSync as lstatSync2, unlinkSync as unlinkSync2, renameSync as renameSync3, linkSync } from "node:fs";
+import { readFileSync as readFileSync6, writeFileSync as writeFileSync3, readdirSync as readdirSync3, existsSync as existsSync9, mkdirSync as mkdirSync6, statSync as statSync2, lstatSync as lstatSync3, unlinkSync as unlinkSync3, renameSync as renameSync3, linkSync } from "node:fs";
 function sha256(text) {
   return createHash3("sha256").update(normalize(text), "utf8").digest("hex");
 }
@@ -8051,7 +8069,7 @@ function validateOpenCodeEntry(entry, where) {
   }
 }
 function loadRegistry(registryPath2) {
-  const registry = JSON.parse(readFileSync5(registryPath2, "utf8"));
+  const registry = JSON.parse(readFileSync6(registryPath2, "utf8"));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
     throw new Error(`agent registry ${registryPath2}: unsupported shape (expected {version: 1, agents: []})`);
   }
@@ -8100,7 +8118,7 @@ var init_agent_distribution = __esm({
 // scripts/hooks/h1-session-start.mjs
 import { randomUUID as randomUUID5 } from "node:crypto";
 import { readFileSync as readFileSync13, existsSync as existsSync15, mkdirSync as mkdirSync10, readdirSync as readdirSync6, renameSync as renameSync6, statSync as statSync5, writeFileSync as writeFileSync8, rmSync as rmSync5 } from "node:fs";
-import { spawnSync as spawnSync6 } from "node:child_process";
+import { spawnSync as spawnSync7 } from "node:child_process";
 import { basename as basename2, join as join18 } from "node:path";
 
 // scripts/hooks/lib/plugin-root-walk.mjs
@@ -9558,8 +9576,44 @@ function renderUnavailable(reason) {
 
 // scripts/hooks/lib/operating-state.mjs
 init_dist2();
-import { existsSync as existsSync8, readFileSync as readFileSync4 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync5 } from "node:fs";
 import { join as join10 } from "node:path";
+
+// scripts/lib/handoff-projection.mjs
+import { spawnSync as spawnSync3 } from "node:child_process";
+
+// scripts/lib/contained-fs.mjs
+import { lstatSync as lstatSync2, readFileSync as readFileSync4, readdirSync as readdirSync2, mkdirSync as mkdirSync5, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
+var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+// scripts/lib/handoff-projection.mjs
+var CONFIG_REL = ".sterling/config.json";
+var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
+var HandoffSettingError = class extends Error {
+};
+function portableAgentsTracked(root) {
+  const r = spawnSync3("git", ["ls-files", "--", ...PORTABLE_AGENT_PATHS], { cwd: root, encoding: "utf8" });
+  return r.status === 0 && r.stdout.trim() !== "";
+}
+function handoffSettingOf(parsed, root, where = CONFIG_REL) {
+  const block = parsed?.handoff;
+  if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
+    throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
+  }
+  const value = block?.enabled;
+  if (value === void 0) return portableAgentsTracked(root) ? { enabled: true, source: "tracked" } : { enabled: false, source: "default" };
+  if (typeof value !== "boolean") {
+    throw new HandoffSettingError(`config.handoff.enabled is ${JSON.stringify(value)} in ${where} \u2014 it must be true or false; switch it in the TUI System tab or fix the file`);
+  }
+  return { enabled: value, source: "config" };
+}
+var HANDOFF_DOCS_DIR = "docs/sterling";
+var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
+var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
+     Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
+     your commit message rather than editing it. -->`;
+var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
+var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
 
 // scripts/hooks/lib/subject-fan.mjs
 import { existsSync as existsSync7 } from "node:fs";
@@ -9631,9 +9685,26 @@ function projectModeLine({ config: config2, configUnreadable: configUnreadable2 
   }
   const mode = config2?.mode;
   if (mode === void 0 || mode === "hobby" || mode === "work") {
-    return `Project mode: ${mode === "work" ? "WORK" : "HOBBY"} (config.mode \u2014 TUI System tab) \u2014 ` + (mode === "work" ? "the OpenCode agents and handoff files are written and maintained." : "the OpenCode agents and handoff files are not written or maintained in hobby mode; existing ones may remain from an earlier work period.");
+    return `Project mode: ${mode === "work" ? "WORK" : "HOBBY"} (config.mode \u2014 TUI System tab) \u2014 ` + (mode === "work" ? "work ships as a pull request through /sterling:merge, followed by the review loop; nothing is merged directly." : "work ships by direct merge through /sterling:merge.");
   }
-  return `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) \u2014 config.mode must be 'hobby' or 'work'; init, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).`;
+  return `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) \u2014 config.mode must be 'hobby' or 'work'; /sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).`;
+}
+var HANDOFF_SET = "the portable OpenCode agents and the handoff projection for colleagues without Sterling";
+function handoffFilesLine({ config: config2, configUnreadable: configUnreadable2, root }) {
+  if (configUnreadable2) {
+    return "Handoff files: UNKNOWN \u2014 the project config could not be read, so config.handoff.enabled could not be determined. This is NOT the off default: repair the config.";
+  }
+  let setting;
+  try {
+    setting = handoffSettingOf(config2, root);
+  } catch (err) {
+    if (!(err instanceof HandoffSettingError)) throw err;
+    const block = config2.handoff;
+    const raw = block !== null && typeof block === "object" && !Array.isArray(block) ? block.enabled : block;
+    return `Handoff files: INVALID (${JSON.stringify(raw).replace(/^"|"$/g, "'")}) \u2014 config.handoff.enabled must be true or false; init, sync-agents, /sterling:update and the handoff projection refuse to act on it until it is fixed (TUI System tab).`;
+  }
+  const where = setting.source === "tracked" ? "config.handoff.enabled is not set; portable agents are tracked in git" : "config.handoff.enabled";
+  return `Handoff files: ${setting.enabled ? "ON" : "OFF"} (${where} \u2014 TUI System tab) \u2014 ` + (setting.enabled ? `${HANDOFF_SET} are written and maintained.` : `${HANDOFF_SET} are not written; existing ones are left in place.`);
 }
 var PENDING_ISSUE_REPORTS = "pending-issue-reports.jsonl";
 function pendingIssueReportsLine({ cwd, pluginRoot: pluginRoot3 }) {
@@ -9641,7 +9712,7 @@ function pendingIssueReportsLine({ cwd, pluginRoot: pluginRoot3 }) {
   if (!existsSync8(path)) return "";
   let count;
   try {
-    count = readFileSync4(path, "utf8").split("\n").filter((l) => l.trim()).length;
+    count = readFileSync5(path, "utf8").split("\n").filter((l) => l.trim()).length;
   } catch (e) {
     return `Sterling issue reports: UNKNOWN \u2014 .sterling/${PENDING_ISSUE_REPORTS} could not be read (${e && e.message || e}), so the number of queued reports is not known.`;
   }
@@ -9671,7 +9742,7 @@ function mountedDomainLines({ config: config2, configUnreadable: configUnreadabl
 
 // scripts/hooks/lib/undeclared-source-scan.mjs
 init_dist();
-import { spawnSync as spawnSync3 } from "node:child_process";
+import { spawnSync as spawnSync4 } from "node:child_process";
 var UNDECLARED_SOURCE_TIMEOUT_MS = 3e3;
 var UNDECLARED_SOURCE_OUTPUT_CAP = 5e6;
 function isPlainObject2(v) {
@@ -9729,14 +9800,14 @@ function gitSpawnFailureReason(result, label) {
   return null;
 }
 function scanFilePaths(cwd) {
-  const gitAll = spawnSync3("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+  const gitAll = spawnSync4("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
     cwd,
     timeout: UNDECLARED_SOURCE_TIMEOUT_MS,
     maxBuffer: UNDECLARED_SOURCE_OUTPUT_CAP
   });
   let reason = gitSpawnFailureReason(gitAll, "ls-files");
   if (reason) return { ok: false, reason };
-  const gitDeleted = spawnSync3("git", ["ls-files", "-z", "-d"], {
+  const gitDeleted = spawnSync4("git", ["ls-files", "-z", "-d"], {
     cwd,
     timeout: UNDECLARED_SOURCE_TIMEOUT_MS,
     maxBuffer: UNDECLARED_SOURCE_OUTPUT_CAP
@@ -9775,8 +9846,8 @@ init_agent_distribution();
 // scripts/hooks/lib/settlement.mjs
 init_dist2();
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync6, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, rmSync as rmSync3, statSync as statSync3, renameSync as renameSync4 } from "node:fs";
-import { spawnSync as spawnSync4 } from "node:child_process";
+import { readFileSync as readFileSync7, writeFileSync as writeFileSync4, mkdirSync as mkdirSync7, rmSync as rmSync3, statSync as statSync3, renameSync as renameSync4 } from "node:fs";
+import { spawnSync as spawnSync5 } from "node:child_process";
 import { join as join11, dirname as dirname8 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
@@ -9785,7 +9856,7 @@ init_dist();
 // scripts/hooks/lib/settlement.mjs
 function hashFile(root, rel) {
   try {
-    return createHash4("sha256").update(readFileSync6(join11(root, rel))).digest("hex");
+    return createHash4("sha256").update(readFileSync7(join11(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -9793,7 +9864,7 @@ function hashFile(root, rel) {
 var GIT_SETTLED_REL = ".sterling/transient/git-settled.json";
 var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 function gitZ(root, args) {
-  const r = spawnSync4("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync5("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.error?.message || "").trim()}`);
   return r.stdout.split("\0").filter(Boolean);
 }
@@ -9808,7 +9879,7 @@ function changedSince(root, base2) {
 var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
 function readGitSettled(root) {
   try {
-    const s2 = JSON.parse(readFileSync6(join11(root, GIT_SETTLED_REL), "utf8"));
+    const s2 = JSON.parse(readFileSync7(join11(root, GIT_SETTLED_REL), "utf8"));
     return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
   } catch {
     return null;
@@ -9817,17 +9888,17 @@ function readGitSettled(root) {
 function gitTouches(root, now) {
   let head;
   try {
-    const r = spawnSync4("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+    const r = spawnSync5("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
     if (r.status === 0) head = r.stdout.trim();
-    else if (spawnSync4("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
+    else if (spawnSync5("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
     else return { ok: false, reason: "no_git" };
     const settled = readGitSettled(root);
     let base2 = settled?.sha;
     let mergeBase = null;
     if (base2 && base2 !== EMPTY_TREE) {
-      if (spawnSync4("git", ["cat-file", "-e", `${base2}^{commit}`], { cwd: root, timeout: 3e4 }).status !== 0) base2 = null;
-      else if (spawnSync4("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0) {
-        const mb = spawnSync4("git", ["merge-base", base2, head], { cwd: root, encoding: "utf8", timeout: 3e4 });
+      if (spawnSync5("git", ["cat-file", "-e", `${base2}^{commit}`], { cwd: root, timeout: 3e4 }).status !== 0) base2 = null;
+      else if (spawnSync5("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0) {
+        const mb = spawnSync5("git", ["merge-base", base2, head], { cwd: root, encoding: "utf8", timeout: 3e4 });
         mergeBase = mb.status === 0 ? mb.stdout.trim() || null : null;
         if (!mergeBase) base2 = null;
       }
@@ -9859,7 +9930,7 @@ function gitTouches(root, now) {
 }
 function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
   const p = join11(root, GIT_SETTLED_REL);
-  mkdirSync6(dirname8(p), { recursive: true });
+  mkdirSync7(dirname8(p), { recursive: true });
   if (ifAbsent) {
     try {
       writeFileSync4(p, JSON.stringify(snapshot), { flag: "wx" });
@@ -9889,7 +9960,7 @@ import { homedir as homedir4 } from "node:os";
 import { join as join13 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync10, readFileSync as readFileSync7, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
+import { existsSync as existsSync10, readFileSync as readFileSync8, readdirSync as readdirSync4, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join12, resolve as resolve3, sep } from "node:path";
 
@@ -10061,7 +10132,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync10, readFileSync7, readdirSync3, join12, homedir3);
+)(existsSync10, readFileSync8, readdirSync4, join12, homedir3);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -10095,7 +10166,7 @@ function configuredSterlingSpec(env, home, root) {
   const path = join12(env.XDG_CONFIG_HOME || join12(home, ".config"), "opencode", "opencode.json");
   let config2;
   try {
-    config2 = parseJsonc(readFileSync7(path, "utf8"));
+    config2 = parseJsonc(readFileSync8(path, "utf8"));
   } catch (err) {
     if (err?.code === "ENOENT") return null;
     return { unreadable: `could not read ${path.replace(/\\/g, "/")}: ${err.message}` };
@@ -10156,8 +10227,8 @@ function isInstalledCopy(root, { env = process.env, home = homedir4() } = {}) {
 }
 
 // scripts/lib/post-update-sync.mjs
-import { spawn, spawnSync as spawnSync5 } from "node:child_process";
-import { existsSync as existsSync12, readFileSync as readFileSync8, writeFileSync as writeFileSync5 } from "node:fs";
+import { spawn, spawnSync as spawnSync6 } from "node:child_process";
+import { existsSync as existsSync12, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { join as join14 } from "node:path";
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
@@ -10198,7 +10269,7 @@ function pluginScript(root, name) {
 }
 function readPluginVersion(root) {
   try {
-    const v = JSON.parse(readFileSync8(join14(root, ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync9(join14(root, ".claude-plugin", "plugin.json"), "utf8")).version;
     return typeof v === "string" && v.length ? v : null;
   } catch {
   }
@@ -10214,7 +10285,7 @@ function stepResult({ error, status, stdout, stderr }) {
   return { status: error ? null : status, error, out, tail: out.split("\n").slice(-8).join(" | ") };
 }
 function runStepSync(root, name, args, { nodeBin = process.execPath } = {}) {
-  const r = spawnSync5(nodeBin, [pluginScript(root, name), ...args], { cwd: root, encoding: "utf8", timeout: POST_UPDATE_STEP_TIMEOUT_MS });
+  const r = spawnSync6(nodeBin, [pluginScript(root, name), ...args], { cwd: root, encoding: "utf8", timeout: POST_UPDATE_STEP_TIMEOUT_MS });
   return stepResult({ error: r.error ? r.error.message : r.signal ? `killed by ${r.signal}` : null, status: r.status, stdout: r.stdout, stderr: r.stderr });
 }
 async function runPostUpdateSteps(root, project, runStep) {
@@ -10243,7 +10314,7 @@ async function postUpdateSync({ root, project, host = "claude", runStep = runSte
   const markerPath = join14(project, SYNC_MARKER_REL);
   let previous = null;
   try {
-    previous = readFileSync8(markerPath, "utf8").trim() || null;
+    previous = readFileSync9(markerPath, "utf8").trim() || null;
   } catch {
   }
   const manifest = join14(root, ".claude-plugin", "plugin.json");
@@ -10311,21 +10382,6 @@ POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart 
 import { closeSync as closeSync3, existsSync as existsSync13, mkdirSync as mkdirSync8, openSync as openSync3, readFileSync as readFileSync10, readdirSync as readdirSync5, readSync as readSync2, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname9, join as join15 } from "node:path";
-
-// scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync3, readFileSync as readFileSync9, readdirSync as readdirSync4, mkdirSync as mkdirSync7, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync3, constants } from "node:fs";
-var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
-
-// scripts/lib/handoff-projection.mjs
-var HANDOFF_DOCS_DIR = "docs/sterling";
-var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
-var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
-     Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
-     your commit message rather than editing it. -->`;
-var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
-var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
-
-// scripts/lib/update.mjs
 var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed-By-Agent", "review-ledger", "frozen-test"]);
 var UPDATE_MARKER_RELATIVE_PATH = join15(".sterling", "update-complete.json");
 function machineStores(cwd) {
@@ -10957,6 +11013,13 @@ try {
 ${projectModeLine({ config, configUnreadable })}`;
 } catch {
 }
+var handoffContext = "";
+try {
+  handoffContext = `
+
+${handoffFilesLine({ config, configUnreadable, root: input.cwd })}`;
+} catch {
+}
 var domainLines = mountedDomainLines({ config, configUnreadable });
 var domainsContext = domainLines.length ? `
 
@@ -10984,7 +11047,7 @@ try {
     }
     if (role !== "authoring") {
       const git = (args, timeout = 5e3) => {
-        const r = spawnSync6("git", args, { cwd: root, encoding: "utf8", timeout });
+        const r = spawnSync7("git", args, { cwd: root, encoding: "utf8", timeout });
         return r.status === 0 ? (r.stdout ?? "").trim() : null;
       };
       const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -10999,7 +11062,7 @@ try {
         } catch {
         }
         if (!fresh) {
-          spawnSync6("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+          spawnSync7("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
           try {
             writeFileSync8(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
           } catch {
@@ -11083,7 +11146,7 @@ function planLockSection(ctx) {
     }
     let branchNow = "unknown";
     try {
-      const r = spawnSync6("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
+      const r = spawnSync7("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
       const current = r.status === 0 ? (r.stdout ?? "").trim() : "";
       const approved = clean(lock.approved_branch, 120);
       if (current && approved) branchNow = current === approved ? "same" : `DIFFERENT (now ${current}, approved on ${approved})`;
@@ -11509,6 +11572,6 @@ var output = {
   systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + handoffContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext }
 };
 exitAfterWrite(JSON.stringify(output), 0);

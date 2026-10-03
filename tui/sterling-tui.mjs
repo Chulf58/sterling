@@ -44317,22 +44317,40 @@ var configSchema = external_exports.object({
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
   }).default({}),
-  // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-  // per-project switch that decides the flow. 'hobby' (the default, today's
-  // behaviour) skips the OpenCode agents and the handoff projection; 'work'
-  // writes and maintains them. Toggled in the TUI System tab. A missing key
-  // means hobby.
+  // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed
+  // by project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+  // the per-project switch that decides how work ships. 'hobby' (the default)
+  // merges directly through /sterling:merge; 'work' opens a pull request and
+  // runs the review loop. It decides nothing else: whether the handoff files
+  // are written is `handoff` below. Toggled in the TUI System tab. A missing
+  // key means hobby.
   // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
   // S1): any other value is PRESERVED raw, never coerced to hobby and never
   // thrown on — a typo here must not turn every parseConfig reader (the MCP
   // server's boot included) into a startup failure. The strict judge is
   // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
-  // surface that ACTS on the mode (init, sync-agents, /sterling:update, the
-  // handoff-projection CLI) uses, and which refuses an invalid value loudly.
+  // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
+  // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.
   // The default lives twice (anti_pattern 85d15143): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // Handoff files (decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+  // `enabled` says whether Sterling writes the files for colleagues who do not
+  // have Sterling, the portable OpenCode agents (.opencode/agents/) and the
+  // handoff projection (architecture.md, rulings.md, docs/sterling/). Off by
+  // default, independent of `mode`. Toggled in the TUI System tab.
+  // PERMISSIVE for the same reason as `mode`: the value is preserved raw. The
+  // strict judge is readHandoffEnabled() in scripts/lib/handoff-projection.mjs,
+  // which init, sync-agents, /sterling:update, the handoff-projection CLI and
+  // the git exclude block use. It refuses a value that is not a boolean, and it
+  // reads a config with NO key as on when portable agents are already tracked
+  // in git, which this default cannot express: read the setting through it,
+  // never from the parsed config.
+  // The default lives twice (anti_pattern 85d15143): here and in
+  // templates/default-config.json; config.test.ts pins that they agree.
+  handoff: external_exports.unknown().default({ enabled: false }),
   // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
   // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
   // first use; empty means unpinned (any Bot login matching /copilot/i, with
@@ -47772,7 +47790,8 @@ var EMPTY_ROSTER = {
   sparringPartner: { enabled: true },
   codexWired: false,
   tdd: { enabled: true },
-  mode: "hobby"
+  mode: "hobby",
+  handoff: false
 };
 function driftOf(installed, config) {
   return installed !== config;
@@ -47946,7 +47965,8 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   const sparringRows = selector ? [] : sparringPartnerRows(snap, ui, width, keys.length);
   const tddRows = selector ? [] : [tddToggleRow(snap, ui, width, keys.length + 2)];
   const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows };
+  const handoffRows = selector ? [] : [handoffToggleRow(snap, ui, width, keys.length + 4)];
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows };
 }
 function catalogBanner(catalog, width) {
   const clip2 = (s2) => clipEllipsis(s2, width);
@@ -47994,6 +48014,14 @@ function modeToggleRow(snap, ui, width, cursorIndex) {
   const shown = mode === null ? "UNKNOWN (config unreadable)" : mode === "hobby" || mode === "work" ? mode.toUpperCase() : `INVALID ('${mode}')`;
   return { id: "sys:project_mode", lines: [{ text: clip2(`${marker}Project mode: ${shown}`), kind: "title", selected }] };
 }
+function handoffToggleRow(snap, ui, width, cursorIndex) {
+  const clip2 = (s2) => clipEllipsis(s2, width);
+  const handoff = snap.handoff === void 0 ? false : snap.handoff;
+  const selected = ui.cursor === cursorIndex;
+  const marker = selected ? "\u203A " : "  ";
+  const shown = handoff === null ? "UNKNOWN (config unreadable)" : handoff === true ? "ON" : handoff === false ? "OFF" : `INVALID (${handoff})`;
+  return { id: "sys:handoff_files", lines: [{ text: clip2(`${marker}Handoff files: ${shown}`), kind: "title", selected }] };
+}
 function tabsFor(store, activeTab, agents) {
   let taskCount = null;
   try {
@@ -48034,7 +48062,7 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, ma
     rows.push({ id: sr.id, type: "system", selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
     screenRow += lines.length;
   }
-  for (const sr of [...view.tddRows, ...view.modeRows]) {
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows]) {
     const lines = sr.lines.map((l) => ({
       text: l.text,
       kind: l.kind === "title" ? "title" : l.kind === "meta" ? "meta" : "body"
@@ -48308,7 +48336,7 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
       }
       if (ui.tab === SYSTEM_TAB && roster) {
         const sysKeys = Object.keys(roster.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
-        const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 4 - 1)));
+        const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 5 - 1)));
         const sel = ui.selector;
         const editing = ui.sparringModelEdit !== void 0;
         switch (event2.name) {
@@ -48359,6 +48387,10 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
             }
             if (cursor === sysKeys.length + 3) {
               effects.push({ type: "mode_toggle", mode: (roster.mode ?? "hobby") === "hobby" ? "work" : "hobby" });
+              return { ui: { ...ui, cursor, notice: void 0 }, effects };
+            }
+            if (cursor === sysKeys.length + 4) {
+              effects.push({ type: "handoff_toggle", enabled: (roster.handoff ?? false) === false });
               return { ui: { ...ui, cursor, notice: void 0 }, effects };
             }
             const key = sysKeys[cursor];
@@ -48561,6 +48593,19 @@ function applyModeToggle(e, onError, path) {
     return true;
   } catch (err) {
     onError?.(`mode toggle failed \u2014 ${err.message}`);
+    return false;
+  }
+}
+function applyHandoffToggle(e, onError, path) {
+  try {
+    const target = configPath(path);
+    const raw = JSON.parse(readFileSync(target, "utf8"));
+    const block = raw.handoff !== null && typeof raw.handoff === "object" && !Array.isArray(raw.handoff) ? raw.handoff : {};
+    raw.handoff = { ...block, enabled: e.enabled };
+    writeFileSync(target, JSON.stringify(raw, null, 2) + "\n");
+    return true;
+  } catch (err) {
+    onError?.(`handoff toggle failed \u2014 ${err.message}`);
     return false;
   }
 }
@@ -48780,14 +48825,50 @@ function userScopeCodexServer({ env = process.env, home = homedir2(), readFile =
   }
 }
 
-// scripts/lib/opencode-install.mjs
+// scripts/lib/handoff-projection.mjs
 import { spawnSync } from "node:child_process";
+
+// scripts/lib/contained-fs.mjs
+import { lstatSync as lstatSync2, readFileSync as readFileSync4, readdirSync as readdirSync2, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
+var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+// scripts/lib/handoff-projection.mjs
+var CONFIG_REL = ".sterling/config.json";
+var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
+var HandoffSettingError = class extends Error {
+};
+function portableAgentsTracked(root) {
+  const r = spawnSync("git", ["ls-files", "--", ...PORTABLE_AGENT_PATHS], { cwd: root, encoding: "utf8" });
+  return r.status === 0 && r.stdout.trim() !== "";
+}
+function handoffSettingOf(parsed, root, where = CONFIG_REL) {
+  const block = parsed?.handoff;
+  if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
+    throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
+  }
+  const value = block?.enabled;
+  if (value === void 0) return portableAgentsTracked(root) ? { enabled: true, source: "tracked" } : { enabled: false, source: "default" };
+  if (typeof value !== "boolean") {
+    throw new HandoffSettingError(`config.handoff.enabled is ${JSON.stringify(value)} in ${where} \u2014 it must be true or false; switch it in the TUI System tab or fix the file`);
+  }
+  return { enabled: value, source: "config" };
+}
+var HANDOFF_DOCS_DIR = "docs/sterling";
+var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
+var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
+     Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
+     your commit message rather than editing it. -->`;
+var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
+var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
+
+// scripts/lib/opencode-install.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync3, rmSync as rmSync2, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname3, isAbsolute, join as join6, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync4, readFileSync as readFileSync4, readdirSync as readdirSync2, realpathSync as realpathSync2 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync5, readdirSync as readdirSync3, realpathSync as realpathSync2 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join5, resolve, sep } from "node:path";
 var RESOLVER_IMPORTS = [
@@ -48933,7 +49014,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync4, readFileSync4, readdirSync2, join5, homedir3);
+)(existsSync4, readFileSync5, readdirSync3, join5, homedir3);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -48942,10 +49023,6 @@ var scanInstalledSterling = api.scanInstalledSterling;
 var newestInstalledSterling = api.newestInstalledSterling;
 var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
-
-// scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync2, readFileSync as readFileSync5, readdirSync as readdirSync3, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
-var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/opencode-agents.mjs
 var OPENCODE_RENDERER = "opencode/1";
@@ -48991,15 +49068,6 @@ function parseOpenCodeHeader(content) {
   return { headerLine, renderer, template, templateHash, contentHash };
 }
 
-// scripts/lib/handoff-projection.mjs
-var HANDOFF_DOCS_DIR = "docs/sterling";
-var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
-var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
-     Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
-     your commit message rather than editing it. -->`;
-var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
-var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
-
 // scripts/lib/opencode-install.mjs
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
 var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "librarian"];
@@ -49023,7 +49091,7 @@ function refusal(item, what, remedy) {
   return { item, status: "refused", refused: true, detail: what, instruction: `REFUSED: ${what}. Sterling will not overwrite it. Remedy: ${remedy}.` };
 }
 function git(projectDir, args2) {
-  const r = spawnSync("git", args2, { cwd: projectDir, encoding: "utf8" });
+  const r = spawnSync2("git", args2, { cwd: projectDir, encoding: "utf8" });
   if (r.error) throw new Error(`git ${args2.join(" ")} could not run in ${fwd(projectDir)}: ${r.error.message}`);
   return r;
 }
@@ -49184,6 +49252,22 @@ function openDashboard(storePath2, options = {}) {
       return null;
     }
   }
+  function readHandoff() {
+    let raw;
+    try {
+      raw = JSON.parse(readFileSync7(configPath2, "utf8"));
+    } catch {
+      return null;
+    }
+    try {
+      return handoffSettingOf(raw, projectRoot).enabled;
+    } catch (err) {
+      if (!(err instanceof HandoffSettingError))
+        throw err;
+      const block = raw?.handoff;
+      return JSON.stringify(block !== null && typeof block === "object" && !Array.isArray(block) ? block.enabled : block);
+    }
+  }
   function loadRoster() {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     let config;
@@ -49197,6 +49281,7 @@ function openDashboard(storePath2, options = {}) {
     const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.model };
     const tdd = { enabled: cfg.tdd?.enabled ?? true };
     const mode = readRawMode();
+    const handoff = readHandoff();
     const codexWired = probeCodexWired();
     const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync6(join7(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
@@ -49219,7 +49304,7 @@ function openDashboard(storePath2, options = {}) {
     } catch (err) {
       ui = { ...ui, notice: `catalog unavailable \u2014 ${err.message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, handoff };
   }
   function applySparringModel(e) {
     try {
@@ -49306,6 +49391,7 @@ function openDashboard(storePath2, options = {}) {
     const sparringToggles = effects.filter((e) => e.type === "sparring_toggle");
     const tddToggles = effects.filter((e) => e.type === "tdd_toggle");
     const modeToggles = effects.filter((e) => e.type === "mode_toggle");
+    const handoffToggles = effects.filter((e) => e.type === "handoff_toggle");
     let toggleWrote = false;
     let toggleFailure;
     const collectFailure = (msg) => {
@@ -49326,14 +49412,23 @@ function openDashboard(storePath2, options = {}) {
         modeWritten = e.mode;
       }
     }
+    let handoffWritten;
+    for (const e of handoffToggles) {
+      if (applyHandoffToggle(e, collectFailure, configPath2)) {
+        toggleWrote = true;
+        handoffWritten = e.enabled;
+      }
+    }
     if (toggleFailure !== void 0) {
       notice(toggleFailure);
     } else if (modeWritten !== void 0) {
-      notice(modeWritten === "work" ? "project mode set to work \u2014 run /sterling:update (or init) to write the OpenCode agents and handoff files; sync-agents refreshes only the OpenCode agents." : "project mode set to hobby \u2014 OpenCode agents and handoff files are no longer maintained; existing files were NOT deleted.");
+      notice(modeWritten === "work" ? "project mode set to work \u2014 /sterling:merge now opens a pull request and the review loop follows; nothing is merged directly." : "project mode set to hobby \u2014 /sterling:merge now merges directly into the base branch.");
+    } else if (handoffWritten !== void 0) {
+      notice(handoffWritten ? "handoff files turned on \u2014 run /sterling:update (or init) to write the portable OpenCode agents and the handoff projection; sync-agents refreshes only the portable agents." : "handoff files turned off \u2014 the portable OpenCode agents and the handoff projection are no longer maintained; existing files were NOT deleted.");
     } else if (toggleWrote) {
       notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session to reload the MCP server.");
     }
-    if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length)
+    if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
       roster = loadRoster();
     return runEffects(store, effects);
   }

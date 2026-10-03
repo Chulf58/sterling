@@ -5395,22 +5395,40 @@ var init_config = __esm({
       tdd: external_exports.object({
         enabled: external_exports.boolean().default(true)
       }).default({}),
-      // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-      // per-project switch that decides the flow. 'hobby' (the default, today's
-      // behaviour) skips the OpenCode agents and the handoff projection; 'work'
-      // writes and maintains them. Toggled in the TUI System tab. A missing key
-      // means hobby.
+      // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed
+      // by project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+      // the per-project switch that decides how work ships. 'hobby' (the default)
+      // merges directly through /sterling:merge; 'work' opens a pull request and
+      // runs the review loop. It decides nothing else: whether the handoff files
+      // are written is `handoff` below. Toggled in the TUI System tab. A missing
+      // key means hobby.
       // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
       // S1): any other value is PRESERVED raw, never coerced to hobby and never
       // thrown on — a typo here must not turn every parseConfig reader (the MCP
       // server's boot included) into a startup failure. The strict judge is
       // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
-      // surface that ACTS on the mode (init, sync-agents, /sterling:update, the
-      // handoff-projection CLI) uses, and which refuses an invalid value loudly.
+      // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
+      // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
       // Consumers of the PARSED config must narrow this field themselves.
       // The default lives twice (anti_pattern 85d15143): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       mode: external_exports.unknown().default("hobby"),
+      // Handoff files (decision
+      // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+      // `enabled` says whether Sterling writes the files for colleagues who do not
+      // have Sterling, the portable OpenCode agents (.opencode/agents/) and the
+      // handoff projection (architecture.md, rulings.md, docs/sterling/). Off by
+      // default, independent of `mode`. Toggled in the TUI System tab.
+      // PERMISSIVE for the same reason as `mode`: the value is preserved raw. The
+      // strict judge is readHandoffEnabled() in scripts/lib/handoff-projection.mjs,
+      // which init, sync-agents, /sterling:update, the handoff-projection CLI and
+      // the git exclude block use. It refuses a value that is not a boolean, and it
+      // reads a config with NO key as on when portable agents are already tracked
+      // in git, which this default cannot express: read the setting through it,
+      // never from the parsed config.
+      // The default lives twice (anti_pattern 85d15143): here and in
+      // templates/default-config.json; config.test.ts pins that they agree.
+      handoff: external_exports.unknown().default({ enabled: false }),
       // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
       // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
       // first use; empty means unpinned (any Bot login matching /copilot/i, with
@@ -9439,7 +9457,7 @@ var init_resolve = __esm({
 init_dist();
 init_dist2();
 import { existsSync as existsSync11, mkdirSync as mkdirSync8, readFileSync as readFileSync14, writeFileSync as writeFileSync6, appendFileSync as appendFileSync3, statSync as statSync5, unlinkSync as unlinkSync5, renameSync as renameSync2 } from "node:fs";
-import { spawnSync as spawnSync9 } from "node:child_process";
+import { spawnSync as spawnSync10 } from "node:child_process";
 import { join as join21, resolve as resolve6, dirname as dirname9, basename as basename2 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 
@@ -10446,6 +10464,7 @@ function syncOpenCodeAgents({ registryPath: registryPath2, templatesDir, targetD
 }
 
 // scripts/lib/handoff-projection.mjs
+import { spawnSync as spawnSync4 } from "node:child_process";
 import { join as join11, resolve as resolve3 } from "node:path";
 var fwd = (p) => p.replace(/\\/g, "/");
 function isSterlingClone(root, pluginRoot2) {
@@ -10455,27 +10474,44 @@ function isSterlingClone(root, pluginRoot2) {
   return JSON.parse(readContained(root, manifest)).name === "sterling";
 }
 var PROJECT_MODES = ["hobby", "work"];
-var HOBBY_SKIP_DETAIL = "project mode is hobby (OpenCode and handoff files are work-only; existing files are no longer maintained, and nothing is deleted)";
-var ProjectModeError = class extends Error {
-};
-function readProjectMode(root) {
-  const rel = ".sterling/config.json";
-  const where = `${fwd(resolve3(root))}/${rel}`;
-  if (!existsContained(root, rel, "file")) return "hobby";
+var CONFIG_REL = ".sterling/config.json";
+function readRawConfig(root, ErrorClass, subject) {
+  const where = `${fwd(resolve3(root))}/${CONFIG_REL}`;
+  if (!existsContained(root, CONFIG_REL, "file")) return { where, parsed: void 0 };
   let parsed;
   try {
-    parsed = JSON.parse(readContained(root, rel));
+    parsed = JSON.parse(readContained(root, CONFIG_REL));
   } catch (err) {
-    throw new ProjectModeError(`${where} is not valid JSON (${err.message}) \u2014 the project mode cannot be read`);
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ProjectModeError(`${where} is not a JSON object \u2014 the project mode cannot be read`);
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
   }
-  if (parsed.mode === void 0) return "hobby";
-  if (!PROJECT_MODES.includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  return { where, parsed };
+}
+var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
+var HANDOFF_OFF_DETAIL = "handoff files are off (config.handoff.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted)";
+var HandoffSettingError = class extends Error {
+};
+function portableAgentsTracked(root) {
+  const r = spawnSync4("git", ["ls-files", "--", ...PORTABLE_AGENT_PATHS], { cwd: root, encoding: "utf8" });
+  return r.status === 0 && r.stdout.trim() !== "";
+}
+function handoffSettingOf(parsed, root, where = CONFIG_REL) {
+  const block = parsed?.handoff;
+  if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
+    throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
   }
-  return parsed.mode;
+  const value = block?.enabled;
+  if (value === void 0) return portableAgentsTracked(root) ? { enabled: true, source: "tracked" } : { enabled: false, source: "default" };
+  if (typeof value !== "boolean") {
+    throw new HandoffSettingError(`config.handoff.enabled is ${JSON.stringify(value)} in ${where} \u2014 it must be true or false; switch it in the TUI System tab or fix the file`);
+  }
+  return { enabled: value, source: "config" };
+}
+function readHandoffEnabled(root) {
+  const { where, parsed } = readRawConfig(root, HandoffSettingError, "the handoff setting");
+  return handoffSettingOf(parsed, root, where).enabled;
 }
 var HANDOFF_DOCS_DIR = "docs/sterling";
 var HANDOFF_ROOT_FILES = ["architecture.md", "rulings.md"];
@@ -10886,12 +10922,12 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
 }
 
 // scripts/lib/codex-mcp.mjs
-import { spawnSync as spawnSync4 } from "node:child_process";
+import { spawnSync as spawnSync5 } from "node:child_process";
 import { readFileSync as readFileSync9 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { join as join16 } from "node:path";
 var PROBE_TIMEOUT_MS = 5e3;
-function probeCodex({ spawnFn = spawnSync4, timeoutMs = PROBE_TIMEOUT_MS, env = process.env } = {}) {
+function probeCodex({ spawnFn = spawnSync5, timeoutMs = PROBE_TIMEOUT_MS, env = process.env } = {}) {
   const run = (args) => {
     try {
       return spawnFn("codex", args, { encoding: "utf8", timeout: timeoutMs, env });
@@ -10993,7 +11029,7 @@ function renderTmuxLauncher(pluginRoot2, { session, splitPercent, installed = is
 }
 
 // scripts/lib/launcher-history.mjs
-import { spawnSync as spawnSync5 } from "node:child_process";
+import { spawnSync as spawnSync6 } from "node:child_process";
 import { mkdirSync as mkdirSync6, mkdtempSync, readFileSync as readFileSync11, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname as dirname7, join as join18 } from "node:path";
@@ -11052,7 +11088,7 @@ var replayFailureLine = (failures, consequence) => {
   return `launcher history: ${failures.length} earlier renderer version(s) could not be replayed (${detail}); ${consequence}`;
 };
 var currentText = (repoRoot, name4) => lf(readFileSync11(join18(repoRoot, "templates", name4), "utf8"));
-var defaultGit = (repoRoot) => (args, { input, encoding = "utf8" } = {}) => spawnSync5("git", args, { cwd: repoRoot, encoding, input, maxBuffer: 256 * 1024 * 1024 });
+var defaultGit = (repoRoot) => (args, { input, encoding = "utf8" } = {}) => spawnSync6("git", args, { cwd: repoRoot, encoding, input, maxBuffer: 256 * 1024 * 1024 });
 function gitLog(git2, repoRoot, rels) {
   const log = git2(["log", "--full-history", "--format=%H", "--", ...rels]);
   if (log.status !== 0) throw new Error(`launcher history: git log failed for ${rels.join(", ")} in ${repoRoot}: ${log.stderr}`);
@@ -11223,7 +11259,7 @@ function loadSnapshot(path) {
   if (!valid) return { ok: false, reason: `${path} is unparseable (expected an object of name \u2192 string[])` };
   return { ok: true, data: parsed };
 }
-function historicalLauncherTemplates({ repoRoot, git: git2 = defaultGit(repoRoot), spawn = spawnSync5 }) {
+function historicalLauncherTemplates({ repoRoot, git: git2 = defaultGit(repoRoot), spawn = spawnSync6 }) {
   const fromGit = gitHistory(repoRoot, git2, spawn);
   const templates = /* @__PURE__ */ new Map();
   if (fromGit) {
@@ -11490,7 +11526,7 @@ function renderUnavailable(reason) {
 }
 
 // scripts/lib/opencode-install.mjs
-import { spawnSync as spawnSync6 } from "node:child_process";
+import { spawnSync as spawnSync7 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
 import { existsSync as existsSync10, mkdirSync as mkdirSync7, readFileSync as readFileSync13, readdirSync as readdirSync5, realpathSync as realpathSync4, rmSync as rmSync3, statSync as statSync4, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
@@ -11515,7 +11551,7 @@ function mcpLauncherPath({ home = homedir7() } = {}) {
   return join20(home, ".sterling", "opencode", "sterling-mcp.mjs");
 }
 function probeOpenCode({ env = process.env } = {}) {
-  const r = spawnSync6("opencode", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  const r = spawnSync7("opencode", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
   if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `opencode` on PATH" : `opencode --version could not run (${r.error.message})` };
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
   if (r.status !== 0 || !m) return { installed: false, reason: `opencode --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
@@ -11869,7 +11905,7 @@ function codexCandidates({ env, home }) {
   for (const dir of (env.PATH ?? "").split(":").filter(Boolean)) out.push(join20(dir, "codex"));
   return { candidates: [...new Set(out)].filter(isFile), notes: notes2 };
 }
-function resolveCodexMcp({ env = process.env, home = homedir7(), nodeBinDir, spawnFn = spawnSync6 }) {
+function resolveCodexMcp({ env = process.env, home = homedir7(), nodeBinDir, spawnFn = spawnSync7 }) {
   const { candidates, notes: notes2 } = codexCandidates({ env, home });
   const tried = [...notes2];
   for (const command of candidates) {
@@ -11890,7 +11926,7 @@ function codexServerEntry(command, nodeBinDir) {
     timeout: { startup: 3e4, execution: 9e5 }
   };
 }
-function ensureCodexServer({ env = process.env, home = homedir7(), nodeBinDir = dirname8(process.execPath), spawnFn = spawnSync6 }) {
+function ensureCodexServer({ env = process.env, home = homedir7(), nodeBinDir = dirname8(process.execPath), spawnFn = spawnSync7 }) {
   const path = join20(opencodeConfigDir({ env, home }), "opencode.json");
   const label = `${fwd5(path)} mcp.servers.codex`;
   const found = resolveCodexMcp({ env, home, nodeBinDir, spawnFn });
@@ -11926,7 +11962,7 @@ function ensureCodexServer({ env = process.env, home = homedir7(), nodeBinDir = 
   return { item: label, status: before === null ? "created" : "refreshed", detail: `${fwd5(found.command)}${legacy}` };
 }
 function git(projectDir, args) {
-  const r = spawnSync6("git", args, { cwd: projectDir, encoding: "utf8" });
+  const r = spawnSync7("git", args, { cwd: projectDir, encoding: "utf8" });
   if (r.error) throw new Error(`git ${args.join(" ")} could not run in ${fwd5(projectDir)}: ${r.error.message}`);
   return r;
 }
@@ -12189,9 +12225,9 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir7(),
 function excludeLines(wholeDir) {
   return wholeDir ? ["/.opencode/"] : [`/${PROJECT_CONFIG_REL}`, `/${STERLING_AGENTS_SUBDIR}/`];
 }
-function ensureExcluded({ projectDir, mode, tracked }) {
+function ensureExcluded({ projectDir, handoff, tracked }) {
   const label = ".git/info/exclude";
-  const wholeDir = mode === "hobby" && tracked.length === 0;
+  const wholeDir = handoff === false && tracked.length === 0;
   const want = [EXCLUDE_BEGIN, ...excludeLines(wholeDir), EXCLUDE_END].join("\n");
   const gp = git(projectDir, ["rev-parse", "--git-path", "info/exclude"]);
   if (gp.status !== 0) return { item: label, status: "skipped", detail: `not a git work tree (${(gp.stderr || "").trim().split("\n")[0]}) \u2014 nothing to keep untracked` };
@@ -12312,14 +12348,14 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
   rows.push(ensureCodexServer({ env, home }));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
-  let mode;
+  let handoff;
   try {
-    mode = readProjectMode(projectDir);
+    handoff = readHandoffEnabled(projectDir);
   } catch (err) {
-    mode = null;
-    rows.push({ item: ".sterling/config.json mode", status: "skipped", detail: `${err.message} \u2014 excluding only Sterling's own .opencode paths` });
+    handoff = null;
+    rows.push({ item: ".sterling/config.json handoff", status: "skipped", detail: `${err.message} \u2014 excluding only Sterling's own .opencode paths` });
   }
-  rows.push(ensureExcluded({ projectDir, mode, tracked }));
+  rows.push(ensureExcluded({ projectDir, handoff, tracked }));
   const agentRows = ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked });
   const conductorRow = agentRows.find((r) => r.item === `${STERLING_AGENTS_SUBDIR}/conductor.md`);
   const conductorOk = ["created", "matches", "refreshed"].includes(conductorRow?.status);
@@ -12329,9 +12365,9 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
 }
 
 // scripts/lib/claude-probe.mjs
-import { spawnSync as spawnSync7 } from "node:child_process";
+import { spawnSync as spawnSync8 } from "node:child_process";
 function probeClaude({ env = process.env } = {}) {
-  const r = spawnSync7("claude", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  const r = spawnSync8("claude", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
   if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `claude` on PATH" : `claude --version could not run (${r.error.message})` };
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
   if (r.status !== 0 || !m) return { installed: false, reason: `claude --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
@@ -12340,7 +12376,7 @@ function probeClaude({ env = process.env } = {}) {
 
 // scripts/hooks/lib/undeclared-source-scan.mjs
 init_dist();
-import { spawnSync as spawnSync8 } from "node:child_process";
+import { spawnSync as spawnSync9 } from "node:child_process";
 var UNDECLARED_SOURCE_TIMEOUT_MS = 3e3;
 var UNDECLARED_SOURCE_OUTPUT_CAP = 5e6;
 function isPlainObject2(v) {
@@ -12398,14 +12434,14 @@ function gitSpawnFailureReason(result, label) {
   return null;
 }
 function scanFilePaths(cwd) {
-  const gitAll = spawnSync8("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+  const gitAll = spawnSync9("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
     cwd,
     timeout: UNDECLARED_SOURCE_TIMEOUT_MS,
     maxBuffer: UNDECLARED_SOURCE_OUTPUT_CAP
   });
   let reason = gitSpawnFailureReason(gitAll, "ls-files");
   if (reason) return { ok: false, reason };
-  const gitDeleted = spawnSync8("git", ["ls-files", "-z", "-d"], {
+  const gitDeleted = spawnSync9("git", ["ls-files", "-z", "-d"], {
     cwd,
     timeout: UNDECLARED_SOURCE_TIMEOUT_MS,
     maxBuffer: UNDECLARED_SOURCE_OUTPUT_CAP
@@ -12552,7 +12588,14 @@ var expectedConfig = parseConfig({
   // recorded declaration like the ones above, switched in the TUI System tab: a
   // work project's config is not "hand-edited" for carrying it. A fresh config
   // takes --mode, else the explicit 'hobby' default.
-  mode: recorded ? recorded.mode : modeFlag ?? "hobby"
+  mode: recorded ? recorded.mode : modeFlag ?? "hobby",
+  // the handoff setting (decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) is
+  // a recorded declaration too, switched in the TUI System tab. A fresh config
+  // starts with it off, unless the project already has portable agents tracked
+  // in git (a clone of a project that commits them): then it starts on, so the
+  // first init on a new machine does not stop maintaining committed files.
+  handoff: recorded ? recorded.handoff : { enabled: portableAgentsTracked(target) }
 });
 if (eff.splitRatio === void 0) eff.splitRatio = expectedConfig.tui_split_ratio;
 var domainMounts = resolveDomainMounts({ stack_tags: eff.stackTags, domain_paths: eff.domainPaths });
@@ -12763,7 +12806,7 @@ function mapNormToRaw(lineBoundaries, normOffset) {
   return null;
 }
 function historicalHeadSegmentSets() {
-  const log = spawnSync9("git", ["log", "--format=%H", "--", "templates/target-claude-md.md"], { cwd: pluginRoot, encoding: "utf8" });
+  const log = spawnSync10("git", ["log", "--format=%H", "--", "templates/target-claude-md.md"], { cwd: pluginRoot, encoding: "utf8" });
   if (log.error || log.status !== 0) {
     const stderrTrimmed = (log.stderr || "").trim();
     const cause = log.error?.message ?? (stderrTrimmed || `exit ${log.status}`);
@@ -12773,7 +12816,7 @@ function historicalHeadSegmentSets() {
   if (!shas.length) return { segmentSets: [], unavailableReason: "templates/target-claude-md.md has no git history in this clone" };
   const segmentSets = [];
   for (const sha of shas) {
-    const show = spawnSync9("git", ["show", `${sha}:templates/target-claude-md.md`], { cwd: pluginRoot, encoding: "utf8" });
+    const show = spawnSync10("git", ["show", `${sha}:templates/target-claude-md.md`], { cwd: pluginRoot, encoding: "utf8" });
     if (show.status !== 0) continue;
     const idx = show.stdout.indexOf("{{CONVENTIONS_SECTION}}");
     if (idx === -1) continue;
@@ -12795,7 +12838,7 @@ function writeMigrationPreview(rawClaudeText, tailForPreview) {
 <!-- AGENTS.md would carry: -->
 
 ${previewAgents}`);
-  const diff = spawnSync9("diff", ["-u", oldTmp, newTmp], { encoding: "utf8" });
+  const diff = spawnSync10("diff", ["-u", oldTmp, newTmp], { encoding: "utf8" });
   writeFileSync6(previewPath, diff.stdout || "(no textual diff produced)");
   unlinkSync5(oldTmp);
   unlinkSync5(newTmp);
@@ -13061,20 +13104,20 @@ try {
   handoffCloneTarget = null;
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: "refused", detail: `${err.message} \u2014 nothing written` });
 }
-var handoffMode = null;
+var handoffEnabled = null;
 if (handoffCloneTarget === false) {
   try {
-    handoffMode = readProjectMode(target);
+    handoffEnabled = readHandoffEnabled(target);
   } catch (err) {
-    if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
+    if (!(err instanceof HandoffSettingError) && !(err instanceof ContainmentError)) throw err;
     items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: "refused", detail: `${err.message} \u2014 nothing written` });
   }
 }
 if (handoffCloneTarget === true) {
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: "skipped", detail: "the target is a Sterling clone \u2014 it has its own projections and is not a handoff target" });
-} else if (handoffMode === "hobby") {
-  items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: "skipped", detail: HOBBY_SKIP_DETAIL });
-} else if (handoffMode === "work") {
+} else if (handoffEnabled === false) {
+  items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: "skipped", detail: HANDOFF_OFF_DETAIL });
+} else if (handoffEnabled === true) {
   const { report: opencodeReport } = syncOpenCodeAgents({
     templatesDir: join21(pluginRoot, "agent-templates"),
     registryPath: join21(pluginRoot, "agent-templates", "registry.json"),
@@ -13098,7 +13141,7 @@ if (handoffCloneTarget === true) {
   }
   const handoffBundle = join21(pluginRoot, "bin", "handoff-projection.mjs");
   const handoffScript = existsSync11(handoffBundle) ? handoffBundle : join21(pluginRoot, "scripts", "handoff-projection.mjs");
-  const handoff = spawnSync9(process.execPath, [handoffScript, target], { cwd: target, encoding: "utf8" });
+  const handoff = spawnSync10(process.execPath, [handoffScript, target], { cwd: target, encoding: "utf8" });
   const handoffOut = `${handoff.stdout ?? ""}${handoff.stderr ?? ""}${handoff.error ? handoff.error.message : ""}`.trim();
   const handoffLine = handoffOut.split("\n")[0].replace(/^handoff projection: /, "");
   const handoffStatus = handoff.status === 0 ? handoffLine.startsWith("unchanged") ? "matches" : handoffLine.startsWith("SKIPPED") ? "skipped" : "refreshed" : handoff.status === 2 || handoff.status === 3 ? "refused" : "failed";

@@ -5078,22 +5078,40 @@ var configSchema = external_exports.object({
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
   }).default({}),
-  // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-  // per-project switch that decides the flow. 'hobby' (the default, today's
-  // behaviour) skips the OpenCode agents and the handoff projection; 'work'
-  // writes and maintains them. Toggled in the TUI System tab. A missing key
-  // means hobby.
+  // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed
+  // by project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+  // the per-project switch that decides how work ships. 'hobby' (the default)
+  // merges directly through /sterling:merge; 'work' opens a pull request and
+  // runs the review loop. It decides nothing else: whether the handoff files
+  // are written is `handoff` below. Toggled in the TUI System tab. A missing
+  // key means hobby.
   // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
   // S1): any other value is PRESERVED raw, never coerced to hobby and never
   // thrown on — a typo here must not turn every parseConfig reader (the MCP
   // server's boot included) into a startup failure. The strict judge is
   // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
-  // surface that ACTS on the mode (init, sync-agents, /sterling:update, the
-  // handoff-projection CLI) uses, and which refuses an invalid value loudly.
+  // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
+  // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.
   // The default lives twice (anti_pattern 85d15143): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // Handoff files (decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+  // `enabled` says whether Sterling writes the files for colleagues who do not
+  // have Sterling, the portable OpenCode agents (.opencode/agents/) and the
+  // handoff projection (architecture.md, rulings.md, docs/sterling/). Off by
+  // default, independent of `mode`. Toggled in the TUI System tab.
+  // PERMISSIVE for the same reason as `mode`: the value is preserved raw. The
+  // strict judge is readHandoffEnabled() in scripts/lib/handoff-projection.mjs,
+  // which init, sync-agents, /sterling:update, the handoff-projection CLI and
+  // the git exclude block use. It refuses a value that is not a boolean, and it
+  // reads a config with NO key as on when portable agents are already tracked
+  // in git, which this default cannot express: read the setting through it,
+  // never from the parsed config.
+  // The default lives twice (anti_pattern 85d15143): here and in
+  // templates/default-config.json; config.test.ts pins that they agree.
+  handoff: external_exports.unknown().default({ enabled: false }),
   // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
   // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
   // first use; empty means unpinned (any Bot login matching /copilot/i, with
@@ -6059,7 +6077,7 @@ function syncOpenCodeAgents({ registryPath, templatesDir, targetDir: targetDir2,
 }
 
 // scripts/lib/opencode-install.mjs
-import { spawnSync as spawnSync2 } from "node:child_process";
+import { spawnSync as spawnSync3 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
 import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync5, readdirSync as readdirSync4, realpathSync as realpathSync3, rmSync, statSync as statSync2, unlinkSync as unlinkSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
@@ -6312,6 +6330,7 @@ function verifyStamp(content, prefix) {
 }
 
 // scripts/lib/handoff-projection.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
 import { join as join7, resolve as resolve4 } from "node:path";
 var fwd = (p) => p.replace(/\\/g, "/");
 function isSterlingClone(root, pluginRoot2) {
@@ -6321,27 +6340,54 @@ function isSterlingClone(root, pluginRoot2) {
   return JSON.parse(readContained(root, manifest)).name === "sterling";
 }
 var PROJECT_MODES = ["hobby", "work"];
-var HOBBY_SKIP_DETAIL = "project mode is hobby (OpenCode and handoff files are work-only; existing files are no longer maintained, and nothing is deleted)";
 var ProjectModeError = class extends Error {
 };
-function readProjectMode(root) {
-  const rel = ".sterling/config.json";
-  const where = `${fwd(resolve4(root))}/${rel}`;
-  if (!existsContained(root, rel, "file")) return "hobby";
+var CONFIG_REL = ".sterling/config.json";
+function readRawConfig(root, ErrorClass, subject) {
+  const where = `${fwd(resolve4(root))}/${CONFIG_REL}`;
+  if (!existsContained(root, CONFIG_REL, "file")) return { where, parsed: void 0 };
   let parsed;
   try {
-    parsed = JSON.parse(readContained(root, rel));
+    parsed = JSON.parse(readContained(root, CONFIG_REL));
   } catch (err) {
-    throw new ProjectModeError(`${where} is not valid JSON (${err.message}) \u2014 the project mode cannot be read`);
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ProjectModeError(`${where} is not a JSON object \u2014 the project mode cannot be read`);
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
   }
-  if (parsed.mode === void 0) return "hobby";
+  return { where, parsed };
+}
+function readProjectMode(root) {
+  const { where, parsed } = readRawConfig(root, ProjectModeError, "the project mode");
+  if (parsed === void 0 || parsed.mode === void 0) return "hobby";
   if (!PROJECT_MODES.includes(parsed.mode)) {
     throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
   }
   return parsed.mode;
+}
+var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
+var HANDOFF_OFF_DETAIL = "handoff files are off (config.handoff.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted)";
+var HandoffSettingError = class extends Error {
+};
+function portableAgentsTracked(root) {
+  const r = spawnSync2("git", ["ls-files", "--", ...PORTABLE_AGENT_PATHS], { cwd: root, encoding: "utf8" });
+  return r.status === 0 && r.stdout.trim() !== "";
+}
+function handoffSettingOf(parsed, root, where = CONFIG_REL) {
+  const block = parsed?.handoff;
+  if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
+    throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
+  }
+  const value = block?.enabled;
+  if (value === void 0) return portableAgentsTracked(root) ? { enabled: true, source: "tracked" } : { enabled: false, source: "default" };
+  if (typeof value !== "boolean") {
+    throw new HandoffSettingError(`config.handoff.enabled is ${JSON.stringify(value)} in ${where} \u2014 it must be true or false; switch it in the TUI System tab or fix the file`);
+  }
+  return { enabled: value, source: "config" };
+}
+function readHandoffEnabled(root) {
+  const { where, parsed } = readRawConfig(root, HandoffSettingError, "the handoff setting");
+  return handoffSettingOf(parsed, root, where).enabled;
 }
 var HANDOFF_DOCS_DIR = "docs/sterling";
 var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
@@ -6371,7 +6417,7 @@ function mcpLauncherPath({ home = homedir3() } = {}) {
   return join8(home, ".sterling", "opencode", "sterling-mcp.mjs");
 }
 function probeOpenCode({ env = process.env } = {}) {
-  const r = spawnSync2("opencode", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  const r = spawnSync3("opencode", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
   if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `opencode` on PATH" : `opencode --version could not run (${r.error.message})` };
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
   if (r.status !== 0 || !m) return { installed: false, reason: `opencode --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
@@ -6725,7 +6771,7 @@ function codexCandidates({ env, home }) {
   for (const dir of (env.PATH ?? "").split(":").filter(Boolean)) out.push(join8(dir, "codex"));
   return { candidates: [...new Set(out)].filter(isFile), notes };
 }
-function resolveCodexMcp({ env = process.env, home = homedir3(), nodeBinDir, spawnFn = spawnSync2 }) {
+function resolveCodexMcp({ env = process.env, home = homedir3(), nodeBinDir, spawnFn = spawnSync3 }) {
   const { candidates, notes } = codexCandidates({ env, home });
   const tried = [...notes];
   for (const command of candidates) {
@@ -6746,7 +6792,7 @@ function codexServerEntry(command, nodeBinDir) {
     timeout: { startup: 3e4, execution: 9e5 }
   };
 }
-function ensureCodexServer({ env = process.env, home = homedir3(), nodeBinDir = dirname(process.execPath), spawnFn = spawnSync2 }) {
+function ensureCodexServer({ env = process.env, home = homedir3(), nodeBinDir = dirname(process.execPath), spawnFn = spawnSync3 }) {
   const path = join8(opencodeConfigDir({ env, home }), "opencode.json");
   const label = `${fwd2(path)} mcp.servers.codex`;
   const found = resolveCodexMcp({ env, home, nodeBinDir, spawnFn });
@@ -6782,7 +6828,7 @@ function ensureCodexServer({ env = process.env, home = homedir3(), nodeBinDir = 
   return { item: label, status: before === null ? "created" : "refreshed", detail: `${fwd2(found.command)}${legacy}` };
 }
 function git(projectDir, args2) {
-  const r = spawnSync2("git", args2, { cwd: projectDir, encoding: "utf8" });
+  const r = spawnSync3("git", args2, { cwd: projectDir, encoding: "utf8" });
   if (r.error) throw new Error(`git ${args2.join(" ")} could not run in ${fwd2(projectDir)}: ${r.error.message}`);
   return r;
 }
@@ -7045,9 +7091,9 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir3(),
 function excludeLines(wholeDir) {
   return wholeDir ? ["/.opencode/"] : [`/${PROJECT_CONFIG_REL}`, `/${STERLING_AGENTS_SUBDIR}/`];
 }
-function ensureExcluded({ projectDir, mode, tracked }) {
+function ensureExcluded({ projectDir, handoff, tracked }) {
   const label = ".git/info/exclude";
-  const wholeDir = mode === "hobby" && tracked.length === 0;
+  const wholeDir = handoff === false && tracked.length === 0;
   const want = [EXCLUDE_BEGIN, ...excludeLines(wholeDir), EXCLUDE_END].join("\n");
   const gp = git(projectDir, ["rev-parse", "--git-path", "info/exclude"]);
   if (gp.status !== 0) return { item: label, status: "skipped", detail: `not a git work tree (${(gp.stderr || "").trim().split("\n")[0]}) \u2014 nothing to keep untracked` };
@@ -7168,14 +7214,14 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
   rows.push(ensureCodexServer({ env, home }));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
-  let mode;
+  let handoff;
   try {
-    mode = readProjectMode(projectDir);
+    handoff = readHandoffEnabled(projectDir);
   } catch (err) {
-    mode = null;
-    rows.push({ item: ".sterling/config.json mode", status: "skipped", detail: `${err.message} \u2014 excluding only Sterling's own .opencode paths` });
+    handoff = null;
+    rows.push({ item: ".sterling/config.json handoff", status: "skipped", detail: `${err.message} \u2014 excluding only Sterling's own .opencode paths` });
   }
-  rows.push(ensureExcluded({ projectDir, mode, tracked }));
+  rows.push(ensureExcluded({ projectDir, handoff, tracked }));
   const agentRows = ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked });
   const conductorRow = agentRows.find((r) => r.item === `${STERLING_AGENTS_SUBDIR}/conductor.md`);
   const conductorOk = ["created", "matches", "refreshed"].includes(conductorRow?.status);
@@ -7189,9 +7235,9 @@ function formatOpenCodeRows(result) {
 }
 
 // scripts/lib/claude-probe.mjs
-import { spawnSync as spawnSync3 } from "node:child_process";
+import { spawnSync as spawnSync4 } from "node:child_process";
 function probeClaude({ env = process.env } = {}) {
-  const r = spawnSync3("claude", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  const r = spawnSync4("claude", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
   if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `claude` on PATH" : `claude --version could not run (${r.error.message})` };
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
   if (r.status !== 0 || !m) return { installed: false, reason: `claude --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
@@ -7212,12 +7258,19 @@ var args = process.argv.slice(2);
 var targetIdx = args.indexOf("--target");
 var targetDir = targetIdx !== -1 ? resolve6(args[targetIdx + 1]) : process.cwd();
 var pluginVersion = JSON.parse(readFileSync6(join9(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
-var projectMode;
 try {
-  projectMode = readProjectMode(targetDir);
+  readProjectMode(targetDir);
 } catch (err) {
   if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
   console.log(`refused_project_mode: ${err.message}; nothing synced`);
+  process.exit(2);
+}
+var handoffEnabled;
+try {
+  handoffEnabled = readHandoffEnabled(targetDir);
+} catch (err) {
+  if (!(err instanceof HandoffSettingError) && !(err instanceof ContainmentError)) throw err;
+  console.log(`refused_handoff_setting: ${err.message}; nothing synced`);
   process.exit(2);
 }
 var claudeProbe;
@@ -7280,9 +7333,9 @@ try {
   cloneTarget = null;
 }
 if (cloneTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED \u2014 the target is a Sterling clone, not a handoff target`);
-var workTarget = cloneTarget === false && projectMode === "work";
-if (cloneTarget === false && !workTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED \u2014 ${HOBBY_SKIP_DETAIL}`);
-var { report: opencodeReport } = !workTarget ? { report: [] } : syncOpenCodeAgents({
+var handoffTarget = cloneTarget === false && handoffEnabled;
+if (cloneTarget === false && !handoffTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED \u2014 ${HANDOFF_OFF_DETAIL}`);
+var { report: opencodeReport } = !handoffTarget ? { report: [] } : syncOpenCodeAgents({
   templatesDir: join9(pluginRoot, "agent-templates"),
   registryPath: join9(pluginRoot, "agent-templates", "registry.json"),
   targetDir
