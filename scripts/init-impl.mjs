@@ -1206,6 +1206,7 @@ const pluginPkg = (() => {
   }
 })();
 const registry = new ProjectRegistry(registryPath());
+let liveProjectPaths = null; // null until the registry is read: cloneCleanupLines then treats every clone as live
 try {
   const already = registry.list().some((p) => p.repo_path === fwd(target));
   registry.register({
@@ -1216,6 +1217,7 @@ try {
     sterling_version: typeof pluginPkg.version === 'string' ? pluginPkg.version : null,
     at: new Date().toISOString(),
   });
+  liveProjectPaths = [target, ...registry.list().map((p) => p.repo_path)];
   const siblings = registry.list().filter((p) => p.repo_path !== fwd(target)).length;
   items.push({
     item: 'project registry',
@@ -1274,5 +1276,5 @@ if (restartNeeded || conductorActivation.activation === 'written' || conductorAc
 }
 
 // S6 ruling point 4: deleting the old clone stays a manual step, printed last.
-const cleanupLines = cloneCleanupLines(oldClonePaths);
+const cleanupLines = cloneCleanupLines(oldClonePaths, liveProjectPaths);
 if (cleanupLines.length) console.log('\n' + cleanupLines.join('\n'));

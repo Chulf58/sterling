@@ -6,13 +6,15 @@
 //     claude with --plugin-dir, which overrides the installed plugin — finding 9bce09a9)?
 //   - marketplaceAutoUpdate / autoUpdateWarning: is "autoUpdate": true set on
 //     extraKnownMarketplaces.sterling in the user-level settings.json? Never written.
-//   - cloneCleanupLines: the manual step naming each old clone. Nothing deletes a clone.
+//   - cloneCleanupLines: the manual step naming each old clone. Nothing deletes a clone,
+//     and a clone that is the init target or a registered project is never offered for it.
 // The sterling-update.bat recogniser lives beside its renderer in update-launcher.mjs.
 //
-// Builtins only, like the other scripts/lib launcher helpers.
+// Builtins plus the shared path comparison (@sterling/schemas), which init and update bundle.
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { sameLocationAnyHost } from '@sterling/schemas';
 
 const fwd = (p) => p.replace(/\\/g, '/');
 
@@ -126,12 +128,24 @@ function inspectClone(dir) {
 const trimSlash = (p) => (p.length > 1 ? p.replace(/\/+$/, '') : p);
 
 /** The manual clone-deletion step, one line per distinct named path; [] when none.
- *  Runs after every init write, so an inspection failure is printed, never thrown. */
-export function cloneCleanupLines(paths) {
+ *  Runs after every init write, so an inspection failure is printed, never thrown.
+ *  `liveProjectPaths` are the init target plus every registered project: a clone path that
+ *  is one of them holds a live project's store and history, so it gets a keep line and never
+ *  a deletion command. null means the registry could not be read; every path is then
+ *  treated as live (fail closed). */
+export function cloneCleanupLines(paths, liveProjectPaths = []) {
   const unique = [...new Set(paths.filter(Boolean).map((p) => trimSlash(fwd(p))))];
   if (unique.length === 0) return [];
   const lines = ['old Sterling clone — this project used to run Sterling from a clone. Init never deletes a clone:'];
   for (const p of unique) {
+    if (liveProjectPaths === null) {
+      lines.push(`  ${p} — the project registry could not be read, so this is treated as a live project and not offered for deletion; keep it unless you have checked by hand that no project on this machine uses it`);
+      continue;
+    }
+    if (liveProjectPaths.some((live) => sameLocationAnyHost(p, live))) {
+      lines.push(`  ${p} — a live Sterling project on this machine with its own store; keep it. Only the --plugin-dir launch was replaced; this directory is not an old clone to delete`);
+      continue;
+    }
     const found = inspectClone(p);
     if (found.kind === 'error') {
       lines.push(`  ${p} — could not inspect ${p}: ${found.code}; check it by hand before deleting anything`);

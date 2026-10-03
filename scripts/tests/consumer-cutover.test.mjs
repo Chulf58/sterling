@@ -244,6 +244,51 @@ test('cloneCleanupLines: paths differing only by a trailing slash are one clone'
   assert.ok(!lines.join('\n').includes(`${clone}/ `), 'the printed path carries no trailing slash');
 });
 
+// ---- (4b) a live Sterling project is never offered for deletion ----
+// The init target and every registered project hold a knowledge store and history;
+// the clone paths come from launchers, so one of them can BE such a project (consumer
+// reports #2 and #3: the hint printed rm -rf for the directory init was running in).
+
+test('cloneCleanupLines: a clone that is the init target is a live project to keep, never rm -rf', () => {
+  const clone = fakeClone();
+  const lines = cloneCleanupLines([clone], [clone]).join('\n');
+  assert.match(lines, /live Sterling project on this machine/);
+  assert.match(lines, /its own store/);
+  assert.match(lines, /keep it/);
+  assert.match(lines, /Only the --plugin-dir launch was replaced/);
+  assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
+});
+
+test('cloneCleanupLines: a clone that is a registered project gets the keep line; an unregistered clone still gets the rm -rf hint', () => {
+  const registered = fakeClone();
+  const stray = fakeClone();
+  const lines = cloneCleanupLines([registered, stray], [fakeClone(), registered]);
+  const reg = lines.find((l) => l.includes(registered));
+  const unreg = lines.find((l) => l.includes(stray));
+  assert.match(reg, /live Sterling project/);
+  assert.doesNotMatch(reg, /rm -rf|delete it by hand/);
+  assert.match(unreg, /delete it by hand once no project on this machine launches from it \(rm -rf "/);
+});
+
+test('cloneCleanupLines: a live path matches across a trailing slash and backslashes, in either argument', () => {
+  const clone = fakeClone();
+  const back = clone.replace(/\//g, '\\');
+  for (const [named, live] of [[clone, `${clone}/`], [clone, `${clone}//`], [clone, back], [back, clone]]) {
+    const lines = cloneCleanupLines([named], [live]).join('\n');
+    assert.match(lines, /live Sterling project/, `${named} vs ${live}`);
+    assert.doesNotMatch(lines, /rm -rf/, `${named} vs ${live}`);
+  }
+});
+
+test('cloneCleanupLines: an unreadable registry (null) treats every clone path as live and says so; never rm -rf', () => {
+  const clone = fakeClone();
+  const lines = cloneCleanupLines([clone, '/nonexistent/sterling-old'], null).join('\n');
+  assert.match(lines, /project registry could not be read/);
+  assert.ok(lines.includes(clone));
+  assert.match(lines, /treated as a live project/);
+  assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
+});
+
 // ---- end to end: init.mjs from an installed copy, and from the authoring clone ----
 //
 // The plugin root is THIS checkout. It counts as an installed copy when it resolves
@@ -301,6 +346,21 @@ test('init from an installed copy: replaces the clone launcher, deletes the clon
   const tail = out.slice(out.lastIndexOf('old Sterling clone'));
   assert.ok(tail.includes(clone), `the end of the run names the clone to delete: ${out}`);
   assert.ok(existsSync(join(clone, '.git')), 'the clone itself is never deleted');
+});
+
+test('init from an installed copy: when the target IS the old clone, the end of the run says to keep it and never prints rm -rf', () => {
+  const target = fakeClone();
+  writeFileSync(join(target, 'sterling-launch.sh'), oldLauncher(target));
+  const cfg = installedConfigDir({ extraKnownMarketplaces: { sterling: { autoUpdate: true } } });
+
+  const { code, out } = runInit(target, cfg);
+  assert.equal(code, 0, out);
+  assert.match(row(out, 'sterling-launch.sh'), /replaced/);
+  const tail = out.slice(out.lastIndexOf('old Sterling clone'));
+  assert.ok(tail.includes(target.replace(/\\/g, '/')), `the end of the run names the directory: ${out}`);
+  assert.match(tail, /live Sterling project on this machine/);
+  assert.doesNotMatch(out, /rm -rf|delete it by hand/);
+  assert.ok(existsSync(join(target, '.git')), 'the directory is untouched');
 });
 
 test('init from an installed copy: a differing launcher without --plugin-dir is left alone; auto-update on prints no warning and no clone step', () => {
