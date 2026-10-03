@@ -76,7 +76,7 @@ test('AC1: knowledge_schema(feature_article) describes files[] element sub-field
     // Unchanged top-level shape. Amended 2026-08-20: the blind-authored literal
     // predated files[]'s optional `unverified` (state-honesty, decision
     // 2e112490) — the reported string reflects the live schema.
-    assert.equal(filesField?.type, '{path, role, unverified}[]');
+    assert.equal(filesField?.type, '{path, role, unverified, entry}[]');
 
     // RED: the element shape itself (path/role, with their own types, and
     // any closed enum among them) must now be nested on this descriptor.

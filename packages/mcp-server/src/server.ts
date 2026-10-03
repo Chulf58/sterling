@@ -394,14 +394,14 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_update',
     {
       description:
-        "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body — pass only changed mutable fields; omitted fields are kept (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused; a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
+        "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body — pass only changed mutable fields; omitted fields are kept (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused; a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({
         id: z.string(),
         body: passthrough,
         resolves: z
           .array(z.string())
           .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review item ids keyed to this record\'s chain that this write discharges — full ids, validated before the write'),
+          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full ids, validated before the write'),
         expected_version: z
           .number()
           .int()
@@ -419,7 +419,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_append',
     {
       description:
-        "Append entries to an array field (history, files, current_ac, live_test_refs, …) without retransmitting it; same versioned write path as knowledge_update. `field` may be an array-element selector 'arr[key=value].sub' to append inside ONE element's array (e.g. field \"live_test_refs[ac_id=AC4].test_paths\", entries [\"tests/x.test.mjs\"]); the selector must match exactly one element and sub must already be an array on it. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review items keyed to this record's chain, plus an article_missing item when an appended files[] entry's path is one of that item's file_keys (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
+        "Append entries to an array field (history, files, current_ac, live_test_refs, …) without retransmitting it; same versioned write path as knowledge_update. `field` may be an array-element selector 'arr[key=value].sub' to append inside ONE element's array (e.g. field \"live_test_refs[ac_id=AC4].test_paths\", entries [\"tests/x.test.mjs\"]); the selector must match exactly one element and sub must already be an array on it. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain, plus an article_missing item when an appended files[] entry's path is one of that item's file_keys (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({
         id: z.string(),
         field: z.string(),
@@ -427,7 +427,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         resolves: z
           .array(z.string())
           .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review item ids keyed to this record\'s chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges — full ids, validated before the write'),
+          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges — full ids, validated before the write'),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
@@ -438,7 +438,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_edit',
     {
       description:
-        "Replace one passage inside a string field without retransmitting it. `find` must match EXACTLY ONCE — zero or multiple matches are refused with the count; extend find to disambiguate. `field` may be an array-element selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\"), which must match exactly one element. A BOOLEAN sub-field is set by value: find is its current value ('true'/'false'), replace the new one (e.g. field \"files[path=scripts/prep.mjs].unverified\", find 'true', replace 'false' clears the flag). Same versioned write path as knowledge_update. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt with chars_before/chars_after; projection:\"full\" returns the whole stored record.",
+        "Replace one passage inside a string field without retransmitting it. `find` must match EXACTLY ONCE — zero or multiple matches are refused with the count; extend find to disambiguate. `field` may be an array-element selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\"), which must match exactly one element. A BOOLEAN sub-field is set by value: find is its current value ('true'/'false'), replace the new one (e.g. field \"files[path=scripts/prep.mjs].unverified\", find 'true', replace 'false' clears the flag); an absent optional boolean such as files[].entry reads as 'false', so field \"files[path=skills/drain/SKILL.md].entry\", find 'false', replace 'true' sets it. Same versioned write path as knowledge_update. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt with chars_before/chars_after; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({
         id: z.string(),
         field: z.string(),
@@ -447,7 +447,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         resolves: z
           .array(z.string())
           .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review item ids keyed to this record\'s chain that this write discharges — full ids, validated before the write'),
+          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full ids, validated before the write'),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
@@ -476,7 +476,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_array_remove',
     {
       description:
-        "Remove ONE element from an array field by selector 'arr[key=value]' (no trailing .sub), e.g. \"files[path=scripts/prep.mjs]\". Zero matches are refused with the count, and so are multiple matches that differ in any field; when every matched element is deep-equal (an identical duplicate) exactly one is removed and removed.note says \"removed 1 of N identical elements\". A selector only matches elements that have the key. Destructive, so: id must be the EXACT FULL UUID (no slug or prefix), and expected_version is REQUIRED — a stale token is refused naming both versions; a non-positive token is refused as invalid; a record with no stored version is refused. Refused: removing a feature_article's last files[] entry, or the last history entry. current_ac and live_test_refs may be emptied. Surviving elements keep order and bytes. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt carrying the removed element; projection:\"full\" returns the whole stored record.",
+        "Remove ONE element from an array field by selector 'arr[key=value]' (no trailing .sub), e.g. \"files[path=scripts/prep.mjs]\". Zero matches are refused with the count, and so are multiple matches that differ in any field; when every matched element is deep-equal (an identical duplicate) exactly one is removed and removed.note says \"removed 1 of N identical elements\". A selector only matches elements that have the key. Destructive, so: id must be the EXACT FULL UUID (no slug or prefix), and expected_version is REQUIRED — a stale token is refused naming both versions; a non-positive token is refused as invalid; a record with no stored version is refused. Refused: removing a feature_article's last files[] entry, or the last history entry. current_ac and live_test_refs may be emptied. Surviving elements keep order and bytes. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt carrying the removed element; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({
         id: z.string().describe('the EXACT full uuid — this call destroys, so no slug and no 8-char prefix is accepted'),
         selector: z.string().describe("arr[key=value] — knowledge_edit's grammar with NO trailing '.sub'; the whole matched element is removed"),
@@ -488,7 +488,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         resolves: z
           .array(z.string())
           .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review item ids keyed to this record\'s chain that this write discharges — full ids, validated before the write'),
+          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full ids, validated before the write'),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },

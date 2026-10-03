@@ -7,13 +7,14 @@ import { SterlingStore } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
 
 // EXTENSION of resolves-claim.test.ts's contract (decision
-// 68988832-2ef5-4ff3-b693-4f0f0ea8dae1) to three additional maintenance-queue
-// lanes: stale_research, wire_in_dormant, state_review. Per board item
-// 4afbfa56 ("resolves LANE COVERAGE — investigated 2026-08-25"): these three
+// 68988832-2ef5-4ff3-b693-4f0f0ea8dae1) to additional maintenance-queue
+// lanes: stale_research and state_review (wire_in_dormant was the third until
+// decision feature-article-states-follow-the-spec-meaning removed the lane). Per board item
+// 4afbfa56 ("resolves LANE COVERAGE — investigated 2026-08-25"): these
 // lanes already have a fulfilling-write discharge shape (knowledge_update),
 // wireable exactly like reconcile_needed/refresh_reference — tranche (a) of
 // the awaited ruling. This file pins that widening is IN and SCOPED: the
-// three new lanes close via resolves, an unclaimed item in a new lane still
+// new lanes close via resolves, an unclaimed item in a new lane still
 // warns (never silently drains), a wrong-lane item (capture_owed,
 // deletion_candidate — whose discharging write is knowledge_create /
 // knowledge_retire, not knowledge_update) is still refused, and the
@@ -92,24 +93,19 @@ test('AC-EXT1: knowledge_update resolves closes a stale_research item — drain-
   }
 });
 
-test('AC-EXT2: knowledge_update resolves closes a wire_in_dormant item — drain-log proof matches AC1', () => {
+test('AC-EXT2: the wire_in_dormant lane is gone — an enqueue naming it is refused (decision feature-article-states-follow-the-spec-meaning)', () => {
   const { tools, cleanup } = harness();
   try {
     const article = mkArticle(tools, 'thing-wid', 'src/thing-wid.ts');
-    const { record: item } = tools.maintenanceEnqueue({
-      reason: 'wire_in_dormant',
-      text: `'thing-wid' has a dormant wiring gap`,
-      file_keys: ['src/thing-wid.ts'],
-      feature_link: article.id,
-    });
-    assert.equal(openIds(tools).length, 1, 'precondition: one open item');
-
-    widen(tools).knowledgeUpdate(article.id, { what_it_does: 'wired' }, [item.id]);
-
-    assert.ok(!openIds(tools).includes(item.id), 'the named wire_in_dormant item is gone from the open queue');
-    const proof = tools.maintenanceRemove(item.id) as { removed?: string; id?: string; already_drained?: boolean };
-    assert.equal(proof.already_drained, true, 'the resolves-claim removal left the same drain-log trace maintenance_remove would have');
-    assert.equal(idOf(proof), item.id);
+    assert.throws(() =>
+      tools.maintenanceEnqueue({
+        reason: 'wire_in_dormant',
+        text: `'thing-wid' has a dormant wiring gap`,
+        file_keys: ['src/thing-wid.ts'],
+        feature_link: article.id,
+      })
+    );
+    assert.equal(openIds(tools).length, 0, 'nothing was queued');
   } finally {
     cleanup();
   }
@@ -200,7 +196,7 @@ test('AC-EXT5 (control): resolves naming a deletion_candidate item refuses — t
 
 // --- UNCLAIMED: named vs unnamed, in the same call --------------------------
 
-test('AC-EXT6 (partial claim across new lanes): resolves naming the stale_research item drains it; the sibling wire_in_dormant item stays open and is named in the warning', () => {
+test('AC-EXT6 (partial claim across new lanes): resolves naming the stale_research item drains it; the sibling state_review item stays open and is named in the warning', () => {
   const { tools, cleanup } = harness();
   try {
     const article = mkArticle(tools, 'thing-mix', 'src/thing-mix.ts');
@@ -211,8 +207,8 @@ test('AC-EXT6 (partial claim across new lanes): resolves naming the stale_resear
       feature_link: article.id,
     });
     const { record: unclaimed } = tools.maintenanceEnqueue({
-      reason: 'wire_in_dormant',
-      text: `'thing-mix' has a dormant wiring gap`,
+      reason: 'state_review',
+      text: `review article 'thing-mix' metadata against reality`,
       file_keys: ['src/thing-mix.ts'],
       feature_link: article.id,
     });
@@ -220,10 +216,10 @@ test('AC-EXT6 (partial claim across new lanes): resolves naming the stale_resear
     const result = widen(tools).knowledgeUpdateResult(article.id, { what_it_does: 'partially resolved' }, [claimed.id]);
 
     assert.ok(!openIds(tools).includes(claimed.id), 'the named stale_research item drained');
-    assert.ok(openIds(tools).includes(unclaimed.id), 'the unnamed wire_in_dormant item stays open');
+    assert.ok(openIds(tools).includes(unclaimed.id), 'the unnamed state_review item stays open');
     assert.ok(
       result.warnings.some((w) => w.includes(unclaimed.id)),
-      'the receipt warns, naming the still-open wire_in_dormant item — not a silent leave-behind'
+      'the receipt warns, naming the still-open state_review item — not a silent leave-behind'
     );
     assert.ok(
       !result.warnings.some((w) => w.includes(claimed.id)),

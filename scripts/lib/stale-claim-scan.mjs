@@ -5,11 +5,11 @@
 // written FROM the stale header (a near-miss double-charged players per trade
 // signal; the safety net was an agent doubting its brief, not a mechanism).
 //
-// WHY NOT AN EXTENSION OF wiring-check.mjs, which the board item proposed:
-// runWiringCheck reaches the repo only through completeness-check.mjs, which
-// hard-requires a live run AND a linked brief (requireRun/requireBrief both
-// fail()) and runs the wiring arm only under --final. The reported failures
-// happened in conductor-direct mode, which has neither. What IS reused: the
+// It is a standalone scan rather than an extension of the old wiring check the
+// board item proposed: that check ran only inside the staged pipeline's
+// completion step, which conductor-direct mode never reached, and it has since
+// been deleted (decision feature-article-states-follow-the-spec-meaning). What
+// IS reused: the
 // capability-gated adapter pattern (§9.1 — all three adapters declare
 // static_wiring explicitly, so absence is declared and skipped loudly, never a
 // crash), diff-json's {path, added_lines[]} shape, and the opt-out-marker

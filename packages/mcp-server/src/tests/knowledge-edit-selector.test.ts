@@ -572,14 +572,25 @@ test('BOOLEAN (array selector): a find that is not the CURRENT value, or a repla
   }
 });
 
-test('BOOLEAN (array selector): an ABSENT sub-field is still refused — edit changes an existing value, it does not add a key', () => {
+// Contract changed by decision feature-article-states-follow-the-spec-meaning:
+// files[].entry is absent on every article written before it existed, so an
+// ABSENT boolean the schema DECLARES reads as false. find must still spell that
+// value, and a sub-field the schema does not declare is still refused.
+test('BOOLEAN (array selector): an ABSENT declared boolean reads as false — find "true" is refused and nothing is written', () => {
   const { tools, cleanup } = harness();
   try {
     const article = mkArticle(tools, 'bool-absent', [{ path: 'src/a.ts', role: 'the a role' }]);
     const id = article.id as string;
     assert.throws(
       () => tools.knowledgeEdit(id, 'files[path=src/a.ts].unverified', 'true', 'false'),
-      /'unverified' on the selected files element is absent/
+      /'unverified' on the selected files element is false, not 'true'/
+    );
+    const after = tools.knowledgeGet(id) as unknown as { files: Record<string, unknown>[] };
+    assert.equal('unverified' in after.files[0], false, 'nothing was written');
+    assert.throws(
+      () => tools.knowledgeEdit(id, 'files[path=src/a.ts].undeclared', 'false', 'true'),
+      /'undeclared' on the selected files element is absent/,
+      'an absent sub-field the schema does not declare boolean is still refused'
     );
   } finally {
     cleanup();
