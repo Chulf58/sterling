@@ -49,6 +49,14 @@ Durable conventions and project facts, for any engineer or agent working in this
 - Domain stores (one shared store per stack tag): {{DOMAINS}}
 - Backup path: {{BACKUP_PATH}}
 
+## Domains
+
+- **A domain is a shared knowledge store for one subject.** It is kept per user, outside any repo, and every project on the machine that mounts it reads and writes the same store. A project mounts the domains named in its stack tags.
+- **Mount every subject the project works with, its own subject included.** Two projects share knowledge only through a domain both mount.
+- **What not to do:** a Salesforce project that mounts only `genesys` and a Genesys project that mounts only `salesforce` share nothing, because no domain is mounted by both. Both should mount `salesforce` and `genesys`.
+- **A domain needs a description** that says which knowledge belongs in it. The description decides where a new record is written and what gets promoted into the domain.
+- **Run `/sterling:domains` to see and change mounts.** It lists every domain on this machine with the projects that mount it, shows what this project shares with each other project, and adds a missing domain after you agree. It never removes one.
+
 ## Conventions (lean — grows only via architecture-altering decision records)
 
 - **No hand-maintained architecture or design documents.** Generated projections only, clearly marked. Knowledge lives in the store; a document that duplicates it will drift from it, and the copy is always the one that lies.
