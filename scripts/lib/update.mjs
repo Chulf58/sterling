@@ -32,7 +32,7 @@ import { fileURLToPath } from 'node:url';
 // bootstrap-independence note in scripts/update.mjs).
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
-import { readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './handoff-projection.mjs';
+import { readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './handoff-projection.mjs';
 import { ContainmentError } from './contained-fs.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { installHostOf, sterlingUpdateRemedy } from './sterling-roots.mjs';
@@ -442,9 +442,9 @@ function writeUpdateMarker(cwd, sha) {
 // project's files: a per-project refusal, never an abort of the machine-wide
 // update (Sol re-check). contained-fs rethrows every non-ENOENT lstat error.
 const isFsError = (err) => typeof err?.code === 'string' && typeof err?.syscall === 'string';
-// The refusals a per-project read may raise: an invalid mode, an unsafe path,
-// or a filesystem error.
-const isProjectReadRefusal = (err) => err instanceof ProjectModeError || err instanceof ContainmentError || isFsError(err);
+// The refusals a per-project read may raise: an invalid mode, an invalid
+// handoff setting, an unsafe path, or a filesystem error.
+const isProjectReadRefusal = (err) => err instanceof ProjectModeError || err instanceof HandoffSettingError || err instanceof ContainmentError || isFsError(err);
 
 // What to do about a project whose handoff refusal will not go away by itself.
 export function handoffRefusalRemedy(repoPath) {
@@ -596,13 +596,16 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // THE PER-PROJECT REFRESH (decision project-mode-hobby-work-toggle-decides-flow,
   // Astra design review item 2 — rebuilt as ONE idempotent pass). Every explicit
   // update visits each registered target exactly once, on the full path and the
-  // already-current path alike; the target's CURRENT mode, read from its own
-  // config, decides what runs:
-  //   - valid mode: sync-agents (it gates the portable agents on work itself);
-  //   - work: also the handoff projection; hobby: no portable-file maintenance,
-  //     nothing deleted;
-  //   - invalid mode, or a filesystem/containment error reading it: a visible
-  //     per-project refusal, exit 2, nothing synced or projected.
+  // already-current path alike; the target's CURRENT handoff setting
+  // (config.handoff.enabled, decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting),
+  // read from its own config, decides what runs. The mode decides nothing here:
+  //   - valid config: sync-agents (it gates the portable agents on the setting itself);
+  //   - handoff on: also the handoff projection; off: no portable-file
+  //     maintenance, nothing deleted;
+  //   - an invalid mode, an invalid handoff setting, or a filesystem/containment
+  //     error reading them: a visible per-project refusal, each its own class,
+  //     exit 2, nothing synced or projected.
   // The generators carry every safety guard (containment, foreign/local-edit
   // refusal, store authority, missing/empty-store protection, unchanged-byte
   // preservation), so running them on every update converges the files without
@@ -614,13 +617,24 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     for (const p of list) {
       const entry = { name: p.name, repo_path: p.repo_path, status: null };
       report.projects.push(entry);
-      let mode;
       try {
-        mode = readProjectMode(p.repo_path);
+        readProjectMode(p.repo_path);
       } catch (err) {
         if (!isProjectReadRefusal(err)) throw err;
         log(`  ✗ ${p.name}: REFUSED — project mode: ${err.message}. Nothing was synced or projected for this project; fix config.mode ('hobby' or 'work', TUI System tab) and rerun /sterling:update.`);
         entry.handoff = 'refused_project_mode';
+        fail(2);
+        failures++;
+        continue;
+      }
+      let handoffEnabled;
+      let handoffUnmaintained;
+      try {
+        ({ enabled: handoffEnabled, unmaintained: handoffUnmaintained } = readHandoffSetting(p.repo_path));
+      } catch (err) {
+        if (!isProjectReadRefusal(err)) throw err;
+        log(`  ✗ ${p.name}: REFUSED — handoff setting: ${err.message}. Nothing was synced or projected for this project; set config.handoff.enabled to true or false (TUI System tab) and rerun /sterling:update.`);
+        entry.handoff = 'refused_handoff_setting';
         fail(2);
         failures++;
         continue;
@@ -651,6 +665,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         for (const line of driftedAgents) log(`      ⚠ ${line}`);
         for (const line of autoMemoryNotices) log(`      ⚠ ${line}`);
       }
+      // An absent handoff key with handoff files on disk that git does not track:
+      // they stopped being maintained, so the run names them (sync-agents prints
+      // the same line, but its output is relayed only on a failure).
+      if (handoffUnmaintained.length) log(`      ⚠ ${handoffUnmaintainedNotice(handoffUnmaintained)}`);
       // Handoff projection (decision
       // init-prepares-opencode-portable-agents-and-target-handoff-projections):
       // refresh the project's committed architecture.md / rulings.md /
@@ -661,8 +679,8 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // INCOMPLETE export: exit 1.
       if (!withHandoff) {
         entry.handoff = 'not_run';
-      } else if (mode !== 'work') {
-        log(`      skipped — ${HOBBY_SKIP_DETAIL}`);
+      } else if (!handoffEnabled) {
+        log(`      skipped — ${HANDOFF_OFF_DETAIL}`);
         entry.handoff = 'skipped';
       } else {
         const handoff = exec(nodeBin, [join(cwd, 'scripts', 'handoff-projection.mjs'), p.repo_path], { cwd });

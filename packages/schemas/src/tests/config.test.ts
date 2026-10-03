@@ -365,6 +365,31 @@ test('mode: parseConfig is PERMISSIVE — hobby/work pass, any other value is pr
   }
 });
 
+// The handoff setting (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+// off by default, in both copies of the default (anti_pattern 85d15143).
+test('handoff: an empty config defaults to { enabled: false }, and the shipped template carries the same default', () => {
+  const empty = parseConfig({}) as unknown as { handoff?: unknown };
+  assert.deepEqual(empty.handoff, { enabled: false }, 'a missing handoff key means off');
+  const rawTemplate = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')) as { handoff?: unknown };
+  assert.deepEqual(rawTemplate.handoff, { enabled: false }, 'templates/default-config.json declares handoff explicitly');
+  assert.deepEqual((parseConfig(rawTemplate) as unknown as { handoff?: unknown }).handoff, empty.handoff, 'schema default and shipped template agree');
+});
+
+test('handoff: parseConfig is PERMISSIVE — any value is preserved raw, never coerced and never thrown on; the mode does not change it', () => {
+  // Like mode: a typo must not brick every parseConfig reader. readHandoffEnabled
+  // (scripts/lib/handoff-projection.mjs) is the strict judge; its refusal tests
+  // live in scripts/tests/handoff-setting.test.mjs.
+  for (const raw of [{ enabled: true }, { enabled: false }, { enabled: 'yes' }, 'on', 1, null, [true]]) {
+    for (const mode of ['hobby', 'work']) {
+      const parsed = parseConfig({ mode, handoff: raw }) as unknown as { handoff?: unknown };
+      assert.deepEqual(parsed.handoff, raw, `handoff ${JSON.stringify(raw)} is preserved verbatim in ${mode} mode`);
+    }
+  }
+  assert.deepEqual((parseConfig({ mode: 'work' }) as unknown as { handoff?: unknown }).handoff, { enabled: false }, 'work mode does not turn handoff on');
+  assert.deepEqual(unreadConfigKeys({ handoff: { enabled: true } }), [], 'handoff is a key the schema reads');
+});
+
 test('pr_review (PR review loop identity pin): permissive, defaults to copilot_logins [], and the template carries the same default', () => {
   assert.deepEqual(parseConfig({}).pr_review, { copilot_logins: [] });
   const rawTemplate = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));

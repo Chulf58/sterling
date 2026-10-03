@@ -27,14 +27,15 @@ function git(dir, args) {
   return r.stdout;
 }
 
-function project(mode, parent = tmpdir()) {
+// `handoff` (config.handoff.enabled) is left out of the config when undefined.
+function project(mode, parent = tmpdir(), handoff) {
   const dir = mkdtempSync(join(parent, 'oc-proj-'));
   git(dir, ['init', '-q']);
   git(dir, ['config', 'user.email', 't@example.com']);
   git(dir, ['config', 'user.name', 't']);
   git(dir, ['config', 'core.autocrlf', 'false']);
   mkdirSync(join(dir, '.sterling'));
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode }));
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode, ...(handoff === undefined ? {} : { handoff: { enabled: handoff } }) }));
   writeFileSync(join(dir, 'README.md'), 'x\n');
   writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
   git(dir, ['add', 'README.md', '.gitignore']);
@@ -572,7 +573,34 @@ test('project config: invalid JSON or a tracked opencode.json is refused and not
   assert.equal(readFileSync(join(dir2, '.opencode', 'opencode.json'), 'utf8'), '{}\n');
 });
 
-test('hobby project: the whole .opencode/ is excluded through .git/info/exclude; .gitignore is never written', () => {
+// CHANGED (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting): the
+// exclude block followed the mode (hobby: whole directory; work: narrow). It
+// follows config.handoff.enabled now, so the fixtures below state the key, and
+// the work-mode project with handoff off shows the mode no longer narrows it.
+for (const mode of ['hobby', 'work']) {
+  test(`${mode} project with handoff off: the whole .opencode/ is excluded, whatever the mode`, () => {
+    const home = tmp('oc-home-');
+    const dir = project(mode, tmpdir(), false);
+    const r = run(dir, home);
+    assert.equal(statusOf(r, '.git/info/exclude'), 'created');
+    assert.match(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), /^\/\.opencode\/$/m);
+    assert.deepEqual(untracked(dir), [], 'nothing Sterling wrote shows up in git status');
+  });
+}
+
+test('an unreadable handoff setting: a skipped row says so and only Sterling paths are excluded', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby', handoff: { enabled: 'yes' } }));
+  const r = run(dir, home);
+  const row = r.rows.find((x) => x.item === '.sterling/config.json handoff');
+  assert.equal(row?.status, 'skipped');
+  assert.match(row.detail, /config\.handoff\.enabled is "yes".*excluding only Sterling's own \.opencode paths/);
+  assert.doesNotMatch(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), /^\/\.opencode\/$/m);
+});
+
+test('handoff-off project: the whole .opencode/ is excluded through .git/info/exclude; .gitignore is never written', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   const r = run(dir, home);
@@ -596,9 +624,30 @@ test('a project that already ignores .opencode/ gets no exclude block', () => {
   assert.doesNotMatch(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), /sterling opencode/);
 });
 
-test('work project with COMMITTED portable agents: only Sterling paths are excluded, the committed copies are untouched', () => {
+test('no handoff key and UNTRACKED portable agents on disk: the block stays narrow, so git status still shows them', () => {
   const home = tmp('oc-home-');
   const dir = project('work');
+  mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
+  writeFileSync(join(dir, '.opencode', 'agents', 'scout.md'), 'portable\n');
+  run(dir, home);
+  assert.doesNotMatch(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), /^\/\.opencode\/$/m);
+  assert.deepEqual(untracked(dir), ['?? .opencode/agents/scout.md'], 'the file Sterling stopped maintaining is not hidden');
+});
+
+test('no handoff key and git cannot say what is tracked: a skipped row names the git error and only Sterling paths are excluded', () => {
+  const home = tmp('oc-home-');
+  const dir = project('work');
+  writeFileSync(join(dir, '.git', 'index'), 'not an index');
+  const r = run(dir, home);
+  const row = r.rows.find((x) => x.item === '.sterling/config.json handoff');
+  assert.equal(row?.status, 'skipped');
+  assert.match(row.detail, /git ls-files exited 128.*excluding only Sterling's own \.opencode paths/);
+  assert.doesNotMatch(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), /^\/\.opencode\/$/m);
+});
+
+test('project with COMMITTED portable agents and no handoff key: only Sterling paths are excluded, the committed copies are untouched', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
   mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
   const portable = '---\ndescription: portable\nmode: subagent\n---\nportable body\n';
   for (const n of ['implementor', 'researcher', 'scout']) writeFileSync(join(dir, '.opencode', 'agents', `${n}.md`), portable);
@@ -618,12 +667,15 @@ test('work project with COMMITTED portable agents: only Sterling paths are exclu
   assert.deepEqual(untracked(dir), ['?? .opencode/agents/new.md']);
 });
 
-test('fresh work project (portable copies not yet committed): never hides them; a hobby→work switch rewrites the block', () => {
+test('handoff just turned on (portable copies not yet committed): never hides them; the off→on switch rewrites the block, a hobby→work switch alone does not', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   run(dir, home);
   assert.match(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), /^\/\.opencode\/$/m);
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'work' }));
+  assert.equal(statusOf(run(dir, home), '.git/info/exclude'), 'matches', 'switching the mode leaves the block alone');
+  assert.match(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), /^\/\.opencode\/$/m);
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby', handoff: { enabled: true } }));
   const r = run(dir, home);
   assert.equal(statusOf(r, '.git/info/exclude'), 'refreshed');
   const exclude = readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8');

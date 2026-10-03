@@ -27,7 +27,7 @@
 // — board 09f05fca half 2, review fix.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ModeToggleEffect, SparringToggleEffect, TddToggleEffect } from './state.js';
+import type { HandoffToggleEffect, ModeToggleEffect, SparringToggleEffect, TddToggleEffect } from './state.js';
 
 function configPath(explicit?: string): string {
   return explicit ?? join(process.cwd(), '.sterling', 'config.json');
@@ -73,9 +73,8 @@ export function applyTddToggle(e: TddToggleEffect, onError?: (msg: string) => vo
 
 /** Execute a mode_toggle effect: config.mode write only (decision
  *  project-mode-hobby-work-toggle-decides-flow) — mirrors applyTddToggle. The
- *  switch deletes nothing: work→hobby leaves existing OpenCode and handoff
- *  files in place (they stop being maintained); hobby→work is provisioned by
- *  the next init, sync-agents or /sterling:update. Optional trailing `path`
+ *  mode decides only how work ships (a direct merge, or a pull request with
+ *  the review loop); it writes and deletes no files. Optional trailing `path`
  *  overrides the cwd-derived default (see applySparringToggle). */
 export function applyModeToggle(e: ModeToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
   try {
@@ -86,6 +85,28 @@ export function applyModeToggle(e: ModeToggleEffect, onError?: (msg: string) => 
     return true;
   } catch (err) {
     onError?.(`mode toggle failed — ${(err as Error).message}`);
+    return false;
+  }
+}
+
+/** Execute a handoff_toggle effect: config.handoff.enabled write only (decision
+ *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) —
+ *  mirrors applyTddToggle. The switch deletes nothing: turning it off leaves the
+ *  existing portable OpenCode agents and handoff projection in place (they stop
+ *  being maintained); turning it on is provisioned by the next init or
+ *  /sterling:update. A recorded `handoff` that is not an object is replaced,
+ *  never spread. Optional trailing `path` overrides the cwd-derived default
+ *  (see applySparringToggle). */
+export function applyHandoffToggle(e: HandoffToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
+  try {
+    const target = configPath(path);
+    const raw = JSON.parse(readFileSync(target, 'utf8')) as { handoff?: unknown };
+    const block = raw.handoff !== null && typeof raw.handoff === 'object' && !Array.isArray(raw.handoff) ? raw.handoff : {};
+    raw.handoff = { ...block, enabled: e.enabled };
+    writeFileSync(target, JSON.stringify(raw, null, 2) + '\n');
+    return true;
+  } catch (err) {
+    onError?.(`handoff toggle failed — ${(err as Error).message}`);
     return false;
   }
 }

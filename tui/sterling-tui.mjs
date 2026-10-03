@@ -4380,23 +4380,23 @@ var require_core = __commonJS({
       return this;
     };
     Promise2.callback = function(fn) {
-      return new Promise2((resolve4, reject) => {
+      return new Promise2((resolve7, reject) => {
         fn((error, arg) => {
           if (error) {
             reject(error);
           } else {
-            resolve4(arg);
+            resolve7(arg);
           }
         });
       });
     };
     Promise2.callbackAll = function(fn) {
-      return new Promise2((resolve4, reject) => {
+      return new Promise2((resolve7, reject) => {
         fn((error, ...args2) => {
           if (error) {
             reject(error);
           } else {
-            resolve4(args2);
+            resolve7(args2);
           }
         });
       });
@@ -4449,19 +4449,19 @@ var require_core = __commonJS({
       setTimeout(() => this.resolve(value), timeout);
     };
     Promise2.resolveTimeout = Promise2.fulfillTimeout = function(timeout, value) {
-      return new Promise2((resolve4) => setTimeout(() => resolve4(value), timeout));
+      return new Promise2((resolve7) => setTimeout(() => resolve7(value), timeout));
     };
     Promise2.prototype.rejectTimeout = function(timeout, error) {
       setTimeout(() => this.reject(error), timeout);
     };
     Promise2.rejectTimeout = function(timeout, error) {
-      return new Promise2((resolve4, reject) => setTimeout(() => reject(error), timeout));
+      return new Promise2((resolve7, reject) => setTimeout(() => reject(error), timeout));
     };
     Promise2.resolveNextTick = Promise2.fulfillNextTick = function(value) {
-      return new Promise2((resolve4) => nextTick(() => resolve4(value)));
+      return new Promise2((resolve7) => nextTick(() => resolve7(value)));
     };
     Promise2.rejectNextTick = function(error) {
-      return new Promise2((resolve4, reject) => nextTick(() => reject(error)));
+      return new Promise2((resolve7, reject) => nextTick(() => reject(error)));
     };
     Promise2.dormant = function(fn) {
       var promise = new Promise2();
@@ -4482,10 +4482,10 @@ var require_core = __commonJS({
       if (thenable instanceof Promise2) {
         return thenable;
       }
-      return new Promise2((resolve4, reject) => {
+      return new Promise2((resolve7, reject) => {
         thenable.then(
           (value) => {
-            resolve4(value);
+            resolve7(value);
           },
           (error) => {
             reject(error);
@@ -4580,10 +4580,10 @@ var require_core = __commonJS({
         window.requestAnimationFrame(() => this.reject(error));
       };
       Promise2.resolveAtAnimationFrame = function(value) {
-        return new Promise2((resolve4) => window.requestAnimationFrame(() => resolve4(value)));
+        return new Promise2((resolve7) => window.requestAnimationFrame(() => resolve7(value)));
       };
       Promise2.rejectAtAnimationFrame = function(error) {
-        return new Promise2((resolve4, reject) => window.requestAnimationFrame(() => reject(error)));
+        return new Promise2((resolve7, reject) => window.requestAnimationFrame(() => reject(error)));
       };
     }
   }
@@ -5039,11 +5039,11 @@ var require_wrapper = __commonJS({
     "use strict";
     var Promise2 = require_seventh();
     Promise2.timeLimit = (timeout, asyncFnOrPromise) => {
-      return new Promise2((resolve4, reject) => {
+      return new Promise2((resolve7, reject) => {
         if (typeof asyncFnOrPromise === "function") {
           asyncFnOrPromise = asyncFnOrPromise();
         }
-        Promise2.resolve(asyncFnOrPromise).then(resolve4, reject);
+        Promise2.resolve(asyncFnOrPromise).then(resolve7, reject);
         setTimeout(() => reject(new Error("Timeout")), timeout);
       });
     };
@@ -5065,13 +5065,13 @@ var require_wrapper = __commonJS({
       return oneTry();
     };
     Promise2.onceEvent = (emitter, eventName) => {
-      return new Promise2((resolve4) => emitter.once(eventName, resolve4));
+      return new Promise2((resolve7) => emitter.once(eventName, resolve7));
     };
     Promise2.onceEventAll = (emitter, eventName) => {
-      return new Promise2((resolve4) => emitter.once(eventName, (...args2) => resolve4(args2)));
+      return new Promise2((resolve7) => emitter.once(eventName, (...args2) => resolve7(args2)));
     };
     Promise2.onceEventOrError = (emitter, eventName, excludeEvents, _internalAllArgs = false) => {
-      return new Promise2((resolve4, reject) => {
+      return new Promise2((resolve7, reject) => {
         var altRejects;
         var resolve_ = (...args2) => {
           emitter.removeListener("error", reject_);
@@ -5080,7 +5080,7 @@ var require_wrapper = __commonJS({
               emitter.removeListener(event2, altRejects[event2]);
             }
           }
-          resolve4(_internalAllArgs ? args2 : args2[0]);
+          resolve7(_internalAllArgs ? args2 : args2[0]);
         };
         var reject_ = (arg) => {
           emitter.removeListener(eventName, resolve_);
@@ -5128,7 +5128,7 @@ var require_decorators = __commonJS({
     Promise2.promisifyAll = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
         return (...args2) => {
-          return new Promise2((resolve4, reject) => {
+          return new Promise2((resolve7, reject) => {
             nodeAsyncFn.call(thisBinding, ...args2, (error, ...cbArgs) => {
               if (error) {
                 if (cbArgs.length && error instanceof Error) {
@@ -5136,14 +5136,14 @@ var require_decorators = __commonJS({
                 }
                 reject(error);
               } else {
-                resolve4(cbArgs);
+                resolve7(cbArgs);
               }
             });
           });
         };
       }
       return function(...args2) {
-        return new Promise2((resolve4, reject) => {
+        return new Promise2((resolve7, reject) => {
           nodeAsyncFn.call(this, ...args2, (error, ...cbArgs) => {
             if (error) {
               if (cbArgs.length && error instanceof Error) {
@@ -5151,7 +5151,7 @@ var require_decorators = __commonJS({
               }
               reject(error);
             } else {
-              resolve4(cbArgs);
+              resolve7(cbArgs);
             }
           });
         });
@@ -5160,7 +5160,7 @@ var require_decorators = __commonJS({
     Promise2.promisify = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
         return (...args2) => {
-          return new Promise2((resolve4, reject) => {
+          return new Promise2((resolve7, reject) => {
             nodeAsyncFn.call(thisBinding, ...args2, (error, cbArg) => {
               if (error) {
                 if (cbArg !== void 0 && error instanceof Error) {
@@ -5168,14 +5168,14 @@ var require_decorators = __commonJS({
                 }
                 reject(error);
               } else {
-                resolve4(cbArg);
+                resolve7(cbArg);
               }
             });
           });
         };
       }
       return function(...args2) {
-        return new Promise2((resolve4, reject) => {
+        return new Promise2((resolve7, reject) => {
           nodeAsyncFn.call(this, ...args2, (error, cbArg) => {
             if (error) {
               if (cbArg !== void 0 && error instanceof Error) {
@@ -5183,7 +5183,7 @@ var require_decorators = __commonJS({
               }
               reject(error);
             } else {
-              resolve4(cbArg);
+              resolve7(cbArg);
             }
           });
         });
@@ -5876,9 +5876,9 @@ var require_misc3 = __commonJS({
           listener(exitCode, timeout);
           return Promise2.dummy;
         }
-        return new Promise2((resolve4) => {
+        return new Promise2((resolve7) => {
           listener(exitCode, timeout, () => {
-            resolve4();
+            resolve7();
           });
         });
       };
@@ -5886,11 +5886,11 @@ var require_misc3 = __commonJS({
       setTimeout(() => process.exit(exitCode), timeout);
     };
     Promise2.resolveSafeTimeout = function(timeout, value) {
-      return new Promise2((resolve4) => {
+      return new Promise2((resolve7) => {
         setTimeout(() => {
           setTimeout(() => {
             setTimeout(() => {
-              setTimeout(() => resolve4(value), 0);
+              setTimeout(() => resolve7(value), 0);
             }, timeout / 2);
           }, timeout / 2);
         }, 0);
@@ -6065,7 +6065,7 @@ var require_detectTerminal = __commonJS({
     };
     function getParentProcess(pid) {
       var parentPid, appName;
-      return new Promise2((resolve4, reject) => {
+      return new Promise2((resolve7, reject) => {
         exec("ps -h -o ppid -p " + pid, (error, stdout) => {
           if (error) {
             reject(error);
@@ -6082,7 +6082,7 @@ var require_detectTerminal = __commonJS({
               return;
             }
             appName = stdout_.trim();
-            resolve4({ pid: parentPid, appName });
+            resolve7({ pid: parentPid, appName });
           });
         });
       });
@@ -9601,13 +9601,13 @@ var require_NextGenEvents = __commonJS({
       return this.addListener(eventName, fn, options);
     };
     NextGenEvents.prototype.waitFor = function(eventName) {
-      return new Promise((resolve4) => {
-        this.addListener(eventName, (firstArg) => resolve4(firstArg), { once: true });
+      return new Promise((resolve7) => {
+        this.addListener(eventName, (firstArg) => resolve7(firstArg), { once: true });
       });
     };
     NextGenEvents.prototype.waitForAll = function(eventName) {
-      return new Promise((resolve4) => {
-        this.addListener(eventName, (...args2) => resolve4(args2), { once: true });
+      return new Promise((resolve7) => {
+        this.addListener(eventName, (...args2) => resolve7(args2), { once: true });
       });
     };
     NextGenEvents.prototype.removeListener = function(eventName, id) {
@@ -9751,8 +9751,8 @@ var require_NextGenEvents = __commonJS({
       return NextGenEvents.emitEvent(event2);
     };
     NextGenEvents.prototype.waitForEmit = function(...args2) {
-      return new Promise((resolve4) => {
-        this.emit(...args2, (interrupt) => resolve4(interrupt));
+      return new Promise((resolve7) => {
+        this.emit(...args2, (interrupt) => resolve7(interrupt));
       });
     };
     NextGenEvents.createEvent = function(emitter, ...args2) {
@@ -10119,13 +10119,13 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForFirst = function(emitters, eventName) {
-      return new Promise((resolve4) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (firstArg) => resolve4(firstArg));
+      return new Promise((resolve7) => {
+        NextGenEvents.groupOnceFirst(emitters, eventName, (firstArg) => resolve7(firstArg));
       });
     };
     NextGenEvents.groupWaitForFirstAll = function(emitters, eventName) {
-      return new Promise((resolve4) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (...args2) => resolve4(args2));
+      return new Promise((resolve7) => {
+        NextGenEvents.groupOnceFirst(emitters, eventName, (...args2) => resolve7(args2));
       });
     };
     NextGenEvents.groupOnceLast = function(emitters, eventName, fn, options) {
@@ -10155,13 +10155,13 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForLast = function(emitters, eventName) {
-      return new Promise((resolve4) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (firstArg) => resolve4(firstArg));
+      return new Promise((resolve7) => {
+        NextGenEvents.groupOnceLast(emitters, eventName, (firstArg) => resolve7(firstArg));
       });
     };
     NextGenEvents.groupWaitForLastAll = function(emitters, eventName) {
-      return new Promise((resolve4) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (...args2) => resolve4(args2));
+      return new Promise((resolve7) => {
+        NextGenEvents.groupOnceLast(emitters, eventName, (...args2) => resolve7(args2));
       });
     };
     NextGenEvents.groupRemoveListener = function(emitters, eventName, id) {
@@ -10210,8 +10210,8 @@ var require_NextGenEvents = __commonJS({
       });
     };
     NextGenEvents.groupWaitForEmit = function(emitters, ...args2) {
-      return new Promise((resolve4) => {
-        NextGenEvents.groupEmit(emitters, ...args2, (interrupt) => resolve4(interrupt));
+      return new Promise((resolve7) => {
+        NextGenEvents.groupEmit(emitters, ...args2, (interrupt) => resolve7(interrupt));
       });
     };
     NextGenEvents.groupDefineStates = function(emitters, ...args2) {
@@ -39067,11 +39067,11 @@ var require_termkit_no_lazy_require = __commonJS({
 });
 
 // packages/tui/dist/main.js
-import { dirname as dirname7, join as join10 } from "node:path";
+import { dirname as dirname7, join as join13 } from "node:path";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync7, writeFileSync as writeFileSync4, existsSync as existsSync6 } from "node:fs";
-import { basename as basename2, dirname as dirname4, join as join7 } from "node:path";
+import { readFileSync as readFileSync7, writeFileSync as writeFileSync4, existsSync as existsSync7 } from "node:fs";
+import { basename as basename2, dirname as dirname4, join as join10 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
@@ -44317,22 +44317,40 @@ var configSchema = external_exports.object({
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
   }).default({}),
-  // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-  // per-project switch that decides the flow. 'hobby' (the default, today's
-  // behaviour) skips the OpenCode agents and the handoff projection; 'work'
-  // writes and maintains them. Toggled in the TUI System tab. A missing key
-  // means hobby.
+  // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed
+  // by project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+  // the per-project switch that decides how work ships. 'hobby' (the default)
+  // merges directly through /sterling:merge; 'work' opens a pull request and
+  // runs the review loop. It decides nothing else: whether the handoff files
+  // are written is `handoff` below. Toggled in the TUI System tab. A missing
+  // key means hobby.
   // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
   // S1): any other value is PRESERVED raw, never coerced to hobby and never
   // thrown on — a typo here must not turn every parseConfig reader (the MCP
   // server's boot included) into a startup failure. The strict judge is
   // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
-  // surface that ACTS on the mode (init, sync-agents, /sterling:update, the
-  // handoff-projection CLI) uses, and which refuses an invalid value loudly.
+  // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
+  // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.
   // The default lives twice (anti_pattern 85d15143): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // Handoff files (decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+  // `enabled` says whether Sterling writes the files for colleagues who do not
+  // have Sterling, the portable OpenCode agents (.opencode/agents/) and the
+  // handoff projection (architecture.md, rulings.md, docs/sterling/). Off by
+  // default, independent of `mode`. Toggled in the TUI System tab.
+  // PERMISSIVE for the same reason as `mode`: the value is preserved raw. The
+  // strict judge is readHandoffEnabled() in scripts/lib/handoff-projection.mjs,
+  // which init, sync-agents, /sterling:update, the handoff-projection CLI and
+  // the git exclude block use. It refuses a value that is not a boolean, and it
+  // reads a config with NO key as on when portable agents are already tracked
+  // in git, which this default cannot express: read the setting through it,
+  // never from the parsed config.
+  // The default lives twice (anti_pattern 85d15143): here and in
+  // templates/default-config.json; config.test.ts pins that they agree.
+  handoff: external_exports.unknown().default({ enabled: false }),
   // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
   // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
   // first use; empty means unpinned (any Bot login matching /copilot/i, with
@@ -47772,7 +47790,8 @@ var EMPTY_ROSTER = {
   sparringPartner: { enabled: true },
   codexWired: false,
   tdd: { enabled: true },
-  mode: "hobby"
+  mode: "hobby",
+  handoff: false
 };
 function driftOf(installed, config) {
   return installed !== config;
@@ -47946,7 +47965,8 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   const sparringRows = selector ? [] : sparringPartnerRows(snap, ui, width, keys.length);
   const tddRows = selector ? [] : [tddToggleRow(snap, ui, width, keys.length + 2)];
   const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows };
+  const handoffRows = selector ? [] : [handoffToggleRow(snap, ui, width, keys.length + 4)];
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows };
 }
 function catalogBanner(catalog, width) {
   const clip2 = (s2) => clipEllipsis(s2, width);
@@ -47994,6 +48014,15 @@ function modeToggleRow(snap, ui, width, cursorIndex) {
   const shown = mode === null ? "UNKNOWN (config unreadable)" : mode === "hobby" || mode === "work" ? mode.toUpperCase() : `INVALID ('${mode}')`;
   return { id: "sys:project_mode", lines: [{ text: clip2(`${marker}Project mode: ${shown}`), kind: "title", selected }] };
 }
+function handoffToggleRow(snap, ui, width, cursorIndex) {
+  const clip2 = (s2) => clipEllipsis(s2, width);
+  const handoff = snap.handoff === void 0 ? false : snap.handoff;
+  const selected = ui.cursor === cursorIndex;
+  const marker = selected ? "\u203A " : "  ";
+  const why = snap.handoffDetail === void 0 ? "" : ` (${snap.handoffDetail})`;
+  const shown = handoff === null ? `UNKNOWN (${snap.handoffDetail ?? "config unreadable"})` : handoff === true ? `ON${why}` : handoff === false ? `OFF${why}` : `INVALID (${handoff})`;
+  return { id: "sys:handoff_files", lines: [{ text: clip2(`${marker}Handoff files: ${shown}`), kind: "title", selected }] };
+}
 function tabsFor(store, activeTab, agents) {
   let taskCount = null;
   try {
@@ -48034,7 +48063,7 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, ma
     rows.push({ id: sr.id, type: "system", selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
     screenRow += lines.length;
   }
-  for (const sr of [...view.tddRows, ...view.modeRows]) {
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows]) {
     const lines = sr.lines.map((l) => ({
       text: l.text,
       kind: l.kind === "title" ? "title" : l.kind === "meta" ? "meta" : "body"
@@ -48308,7 +48337,7 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
       }
       if (ui.tab === SYSTEM_TAB && roster) {
         const sysKeys = Object.keys(roster.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
-        const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 4 - 1)));
+        const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 5 - 1)));
         const sel = ui.selector;
         const editing = ui.sparringModelEdit !== void 0;
         switch (event2.name) {
@@ -48359,6 +48388,10 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
             }
             if (cursor === sysKeys.length + 3) {
               effects.push({ type: "mode_toggle", mode: (roster.mode ?? "hobby") === "hobby" ? "work" : "hobby" });
+              return { ui: { ...ui, cursor, notice: void 0 }, effects };
+            }
+            if (cursor === sysKeys.length + 4) {
+              effects.push({ type: "handoff_toggle", enabled: (roster.handoff ?? false) === false });
               return { ui: { ...ui, cursor, notice: void 0 }, effects };
             }
             const key = sysKeys[cursor];
@@ -48561,6 +48594,19 @@ function applyModeToggle(e, onError, path) {
     return true;
   } catch (err) {
     onError?.(`mode toggle failed \u2014 ${err.message}`);
+    return false;
+  }
+}
+function applyHandoffToggle(e, onError, path) {
+  try {
+    const target = configPath(path);
+    const raw = JSON.parse(readFileSync(target, "utf8"));
+    const block = raw.handoff !== null && typeof raw.handoff === "object" && !Array.isArray(raw.handoff) ? raw.handoff : {};
+    raw.handoff = { ...block, enabled: e.enabled };
+    writeFileSync(target, JSON.stringify(raw, null, 2) + "\n");
+    return true;
+  } catch (err) {
+    onError?.(`handoff toggle failed \u2014 ${err.message}`);
     return false;
   }
 }
@@ -48780,16 +48826,270 @@ function userScopeCodexServer({ env = process.env, home = homedir2(), readFile =
   }
 }
 
-// scripts/lib/opencode-install.mjs
+// scripts/lib/handoff-projection.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync3, rmSync as rmSync2, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname3, isAbsolute, join as join6, resolve as resolve2 } from "node:path";
+import { existsSync as existsSync4 } from "node:fs";
+import { join as join7, resolve as resolve3 } from "node:path";
+
+// scripts/lib/contained-fs.mjs
+import { lstatSync as lstatSync3, readFileSync as readFileSync4, readdirSync as readdirSync2, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { join as join6, resolve as resolve2 } from "node:path";
+
+// scripts/lib/store-path.mjs
+import { lstatSync as lstatSync2, realpathSync as realpathSync2 } from "node:fs";
+import { join as join5, resolve, sep } from "node:path";
+var StorePathContainmentError = class extends Error {
+  constructor(message, { root, target } = {}) {
+    super(message);
+    this.name = "StorePathContainmentError";
+    this.root = root;
+    this.target = target;
+  }
+};
+function isAbsoluteSegment(seg) {
+  return seg.startsWith("/") || seg.startsWith("\\") || /^[A-Za-z]:[\\/]?/.test(seg);
+}
+function resolveStoreWritePath(root, ...segments) {
+  if (typeof root !== "string" || !root.length) {
+    throw new StorePathContainmentError(`resolveStoreWritePath: root must be a non-empty string (got ${JSON.stringify(root)})`);
+  }
+  for (const raw of segments) {
+    if (typeof raw !== "string" || raw.length === 0) {
+      throw new StorePathContainmentError(
+        `resolveStoreWritePath: empty or non-string segment (${JSON.stringify(raw)}) \u2014 refusing before any filesystem access`
+      );
+    }
+  }
+  const rootResolved = resolve(root);
+  const target = resolve(rootResolved, ...segments);
+  for (const raw of segments) {
+    if (isAbsoluteSegment(raw)) {
+      throw new StorePathContainmentError(
+        `resolveStoreWritePath: absolute segment '${raw}' resolves outside '${rootResolved}' (got '${target}') \u2014 refused before any filesystem access`,
+        { root: rootResolved, target }
+      );
+    }
+    for (const part of raw.split(/[\\/]/)) {
+      if (part === "..") {
+        throw new StorePathContainmentError(
+          `resolveStoreWritePath: '..' segment in '${raw}' resolves outside '${rootResolved}' (got '${target}') \u2014 refused before any filesystem access`,
+          { root: rootResolved, target }
+        );
+      }
+    }
+  }
+  if (target !== rootResolved && !target.startsWith(rootResolved + sep)) {
+    throw new StorePathContainmentError(
+      `resolveStoreWritePath: '${join5(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
+      { root: rootResolved, target }
+    );
+  }
+  const relParts = target.slice(rootResolved.length).split(sep).filter(Boolean);
+  let cursor = rootResolved;
+  let deepestExisting = rootResolved;
+  for (const part of relParts) {
+    const next = join5(cursor, part);
+    let st;
+    try {
+      st = lstatSync2(next);
+    } catch (e) {
+      if (e && e.code === "ENOENT") break;
+      throw new StorePathContainmentError(
+        `resolveStoreWritePath: could not stat '${next}' while walking toward '${target}' (${e && e.code || e && e.message || e}) \u2014 refusing`,
+        { root: rootResolved, target }
+      );
+    }
+    if (st.isSymbolicLink()) {
+      let resolvedRoot;
+      try {
+        resolvedRoot = realpathSync2(rootResolved);
+      } catch {
+        resolvedRoot = rootResolved;
+      }
+      let resolvedEscape;
+      try {
+        resolvedEscape = realpathSync2(next);
+      } catch {
+        resolvedEscape = null;
+      }
+      throw new StorePathContainmentError(
+        `resolveStoreWritePath: '${next}' is a symlink component beneath '${resolvedRoot}' on the way to '${target}'` + (resolvedEscape ? ` \u2014 it resolves to '${resolvedEscape}', outside '${resolvedRoot}'` : " \u2014 the link is dangling") + ` \u2014 refusing, nothing was written`,
+        { root: resolvedRoot, target: resolvedEscape ?? target }
+      );
+    }
+    cursor = next;
+    deepestExisting = next;
+  }
+  let realRoot;
+  try {
+    realRoot = realpathSync2(rootResolved);
+  } catch (e) {
+    if (e && e.code === "ENOENT") {
+      realRoot = rootResolved;
+    } else {
+      throw new StorePathContainmentError(
+        `resolveStoreWritePath: could not realpath root '${rootResolved}' (${e && e.code || e && e.message || e}) \u2014 refusing rather than trusting an unverified root`,
+        { root: rootResolved, target }
+      );
+    }
+  }
+  let realDeepest;
+  if (deepestExisting === rootResolved) {
+    realDeepest = realRoot;
+  } else {
+    try {
+      realDeepest = realpathSync2(deepestExisting);
+    } catch (e) {
+      throw new StorePathContainmentError(
+        `resolveStoreWritePath: could not realpath '${deepestExisting}' while walking toward '${target}' (${e && e.code || e && e.message || e}) \u2014 refusing rather than trusting an unverified ancestor`,
+        { root: rootResolved, target }
+      );
+    }
+  }
+  if (realDeepest !== realRoot && !realDeepest.startsWith(realRoot + sep)) {
+    throw new StorePathContainmentError(
+      `resolveStoreWritePath: '${deepestExisting}' resolves (via realpath) to '${realDeepest}', outside '${realRoot}' \u2014 refusing`,
+      { root: realRoot, target: realDeepest }
+    );
+  }
+  const suffix = target.slice(deepestExisting.length);
+  const reconstructed = suffix ? join5(realDeepest, suffix) : realDeepest;
+  if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep)) {
+    throw new StorePathContainmentError(
+      `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target}') resolves outside the project \u2014 refusing, nothing was written`,
+      { root: realRoot, target: reconstructed }
+    );
+  }
+  return target;
+}
+
+// scripts/lib/contained-fs.mjs
+var ContainmentError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ContainmentError";
+  }
+};
+var lstatOrNull = (p) => {
+  try {
+    return lstatSync3(p);
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    throw e;
+  }
+};
+function containedPath(root, rel, leaf) {
+  const segments = rel.split("/").filter(Boolean);
+  if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
+  let cursor = resolve2(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join6(cursor, part);
+    const st = lstatOrNull(cursor);
+    if (!st) break;
+    const isLeaf = index === segments.length - 1;
+    const wantDir = !isLeaf || leaf === "dir";
+    if (st.isSymbolicLink()) throw new ContainmentError(`${segments.slice(0, index + 1).join("/")} is a symlink \u2014 refusing to follow it out of the project`);
+    if (wantDir && !st.isDirectory()) throw new ContainmentError(`${segments.slice(0, index + 1).join("/")} exists but is not a directory`);
+    if (!wantDir && !st.isFile()) throw new ContainmentError(`${rel} exists but is not a regular file`);
+  }
+  try {
+    return resolveStoreWritePath(root, ...segments);
+  } catch (e) {
+    if (e instanceof StorePathContainmentError) throw new ContainmentError(`${rel}: ${e.message.replace(/^resolveStoreWritePath: /, "")}`);
+    throw e;
+  }
+}
+function existsContained(root, rel, leaf) {
+  return lstatOrNull(containedPath(root, rel, leaf)) !== null;
+}
+function readContained(root, rel) {
+  return readFileSync4(containedPath(root, rel, "file"), "utf8");
+}
+var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+// scripts/lib/handoff-projection.mjs
+var CONFIG_REL = ".sterling/config.json";
+var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
+var HandoffSettingError = class extends Error {
+};
+var HandoffGitError = class extends HandoffSettingError {
+  constructor(message, reason) {
+    super(message);
+    this.reason = reason;
+  }
+};
+var GIT_TIMEOUT_MS = 3e4;
+function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
+  const run = (args2) => {
+    const r = spawn("git", args2, { cwd: root, encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
+    const name = `git ${args2[0]}`;
+    if (r.error) return { failed: r.error.code === "ETIMEDOUT" ? `${name} timed out after ${GIT_TIMEOUT_MS / 1e3}s` : `${name} did not run (${r.error.message})` };
+    if (r.status !== 0) {
+      const stderr = (r.stderr || "").trim().split("\n")[0];
+      return { failed: `${name} exited ${r.status ?? `on signal ${r.signal}`}: ${stderr || "no error output"}`, notARepo: r.status === 128 && /not a git repository/i.test(stderr) };
+    }
+    return { stdout: r.stdout || "" };
+  };
+  if (!existsSync4(root)) return { files: [], unknown: null };
+  const inside = run(["rev-parse", "--is-inside-work-tree"]);
+  if (inside.failed) {
+    if (inside.notARepo && !existsSync4(join7(root, ".git"))) return { files: [], unknown: null };
+    return { files: [], unknown: inside.failed };
+  }
+  if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
+  const ls = run(["ls-files", "-z", "--", ...PORTABLE_AGENT_PATHS, HANDOFF_DOCS_DIR, ...HANDOFF_ROOT_FILES]);
+  if (ls.failed) return { files: [], unknown: ls.failed };
+  const files = [];
+  for (const rel of ls.stdout.split("\0").filter(Boolean)) {
+    if (!HANDOFF_ROOT_FILES.includes(rel)) {
+      files.push(rel);
+      continue;
+    }
+    try {
+      if (existsContained(root, rel, "file") && readContained(root, rel).startsWith(HANDOFF_MARKER)) files.push(rel);
+    } catch (err) {
+      return { files: [], unknown: `${rel} is tracked but could not be read (${err.message})` };
+    }
+  }
+  return { files, unknown: null };
+}
+function handoffSettingOf(parsed, root, where = CONFIG_REL) {
+  const block = parsed?.handoff;
+  if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
+    throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
+  }
+  const value = block?.enabled;
+  if (value === void 0) {
+    const tracked = trackedHandoffFiles(root);
+    if (tracked.unknown !== null) {
+      throw new HandoffGitError(`config.handoff.enabled is not set in ${where} and git could not say whether handoff files are committed (${tracked.unknown}) \u2014 the setting is not guessed; repair the repository, or set config.handoff.enabled to true or false (TUI System tab)`, tracked.unknown);
+    }
+    return tracked.files.length ? { enabled: true, source: "tracked" } : { enabled: false, source: "default" };
+  }
+  if (typeof value !== "boolean") {
+    throw new HandoffSettingError(`config.handoff.enabled is ${JSON.stringify(value)} in ${where} \u2014 it must be true or false; switch it in the TUI System tab or fix the file`);
+  }
+  return { enabled: value, source: "config" };
+}
+var HANDOFF_DOCS_DIR = "docs/sterling";
+var HANDOFF_ROOT_FILES = ["architecture.md", "rulings.md"];
+var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
+var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
+     Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
+     your commit message rather than editing it. -->`;
+var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
+var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
+
+// scripts/lib/opencode-install.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync3, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname3, isAbsolute, join as join9, resolve as resolve5 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync4, readFileSync as readFileSync4, readdirSync as readdirSync2, realpathSync as realpathSync2 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync5, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { join as join5, resolve, sep } from "node:path";
+import { join as join8, resolve as resolve4, sep as sep2 } from "node:path";
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -48933,7 +49233,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync4, readFileSync4, readdirSync2, join5, homedir3);
+)(existsSync5, readFileSync5, readdirSync3, join8, homedir3);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -48942,10 +49242,6 @@ var scanInstalledSterling = api.scanInstalledSterling;
 var newestInstalledSterling = api.newestInstalledSterling;
 var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
-
-// scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync2, readFileSync as readFileSync5, readdirSync as readdirSync3, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
-var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/opencode-agents.mjs
 var OPENCODE_RENDERER = "opencode/1";
@@ -48991,15 +49287,6 @@ function parseOpenCodeHeader(content) {
   return { headerLine, renderer, template, templateHash, contentHash };
 }
 
-// scripts/lib/handoff-projection.mjs
-var HANDOFF_DOCS_DIR = "docs/sterling";
-var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
-var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
-     Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
-     your commit message rather than editing it. -->`;
-var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
-var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
-
 // scripts/lib/opencode-install.mjs
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
 var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "librarian"];
@@ -49023,7 +49310,7 @@ function refusal(item, what, remedy) {
   return { item, status: "refused", refused: true, detail: what, instruction: `REFUSED: ${what}. Sterling will not overwrite it. Remedy: ${remedy}.` };
 }
 function git(projectDir, args2) {
-  const r = spawnSync("git", args2, { cwd: projectDir, encoding: "utf8" });
+  const r = spawnSync2("git", args2, { cwd: projectDir, encoding: "utf8" });
   if (r.error) throw new Error(`git ${args2.join(" ")} could not run in ${fwd(projectDir)}: ${r.error.message}`);
   return r;
 }
@@ -49036,10 +49323,10 @@ var FULL_PERMISSIONS = {
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
 function storeWriteTools(pluginRoot = sterlingRootFrom()) {
-  const fm = normalize3(readFileSync6(join6(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+  const fm = normalize3(readFileSync6(join9(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
   const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
   const tools = [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
-  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd(join6(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
+  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd(join9(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
   return tools;
 }
 function opencodeModelRef(model) {
@@ -49049,7 +49336,7 @@ function opencodeModelRef(model) {
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname3(fileURLToPath(moduleUrl));
   for (let dir = start; ; dir = dirname3(dir)) {
-    if (existsSync5(join6(dir, "agent-templates", "registry.json"))) return dir;
+    if (existsSync6(join9(dir, "agent-templates", "registry.json"))) return dir;
     if (dirname3(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
@@ -49080,19 +49367,19 @@ function frontmatterModel(content) {
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
 function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
-  const registry = loadRegistry(join6(pluginRoot, "agent-templates", "registry.json"));
+  const registry = loadRegistry(join9(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const rows = [];
   for (const name of ROSTER) {
     const entry = registry.agents.find((a) => a.name === name);
     if (!entry) throw new Error(`opencode roster: '${name}' is not in agent-templates/registry.json (P5)`);
     const rel = `${STERLING_AGENTS_SUBDIR}/${name}.md`;
-    const path = join6(projectDir, rel);
+    const path = join9(projectDir, rel);
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const disk = existsSync5(path) ? normalize3(readFileSync6(path, "utf8")) : null;
+    const disk = existsSync6(path) ? normalize3(readFileSync6(path, "utf8")) : null;
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
       if (!m || m[1] !== name) {
@@ -49106,7 +49393,7 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       }
     }
     const model = models[name] ?? (disk === null ? void 0 : frontmatterModel(disk));
-    const agent = renderFullOpenCodeAgent(readFileSync6(join6(pluginRoot, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name === "conductor", model, writeTools });
+    const agent = renderFullOpenCodeAgent(readFileSync6(join9(pluginRoot, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name === "conductor", model, writeTools });
     if (agent.name !== name) throw new Error(`opencode roster: '${entry.file}' renders as '${agent.name}', not '${name}' (P5)`);
     if (disk === agent.content) {
       rows.push({ item: rel, status: "matches" });
@@ -49119,7 +49406,7 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   return rows;
 }
 function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
-  if (!existsSync5(join6(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync6(join9(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelRef(model);
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
@@ -49130,9 +49417,9 @@ function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
 // packages/tui/dist/controller.js
 function openDashboard(storePath2, options = {}) {
   const disabled = options.disabledEffects ?? {};
-  const configPath2 = join7(dirname4(storePath2), "config.json");
+  const configPath2 = join10(dirname4(storePath2), "config.json");
   const projectRoot = dirname4(dirname4(storePath2));
-  const agentsDir = join7(projectRoot, ".claude", "agents");
+  const agentsDir = join10(projectRoot, ".claude", "agents");
   function resolveProjectHeadSha() {
     try {
       const sha = execFileSync2("git", ["rev-parse", "HEAD"], {
@@ -49161,7 +49448,7 @@ function openDashboard(storePath2, options = {}) {
   let roster;
   function readInstalledModelEffort(name) {
     try {
-      const content = readFileSync7(join7(agentsDir, `${name}.md`), "utf8");
+      const content = readFileSync7(join10(agentsDir, `${name}.md`), "utf8");
       const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
       const block = fm ? fm[1] : "";
       return {
@@ -49184,6 +49471,27 @@ function openDashboard(storePath2, options = {}) {
       return null;
     }
   }
+  function readHandoff() {
+    let raw;
+    try {
+      raw = JSON.parse(readFileSync7(configPath2, "utf8"));
+    } catch {
+      return { handoff: null };
+    }
+    try {
+      const setting = handoffSettingOf(raw, projectRoot);
+      if (setting.source === "config")
+        return { handoff: setting.enabled };
+      return { handoff: setting.enabled, handoffDetail: setting.source === "tracked" ? "not set; handoff files are tracked in git" : "not set" };
+    } catch (err) {
+      if (err instanceof HandoffGitError)
+        return { handoff: null, handoffDetail: err.reason };
+      if (!(err instanceof HandoffSettingError))
+        throw err;
+      const block = raw?.handoff;
+      return { handoff: JSON.stringify(block !== null && typeof block === "object" && !Array.isArray(block) ? block.enabled : block) };
+    }
+  }
   function loadRoster() {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     let config;
@@ -49197,8 +49505,9 @@ function openDashboard(storePath2, options = {}) {
     const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.model };
     const tdd = { enabled: cfg.tdd?.enabled ?? true };
     const mode = readRawMode();
+    const handoff = readHandoff();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync6(join7(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync7(join10(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
@@ -49219,7 +49528,7 @@ function openDashboard(storePath2, options = {}) {
     } catch (err) {
       ui = { ...ui, notice: `catalog unavailable \u2014 ${err.message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, ...handoff };
   }
   function applySparringModel(e) {
     try {
@@ -49243,8 +49552,8 @@ function openDashboard(storePath2, options = {}) {
       raw.models[e.key] = { model: e.to.model, effort: e.to.effort };
       writeFileSync4(configPath2, JSON.stringify(raw, null, 2) + "\n");
       for (const name of e.agents) {
-        const p = join7(agentsDir, `${name}.md`);
-        if (!existsSync6(p))
+        const p = join10(agentsDir, `${name}.md`);
+        if (!existsSync7(p))
           continue;
         const content = readFileSync7(p, "utf8");
         const hdr = parseInstalledHeader(content);
@@ -49306,6 +49615,7 @@ function openDashboard(storePath2, options = {}) {
     const sparringToggles = effects.filter((e) => e.type === "sparring_toggle");
     const tddToggles = effects.filter((e) => e.type === "tdd_toggle");
     const modeToggles = effects.filter((e) => e.type === "mode_toggle");
+    const handoffToggles = effects.filter((e) => e.type === "handoff_toggle");
     let toggleWrote = false;
     let toggleFailure;
     const collectFailure = (msg) => {
@@ -49326,14 +49636,23 @@ function openDashboard(storePath2, options = {}) {
         modeWritten = e.mode;
       }
     }
+    let handoffWritten;
+    for (const e of handoffToggles) {
+      if (applyHandoffToggle(e, collectFailure, configPath2)) {
+        toggleWrote = true;
+        handoffWritten = e.enabled;
+      }
+    }
     if (toggleFailure !== void 0) {
       notice(toggleFailure);
     } else if (modeWritten !== void 0) {
-      notice(modeWritten === "work" ? "project mode set to work \u2014 run /sterling:update (or init) to write the OpenCode agents and handoff files; sync-agents refreshes only the OpenCode agents." : "project mode set to hobby \u2014 OpenCode agents and handoff files are no longer maintained; existing files were NOT deleted.");
+      notice(modeWritten === "work" ? "project mode set to work \u2014 /sterling:merge now opens a pull request and the review loop follows; nothing is merged directly." : "project mode set to hobby \u2014 /sterling:merge now merges directly into the base branch.");
+    } else if (handoffWritten !== void 0) {
+      notice(handoffWritten ? "handoff files turned on \u2014 run /sterling:update (or init) to write the portable OpenCode agents and the handoff projection; sync-agents refreshes only the portable agents." : "handoff files turned off \u2014 the portable OpenCode agents and the handoff projection are no longer maintained; existing files were NOT deleted.");
     } else if (toggleWrote) {
       notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session to reload the MCP server.");
     }
-    if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length)
+    if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
       roster = loadRoster();
     return runEffects(store, effects);
   }
@@ -49533,17 +49852,17 @@ function mouseToEvent(name, data) {
 }
 
 // packages/tui/dist/subagents.js
-import { existsSync as existsSync9, readFileSync as readFileSync9, readdirSync as readdirSync7, statSync as statSync5 } from "node:fs";
+import { existsSync as existsSync10, readFileSync as readFileSync9, readdirSync as readdirSync7, statSync as statSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join9 } from "node:path";
+import { join as join12 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync5, rmSync as rmSync3, rmdirSync, renameSync as renameSync2, existsSync as existsSync7, lstatSync as lstatSync3, readdirSync as readdirSync5, realpathSync as realpathSync4, chmodSync } from "node:fs";
-import { join as join8, resolve as resolve3, dirname as dirname5, isAbsolute as isAbsolute2 } from "node:path";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync5, rmSync as rmSync3, rmdirSync, renameSync as renameSync2, existsSync as existsSync8, lstatSync as lstatSync4, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
+import { join as join11, resolve as resolve6, dirname as dirname5, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash as createHash2 } from "node:crypto";
 function registerPath(root) {
-  return join8(root, ".sterling", "transient", "dispatch-register.json");
+  return join11(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -49565,7 +49884,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync7(p)) return { availability: "absent", arr: [] };
+  if (!existsSync8(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync8(p, "utf8");
@@ -49597,7 +49916,7 @@ var MAX_PROMPT_BYTES = 512 * 1024;
 var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 function dispatchStateDir(root) {
-  return join8(root, ".sterling", "transient", "dispatch-state");
+  return join11(root, ".sterling", "transient", "dispatch-state");
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
@@ -49605,24 +49924,24 @@ function dispatchStateKey(toolUseId) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync8, statSync as statSync4, readdirSync as readdirSync6 } from "node:fs";
+import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync9, statSync as statSync4, readdirSync as readdirSync6 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
   const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
-  if (existsSync8(flat)) return flat;
+  if (existsSync9(flat)) return flat;
   const wfRoot = `${sessionDir}/subagents/workflows`;
   try {
     for (const d of readdirSync6(wfRoot)) {
       const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
-      if (existsSync8(candidate)) return candidate;
+      if (existsSync9(candidate)) return candidate;
     }
   } catch {
   }
   return flat;
 }
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync8(path)) return null;
+  if (!existsSync9(path)) return null;
   const fd = openSync3(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -52036,13 +52355,13 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
 function readDispatchDescription(projectRoot, toolUseId) {
   const dir = dispatchStateDir(projectRoot);
   const key = dispatchStateKey(toolUseId);
-  let file = join9(dir, `live-${key}.json`);
+  let file = join12(dir, `live-${key}.json`);
   try {
-    if (!existsSync9(file)) {
+    if (!existsSync10(file)) {
       const done = readdirSync7(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
       if (!done)
         return null;
-      file = join9(dir, done);
+      file = join12(dir, done);
     }
     const rec = JSON.parse(readFileSync9(file, "utf8"));
     return rec.tool_use_id === toolUseId && typeof rec.description === "string" && rec.description ? rec.description : null;
@@ -52052,7 +52371,7 @@ function readDispatchDescription(projectRoot, toolUseId) {
 }
 function readAgentModel(projectRoot, type) {
   try {
-    const content = readFileSync9(join9(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
+    const content = readFileSync9(join12(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
     const model = content.match(/^---\n([\s\S]*?)\n---\n/)?.[1]?.match(/^model:\s*(\S+)/m)?.[1];
     if (model)
       return model;
@@ -52062,7 +52381,7 @@ function readAgentModel(projectRoot, type) {
   if (!key)
     return null;
   try {
-    const raw = JSON.parse(readFileSync9(join9(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync9(join12(projectRoot, ".sterling", "config.json"), "utf8"));
     const model = raw.models?.[key]?.model;
     return typeof model === "string" && model ? model : null;
   } catch {
@@ -52070,9 +52389,9 @@ function readAgentModel(projectRoot, type) {
   }
 }
 function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir = defaultClaudeConfigDir()) {
-  const projects = join9(claudeConfigDir, "projects");
+  const projects = join12(claudeConfigDir, "projects");
   const slug = projectRoot.replace(/[^A-Za-z0-9]/g, "-");
-  const sessionUnder = (dir2) => existsSync9(join9(projects, dir2, sessionId));
+  const sessionUnder = (dir2) => existsSync10(join12(projects, dir2, sessionId));
   let dir = sessionUnder(slug) ? slug : void 0;
   if (!dir) {
     let all;
@@ -52083,10 +52402,10 @@ function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir
     }
     dir = all.find((d) => d !== slug && sessionUnder(d));
   }
-  return dir ? deriveAgentTranscript(join9(projects, dir, `${sessionId}.jsonl`), agentId) : null;
+  return dir ? deriveAgentTranscript(join12(projects, dir, `${sessionId}.jsonl`), agentId) : null;
 }
 function defaultClaudeConfigDir() {
-  return process.env.CLAUDE_CONFIG_DIR || join9(homedir4(), ".claude");
+  return process.env.CLAUDE_CONFIG_DIR || join12(homedir4(), ".claude");
 }
 function readContextUsage(path) {
   try {
@@ -52108,7 +52427,7 @@ function contextPercent(tokens, window2) {
 }
 function readSharedWindows() {
   try {
-    const raw = JSON.parse(readFileSync9(join9(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
+    const raw = JSON.parse(readFileSync9(join12(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
     return parseConfig({ context_watch: { windows: raw.windows } }).context_watch.windows;
   } catch {
     return null;
@@ -52116,7 +52435,7 @@ function readSharedWindows() {
 }
 function readProjectWindows(projectRoot) {
   try {
-    const raw = JSON.parse(readFileSync9(join9(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync9(join12(projectRoot, ".sterling", "config.json"), "utf8"));
     return parseConfig(raw).context_watch.windows;
   } catch {
     return {};
@@ -52385,7 +52704,7 @@ if (smoke) {
   console.error(`sterling-tui smoke: terminal stack loaded (${term.width}x${term.height})`);
   process.exit(0);
 }
-var lockPath = join10(dirname7(storePath), "transient", "tui.lock");
+var lockPath = join13(dirname7(storePath), "transient", "tui.lock");
 var owner = acquireTuiLock(lockPath, process.pid);
 if (owner !== null) {
   console.error(`sterling-tui: already running (pid ${owner}) for this store \u2014 exiting politely (\xA711)`);

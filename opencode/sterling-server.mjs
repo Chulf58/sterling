@@ -5385,22 +5385,40 @@ var init_config = __esm({
       tdd: external_exports.object({
         enabled: external_exports.boolean().default(true)
       }).default({}),
-      // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-      // per-project switch that decides the flow. 'hobby' (the default, today's
-      // behaviour) skips the OpenCode agents and the handoff projection; 'work'
-      // writes and maintains them. Toggled in the TUI System tab. A missing key
-      // means hobby.
+      // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed
+      // by project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+      // the per-project switch that decides how work ships. 'hobby' (the default)
+      // merges directly through /sterling:merge; 'work' opens a pull request and
+      // runs the review loop. It decides nothing else: whether the handoff files
+      // are written is `handoff` below. Toggled in the TUI System tab. A missing
+      // key means hobby.
       // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
       // S1): any other value is PRESERVED raw, never coerced to hobby and never
       // thrown on — a typo here must not turn every parseConfig reader (the MCP
       // server's boot included) into a startup failure. The strict judge is
       // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
-      // surface that ACTS on the mode (init, sync-agents, /sterling:update, the
-      // handoff-projection CLI) uses, and which refuses an invalid value loudly.
+      // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
+      // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
       // Consumers of the PARSED config must narrow this field themselves.
       // The default lives twice (anti_pattern 85d15143): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       mode: external_exports.unknown().default("hobby"),
+      // Handoff files (decision
+      // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+      // `enabled` says whether Sterling writes the files for colleagues who do not
+      // have Sterling, the portable OpenCode agents (.opencode/agents/) and the
+      // handoff projection (architecture.md, rulings.md, docs/sterling/). Off by
+      // default, independent of `mode`. Toggled in the TUI System tab.
+      // PERMISSIVE for the same reason as `mode`: the value is preserved raw. The
+      // strict judge is readHandoffEnabled() in scripts/lib/handoff-projection.mjs,
+      // which init, sync-agents, /sterling:update, the handoff-projection CLI and
+      // the git exclude block use. It refuses a value that is not a boolean, and it
+      // reads a config with NO key as on when portable agents are already tracked
+      // in git, which this default cannot express: read the setting through it,
+      // never from the parsed config.
+      // The default lives twice (anti_pattern 85d15143): here and in
+      // templates/default-config.json; config.test.ts pins that they agree.
+      handoff: external_exports.unknown().default({ enabled: false }),
       // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
       // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
       // first use; empty means unpinned (any Bot login matching /copilot/i, with
@@ -12127,16 +12145,16 @@ function createCompactionHandler({ rootOf, fenced }) {
 
 // packages/opencode-plugin/src/config.mjs
 init_agent_fences();
-import { existsSync as existsSync12, readdirSync as readdirSync5, readFileSync as readFileSync10 } from "node:fs";
+import { existsSync as existsSync13, readdirSync as readdirSync5, readFileSync as readFileSync10 } from "node:fs";
 import { join as join18 } from "node:path";
 
 // packages/opencode-plugin/src/layer.mjs
-import { existsSync as existsSync10, readFileSync as readFileSync8 } from "node:fs";
+import { existsSync as existsSync11, readFileSync as readFileSync8 } from "node:fs";
 import { basename as basename2, join as join15 } from "node:path";
 
 // scripts/lib/opencode-install.mjs
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync9, mkdirSync as mkdirSync6, readFileSync as readFileSync7, readdirSync as readdirSync4, realpathSync as realpathSync5, rmSync as rmSync3, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync10, mkdirSync as mkdirSync6, readFileSync as readFileSync7, readdirSync as readdirSync4, realpathSync as realpathSync5, rmSync as rmSync3, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { dirname as dirname6, isAbsolute as isAbsolute4, join as join14, resolve as resolve9 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12598,31 +12616,100 @@ init_agent_distribution();
 init_agent_fences();
 
 // scripts/lib/handoff-projection.mjs
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { existsSync as existsSync9 } from "node:fs";
 import { join as join13, resolve as resolve8 } from "node:path";
 var fwd = (p) => p.replace(/\\/g, "/");
 var PROJECT_MODES = ["hobby", "work"];
 var ProjectModeError = class extends Error {
 };
-function readProjectMode(root) {
-  const rel = ".sterling/config.json";
-  const where = `${fwd(resolve8(root))}/${rel}`;
-  if (!existsContained(root, rel, "file")) return "hobby";
+var CONFIG_REL = ".sterling/config.json";
+function readRawConfig(root, ErrorClass, subject) {
+  const where = `${fwd(resolve8(root))}/${CONFIG_REL}`;
+  if (!existsContained(root, CONFIG_REL, "file")) return { where, parsed: void 0 };
   let parsed;
   try {
-    parsed = JSON.parse(readContained(root, rel));
+    parsed = JSON.parse(readContained(root, CONFIG_REL));
   } catch (err) {
-    throw new ProjectModeError(`${where} is not valid JSON (${err.message}) \u2014 the project mode cannot be read`);
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ProjectModeError(`${where} is not a JSON object \u2014 the project mode cannot be read`);
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
   }
-  if (parsed.mode === void 0) return "hobby";
+  return { where, parsed };
+}
+function readProjectMode(root) {
+  const { where, parsed } = readRawConfig(root, ProjectModeError, "the project mode");
+  if (parsed === void 0 || parsed.mode === void 0) return "hobby";
   if (!PROJECT_MODES.includes(parsed.mode)) {
     throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
   }
   return parsed.mode;
 }
+var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
+var HandoffSettingError = class extends Error {
+};
+var HandoffGitError = class extends HandoffSettingError {
+  constructor(message, reason) {
+    super(message);
+    this.reason = reason;
+  }
+};
+var GIT_TIMEOUT_MS = 3e4;
+function trackedHandoffFiles(root, { spawn: spawn3 = spawnSync2 } = {}) {
+  const run = (args) => {
+    const r = spawn3("git", args, { cwd: root, encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
+    const name = `git ${args[0]}`;
+    if (r.error) return { failed: r.error.code === "ETIMEDOUT" ? `${name} timed out after ${GIT_TIMEOUT_MS / 1e3}s` : `${name} did not run (${r.error.message})` };
+    if (r.status !== 0) {
+      const stderr = (r.stderr || "").trim().split("\n")[0];
+      return { failed: `${name} exited ${r.status ?? `on signal ${r.signal}`}: ${stderr || "no error output"}`, notARepo: r.status === 128 && /not a git repository/i.test(stderr) };
+    }
+    return { stdout: r.stdout || "" };
+  };
+  if (!existsSync9(root)) return { files: [], unknown: null };
+  const inside = run(["rev-parse", "--is-inside-work-tree"]);
+  if (inside.failed) {
+    if (inside.notARepo && !existsSync9(join13(root, ".git"))) return { files: [], unknown: null };
+    return { files: [], unknown: inside.failed };
+  }
+  if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
+  const ls = run(["ls-files", "-z", "--", ...PORTABLE_AGENT_PATHS, HANDOFF_DOCS_DIR, ...HANDOFF_ROOT_FILES]);
+  if (ls.failed) return { files: [], unknown: ls.failed };
+  const files = [];
+  for (const rel of ls.stdout.split("\0").filter(Boolean)) {
+    if (!HANDOFF_ROOT_FILES.includes(rel)) {
+      files.push(rel);
+      continue;
+    }
+    try {
+      if (existsContained(root, rel, "file") && readContained(root, rel).startsWith(HANDOFF_MARKER)) files.push(rel);
+    } catch (err) {
+      return { files: [], unknown: `${rel} is tracked but could not be read (${err.message})` };
+    }
+  }
+  return { files, unknown: null };
+}
+function handoffSettingOf(parsed, root, where = CONFIG_REL) {
+  const block = parsed?.handoff;
+  if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
+    throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
+  }
+  const value = block?.enabled;
+  if (value === void 0) {
+    const tracked = trackedHandoffFiles(root);
+    if (tracked.unknown !== null) {
+      throw new HandoffGitError(`config.handoff.enabled is not set in ${where} and git could not say whether handoff files are committed (${tracked.unknown}) \u2014 the setting is not guessed; repair the repository, or set config.handoff.enabled to true or false (TUI System tab)`, tracked.unknown);
+    }
+    return tracked.files.length ? { enabled: true, source: "tracked" } : { enabled: false, source: "default" };
+  }
+  if (typeof value !== "boolean") {
+    throw new HandoffSettingError(`config.handoff.enabled is ${JSON.stringify(value)} in ${where} \u2014 it must be true or false; switch it in the TUI System tab or fix the file`);
+  }
+  return { enabled: value, source: "config" };
+}
 var HANDOFF_DOCS_DIR = "docs/sterling";
+var HANDOFF_ROOT_FILES = ["architecture.md", "rulings.md"];
 var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
 var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
      Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
@@ -12669,7 +12756,7 @@ function materializedState(dir) {
   const extra = readdirSync4(dir).filter((n) => n !== MATERIALIZED_MARKER && !(n in files));
   if (extra.length) return "edited";
   for (const [name, hash] of Object.entries(files)) {
-    if (!existsSync9(join14(dir, name)) || bytesHash(readFileSync7(join14(dir, name))) !== hash) return "edited";
+    if (!existsSync10(join14(dir, name)) || bytesHash(readFileSync7(join14(dir, name))) !== hash) return "edited";
   }
   return "ours";
 }
@@ -12679,7 +12766,7 @@ function materializeTui({ pluginRoot, env = process.env, home = homedir4() }) {
   const src = join14(pluginRoot, "opencode", "sterling-tui");
   const v = readCopyVersion(pluginRoot, "opencode");
   if (!v.version) return [refusal2(`${fwd2(base2)}/`, `the version of ${fwd2(pluginRoot)} cannot be read: ${v.reason}`, `reinstall Sterling (${sterlingInstallRemedy("opencode")}), then rerun /sterling:update`)];
-  const missing = TUI_MATERIALIZED_FILES.filter((f) => !existsSync9(join14(src, f)));
+  const missing = TUI_MATERIALIZED_FILES.filter((f) => !existsSync10(join14(src, f)));
   if (missing.length) return [refusal2(`${fwd2(base2)}/`, `${fwd2(src)} lacks ${missing.join(", ")}, so there is no dashboard to copy`, "update Sterling, then rerun /sterling:update")];
   const rows = [];
   const dest = join14(base2, v.version);
@@ -12692,7 +12779,7 @@ function materializeTui({ pluginRoot, env = process.env, home = homedir4() }) {
     writeFileSync3(join14(dest, MATERIALIZED_MARKER), `${JSON.stringify({ version: v.version, files: hashes }, null, 2)}
 `);
   };
-  if (!existsSync9(dest)) {
+  if (!existsSync10(dest)) {
     write();
     rows.push({ item, status: "created", detail: `the dashboard copied out of the npm cache (OpenCode gives its own solid-js only outside node_modules)` });
   } else {
@@ -12726,7 +12813,7 @@ var GUARDED_KEYS = /* @__PURE__ */ new Set(["*", ...EDIT_FAMILY]);
 function sterlingRootFrom(moduleUrl = import.meta.url) {
   const start = dirname6(fileURLToPath(moduleUrl));
   for (let dir = start; ; dir = dirname6(dir)) {
-    if (existsSync9(join14(dir, "agent-templates", "registry.json"))) return dir;
+    if (existsSync10(join14(dir, "agent-templates", "registry.json"))) return dir;
     if (dirname6(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
@@ -12828,14 +12915,14 @@ function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), templatePa
   const templateText = readFileSync8(templatePath, "utf8");
   const pairs = hostBlockPairs(templateText).map((p) => ({ claude: p.claude.map(named), opencode: p.opencode.map(named) }));
   const claudeMdPath = join15(projectDir, "CLAUDE.md");
-  const source = existsSync10(claudeMdPath) ? readFileSync8(claudeMdPath, "utf8") : named(renderClaudeText(templateText, templatePath));
+  const source = existsSync11(claudeMdPath) ? readFileSync8(claudeMdPath, "utf8") : named(renderClaudeText(templateText, templatePath));
   const lines = renderOpenCodeFullText(source, "CLAUDE.md").split("\n");
   const plain = unfencedText(source);
   const unmatched = swapBlocks(lines, pairs).filter((first) => plain.includes(leadOf(first)));
   const missingCommands = [];
   const text = lines.join("\n").replaceAll(ROOT_TOKEN, () => pluginRoot).replaceAll("${CLAUDE_PLUGIN_ROOT}", () => pluginRoot).replace(/`?\/sterling:([a-z][a-z-]*)`?/g, (whole, name) => {
     const file = join15(pluginRoot, "commands", `${name}.md`);
-    if (existsSync10(file)) return `${whole} (on OpenCode: follow \`${file}\`)`;
+    if (existsSync11(file)) return `${whole} (on OpenCode: follow \`${file}\`)`;
     missingCommands.push(`\`/sterling:${name}\` names a command with no file at ${file}.`);
     return whole;
   });
@@ -12870,7 +12957,7 @@ function logLine(root, line) {
 
 // packages/opencode-plugin/src/notices.mjs
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { existsSync as existsSync11, mkdirSync as mkdirSync8, readFileSync as readFileSync9, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync9, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname8, join as join17 } from "node:path";
 var NOTICES_REL = ".sterling/transient/opencode-notices.json";
 function writeJsonAtomic(path, value) {
@@ -12886,7 +12973,7 @@ function writeJsonAtomic(path, value) {
 }
 function readNotices(root) {
   const p = join17(root, NOTICES_REL);
-  if (!existsSync11(p)) return [];
+  if (!existsSync12(p)) return [];
   const parsed = JSON.parse(readFileSync9(p, "utf8"));
   if (!Array.isArray(parsed)) throw new Error(`${NOTICES_REL} is not a JSON array`);
   return parsed;
@@ -12966,8 +13053,8 @@ function renderRegistrations(root) {
   const failures = [];
   const commandsDir = join18(root, "commands");
   const skillsDir = join18(root, "skills");
-  if (!existsSync12(commandsDir)) throw new Error(`no commands directory at ${commandsDir}`);
-  if (!existsSync12(skillsDir)) throw new Error(`no skills directory at ${skillsDir}`);
+  if (!existsSync13(commandsDir)) throw new Error(`no commands directory at ${commandsDir}`);
+  if (!existsSync13(skillsDir)) throw new Error(`no skills directory at ${skillsDir}`);
   for (const file of readdirSync5(commandsDir).filter((f) => f.endsWith(".md")).sort()) {
     const name = `${COMMAND_PREFIX}${file.slice(0, -3)}`;
     try {
@@ -12979,7 +13066,7 @@ function renderRegistrations(root) {
   }
   for (const dir of readdirSync5(skillsDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort()) {
     const path = join18(skillsDir, dir, "SKILL.md");
-    if (!existsSync12(path)) continue;
+    if (!existsSync13(path)) continue;
     const id = `${SKILL_PREFIX}${dir}`;
     try {
       const { description, body } = renderSource(path, root, `skills/${dir}/SKILL.md`);
@@ -13069,13 +13156,13 @@ init_dist2();
 import { join as join27 } from "node:path";
 
 // scripts/lib/update.mjs
-import { closeSync as closeSync3, existsSync as existsSync13, mkdirSync as mkdirSync9, openSync as openSync3, readFileSync as readFileSync11, readdirSync as readdirSync6, readSync, writeFileSync as writeFileSync5 } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync14, mkdirSync as mkdirSync9, openSync as openSync3, readFileSync as readFileSync11, readdirSync as readdirSync6, readSync, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname9, join as join19 } from "node:path";
 var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed-By-Agent", "review-ledger", "frozen-test"]);
 var UPDATE_MARKER_RELATIVE_PATH = join19(".sterling", "update-complete.json");
 function walUserVersion(dbPath) {
   const walPath = `${dbPath}-wal`;
-  if (!existsSync13(walPath)) return null;
+  if (!existsSync14(walPath)) return null;
   const wal = readFileSync11(walPath);
   if (wal.length < 32) return null;
   const magic = wal.readUInt32BE(0);
@@ -13114,7 +13201,7 @@ import { join as join21 } from "node:path";
 // scripts/hooks/lib/maintenance-worker.mjs
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync4, existsSync as existsSync14, mkdirSync as mkdirSync10, openSync as openSync4, readFileSync as readFileSync12, renameSync as renameSync4, rmSync as rmSync5, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync6, appendFileSync as appendFileSync3 } from "node:fs";
+import { closeSync as closeSync4, existsSync as existsSync15, mkdirSync as mkdirSync10, openSync as openSync4, readFileSync as readFileSync12, renameSync as renameSync4, rmSync as rmSync5, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync6, appendFileSync as appendFileSync3 } from "node:fs";
 import { dirname as dirname10, isAbsolute as isAbsolute5, join as join20, resolve as resolve10, sep as sep3 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
@@ -13166,7 +13253,7 @@ function workerPaths(root) {
 function pluginRootFrom(moduleUrl = import.meta.url) {
   let dir = dirname10(fileURLToPath2(moduleUrl));
   for (let i = 0; i < 5; i++) {
-    if (existsSync14(join20(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync15(join20(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname10(dir);
   }
   return null;
@@ -13235,15 +13322,15 @@ function openReconcileItems(store) {
   if (!total) return [];
   return store.query({ types: ["todo"], source: "system", cap: total }).filter((t) => t.system_reason === "reconcile_needed");
 }
-function gitState(root, spawnSync7 = nodeSpawnSync) {
-  const r = spawnSync7("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
+function gitState(root, spawnSync8 = nodeSpawnSync) {
+  const r = spawnSync8("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const [head, prefix = ""] = String(r.stdout ?? "").split("\n");
   return /^[0-9a-f]{40,64}$/.test(head) ? { head, prefix: prefix.trim() } : null;
 }
-function dirtyPaths(root, paths, spawnSync7 = nodeSpawnSync, prefix = "") {
+function dirtyPaths(root, paths, spawnSync8 = nodeSpawnSync, prefix = "") {
   if (!paths.length) return /* @__PURE__ */ new Set();
-  const r = spawnSync7("git", ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync8("git", ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const dirty = /* @__PURE__ */ new Set();
   const add = (p) => {
@@ -13432,7 +13519,7 @@ function launchWorker(opts) {
     resolveMcpConfig(pluginRoot, opts.root);
     readWorkerPrompt(pluginRoot);
     const runner = join20(pluginRoot, "scripts", "maintenance-worker-run.mjs");
-    if (!existsSync14(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
+    if (!existsSync15(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
     mkdirSync10(dirname10(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
@@ -13712,7 +13799,7 @@ function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP 
 
 // scripts/hooks/lib/undeclared-source-scan.mjs
 init_dist();
-import { spawnSync as spawnSync2 } from "node:child_process";
+import { spawnSync as spawnSync3 } from "node:child_process";
 
 // scripts/hooks/lib/undeclared-source.mjs
 init_dist();
@@ -13920,14 +14007,14 @@ function gitSpawnFailureReason(result, label) {
   return null;
 }
 function scanFilePaths(cwd) {
-  const gitAll = spawnSync2("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+  const gitAll = spawnSync3("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
     cwd,
     timeout: UNDECLARED_SOURCE_TIMEOUT_MS,
     maxBuffer: UNDECLARED_SOURCE_OUTPUT_CAP
   });
   let reason = gitSpawnFailureReason(gitAll, "ls-files");
   if (reason) return { ok: false, reason };
-  const gitDeleted = spawnSync2("git", ["ls-files", "-z", "-d"], {
+  const gitDeleted = spawnSync3("git", ["ls-files", "-z", "-d"], {
     cwd,
     timeout: UNDECLARED_SOURCE_TIMEOUT_MS,
     maxBuffer: UNDECLARED_SOURCE_OUTPUT_CAP
@@ -13960,7 +14047,7 @@ function computeUndeclaredSourceDisclosure({ cwd, config }) {
 
 // scripts/hooks/lib/operating-state.mjs
 init_dist2();
-import { existsSync as existsSync15, readFileSync as readFileSync14 } from "node:fs";
+import { existsSync as existsSync16, readFileSync as readFileSync14 } from "node:fs";
 import { join as join22 } from "node:path";
 function readProjectConfig2(cwd) {
   let config = null;
@@ -14006,14 +14093,38 @@ function projectModeLine({ config, configUnreadable }) {
   }
   const mode = config?.mode;
   if (mode === void 0 || mode === "hobby" || mode === "work") {
-    return `Project mode: ${mode === "work" ? "WORK" : "HOBBY"} (config.mode \u2014 TUI System tab) \u2014 ` + (mode === "work" ? "the OpenCode agents and handoff files are written and maintained." : "the OpenCode agents and handoff files are not written or maintained in hobby mode; existing ones may remain from an earlier work period.");
+    return `Project mode: ${mode === "work" ? "WORK" : "HOBBY"} (config.mode \u2014 TUI System tab) \u2014 ` + (mode === "work" ? "work ships as a pull request through /sterling:merge, followed by the review loop; nothing is merged directly." : "work ships by direct merge through /sterling:merge.");
   }
-  return `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) \u2014 config.mode must be 'hobby' or 'work'; init, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).`;
+  return `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) \u2014 config.mode must be 'hobby' or 'work'; /sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).`;
+}
+var HANDOFF_SET = "the portable OpenCode agents and the handoff projection for colleagues without Sterling";
+function handoffFilesLine({ config, configUnreadable, root }) {
+  if (configUnreadable) {
+    return "Handoff files: UNKNOWN \u2014 the project config could not be read, so config.handoff.enabled could not be determined. This is NOT the off default: repair the config.";
+  }
+  let setting;
+  try {
+    setting = handoffSettingOf(config, root);
+  } catch (err) {
+    if (err instanceof HandoffGitError) {
+      return `Handoff files: UNKNOWN \u2014 config.handoff.enabled is not set and git could not say whether handoff files are committed (${err.reason}). This is NOT the off default: init, sync-agents, /sterling:update and the handoff projection refuse to act until git answers or the setting is set (TUI System tab).`;
+    }
+    if (!(err instanceof HandoffSettingError)) throw err;
+    const block = config.handoff;
+    const raw = block !== null && typeof block === "object" && !Array.isArray(block) ? block.enabled : block;
+    return `Handoff files: INVALID (${JSON.stringify(raw).replace(/^"|"$/g, "'")}) \u2014 config.handoff.enabled must be true or false; init, sync-agents, /sterling:update and the handoff projection refuse to act on it until it is fixed (TUI System tab).`;
+  }
+  const where = {
+    config: "config.handoff.enabled",
+    tracked: "config.handoff.enabled is not set; handoff files are tracked in git",
+    default: "not set: config.handoff.enabled is absent and no handoff files are tracked in git"
+  }[setting.source];
+  return `Handoff files: ${setting.enabled ? "ON" : "OFF"} (${where} \u2014 TUI System tab) \u2014 ` + (setting.enabled ? `${HANDOFF_SET} are written and maintained.` : `${HANDOFF_SET} are not written; existing ones are left in place.`);
 }
 var PENDING_ISSUE_REPORTS = "pending-issue-reports.jsonl";
 function pendingIssueReportsLine({ cwd, pluginRoot }) {
   const path = join22(cwd, ".sterling", PENDING_ISSUE_REPORTS);
-  if (!existsSync15(path)) return "";
+  if (!existsSync16(path)) return "";
   let count;
   try {
     count = readFileSync14(path, "utf8").split("\n").filter((l) => l.trim()).length;
@@ -14045,8 +14156,8 @@ function mountedDomainLines({ config, configUnreadable, opener }) {
 }
 
 // scripts/lib/post-update-sync.mjs
-import { spawn, spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync16, readFileSync as readFileSync15, writeFileSync as writeFileSync7 } from "node:fs";
+import { spawn, spawnSync as spawnSync4 } from "node:child_process";
+import { existsSync as existsSync17, readFileSync as readFileSync15, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { join as join23 } from "node:path";
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
@@ -14083,7 +14194,7 @@ function samePath2(a, b) {
 }
 function pluginScript(root, name) {
   const bundled = join23(root, "bin", name);
-  return existsSync16(bundled) ? bundled : join23(root, "scripts", name);
+  return existsSync17(bundled) ? bundled : join23(root, "scripts", name);
 }
 function readPluginVersion(root) {
   try {
@@ -14103,7 +14214,7 @@ function stepResult({ error, status, stdout, stderr }) {
   return { status: error ? null : status, error, out, tail: out.split("\n").slice(-8).join(" | ") };
 }
 function runStepSync(root, name, args, { nodeBin = process.execPath } = {}) {
-  const r = spawnSync3(nodeBin, [pluginScript(root, name), ...args], { cwd: root, encoding: "utf8", timeout: POST_UPDATE_STEP_TIMEOUT_MS });
+  const r = spawnSync4(nodeBin, [pluginScript(root, name), ...args], { cwd: root, encoding: "utf8", timeout: POST_UPDATE_STEP_TIMEOUT_MS });
   return stepResult({ error: r.error ? r.error.message : r.signal ? `killed by ${r.signal}` : null, status: r.status, stdout: r.stdout, stderr: r.stderr });
 }
 function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
@@ -14136,7 +14247,7 @@ function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
 async function runPostUpdateSteps(root, project, runStep) {
   const sync = await runStep(root, "sync-agents.mjs", ["--target", project]);
   if (sync.error) return { ok: false, detail: `sync-agents did not run (${sync.error})` };
-  if (sync.status === 2) return { ok: false, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, or a foreign or malformed .claude/settings.json): ${sync.tail}` };
+  if (sync.status === 2) return { ok: false, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
   if (sync.status !== 0) return { ok: false, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
   const contract = await runStep(root, "stamp-contract.mjs", ["--project", project]);
@@ -14150,7 +14261,7 @@ async function runPostUpdateSteps(root, project, runStep) {
   return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail };
 }
 function postUpdateApplies(root, project) {
-  return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync16(join23(project, ".sterling", "config.json"));
+  return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync17(join23(project, ".sterling", "config.json"));
 }
 async function postUpdateSync({ root, project, host = "claude", runStep = runStepSync, env = process.env, home = homedir5() }) {
   const t = hostText(host);
@@ -14227,7 +14338,7 @@ POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart 
 function operatingStateLines(root, pluginRoot, { opener } = {}) {
   const { config, configUnreadable } = readProjectConfig2(root);
   const atClone = Boolean(pluginRoot && samePath2(root, pluginRoot));
-  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: "opencode" }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable }), ...mountedDomainLines({ config, configUnreadable, opener }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
+  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: "opencode" }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable }), handoffFilesLine({ config, configUnreadable, root }), ...mountedDomainLines({ config, configUnreadable, opener }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
   return { lines, config };
 }
 function undeclaredSourceBlock(root, config) {
@@ -14247,7 +14358,7 @@ function maintenanceLines(state, config, root) {
 init_dist2();
 
 // scripts/hooks/lib/plan-lock.mjs
-import { closeSync as closeSync5, constants as FS, existsSync as existsSync17, fstatSync, mkdirSync as mkdirSync11, openSync as openSync5, readSync as readSync2, renameSync as renameSync5, unlinkSync as unlinkSync3, writeFileSync as writeFileSync8 } from "node:fs";
+import { closeSync as closeSync5, constants as FS, existsSync as existsSync18, fstatSync, mkdirSync as mkdirSync11, openSync as openSync5, readSync as readSync2, renameSync as renameSync5, unlinkSync as unlinkSync3, writeFileSync as writeFileSync8 } from "node:fs";
 import { join as join24 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
@@ -14713,12 +14824,12 @@ function createDispatchHandlers({ rootOf, fenced, now = () => Date.now() }) {
 
 // packages/opencode-plugin/src/worker.mjs
 import { spawn as spawn2 } from "node:child_process";
-import { existsSync as existsSync18 } from "node:fs";
+import { existsSync as existsSync19 } from "node:fs";
 import { delimiter, join as join26 } from "node:path";
 function inWorkerChild(env = process.env) {
   return env?.[WORKER_ENV_FLAG] === "1";
 }
-var onPath = (name) => (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync18(join26(d, name)));
+var onPath = (name) => (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync19(join26(d, name)));
 function claudeOnPathDefault() {
   return onPath("claude");
 }
@@ -14963,14 +15074,14 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
 import { join as join30 } from "node:path";
 
 // scripts/lib/work-pr.mjs
-import { existsSync as existsSync19, mkdirSync as mkdirSync13, readFileSync as readFileSync16, renameSync as renameSync6, writeFileSync as writeFileSync9 } from "node:fs";
+import { existsSync as existsSync20, mkdirSync as mkdirSync13, readFileSync as readFileSync16, renameSync as renameSync6, writeFileSync as writeFileSync9 } from "node:fs";
 import { delimiter as delimiter2, dirname as dirname12, join as join28 } from "node:path";
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
 var prLoopPath = (root) => join28(root, PR_LOOP_REL);
 function readPrLoop(root) {
   const file = prLoopPath(root);
-  if (!existsSync19(file)) return null;
+  if (!existsSync20(file)) return null;
   let s2;
   try {
     s2 = JSON.parse(readFileSync16(file, "utf8"));
@@ -14989,7 +15100,7 @@ function readPrLoop(root) {
 }
 
 // scripts/hooks/lib/pr-loop-duty.mjs
-import { existsSync as existsSync20 } from "node:fs";
+import { existsSync as existsSync21 } from "node:fs";
 import { join as join29 } from "node:path";
 var errMessage = (e) => String(e && e.message || e);
 function evaluatePrLoop(root) {
@@ -14997,7 +15108,7 @@ function evaluatePrLoop(root) {
   try {
     mode = readProjectMode(root);
   } catch (e) {
-    if (existsSync20(join29(root, PR_LOOP_REL))) {
+    if (existsSync21(join29(root, PR_LOOP_REL))) {
       return {
         state: null,
         degraded: `\u2022 PR review loop: the project mode is unreadable (${errMessage(e)}) \u2014 ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
@@ -15044,8 +15155,8 @@ import { statSync as statSync6 } from "node:fs";
 import { join as join32 } from "node:path";
 
 // scripts/hooks/lib/rotation-restore.mjs
-import { spawnSync as spawnSync4 } from "node:child_process";
-import { existsSync as existsSync21, readFileSync as readFileSync17, rmSync as rmSync7 } from "node:fs";
+import { spawnSync as spawnSync5 } from "node:child_process";
+import { existsSync as existsSync22, readFileSync as readFileSync17, rmSync as rmSync7 } from "node:fs";
 import { join as join31 } from "node:path";
 var NOTE_PROSE_MAX = 2e3;
 var LIVE_DISPATCH_MAX = 20;
@@ -15067,7 +15178,7 @@ function rotationNotePath(cwd) {
 }
 function readRotationNote(cwd) {
   const notePath = rotationNotePath(cwd);
-  if (!existsSync21(notePath)) return null;
+  if (!existsSync22(notePath)) return null;
   return JSON.parse(readFileSync17(notePath, "utf8"));
 }
 function consumeRotationNote(cwd) {
@@ -15079,7 +15190,7 @@ function renderRotationRestore(note, { cwd, source, host = "claude", planLock = 
   if (host !== "claude" && host !== "opencode") throw new Error(`renderRotationRestore: unknown host '${host}'`);
   const head = (() => {
     try {
-      const r = spawnSync4("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", timeout: 5e3 });
+      const r = spawnSync5("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", timeout: 5e3 });
       return r.status === 0 ? (r.stdout ?? "").trim() : null;
     } catch {
       return null;
@@ -15096,7 +15207,7 @@ function renderRotationRestore(note, { cwd, source, host = "claude", planLock = 
       commitsAheadUnverified = true;
     } else {
       try {
-        const countR = spawnSync4("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd, encoding: "utf8", timeout: 5e3 });
+        const countR = spawnSync5("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd, encoding: "utf8", timeout: 5e3 });
         const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
         if (Number.isFinite(actual)) {
           if (actual !== note.commits_ahead) {
@@ -15273,7 +15384,7 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { existsSync as existsSync22, mkdirSync as mkdirSync14, readFileSync as readFileSync18, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync23, mkdirSync as mkdirSync14, readFileSync as readFileSync18, writeFileSync as writeFileSync10 } from "node:fs";
 import { dirname as dirname13, join as join33 } from "node:path";
 var SESSION_EVENTS_REL = join33(".sterling", "transient", "session-events.json");
 function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
@@ -15284,7 +15395,7 @@ function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOStri
 function appendSessionEvent(projectDir, event) {
   const eventsPath = join33(projectDir, SESSION_EVENTS_REL);
   mkdirSync14(dirname13(eventsPath), { recursive: true });
-  const events = existsSync22(eventsPath) ? JSON.parse(readFileSync18(eventsPath, "utf8")) : [];
+  const events = existsSync23(eventsPath) ? JSON.parse(readFileSync18(eventsPath, "utf8")) : [];
   events.push(event);
   writeFileSync10(eventsPath, JSON.stringify(events));
 }
@@ -15340,9 +15451,9 @@ TUI selection (one-shot): the user has selected ${selection.type} '${selection.r
 
 // packages/opencode-plugin/src/settle.mjs
 init_dist();
-import { spawnSync as spawnSync6 } from "node:child_process";
+import { spawnSync as spawnSync7 } from "node:child_process";
 import { randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync23, mkdirSync as mkdirSync16, readFileSync as readFileSync20, renameSync as renameSync8, rmSync as rmSync9, writeFileSync as writeFileSync12 } from "node:fs";
+import { existsSync as existsSync24, mkdirSync as mkdirSync16, readFileSync as readFileSync20, renameSync as renameSync8, rmSync as rmSync9, writeFileSync as writeFileSync12 } from "node:fs";
 import { dirname as dirname15, join as join36 } from "node:path";
 
 // scripts/hooks/lib/session-duties.mjs
@@ -15447,7 +15558,7 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 init_dist2();
 import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
 import { readFileSync as readFileSync19, writeFileSync as writeFileSync11, mkdirSync as mkdirSync15, rmSync as rmSync8, statSync as statSync7, renameSync as renameSync7 } from "node:fs";
-import { spawnSync as spawnSync5 } from "node:child_process";
+import { spawnSync as spawnSync6 } from "node:child_process";
 import { join as join35, dirname as dirname14 } from "node:path";
 function hashFile(root, rel) {
   try {
@@ -15517,7 +15628,7 @@ function mintSettlementReconcile(store, root, candidatePaths, now = (/* @__PURE_
 var GIT_SETTLED_REL = ".sterling/transient/git-settled.json";
 var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 function gitZ(root, args) {
-  const r = spawnSync5("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync6("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.error?.message || "").trim()}`);
   return r.stdout.split("\0").filter(Boolean);
 }
@@ -15541,17 +15652,17 @@ function readGitSettled(root) {
 function gitTouches(root, now) {
   let head;
   try {
-    const r = spawnSync5("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+    const r = spawnSync6("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
     if (r.status === 0) head = r.stdout.trim();
-    else if (spawnSync5("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
+    else if (spawnSync6("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
     else return { ok: false, reason: "no_git" };
     const settled = readGitSettled(root);
     let base2 = settled?.sha;
     let mergeBase = null;
     if (base2 && base2 !== EMPTY_TREE) {
-      if (spawnSync5("git", ["cat-file", "-e", `${base2}^{commit}`], { cwd: root, timeout: 3e4 }).status !== 0) base2 = null;
-      else if (spawnSync5("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0) {
-        const mb = spawnSync5("git", ["merge-base", base2, head], { cwd: root, encoding: "utf8", timeout: 3e4 });
+      if (spawnSync6("git", ["cat-file", "-e", `${base2}^{commit}`], { cwd: root, timeout: 3e4 }).status !== 0) base2 = null;
+      else if (spawnSync6("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0) {
+        const mb = spawnSync6("git", ["merge-base", base2, head], { cwd: root, encoding: "utf8", timeout: 3e4 });
         mergeBase = mb.status === 0 ? mb.stdout.trim() || null : null;
         if (!mergeBase) base2 = null;
       }
@@ -15614,14 +15725,14 @@ var WEIGHED_KINDS = /* @__PURE__ */ new Set(["concept_designed", "research_tool"
 var eventKey = (e) => `${e.kind}|${e.detail ?? ""}|${e.at ?? ""}`;
 function readDutyState(root) {
   const p = join36(root, DUTIES_REL);
-  if (!existsSync23(p)) return { owed: [], weighed: [] };
+  if (!existsSync24(p)) return { owed: [], weighed: [] };
   const parsed = JSON.parse(readFileSync20(p, "utf8"));
   if (!parsed || !Array.isArray(parsed.owed) || !Array.isArray(parsed.weighed)) throw new Error(`${DUTIES_REL} is not a {owed, weighed} object`);
   return parsed;
 }
 function readSessionEvents(root) {
   const p = join36(root, EVENTS_REL);
-  if (!existsSync23(p)) return { events: [] };
+  if (!existsSync24(p)) return { events: [] };
   try {
     const parsed = JSON.parse(readFileSync20(p, "utf8"));
     if (!Array.isArray(parsed)) return { events: [], error: "it is not a JSON array" };
@@ -15632,7 +15743,7 @@ function readSessionEvents(root) {
 }
 function newSince(root, base2, paths) {
   if (!paths.length) return [];
-  const r = spawnSync6("git", ["ls-tree", "-r", base2, "--name-only", "--", ...paths], { cwd: root, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync7("git", ["ls-tree", "-r", base2, "--name-only", "--", ...paths], { cwd: root, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) return null;
   const inBase = new Set(r.stdout.split("\n").filter(Boolean));
   return paths.filter((p) => !inBase.has(p));
@@ -15640,7 +15751,7 @@ function newSince(root, base2, paths) {
 function articleDemand(store, root, config, paths, base2, degraded) {
   const exempt = demandExemption(config, loadGeneratedProjections(root));
   const { isUnowned } = ownershipJoin(store, root);
-  let unowned = paths.filter((p) => existsSync23(join36(root, p)) && !exempt(p) && isUnowned(p));
+  let unowned = paths.filter((p) => existsSync24(join36(root, p)) && !exempt(p) && isUnowned(p));
   if (unowned.length) {
     const ignored = gitIgnored(unowned, root);
     if (ignored === null) degraded.push("git check-ignore failed, so ignored files may be named");
@@ -15700,7 +15811,7 @@ function settleDuties(store, root, git, at) {
   if (queued.length) notices.push(`Sterling settlement: duties the previous turn left unpaid are now queued as maintenance items: ${queued.join(", ")}. Pay them, or drain them with /sterling:drain.`);
   const owed = [];
   const windowStart = isValidAt(git.settled.at) ? git.settled.at : at;
-  const changed = git.candidates.filter((c) => existsSync23(join36(root, c.path)));
+  const changed = git.candidates.filter((c) => existsSync24(join36(root, c.path)));
   const generated = loadGeneratedProjections(root);
   const touched = changed.filter((c) => !IMAGE_BINARY_EXT.test(c.path) && !generated.has(c.path) && !dischargedByCutoff(c.at, cutoffs.capture));
   if (touched.length && !capturedSince(store, windowStart)) {
