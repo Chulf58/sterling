@@ -132,6 +132,69 @@ test('unit: the floor constant is 2, and one discriminating term among generic o
   assert.equal(hasDiscriminatingHit(['hook', 'test']), true);
 });
 
+// Word variants (finding h20-discriminating-term-floor-counts-word-variants-as-two-terms-october-2026):
+// 'resolved' and 'resolve' are one word, so they are one term against the floor.
+test('unit: two forms of one word count as ONE discriminating term', () => {
+  assert.equal(hasDiscriminatingHit(['path', 'resolved', 'resolve'], 2), false);
+  assert.equal(hasDiscriminatingHit(['resolve', 'RESOLVED'], 2), false, 'case-insensitive');
+  assert.equal(hasDiscriminatingHit(['latch', 'latches', 'latching'], 2), false, 'a chain of variants is still one word');
+  // The pull default of one term is unaffected by collapsing.
+  assert.equal(hasDiscriminatingHit(['resolved', 'resolve']), true);
+});
+
+test('unit: inflections that are not prefixes of each other are one word', () => {
+  assert.equal(hasDiscriminatingHit(['test', 'resolved', 'resolving'], 2), false);
+  assert.equal(hasDiscriminatingHit(['resolving', 'resolved', 'test'], 2), false, 'input order does not matter');
+  assert.equal(hasDiscriminatingHit(['resolve', 'resolved', 'resolving', 'resolves'], 2), false);
+  assert.equal(hasDiscriminatingHit(['class', 'classes', 'test'], 2), false);
+  assert.equal(hasDiscriminatingHit(['latch', 'latches', 'latching'], 2), false);
+});
+
+test('unit: words that share letters but not a stem stay two terms', () => {
+  assert.equal(hasDiscriminatingHit(['mode', 'model'], 2), true);
+  assert.equal(hasDiscriminatingHit(['model', 'mode'], 2), true);
+  assert.equal(hasDiscriminatingHit(['provenance', 'resolve'], 2), true);
+});
+
+test('unit: a bare word is never stripped, so near-spellings of different words stay two terms', () => {
+  assert.equal(hasDiscriminatingHit(['stat', 'state'], 2), true);
+  assert.equal(hasDiscriminatingHit(['state', 'stat'], 2), true);
+  assert.equal(hasDiscriminatingHit(['plan', 'plane'], 2), true);
+});
+
+test('unit: a short word and its plural or -s form are one term', () => {
+  assert.equal(hasDiscriminatingHit(['test', 'type', 'types'], 2), false);
+  assert.equal(hasDiscriminatingHit(['types', 'type', 'test'], 2), false, 'input order does not matter');
+  assert.equal(hasDiscriminatingHit(['test', 'make', 'makes'], 2), false);
+  assert.equal(hasDiscriminatingHit(['makes', 'make', 'test'], 2), false, 'input order does not matter');
+});
+
+test('unit: a lone term that merely ends like an inflection still counts as one term', () => {
+  assert.equal(hasDiscriminatingHit(['bus']), true);
+  assert.equal(hasDiscriminatingHit(['embed']), true);
+  assert.equal(hasDiscriminatingHit(['bus', 'embed'], 2), true);
+  assert.equal(hasDiscriminatingHit(['analysis']), true);
+});
+
+test('unit: two different words still count as two', () => {
+  assert.equal(hasDiscriminatingHit(['path', 'provenance', 'resolve'], 2), true);
+  assert.equal(hasDiscriminatingHit(['latch', 'emission'], 2), true);
+});
+
+test('unit: short words do not collapse into longer unrelated words', () => {
+  // 'cap' is a prefix of 'capture' but is not its stem: two words.
+  assert.equal(hasDiscriminatingHit(['cap', 'capture'], 2), true);
+  // 'hook' / 'hooks' share a stem: one word.
+  assert.equal(hasDiscriminatingHit(['hook', 'hooks'], 2), false);
+  // 'bus' / 'busy' do not share a stem: two words.
+  assert.equal(hasDiscriminatingHit(['bus', 'busy'], 2), true);
+});
+
+test('unit: a generic term plus one variant pair stays below the floor of 2', () => {
+  assert.equal(hasDiscriminatingHit(['test', 'resolved', 'resolve'], 2), false);
+  assert.equal(hasDiscriminatingHit(['test', 'resolved', 'resolve', 'provenance'], 2), true);
+});
+
 test('H20 CONTROL: a dispatch naming a specific record subject still fires', () => {
   const { dir, store, cleanup } = makeProject();
   try {
