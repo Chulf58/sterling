@@ -2,8 +2,8 @@
 // FROZEN PINS — classifyClaimPath, the ONE exported store classifier decision
 // `path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-
 // boundary` (knowledge_get 7933e3a8-2c50-40bb-a6f6-0e37c788a43b) names as the
-// shared oracle between the MCP tool write boundary and scripts/delivery-
-// oracle.mjs — "the store exports the classifier, the TOOL layer decides that
+// shared classifier between the MCP tool write boundary and a script outside
+// the store — "the store exports the classifier, the TOOL layer decides that
 // 'real_directory' refuses a write". This file pins ONLY the classifier's
 // pure behaviour, never the refusal decision (that lives in
 // directory-claims.test.ts, at the tool layer).
@@ -39,7 +39,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, symlinkSync, chmodSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 // The PUBLIC package entry point — this is the import the decision requires
-// the tool layer and the delivery oracle to BOTH use, "so the census and the
+// the tool layer and a script outside the store to BOTH use, "so the census and the
 // gate cannot disagree". Cast through `unknown` so this file compiles under
 // any TS strictness while the runtime call still hits the real (currently
 // absent) export honestly — same precedent as knowledge-extract.test.ts's
@@ -158,7 +158,7 @@ test('3: classifyClaimPath returns {kind:"unverifiable", errno} for a path behin
 // arm needs: a mutant that merges the two would still make ENOENT report
 // 'absent' correctly while this arm alone catches the merge.
 
-test('4: classifyClaimPath is the SAME function object whether imported from the public package entry ("@sterling/store") or the internal module — the tool layer and the delivery oracle cannot silently diverge onto two copies', () => {
+test('4: classifyClaimPath is the SAME function object whether imported from the public package entry ("@sterling/store") or the internal module — the tool layer and a script outside the store cannot silently diverge onto two copies', () => {
   const pkg = classifierFrom(sterlingStorePkg);
   const internal = classifierFrom(sterlingStoreInternal);
   assert.equal(typeof pkg, 'function', 'EXPECTED FAILURE (red): the public entry exports no classifyClaimPath yet');
@@ -175,5 +175,5 @@ test('4: classifyClaimPath is the SAME function object whether imported from the
 // the two `typeof` assertions stay green while the identity assertion is the
 // one that would catch a package that re-exports a DIFFERENT function under
 // the same name from its two entry surfaces; disclosed as a LIMITATION this
-// pin does not reach the tool-layer/oracle call sites themselves — those are
+// pin does not reach the tool-layer and script call sites themselves — those are
 // out of this file's scope (packages/store) and are not re-pinned here.
