@@ -9836,9 +9836,17 @@ try {
       }
     }
   }
+  const liveAgentIds = new Set(liveDispatches.map((e) => e.agent_id).filter((id) => typeof id === "string" && id !== ""));
+  const writerOwners = /* @__PURE__ */ new Map();
+  for (const t of Array.isArray(touches) ? touches : []) {
+    if (!t?.path || !liveAgentIds.has(t.agent_id)) continue;
+    const k = joinKey(t.path);
+    if (!writerOwners.has(k)) writerOwners.set(k, /* @__PURE__ */ new Set());
+    writerOwners.get(k).add(t.agent_id);
+  }
   const ownersOf = (p) => {
     const k = joinKey(p);
-    const owners = /* @__PURE__ */ new Set();
+    const owners = new Set(writerOwners.get(k) ?? []);
     for (const [entryKey, ids] of deferredOwners) for (const [id, isFile] of ids) if (entryOwns(entryKey, k, isFile)) owners.add(id);
     return owners;
   };

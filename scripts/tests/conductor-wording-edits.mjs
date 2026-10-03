@@ -46,6 +46,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'A consequential choice (scope, acceptance, architecture, an expensive commitment) that the store cannot settle goes to the user through the `grill` skill (`/sterling:grill`), and you name that choice before starting it (decision `sterling-grill-skill-design`).',
     after: 'For every new non-trivial ask, before the first dispatch, check whether the intent, the acceptance or the scope is unstated, or whether the ask has two or more reasonable readings. If any holds, run a short `grill` first (`/sterling:grill`, usually 1-3 questions, one at a time through the question form); its first question restates your understanding as an option, "Proceed as I understand it: ...". A clear ask starts at once; a vague one always gets the grill (user-ruled 2026-10-03 through the question form, "On ambiguity, at intake (Recommended)", after *"TGhe grill-me skills is super good. How do we use it more often to also drill intro requests/new tasks, understand intent, explain something vague"*). The older trigger still applies: a consequential choice (scope, acceptance, architecture, an expensive commitment) that the store cannot settle, met mid-task, goes to the same skill, and you name that choice before starting it (decision `sterling-grill-skill-design`).',
   },
+  {
+    commit: 'aa402b1',
+    date: '2026-10-03',
+    reason: 'conductor points at the CLAUDE.md record-authoring rule when it creates records (decision make-records-findable-authoring-rule-disclosure-lint-then-blind-experiment)',
+    before: "the librarian's grant is for text you drafted, never for a new record.",
+    after: "the librarian's grant is for text you drafted, never for a new record. Write every title, trigger and statement to the CLAUDE.md rule \"Author records to be found\", so the record is findable by the words a user would say.",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

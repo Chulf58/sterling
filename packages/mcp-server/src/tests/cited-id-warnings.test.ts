@@ -66,6 +66,7 @@ function escapeRegex(s: string): string {
 
 function mkDecision(tools: SterlingTools, title: string, statement = 's'): Loose {
   return tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
     title,
     statement,
     alternatives_rejected: [],
@@ -85,6 +86,7 @@ test('AC1 & AC2: knowledge_create draws no warning citing a real record\'s full 
     // ships, not to be independently red.)
     const resolvable = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'cites the real one',
         statement: `Builds directly on (knowledge_get ${seed.id}).`,
         alternatives_rejected: [],
@@ -99,6 +101,7 @@ test('AC1 & AC2: knowledge_create draws no warning citing a real record\'s full 
     // because no citation scanning exists yet.
     const unresolved = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'cites a phantom',
         statement: `Cites a fabricated ruling (knowledge_get ${fake}) as though it were settled.`,
         alternatives_rejected: [],
@@ -138,6 +141,7 @@ test("AC3: citing a SUPERSEDED record's id resolves (tombstones are legitimate c
     // (no scanning exists yet, so neither citation is evaluated).
     const res = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'cites the tombstone and a phantom',
         statement: `The prior ruling (knowledge_get ${v1.id}) still holds; (knowledge_get ${fake}) does not exist.`,
         alternatives_rejected: [],
@@ -188,6 +192,7 @@ test('AC5 (never a gate): a write carrying an unresolved citation still succeeds
     const fake = randomUUID();
     const created = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'phantom citation, advisory only',
         statement: `Cites a phantom (knowledge_get ${fake}) yet must still land as a record.`,
         alternatives_rejected: [],
@@ -226,6 +231,7 @@ test('AC6: an 8-char prefix matching an existing id resolves (no warning), but a
     // (prefix-form citations are not scanned at all yet).
     const res = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'cites by prefix, real and phantom',
         statement: `Follows decision ${prefix} for the settled half; decision ${unresolvedPrefix} does not exist.`,
         alternatives_rejected: [],
@@ -434,6 +440,7 @@ test('AC-S: fabricated citations spelled with backticks or a colon after the tri
     // fires.
     const fabricated = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'cites two phantom ids in the backtick and colon spellings',
         statement: `Per decision \`${fakeBacktick}\` this holds; also see decision: ${fakeColon} for context. Unrelated hex string mentioned in passing, ${bareSha}, ends the thought.`,
         alternatives_rejected: [],
@@ -462,6 +469,7 @@ test('AC-S: fabricated citations spelled with backticks or a colon after the tri
     // no citation warning naming it.
     const resolved = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'cites the real prefix in the backtick and colon spellings',
         statement: `Per decision \`${seedPrefix}\` this holds; also see decision: ${seedPrefix} for context.`,
         alternatives_rejected: [],

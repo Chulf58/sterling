@@ -16,6 +16,7 @@
 // inherits-prior-round): it was deleted in e16e127 as reader-less, but it fed
 // the register's `files`, which H10's deferral join reads. Without it every
 // path in a brief's "NEVER write" list became that lane's ownership.
+import { posix } from 'node:path';
 import { normalizeRepoPath } from '@sterling/schemas';
 
 // Path-candidate extraction from free-form prompt prose. No shared extractor
@@ -34,6 +35,40 @@ export const PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
 export function extractPathCandidates(text) {
   const found = String(text ?? '').match(PATH_CANDIDATE_RE) ?? [];
   return [...new Set(found)];
+}
+
+// The same candidates, classified by the WHOLE token each one sits in, so a
+// path suffix inside a larger token is never read as a repo path (decision
+// h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round,
+// probe 2026-10-03; Codex Sol review). The token is the run of characters
+// around the match up to whitespace, a quote or backtick, a bracket, or one
+// of , ; * | =. A match followed by '/' stopped at a dotted directory
+// ('foo.bar' in 'foo.bar/src/a.ts') and is skipped; the later match that
+// reaches the end of the path carries the whole token. The candidate is the
+// token text from its start through the match:
+//   '/...'                  an absolute POSIX path, '..' resolved; the caller
+//                           makes it repo-relative or drops it when it is
+//                           outside the project
+//   path characters only    a relative path ('src/a.mjs', './a/b.mjs',
+//                           'foo.bar/c.ts'), '..' resolved; one that escapes
+//                           upward keeps its leading '..' and the caller's
+//                           normalisation refuses it
+//   anything else           dropped: a URL ('scheme://'), a drive-letter
+//                           path, a '~/' path, or a suffix of some other token.
+const TOKEN_DELIMITER_RE = /[\s'"`()[\]{}<>,;*|=]/;
+const RELATIVE_PATH_CHARS_RE = /^[\w./-]+$/;
+
+export function extractPathCandidatesRooted(text) {
+  const s = String(text ?? '');
+  const found = new Set();
+  for (const m of s.matchAll(PATH_CANDIDATE_RE)) {
+    if (s[m.index + m[0].length] === '/') continue;
+    let start = m.index;
+    while (start > 0 && !TOKEN_DELIMITER_RE.test(s[start - 1])) start -= 1;
+    const candidate = s.slice(start, m.index) + m[0];
+    if (candidate.startsWith('/') || RELATIVE_PATH_CHARS_RE.test(candidate)) found.add(posix.normalize(candidate));
+  }
+  return [...found];
 }
 
 // REVIEW-TERRITORY structured declaration — a dispatch prompt may carry a line

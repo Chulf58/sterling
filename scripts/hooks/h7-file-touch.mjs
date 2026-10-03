@@ -55,10 +55,10 @@ try {
       // disk must never throw here and silently stop every future H7
       // append (a bare JSON.parse would have thrown for this whole write).
       const touches = existsSync(touchesPath) ? parseTouchesContent(readFileSync(touchesPath, 'utf8')) : [];
-      // agent_id is a MEASUREMENT field only (decision
+      // agent_id names the subagent that wrote the file (decision
       // h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round,
-      // 2026-10-02 amendment): it records whether a subagent's PostToolUse
-      // Write/Edit payload carries one. Nothing reads it. It is stored only
+      // 2026-10-02 amendment): H10 defers a touch whose agent_id belongs to a
+      // presumed-active dispatch-register row. It is stored only
       // when the payload carries a non-empty string, so a record without one
       // stays exactly {path, at}. H7 only appends and never updates or dedups
       // an entry, so each record keeps the agent_id of its own touch (two

@@ -267,6 +267,14 @@ function unionCentralTerms(record: AxisRecord, topK: number): string[] {
   ];
 }
 
+/** The record's RETRIEVAL central set itself (unionCentralTerms, exported): the
+ *  terms push delivery and knowledge_preflight match the record on. Write-time
+ *  disclosure (knowledge_create/knowledge_update receipts) reports this exact
+ *  set so an author sees what the record will be found by. */
+export function recordCentralTerms(record: AxisRecord, opts: CentralityOpts = {}): string[] {
+  return unionCentralTerms(record, opts.topK ?? AXIS_RECORD_TOP_K);
+}
+
 /** Which of `central` the outgoing text covers, by symmetric prefix match. */
 function coveredCentralTerms(central: string[], outgoingText: unknown): string[] {
   const words = [

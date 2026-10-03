@@ -84,6 +84,7 @@ function escapeRegex(s: string): string {
 
 function mkDecision(tools: SterlingTools, title: string, statement = 's'): Loose {
   return tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
     title,
     statement,
     alternatives_rejected: [],
@@ -133,6 +134,7 @@ test('AMBIG-ONE-RECORD (control): an 8-hex-char prefix matching exactly ONE live
     const prefix = (seed.id as string).slice(0, 8);
     const res = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'cites an unambiguous live prefix',
         statement: `Follows decision ${prefix} for the settled half.`,
         alternatives_rejected: [],
@@ -155,6 +157,7 @@ test('AMBIG-ONE-ALIAS (control): an 8-hex-char prefix matching exactly ONE histo
 
     const res = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'cites an alias-only prefix',
         statement: `Per decision ${aliasPrefix} this still holds.`,
         alternatives_rejected: [],
@@ -178,6 +181,7 @@ test('AMBIG-MANY-RECORDS: an 8-hex-char prefix matching TWO live record ids warn
 
     const res = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'cites an ambiguous prefix (two records)',
         statement: `Per decision ${prefix} this holds.`,
         alternatives_rejected: [],
@@ -208,6 +212,7 @@ test('AMBIG-MANY-ALIAS: an 8-hex-char prefix matching ONE live record AND a SEPA
 
     const res = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'cites a live+alias ambiguous prefix',
         statement: `Per decision ${prefix} this holds.`,
         alternatives_rejected: [],
@@ -231,6 +236,7 @@ test('AMBIG-ZERO: a bare 8-hex-char citation matching ZERO record ids and ZERO a
     const zeroMatch = 'deadbeef'; // well-formed 8-hex-char string, matches nothing seeded in this fresh store
     const res = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'cites a prefix matching nothing',
         statement: `Per decision ${zeroMatch} this holds.`,
         alternatives_rejected: [],
@@ -257,6 +263,7 @@ test('REGRESSION-FULL-UUID: a full dashed uuid that exists resolves silently; a 
     const fakeUuid = randomUUID();
     const res = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'cites a real full uuid and a fake one',
         statement: `The real one (knowledge_get ${seed.id}) holds; the fake one (knowledge_get ${fakeUuid}) does not.`,
         alternatives_rejected: [],
@@ -289,6 +296,7 @@ test('ORIGIN-EXEMPT-BALANCED: a fabricated id INSIDE a balanced [origin-ids: rea
       `Separately this write also cites (knowledge_get ${outsideFake}) outside any exempt region.`;
     const res = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'origin-ids balanced exemption with an outside control citation',
         statement,
         alternatives_rejected: [],
@@ -313,6 +321,7 @@ test('ORIGIN-UNBALANCED-OPEN: an [origin-ids: ...] marker with NO matching [/ori
     const statement = `[origin-ids: imported, but the close marker is missing on purpose] this cites (knowledge_get ${fake}) after an unmatched open marker.`;
     const res = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'origin-ids unbalanced: open with no close',
         statement,
         alternatives_rejected: [],
@@ -337,6 +346,7 @@ test('ORIGIN-UNBALANCED-EXTRA-CLOSE: an extra/orphan [/origin-ids] close (1 open
       `[/origin-ids] [/origin-ids]`;
     const res = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'origin-ids unbalanced: extra orphan close',
         statement,
         alternatives_rejected: [],
@@ -369,6 +379,7 @@ test('NEVER-THROWS-MARKER-SOUP: pathological/malformed [origin-ids] marker soup 
     assert.doesNotThrow(() => {
       res = asEcho(
         tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
           title: 'pathological origin-ids marker soup',
           statement,
           alternatives_rejected: [],
@@ -391,6 +402,7 @@ test('NEVER-A-GATE: a fabricated citation produces a warning but the write still
     const fake = randomUUID();
     const created = asEcho(
       tools.knowledgeCreate('decision', {
+      file_keys: ['src/cited.ts'],
         title: 'phantom citation still lands',
         statement: `Cites a phantom (knowledge_get ${fake}).`,
         alternatives_rejected: [],
