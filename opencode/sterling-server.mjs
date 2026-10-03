@@ -15376,6 +15376,36 @@ function createSettle({ openStore, now, launchWorkerFor }) {
   return settle;
 }
 
+// packages/opencode-plugin/src/store-guard.mjs
+import { posix } from "node:path";
+var STORE_GUARD_MESSAGE = "Sterling store guard: .sterling/sterling.db is written only by the Sterling MCP server. Use the sterling knowledge_* and board_* tools instead. Every other file under .sterling/ can be edited.";
+var STORE_GUARD_UNREADABLE_MESSAGE = "Sterling store guard: could not read which files or commands this request touches (the OpenCode permission request has an unknown shape), so it is denied rather than risk the store.";
+var SHELL_ACTIONS = /* @__PURE__ */ new Set(["shell", "bash"]);
+var EDIT_ACTIONS = /* @__PURE__ */ new Set(["edit", "write", "patch"]);
+var SHELL_STORE = /sterling\.db/i;
+var STORE_FILE = /^sterling\.db(-wal|-shm|-journal|\..+)?$/i;
+function isStorePath(path) {
+  const parts = posix.normalize(path.replaceAll("\\", "/")).split("/");
+  return STORE_FILE.test(parts.at(-1)) && parts.slice(0, -1).some((c) => c.toLowerCase() === ".sterling");
+}
+var unquoted = (command) => command.replace(/['"\\]/g, "");
+function storeGuardVerdict(request) {
+  const shell = SHELL_ACTIONS.has(request.action);
+  if (!shell && !EDIT_ACTIONS.has(request.action)) return null;
+  const { resources } = request;
+  if (!Array.isArray(resources) || !resources.every((r) => typeof r === "string")) return STORE_GUARD_UNREADABLE_MESSAGE;
+  if (shell) return resources.some((r) => SHELL_STORE.test(unquoted(r))) ? STORE_GUARD_MESSAGE : null;
+  const filepath = request.metadata?.filepath;
+  const paths = typeof filepath === "string" ? [...resources, filepath] : resources;
+  return paths.some(isStorePath) ? STORE_GUARD_MESSAGE : null;
+}
+function onEvaluate(request) {
+  const message = storeGuardVerdict(request);
+  if (message === null) return;
+  request.effect = "deny";
+  request.message = message;
+}
+
 // packages/opencode-plugin/src/store.mjs
 init_dist2();
 var BUSY_TIMEOUT_MS = 1e3;
@@ -15470,10 +15500,24 @@ function createSessionSync(deps = {}) {
 }
 
 // packages/opencode-plugin/src/server.mjs
+import { realpathSync as realpathSync6 } from "node:fs";
 import { resolve as resolve11 } from "node:path";
 var PLUGIN_ID = "sterling.server";
 var EXECUTION_END_EVENTS = /* @__PURE__ */ new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"]);
 var BUDGET_MS = { context: 4e3, delivery: 4e3, axis: 4e3, dispatch: 1e4, research: 4e3, settle: 3e4, prompt: 4e3, compaction: 4e3, config: 4e3 };
+function sameDirectory(a, b) {
+  let unresolved = "";
+  const real = (p) => {
+    try {
+      return realpathSync6(p);
+    } catch (e) {
+      unresolved ||= `${p}: ${errText(e)}`;
+      return resolve11(p);
+    }
+  };
+  const equal = real(a) === real(b);
+  return { equal, unresolved };
+}
 function createSterlingServer(deps = {}) {
   const openStore = deps.openStore ?? openProjectStore;
   const now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
@@ -15516,6 +15560,21 @@ function createSterlingServer(deps = {}) {
     let chain = Promise.resolve();
     const parents = /* @__PURE__ */ new Map();
     const rootOf = () => projectRoot(directory);
+    const sessionDirs = /* @__PURE__ */ new Map();
+    const lookupLogged = /* @__PURE__ */ new Map();
+    async function sessionDirectory(sessionID) {
+      if (sessionDirs.has(sessionID)) return { dir: sessionDirs.get(sessionID) };
+      let info;
+      try {
+        if (typeof session?.get !== "function") throw new Error("ctx.session.get is unavailable");
+        info = await session.get({ sessionID });
+      } catch (e) {
+        return { why: errText(e) };
+      }
+      const dir = info?.location?.directory;
+      if (info?.id !== sessionID || typeof dir !== "string" || !dir) return { why: `session.get gave no location.directory for session ${sessionID}` };
+      return { dir: remember(sessionDirs, sessionID, dir) };
+    }
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
     const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
@@ -15547,6 +15606,31 @@ function createSterlingServer(deps = {}) {
       if (!root) return;
       const sessionID = ev.data?.sessionID;
       dispatch.noteExecutionEnd(sessionID);
+      if (typeof sessionID === "string" && sessionID) {
+        let mine = false;
+        await fenced("dispatch", root, async () => {
+          if (liveChildInRegister(root, sessionID)) {
+            mine = true;
+            return;
+          }
+          const owner = await sessionDirectory(sessionID);
+          if (owner.why) {
+            if (!lookupLogged.has(sessionID)) {
+              remember(lookupLogged, sessionID, true);
+              logLine(root, `settle skipped: ${ev.type} of session ${sessionID} not handled at ${directory}: could not read which directory the session belongs to (${owner.why})`);
+              addNotice(root, `Sterling settlement skipped: could not read which project session ${sessionID} belongs to (${owner.why}); only the session's own project settles, and the next settlement there covers this range.`, now());
+            }
+            return;
+          }
+          const same = sameDirectory(owner.dir, directory);
+          mine = same.equal;
+          if (!mine && same.unresolved && !lookupLogged.has(sessionID)) {
+            remember(lookupLogged, sessionID, true);
+            logLine(root, `settle skipped: ${ev.type} of session ${sessionID} not handled at ${directory}: its directory ${owner.dir} differs after normalisation and a real path could not be read (${same.unresolved})`);
+          }
+        });
+        if (!mine) return;
+      }
       const succeeded = ev.type === "session.execution.succeeded";
       let gate = { settle: false };
       await fenced(succeeded ? "settle" : "dispatch", root, async () => {
@@ -15565,9 +15649,18 @@ function createSterlingServer(deps = {}) {
       await fenced("settle", root, () => prLoopNotice(root));
     }
     const handlers = { context: onContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };
-    async function bind(ctx) {
+    async function bind(ctx, guarded) {
       session = ctx.session;
       const root = rootOf();
+      if (!guarded) {
+        const why = `this OpenCode has no ctx.permission.hook (it needs 2.0.22 or later), so the Sterling store guard (deny on .sterling/sterling.db) is NOT registered at ${directory}; only the config guard in .opencode/opencode.json holds, and project agent files in .opencode/agents/ with their own shell or edit rules are unguarded`;
+        process.stderr.write(`[sterling] ${why}
+`);
+        if (root) {
+          logLine(root, `store guard: ${why}`);
+          addNotice(root, `Sterling plugin: ${why}.`, now());
+        }
+      }
       if (root) await fenced("config", root, () => configure(ctx));
       else {
         try {
@@ -15619,8 +15712,11 @@ function createSterlingServer(deps = {}) {
       await Promise.all([...locations.values()].map((l) => l.idle()));
     },
     async setup(ctx) {
+      const guarded = typeof ctx?.permission?.hook === "function";
+      if (guarded) await ctx.permission.hook("evaluate", onEvaluate);
       const directory = ctx?.location?.directory;
       if (typeof directory !== "string" || !directory) {
+        if (!guarded) process.stderr.write("[sterling] this OpenCode has no ctx.permission.hook (it needs 2.0.22 or later), so the Sterling store guard is NOT registered\n");
         process.stderr.write("[sterling] setup received no ctx.location.directory, so this location cannot be tied to a project; no Sterling hook is registered for it\n");
         return void 0;
       }
@@ -15631,7 +15727,7 @@ function createSterlingServer(deps = {}) {
         locations.set(key, loc);
       }
       last = loc;
-      return loc.bind(ctx);
+      return loc.bind(ctx, guarded);
     }
   };
 }

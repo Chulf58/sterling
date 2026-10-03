@@ -474,7 +474,8 @@ test('project config: symlinked agent files and directories count as agents, and
   assert.ok(!names.some((n) => n.includes('loop/')), 'the loop is walked once');
 });
 
-test('project config: a project agent file whose rules can allow edit or shell gets a row, because its rules come after the per-agent guard', () => {
+/** Project agent files whose own rules allow edit or shell, in both forms, plus a global one. */
+function looseAgentsProject() {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   const put = (rel, text) => {
@@ -486,12 +487,39 @@ test('project config: a project agent file whose rules can allow edit or shell g
   put('.opencode/agents/scalar.md', '---\ndescription: d\npermission: allow\n---\n\nbody\n');
   put('.opencode/agents/denies.md', '---\ndescription: d\npermission:\n  edit: deny\n  bash: deny\n  webfetch: allow\n  sterling_board_add: deny\n---\n\nbody\n');
   put('.opencode/agents/plain.md', '---\ndescription: d\n---\n\npermission: allow in the body is not frontmatter\n');
+  put('.opencode/agents/toolsform.md', '---\ndescription: d\nmode: primary\ntools:\n  bash: true\n---\n\nbody\n');
   mkdirSync(join(home, '.config', 'opencode', 'agents'), { recursive: true });
   writeFileSync(join(home, '.config', 'opencode', 'agents', 'globalloose.md'), '---\ndescription: d\npermission:\n  bash: allow\n---\n\nbody\n');
-  const r = run(dir, home);
-  const flagged = r.rows.filter((x) => x.status === 'skipped' && /store guard does NOT hold/.test(x.detail)).map((x) => x.item.split('/').pop()).sort();
+  return { dir, home };
+}
+const agentRows = (r) => r.rows.filter((x) => x.status === 'skipped' && /\.opencode\/agents\//.test(x.item));
+
+test('project config below OpenCode 2.0.22: a project agent file whose rules can allow edit or shell gets a row, because its rules come after the per-agent guard and there is no evaluate hook', () => {
+  const { dir, home } = looseAgentsProject();
+  const r = run(dir, home, { probe: () => ({ installed: true, version: '2.0.21', major: 2 }) });
+  const flagged = agentRows(r).filter((x) => /store guard does NOT hold/.test(x.detail)).map((x) => x.item.split('/').pop()).sort();
   assert.deepEqual(flagged, ['loose.md', 'scalar.md', 'star.md'], 'only project agent files that can allow edit or shell; a global agent file comes before the guard');
-  assert.match(r.rows.find((x) => x.item.endsWith('loose.md')).detail, /move its .* rules into agent\."loose"\.permission in \.opencode\/opencode\.json/);
+  assert.match(r.rows.find((x) => x.item.endsWith('loose.md')).detail, /needs 2\.0\.22 or later.*move its .* rules into agent\."loose"\.permission in \.opencode\/opencode\.json/);
+});
+
+// From 2.0.22 the server plugin's evaluate hook (packages/opencode-plugin/src/store-guard.mjs)
+// denies the store after every agent rule, measured live for the permission and tools: forms.
+test('project config on OpenCode 2.0.22 and later: no row for such agent files, and each keeps its config guard entry', () => {
+  for (const version of ['2.0.22', '2.1.0', '3.0.0']) {
+    const { dir, home } = looseAgentsProject();
+    const r = run(dir, home, { probe: () => ({ installed: true, version, major: Number(version[0]) }) });
+    assert.deepEqual(agentRows(r), [], `no skipped row names a project agent file on ${version}`);
+    const agents = JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).agent;
+    for (const name of ['loose', 'star', 'scalar', 'denies', 'plain', 'toolsform', 'globalloose']) {
+      assert.deepEqual(agents[name]?.permission?.shell, { '*sterling.db*': 'deny' }, `${name} keeps its config guard entry on ${version}`);
+    }
+  }
+});
+
+test('hasEvaluateHook: 2.0.22 and later only; an unreadable version counts as without', async () => {
+  const { hasEvaluateHook } = await import('../lib/opencode-install.mjs');
+  for (const v of ['2.0.22', '2.0.23', '2.1.0', '10.0.0']) assert.equal(hasEvaluateHook(v), true, v);
+  for (const v of ['2.0.21', '2.0.3', '1.18.31', undefined, '', 'v?']) assert.equal(hasEvaluateHook(v), false, String(v));
 });
 
 test('parseJsonc: comments and trailing commas go only outside strings', async () => {

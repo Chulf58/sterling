@@ -11779,7 +11779,15 @@ function agentFileLoosensGuard(text) {
     return m !== null && GUARDED_KEYS.has(m[2].trim()) && m[3].trim() !== "deny";
   });
 }
-function visibleAgents({ projectDir, env = process.env, home = homedir7() }) {
+var EVALUATE_HOOK_MIN_VERSION = "2.0.22";
+function hasEvaluateHook(version) {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(version ?? ""));
+  if (!m) return false;
+  const want = EVALUATE_HOOK_MIN_VERSION.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if (Number(m[i + 1]) !== want[i]) return Number(m[i + 1]) > want[i];
+  return true;
+}
+function visibleAgents({ projectDir, env = process.env, home = homedir7(), checkAgentFiles = true }) {
   const globalDir = env.OPENCODE_CONFIG_DIR || opencodeConfigDir({ env, home });
   const dotDir = join20(projectDir, ".opencode");
   const ancestors = [];
@@ -11806,7 +11814,7 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7() }) {
       }
       for (const { name: name4, path } of files) {
         (dir === env.OPENCODE_CONFIG_DIR ? envNames : names).add(name4);
-        if (dir !== dotDir) continue;
+        if (dir !== dotDir || !checkAgentFiles) continue;
         let text;
         try {
           text = readFileSync13(path, "utf8");
@@ -11815,7 +11823,7 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7() }) {
           continue;
         }
         if (agentFileLoosensGuard(text)) {
-          problems.push({ item: fwd5(path), status: "skipped", detail: `its permission rules can allow edit or shell, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name4}"; move its edit, write, patch, shell, bash and "*" rules into agent.${JSON.stringify(name4)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
+          problems.push({ item: fwd5(path), status: "skipped", detail: `its permission rules can allow edit or shell, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name4}" on this OpenCode (the plugin store guard needs ${EVALUATE_HOOK_MIN_VERSION} or later); upgrade OpenCode, or move its edit, write, patch, shell, bash and "*" rules into agent.${JSON.stringify(name4)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
         }
       }
     }
@@ -11858,7 +11866,7 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7() }) {
   const envOnly = [...envNames].filter((n) => !names.has(n)).sort();
   return { names: [.../* @__PURE__ */ new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete };
 }
-function ensureProjectConfig({ projectDir, env = process.env, home = homedir7(), tracked, conductorOk = true }) {
+function ensureProjectConfig({ projectDir, env = process.env, home = homedir7(), tracked, conductorOk = true, opencodeVersion }) {
   const rel = PROJECT_CONFIG_REL;
   const path = join20(projectDir, rel);
   if (tracked.includes(rel)) {
@@ -11899,7 +11907,7 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir7(),
   config.permission = top.value;
   const agents = config.agent ?? {};
   if (typeof agents !== "object" || agents === null || Array.isArray(agents)) return [refusal(rel, `${rel}: "agent" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
-  const visible = visibleAgents({ projectDir, env, home });
+  const visible = visibleAgents({ projectDir, env, home, checkAgentFiles: !hasEvaluateHook(opencodeVersion) });
   extraRows.push(...visible.problems);
   const guardOnly = JSON.stringify({ permission: guardPermission(void 0).value });
   const names = new Set(visible.names);
@@ -12069,7 +12077,7 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
   const agentRows = ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked });
   const conductorRow = agentRows.find((r) => r.item === `${STERLING_AGENTS_SUBDIR}/conductor.md`);
   const conductorOk = ["created", "matches", "refreshed"].includes(conductorRow?.status);
-  rows.push(...ensureProjectConfig({ projectDir, env, home, tracked, conductorOk }));
+  rows.push(...ensureProjectConfig({ projectDir, env, home, tracked, conductorOk, opencodeVersion: oc.version }));
   rows.push(...agentRows);
   return { rows };
 }

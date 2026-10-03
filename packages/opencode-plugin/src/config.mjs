@@ -1,8 +1,13 @@
 // Config registration: the one place the plugin registers commands, skills and
-// the sterling MCP entry with OpenCode. OpenCode 2.0.21's plugin context has no
-// `config` hook; the registration surfaces are `ctx.command.transform(cb)`,
+// the sterling MCP entry with OpenCode. The plugin context has no single `config`
+// hook; it has one surface per kind. The ones used here are `ctx.command.transform(cb)`,
 // `ctx.skill.transform(cb)` and `ctx.mcp.transform(cb)`, each returning a
-// Registration. Measured on 2.0.21:
+// Registration. 2.0.22 also has `ctx.agent.transform(cb)` and `ctx.permission.hook(name, fn)`
+// (with tool, shell and others). Sterling does not use the agent transform: a plugin's
+// transform runs BEFORE the built-in one that loads agent files, so it cannot see or
+// guard a project agent, and awaiting ctx.agent.list() in setup hangs (both measured
+// live). The store guard uses permission.hook('evaluate') instead (store-guard.mjs).
+// Measured on 2.0.21:
 //   - a command name may contain ':' (and '/'), so commands/<name>.md registers as
 //     sterling:<name>, the name Claude Code uses. execute receives
 //     { sessionID, prompt: { text: <the arguments> }, delivery } and puts the body
