@@ -8,6 +8,8 @@ import { parseConfig } from '@sterling/schemas';
 import { SterlingStore, MountedStores } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
 import { harnessMounted as harnessMountedShared } from './test-helpers/mounted-harness.js';
+import { seedRecordRaw } from './test-helpers/raw-seed.js';
+import type { DurableRecord } from '@sterling/schemas';
 
 // APPEND-JOIN ADMISSION for `article_missing` — a new resolvable lane on top
 // of the resolves-claim contract already pinned in resolves-claim.test.ts /
@@ -135,8 +137,8 @@ const mkReference = (tools: SterlingTools, title: string, location: string) =>
 /** Same as mkArticle, but sets an explicit `scope` — used to pin the
  *  target-scope refusal (project-only append-join admission) and the
  *  project-local owner-lookup boundary. */
-const mkArticleScoped = (tools: SterlingTools, slug: string, paths: string[], scope: string) =>
-  tools.knowledgeCreate('feature_article', {
+const mkArticleScoped = (tools: SterlingTools, slug: string, paths: string[], scope: string, store?: { create(input: unknown): DurableRecord }) => {
+  const fields = {
     slug,
     title: slug,
     what_it_does: 'does',
@@ -149,7 +151,13 @@ const mkArticleScoped = (tools: SterlingTools, slug: string, paths: string[], sc
     history: [{ date: NOW, event: 'seed' }],
     live_test_refs: [],
     scope,
-  }).record;
+  };
+  // knowledge_create refuses a domain-scoped article that owns files (Domains D2), so a
+  // non-project row is seeded straight through the store (test-helpers/raw-seed.ts).
+  if (scope === 'project') return tools.knowledgeCreate('feature_article', fields).record;
+  if (!store) throw new Error('mkArticleScoped: a non-project scope needs the store to seed through');
+  return seedRecordRaw(store, 'feature_article', fields, NOW);
+};
 
 /**
  * Extracts every "N file(s)" occurrence from a maintenance item's text, in
@@ -1024,9 +1032,9 @@ test('CONTROL: an append-join against an article explicitly scoped "project" dra
 // non-project scopes".
 
 test('target scope refusal: an append-join whose target article has scope other than "project" (e.g. domain:node) is REFUSED, naming scope', () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
-    const article = mkArticleScoped(tools, 'thing-domain', ['src/thing.ts'], 'domain:node');
+    const article = mkArticleScoped(tools, 'thing-domain', ['src/thing.ts'], 'domain:node', store);
     const { record: item } = tools.maintenanceEnqueue({
       reason: 'article_missing',
       text: `'thing-domain' does not yet own src/x.ts`,
@@ -1588,9 +1596,9 @@ test('CONTROL: a resolves claim naming a reconcile_needed item, targeting a PROJ
 // the domain-scoped refusal below is compared against.
 
 test('mount-boundary: a DOMAIN-scoped target cannot enter a resolves transaction AT ALL, even for a pass-through (non-article_missing) claim — the whole call is refused', () => {
-  const { tools, cleanup } = harnessMounted(['node']);
+  const { store, tools, cleanup } = harnessMounted(['node']);
   try {
-    const article = mkArticleScoped(tools, 'thing-domain', ['src/thing.ts'], 'domain:node');
+    const article = mkArticleScoped(tools, 'thing-domain', ['src/thing.ts'], 'domain:node', store);
     const { record: item } = tools.maintenanceEnqueue({
       reason: 'reconcile_needed',
       text: "'thing-domain' needs reconciling",

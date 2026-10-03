@@ -17,10 +17,11 @@ const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const NOW = '2026-10-02T12:00:00.000Z';
 
 let SterlingStore;
+let createDomain;
 let server;
 let readDispatchState;
 before(async () => {
-  ({ SterlingStore } = await import(pathToFileURL(join(repo, 'packages', 'store', 'dist', 'index.js')).href));
+  ({ SterlingStore, createDomain } = await import(pathToFileURL(join(repo, 'packages', 'store', 'dist', 'index.js')).href));
   server = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'server.mjs')).href);
   ({ readDispatchState } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'dispatch-register.mjs')).href));
 });
@@ -163,6 +164,55 @@ test('H20 on the subagent tool: a brief matching a stored hazard gets the mechan
     await cleanup?.();
   } finally {
     p.cleanup();
+  }
+});
+
+test('H20 and H23 read the mounted domains through the subject fan, with the plugin opener', async () => {
+  const domainDb = join(tmpdir(), `sterling-oc-axis-domain-${randomUUID()}`, 'sterling.db');
+  const p = makeProject({ records: [], config: { stack_tags: ['alpha'], domain_paths: { alpha: domainDb } } });
+  try {
+    mkdirSync(dirname(domainDb), { recursive: true });
+    createDomain('alpha', 'Alpha reactor facts', domainDb);
+    const d = new SterlingStore(domainDb);
+    d.create({ ...antiPattern('DELTA domain breach countdown widget flywheel ballast klaxon failure'), scope: 'domain:alpha' });
+    d.close();
+    const opened = [];
+    const { ctx, cleanup } = await setup(p.dir, { ses_root: {} }, { openStore: (dbPath) => (opened.push(dbPath), new SterlingStore(dbPath)) });
+    const { after } = await call(ctx, { tool: 'subagent', input: { agent: 'sterling/implementor', description: 'fix', prompt: `Fix the breach alarm: ${MATCHING}` }, metadata: { sessionID: 'ses_child1', status: 'completed' } });
+    assert.match(appended(after), /DELTA domain breach countdown/, 'H20 delivers the domain hazard');
+    const read = await call(ctx, { tool: 'read', sessionID: 'ses_other', input: { path: join(p.dir, 'notes.txt') }, content: MATCHING });
+    assert.match(appended(read.after), /→ HAZARD anti_pattern 'DELTA domain breach countdown/, 'H23 points at the domain hazard');
+    assert.ok(opened.includes(domainDb), "the domain store was opened through the plugin's opener");
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+    rmSync(dirname(domainDb), { recursive: true, force: true });
+  }
+});
+
+test('a configured domain file that is not SQLite: H20 and H23 still deliver the project hazard, each with one stderr line', async () => {
+  // Task-end review 2026-10-03: a bad domain made openSubjectFan throw, so the project hazard was lost too.
+  const domainDb = join(tmpdir(), `sterling-oc-axis-junk-${randomUUID()}`, 'sterling.db');
+  const p = makeProject({ records: ['hazard'], config: { stack_tags: ['junk'], domain_paths: { junk: domainDb } } });
+  const writes = [];
+  const realWrite = process.stderr.write;
+  try {
+    mkdirSync(dirname(domainDb), { recursive: true });
+    writeFileSync(domainDb, 'this is not a sqlite database, just text '.repeat(50));
+    const { ctx, cleanup } = await setup(p.dir);
+    process.stderr.write = (chunk, ...rest) => (String(chunk).includes('DEGRADED subject fan') ? (writes.push(String(chunk)), true) : realWrite.call(process.stderr, chunk, ...rest));
+    const { after } = await call(ctx, { tool: 'subagent', input: { agent: 'sterling/implementor', description: 'fix', prompt: `Fix the breach alarm: ${MATCHING}` }, metadata: { sessionID: 'ses_child1', status: 'completed' } });
+    const read = await call(ctx, { tool: 'read', sessionID: 'ses_other', input: { path: join(p.dir, 'notes.txt') }, content: MATCHING });
+    process.stderr.write = realWrite;
+    assert.match(appended(after), /ALPHA breach countdown widget flywheel ballast klaxon failure/, 'H20 still delivers the project hazard');
+    assert.match(appended(read.after), /→ HAZARD anti_pattern 'ALPHA breach countdown/, 'H23 still points at the project hazard');
+    assert.equal(writes.filter((w) => /^H20: DEGRADED subject fan: domain 'junk'/.test(w)).length, 1, writes.join(''));
+    assert.equal(writes.filter((w) => /^H23: DEGRADED subject fan: domain 'junk'/.test(w)).length, 1, writes.join(''));
+    await cleanup?.();
+  } finally {
+    process.stderr.write = realWrite;
+    p.cleanup();
+    rmSync(dirname(domainDb), { recursive: true, force: true });
   }
 });
 

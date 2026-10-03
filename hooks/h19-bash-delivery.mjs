@@ -4854,10 +4854,11 @@ var configSchema = external_exports.object({
   // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
   // with opt-out, disposal skips the snapshot LOUDLY (check_skipped).
   backup_opt_out: external_exports.boolean().default(false),
-  // §3.3: the project's stack_tags, declared at init, ARE the domain mount
-  // manifest — the SAME list that filters retrieval (§3.4) mounts the shared
-  // domain stores, so the mounted set and the filter align by construction. Each
-  // tag mounts a store at ~/.sterling/domains/<tag>/sterling.db (lazily created).
+  // §3.3: the project's stack_tags, declared at init, are the domain mount
+  // manifest and nothing else; they do not filter retrieval (a query's own
+  // stack_tags option is a separate, caller-supplied filter). Each tag mounts an
+  // EXISTING store at ~/.sterling/domains/<tag>/sterling.db; a new domain store
+  // is made only by createDomain in @sterling/store, which requires a description.
   stack_tags: external_exports.array(external_exports.string()).default([]),
   // §3.3 (spec line 94 — path configurable per domain): per-tag store-path
   // override; default is the per-user root above. tag → absolute db path (POSIX).
@@ -5280,11 +5281,11 @@ import { mkdirSync, existsSync, realpathSync, statSync } from "node:fs";
 import { dirname, basename, join, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 
-// packages/store/dist/registry.js
-import { DatabaseSync } from "node:sqlite";
-
 // packages/store/dist/axis.js
 var AXIS_MAX_TERM_LEN = 64;
+
+// packages/store/dist/registry.js
+import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
 function decodeLiveRecordRow(op, row) {
@@ -5400,6 +5401,15 @@ CREATE TABLE IF NOT EXISTS activity_log (
   type TEXT NOT NULL,
   record_id TEXT NOT NULL,
   title TEXT NOT NULL
+);
+-- Store-level key/value metadata (board 675daf9d, decision
+-- projects-mount-domains-and-sibling-projects): a domain store's description is
+-- its 'description' key. Additive: CREATE IF NOT EXISTS on every v2 open, so no
+-- user_version bump; a pre-v2 store opens read-only before this DDL runs.
+CREATE TABLE IF NOT EXISTS store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 `;
 var SUPPORTED_SCHEMA_VERSION = 2;
@@ -7247,6 +7257,28 @@ var SterlingStore = class _SterlingStore {
       this.db.prepare("INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at").run(type, recordId, at);
     });
   }
+  /**
+   * Store-level metadata read (store_meta). undefined when the key was never
+   * set. A pre-v2 store has no store_meta table (it opens read-only before the
+   * DDL runs), so this refuses there with the migration error rather than
+   * answering "unset" for a question the store cannot answer.
+   */
+  getMeta(key) {
+    this.assertV2Surface("getMeta");
+    const row = this.db.prepare("SELECT value FROM store_meta WHERE key = ?").get(key);
+    return row?.value;
+  }
+  /** Store-level metadata write (store_meta): upsert, one row per key, stamped updated_at. */
+  setMeta(key, value) {
+    this.assertWritable("setMeta");
+    if (typeof key !== "string" || key.length === 0)
+      throw new Error("setMeta: key must be a non-empty string");
+    if (typeof value !== "string")
+      throw new Error(`setMeta: value for key '${key}' must be a string`);
+    this.tx(() => {
+      this.db.prepare("INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(key, value, (/* @__PURE__ */ new Date()).toISOString());
+    });
+  }
   takeSelection() {
     let row;
     this.tx(() => {
@@ -7806,7 +7838,8 @@ var SERVER = "sterling";
 var OPENCODE_DENIED_MCP = [
   ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => `${SERVER}_knowledge_${v}`),
   ...["add", "remove", "update", "edit"].map((v) => `${SERVER}_board_${v}`),
-  `${SERVER}_config_set`
+  `${SERVER}_config_set`,
+  `${SERVER}_domain_describe`
 ];
 
 // scripts/hooks/lib/maintenance-worker.mjs
@@ -7829,6 +7862,7 @@ var WORKER_DISALLOWED_TOOLS = [
   ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
   ...["add", "remove", "update", "edit"].map((v) => mcp(`board_${v}`)),
   mcp("config_set"),
+  mcp("domain_describe"),
   "Write",
   "Edit",
   "Bash"

@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
-import { SterlingStore, MountedStores } from '@sterling/store';
+import { SterlingStore, MountedStores, createDomain } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
 
 // ---------------------------------------------------------------------------
@@ -39,6 +39,7 @@ function harness() {
 function domainHarness() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-valshape-domain-'));
   const domainDb = join(dir, 'domains', 'node', 'sterling.db');
+  createDomain('node', 'test domain', domainDb);
   const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: 'node', dbPath: domainDb }]);
   const config = parseConfig({ stack_tags: ['node'] });
   const tools = new SterlingTools({ store, config, now: () => NOW, newId: randomUUID });

@@ -1145,7 +1145,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // a clone with no .sterling/config.json is the NORMAL consumer shape, not a broken
   // one, and nothing is missing when this step is skipped.
   if (existsSync(join(cwd, '.sterling', 'config.json'))) {
-    step('re-bake machine artifacts (init ensure pass)', nodeBin, [join(cwd, 'scripts', 'init.mjs'), '--target', cwd], { show: true, tolerate: true });
+    step('re-bake machine artifacts (init ensure pass)', nodeBin, [join(cwd, 'scripts', 'init.mjs'), '--target', cwd, '--update-ensure'], { show: true, tolerate: true });
   } else {
     log(
       '\n▸ re-bake machine artifacts — SKIPPED: no .sterling/config.json in the Sterling clone. That is the NORMAL consumer shape and nothing is missing: the clone-as-project artifacts (its own launchers/CLAUDE.md/agents) are what this step bakes, and the plugin MCP config plugin.json points at is committed and arrived with the fast-forward. Run /sterling:init in a project — not here — if this machine has never done so.',

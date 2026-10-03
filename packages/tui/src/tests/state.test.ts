@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SterlingStore, MountedStores, MAX_RANK_TERMS } from '@sterling/store';
+import { SterlingStore, MountedStores, MAX_RANK_TERMS, createDomain } from '@sterling/store';
 import { todoCards } from '../viewmodel.js';
 import * as viewmodel from '../viewmodel.js';
 import { buildDashboardState, initialUi, reduce, screenLineToRow, visibleBodyLines, wrapText, AGENTS_TAB, QUEUE_TAB, SYSTEM_TAB, TABS, type UiState, type DashboardState } from '../state.js';
@@ -848,10 +848,12 @@ function featureArticleRec(over: Record<string, unknown> = {}) {
 }
 
 /** MountedStores fixture (mirrors mounted.test.ts's harness): a project store
- *  plus one mounted domain store, both real on disk. */
+ *  plus one mounted domain store, both real on disk. Each domain is made with
+ *  createDomain first, since MountedStores no longer creates one on mount. */
 function mountedFixture(domains: string[] = ['node']) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-vm-knowledge-'));
   const mounts = domains.map((name) => ({ name, dbPath: join(dir, 'domains', name, 'sterling.db') }));
+  for (const m of mounts) createDomain(m.name, `test domain ${m.name}`, m.dbPath);
   const stores = new MountedStores(join(dir, '.sterling', 'sterling.db'), mounts);
   return { dir, stores, cleanup: () => { stores.close(); rmSync(dir, { recursive: true, force: true }); } };
 }

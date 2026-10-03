@@ -48,6 +48,7 @@ export const OPENCODE_DENIED_MCP = [
   ...['create', 'update', 'append', 'edit', 'array_remove', 'retire', 'supersede', 'split', 'extract', 'promote', 'link'].map((v) => `${SERVER}_knowledge_${v}`),
   ...['add', 'remove', 'update', 'edit'].map((v) => `${SERVER}_board_${v}`),
   `${SERVER}_config_set`,
+  `${SERVER}_domain_describe`,
 ];
 
 /** Appended to the shipped prompt on this host: the prompt names the claude
