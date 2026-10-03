@@ -178,12 +178,27 @@ export function queueDepthLine({ drainable, parked, queueReasons, queueReasonEnt
   return queueContext.replace(/^\n\n/, '');
 }
 
+// A raw exception message can quote a prefix of the file it failed on, and the
+// worker-state clause reaches the banner and the conductor context, so the
+// clause carries only a stable reason: the one readProjectConfig classified, or
+// a fixed "internal error" plus the error's code when it has one.
+function stateUnknownReason(e) {
+  if (typeof e?.stableReason === 'string') return e.stableReason;
+  return typeof e?.code === 'string' ? `internal error: ${e.code}` : 'internal error';
+}
+
 function readProjectConfig(cwd) {
+  let raw;
   try {
-    return JSON.parse(readFileSync(join(cwd, '.sterling', 'config.json'), 'utf8'));
+    raw = readFileSync(join(cwd, '.sterling', 'config.json'), 'utf8');
   } catch (e) {
     if (e?.code === 'ENOENT') return null; // no config file: the defaults, worker enabled
-    throw new Error(`config.json unreadable: ${e?.message ?? e}`);
+    throw Object.assign(new Error('config.json unreadable'), { stableReason: `config.json unreadable: ${typeof e?.code === 'string' ? e.code : 'read error'}` });
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw Object.assign(new Error('config.json unreadable'), { stableReason: 'config.json unreadable: invalid JSON' });
   }
 }
 
@@ -252,7 +267,7 @@ function workerStateText({ ws, reconcile, cwd, config, nowMs, env }) {
     }
     return `worker due to launch at the next Stop or git commit (${reconcile.unjudged} unjudged, oldest ${waited})`;
   } catch (e) {
-    return `worker state unknown (${e?.message ?? e})`;
+    return `worker state unknown (${stateUnknownReason(e)})`;
   }
 }
 
@@ -283,7 +298,7 @@ export function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), e
       const broken = workerBreakage(ws.lastRun);
       if (broken) lastRunNote = `; last worker run FAILED at ${broken.at}: ${broken.reason} (log: .sterling/maintenance-worker.log)`;
     } catch (e) {
-      worker = `worker state unknown (${e?.message ?? e})`;
+      worker = `worker state unknown (${stateUnknownReason(e)})`;
     }
     const age = ageText(reconcile.oldest, nowMs);
     // Counts keep H1's "N item(s) in lane <reason>" shape, so a round number

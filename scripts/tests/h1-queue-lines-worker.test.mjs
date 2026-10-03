@@ -211,6 +211,43 @@ test('BACKLOG worker state: a state file that cannot be read (a directory at its
   });
 });
 
+test('BACKLOG worker state: a malformed config.json gives "invalid JSON", never its content', () => {
+  const now = Date.now();
+  withDir('SECRET-MARKER-9c1e <html>not json', (dir) => {
+    const b = backlog(dir, reconcile(now), now, { config: undefined });
+    assert.ok(b.banner.endsWith(', worker state unknown (config.json unreadable: invalid JSON)'), b.banner);
+    assert.ok(b.line.endsWith('worker state unknown (config.json unreadable: invalid JSON).'), b.line);
+    assert.doesNotMatch(b.banner, /SECRET-MARKER/);
+    assert.doesNotMatch(b.line, /SECRET-MARKER/);
+  });
+});
+
+test('BACKLOG worker state: a config.json that cannot be read (a directory at its path) names only the error code', () => {
+  const now = Date.now();
+  withDir(null, (dir) => {
+    mkdirSync(join(dir, '.sterling', 'config.json'));
+    const b = backlog(dir, reconcile(now), now, { config: undefined });
+    assert.ok(b.banner.endsWith(', worker state unknown (config.json unreadable: EISDIR)'), b.banner);
+    assert.doesNotMatch(b.banner, /illegal operation/);
+  });
+});
+
+test('BACKLOG worker state: any other caught error says "internal error" plus its code, never its message', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    const boom = (err) => ({
+      count: 1, owesProse: 0, oldest: iso(now - 8 * MIN), oldestUnjudged: iso(now - 8 * MIN),
+      get unjudged() { throw err; },
+    });
+    const withCode = backlog(dir, boom(Object.assign(new Error('SECRET-MARKER-9c1e'), { code: 'EBOOM' })), now);
+    assert.ok(withCode.banner.endsWith(', worker state unknown (internal error: EBOOM)'), withCode.banner);
+    assert.ok(withCode.line.endsWith('worker state unknown (internal error: EBOOM).'), withCode.line);
+    const noCode = backlog(dir, boom(new Error('SECRET-MARKER-9c1e')), now);
+    assert.ok(noCode.banner.endsWith(', worker state unknown (internal error)'), noCode.banner);
+    for (const text of [withCode.banner, withCode.line, noCode.banner, noCode.line]) assert.doesNotMatch(text, /SECRET-MARKER/);
+  });
+});
+
 test('BACKLOG worker state: an absent state file means no run recorded, so due is still inferred', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
