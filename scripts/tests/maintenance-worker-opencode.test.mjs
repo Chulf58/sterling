@@ -368,6 +368,9 @@ test('[decision opencode-maintenance-worker-refuses-without-a-configured-model] 
     const refused = notices(fx.project).filter((t) => /maintenance worker did not run/.test(t));
     assert.equal(refused.length, 1, 'one notice per process');
     assert.match(refused[0], /maintenance_worker\.opencode_model/);
+    assert.match(refused[0], /"maintenance_worker": \{ "opencode_model": "<provider>\/<model>" \}/, 'the notice gives the exact config shape with a placeholder, never a picked model');
+    assert.doesNotMatch(refused[0], /gpt-|claude-|sonnet|opus/i, 'no real model id is suggested');
+    assert.match(refused[0], /\.sterling\/config\.json/);
     const log = readFileSync(join(fx.project, '.sterling', 'transient', 'opencode-plugin.log'), 'utf8');
     assert.equal(log.match(/opencode_model is not set/g).length, 1, 'one log line');
 

@@ -9750,6 +9750,31 @@ import { join as join2 } from "node:path";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
+
+// scripts/lib/jsonc.mjs
+function parseJsonc(text) {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j;
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+      out += "\n";
+    } else if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end === -1) throw new Error("unterminated /* comment");
+      i = end + 1;
+    } else if (c === "," && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, " ")))) {
+    } else out += c;
+  }
+  return JSON.parse(out);
+}
+
+// scripts/lib/sterling-roots.mjs
 var STERLING_GIT_SPEC = "github:Chulf58/sterling#semver:>=0.18.0";
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
@@ -9903,10 +9928,64 @@ var scanInstalledSterling = api.scanInstalledSterling;
 var newestInstalledSterling = api.newestInstalledSterling;
 var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
-function sterlingUpdateRemedy(host) {
+var STERLING_NPM_PACKAGE = "@chulf58/sterling";
+var STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+var isNpmSpec = (s2) => s2 === STERLING_NPM_PACKAGE || s2.startsWith(`${STERLING_NPM_PACKAGE}@`);
+var namesSterling = (s2) => typeof s2 === "string" && (isNpmSpec(s2) || STERLING_GIT_REPO.test(s2.split("#")[0]));
+function sterlingPluginSpecs(plugins) {
+  if (!Array.isArray(plugins)) return [];
+  const out = [];
+  for (const entry of plugins) {
+    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === "object" ? entry.package : entry;
+    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? "npm" : "git" });
+  }
+  return out;
+}
+function copyKindOf(root, env, home) {
+  if (!root) return null;
+  const cache = installRoots(env, home).find((r) => r.host === "opencode")?.dir;
+  const real = canonical(root);
+  const base2 = canonical(cache) + sep;
+  if (!real.startsWith(base2)) return null;
+  return real.slice(base2.length).split(sep)[0].startsWith("git-") ? "git" : "npm";
+}
+function configuredSterlingSpec(env, home, root) {
+  const path = join(env.XDG_CONFIG_HOME || join(home, ".config"), "opencode", "opencode.json");
+  let config;
+  try {
+    config = parseJsonc(readFileSync(path, "utf8"));
+  } catch (err) {
+    if (err?.code === "ENOENT") return null;
+    return { unreadable: `could not read ${path.replace(/\\/g, "/")}: ${err.message}` };
+  }
+  const found = sterlingPluginSpecs(config && typeof config === "object" ? config.plugins : void 0);
+  const kind = copyKindOf(root, env, home);
+  return found.find((f) => f.kind === kind) ?? found[0] ?? null;
+}
+var TAG_REF = /^v?\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?$/;
+var COMMIT_REF = /^[0-9a-f]{7,40}$/i;
+function pinOf(spec) {
+  const at = spec.indexOf("#");
+  const ref = at === -1 ? "" : spec.slice(at + 1);
+  return TAG_REF.test(ref) || COMMIT_REF.test(ref) ? ref : null;
+}
+var SHELL_SPECIAL = /["$`]/;
+function sterlingUpdateRemedy(host, { env = process.env, home = homedir(), root = null } = {}) {
   if (host === "claude-code") return "/plugin (Installed tab \u2192 Update) or `claude plugin update sterling@<marketplace>`";
-  if (host === "opencode") return `\`opencode plugin update "${STERLING_GIT_SPEC}"\``;
-  if (host === null) return `\`claude plugin update sterling@<marketplace>\` (Claude Code) or \`opencode plugin update "${STERLING_GIT_SPEC}"\` (OpenCode)`;
+  if (host === "opencode" || host === null) {
+    const found = configuredSterlingSpec(env, home, root);
+    const shipped = (why) => `\`opencode plugin update "${STERLING_GIT_SPEC}"\`${why ? ` (the shipped spec; ${why})` : ""}`;
+    let opencode;
+    if (found?.unreadable) opencode = shipped(`${found.unreadable}, so the spec it configures is unknown`);
+    else if (found && SHELL_SPECIAL.test(found.spec)) opencode = shipped("the configured plugin spec contains a quote, $ or backtick and is not echoed here");
+    else if (!found) opencode = shipped("");
+    else {
+      const pin = pinOf(found.spec);
+      const note = pin ? ` \u2014 but that spec is pinned to #${pin} and never updates; change it to "${STERLING_GIT_SPEC}" (a semver range) in the plugins list of opencode.json, then update` : "";
+      opencode = `\`opencode plugin update "${found.spec}"\`${note}`;
+    }
+    return host === "opencode" ? opencode : `\`claude plugin update sterling@<marketplace>\` (Claude Code) or ${opencode} (OpenCode)`;
+  }
   throw new Error(`sterlingUpdateRemedy: unknown host ${JSON.stringify(host)}`);
 }
 function canonical(p) {
@@ -10514,9 +10593,9 @@ function ownPluginRoot() {
   }
   return null;
 }
-function installedCopyRefusal(host) {
+function installedCopyRefusal(host, { env = process.env, home = homedir5(), root = null } = {}) {
   const by = host === "claude-code" ? "as a Claude Code plugin" : host === "opencode" ? "as an OpenCode plugin" : "as a plugin";
-  return `Sterling is installed ${by} \u2014 update it with ${sterlingUpdateRemedy(host)}. /sterling:update serves only a git clone of Sterling.`;
+  return `Sterling is installed ${by} \u2014 update it with ${sterlingUpdateRemedy(host, { env, home, root })}. /sterling:update serves only a git clone of Sterling.`;
 }
 function machineStores(cwd) {
   const stores = [join13(cwd, ".sterling", "sterling.db")];
@@ -10563,7 +10642,7 @@ function probeSchemaVersion(dbPath) {
 }
 async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts: opts2 = {}, reexec: reexec2 = null, invokingProject = null, projectDir = null, pluginRoot: pluginRoot2 = ownPluginRoot(), env = process.env, home = homedir5() }) {
   if (pluginRoot2 && isInstalledCopy(pluginRoot2, { env, home })) {
-    const refusal2 = installedCopyRefusal(installHostOf(pluginRoot2, { env, home }));
+    const refusal2 = installedCopyRefusal(installHostOf(pluginRoot2, { env, home }), { env, home, root: pluginRoot2 });
     log(`
 \u2717 ${refusal2}`);
     return { exit: 2, currency: null, steps: [], projects: [], migrations: [], refusal: refusal2 };

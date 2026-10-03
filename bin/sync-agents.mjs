@@ -6061,6 +6061,31 @@ import { join as join6 } from "node:path";
 import { existsSync as existsSync2, readFileSync as readFileSync4, readdirSync as readdirSync3, realpathSync as realpathSync2 } from "node:fs";
 import { homedir } from "node:os";
 import { join as join5, resolve as resolve3, sep as sep2 } from "node:path";
+
+// scripts/lib/jsonc.mjs
+function parseJsonc(text) {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j;
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+      out += "\n";
+    } else if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end === -1) throw new Error("unterminated /* comment");
+      i = end + 1;
+    } else if (c === "," && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, " ")))) {
+    } else out += c;
+  }
+  return JSON.parse(out);
+}
+
+// scripts/lib/sterling-roots.mjs
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -6213,6 +6238,19 @@ var scanInstalledSterling = api.scanInstalledSterling;
 var newestInstalledSterling = api.newestInstalledSterling;
 var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
+var STERLING_NPM_PACKAGE = "@chulf58/sterling";
+var STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+var isNpmSpec = (s) => s === STERLING_NPM_PACKAGE || s.startsWith(`${STERLING_NPM_PACKAGE}@`);
+var namesSterling = (s) => typeof s === "string" && (isNpmSpec(s) || STERLING_GIT_REPO.test(s.split("#")[0]));
+function sterlingPluginSpecs(plugins) {
+  if (!Array.isArray(plugins)) return [];
+  const out = [];
+  for (const entry of plugins) {
+    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === "object" ? entry.package : entry;
+    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? "npm" : "git" });
+  }
+  return out;
+}
 function canonical(p) {
   try {
     return realpathSync2(p);
@@ -6304,7 +6342,6 @@ var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
 var PROJECT_CONFIG_REL = ".opencode/opencode.json";
 var CONDUCTOR_AGENT = "sterling/conductor";
 var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "librarian"];
-var STERLING_NPM_PACKAGE = "@chulf58/sterling";
 var STORE_GUARD_PATTERNS = ["**/.sterling/sterling.db*", ".sterling/sterling.db*"];
 var SHELL_STORE_GUARD_PATTERN = "*sterling.db*";
 var SHELL_STORE_PATH_PATTERN = "*.sterling/sterling.db*";
@@ -6617,8 +6654,6 @@ function ensureTuiShim(tuiDir, shim) {
     ensureStampedFile(join8(tuiDir, "tui.tsx"), shim, `${fwd2(tuiDir)}/tui.tsx`)
   ];
 }
-var STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
-var namesNpmPackage = (s) => typeof s === "string" && (s === STERLING_NPM_PACKAGE || s.startsWith(`${STERLING_NPM_PACKAGE}@`) || STERLING_GIT_REPO.test(s.split("#")[0]));
 function npmCopyOnMachine({ env = process.env, home = homedir3() } = {}) {
   const copies = scanInstalledSterling(env, home).copies.filter((c) => c.host === "opencode");
   copies.sort((a, b) => compareSterlingVersions(a.version, b.version) || (a.root > b.root ? 1 : a.root < b.root ? -1 : 0));
@@ -6628,13 +6663,12 @@ function npmCopyOnMachine({ env = process.env, home = homedir3() } = {}) {
   const item = `${fwd2(path)} plugins`;
   let config2;
   try {
-    config2 = JSON.parse(readFileSync5(path, "utf8"));
+    config2 = parseJsonc(readFileSync5(path, "utf8"));
   } catch (err) {
     return { root, configured: false, row: { item, status: "skipped", detail: `${fwd2(path)} is not valid JSON (${err.message}), so whether it registers ${STERLING_NPM_PACKAGE} is unknown; the server shim is written unless the npm copy is in OpenCode's cache. Fix the file, then rerun /sterling:update` } };
   }
   const plugins = config2 && typeof config2 === "object" && !Array.isArray(config2) ? config2.plugins : void 0;
-  const configured = Array.isArray(plugins) && plugins.some((e) => namesNpmPackage(e) || e && typeof e === "object" && Object.values(e).some(namesNpmPackage));
-  return { root, configured };
+  return { root, configured: sterlingPluginSpecs(plugins).length > 0 };
 }
 function installGlobal({ pluginRoot: pluginRoot2, installed, npmCopy = false, env = process.env, home = homedir3() }) {
   const pluginsDir = join8(opencodeConfigDir({ env, home }), "plugins");
@@ -6775,27 +6809,6 @@ function guardPermission(permission) {
   }
   for (const key of ["edit", "shell", "bash"]) if (out[key] === void 0) out[key] = withGuard({}, patternsFor(key));
   return { value: out };
-}
-function parseJsonc(text) {
-  let out = "";
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"') {
-      let j = i + 1;
-      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
-      out += text.slice(i, j + 1);
-      i = j;
-    } else if (c === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-      out += "\n";
-    } else if (c === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      if (end === -1) throw new Error("unterminated /* comment");
-      i = end + 1;
-    } else if (c === "," && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, " ")))) {
-    } else out += c;
-  }
-  return JSON.parse(out);
 }
 function agentFiles(dir, { flat = false, prefix = "", seen = /* @__PURE__ */ new Set() } = {}) {
   if (!existsSync4(dir)) return [];
