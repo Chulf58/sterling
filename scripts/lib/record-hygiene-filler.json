@@ -1,0 +1,13 @@
+{
+  "_note": "Filler words for the record-hygiene arm (scripts/check-record-hygiene.mjs): words that say nothing about a record's subject but survive the axis stopword list, so they can land among its central terms (the terms push delivery and knowledge_preflight match on). Changelog and hedge prose, lower case, at least four letters. Edit this list freely: it is data, never enforced.",
+  "words": [
+    "added", "adds", "adding", "fixed", "fixes", "fixing", "updated", "updates", "update", "updating",
+    "removed", "removes", "removing", "improved", "improves", "improve", "improving", "better",
+    "ensure", "ensures", "ensuring", "handle", "handles", "handled", "handling", "support", "supports",
+    "supported", "various", "several", "related", "general", "generally", "additional", "further",
+    "proper", "properly", "correct", "correctly", "currently", "current", "always", "never", "newly",
+    "instead", "within", "without", "across", "during", "another", "other", "need", "needs", "needed",
+    "already", "simply", "basically", "really", "thing", "things", "stuff", "something",
+    "anything", "everything", "whether", "however", "therefore", "again", "once", "same"
+  ]
+}

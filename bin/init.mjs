@@ -10884,14 +10884,51 @@ function matchFrom(body, literals, names, i, pos, ctx, values) {
   }
   return null;
 }
+var replayFailureLine = (failures, consequence) => {
+  const reasons = failures.map((f) => f.slice(f.indexOf(": ") + 2));
+  const detail = failures.length > 1 && reasons.every((r) => r === reasons[0]) ? `all: ${reasons[0]}` : failures.join("; ");
+  return `launcher history: ${failures.length} earlier renderer version(s) could not be replayed (${detail}); ${consequence}`;
+};
 var currentText = (repoRoot, name4) => lf(readFileSync11(join18(repoRoot, "templates", name4), "utf8"));
-var defaultGit = (repoRoot) => (args) => spawnSync5("git", args, { cwd: repoRoot, encoding: "utf8" });
+var defaultGit = (repoRoot) => (args, { input, encoding = "utf8" } = {}) => spawnSync5("git", args, { cwd: repoRoot, encoding, input, maxBuffer: 256 * 1024 * 1024 });
 function gitLog(git2, repoRoot, rels) {
-  const log = git2(["log", "--format=%H", "--", ...rels]);
+  const log = git2(["log", "--full-history", "--format=%H", "--", ...rels]);
   if (log.status !== 0) throw new Error(`launcher history: git log failed for ${rels.join(", ")} in ${repoRoot}: ${log.stderr}`);
   return log.stdout.split("\n").filter(Boolean);
 }
+function gitBlobs(git2) {
+  const held = /* @__PURE__ */ new Map();
+  const fetch = (specs) => {
+    const need = [...new Set(specs)].filter((spec) => !held.has(spec));
+    if (!need.length) return;
+    const run = git2(["cat-file", "--batch"], { input: Buffer.from(`${need.join("\n")}
+`), encoding: "buffer" });
+    if (run.status !== 0) throw new Error(`launcher history: git cat-file --batch failed: ${run.stderr}`);
+    const out = run.stdout;
+    let pos = 0;
+    for (const spec of need) {
+      const eol = out.indexOf(10, pos);
+      if (eol === -1) throw new Error(`launcher history: git cat-file --batch ended before ${spec}`);
+      const header = out.subarray(pos, eol).toString("utf8");
+      pos = eol + 1;
+      if (header.endsWith(" missing")) {
+        held.set(spec, null);
+        continue;
+      }
+      const m = /^[0-9a-f]+ (\w+) (\d+)$/.exec(header);
+      if (!m || m[1] !== "blob") throw new Error(`launcher history: unexpected git cat-file --batch header for ${spec}: ${header}`);
+      const size = Number(m[2]);
+      held.set(spec, out.subarray(pos, pos + size).toString("utf8"));
+      pos += size + 1;
+    }
+  };
+  return { fetch, get: (spec) => {
+    fetch([spec]);
+    return held.get(spec);
+  } };
+}
 var RENDERER_REL = "scripts/lib/launcher-tmux.mjs";
+var RELATIVE_SPECIFIER = /^(?:import|export) [^;]*? from (['"])(\.{1,2}\/[^'"]+)\1;/gm;
 function rendererClosure(read) {
   const files = {};
   const pending = [RENDERER_REL];
@@ -10901,54 +10938,110 @@ function rendererClosure(read) {
     const src = read(rel);
     if (src === null) return null;
     files[rel] = src;
-    for (const m of src.matchAll(/^import [^;]*? from '(\.{1,2}\/[^']+)';/gm)) {
-      pending.push(join18(dirname7(rel), m[1]).split("\\").join("/"));
+    for (const m of src.matchAll(RELATIVE_SPECIFIER)) {
+      pending.push(join18(dirname7(rel), m[2]).split("\\").join("/"));
     }
   }
   return files;
 }
-function installedBlockAt(git2, sha) {
-  const files = rendererClosure((rel) => {
-    const show = git2(["show", `${sha}:${rel}`]);
-    return show.status === 0 ? show.stdout : null;
-  });
-  if (!files) return null;
-  const dir = mkdtempSync(join18(tmpdir(), "sterling-launcher-history-"));
-  try {
-    for (const [rel, src] of Object.entries(files)) {
-      mkdirSync6(join18(dir, dirname7(rel)), { recursive: true });
-      writeFileSync4(join18(dir, rel), src);
+function rendererClosures(blobs, shas) {
+  const states = shas.map((sha) => ({ sha, files: {}, next: [RENDERER_REL], dead: false }));
+  for (let live = states; live.length; live = live.filter((s2) => !s2.dead && s2.next.length)) {
+    blobs.fetch(live.flatMap((s2) => s2.next.map((rel) => `${s2.sha}:${rel}`)));
+    for (const s2 of live) {
+      const level = s2.next;
+      s2.next = [];
+      for (const rel of level) {
+        if (Object.hasOwn(s2.files, rel)) continue;
+        const src = blobs.get(`${s2.sha}:${rel}`);
+        if (src === null) {
+          s2.dead = true;
+          break;
+        }
+        s2.files[rel] = src;
+        for (const m of src.matchAll(RELATIVE_SPECIFIER)) s2.next.push(join18(dirname7(rel), m[2]).split("\\").join("/"));
+      }
     }
-    mkdirSync6(join18(dir, "templates"));
-    writeFileSync4(join18(dir, "templates", "launcher-tmux.sh"), "{{PLUGIN_PATHS}}");
-    const program = `import { renderTmuxLauncher } from ${JSON.stringify(pathToFileURL(join18(dir, RENDERER_REL)).href)};
-process.stdout.write(renderTmuxLauncher(${JSON.stringify(dir)}, { session: 's', splitPercent: 1, installed: true }));`;
-    const run = spawnSync5(process.execPath, ["--input-type=module", "-e", program], { encoding: "utf8" });
-    if (run.status !== 0) throw new Error(`launcher history: rendering ${RENDERER_REL} at ${sha} failed: ${run.stderr}`);
-    return run.stdout;
-  } finally {
-    rmSync2(dir, { recursive: true, force: true });
+  }
+  return new Map(states.filter((s2) => !s2.dead).map((s2) => [s2.sha, s2.files]));
+}
+function replayRenderers(versions, spawn) {
+  if (!versions.length) return [];
+  const root = mkdtempSync(join18(tmpdir(), "sterling-launcher-history-"));
+  try {
+    const dirs = versions.map(({ files }, i) => {
+      const dir = join18(root, String(i));
+      for (const [rel, src] of Object.entries(files)) {
+        mkdirSync6(join18(dir, dirname7(rel)), { recursive: true });
+        writeFileSync4(join18(dir, rel), src);
+      }
+      mkdirSync6(join18(dir, "templates"));
+      writeFileSync4(join18(dir, "templates", "launcher-tmux.sh"), "{{PLUGIN_PATHS}}");
+      return dir;
+    });
+    const urls = dirs.map((dir) => pathToFileURL(join18(dir, RENDERER_REL)).href);
+    const program = `const dirs = ${JSON.stringify(dirs)};
+const urls = ${JSON.stringify(urls)};
+const out = [];
+for (const [i, dir] of dirs.entries()) {
+  try {
+    const mod = await import(urls[i]);
+    out.push({ block: mod.renderTmuxLauncher(dir, { session: 's', splitPercent: 1, installed: true }), error: null });
+  } catch (err) {
+    out.push({ block: null, error: String(err?.message ?? err).split('\\n')[0] });
   }
 }
-function gitHistory(repoRoot, git2) {
+process.stdout.write(JSON.stringify(out));`;
+    const run = spawn(process.execPath, ["--input-type=module", "-e", program], { encoding: "utf8" });
+    const died = (why) => versions.map(() => ({ block: null, error: why }));
+    if (run.status !== 0) {
+      const exit = run.status === null ? "did not exit normally" : `exited ${run.status}`;
+      const detail = [(run.stderr ?? "").trim().split("\n")[0], run.error?.message, run.signal && `signal ${run.signal}`].filter(Boolean).join("; ");
+      return died(`the replay process ${exit}${detail ? `: ${detail}` : ""}`);
+    }
+    let results;
+    try {
+      results = JSON.parse(run.stdout);
+    } catch (err) {
+      return died(`the replay process printed unparseable output (${err.message})`);
+    }
+    if (!Array.isArray(results) || results.length !== versions.length) {
+      return died(`the replay process printed unexpected output (expected ${versions.length} results)`);
+    }
+    return results.map((r) => typeof r?.block === "string" ? r : { block: null, error: r?.error ?? "the renderer returned no text" });
+  } finally {
+    rmSync2(root, { recursive: true, force: true });
+  }
+}
+function gitHistory(repoRoot, git2, spawn) {
   if (isInstalledCopy(repoRoot)) return null;
+  const blobs = gitBlobs(git2);
+  const closure = Object.keys(rendererClosure((rel) => readFileSync11(join18(repoRoot, rel), "utf8")));
+  const templateRels = LAUNCHER_TEMPLATES.map((name4) => `templates/${name4}`);
+  const shas = gitLog(git2, repoRoot, [...templateRels, ...closure]);
+  blobs.fetch(shas.flatMap((sha) => [...templateRels, ...closure].map((rel) => `${sha}:${rel}`)));
   const templates = /* @__PURE__ */ new Map();
   for (const name4 of LAUNCHER_TEMPLATES) {
-    const rel = `templates/${name4}`;
     const set = /* @__PURE__ */ new Set();
-    for (const sha of gitLog(git2, repoRoot, [rel])) {
-      const show = git2(["show", `${sha}:${rel}`]);
-      if (show.status === 0) set.add(lf(show.stdout));
+    for (const sha of shas) {
+      const text = blobs.get(`${sha}:templates/${name4}`);
+      if (text !== null) set.add(lf(text));
     }
     templates.set(name4, set);
   }
-  const closure = Object.keys(rendererClosure((rel) => readFileSync11(join18(repoRoot, rel), "utf8")));
-  const installedBlocks = /* @__PURE__ */ new Set();
-  for (const sha of gitLog(git2, repoRoot, closure)) {
-    const block = installedBlockAt(git2, sha);
-    if (block !== null && block !== INSTALLED_PATHS) installedBlocks.add(block);
+  const versions = /* @__PURE__ */ new Map();
+  for (const [sha, files] of rendererClosures(blobs, shas)) {
+    const key = JSON.stringify(Object.entries(files).sort(([x], [y]) => x < y ? -1 : 1));
+    if (!versions.has(key)) versions.set(key, { sha, files });
   }
-  return { templates, installedBlocks };
+  const replayed = [...versions.values()];
+  const installedBlocks = /* @__PURE__ */ new Set();
+  const replayFailures = [];
+  replayRenderers(replayed, spawn).forEach(({ block, error }, i) => {
+    if (block === null) replayFailures.push(`${replayed[i].sha.slice(0, 8)}: ${error}`);
+    else if (block !== INSTALLED_PATHS) installedBlocks.add(block);
+  });
+  return { templates, installedBlocks, replayFailures };
 }
 function loadSnapshot(path) {
   let raw;
@@ -10968,22 +11061,22 @@ function loadSnapshot(path) {
   if (!valid) return { ok: false, reason: `${path} is unparseable (expected an object of name \u2192 string[])` };
   return { ok: true, data: parsed };
 }
-function historicalLauncherTemplates({ repoRoot, git: git2 = defaultGit(repoRoot) }) {
-  const fromGit = gitHistory(repoRoot, git2);
+function historicalLauncherTemplates({ repoRoot, git: git2 = defaultGit(repoRoot), spawn = spawnSync5 }) {
+  const fromGit = gitHistory(repoRoot, git2, spawn);
   const templates = /* @__PURE__ */ new Map();
   if (fromGit) {
     for (const name4 of LAUNCHER_TEMPLATES) {
       const current = currentText(repoRoot, name4);
       templates.set(name4, [...fromGit.templates.get(name4)].filter((t) => t !== current));
     }
-    return { templates, installedBlocks: /* @__PURE__ */ new Set([INSTALLED_PATHS, ...fromGit.installedBlocks]), degraded: null };
+    return { templates, installedBlocks: /* @__PURE__ */ new Set([INSTALLED_PATHS, ...fromGit.installedBlocks]), degraded: null, replayFailures: fromGit.replayFailures };
   }
   const path = join18(repoRoot, LAUNCHER_HISTORY_REL);
   const snapshot = loadSnapshot(path);
   for (const name4 of LAUNCHER_TEMPLATES) templates.set(name4, snapshot.ok ? (snapshot.data[name4] ?? []).map(lf) : []);
   const installedBlocks = /* @__PURE__ */ new Set([INSTALLED_PATHS, ...snapshot.ok ? snapshot.data[INSTALLED_BLOCKS_KEY] ?? [] : []]);
   const degraded = snapshot.ok ? null : `no git history at ${repoRoot} (installed plugin copy) and ${snapshot.reason}`;
-  return { templates, installedBlocks, degraded };
+  return { templates, installedBlocks, degraded, replayFailures: [] };
 }
 function olderGeneratedLauncher(text, templateName, history) {
   for (const t of history.templates.get(templateName) ?? []) {
@@ -12651,7 +12744,13 @@ if (claudeHost) {
   const crlf2 = (s2) => s2.replace(/\r?\n/g, "\r\n");
   let launcherHistory = null;
   const olderGenerated = (text, templateName) => {
-    launcherHistory ??= historicalLauncherTemplates({ repoRoot: pluginRoot });
+    if (!launcherHistory) {
+      launcherHistory = historicalLauncherTemplates({ repoRoot: pluginRoot });
+      if (launcherHistory.replayFailures.length) {
+        warns.push(`
+\u26A0 ${replayFailureLine(launcherHistory.replayFailures, "a launcher rendered by one of them is left untouched as if hand-edited. Fix or report the renderer commit named above.")}`);
+      }
+    }
     return olderGeneratedLauncher(text, templateName, launcherHistory);
   };
   const refreshedDetail = (oldPath, newPath) => "an earlier generated version of the template; rewritten from the current one" + (oldPath && oldPath !== newPath ? ` (it was rendered for ${oldPath}, now ${newPath})` : "");
