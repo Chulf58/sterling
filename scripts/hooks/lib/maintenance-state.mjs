@@ -202,14 +202,16 @@ function workerStateFileProblem(cwd) {
     raw = readFileSync(path, 'utf8');
   } catch (e) {
     if (e?.code === 'ENOENT') return null;
-    return `worker state file ${shown} unreadable: ${e?.message ?? e}`;
+    // Stable reasons only: a raw exception message can quote the file's content.
+    return `worker state file ${shown} unreadable: ${typeof e?.code === 'string' ? e.code : 'read error'}`;
   }
+  let parsed;
   try {
-    const parsed = JSON.parse(raw);
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return `worker state file ${shown} unreadable: not a JSON object`;
-  } catch (e) {
-    return `worker state file ${shown} unreadable: ${e?.message ?? e}`;
+    parsed = JSON.parse(raw);
+  } catch {
+    return `worker state file ${shown} unreadable: invalid JSON`;
   }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return `worker state file ${shown} unreadable: not a JSON object`;
   return null;
 }
 

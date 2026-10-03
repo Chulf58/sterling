@@ -171,26 +171,42 @@ test('BACKLOG worker state: a failed run older than the back-off no longer backs
   });
 });
 
-const STATE_UNKNOWN = /worker state unknown \(worker state file \.sterling\/transient\/maintenance-worker\.state\.json unreadable: [^)]+\)/;
+const stateUnknown = (reason) =>
+  `worker state unknown (worker state file .sterling/transient/maintenance-worker.state.json unreadable: ${reason})`;
 
-test('BACKLOG worker state: a malformed state file gives "state unknown", never a waiting/due guess', () => {
+test('BACKLOG worker state: a malformed state file gives "state unknown" with a stable reason, never its content', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
-    writeFileSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'), '{"last_run": {"ok": false, ');
+    // JSON.parse's own message can quote a prefix of the file, so the marker leads the content
+    writeFileSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'), 'SECRET-MARKER-7f3a <html>not json');
     // one hour-old unjudged item: without the state file this reads "due to launch"
     const b = backlog(dir, reconcile(now, { ageMin: 60 }), now);
-    assert.match(b.banner, STATE_UNKNOWN);
-    assert.match(b.line, STATE_UNKNOWN);
+    assert.ok(b.banner.endsWith(`, ${stateUnknown('invalid JSON')}`), b.banner);
+    assert.ok(b.line.endsWith(`${stateUnknown('invalid JSON')}.`), b.line);
+    assert.doesNotMatch(b.banner, /SECRET-MARKER/);
+    assert.doesNotMatch(b.line, /SECRET-MARKER/);
     assert.doesNotMatch(b.banner, /due to launch|waiting to batch|backing off|idle/);
   });
 });
 
-test('BACKLOG worker state: a state file that cannot be read (a directory at its path) gives "state unknown"', () => {
+test('BACKLOG worker state: a state file that is valid JSON but not an object gives "not a JSON object"', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeFileSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'), '["SECRET-MARKER-7f3a"]');
+    const b = backlog(dir, reconcile(now, { ageMin: 60 }), now);
+    assert.ok(b.banner.endsWith(`, ${stateUnknown('not a JSON object')}`), b.banner);
+    assert.doesNotMatch(b.banner, /SECRET-MARKER/);
+  });
+});
+
+test('BACKLOG worker state: a state file that cannot be read (a directory at its path) names only the error code', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     mkdirSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'));
     const b = backlog(dir, reconcile(now, { ageMin: 60 }), now);
-    assert.match(b.banner, STATE_UNKNOWN);
+    assert.ok(b.banner.endsWith(`, ${stateUnknown('EISDIR')}`), b.banner);
+    assert.ok(b.line.endsWith(`${stateUnknown('EISDIR')}.`), b.line);
+    assert.doesNotMatch(b.banner, /illegal operation/);
     assert.doesNotMatch(b.banner, /due to launch|waiting to batch|backing off|idle/);
   });
 });
