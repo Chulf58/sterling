@@ -56,6 +56,11 @@ export const AGENTS_TAB = TABS.indexOf('Agents');
  *  and the inline model/effort swap selector — the TUI's first write surface */
 export const SYSTEM_TAB = TABS.indexOf('System');
 
+/** The Knowledge tab's feature-article state filter, in cycle order. 'all' is the
+ *  unfiltered position (UiState.stateFilter absent); the rest mirror the state
+ *  enum in packages/schemas/src/records.ts. */
+export const ARTICLE_STATE_FILTERS = ['all', 'planned', 'built', 'wired_in', 'active', 'dormant', 'deprecated'] as const;
+
 export interface UiState {
   tab: number;
   cursor: number;
@@ -63,6 +68,9 @@ export interface UiState {
   /** Knowledge-tab FTS filter; an always-visible field — printable keys feed it
    *  directly (no '/' toggle). Persists across tab switches until ESC clears it. */
   searchQuery: string;
+  /** Knowledge tab: show only feature articles in this state (ctrl-f cycles
+   *  ARTICLE_STATE_FILTERS). Absent → all. Other record types are not filtered. */
+  stateFilter?: string;
   /** body scroll offset in display LINES (0-based) for the scrollable card tabs
    *  (Tasks/Knowledge). Absent → 0. buildDashboardState clamps it to the
    *  content height each frame; the queue tab has a fixed layout and never
@@ -419,12 +427,20 @@ export type Effect =
   | BoardEditEffect;
 
 export type UiEvent =
-  | { kind: 'key'; name: 'LEFT' | 'RIGHT' | 'TAB' | 'UP' | 'DOWN' | 'ENTER' | 'SPACE' | 'QUIT' | 'ESCAPE' | 'BACKSPACE' }
+  | { kind: 'key'; name: 'LEFT' | 'RIGHT' | 'TAB' | 'UP' | 'DOWN' | 'ENTER' | 'SPACE' | 'QUIT' | 'ESCAPE' | 'BACKSPACE' | 'STATE_FILTER' }
   | { kind: 'char'; ch: string } // printable keys — search input, 'q' quit, digit hotkeys, '/' search
   | { kind: 'tab'; index: number } // direct tab select, 0-based; out-of-range ignored here
   | { kind: 'click'; x: number; y: number }
   | { kind: 'rightclick' }
   | { kind: 'wheel'; dy: number };
+
+/** The Knowledge tab's state column: a fixed-width `[state]` cell on feature
+ *  article rows, nothing on any other row. Padded to the widest tag
+ *  ('[deprecated]') so titles line up. */
+const STATE_COLUMN_WIDTH = Math.max(...ARTICLE_STATE_FILTERS.slice(1).map((n) => n.length)) + 2;
+function stateColumn(card: Card): string {
+  return card.state ? `${`[${card.state}]`.padEnd(STATE_COLUMN_WIDTH)} ` : '';
+}
 
 export function cardsFor(store: SterlingStore, tab: number, expanded: string[] = []): Card[] {
   if (tab === 0) return todoCards(store, expanded);
@@ -539,6 +555,13 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
 
   const cap = 500;
   const query = ui.searchQuery.trim();
+  // state filter: drops feature articles outside the chosen state; every other
+  // record type passes through untouched.
+  const inState = (r: unknown): boolean => {
+    const rec = r as { type?: string; state?: string };
+    return !ui.stateFilter || rec.type !== 'feature_article' || rec.state === ui.stateFilter;
+  };
+  const cardInState = (c: Card): boolean => !ui.stateFilter || c.type !== 'feature_article' || c.state === ui.stateFilter;
   if (query) {
     const terms = rankTermsOf(query);
     if (terms.length) {
@@ -547,11 +570,12 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
       // category tree must render identically — same body, same disclosure —
       // and the query stays gated on that card being expanded.
       if (knowledge) {
-        return knowledgeSearch(knowledge, terms).map((card) => ({ kind: 'card' as const, card: hydrateInbound(card, ui, knowledge), depth: 0, knowledge: true }));
+        return knowledgeSearch(knowledge, terms).filter(cardInState).map((card) => ({ kind: 'card' as const, card: hydrateInbound(card, ui, knowledge), depth: 0, knowledge: true }));
       }
       const types = KNOWLEDGE_CATEGORIES.map((c) => c.type);
       return store
         .query({ types, rank_terms: terms, match_all: true, cap })
+        .filter(inState)
         .map((r) => ({ kind: 'card' as const, card: hydrateInbound({ ...toCard(r), source: 'project' }, ui, store), depth: 0, knowledge: true }));
     }
   }
@@ -592,7 +616,7 @@ export function nodesFor(store: SterlingStore, ui: UiState, knowledge?: MountedS
       // bucket is a foldable sub-category node and its cards sit at depth 3 when
       // expanded. No new query — we regroup the records already fetched, so the
       // COUNT-then-fetch perf model is untouched.
-      const groups = knowledgeSubgroups(records);
+      const groups = knowledgeSubgroups(records.filter(inState));
       const reader = knowledge ?? store;
       if (groups.length <= 1) {
         for (const card of groups[0]?.cards ?? []) {
@@ -1008,7 +1032,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
         // lines, dim meta — the title is NEVER replaced by the body.
         const indent = ' '.repeat(2 + pad.length);
         const wrapWidth = Number.isFinite(width) ? Math.max(1, width - indent.length) : width;
-        lines = [{ text: clipEllipsis(marker + pad + card.title, width), kind: 'title' }, { text: '', kind: 'body' }];
+        lines = [{ text: clipEllipsis(marker + pad + stateColumn(card) + card.title, width), kind: 'title' }, { text: '', kind: 'body' }];
         for (const text of wrapText(card.body, wrapWidth)) lines.push({ text: indent + text, kind: 'body' });
         lines.push({ text: clipEllipsis(`${indent}${card.detail}`, width), kind: 'meta' });
       } else if (expanded) {
@@ -1023,7 +1047,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
         if (card.detail) lines.push({ text: `    ${pad}${card.detail}`, kind: 'meta' });
         if (card.blocked) lines.push({ text: `    ${pad}${card.blocked}`, kind: 'meta' });
       } else {
-        lines = [{ text: clipEllipsis(marker + pad + card.title, width), kind: 'title' }];
+        lines = [{ text: clipEllipsis(marker + pad + stateColumn(card) + card.title, width), kind: 'title' }];
       }
     }
     rows.push({ id, type, selected, expanded, lines, screenRow });
@@ -1097,9 +1121,9 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
         : ui.tab === AGENTS_TAB
           ? `←/→ or 1-${visibleTabs(agents).length} tabs · q quit`
           : `←/→ or 1-${visibleTabs(agents).length} tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit` +
-          (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears' : '') +
+          (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears · ctrl-f article state' : '') +
           (ui.tab === TASKS_TAB ? (ui.boardEdit ? ' · enter save · esc cancel' : ' · e edit') : ''),
-    searchLine: searchActive ? `search: ${ui.searchQuery}` : undefined,
+    searchLine: searchActive ? `search: ${ui.searchQuery}${ui.stateFilter ? `  state: ${ui.stateFilter}` : ''}` : undefined,
     queueCompleted,
     queueActivity,
     banner,
@@ -1437,6 +1461,12 @@ export function reduce(
             return { ui: { ...ui, searchQuery: '', cursor: 0, scroll: 0 }, effects };
           }
           return { ui, effects };
+        case 'STATE_FILTER': {
+          if (ui.tab !== KNOWLEDGE_TAB) return { ui, effects };
+          const at = ARTICLE_STATE_FILTERS.indexOf((ui.stateFilter ?? 'all') as (typeof ARTICLE_STATE_FILTERS)[number]);
+          const next = ARTICLE_STATE_FILTERS[(at + 1) % ARTICLE_STATE_FILTERS.length]!;
+          return { ui: { ...ui, stateFilter: next === 'all' ? undefined : next, cursor: 0, scroll: 0 }, effects };
+        }
         case 'BACKSPACE':
           if (ui.tab === KNOWLEDGE_TAB) {
             return { ui: { ...ui, searchQuery: ui.searchQuery.slice(0, -1), cursor: 0, scroll: 0 }, effects };

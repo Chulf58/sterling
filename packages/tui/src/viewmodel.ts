@@ -18,6 +18,8 @@ export interface Card {
   depth?: number;
   /** board item's open blockers as one line ('blocked by: a, b'); absent when none is open */
   blocked?: string;
+  /** feature_article lifecycle state (planned … deprecated); absent on every other card type */
+  state?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +174,7 @@ function baseCard(rec: unknown): Card {
         type: 'feature_article',
         title: a.title,
         body: `What it does:\n${a.what_it_does}\n\nIntended behaviour:\n${a.intended_behavior}${acSection}`,
+        state: a.state,
         detail: `${a.slug} · ${a.state} · v${a.version} · ${a.files.length} file(s) · relies on ${a.dependencies.relies_on.length}`,
       };
     }

@@ -215,6 +215,8 @@ export function keyToEvent(name: string): UiEvent | undefined {
       return { kind: 'key', name: 'BACKSPACE' };
     case 'CTRL_C':
       return { kind: 'key', name: 'QUIT' };
+    case 'CTRL_F':
+      return { kind: 'key', name: 'STATE_FILTER' };
     default:
       if (name.length === 1 && name >= ' ') return { kind: 'char', ch: name };
       return undefined;
