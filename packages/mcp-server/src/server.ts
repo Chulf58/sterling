@@ -173,6 +173,16 @@ const knowledgeCreateFieldsSchema = z.discriminatedUnion(
  */
 const strict = <T extends z.ZodRawShape>(shape: T) => z.object(shape).strict();
 
+/** The one-line boot warning for a mounted domain whose store could not be
+ *  read (a pre-v2 store, any other read failure), the sibling of the store's
+ *  missingDomainWarning. */
+export function unreadableDomainWarning(d: MountedStores['unreadableDomains'][number]): string {
+  return (
+    `sterling: domain '${d.name}' is mounted but its store at '${d.dbPath}' could not be read (${d.error}); ` +
+    `reads skip it until the store is repaired and the session restarts, so its knowledge is not in any result, and writes into it are refused.`
+  );
+}
+
 export function createSterlingServer(storePath: string): { server: McpServer; store: MountedStores; tools: SterlingTools } {
   // config.json sits beside the store in .sterling/ (§12); malformed fails loud.
   // Read before opening the store: config.stack_tags is the §3.3 mount manifest.
@@ -185,6 +195,9 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   // stays on store.missingDomains. Creating it is an explicit createDomain call.
   const store = new MountedStores(storePath, resolveDomainMounts(config), { skipMissing: true });
   for (const m of store.missingDomains) process.stderr.write(missingDomainWarning(m) + '\n');
+  // A mounted domain that fails the mount-time read check never fails boot
+  // either: reads skip it, and it is announced the same way.
+  for (const d of store.unreadableDomains) process.stderr.write(unreadableDomainWarning(d) + '\n');
   // store lives at <project>/.sterling/sterling.db (§2.3) — project root is two up;
   // §3.2.5 repo-located doc mtime checks resolve against it
   const tools = new SterlingTools({ store, config, repoRoot: dirname(dirname(storePath)), domains: mountedDomainSurface(store) });
@@ -245,7 +258,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_query',
     {
       description:
-        "Retrieve knowledge: filter (types, stack_tags) → file_keys join → rank (rank_terms: single keywords, never prose) → cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW — raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: \"full\" (default), \"digest\" (one headline line per record — scan wide, then knowledge_get the few you need), or \"count\". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (score = -bm25, higher is more relevant, unbounded). Each record carries `source` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched.",
+        "Retrieve knowledge: filter (types, stack_tags) → file_keys join → rank (rank_terms: single keywords, never prose) → cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW — raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: \"full\" (default), \"digest\" (one headline line per record — scan wide, then knowledge_get the few you need), or \"count\". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (score = -bm25, higher is more relevant, unbounded). Each record carries `source` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched; unreadable_domains lists mounted domains that could not be read, each with its error, and their records are not in the result.",
       inputSchema: strict({
         types: z.array(z.string()).optional(),
         stack_tags: z.array(z.string()).optional(),
@@ -263,7 +276,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_get',
     {
       description:
-        "Fetch one record by id (full uuid, exact slug, or unambiguous 8-char prefix) — the full-fidelity read. version:<n> reads an archived prior version. With `field`: a windowed read of just that field — strings page by characters, arrays by elements (offset/length); returns {kind, total_chars|total_entries, offset, value|entries}; an offset past the end returns empty with the true total. Scalar/object fields return whole and refuse offset/length. Unknown field is refused naming the valid set; offset/length without field is refused.",
+        "Fetch one record by id (full uuid, exact slug, or unambiguous 8-char prefix) — the full-fidelity read. version:<n> reads an archived prior version. With `field`: a windowed read of just that field — strings page by characters, arrays by elements (offset/length); returns {kind, total_chars|total_entries, offset, value|entries}; an offset past the end returns empty with the true total. Scalar/object fields return whole and refuse offset/length. Unknown field is refused naming the valid set; offset/length without field is refused. unreadable_domains (only when a mounted domain could not be read: each with its error) means a record held there cannot be found by this read.",
       inputSchema: strict({
         id: z.string(),
         field: z.string().optional(),
@@ -695,7 +708,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_preflight',
     {
       description:
-        "Pre-write conflict check: does the store already govern this subject? Run it before dispatching, designing, asking the user, or drafting a new record. Pass `text` (one subject) or `texts` (an agenda, one verdict per entry, in order). Matches anti_pattern, decision, feature_article, research_finding, disconfirmed_hypothesis and open_question records. Verdicts: \"verify_targets\" — the store governs this; open the named matches before proceeding (a match is a pointer, not the source); \"ungoverned\" — nothing governs it; \"insufficient\" — too little vocabulary to judge; the verdict and matched_total are decided from the centrality-passing candidate set only, not the capped `matches` window. Returns {terms, matched_total, capped (present/true only when `matches` was truncated), matches:[{id,type,title,matched_on,central,source}], answerability, missing_domains (only when a configured domain has no store)} or {verdicts:[…]}. `matches` is capped at 20, sorted centrality-first (a central match always outranks a merely-hitting one), then by raw hit count. `matches` may include records with `central:[]` (non-central) — record-centrality is no longer required to LIST a candidate, only to decide the verdict and matched_total. matched_total counts centrality-passing, qualifying records among the candidates evaluated (each record type's own query is itself capped at 40), not a true/exact/full count.",
+        "Pre-write conflict check: does the store already govern this subject? Run it before dispatching, designing, asking the user, or drafting a new record. Pass `text` (one subject) or `texts` (an agenda, one verdict per entry, in order). Matches anti_pattern, decision, feature_article, research_finding, disconfirmed_hypothesis and open_question records. Verdicts: \"verify_targets\" — the store governs this; open the named matches before proceeding (a match is a pointer, not the source); \"ungoverned\" — nothing governs it; \"insufficient\" — too little vocabulary to judge; the verdict and matched_total are decided from the centrality-passing candidate set only, not the capped `matches` window. Returns {terms, matched_total, capped (present/true only when `matches` was truncated), matches:[{id,type,title,matched_on,central,source}], answerability, missing_domains (only when a configured domain has no store), unreadable_domains (only when a mounted domain could not be read: each with its error; its records are not in the result)} or {verdicts:[…]}. `matches` is capped at 20, sorted centrality-first (a central match always outranks a merely-hitting one), then by raw hit count. `matches` may include records with `central:[]` (non-central) — record-centrality is no longer required to LIST a candidate, only to decide the verdict and matched_total. matched_total counts centrality-passing, qualifying records among the candidates evaluated (each record type's own query is itself capped at 40), not a true/exact/full count.",
       inputSchema: strict({ text: z.string().optional(), texts: z.array(z.string()).optional() }),
     },
     ({ text, texts }) => {
