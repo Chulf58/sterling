@@ -10407,6 +10407,31 @@ import { join as join13 } from "node:path";
 import { existsSync as existsSync5, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join12, resolve as resolve4, sep as sep2 } from "node:path";
+
+// scripts/lib/jsonc.mjs
+function parseJsonc(text) {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j;
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+      out += "\n";
+    } else if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end === -1) throw new Error("unterminated /* comment");
+      i = end + 1;
+    } else if (c === "," && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, " ")))) {
+    } else out += c;
+  }
+  return JSON.parse(out);
+}
+
+// scripts/lib/sterling-roots.mjs
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -10559,6 +10584,19 @@ var scanInstalledSterling = api.scanInstalledSterling;
 var newestInstalledSterling = api.newestInstalledSterling;
 var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
+var STERLING_NPM_PACKAGE = "@chulf58/sterling";
+var STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+var isNpmSpec = (s2) => s2 === STERLING_NPM_PACKAGE || s2.startsWith(`${STERLING_NPM_PACKAGE}@`);
+var namesSterling = (s2) => typeof s2 === "string" && (isNpmSpec(s2) || STERLING_GIT_REPO.test(s2.split("#")[0]));
+function sterlingPluginSpecs(plugins) {
+  if (!Array.isArray(plugins)) return [];
+  const out = [];
+  for (const entry of plugins) {
+    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === "object" ? entry.package : entry;
+    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? "npm" : "git" });
+  }
+  return out;
+}
 function canonical(p) {
   try {
     return realpathSync3(p);
@@ -11338,7 +11376,6 @@ var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
 var PROJECT_CONFIG_REL = ".opencode/opencode.json";
 var CONDUCTOR_AGENT = "sterling/conductor";
 var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "librarian"];
-var STERLING_NPM_PACKAGE = "@chulf58/sterling";
 var STORE_GUARD_PATTERNS = ["**/.sterling/sterling.db*", ".sterling/sterling.db*"];
 var SHELL_STORE_GUARD_PATTERN = "*sterling.db*";
 var SHELL_STORE_PATH_PATTERN = "*.sterling/sterling.db*";
@@ -11651,8 +11688,6 @@ function ensureTuiShim(tuiDir, shim) {
     ensureStampedFile(join20(tuiDir, "tui.tsx"), shim, `${fwd5(tuiDir)}/tui.tsx`)
   ];
 }
-var STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
-var namesNpmPackage = (s2) => typeof s2 === "string" && (s2 === STERLING_NPM_PACKAGE || s2.startsWith(`${STERLING_NPM_PACKAGE}@`) || STERLING_GIT_REPO.test(s2.split("#")[0]));
 function npmCopyOnMachine({ env = process.env, home = homedir7() } = {}) {
   const copies = scanInstalledSterling(env, home).copies.filter((c) => c.host === "opencode");
   copies.sort((a, b) => compareSterlingVersions(a.version, b.version) || (a.root > b.root ? 1 : a.root < b.root ? -1 : 0));
@@ -11662,13 +11697,12 @@ function npmCopyOnMachine({ env = process.env, home = homedir7() } = {}) {
   const item = `${fwd5(path)} plugins`;
   let config;
   try {
-    config = JSON.parse(readFileSync13(path, "utf8"));
+    config = parseJsonc(readFileSync13(path, "utf8"));
   } catch (err) {
     return { root, configured: false, row: { item, status: "skipped", detail: `${fwd5(path)} is not valid JSON (${err.message}), so whether it registers ${STERLING_NPM_PACKAGE} is unknown; the server shim is written unless the npm copy is in OpenCode's cache. Fix the file, then rerun /sterling:update` } };
   }
   const plugins = config && typeof config === "object" && !Array.isArray(config) ? config.plugins : void 0;
-  const configured = Array.isArray(plugins) && plugins.some((e) => namesNpmPackage(e) || e && typeof e === "object" && Object.values(e).some(namesNpmPackage));
-  return { root, configured };
+  return { root, configured: sterlingPluginSpecs(plugins).length > 0 };
 }
 function installGlobal({ pluginRoot: pluginRoot2, installed, npmCopy = false, env = process.env, home = homedir7() }) {
   const pluginsDir = join20(opencodeConfigDir({ env, home }), "plugins");
@@ -11809,27 +11843,6 @@ function guardPermission(permission) {
   }
   for (const key of ["edit", "shell", "bash"]) if (out[key] === void 0) out[key] = withGuard({}, patternsFor(key));
   return { value: out };
-}
-function parseJsonc(text) {
-  let out = "";
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"') {
-      let j = i + 1;
-      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
-      out += text.slice(i, j + 1);
-      i = j;
-    } else if (c === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-      out += "\n";
-    } else if (c === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      if (end === -1) throw new Error("unterminated /* comment");
-      i = end + 1;
-    } else if (c === "," && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, " ")))) {
-    } else out += c;
-  }
-  return JSON.parse(out);
 }
 function agentFiles(dir, { flat = false, prefix = "", seen = /* @__PURE__ */ new Set() } = {}) {
   if (!existsSync10(dir)) return [];
@@ -13007,7 +13020,7 @@ if (initIsPluginRepo) {
 } else {
   const mcp = existsSync11(mcpPath) ? readMcp() : void 0;
   if (!existsSync11(mcpPath)) {
-    items.push({ item: ".mcp.json", status: "matches", detail: "not written \u2014 the plugin declares sterling, bound to this project via ${CLAUDE_PROJECT_DIR}" });
+    items.push(claudeHost ? { item: ".mcp.json", status: "matches", detail: "not written \u2014 the plugin declares sterling, bound to this project via ${CLAUDE_PROJECT_DIR}" } : { item: ".mcp.json", status: "skipped", detail: "not applicable \u2014 Claude Code is not installed on this machine, and the Claude Code plugin is what declares sterling there" });
   } else if (!mcp) {
     items.push({ item: ".mcp.json", status: "differs", detail: "exists but is not a parseable object \u2014 left untouched" });
   } else if (isOurMcpEntry(mcp.mcpServers?.sterling)) {
@@ -13020,7 +13033,7 @@ if (initIsPluginRepo) {
     items.push({ item: ".mcp.json", status: "matches", detail: "no per-project sterling entry \u2014 the plugin declares it" });
   }
 }
-items.push({ item: "hooks (\xA76 set)", status: "matches", detail: "active via the plugin (hooks/hooks.json) \u2014 not duplicated into the project" });
+items.push(claudeHost ? { item: "hooks (\xA76 set)", status: "matches", detail: "active via the plugin (hooks/hooks.json) \u2014 not duplicated into the project" } : { item: "hooks (\xA76 set)", status: "skipped", detail: "not applicable \u2014 Claude Code is not installed on this machine, and the Claude Code plugin is what activates these hooks (OpenCode runs its own plugin hooks)" });
 var gitignorePath = join21(target, ".gitignore");
 var existingIgnore = existsSync11(gitignorePath) ? readFileSync14(gitignorePath, "utf8") : "";
 var entries = [".sterling/", "sterling.bat", "sterling-windows.bat", "tui.bat", "sterling-launch.sh", UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, ".claude/agents/"];

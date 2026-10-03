@@ -11991,6 +11991,31 @@ import { join as join10 } from "node:path";
 import { existsSync as existsSync7, readFileSync as readFileSync5, readdirSync as readdirSync2, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join9, resolve as resolve5, sep } from "node:path";
+
+// scripts/lib/jsonc.mjs
+function parseJsonc(text) {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j;
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+      out += "\n";
+    } else if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end === -1) throw new Error("unterminated /* comment");
+      i = end + 1;
+    } else if (c === "," && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, " ")))) {
+    } else out += c;
+  }
+  return JSON.parse(out);
+}
+
+// scripts/lib/sterling-roots.mjs
 var STERLING_GIT_SPEC = "github:Chulf58/sterling#semver:>=0.18.0";
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
@@ -12144,10 +12169,64 @@ var scanInstalledSterling = api.scanInstalledSterling;
 var newestInstalledSterling = api.newestInstalledSterling;
 var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
-function sterlingUpdateRemedy(host) {
+var STERLING_NPM_PACKAGE = "@chulf58/sterling";
+var STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
+var isNpmSpec = (s2) => s2 === STERLING_NPM_PACKAGE || s2.startsWith(`${STERLING_NPM_PACKAGE}@`);
+var namesSterling = (s2) => typeof s2 === "string" && (isNpmSpec(s2) || STERLING_GIT_REPO.test(s2.split("#")[0]));
+function sterlingPluginSpecs(plugins) {
+  if (!Array.isArray(plugins)) return [];
+  const out = [];
+  for (const entry of plugins) {
+    const spec = Array.isArray(entry) ? entry[0] : entry && typeof entry === "object" ? entry.package : entry;
+    if (namesSterling(spec)) out.push({ spec, kind: isNpmSpec(spec) ? "npm" : "git" });
+  }
+  return out;
+}
+function copyKindOf(root, env, home) {
+  if (!root) return null;
+  const cache = installRoots(env, home).find((r) => r.host === "opencode")?.dir;
+  const real = canonical(root);
+  const base2 = canonical(cache) + sep;
+  if (!real.startsWith(base2)) return null;
+  return real.slice(base2.length).split(sep)[0].startsWith("git-") ? "git" : "npm";
+}
+function configuredSterlingSpec(env, home, root) {
+  const path = join9(env.XDG_CONFIG_HOME || join9(home, ".config"), "opencode", "opencode.json");
+  let config;
+  try {
+    config = parseJsonc(readFileSync5(path, "utf8"));
+  } catch (err) {
+    if (err?.code === "ENOENT") return null;
+    return { unreadable: `could not read ${path.replace(/\\/g, "/")}: ${err.message}` };
+  }
+  const found = sterlingPluginSpecs(config && typeof config === "object" ? config.plugins : void 0);
+  const kind = copyKindOf(root, env, home);
+  return found.find((f) => f.kind === kind) ?? found[0] ?? null;
+}
+var TAG_REF = /^v?\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?$/;
+var COMMIT_REF = /^[0-9a-f]{7,40}$/i;
+function pinOf(spec) {
+  const at = spec.indexOf("#");
+  const ref = at === -1 ? "" : spec.slice(at + 1);
+  return TAG_REF.test(ref) || COMMIT_REF.test(ref) ? ref : null;
+}
+var SHELL_SPECIAL = /["$`]/;
+function sterlingUpdateRemedy(host, { env = process.env, home = homedir2(), root = null } = {}) {
   if (host === "claude-code") return "/plugin (Installed tab \u2192 Update) or `claude plugin update sterling@<marketplace>`";
-  if (host === "opencode") return `\`opencode plugin update "${STERLING_GIT_SPEC}"\``;
-  if (host === null) return `\`claude plugin update sterling@<marketplace>\` (Claude Code) or \`opencode plugin update "${STERLING_GIT_SPEC}"\` (OpenCode)`;
+  if (host === "opencode" || host === null) {
+    const found = configuredSterlingSpec(env, home, root);
+    const shipped = (why) => `\`opencode plugin update "${STERLING_GIT_SPEC}"\`${why ? ` (the shipped spec; ${why})` : ""}`;
+    let opencode;
+    if (found?.unreadable) opencode = shipped(`${found.unreadable}, so the spec it configures is unknown`);
+    else if (found && SHELL_SPECIAL.test(found.spec)) opencode = shipped("the configured plugin spec contains a quote, $ or backtick and is not echoed here");
+    else if (!found) opencode = shipped("");
+    else {
+      const pin = pinOf(found.spec);
+      const note = pin ? ` \u2014 but that spec is pinned to #${pin} and never updates; change it to "${STERLING_GIT_SPEC}" (a semver range) in the plugins list of opencode.json, then update` : "";
+      opencode = `\`opencode plugin update "${found.spec}"\`${note}`;
+    }
+    return host === "opencode" ? opencode : `\`claude plugin update sterling@<marketplace>\` (Claude Code) or ${opencode} (OpenCode)`;
+  }
   throw new Error(`sterlingUpdateRemedy: unknown host ${JSON.stringify(host)}`);
 }
 function canonical(p) {
@@ -13680,8 +13759,8 @@ var HOST_TEXT2 = {
   }
 };
 var UPDATE_ROUTE = {
-  "claude-code": "update it through /plugin (Installed tab \u2192 Update)",
-  opencode: `update it with ${sterlingUpdateRemedy("opencode")}`
+  "claude-code": () => "update it through /plugin (Installed tab \u2192 Update)",
+  opencode: (env, home, root) => `update it with ${sterlingUpdateRemedy("opencode", { env, home, root })}`
 };
 var ASKING_HOST_INSTALL = { claude: "claude-code", opencode: "opencode" };
 function hostText(host) {
@@ -13796,7 +13875,7 @@ POST-UPDATE SYNC (${t.label}): SKIPPED \u2014 ${manifest} carries version '${cur
   const order = previous === null ? 1 : compareVersions(current, previous) ?? 1;
   if (order === 0) return null;
   if (order < 0) {
-    const update = UPDATE_ROUTE[installHostOf(root, { env, home }) ?? ASKING_HOST_INSTALL[host]];
+    const update = UPDATE_ROUTE[installHostOf(root, { env, home }) ?? ASKING_HOST_INSTALL[host]](env, home, root);
     return {
       outcome: "refused-older",
       warning: `\u2717 Sterling ${current} is OLDER than this project's sync marker ${previous}: post-update sync REFUSED, nothing downgraded \u2014 ${update}. `,
@@ -14341,6 +14420,7 @@ var isNodeBinary = (execPath) => /^node(\.exe)?$/i.test(String(execPath ?? "").s
 function opencodeBinDefault(execPath = process.execPath) {
   return !isNodeBinary(execPath) && /opencode/i.test(String(execPath ?? "").split(/[\\/]/).pop()) ? execPath : null;
 }
+var MODEL_UNSET_TEXT = `Sterling: the maintenance worker did not run. config maintenance_worker.opencode_model is not set, and the OpenCode worker never falls back to OpenCode's default one. To enable it, add this to .sterling/config.json (any provider/model you can run): "maintenance_worker": { "opencode_model": "<provider>/<model>" }. Until then the queue drains by hand with /sterling:drain.`;
 var NO_RUNNER_TEXT = "Sterling: the maintenance worker did not run. No maintenance runner exists on this machine: the worker runs `claude -p` or `opencode run`, and neither `claude` nor an OpenCode binary was found (this plugin is not running inside an OpenCode binary). The maintenance queue drains only by hand (/sterling:drain) until one is installed.";
 function createWorkerLaunch({
   openStore,
@@ -14368,7 +14448,7 @@ function createWorkerLaunch({
     }
     const config = loadConfig(root);
     if (ocBin && opencodeModelOf(config) === null) {
-      skipOnce(root, at, `maintenance worker skipped: ${OPENCODE_MODEL_UNSET}`, `Sterling: the maintenance worker did not run. ${OPENCODE_MODEL_UNSET}.`);
+      skipOnce(root, at, `maintenance worker skipped: ${OPENCODE_MODEL_UNSET}`, MODEL_UNSET_TEXT);
       return;
     }
     const nodeCmd = isNodeBinary(execPath) ? execPath : nodeOnPath() ? "node" : null;

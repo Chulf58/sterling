@@ -2192,6 +2192,25 @@ test('installed copy under OpenCode\'s npm cache: the refusal names `opencode pl
   }
 });
 
+test('installed copy under OpenCode\'s npm cache: the refusal names the spec the user configured, not the shipped github spec', async () => {
+  const cwd = authoringCwd();
+  const home = mkdtempSync(join(tmpdir(), 'sterling-update-oc-spec-home-'));
+  try {
+    const pluginRoot = join(home, '.cache', 'opencode', 'npm', '@chulf58', 'sterling@latest', '1759500000000', 'node_modules', '@chulf58', 'sterling');
+    mkdirSync(join(pluginRoot, '.git'), { recursive: true });
+    mkdirSync(join(home, '.config', 'opencode'), { recursive: true });
+    writeFileSync(join(home, '.config', 'opencode', 'opencode.json'), JSON.stringify({ plugins: ['some-other-plugin', '@chulf58/sterling@latest'] }));
+    const { exec } = fakeExec({ behind: 2 });
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: REG_P, invokingProject: '/tmp/p', opts: {}, pluginRoot, env: {}, home });
+    assert.equal(report.exit, 2);
+    assert.match(report.refusal, /update it with `opencode plugin update "@chulf58\/sterling@latest"`/);
+    assert.doesNotMatch(report.refusal, /github:Chulf58/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('installed copy under the Claude Code plugin cache: the refusal names /plugin and `claude plugin update`', async () => {
   const cwd = authoringCwd();
   const home = mkdtempSync(join(tmpdir(), 'sterling-update-cc-home-'));
@@ -2222,4 +2241,10 @@ test('a clone plugin root (.git present) is not refused: the authoring path runs
     rmSync(cwd, { recursive: true, force: true });
     rmSync(pluginRoot, { recursive: true, force: true });
   }
+});
+
+test('commands/update.md documents the OpenCode spec requirement: only the semver range updates, a pinned tag never does', () => {
+  const doc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'commands', 'update.md'), 'utf8');
+  assert.match(doc, /github:Chulf58\/sterling#semver:>=0\.18\.0/);
+  assert.match(doc, /pinned to a tag or commit \(`#v0\.18\.58`\) resolves to that one revision and never updates/);
 });

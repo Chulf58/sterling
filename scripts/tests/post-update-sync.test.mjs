@@ -417,6 +417,25 @@ test('OpenCode sync: a child session does nothing; the first ROOT session syncs 
   }
 });
 
+test('OpenCode sync: a project init left with no synced-version marker (0.18.59, OpenCode-only machine) reads as never synced: the first root session syncs it and writes the marker', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: null, store: false });
+  const session = sessionStub({ ses_root: {} });
+  process.env.FIXTURE_LOG = join(tmp('sterling-pus-log-'), 'calls.log');
+  try {
+    assert.equal(markerOf(project), 'ENOENT', 'precondition: no marker');
+    const syncOnce = ocSync(plugin, session);
+    await syncOnce(project, 'ses_root');
+    await syncOnce.idle();
+    assert.equal(markerOf(project), `${VERSION}\n`, 'the marker is written once both steps succeed');
+    const texts = noticeTexts(project);
+    assert.equal(texts.length, 1);
+    assert.match(texts[0], /Sterling \(never synced\)→9\.9\.9-fixture — agents synced/);
+  } finally {
+    delete process.env.FIXTURE_LOG;
+  }
+});
+
 test('OpenCode sync: the latch is per project, so one process syncs each project it serves once', async () => {
   const plugin = makePluginRoot();
   const first = makeProject({ marker: '0.0.1', store: false });
@@ -468,7 +487,7 @@ test('OpenCode sync: the sync runs in the background, so the context request doe
 test('OpenCode sync: an older copy leaves the refusal notice naming the update route and writes nothing', async () => {
   const plugin = makePluginRoot();
   const project = makeProject({ marker: '10.0.0', store: false });
-  const syncOnce = ocSync(plugin, sessionStub({ ses_root: {} }));
+  const syncOnce = ocSync(plugin, sessionStub({ ses_root: {} }), { env: {}, home: tmp('sterling-pus-home-') });
   await syncOnce(project, 'ses_root');
   await syncOnce.idle();
   assert.equal(markerOf(project), '10.0.0\n');
