@@ -18,6 +18,7 @@ import {
   hasDiscriminatingHit,
   hasRecordCentralityHit,
   recordCentralityHits,
+  recordCentralTerms,
   classifyClaimPath,
   fitDomains,
   MountedStores,
@@ -55,6 +56,13 @@ export interface CreateResult {
    * or none were found. Never gates the write (AC5): the record still lands.
    */
   warnings: string[];
+  /**
+   * FINDABILITY DISCLOSURE (decision make-records-findable-authoring-rule-
+   * disclosure-lint-then-blind-experiment, part 2): the record's central terms,
+   * the set push delivery and knowledge_preflight match on. Omitted when the
+   * type has none (reference_material, todo). Disclosure only.
+   */
+  central_terms?: string[];
   /**
    * SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): present only for ruling-type
    * creates (decision / anti_pattern / research_finding) — other types'
@@ -3956,10 +3964,13 @@ export class SterlingTools {
     const sameSubject = SterlingTools.SAME_SUBJECT_TYPES.includes(type)
       ? this.sameSubjectDigest(registered ? registered.fts(parsed) : '', new Set([record.id]))
       : undefined;
+    const findability = this.findabilityDisclosure(record);
+    citationWarnings.push(...findability.warnings);
     return {
       record,
       check_skipped: skipped,
       warnings: citationWarnings,
+      ...findability.central,
       ...(sameSubject ? { same_subject: sameSubject } : {}),
       ...(mountedDomains.length ? { mounted_domains: mountedDomains } : {}),
       ...claimsCheck,
@@ -5436,6 +5447,41 @@ export class SterlingTools {
   }
 
   /**
+   * FINDABILITY DISCLOSURE for knowledge_create/knowledge_update receipts
+   * (decision make-records-findable-authoring-rule-disclosure-lint-then-blind-
+   * experiment, part 2). Reports the record's central terms — recordCentralTerms
+   * in packages/store/src/axis.ts, the same set knowledge_preflight reports as
+   * `central` and H20 prints as "central to the record" — and warns when a
+   * path-carrying type has no file paths, because push-by-file can then never
+   * surface it. "Missing" is absent or empty; whether listed paths exist on
+   * disk is not checked. Disclosure only: it never refuses or alters a write.
+   * todo/board items and the types the decision does not name are skipped.
+   */
+  private findabilityDisclosure(record: DurableRecord): { central: { central_terms?: string[] }; warnings: string[] } {
+    const r = record as unknown as Record<string, unknown>;
+    const central = recordCentralTerms(r as Parameters<typeof recordCentralTerms>[0]);
+    const pathField: Record<string, string> = {
+      feature_article: 'files[].path',
+      decision: 'file_keys',
+      anti_pattern: 'file_keys',
+      research_finding: 'file_keys',
+      reference_material: 'location',
+    };
+    const field = pathField[record.type];
+    const hasPaths =
+      record.type === 'reference_material'
+        ? typeof r.location === 'string' && r.location.length > 0
+        : (RECORD_TYPES[record.type]?.fileKeys(r) ?? []).length > 0;
+    return {
+      central: central.length > 0 ? { central_terms: central } : {},
+      warnings:
+        field && !hasPaths
+          ? [`no file paths: push by file will never surface this record (set ${field}; knowledge_preflight and subject matching still can)`]
+          : [],
+    };
+  }
+
+  /**
    * History rotation disclosure (board 0697c6bd; middle-out since ab87fe24).
    * knowledgeUpdate bounds a feature_article's history to the first
    * article_history_genesis_entries plus the newest remainder at the
@@ -5489,7 +5535,7 @@ export class SterlingTools {
     body: Record<string, unknown>,
     resolves?: string[],
     expectedVersion?: number
-  ): { record: DurableRecord; warnings: string[]; same_subject?: SameSubjectEntry[]; claims_check?: string } {
+  ): { record: DurableRecord; warnings: string[]; central_terms?: string[]; same_subject?: SameSubjectEntry[]; claims_check?: string } {
     // Resolved the SAME way knowledgeUpdate resolves its own `id` (uuid/slug/
     // 8-char-prefix ladder) — review finding, 2026-08-21: a raw store.get(id)
     // here only matches an exact uuid, so a slug- or prefix-addressed write
@@ -5541,7 +5587,9 @@ export class SterlingTools {
     // debt — named here so it is visible at the exact moment the writer is
     // looking, never silent (P5). Empty when nothing is owed (P1).
     if (before) warnings.push(...this.openReconcileLaneWarnings(this.supersedeChain(before)));
-    return { record, warnings, ...(same_subject ? { same_subject } : {}), ...(claims_check ? { claims_check } : {}) };
+    const findability = this.findabilityDisclosure(record);
+    warnings.push(...findability.warnings);
+    return { record, warnings, ...findability.central, ...(same_subject ? { same_subject } : {}), ...(claims_check ? { claims_check } : {}) };
   }
 
   /**

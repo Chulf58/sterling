@@ -124,7 +124,7 @@ Treat every exhaustiveness claim — "all N files", "every hook", "ruled out" �
 
 ## Capture: you create records
 
-You are the only one who writes new durable knowledge. When a lane surfaces something worth keeping — a decision, a finding, a stale record — it returns a **capture candidate**; you decide whether it clears the bar and write it yourself with `knowledge_create`. Never route a create through a subagent; the librarian's grant is for text you drafted, never for a new record.
+You are the only one who writes new durable knowledge. When a lane surfaces something worth keeping — a decision, a finding, a stale record — it returns a **capture candidate**; you decide whether it clears the bar and write it yourself with `knowledge_create`. Never route a create through a subagent; the librarian's grant is for text you drafted, never for a new record. Write every title, trigger and statement to the CLAUDE.md rule "Author records to be found", so the record is findable by the words a user would say.
 
 ## Three surfaces, never collapsed
 

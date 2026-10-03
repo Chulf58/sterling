@@ -26,7 +26,9 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // Moved 2026-10-03 (from cea77543…): one sentence added to each "Codex runs through the MCP tool"
 // bullet, saying every Codex brief forbids reading or writing under .sterling/ (decision
 // codex-reaching-around-the-store-guard-is-documented-and-codex-lanes-stay-narrow).
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = '1a96cf4e0c27fdf1c31318a84642aaae2871c80df340b9cf850c8ebbd51ea0fa';
+// Moved 2026-10-03 (from 1a96cf4e…): one bullet added to Reconcile-always, "Author records to be
+// found" (decision make-records-findable-authoring-rule-disclosure-lint-then-blind-experiment).
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'e5c7614018d7a984eda42a6aaac2a9ebfdd9a8e96cb2e01f0bd44270f42ac41c';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);

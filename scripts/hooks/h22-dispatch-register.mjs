@@ -38,7 +38,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
-import { extractPathCandidates, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
+import { extractPathCandidatesRooted, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
 import { deriveAgentTranscript } from './lib/transcript.mjs';
 import { isReviewerClass } from './lib/dispatch-advisory.mjs';
 import { probeDirtyPaths, formatResidueLine, claimedResources, fileEntriesOf } from './lib/dispatch-residue.mjs';
@@ -92,8 +92,10 @@ function loadExclusiveResourceNames(cwd) {
 // have-a-reader-september-2026).
 // ---------------------------------------------------------------------------
 
+// An absolute candidate keeps its leading '/', so normalizeRegisterPaths makes
+// an in-project one repo-relative and drops one outside the project.
 function candidatesFromBlocks(blocks) {
-  return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
+  return [...new Set(blocks.flatMap((b) => extractPathCandidatesRooted(b.prompt)))];
 }
 
 function normalizeRegisterPaths(cands, cwd) {

@@ -977,9 +977,24 @@ try {
       // inactive-confirmed: ignored entirely — no exclusion, no disclosure.
     }
   }
+  // OWNERSHIP FROM ACTUAL WRITES (same decision, amendment 2026-10-02 (2)):
+  // H7 stores the writing subagent's agent_id on a touch, and a touch whose
+  // agent_id belongs to a presumed-active row is deferred to that agent
+  // whatever its path, so a file a lane creates outside its declared `files`
+  // is not demanded while the lane runs. Ended, lease-expired (unknown) and
+  // unregistered agent_ids defer nothing; a touch without agent_id keeps the
+  // `files` join only.
+  const liveAgentIds = new Set(liveDispatches.map((e) => e.agent_id).filter((id) => typeof id === 'string' && id !== ''));
+  const writerOwners = new Map(); // joinKey(touched path) -> Set(live writing agent_id)
+  for (const t of Array.isArray(touches) ? touches : []) {
+    if (!t?.path || !liveAgentIds.has(t.agent_id)) continue;
+    const k = joinKey(t.path);
+    if (!writerOwners.has(k)) writerOwners.set(k, new Set());
+    writerOwners.get(k).add(t.agent_id);
+  }
   const ownersOf = (p) => {
     const k = joinKey(p);
-    const owners = new Set();
+    const owners = new Set(writerOwners.get(k) ?? []);
     for (const [entryKey, ids] of deferredOwners) for (const [id, isFile] of ids) if (entryOwns(entryKey, k, isFile)) owners.add(id);
     return owners;
   };
