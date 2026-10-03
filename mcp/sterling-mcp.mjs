@@ -24596,7 +24596,7 @@ var SterlingStore = class _SterlingStore {
    * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
    *
    * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
-   * above, so an out-of-class reader (the delivery oracle's read-only fallback)
+   * above, so an out-of-class reader (a script outside the store with a read-only fallback)
    * decodes through the same function rather than re-parsing `body` alone.
    */
   static decodeLiveRecord(op, row) {
