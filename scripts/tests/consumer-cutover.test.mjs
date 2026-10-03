@@ -212,7 +212,7 @@ test('autoUpdateWarning: every form says what settings.json lacks and that a /pl
 
 test('cloneCleanupLines: a Sterling clone is named for manual deletion; a path that is gone or not a clone says so', () => {
   const clone = fakeClone();
-  const lines = cloneCleanupLines([clone, clone, '/nonexistent/sterling-old']).join('\n');
+  const lines = cloneCleanupLines([clone, clone, '/nonexistent/sterling-old'], []).join('\n');
   assert.equal(lines.split('\n').filter((l) => l.includes(clone)).length, 1, 'each clone gets one line');
   assert.match(lines, /delete it by hand/);
   assert.match(lines, /\/nonexistent\/sterling-old.*not a Sterling clone on this machine/);
@@ -223,7 +223,7 @@ test('cloneCleanupLines: a clone whose own config declares machine_role authorin
   const clone = fakeClone();
   mkdirSync(join(clone, '.sterling'));
   writeFileSync(join(clone, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring' }));
-  const lines = cloneCleanupLines([clone]).join('\n');
+  const lines = cloneCleanupLines([clone], []).join('\n');
   assert.match(lines, /authoring clone .*keep it/);
   assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
 });
@@ -232,16 +232,114 @@ test('cloneCleanupLines: a read failure other than ENOENT is printed as "could n
   const clone = fakeClone();
   mkdirSync(join(clone, '.sterling', 'config.json'), { recursive: true }); // a directory: reading it is EISDIR
   let lines;
-  assert.doesNotThrow(() => { lines = cloneCleanupLines([clone]).join('\n'); });
+  assert.doesNotThrow(() => { lines = cloneCleanupLines([clone], []).join('\n'); });
   assert.ok(lines.includes(`could not inspect ${clone}: EISDIR`), lines);
   assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
 });
 
 test('cloneCleanupLines: paths differing only by a trailing slash are one clone', () => {
   const clone = fakeClone();
-  const lines = cloneCleanupLines([clone, `${clone}/`, `${clone}//`]);
+  const lines = cloneCleanupLines([clone, `${clone}/`, `${clone}//`], []);
   assert.equal(lines.filter((l) => l.includes(clone)).length, 1, lines.join('\n'));
   assert.ok(!lines.join('\n').includes(`${clone}/ `), 'the printed path carries no trailing slash');
+});
+
+// ---- (4b) a live Sterling project is never offered for deletion ----
+// The init target and every registered project hold a knowledge store and history;
+// the clone paths come from launchers, so one of them can BE such a project (consumer
+// reports #2 and #3: the hint printed rm -rf for the directory init was running in).
+
+test('cloneCleanupLines: a clone that is the init target is a live project to keep, never rm -rf', () => {
+  const clone = fakeClone();
+  const lines = cloneCleanupLines([clone], [clone]).join('\n');
+  assert.match(lines, /live Sterling project on this machine/);
+  assert.match(lines, /its own store/);
+  assert.match(lines, /keep it/);
+  assert.match(lines, /Only the --plugin-dir launch was replaced/);
+  assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
+});
+
+test('cloneCleanupLines: a clone that is a registered project gets the keep line; an unregistered clone still gets the rm -rf hint', () => {
+  const registered = fakeClone();
+  const stray = fakeClone();
+  const lines = cloneCleanupLines([registered, stray], [fakeClone(), registered]);
+  const reg = lines.find((l) => l.includes(registered));
+  const unreg = lines.find((l) => l.includes(stray));
+  assert.match(reg, /live Sterling project/);
+  assert.doesNotMatch(reg, /rm -rf|delete it by hand/);
+  assert.match(unreg, /delete it by hand once no project on this machine launches from it \(rm -rf "/);
+});
+
+test('cloneCleanupLines: a live path matches across a trailing slash and backslashes, in either argument', () => {
+  const clone = fakeClone();
+  const back = clone.replace(/\//g, '\\');
+  for (const [named, live] of [[clone, `${clone}/`], [clone, `${clone}//`], [clone, back], [back, clone]]) {
+    const lines = cloneCleanupLines([named], [live]).join('\n');
+    assert.match(lines, /live Sterling project/, `${named} vs ${live}`);
+    assert.doesNotMatch(lines, /rm -rf/, `${named} vs ${live}`);
+  }
+});
+
+test('cloneCleanupLines: an unreadable registry (null) treats every clone path as live and says so; never rm -rf', () => {
+  const clone = fakeClone();
+  const lines = cloneCleanupLines([clone, '/nonexistent/sterling-old'], null).join('\n');
+  assert.match(lines, /project registry could not be read/);
+  assert.ok(lines.includes(clone));
+  assert.match(lines, /treated as a live project/);
+  assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
+});
+
+test('cloneCleanupLines: an omitted live-project list means unknown, not none: no rm -rf', () => {
+  const clone = fakeClone();
+  const lines = cloneCleanupLines([clone]).join('\n');
+  assert.match(lines, /project registry could not be read/);
+  assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
+});
+
+test('cloneCleanupLines: a clone that CONTAINS a live project is kept; a clone inside a live project, or a name-prefix sibling, keeps the hint', () => {
+  const clone = fakeClone();
+  const nested = join(clone, 'projects', 'app');
+  mkdirSync(nested, { recursive: true });
+  const containing = cloneCleanupLines([clone], [nested]).join('\n');
+  assert.match(containing, /contains a live Sterling project on this machine; keep it/);
+  assert.doesNotMatch(containing, /rm -rf|delete it by hand/);
+
+  const parent = tmp('sterling-cut-liveparent-');
+  const inside = join(parent, 'clone');
+  mkdirSync(join(inside, '.git'), { recursive: true });
+  mkdirSync(join(inside, '.claude-plugin'));
+  writeFileSync(join(inside, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling' }));
+  assert.match(cloneCleanupLines([inside], [parent]).join('\n'), /rm -rf/, 'a clone inside a live project is still a clone to delete');
+
+  assert.match(cloneCleanupLines([clone], [`${clone}2`]).join('\n'), /rm -rf/, 'a name-prefix sibling is not inside the clone');
+});
+
+test('cloneCleanupLines: a symlinked clone path, a path through a symlinked parent and a `..` spelling all match the real live path', () => {
+  const clone = fakeClone();
+  const holder = tmp('sterling-cut-links-');
+  const link = join(holder, 'clone-link');
+  symlinkSync(clone, link, 'dir');
+  const parentLink = join(holder, 'parent-link');
+  symlinkSync(dirname(clone), parentLink, 'dir');
+  const dotdot = join(clone, 'projects', '..');
+  mkdirSync(join(clone, 'projects'));
+  const spellings = [link, join(parentLink, clone.split('/').pop()), dotdot];
+  for (const spelling of spellings) {
+    const asClone = cloneCleanupLines([spelling], [clone]).join('\n');
+    assert.match(asClone, /live Sterling project/, `clone spelled ${spelling}`);
+    assert.doesNotMatch(asClone, /rm -rf/, `clone spelled ${spelling}`);
+    const asLive = cloneCleanupLines([clone], [spelling]).join('\n');
+    assert.doesNotMatch(asLive, /rm -rf/, `live spelled ${spelling}`);
+  }
+});
+
+test('cloneCleanupLines: a clone directory holding its own .sterling/sterling.db is a live project even when no registry lists it', () => {
+  const clone = fakeClone();
+  mkdirSync(join(clone, '.sterling'));
+  writeFileSync(join(clone, '.sterling', 'sterling.db'), 'not a database: existence is the only thing checked');
+  const lines = cloneCleanupLines([clone], []).join('\n');
+  assert.match(lines, /holds its own project store \(\.sterling\/sterling\.db\).*keep it/);
+  assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
 });
 
 // ---- end to end: init.mjs from an installed copy, and from the authoring clone ----
@@ -301,6 +399,21 @@ test('init from an installed copy: replaces the clone launcher, deletes the clon
   const tail = out.slice(out.lastIndexOf('old Sterling clone'));
   assert.ok(tail.includes(clone), `the end of the run names the clone to delete: ${out}`);
   assert.ok(existsSync(join(clone, '.git')), 'the clone itself is never deleted');
+});
+
+test('init from an installed copy: when the target IS the old clone, the end of the run says to keep it and never prints rm -rf', () => {
+  const target = fakeClone();
+  writeFileSync(join(target, 'sterling-launch.sh'), oldLauncher(target));
+  const cfg = installedConfigDir({ extraKnownMarketplaces: { sterling: { autoUpdate: true } } });
+
+  const { code, out } = runInit(target, cfg);
+  assert.equal(code, 0, out);
+  assert.match(row(out, 'sterling-launch.sh'), /replaced/);
+  const tail = out.slice(out.lastIndexOf('old Sterling clone'));
+  assert.ok(tail.includes(target.replace(/\\/g, '/')), `the end of the run names the directory: ${out}`);
+  assert.match(tail, /live Sterling project on this machine/);
+  assert.doesNotMatch(out, /rm -rf|delete it by hand/);
+  assert.ok(existsSync(join(target, '.git')), 'the directory is untouched');
 });
 
 test('init from an installed copy: a differing launcher without --plugin-dir is left alone; auto-update on prints no warning and no clone step', () => {
