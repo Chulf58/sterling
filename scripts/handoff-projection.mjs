@@ -12,13 +12,13 @@
 //   0  written | unchanged | SKIPPED (the Sterling clone itself — it owns
 //      different projections, produced by architecture-projection.mjs and
 //      rulings-projection.mjs)
-//   2  REFUSED, STANDING — the project mode is hobby (decision
-//      project-mode-hobby-work-toggle-decides-flow: these files are work-only),
+//   2  REFUSED, STANDING — the handoff files are off (config.handoff.enabled,
+//      decision project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting),
 //      or store_authority is not 'primary' (refinement (f)). A declared state of
 //      this project, not a defect: nothing was written, and nothing here can
-//      change until the mode or the authority does.
-//   3  REFUSED, ACTIONABLE — nothing was written, and the user can fix it: an
-//      invalid config.mode; no store; an empty store while exports exist; a
+//      change until the setting or the authority does.
+//   3  REFUSED, ACTIONABLE — nothing was written, and the user can fix it: a
+//      config.handoff.enabled that is not true or false; no store; an empty store while exports exist; a
 //      hand-written file in the way; a symlink or non-directory on the way; a
 //      generated path the target's own ignore rules cover. /sterling:update
 //      exits non-zero; its core completion marker stays valid, and every later
@@ -28,7 +28,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openProject } from './lib/project.mjs';
 import { ContainmentError, existsContained, readContained, writeContained, unlinkContained } from './lib/contained-fs.mjs';
-import { buildHandoffFiles, planHandoff, registeredProjections, isSterlingClone, readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './lib/handoff-projection.mjs';
+import { buildHandoffFiles, planHandoff, registeredProjections, isSterlingClone, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
 import { ignoredPaths, ignoredRemedy } from './lib/git-ignore-check.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -69,18 +69,19 @@ if (cloneTarget) {
   console.log(`handoff projection: SKIPPED — ${fwd(target)} is a Sterling clone; its architecture.md and rulings.md come from scripts/architecture-projection.mjs and scripts/rulings-projection.mjs, never from this script.`);
   process.exit(0);
 }
-// The project mode is read from the TARGET's own config, so this script cannot
-// bypass the switch: only a work project gets the exports. Hobby deletes
-// nothing — existing exports simply stop being maintained.
-let mode;
+// The handoff setting is read from the TARGET's own config, so this script cannot
+// bypass the switch: only a project with config.handoff.enabled on gets the
+// exports, in hobby and work mode alike. Off deletes nothing: existing exports
+// stop being maintained.
+let handoffEnabled;
 try {
-  mode = readProjectMode(target);
+  handoffEnabled = readHandoffEnabled(target);
 } catch (err) {
-  if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
+  if (!(err instanceof HandoffSettingError) && !(err instanceof ContainmentError)) throw err;
   refuse(`${err.message}.`);
 }
-if (mode !== 'work') {
-  refuse(`${HOBBY_SKIP_DETAIL}. Switch the project to work in the TUI System tab to produce these exports.`, STANDING);
+if (!handoffEnabled) {
+  refuse(`${HANDOFF_OFF_DETAIL}. Turn Handoff files on in the TUI System tab to produce these exports.`, STANDING);
 }
 if (!storePresent) {
   refuse(`no Sterling store at ${fwd(join(target, '.sterling', 'sterling.db'))} — run /sterling:init in that project first.`);

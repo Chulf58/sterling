@@ -21142,19 +21142,23 @@ function isAbsolutePathAnyHost(p) {
   return /^[A-Za-z]:[\\/]/.test(s2) || s2.startsWith("/") || s2.startsWith("\\");
 }
 function sameLocationAnyHost(a, b) {
-  const drvfs = (p) => {
-    const s2 = String(p ?? "").replace(/\\/g, "/");
-    if (!isAbsolutePathAnyHost(s2))
-      return void 0;
-    const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
-    return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
-  };
-  const x = drvfs(a);
-  const y = drvfs(b);
+  const x = drvfsForm(a);
+  const y = drvfsForm(b);
   if (x === void 0 || y === void 0)
     return false;
+  const [fx, fy] = foldDrvfs(x, y);
+  return fx === fy;
+}
+function drvfsForm(p) {
+  const s2 = String(p ?? "").replace(/\\/g, "/");
+  if (!isAbsolutePathAnyHost(s2))
+    return void 0;
+  const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
+  return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
+}
+function foldDrvfs(x, y) {
   const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
-  return onDrvfs(x) && onDrvfs(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
+  return onDrvfs(x) && onDrvfs(y) ? [x.toLowerCase(), y.toLowerCase()] : [x, y];
 }
 
 // packages/schemas/dist/envelope.js
@@ -22733,22 +22737,40 @@ var configSchema = external_exports.object({
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
   }).default({}),
-  // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-  // per-project switch that decides the flow. 'hobby' (the default, today's
-  // behaviour) skips the OpenCode agents and the handoff projection; 'work'
-  // writes and maintains them. Toggled in the TUI System tab. A missing key
-  // means hobby.
+  // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed
+  // by project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+  // the per-project switch that decides how work ships. 'hobby' (the default)
+  // merges directly through /sterling:merge; 'work' opens a pull request and
+  // runs the review loop. It decides nothing else: whether the handoff files
+  // are written is `handoff` below. Toggled in the TUI System tab. A missing
+  // key means hobby.
   // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
   // S1): any other value is PRESERVED raw, never coerced to hobby and never
   // thrown on — a typo here must not turn every parseConfig reader (the MCP
   // server's boot included) into a startup failure. The strict judge is
   // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
-  // surface that ACTS on the mode (init, sync-agents, /sterling:update, the
-  // handoff-projection CLI) uses, and which refuses an invalid value loudly.
+  // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
+  // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.
   // The default lives twice (anti_pattern 85d15143): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // Handoff files (decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+  // `enabled` says whether Sterling writes the files for colleagues who do not
+  // have Sterling, the portable OpenCode agents (.opencode/agents/) and the
+  // handoff projection (architecture.md, rulings.md, docs/sterling/). Off by
+  // default, independent of `mode`. Toggled in the TUI System tab.
+  // PERMISSIVE for the same reason as `mode`: the value is preserved raw. The
+  // strict judge is readHandoffEnabled() in scripts/lib/handoff-projection.mjs,
+  // which init, sync-agents, /sterling:update, the handoff-projection CLI and
+  // the git exclude block use. It refuses a value that is not a boolean, and it
+  // reads a config with NO key as on when portable agents are already tracked
+  // in git, which this default cannot express: read the setting through it,
+  // never from the parsed config.
+  // The default lives twice (anti_pattern 85d15143): here and in
+  // templates/default-config.json; config.test.ts pins that they agree.
+  handoff: external_exports.unknown().default({ enabled: false }),
   // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
   // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
   // first use; empty means unpinned (any Bot login matching /copilot/i, with
@@ -22897,6 +22919,13 @@ function open(dbPath) {
   mkdirSync(dirname2(dbPath), { recursive: true });
   return new SterlingStore(dbPath);
 }
+var PROBE_ID = "00000000-0000-0000-0000-000000000000";
+var DROPPED_AFTER_MOUNT_NOTE = "dropped after mount; reads skip it until the session restarts";
+var DROPPED_AT_MOUNT_NOTE = "dropped at mount; restart the session after the store is repaired";
+function isStoreFailure(e) {
+  return e instanceof SchemaMigrationRequiredError || e instanceof UnsupportedSchemaVersionError || e instanceof StoreRowDecodeError || e?.code === "ERR_SQLITE_ERROR";
+}
+var errorText = (e) => String(e?.message ?? e);
 var DOMAIN_DESCRIPTION_KEY = "description";
 var DomainNotCreatedError = class extends Error {
   domain;
@@ -22950,8 +22979,26 @@ var MountedStores = class {
    *  exist, in manifest order. Kept so a caller (boot, a tool response, H1) can
    *  disclose the skip instead of the domain silently vanishing. */
   missingDomains = [];
-  /** The project store is opened, and created when absent. A domain store is
-   *  only ever OPENED here, never created: a mount whose db file does not exist
+  /** Mounted domains whose store failed a read, in the order they were dropped.
+   *  One broken domain must not fail a read over the whole mounted set, so a
+   *  domain read that throws drops that domain from every later read and lists
+   *  it here with the error; a caller (a tool response, boot) discloses it
+   *  instead of the domain silently vanishing. Checked at mount (probeDomain)
+   *  and on every fanned read. The drop lasts for this instance's lifetime:
+   *  a later read does not retry the store. It covers READS only: the domain
+   *  stays in domainNames(), but every write into it is refused
+   *  (assertWritable), and the slug uniqueness checks still ask it
+   *  (slugHolders). The PROJECT store is never listed here: its failure
+   *  throws. */
+  unreadableDomains = [];
+  domainPaths = /* @__PURE__ */ new Map();
+  /** Every configured domain whose store file exists, in manifest order,
+   *  whether or not it could be opened. */
+  mountedNames = [];
+  /** The project store is opened, and created when absent; a failure to open
+   *  it throws. A domain store is only ever OPENED here, never created, and one
+   *  that exists but cannot be opened is listed on unreadableDomains instead of
+   *  failing the mount: a mount whose db file does not exist
    *  throws DomainNotCreatedError naming createDomain (board 675daf9d (c)), with
    *  every handle opened so far closed and no file written for the missing
    *  domain. When options.skipMissing is true such a mount is skipped instead,
@@ -22968,17 +23015,123 @@ var MountedStores = class {
           }
           throw new DomainNotCreatedError(m.name, m.dbPath);
         }
-        this.domains.set(m.name, new SterlingStore(m.dbPath));
+        this.mountedNames.push(m.name);
+        this.domainPaths.set(m.name, m.dbPath);
+        let store;
+        try {
+          store = new SterlingStore(m.dbPath);
+        } catch (e) {
+          if (!isStoreFailure(e))
+            throw e;
+          this.dropDomain(m.name, e, true);
+          continue;
+        }
+        this.domains.set(m.name, store);
+        this.probeDomain(m.name, store);
       }
     } catch (e) {
       this.close();
       throw e;
     }
   }
+  /** Mount-time read check. A pre-v2 store opens and answers some reads (get,
+   *  query over pre-v2 bodies) but not others (inboundSupersedes: it has no
+   *  record_relations table), so without this a first tool call could serve
+   *  that domain's records and then drop it halfway through. The probe runs the
+   *  two per-record reads the fan makes, against an id no record has, and drops
+   *  the domain when either throws. */
+  probeDomain(name, store) {
+    try {
+      store.get(PROBE_ID);
+      store.inboundSupersedes(PROBE_ID);
+    } catch (e) {
+      if (!isStoreFailure(e))
+        throw e;
+      this.dropDomain(name, e, true);
+    }
+  }
+  /** Drop a domain from reads. The drop lasts for this instance's lifetime:
+   *  no later read retries the store, even when the failure was transient. That
+   *  is safe to leave because a dropped domain cannot be written either
+   *  (assertWritable): a session never writes into a store it cannot read back,
+   *  and the slug checks still ask it (fanEveryDomain). */
+  dropDomain(name, e, atMount = false) {
+    if (this.isUnreadable(name))
+      return;
+    this.unreadableDomains.push({
+      name,
+      dbPath: this.domainPaths.get(name) ?? "",
+      error: errorText(e),
+      note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE
+    });
+  }
+  isUnreadable(name) {
+    return this.unreadableDomains.some((d) => d.name === name);
+  }
+  /** `(<error>; <note>)` for a dropped domain, for refusal text. */
+  droppedReason(name) {
+    const d = this.unreadableDomains.find((x) => x.name === name);
+    return d ? `(${d.error}; ${d.note})` : "";
+  }
+  /** Refuse a write into a domain this session has dropped from reads: the
+   *  write could not be read back, and a promotion would retire the project
+   *  original in favour of a copy nobody can see. */
+  assertWritable(name) {
+    if (!this.isUnreadable(name))
+      return;
+    throw new Error(`domain '${name}' cannot be written: this session cannot read it ${this.droppedReason(name)}. Nothing was written. Repair the store, then restart the session.`);
+  }
+  /** `fn` on the project store and then on EVERY mounted domain, dropped ones
+   *  included, for a check where "not read" must never count as "absent" (slug
+   *  uniqueness). A dropped domain that still answers is believed. A domain
+   *  whose read fails makes the whole check refuse, naming it and the error. */
+  fanEveryDomain(what, fn) {
+    const out = [fn(this.project)];
+    for (const [name, store] of this.domains) {
+      try {
+        out.push(fn(store));
+      } catch (e) {
+        if (!isStoreFailure(e))
+          throw e;
+        this.dropDomain(name, e);
+        throw new Error(`${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. Nothing was written. Repair the store, then restart the session.`);
+      }
+    }
+    return out;
+  }
+  /** The one read fan: `fn` on the project store, then on each readable domain
+   *  in manifest order, yielding each answer with its source ('project' or the
+   *  domain's manifest name). The project read is NOT guarded, so its failure
+   *  throws. A domain read that fails with a store failure (isStoreFailure)
+   *  drops that domain (dropDomain) and the fan moves on; any other error is
+   *  rethrown. Lazy, so a first-hit caller stops reading at its hit. */
+  *fanRead(fn) {
+    yield { source: "project", store: this.project, value: fn(this.project) };
+    for (const [name, store] of [...this.domains]) {
+      if (this.isUnreadable(name))
+        continue;
+      let value;
+      try {
+        value = fn(store);
+      } catch (e) {
+        if (!isStoreFailure(e))
+          throw e;
+        this.dropDomain(name, e);
+        continue;
+      }
+      yield { source: name, store, value };
+    }
+  }
+  /** fanRead's answers alone, project first. */
+  fanValues(fn) {
+    return [...this.fanRead(fn)].map((r) => r.value);
+  }
   /** A mounted domain's description (store_meta 'description'), or undefined
    *  when that existing store has none. An unmounted name is refused. */
   domainDescription(name) {
     const store = this.domains.get(name);
+    if (!store && this.isUnreadable(name))
+      throw new Error(`domainDescription: domain '${name}' cannot be read ${this.droppedReason(name)}`);
     if (!store)
       throw new Error(`domainDescription: domain '${name}' is not mounted`);
     return store.getMeta(DOMAIN_DESCRIPTION_KEY);
@@ -22990,6 +23143,7 @@ var MountedStores = class {
    *  transaction open on another mount (the same affinity rule as every write
    *  through this class). */
   setDomainDescription(name, description) {
+    this.assertWritable(name);
     const store = this.domains.get(name);
     if (!store)
       throw new Error(`setDomainDescription: domain '${name}' is not mounted`);
@@ -23043,6 +23197,7 @@ var MountedStores = class {
       return this.project;
     const m = /^domain:(.+)$/.exec(scope);
     if (m) {
+      this.assertWritable(m[1]);
       const store = this.domains.get(m[1]);
       if (!store)
         throw new Error(`scope '${scope}' targets an unmounted domain \u2014 not in the project's domains manifest`);
@@ -23059,7 +23214,7 @@ var MountedStores = class {
    *  databases. When only the project matches it fills the cap, as before. */
   query(opts = {}) {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-    const perStore = this.all().map((s2) => s2.query({ ...opts, cap }));
+    const perStore = this.fanValues((s2) => s2.query({ ...opts, cap }));
     const shares = allocateShares(perStore.map((r) => r.length), cap);
     return perStore.flatMap((records, i) => records.slice(0, shares[i]));
   }
@@ -23074,7 +23229,7 @@ var MountedStores = class {
   /** Cross-mount twin of countAboveScore (board a577a69d) — summed
    *  project-first across every mounted store, same fan as count(). */
   countAboveScore(opts, minScore) {
-    return this.all().reduce((n, s2) => n + s2.countAboveScore(opts, minScore), 0);
+    return this.fanValues((s2) => s2.countAboveScore(opts, minScore)).reduce((n, c) => n + c, 0);
   }
   /** Per-source projection (AC2): project store FIRST, then each mounted domain
    *  in manifest order. Each store runs the full query independently — type
@@ -23083,37 +23238,39 @@ var MountedStores = class {
    *  The source name is 'project' for the project store and the domain manifest
    *  name (DomainMount.name) for each domain store. */
   bySource(opts) {
-    const result = [];
-    result.push({ source: "project", records: this.project.query(opts) });
-    for (const [name, store] of this.domains) {
-      result.push({ source: name, records: store.query(opts) });
-    }
-    return result;
+    return [...this.fanRead((s2) => s2.query(opts))].map((r) => ({ source: r.source, records: r.value }));
   }
   /** Count-only per-source projection — the COUNT(*) twin of bySource (same
    *  project-first, per-store ordering) with NO body fetch. The TUI Knowledge
    *  tree's collapsed category/source badges use this so the default all-collapsed
    *  view does not fetch + parse every source's record bodies each frame. */
   countBySource(opts) {
-    const result = [{ source: "project", count: this.project.count(opts) }];
-    for (const [name, store] of this.domains) {
-      result.push({ source: name, count: store.count(opts) });
-    }
-    return result;
+    return [...this.fanRead((s2) => s2.count(opts))].map((r) => ({ source: r.source, count: r.value }));
   }
   /** Records from ONE named source ('project' or a mounted domain name) — the
    *  full §3.4 query against that single store. The TUI fetches bodies only for
-   *  the source the user actually expanded; an unknown source yields []. */
+   *  the source the user actually expanded; an unknown source yields [], and so
+   *  does a domain that is, or on this read becomes, unreadable. */
   querySource(source, opts = {}) {
-    const store = source === "project" ? this.project : this.domains.get(source);
-    return store ? store.query(opts) : [];
+    if (source === "project")
+      return this.project.query(opts);
+    const store = this.domains.get(source);
+    if (!store || this.isUnreadable(source))
+      return [];
+    try {
+      return store.query(opts);
+    } catch (e) {
+      if (!isStoreFailure(e))
+        throw e;
+      this.dropDomain(source, e);
+      return [];
+    }
   }
   /** Cross-store fetch by id: project first, then domains. */
   get(id) {
-    for (const s2 of this.all()) {
-      const r = s2.get(id);
-      if (r)
-        return r;
+    for (const { value } of this.fanRead((s2) => s2.get(id))) {
+      if (value)
+        return value;
     }
     return void 0;
   }
@@ -23133,7 +23290,7 @@ var MountedStores = class {
    *  so a project-only lookup calls them dangling. No dedup needed — a record
    *  lives in exactly one store. */
   recordIdIndex() {
-    return this.all().flatMap((s2) => s2.recordIdIndex());
+    return this.fanValues((s2) => s2.recordIdIndex()).flat();
   }
   /** Project-first concatenation of every mounted store's dead-id alias index
    *  ([stable-identity-design-v2] contract 3) — same reasoning as
@@ -23142,7 +23299,7 @@ var MountedStores = class {
    *  A historical id is unique across the fan (it was one record's id), so no
    *  dedup is needed. */
   recordAliases() {
-    return this.all().flatMap((s2) => s2.recordAliases());
+    return this.fanValues((s2) => s2.recordAliases()).flat();
   }
   /** Exact-slug article resolution across the fan, PROJECT-FIRST (decision
    *  3db7095f's deterministic lookup, mounted). Feature articles are always
@@ -23154,14 +23311,26 @@ var MountedStores = class {
    *  serve two records under one slug, which is the failure the refusal exists to
    *  prevent. No dedup needed — a record lives in exactly one store. */
   articlesBySlug(slug) {
-    return this.all().flatMap((s2) => s2.articlesBySlug(slug));
+    return this.fanValues((s2) => s2.articlesBySlug(slug)).flat();
   }
   /** Type-agnostic exact-slug lookup across the fan, PROJECT-FIRST (board
    *  1e639f32) — same over-detect-is-safe reasoning as articlesBySlug: its
    *  callers are a uniqueness refusal and an identity resolution, and both
    *  would rather see a domain-store record than miss one. */
   recordsBySlug(slug) {
-    return this.all().flatMap((s2) => s2.recordsBySlug(slug));
+    return this.fanValues((s2) => s2.recordsBySlug(slug)).flat();
+  }
+  /** recordsBySlug for a UNIQUENESS check: every mounted domain is asked,
+   *  dropped ones included (fanEveryDomain), so a slug held by a record in a
+   *  dropped domain still counts as taken, and a domain that cannot answer
+   *  makes the check refuse instead of passing. Identity resolution keeps using
+   *  recordsBySlug, which skips a dropped domain and says so. */
+  slugHolders(slug) {
+    return this.fanEveryDomain(`slug '${slug}'`, (s2) => s2.recordsBySlug(slug)).flat();
+  }
+  /** articlesBySlug for a uniqueness check; same rule as slugHolders. */
+  articleSlugHolders(slug) {
+    return this.fanEveryDomain(`slug '${slug}'`, (s2) => s2.articlesBySlug(slug)).flat();
   }
   /** Superseded-only counterpart of recordsBySlug — knowledge_get's dead-slug
    *  fallthrough is the sole caller (decision foreign_df361a0f) and takes result[0] as
@@ -23177,16 +23346,15 @@ var MountedStores = class {
    *  the one field comparable across stores, and is therefore the cross-store
    *  sort key here (review finding, 2026-08-20). */
   supersededRecordsBySlug(slug) {
-    return this.all().flatMap((s2) => s2.supersededRecordsBySlug(slug)).sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
+    return this.fanValues((s2) => s2.supersededRecordsBySlug(slug)).flat().sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
   }
   /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
    *  exactly one store (same reasoning as get()), so this tries each mounted
    *  store project-first and returns the first hit. */
   resolveTerminus(id) {
-    for (const s2 of this.all()) {
-      const r = s2.resolveTerminus(id);
-      if (r)
-        return r;
+    for (const { value } of this.fanRead((s2) => s2.resolveTerminus(id))) {
+      if (value)
+        return value;
     }
     return null;
   }
@@ -23197,12 +23365,12 @@ var MountedStores = class {
    *  reasoning as recordsBySlug's fan. DEDUPED BY ID (roster review F3,
    *  anti_pattern foreign_1896c79b): a record promoted into a domain store leaves a
    *  project-store tombstone behind, so the SAME source id can resolve out of
-   *  two different mounts — first-seen (project-first, this.all()'s own
+   *  two different mounts — first-seen (project-first, the read fan's own
    *  ordering) wins, never a duplicate entry for one concept. */
   inboundSupersedes(id) {
     const seen = /* @__PURE__ */ new Set();
     const out = [];
-    for (const record2 of this.all().flatMap((s2) => s2.inboundSupersedes(id))) {
+    for (const record2 of this.fanValues((s2) => s2.inboundSupersedes(id)).flat()) {
       if (seen.has(record2.id))
         continue;
       seen.add(record2.id);
@@ -23293,21 +23461,45 @@ var MountedStores = class {
    *  target is already validated. */
   addLink(sourceId, rel, targetId) {
     if (!this.get(targetId))
-      throw new Error(`addLink: no target record '${targetId}' in the project store or any mounted domain`);
+      throw new Error(`addLink: no target record '${targetId}' in the project store or any mounted domain${this.unreadableNote()}`);
     return this.mutatingStoreHolding("addLink", sourceId).addLink(sourceId, rel, targetId, true);
   }
   /** EVERY mounted store physically holding `id`, project-first. Ordinarily
    *  exactly one — a record lives in one store — which is precisely why the
    *  cardinality is returned rather than assumed away by a first-hit scan. */
   holdersOf(id) {
-    return this.all().filter((s2) => s2.get(id) !== void 0);
+    const holders = [...this.fanRead((s2) => s2.get(id) !== void 0)].filter((r) => r.value).map((r) => r.store);
+    for (const [name, store] of this.domains) {
+      if (!this.isUnreadable(name))
+        continue;
+      try {
+        if (store.get(id) !== void 0)
+          holders.push(store);
+      } catch (e) {
+        if (!isStoreFailure(e))
+          throw e;
+      }
+    }
+    return holders;
+  }
+  /** ' Not read: domain <name> (<error>)...' for a refusal that says a record
+   *  was not found, so a miss caused by a dropped domain is not read as absence. */
+  unreadableNote() {
+    if (!this.unreadableDomains.length)
+      return "";
+    return `. Not read: ${this.unreadableDomains.map((d) => `domain '${d.name}' (${d.error}; ${d.note})`).join("; ")}`;
   }
   storeHolding(id) {
     const holders = this.holdersOf(id);
     if (holders.length === 0)
-      throw new Error(`no record '${id}' in the project store or any mounted domain`);
+      throw new Error(`no record '${id}' in the project store or any mounted domain${this.unreadableNote()}`);
     if (holders.length > 1) {
       throw new Error(`ambiguous holder: record '${id}' is held by ${holders.length} mounts \u2014 ${holders.map((s2) => `'${this.mountNameOf(s2)}'`).join(", ")}. One id must name one row: every routing decision here (which store a write lands in, which mount a transaction opens on, what scope a derived record inherits) assumes a single holder, so the ambiguity is refused rather than resolved project-first. Resolve the duplicate (scripts/domain-doctor.mjs show --id '${id}' on each store) before retrying.`);
+    }
+    for (const [name, store] of this.domains) {
+      if (store === holders[0] && this.isUnreadable(name)) {
+        throw new Error(`record '${id}' is held by domain '${name}', which this session cannot read ${this.droppedReason(name)}. Nothing was read or written. Repair the store, then restart the session.`);
+      }
     }
     return holders[0];
   }
@@ -23454,9 +23646,10 @@ var MountedStores = class {
     for (const [name, store] of this.domains)
       store.snapshot(pathFor(`domain-${name}`));
   }
-  /** Mounted domain names, in manifest order. */
+  /** Mounted domain names, in manifest order. Includes a domain listed on
+   *  unreadableDomains: it is still configured, though neither read nor written. */
   domainNames() {
-    return [...this.domains.keys()];
+    return [...this.mountedNames];
   }
   close() {
     for (const s2 of this.all())
@@ -23842,8 +24035,21 @@ function classifyClaimPath(repoRoot, path) {
     return { kind: "unverifiable", errno: code ?? String(err) };
   }
 }
+var StoreRowDecodeError = class extends Error {
+  op;
+  constructor(op, cause) {
+    super(`${op}: a record row's body is not valid JSON (${cause?.message ?? String(cause)})`);
+    this.name = "StoreRowDecodeError";
+    this.op = op;
+  }
+};
 function decodeLiveRecordRow(op, row) {
-  const record2 = JSON.parse(row.body);
+  let record2;
+  try {
+    record2 = JSON.parse(row.body);
+  } catch (e) {
+    throw new StoreRowDecodeError(op, e);
+  }
   if (typeof row.scope !== "string" || row.scope.length === 0) {
     throw new Error(`${op}: record '${record2.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
   }
@@ -26652,7 +26858,10 @@ function mountedDomainSurface(stores) {
     names: () => stores.domainNames(),
     description: (name) => stores.domainDescription(name),
     setDescription: (name, description) => stores.setDomainDescription(name, description),
-    missing: () => stores.missingDomains.map((m) => m.name)
+    missing: () => stores.missingDomains.map((m) => m.name),
+    unreadable: () => stores.unreadableDomains.map((d) => ({ name: d.name, error: d.error, note: d.note })),
+    slugHolders: (slug) => stores.slugHolders(slug),
+    articleSlugHolders: (slug) => stores.articleSlugHolders(slug)
   };
 }
 var UNPROMOTABLE_TYPES = ["feature_article", "todo", "attestation"];
@@ -26958,10 +27167,39 @@ var SterlingTools = class _SterlingTools {
     });
   }
   /** `{ missing_domains }` when a configured domain was skipped for having no
-   *  store, else nothing: a read over fewer stores than configured says so. */
-  missingDomainsDisclosure() {
+   *  store, and `{ unreadable_domains }` when a mounted domain's store failed a
+   *  read and was dropped, else nothing: a read over fewer stores than
+   *  configured says so. Call it AFTER the read it discloses for, because a
+   *  domain can be dropped by that read. */
+  unreadDomainsDisclosure() {
     const missing = this.domains?.missing() ?? [];
-    return missing.length ? { missing_domains: missing } : {};
+    const unreadable = this.domains?.unreadable() ?? [];
+    return {
+      ...missing.length ? { missing_domains: missing } : {},
+      ...unreadable.length ? { unreadable_domains: unreadable } : {}
+    };
+  }
+  /** Who holds `slug`, for a UNIQUENESS check: through the domain surface every
+   *  mounted domain is asked, dropped ones included, because "not read" must
+   *  never count as "absent" there. With no domain surface the store is a single
+   *  store (or a caller that mounted domains without handing over the surface,
+   *  which then gets the store's ordinary slug read). */
+  slugHolders(slug) {
+    return this.domains ? this.domains.slugHolders(slug) : this.store.recordsBySlug(slug);
+  }
+  articleSlugHolders(slug) {
+    return this.domains ? this.domains.articleSlugHolders(slug) : this.store.articlesBySlug(slug);
+  }
+  /** Append the unreadable domains to a not-found refusal, in place so the
+   *  error keeps its class: a record held by a dropped domain is not absent.
+   *  Called on resolveRecordId's not-found throws, so every tool that resolves
+   *  an id inherits it. */
+  withUnreadableDomains(err) {
+    const unreadable = this.domains?.unreadable() ?? [];
+    if (unreadable.length) {
+      err.message += ` ${unreadable.map((d) => `Mounted domain '${d.name}' was not read (${d.error}; ${d.note}), so a record it holds cannot be found here.`).join(" ")}`;
+    }
+    return err;
   }
   /** The store a read record came from: 'project' or 'domain:<name>', from the
    *  mount that physically holds it (scopeOfHolder), never the body's label. */
@@ -28586,7 +28824,7 @@ var SterlingTools = class _SterlingTools {
     } else if (type === "feature_article") {
       const slug = parsed.slug;
       if (slug) {
-        const clash = this.store.articlesBySlug(slug);
+        const clash = this.articleSlugHolders(slug);
         if (clash.length) {
           throw new Error(`knowledge_create: a feature_article with slug '${slug}' already exists ('${clash[0].id}'). Two records under one slug is worse than one wrong record \u2014 retrieval serves both and they contradict. Revising that article: knowledge_update '${clash[0].id}' (the correction supersedes the error \u2014 fix it FORWARD). Genuinely a different concept: choose a distinct slug. Replacing it wholesale: knowledge_create the new article under its own slug, then knowledge_retire the old one in_favor_of the new \u2014 never leave both live.`);
         }
@@ -28598,7 +28836,7 @@ var SterlingTools = class _SterlingTools {
     if (type === "decision" || type === "anti_pattern" || type === "research_finding" || type === "open_question" || type === "attestation" || type === "todo") {
       const explicit = parsed.slug;
       if (explicit) {
-        if (this.store.recordsBySlug(explicit).length) {
+        if (this.slugHolders(explicit).length) {
           throw new Error(`knowledge_create: a record with slug '${explicit}' already exists \u2014 one handle resolves to one record. Choose a distinct slug, or omit it to auto-derive a unique one.`);
         }
       } else {
@@ -29781,7 +30019,7 @@ var SterlingTools = class _SterlingTools {
         provenance: "unavailable:count_projection",
         records: [],
         ...byType ? { by_type: byType } : {},
-        ...this.missingDomainsDisclosure()
+        ...this.unreadDomainsDisclosure()
       };
     }
     const records = this.knowledgeQuery(filter);
@@ -29812,7 +30050,7 @@ var SterlingTools = class _SterlingTools {
       provenance,
       records: records.map(projectRecord),
       ...aboveThreshold !== void 0 ? { above_threshold: aboveThreshold } : {},
-      ...this.missingDomainsDisclosure(),
+      ...this.unreadDomainsDisclosure(),
       ...mintFailures.length > 0 ? { maintenance_mint_failed: mintFailures } : {}
     };
   }
@@ -29873,7 +30111,7 @@ var SterlingTools = class _SterlingTools {
   knowledgePreflight(text) {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) {
-      return { answerability: "insufficient", reason: "too_little_vocabulary", terms, matched_total: 0, matches: [], ...this.missingDomainsDisclosure() };
+      return { answerability: "insufficient", reason: "too_little_vocabulary", terms, matched_total: 0, matches: [], ...this.unreadDomainsDisclosure() };
     }
     const allMatches = this.axisCandidateMatches(text, terms, _SterlingTools.PREFLIGHT_MIN_HITS, false);
     const withCentrality = allMatches.map(({ record: record2, hits }) => ({
@@ -29907,7 +30145,7 @@ var SterlingTools = class _SterlingTools {
       ...capped ? { capped: true } : {},
       matches,
       answerability: matchedTotal ? "verify_targets" : "ungoverned",
-      ...this.missingDomainsDisclosure()
+      ...this.unreadDomainsDisclosure()
     };
   }
   /** knowledgePreflight's listed window under the READ SHARE ruling (decision
@@ -30216,7 +30454,7 @@ var SterlingTools = class _SterlingTools {
     if (!base2)
       return void 0;
     let slug = base2;
-    for (let n = 2; this.store.recordsBySlug(slug).length; n++)
+    for (let n = 2; this.slugHolders(slug).length; n++)
       slug = `${base2}-${n}`;
     return slug;
   }
@@ -30304,6 +30542,10 @@ var SterlingTools = class _SterlingTools {
       if (inbound.length) {
         served = { ...served, inbound_supersedes: inbound };
       }
+    }
+    const unreadable = this.domains?.unreadable() ?? [];
+    if (unreadable.length) {
+      served = { ...served, unreadable_domains: unreadable };
     }
     return this.projectFieldWindow(served, options);
   }
@@ -30540,7 +30782,8 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       // An ALIAS read keeps its disclosure on the windowed shape too: the block
       // is what tells the reader the id they cited is historical and where the
       // concept lives now, which a window has no other way to say.
-      ...rec.legacy_resolution !== void 0 ? { legacy_resolution: rec.legacy_resolution } : {}
+      ...rec.legacy_resolution !== void 0 ? { legacy_resolution: rec.legacy_resolution } : {},
+      ...rec.unreadable_domains !== void 0 ? { unreadable_domains: rec.unreadable_domains } : {}
     };
     const known = knownFieldsFor(type);
     if (!known?.has(field)) {
@@ -30602,7 +30845,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       throw new Error(`${toolName}: slug '${id}' resolves to ${bySlug.length} records (${bySlug.map((r) => `${r.id} (${r.type})`).join("; ")}) \u2014 a slug must name one record; cite the id.`);
     }
     if (id.length < _SterlingTools.CITATION_PREFIX_LEN) {
-      throw new UnresolvedIdentifierError(`${toolName}: no ${noun} '${id}' \u2014 no slug matches, and it is shorter than the ${_SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve as an id. Cite at least ${_SterlingTools.CITATION_PREFIX_LEN} characters, the full uuid, or an exact slug.`);
+      throw this.withUnreadableDomains(new UnresolvedIdentifierError(`${toolName}: no ${noun} '${id}' \u2014 no slug matches, and it is shorter than the ${_SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve as an id. Cite at least ${_SterlingTools.CITATION_PREFIX_LEN} characters, the full uuid, or an exact slug.`));
     }
     const aliases = this.store.recordAliases();
     const exactAlias = aliases.find((a) => a.historical_id === id);
@@ -30618,8 +30861,9 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     }
     if (hits.length === 0 && aliasHits.length === 1)
       throw this.historicalIdRefusal(aliasHits[0], id, toolName);
-    if (hits.length === 0)
-      throw new UnresolvedIdentifierError(`${toolName}: no ${noun} '${id}' in the project store or any mounted domain, at any status \u2014 and no slug matches`);
+    if (hits.length === 0) {
+      throw this.withUnreadableDomains(new UnresolvedIdentifierError(`${toolName}: no ${noun} '${id}' in the project store or any mounted domain, at any status \u2014 and no slug matches.`));
+    }
     const record2 = this.store.get(hits[0].id);
     if (!record2)
       throw new Error(`${toolName}: index resolved '${id}' to '${hits[0].id}' but no body was stored \u2014 the store is inconsistent`);
@@ -31599,7 +31843,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         throw new Error(`knowledge_split: two children in this call share slug '${child.slug}' \u2014 child slugs must be pairwise distinct; nothing was written.`);
       }
       seenSlugs.add(child.slug);
-      const clash = this.store.articlesBySlug(child.slug);
+      const clash = this.articleSlugHolders(child.slug);
       if (clash.length) {
         throw new Error(`knowledge_split: child slug '${child.slug}' collides with an existing feature_article ('${clash[0].id}') \u2014 two records under one slug is worse than one wrong record; choose a distinct slug. Nothing was written.`);
       }
@@ -33518,7 +33762,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     } catch (err) {
       if (!(err instanceof UnresolvedIdentifierError))
         throw err;
-      throw new Error(`knowledge_retire: no record '${inFavorOf}' to retire in favour of. The survivor must exist first \u2014 retiring into a void leaves the reader nowhere to go, which is the failure this tool exists to prevent.`);
+      throw this.withUnreadableDomains(new Error(`knowledge_retire: no record '${inFavorOf}' to retire in favour of. The survivor must exist first \u2014 retiring into a void leaves the reader nowhere to go, which is the failure this tool exists to prevent.`));
     }
     if (record2.id === survivor.id) {
       throw new Error(`knowledge_retire: '${id}' and '${inFavorOf}' both resolve to record '${record2.id}' \u2014 a record cannot be retired in favour of itself.`);
@@ -33764,7 +34008,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     const explicitSlug = body.slug;
     let slug;
     if (explicitSlug !== void 0) {
-      const clash = this.store.recordsBySlug(explicitSlug).filter((r) => r.id !== old.id);
+      const clash = this.slugHolders(explicitSlug).filter((r) => r.id !== old.id);
       if (clash.length) {
         throw new Error(`knowledge_supersede: a record with slug '${explicitSlug}' already exists ('${clash[0].id}') \u2014 one handle resolves to one record. Choose a distinct slug, or omit it to inherit '${old.slug ?? ""}'.`);
       }
@@ -33998,12 +34242,17 @@ if (KNOWLEDGE_CREATE_FIELD_VARIANTS.length < 2) {
 }
 var knowledgeCreateFieldsSchema = external_exports.discriminatedUnion("type", KNOWLEDGE_CREATE_FIELD_VARIANTS);
 var strict = (shape) => external_exports.object(shape).strict();
+function unreadableDomainWarning(d) {
+  return `sterling: domain '${d.name}' is mounted but its store at '${d.dbPath}' could not be read (${d.error}); reads skip it until the store is repaired and the session restarts, so its knowledge is not in any result, and writes into it are refused.`;
+}
 function createSterlingServer(storePath2) {
   const configPath = join6(dirname5(storePath2), "config.json");
   const config2 = parseConfig(existsSync5(configPath) ? JSON.parse(readFileSync3(configPath, "utf8")) : {});
   const store = new MountedStores(storePath2, resolveDomainMounts(config2), { skipMissing: true });
   for (const m of store.missingDomains)
     process.stderr.write(missingDomainWarning(m) + "\n");
+  for (const d of store.unreadableDomains)
+    process.stderr.write(unreadableDomainWarning(d) + "\n");
   const tools = new SterlingTools({ store, config: config2, repoRoot: dirname5(dirname5(storePath2)), domains: mountedDomainSurface(store) });
   const bootDomains = store.domainNames().map((name) => {
     let description;
@@ -34031,7 +34280,7 @@ function createSterlingServer(storePath2) {
     return json(tools.writeProjected(tools.knowledgeCreate(type, restFields), projection));
   });
   server2.registerTool("knowledge_query", {
-    description: `Retrieve knowledge: filter (types, stack_tags) \u2192 file_keys join \u2192 rank (rank_terms: single keywords, never prose) \u2192 cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW \u2014 raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: "full" (default), "digest" (one headline line per record \u2014 scan wide, then knowledge_get the few you need), or "count". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (score = -bm25, higher is more relevant, unbounded). Each record carries \`source\` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched.`,
+    description: `Retrieve knowledge: filter (types, stack_tags) \u2192 file_keys join \u2192 rank (rank_terms: single keywords, never prose) \u2192 cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW \u2014 raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: "full" (default), "digest" (one headline line per record \u2014 scan wide, then knowledge_get the few you need), or "count". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (score = -bm25, higher is more relevant, unbounded). Each record carries \`source\` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched; unreadable_domains lists mounted domains that could not be read, each with its error, and their records are not in the result.`,
     inputSchema: strict({
       types: external_exports.array(external_exports.string()).optional(),
       stack_tags: external_exports.array(external_exports.string()).optional(),
@@ -34043,7 +34292,7 @@ function createSterlingServer(storePath2) {
     })
   }, (opts) => json(tools.knowledgeQueryResult(opts)));
   server2.registerTool("knowledge_get", {
-    description: "Fetch one record by id (full uuid, exact slug, or unambiguous 8-char prefix) \u2014 the full-fidelity read. version:<n> reads an archived prior version. With `field`: a windowed read of just that field \u2014 strings page by characters, arrays by elements (offset/length); returns {kind, total_chars|total_entries, offset, value|entries}; an offset past the end returns empty with the true total. Scalar/object fields return whole and refuse offset/length. Unknown field is refused naming the valid set; offset/length without field is refused.",
+    description: "Fetch one record by id (full uuid, exact slug, or unambiguous 8-char prefix) \u2014 the full-fidelity read. version:<n> reads an archived prior version. With `field`: a windowed read of just that field \u2014 strings page by characters, arrays by elements (offset/length); returns {kind, total_chars|total_entries, offset, value|entries}; an offset past the end returns empty with the true total. Scalar/object fields return whole and refuse offset/length. Unknown field is refused naming the valid set; offset/length without field is refused. unreadable_domains (only when a mounted domain could not be read: each with its error) means a record held there cannot be found by this read.",
     inputSchema: strict({
       id: external_exports.string(),
       field: external_exports.string().optional(),
@@ -34257,7 +34506,7 @@ function createSterlingServer(storePath2) {
     inputSchema: strict({ from: external_exports.string(), rel: external_exports.string(), to: external_exports.string() })
   }, ({ from, rel, to }) => json(tools.knowledgeLink(from, rel, to)));
   server2.registerTool("knowledge_preflight", {
-    description: 'Pre-write conflict check: does the store already govern this subject? Run it before dispatching, designing, asking the user, or drafting a new record. Pass `text` (one subject) or `texts` (an agenda, one verdict per entry, in order). Matches anti_pattern, decision, feature_article, research_finding, disconfirmed_hypothesis and open_question records. Verdicts: "verify_targets" \u2014 the store governs this; open the named matches before proceeding (a match is a pointer, not the source); "ungoverned" \u2014 nothing governs it; "insufficient" \u2014 too little vocabulary to judge; the verdict and matched_total are decided from the centrality-passing candidate set only, not the capped `matches` window. Returns {terms, matched_total, capped (present/true only when `matches` was truncated), matches:[{id,type,title,matched_on,central,source}], answerability, missing_domains (only when a configured domain has no store)} or {verdicts:[\u2026]}. `matches` is capped at 20, sorted centrality-first (a central match always outranks a merely-hitting one), then by raw hit count. `matches` may include records with `central:[]` (non-central) \u2014 record-centrality is no longer required to LIST a candidate, only to decide the verdict and matched_total. matched_total counts centrality-passing, qualifying records among the candidates evaluated (each record type\'s own query is itself capped at 40), not a true/exact/full count.',
+    description: 'Pre-write conflict check: does the store already govern this subject? Run it before dispatching, designing, asking the user, or drafting a new record. Pass `text` (one subject) or `texts` (an agenda, one verdict per entry, in order). Matches anti_pattern, decision, feature_article, research_finding, disconfirmed_hypothesis and open_question records. Verdicts: "verify_targets" \u2014 the store governs this; open the named matches before proceeding (a match is a pointer, not the source); "ungoverned" \u2014 nothing governs it; "insufficient" \u2014 too little vocabulary to judge; the verdict and matched_total are decided from the centrality-passing candidate set only, not the capped `matches` window. Returns {terms, matched_total, capped (present/true only when `matches` was truncated), matches:[{id,type,title,matched_on,central,source}], answerability, missing_domains (only when a configured domain has no store), unreadable_domains (only when a mounted domain could not be read: each with its error; its records are not in the result)} or {verdicts:[\u2026]}. `matches` is capped at 20, sorted centrality-first (a central match always outranks a merely-hitting one), then by raw hit count. `matches` may include records with `central:[]` (non-central) \u2014 record-centrality is no longer required to LIST a candidate, only to decide the verdict and matched_total. matched_total counts centrality-passing, qualifying records among the candidates evaluated (each record type\'s own query is itself capped at 40), not a true/exact/full count.',
     inputSchema: strict({ text: external_exports.string().optional(), texts: external_exports.array(external_exports.string()).optional() })
   }, ({ text, texts }) => {
     if (text === void 0 === (texts === void 0)) {

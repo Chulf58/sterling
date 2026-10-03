@@ -65,6 +65,22 @@ export function classifyClaimPath(repoRoot: string, path: string): ClaimPathVerd
 }
 
 /**
+ * A `records` row whose body is not valid JSON, raised by the live-record
+ * decoder so a caller can tell a damaged row in the store apart from a
+ * SyntaxError raised anywhere else. MountedStores treats it as a failure of
+ * the store that holds the row. `op` is the read that hit it. The row's id is
+ * not carried: the decoder is handed only the body and scope columns.
+ */
+export class StoreRowDecodeError extends Error {
+  readonly op: string;
+  constructor(op: string, cause: unknown) {
+    super(`${op}: a record row's body is not valid JSON (${(cause as Error)?.message ?? String(cause)})`);
+    this.name = 'StoreRowDecodeError';
+    this.op = op;
+  }
+}
+
+/**
  * THE COLUMN-AUTHORITATIVE LIVE-RECORD DECODER, as a standalone export — the
  * body of SterlingStore.decodeLiveRecord (see its full contract there), lifted
  * so a reader OUTSIDE this class that materialises a live DurableRecord from a
@@ -73,7 +89,12 @@ export function classifyClaimPath(repoRoot: string, path: string): ClaimPathVerd
  * scope the body happens to carry.
  */
 export function decodeLiveRecordRow(op: string, row: { body: string; scope: string }): DurableRecord {
-  const record = JSON.parse(row.body) as DurableRecord;
+  let record: DurableRecord;
+  try {
+    record = JSON.parse(row.body) as DurableRecord;
+  } catch (e) {
+    throw new StoreRowDecodeError(op, e);
+  }
   if (typeof row.scope !== 'string' || row.scope.length === 0) {
     throw new Error(
       `${op}: record '${(record as { id?: string }).id ?? 'unknown'}' was read with an EMPTY records.scope column. ` +

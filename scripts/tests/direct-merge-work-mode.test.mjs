@@ -185,7 +185,7 @@ const noPrCreateEver = (state) => assert.equal(ghCalls(state).filter((c) => c[0]
 
 /** A project with a bare origin holding main, a feature branch checked out
  * with `commits` commits, and (unless mode is undefined) .sterling/config.json. */
-function makeProject({ mode, commits = [{ subject: 'feat: widget sprockets', body: 'Adds sprockets to the widget.' }], branchName = 'feat/sprockets', checkScript } = {}) {
+function makeProject({ mode, handoff, commits = [{ subject: 'feat: widget sprockets', body: 'Adds sprockets to the widget.' }], branchName = 'feat/sprockets', checkScript } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'sterling-dm-work-'));
   const dir = join(base, 'repo');
   const ssh = sshEnv(base);
@@ -207,7 +207,7 @@ function makeProject({ mode, commits = [{ subject: 'feat: widget sprockets', bod
   git(dir, ['remote', 'add', 'origin', ORIGIN_URL]);
   git(dir, ['push', 'origin', 'main'], env);
   mkdirSync(join(dir, '.sterling'), { recursive: true });
-  if (mode !== undefined) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode }));
+  if (mode !== undefined) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode, ...(handoff === undefined ? {} : { handoff: { enabled: handoff } }) }));
   new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
   git(dir, ['checkout', '-b', branchName]);
   commits.forEach((c, i) => {
@@ -887,6 +887,43 @@ for (const mode of [undefined, 'hobby']) {
       assert.equal(git(p.origin, ['rev-parse', 'main']), git(p.dir, ['rev-parse', 'main']), 'hobby pushes main to origin');
       assert.equal(gitMaybe(p.dir, ['rev-parse', '--verify', `refs/heads/${p.branchName}`]), null, 'hobby deletes the merged branch');
       assert.equal(existsSync(prLoopFile(p)), false, 'hobby never arms the PR review loop duty');
+    } finally {
+      p.cleanup();
+    }
+  });
+}
+
+// The shipping flow follows the mode and nothing else (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+// the handoff setting, on or off, changes neither flow, and /sterling:merge
+// writes no handoff files in any of the four combinations.
+const HANDOFF_PATHS = ['.opencode', 'architecture.md', 'rulings.md', 'docs'];
+for (const handoff of [true, false]) {
+  test(`work, handoff ${handoff ? 'on' : 'off'}: /sterling:merge opens the PR and never merges`, () => {
+    const p = makeProject({ mode: 'work', handoff });
+    try {
+      const r = runDirectMerge(p);
+      assert.equal(r.status, 0, `work merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+      const out = parseSingleJson(r.stdout, 'work + handoff');
+      assert.deepEqual([out.mode, out.ok, out.created, out.pr_number], ['work', true, true, 7]);
+      assertBaseUntouched(p, 'work + handoff');
+      assert.equal(existsSync(prLoopFile(p)), true, 'the PR review loop duty is armed');
+      for (const f of HANDOFF_PATHS) assert.equal(existsSync(join(p.dir, f)), false, `${f} is not written by a merge`);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test(`hobby, handoff ${handoff ? 'on' : 'off'}: /sterling:merge merges directly and never calls gh`, () => {
+    const p = makeProject({ mode: 'hobby', handoff });
+    try {
+      const r = runDirectMerge(p);
+      assert.equal(r.status, 0, `hobby merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+      assert.equal(parseSingleJson(r.stdout, 'hobby + handoff').mode, undefined, 'the hobby report shape is unchanged');
+      assert.deepEqual(ghCalls(p.gh.state), [], 'hobby never calls gh');
+      assert.notEqual(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'hobby merges into main');
+      assert.equal(existsSync(prLoopFile(p)), false, 'hobby never arms the PR review loop duty');
+      for (const f of HANDOFF_PATHS) assert.equal(existsSync(join(p.dir, f)), false, `${f} is not written by a merge`);
     } finally {
       p.cleanup();
     }

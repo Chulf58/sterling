@@ -1643,16 +1643,17 @@ test('the created launcher is CRLF on disk end to end — the appended generated
 // standing state of that project: loud, never fatal. A run that failed part-way
 // (exit 1) may have left an incomplete export: the update exits non-zero, and the
 // next run — which refreshes every registered project — projects it again.
-// The projection is WORK-ONLY (decision project-mode-hobby-work-toggle-decides-flow):
-// the fan-out reads each project's own config.mode before running it, so the
-// projects below are real temp dirs declaring mode 'work' (the hobby skip is pinned
-// in project-mode-gating.test.mjs). `provisioned` seeds the portable agent set and
+// The projection follows config.handoff.enabled (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+// the fan-out reads each project's own setting before running it, so the
+// projects below are real temp dirs with handoff on (the off skip is pinned
+// in handoff-setting.test.mjs). `provisioned` seeds the portable agent set and
 // the handoff indexes a completed run would have left.
 const workProjects = [];
 function workProject(name, { provisioned = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), `${name}-`));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'work' }));
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ handoff: { enabled: true } }));
   if (provisioned) {
     mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
     for (const name of ['implementor', 'researcher', 'scout']) writeFileSync(join(dir, '.opencode', 'agents', `${name}.md`), 'x\n');

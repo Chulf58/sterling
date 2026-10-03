@@ -6,13 +6,15 @@
 //     claude with --plugin-dir, which overrides the installed plugin — finding 9bce09a9)?
 //   - marketplaceAutoUpdate / autoUpdateWarning: is "autoUpdate": true set on
 //     extraKnownMarketplaces.sterling in the user-level settings.json? Never written.
-//   - cloneCleanupLines: the manual step naming each old clone. Nothing deletes a clone.
+//   - cloneCleanupLines: the manual step naming each old clone. Nothing deletes a clone,
+//     and a clone that is the init target or a registered project is never offered for it.
 // The sterling-update.bat recogniser lives beside its renderer in update-launcher.mjs.
 //
-// Builtins only, like the other scripts/lib launcher helpers.
-import { existsSync, readFileSync } from 'node:fs';
+// Builtins plus the shared path comparison (@sterling/schemas), which init and update bundle.
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { sameLocationAnyHost, isUnderLocationAnyHost } from '@sterling/schemas';
 
 const fwd = (p) => p.replace(/\\/g, '/');
 
@@ -125,13 +127,44 @@ function inspectClone(dir) {
 
 const trimSlash = (p) => (p.length > 1 ? p.replace(/\/+$/, '') : p);
 
+// The location a path really names: symlinks and '..' resolved when it exists, else the
+// string as given (the same helper shape as scripts/domains.mjs). A string comparison alone
+// would miss a clone reached through a symlink or a '..' spelling.
+const real = (p) => {
+  try {
+    return existsSync(p) ? realpathSync(p) : p;
+  } catch {
+    return p; // unresolvable (permissions, a loop): compare the string; inspectClone then reports what it can read
+  }
+};
+
 /** The manual clone-deletion step, one line per distinct named path; [] when none.
- *  Runs after every init write, so an inspection failure is printed, never thrown. */
-export function cloneCleanupLines(paths) {
+ *  Runs after every init write, so an inspection failure is printed, never thrown.
+ *  `liveProjectPaths` are the init target plus every registered project. A clone path that is
+ *  one of them, or CONTAINS one, holds a live project's store and history, so it gets a keep
+ *  line and never a deletion command (a clone INSIDE a live project keeps the hint); so does
+ *  a clone holding its own .sterling/sterling.db (checked by existence only). Pass [] only
+ *  when there are known to be none. null or omitted means the registry could not be read:
+ *  every path is then treated as live (fail closed). */
+export function cloneCleanupLines(paths, liveProjectPaths) {
   const unique = [...new Set(paths.filter(Boolean).map((p) => trimSlash(fwd(p))))];
   if (unique.length === 0) return [];
   const lines = ['old Sterling clone — this project used to run Sterling from a clone. Init never deletes a clone:'];
   for (const p of unique) {
+    if (liveProjectPaths === null || liveProjectPaths === undefined) {
+      lines.push(`  ${p} — the project registry could not be read, so this is treated as a live project and not offered for deletion; keep it unless you have checked by hand that no project on this machine uses it`);
+      continue;
+    }
+    const here = real(p);
+    const live = liveProjectPaths.map(real);
+    if (live.some((l) => sameLocationAnyHost(here, l))) {
+      lines.push(`  ${p} — a live Sterling project on this machine with its own store; keep it. Only the --plugin-dir launch was replaced; this directory is not an old clone to delete`);
+      continue;
+    }
+    if (live.some((l) => isUnderLocationAnyHost(l, here))) {
+      lines.push(`  ${p} — contains a live Sterling project on this machine; keep it. Deleting this directory would delete that project with it`);
+      continue;
+    }
     const found = inspectClone(p);
     if (found.kind === 'error') {
       lines.push(`  ${p} — could not inspect ${p}: ${found.code}; check it by hand before deleting anything`);
@@ -139,6 +172,8 @@ export function cloneCleanupLines(paths) {
       lines.push(`  ${p} — not a Sterling clone on this machine (already removed or moved); nothing to delete`);
     } else if (found.authoring) {
       lines.push(`  ${p} — this machine's authoring clone (machine_role authoring in its .sterling/config.json); keep it`);
+    } else if (existsSync(join(p, '.sterling', 'sterling.db'))) {
+      lines.push(`  ${p} — holds its own project store (.sterling/sterling.db), so it is a live Sterling project even if no registry lists it; keep it`);
     } else {
       lines.push(`  ${p} — delete it by hand once no project on this machine launches from it (rm -rf "${p}")`);
     }

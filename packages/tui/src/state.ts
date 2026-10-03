@@ -181,6 +181,20 @@ export interface AgentRosterSnapshot {
    *  instead of vanishing into a failed parse. Absent → hobby (the schema default);
    *  null → the config could not be read (UNKNOWN, never the default). */
   mode?: string | null;
+  /** The handoff setting (decision
+   *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+   *  true or false is the EFFECTIVE setting as the writers read it
+   *  (readHandoffEnabled: config.handoff.enabled, or on when the key is absent
+   *  and handoff files are tracked in git). A string is a raw value that is
+   *  not a boolean (INVALID). Absent → off; null → the setting could not be
+   *  determined (UNKNOWN, never the default): the config could not be read, or
+   *  the key is absent and git could not say what is tracked. */
+  handoff?: boolean | string | null;
+  /** Why the handoff row reads as it does, shown in brackets after the value:
+   *  'not set' for an absent key, the tracked-files note for ON without a key,
+   *  and the git error for UNKNOWN. Absent for an explicit key; an UNKNOWN
+   *  without it is an unreadable config. */
+  handoffDetail?: string;
 }
 
 /** A projected System-tab line (renderer prints text verbatim; kind styles it). */
@@ -220,6 +234,11 @@ export interface SystemTabView {
    *  a single-entry list, same toggle-only shape as tddRows, appended after it in
    *  cursor order; hidden while a config.models picker is open. */
   modeRows: SystemRow[];
+  /** handoff files toggle row (decision
+   *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+   *  a single-entry list, same toggle-only shape as modeRows, appended after it in
+   *  cursor order; hidden while a config.models picker is open. */
+  handoffRows: SystemRow[];
 }
 
 const EMPTY_ROSTER: AgentRosterSnapshot = {
@@ -230,6 +249,7 @@ const EMPTY_ROSTER: AgentRosterSnapshot = {
   codexWired: false,
   tdd: { enabled: true },
   mode: 'hobby',
+  handoff: false,
 };
 
 /** Pure scalar drift check: true iff the installed value differs from config. */
@@ -396,6 +416,13 @@ export interface ModeToggleEffect {
   type: 'mode_toggle';
   mode: 'hobby' | 'work';
 }
+/** System tab, handoff files row (decision
+ *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+ *  writes config.handoff.enabled. Carries the NEW value. */
+export interface HandoffToggleEffect {
+  type: 'handoff_toggle';
+  enabled: boolean;
+}
 /** Tasks tab board-item edit commit (user-ruled 2026-09-28, board f25e5547
  *  lane J): the TUI's second write surface after the System tab. Carries the
  *  full replacement text; runEffects executes it through the same store
@@ -424,6 +451,7 @@ export type Effect =
   | SparringModelEffect
   | TddToggleEffect
   | ModeToggleEffect
+  | HandoffToggleEffect
   | BoardEditEffect;
 
 export type UiEvent =
@@ -758,7 +786,9 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   const tddRows = selector ? [] : [tddToggleRow(snap, ui, width, keys.length + 2)];
   // the project mode row follows the tdd row, at keys.length + 3.
   const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows };
+  // the handoff files row follows the project mode row, at keys.length + 4.
+  const handoffRows = selector ? [] : [handoffToggleRow(snap, ui, width, keys.length + 4)];
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows };
 }
 
 /** The catalog-status banner: absent / current(fresh) / stale-with-date. */
@@ -844,6 +874,23 @@ function modeToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cu
   const marker = selected ? '› ' : '  ';
   const shown = mode === null ? 'UNKNOWN (config unreadable)' : mode === 'hobby' || mode === 'work' ? mode.toUpperCase() : `INVALID ('${mode}')`;
   return { id: 'sys:project_mode', lines: [{ text: clip(`${marker}Project mode: ${shown}`), kind: 'title', selected }] };
+}
+
+/** handoff files row (decision
+ *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting): ON or
+ *  OFF from the effective setting (absent → OFF), UNKNOWN for an unreadable
+ *  config or a git failure, and INVALID for a raw value that is not a boolean —
+ *  never shown as on or off. handoffDetail follows the value in brackets, so an
+ *  absent key reads OFF (not set) and an explicit false reads OFF. Mirrors
+ *  modeToggleRow's shape. */
+function handoffToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorIndex: number): SystemRow {
+  const clip = (s: string): string => clipEllipsis(s, width);
+  const handoff = snap.handoff === undefined ? false : snap.handoff;
+  const selected = ui.cursor === cursorIndex;
+  const marker = selected ? '› ' : '  ';
+  const why = snap.handoffDetail === undefined ? '' : ` (${snap.handoffDetail})`;
+  const shown = handoff === null ? `UNKNOWN (${snap.handoffDetail ?? 'config unreadable'})` : handoff === true ? `ON${why}` : handoff === false ? `OFF${why}` : `INVALID (${handoff})`;
+  return { id: 'sys:handoff_files', lines: [{ text: clip(`${marker}Handoff files: ${shown}`), kind: 'title', selected }] };
 }
 
 /** Bridge the pure System projection into a DashboardState the renderer draws:
@@ -944,8 +991,8 @@ function systemDashboardState(
   // tdd toggle row (decision foreign_752caf98): drawn after the sparring-partner
   // rows, same row shape — a separate list, never merged.
   // project mode row (decision project-mode-hobby-work-toggle-decides-flow): drawn
-  // after the tdd row, same row shape.
-  for (const sr of [...view.tddRows, ...view.modeRows]) {
+  // after the tdd row, same row shape. The handoff files row follows it.
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows]) {
     const lines: RowLine[] = sr.lines.map((l) => ({
       text: l.text,
       kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],
@@ -1345,7 +1392,10 @@ export function reduce(
         // 2026-09-22).
         // + 4 since the project mode row (sysKeys.length + 3, decision
         // project-mode-hobby-work-toggle-decides-flow) joined after the tdd row.
-        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 4 - 1)));
+        // + 5 since the handoff files row (sysKeys.length + 4, decision
+        // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting)
+        // joined after the project mode row.
+        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 5 - 1)));
         const sel = ui.selector;
         const editing = ui.sparringModelEdit !== undefined;
         switch (event.name) {
@@ -1407,6 +1457,12 @@ export function reduce(
               // project mode row: an immediate flip. An invalid value flips to
               // hobby, the default flow — a visible, deliberate write, never a guess.
               effects.push({ type: 'mode_toggle', mode: (roster.mode ?? 'hobby') === 'hobby' ? 'work' : 'hobby' });
+              return { ui: { ...ui, cursor, notice: undefined }, effects };
+            }
+            if (cursor === sysKeys.length + 4) {
+              // handoff files row: an immediate flip. An invalid value flips to
+              // off, the default — a visible, deliberate write, never a guess.
+              effects.push({ type: 'handoff_toggle', enabled: (roster.handoff ?? false) === false });
               return { ui: { ...ui, cursor, notice: undefined }, effects };
             }
             const key = sysKeys[cursor];

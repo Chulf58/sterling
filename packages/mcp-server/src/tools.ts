@@ -566,6 +566,10 @@ export interface KnowledgeQueryResult {
    *  read did not search them. Present only when non-empty. Each record also
    *  carries `source`: 'project' or 'domain:<name>', the store that holds it. */
   missing_domains?: string[];
+  /** Mounted domains whose store failed a read, so this read did not search
+   *  them: each with the error of the failing read and a `note` saying when it
+   *  was dropped and that the session must restart. Present only when non-empty. */
+  unreadable_domains?: UnreadableDomainDisclosure[];
   /** Read-time maintenance mints the store REFUSED during this read (a write
    *  refusal such as live schema version drift). The records are still served;
    *  each entry names the record, the lane and the error, and the record itself
@@ -611,6 +615,10 @@ export interface KnowledgePreflightResult {
   /** Configured domains not mounted because their store is missing, so this
    *  check did not search them. Present only when non-empty. */
   missing_domains?: string[];
+  /** Mounted domains whose store failed a read, so this read did not search
+   *  them: each with the error of the failing read and a `note` saying when it
+   *  was dropped and that the session must restart. Present only when non-empty. */
+  unreadable_domains?: UnreadableDomainDisclosure[];
   matches: {
     id: string;
     type: string;
@@ -683,6 +691,10 @@ export interface ToolDeps {
  * Kept beside ToolStore rather than inside it because only the domain-facing
  * tools need it and a plain SterlingStore has no domains to report.
  */
+/** A dropped domain as a tool result or refusal names it: the store's
+ *  UnreadableDomain without its absolute path. */
+export type UnreadableDomainDisclosure = Omit<MountedStores['unreadableDomains'][number], 'dbPath'>;
+
 export interface DomainSurface {
   /** Mounted domain names, in manifest order. */
   names(): string[];
@@ -692,6 +704,15 @@ export interface DomainSurface {
   setDescription(name: string, description: string): void;
   /** Configured domains that are NOT mounted because their store is missing. */
   missing(): string[];
+  /** Mounted domains dropped from reads because their store failed one, each
+   *  with the error of the failing read and the note saying when it was dropped. */
+  unreadable(): UnreadableDomainDisclosure[];
+  /** Live records carrying `slug` in the project store or ANY mounted domain,
+   *  dropped ones included, for a uniqueness check. Throws when a domain cannot
+   *  answer, naming it. */
+  slugHolders(slug: string): DurableRecord[];
+  /** The feature_article counterpart of slugHolders. */
+  articleSlugHolders(slug: string): DurableRecord[];
 }
 
 /** The DomainSurface over a MountedStores: every read and the one write go
@@ -703,6 +724,9 @@ export function mountedDomainSurface(stores: MountedStores): DomainSurface {
     description: (name) => stores.domainDescription(name),
     setDescription: (name, description) => stores.setDomainDescription(name, description),
     missing: () => stores.missingDomains.map((m) => m.name),
+    unreadable: () => stores.unreadableDomains.map((d) => ({ name: d.name, error: d.error, note: d.note })),
+    slugHolders: (slug) => stores.slugHolders(slug),
+    articleSlugHolders: (slug) => stores.articleSlugHolders(slug),
   };
 }
 
@@ -1686,10 +1710,42 @@ export class SterlingTools {
   }
 
   /** `{ missing_domains }` when a configured domain was skipped for having no
-   *  store, else nothing: a read over fewer stores than configured says so. */
-  private missingDomainsDisclosure(): { missing_domains?: string[] } {
+   *  store, and `{ unreadable_domains }` when a mounted domain's store failed a
+   *  read and was dropped, else nothing: a read over fewer stores than
+   *  configured says so. Call it AFTER the read it discloses for, because a
+   *  domain can be dropped by that read. */
+  private unreadDomainsDisclosure(): { missing_domains?: string[]; unreadable_domains?: UnreadableDomainDisclosure[] } {
     const missing = this.domains?.missing() ?? [];
-    return missing.length ? { missing_domains: missing } : {};
+    const unreadable = this.domains?.unreadable() ?? [];
+    return {
+      ...(missing.length ? { missing_domains: missing } : {}),
+      ...(unreadable.length ? { unreadable_domains: unreadable } : {}),
+    };
+  }
+
+  /** Who holds `slug`, for a UNIQUENESS check: through the domain surface every
+   *  mounted domain is asked, dropped ones included, because "not read" must
+   *  never count as "absent" there. With no domain surface the store is a single
+   *  store (or a caller that mounted domains without handing over the surface,
+   *  which then gets the store's ordinary slug read). */
+  private slugHolders(slug: string): DurableRecord[] {
+    return this.domains ? this.domains.slugHolders(slug) : this.store.recordsBySlug(slug);
+  }
+
+  private articleSlugHolders(slug: string): DurableRecord[] {
+    return this.domains ? this.domains.articleSlugHolders(slug) : this.store.articlesBySlug(slug);
+  }
+
+  /** Append the unreadable domains to a not-found refusal, in place so the
+   *  error keeps its class: a record held by a dropped domain is not absent.
+   *  Called on resolveRecordId's not-found throws, so every tool that resolves
+   *  an id inherits it. */
+  private withUnreadableDomains<E extends Error>(err: E): E {
+    const unreadable = this.domains?.unreadable() ?? [];
+    if (unreadable.length) {
+      err.message += ` ${unreadable.map((d) => `Mounted domain '${d.name}' was not read (${d.error}; ${d.note}), so a record it holds cannot be found here.`).join(' ')}`;
+    }
+    return err;
   }
 
   /** The store a read record came from: 'project' or 'domain:<name>', from the
@@ -3843,7 +3899,7 @@ export class SterlingTools {
       // invent the tombstone workaround that caused the incident.
       const slug = (parsed as { slug?: string }).slug;
       if (slug) {
-        const clash = this.store.articlesBySlug(slug);
+        const clash = this.articleSlugHolders(slug);
         if (clash.length) {
           throw new Error(
             `knowledge_create: a feature_article with slug '${slug}' already exists ('${clash[0].id}'). ` +
@@ -3901,7 +3957,7 @@ export class SterlingTools {
     ) {
       const explicit = (parsed as { slug?: string }).slug;
       if (explicit) {
-        if (this.store.recordsBySlug(explicit).length) {
+        if (this.slugHolders(explicit).length) {
           throw new Error(
             `knowledge_create: a record with slug '${explicit}' already exists — one handle resolves to one record. ` +
               `Choose a distinct slug, or omit it to auto-derive a unique one.`
@@ -5753,7 +5809,7 @@ export class SterlingTools {
         provenance: 'unavailable:count_projection',
         records: [],
         ...(byType ? { by_type: byType } : {}),
-        ...this.missingDomainsDisclosure(),
+        ...this.unreadDomainsDisclosure(),
       };
     }
     const records = this.knowledgeQuery(filter);
@@ -5808,7 +5864,7 @@ export class SterlingTools {
       provenance,
       records: records.map(projectRecord),
       ...(aboveThreshold !== undefined ? { above_threshold: aboveThreshold } : {}),
-      ...this.missingDomainsDisclosure(),
+      ...this.unreadDomainsDisclosure(),
       ...(mintFailures.length > 0 ? { maintenance_mint_failed: mintFailures } : {}),
     };
   }
@@ -5870,7 +5926,7 @@ export class SterlingTools {
   knowledgePreflight(text: string): KnowledgePreflightResult {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) {
-      return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matched_total: 0, matches: [], ...this.missingDomainsDisclosure() };
+      return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matched_total: 0, matches: [], ...this.unreadDomainsDisclosure() };
     }
     // B2G widening (findings f6ada94d and
     // preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
@@ -5945,7 +6001,7 @@ export class SterlingTools {
       ...(capped ? { capped: true as const } : {}),
       matches,
       answerability: matchedTotal ? 'verify_targets' : 'ungoverned',
-      ...this.missingDomainsDisclosure(),
+      ...this.unreadDomainsDisclosure(),
     };
   }
 
@@ -6353,7 +6409,7 @@ export class SterlingTools {
     const base = SterlingTools.slugify(headline);
     if (!base) return undefined;
     let slug = base;
-    for (let n = 2; this.store.recordsBySlug(slug).length; n++) slug = `${base}-${n}`;
+    for (let n = 2; this.slugHolders(slug).length; n++) slug = `${base}-${n}`;
     return slug;
   }
 
@@ -6499,6 +6555,13 @@ export class SterlingTools {
       if (inbound.length) {
         served = { ...served, inbound_supersedes: inbound };
       }
+    }
+    // Every read shape (whole record, archived version, field window) says
+    // which mounted domains its lookups could not read, under the same key as
+    // knowledge_query. Omitted when every domain was read.
+    const unreadable = this.domains?.unreadable() ?? [];
+    if (unreadable.length) {
+      served = { ...served, unreadable_domains: unreadable };
     }
 
     return this.projectFieldWindow(served, options);
@@ -6764,6 +6827,7 @@ export class SterlingTools {
       // is what tells the reader the id they cited is historical and where the
       // concept lives now, which a window has no other way to say.
       ...(rec.legacy_resolution !== undefined ? { legacy_resolution: rec.legacy_resolution } : {}),
+      ...(rec.unreadable_domains !== undefined ? { unreadable_domains: rec.unreadable_domains } : {}),
     };
     // REAL FIELDS WIN OVER THE VIRTUAL ONE (roster review follow-up): check
     // knownFieldsFor FIRST — if some type ever registers an actual field
@@ -6862,8 +6926,10 @@ export class SterlingTools {
       );
     }
     if (id.length < SterlingTools.CITATION_PREFIX_LEN) {
-      throw new UnresolvedIdentifierError(
-        `${toolName}: no ${noun} '${id}' — no slug matches, and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve as an id. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, the full uuid, or an exact slug.`
+      throw this.withUnreadableDomains(
+        new UnresolvedIdentifierError(
+          `${toolName}: no ${noun} '${id}' — no slug matches, and it is shorter than the ${SterlingTools.CITATION_PREFIX_LEN}-char citation prefix, too little to resolve as an id. Cite at least ${SterlingTools.CITATION_PREFIX_LEN} characters, the full uuid, or an exact slug.`
+        )
       );
     }
     // HISTORICAL (aliased) ids join the ladder here, between exact-slug and
@@ -6895,7 +6961,11 @@ export class SterlingTools {
       );
     }
     if (hits.length === 0 && aliasHits.length === 1) throw this.historicalIdRefusal(aliasHits[0], id, toolName);
-    if (hits.length === 0) throw new UnresolvedIdentifierError(`${toolName}: no ${noun} '${id}' in the project store or any mounted domain, at any status — and no slug matches`);
+    if (hits.length === 0) {
+      throw this.withUnreadableDomains(
+        new UnresolvedIdentifierError(`${toolName}: no ${noun} '${id}' in the project store or any mounted domain, at any status — and no slug matches.`)
+      );
+    }
     const record = this.store.get(hits[0].id);
     // The index and the bodies come from the same rows, so a hit with no body is
     // a torn store, not a miss — say which it is rather than reporting "no record".
@@ -8622,7 +8692,7 @@ export class SterlingTools {
         throw new Error(`knowledge_split: two children in this call share slug '${child.slug}' — child slugs must be pairwise distinct; nothing was written.`);
       }
       seenSlugs.add(child.slug);
-      const clash = this.store.articlesBySlug(child.slug);
+      const clash = this.articleSlugHolders(child.slug);
       if (clash.length) {
         throw new Error(
           `knowledge_split: child slug '${child.slug}' collides with an existing feature_article ('${clash[0].id}') — two records under one slug is worse than one wrong record; choose a distinct slug. Nothing was written.`
@@ -11599,9 +11669,13 @@ export class SterlingTools {
       survivor = this.resolveRecordId(inFavorOf, 'knowledge_retire', 'target record');
     } catch (err) {
       if (!(err instanceof UnresolvedIdentifierError)) throw err;
-      throw new Error(
-        `knowledge_retire: no record '${inFavorOf}' to retire in favour of. The survivor must exist first — ` +
-          `retiring into a void leaves the reader nowhere to go, which is the failure this tool exists to prevent.`
+      // The replacement keeps the dropped-domain text: a survivor held by a
+      // domain this session cannot read is not a void.
+      throw this.withUnreadableDomains(
+        new Error(
+          `knowledge_retire: no record '${inFavorOf}' to retire in favour of. The survivor must exist first — ` +
+            `retiring into a void leaves the reader nowhere to go, which is the failure this tool exists to prevent.`
+        )
       );
     }
     // The literal-string self-retire check above cannot see two SPELLINGS of one
@@ -11871,7 +11945,7 @@ export class SterlingTools {
     const explicitSlug = (body as { slug?: string }).slug;
     let slug: string | undefined;
     if (explicitSlug !== undefined) {
-      const clash = this.store.recordsBySlug(explicitSlug).filter((r) => r.id !== old.id);
+      const clash = this.slugHolders(explicitSlug).filter((r) => r.id !== old.id);
       if (clash.length) {
         throw new Error(
           `knowledge_supersede: a record with slug '${explicitSlug}' already exists ('${clash[0].id}') — one handle resolves to one record. ` +

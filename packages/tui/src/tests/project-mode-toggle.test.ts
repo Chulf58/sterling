@@ -19,8 +19,8 @@ import * as stateMod from '../state.js';
 //   • the AgentRosterSnapshot carries `mode?: string | null` — the RAW config
 //     value (absent → hobby; null → the config was unreadable → UNKNOWN). A
 //     value other than hobby/work renders INVALID, never as either flow.
-//   • cursor index: configModels-key-count + 3 (after the tdd row); it is the
-//     tab's last row, so DOWN clamps there.
+//   • cursor index: configModels-key-count + 3 (after the tdd row). The handoff
+//     files row sits below it (handoff-toggle.test.ts owns the bottom clamp).
 //   • ENTER/SPACE emit { type: 'mode_toggle', mode } with the NEW mode:
 //     hobby → work, work → hobby, invalid → hobby (the default flow).
 //   • hidden (empty array) while a config.models picker is open.
@@ -101,16 +101,20 @@ test('mode row: renders HOBBY, WORK, HOBBY for an absent key, and INVALID for an
   assert.match(unknown, /Project mode: UNKNOWN \(config unreadable\)/, 'an unreadable config is UNKNOWN, never the hobby default');
 });
 
-test('mode row: DOWN from the tdd row lands on it; it is the last row (DOWN clamps); UP returns to tdd', () => {
+// CHANGED: the mode row was the tab's last row and this pinned the DOWN clamp on
+// it. The handoff files row now sits below it (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting), so
+// DOWN moves on to that row; the clamp is pinned in handoff-toggle.test.ts.
+test('mode row: DOWN from the tdd row lands on it; DOWN again moves to the handoff files row; UP returns to tdd', () => {
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ mode: 'hobby' });
     const n = Object.keys(snap.configModels).length;
     const down = reduce(store, st({ tab: SYS_TAB, cursor: n + 2 }), key('DOWN'), undefined, undefined, snap);
     assert.equal(down.ui.cursor, n + 3);
-    const clamped = reduce(store, down.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(clamped.ui.cursor, n + 3);
-    const up = reduce(store, clamped.ui, key('UP'), undefined, undefined, snap);
+    const next = reduce(store, down.ui, key('DOWN'), undefined, undefined, snap);
+    assert.equal(next.ui.cursor, n + 4);
+    const up = reduce(store, down.ui, key('UP'), undefined, undefined, snap);
     assert.equal(up.ui.cursor, n + 2);
     const selected = buildSystemTab!(snap, down.ui, 80).modeRows![0].lines[0];
     assert.equal(selected.selected, true, 'the row is marked selected under the cursor');
@@ -211,21 +215,24 @@ test('applyModeToggle: an unreadable config reports the failure through onError 
 });
 
 // ---------------------------------------------------------------------------
-// The notice after a mode toggle (Astra design review item 5, decision
-// project-mode-hobby-work-toggle-decides-flow). sync-agents refreshes only the
-// portable agents; the handoff projection runs from init or /sterling:update. So
-// the work notice must name /sterling:update (or init) as the path that writes
-// BOTH file sets, and must never claim sync-agents writes the handoff files.
+// The notice after a mode toggle. CHANGED (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+// this pinned that the work notice named /sterling:update (or init) as the path
+// that writes the OpenCode agents and handoff files, and sync-agents as the
+// agents-only path (Astra design review item 5). The mode no longer writes those
+// files, so the mode notices say only how work ships. The same three facts are
+// now pinned on the handoff notice in handoff-toggle.test.ts.
 // The notice is composed inline in controller.ts (shared by the terminal entry
 // and the OpenCode plugin), so this pins its source text.
-test('mode toggle notice: work names /sterling:update (or init) for both file sets, never sync-agents for the handoff files', () => {
+test('mode toggle notice: work says a pull request is opened, hobby says a direct merge; neither claims anything about the handoff files', () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const src = readFileSync(join(here, '..', '..', 'src', 'controller.ts'), 'utf8');
   const work = src.match(/'project mode set to work[^']*'/)?.[0];
+  const hobby = src.match(/'project mode set to hobby[^']*'/)?.[0];
   assert.ok(work, 'the work notice is present');
-  assert.match(work, /\/sterling:update/);
-  assert.match(work, /\binit\b/);
-  assert.match(work, /OpenCode agents and (the )?handoff files/);
-  assert.doesNotMatch(work, /sync-agents[^.]*handoff/, 'sync-agents does not run the handoff projection');
-  assert.match(work, /sync-agents[^.]*only[^.]*OpenCode agents|OpenCode agents only/, 'if sync-agents is named, it is named as the agents-only path');
+  assert.ok(hobby, 'the hobby notice is present');
+  assert.match(work, /\/sterling:merge now opens a pull request/);
+  assert.match(work, /nothing is merged directly/);
+  assert.match(hobby, /\/sterling:merge now merges directly/);
+  for (const n of [work, hobby]) assert.doesNotMatch(n, /OpenCode|handoff|sync-agents/i);
 });

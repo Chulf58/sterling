@@ -53,6 +53,9 @@
     "enabled": true
   },
   "mode": "hobby",
+  "handoff": {
+    "enabled": false
+  },
   "pr_review": {
     "copilot_logins": []
   }
