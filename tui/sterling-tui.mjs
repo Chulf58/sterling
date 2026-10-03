@@ -52479,9 +52479,35 @@ function tileCells(avatarIndex, frame) {
     return [pad, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), pad];
   });
 }
-var SEQUENCE = [0, 0, 1, 0, 2, 0, 3, 0];
+var ANIMATION_MS = 333;
+var SEQUENCE = [
+  0,
+  0,
+  0,
+  0,
+  1,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  2,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  3,
+  0,
+  0,
+  0
+];
 function phaseFor(avatarIndex) {
-  return (avatarIndex * 3 % SEQUENCE.length + SEQUENCE.length) % SEQUENCE.length;
+  return (avatarIndex * 5 % SEQUENCE.length + SEQUENCE.length) % SEQUENCE.length;
 }
 function frameAt(tick, phase, running) {
   if (!running)
@@ -52496,10 +52522,19 @@ var DONE_LINGER_MS = 5 * 6e4;
 function roundOf(e) {
   return typeof e.round === "number" ? e.round : 1;
 }
+function readCurrentSessionId(projectRoot) {
+  try {
+    const parsed = JSON.parse(readFileSync9(join12(projectRoot, ".sterling", "transient", "session.json"), "utf8"));
+    return typeof parsed?.session_id === "string" && parsed.session_id ? parsed.session_id : null;
+  } catch {
+    return null;
+  }
+}
 function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
   const reg = readRegister(projectRoot);
   if (reg.availability !== "ok")
     return { availability: reg.availability, rows: [] };
+  const currentSession = readCurrentSessionId(projectRoot);
   const byAgent = /* @__PURE__ */ new Map();
   for (const e of reg.entries) {
     const list = byAgent.get(e.agent_id) ?? [];
@@ -52510,19 +52545,22 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
   for (const [agentId, rounds] of byAgent) {
     rounds.sort((a, b) => roundOf(b) - roundOf(a) || Date.parse(b.at) - Date.parse(a.at));
     const latest = rounds[0];
+    if (currentSession !== null && latest.session_id !== currentSession)
+      continue;
     const startedAt = Date.parse(latest.at);
     if (Number.isNaN(startedAt))
       continue;
     const endStamp = latest.ended ? latest.ended.at : latest.residue_reported_at ? String(latest.residue_reported_at) : null;
     const endedAt = endStamp === null ? null : Date.parse(endStamp);
-    if (endedAt !== null && (Number.isNaN(endedAt) || now - endedAt > lingerMs))
+    const resumable = currentSession !== null && Boolean(latest.ended);
+    if (endedAt !== null && (Number.isNaN(endedAt) || !resumable && now - endedAt > lingerMs))
       continue;
     const withId = rounds.find((r) => typeof r.tool_use_id === "string" && r.tool_use_id !== "");
     rows.push({
       agentId,
       sessionId: latest.session_id,
       agentType: typeof latest.agent_type === "string" && latest.agent_type ? latest.agent_type : null,
-      status: endedAt === null ? "running" : "done",
+      status: endedAt === null ? "running" : resumable ? "resumable" : "done",
       startedAt,
       endedAt,
       elapsedMs: Math.max(0, (endedAt ?? now) - startedAt),
@@ -52530,9 +52568,10 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
     });
   }
   rows.sort((a, b) => {
-    if (a.status !== b.status)
-      return a.status === "running" ? -1 : 1;
-    return a.status === "running" ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0);
+    const [aRun, bRun] = [a.status === "running", b.status === "running"];
+    if (aRun !== bRun)
+      return aRun ? -1 : 1;
+    return aRun ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0);
   });
   return { availability: "ok", rows };
 }
@@ -52649,13 +52688,13 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
         missing.set(key, now + TRANSCRIPT_RETRY_MS);
     }
     if (!path)
-      return { model: null, pct: null };
+      return { model: null, pct: null, tokens: null };
     let stamp;
     try {
       const st = statSync5(path);
       stamp = `${st.size}:${st.mtimeMs}`;
     } catch {
-      return { model: null, pct: null };
+      return { model: null, pct: null, tokens: null };
     }
     let cached = usage.get(r.agentId);
     if (cached?.stamp !== stamp) {
@@ -52664,10 +52703,10 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
     }
     const u = cached.value;
     if (!u)
-      return { model: null, pct: null };
+      return { model: null, pct: null, tokens: null };
     const model = u.model ?? (r.agentType ? models.get(r.agentType) ?? null : null);
     const window2 = model ? contextWindowFor(model, windows, sharedWindows) : null;
-    return { model: u.model, pct: window2 ? contextPercent(u.tokens, window2) : null };
+    return { model: u.model, pct: window2 ? contextPercent(u.tokens, window2) : null, tokens: u.tokens };
   }
   function refresh(now) {
     lastRead = now;
@@ -52677,9 +52716,9 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
     avatars = assign(source.rows.map((r) => r.agentId), avatars.current, rng, { poolSize: POOL_SIZE, freed: avatars.freed });
     models = /* @__PURE__ */ new Map();
     for (const r of source.rows) {
-      if (r.toolUseId && !descriptions.has(r.toolUseId)) {
+      if (r.toolUseId && (!descriptions.has(r.toolUseId) || r.status === "running" && descriptions.get(r.toolUseId) === null)) {
         const d = readDispatchDescription(projectRoot, r.toolUseId);
-        if (d !== null || r.status === "done")
+        if (d !== null || r.status !== "running")
           descriptions.set(r.toolUseId, d);
       }
       if (r.agentType && !models.has(r.agentType))
@@ -52715,11 +52754,34 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
         model: context.get(r.agentId)?.model ?? (r.agentType ? models.get(r.agentType) ?? null : null),
         status: r.status,
         elapsedMs: r.status === "running" ? Math.max(0, now - r.startedAt) : r.elapsedMs,
-        contextPct: context.get(r.agentId)?.pct ?? null
+        contextPct: context.get(r.agentId)?.pct ?? null,
+        contextTokens: context.get(r.agentId)?.tokens ?? null,
+        idleMs: r.endedAt === null ? null : Math.max(0, now - r.endedAt)
       }));
       return { availability: source.availability, active: agents.filter((a) => a.status === "running").length, agents };
     }
   };
+}
+function formatIdle(ms) {
+  const s2 = Math.max(0, Math.floor(ms / 1e3));
+  if (s2 < 60)
+    return `${s2}s`;
+  const m = Math.floor(s2 / 60);
+  if (m < 60)
+    return `${m}m`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+function formatTokens(tokens) {
+  if (tokens === null)
+    return "?";
+  return tokens < 1e3 ? String(tokens) : `${Math.round(tokens / 1e3)}k`;
+}
+function resumableStatus(a, width) {
+  const idle = formatIdle(a.idleMs ?? 0);
+  const tokens = formatTokens(a.contextTokens);
+  const pct = a.contextPct === null ? [] : [`resumable \xB7 idle ${idle} \xB7 ${tokens} ctx (${a.contextPct}%)`];
+  const forms = [...pct, `resumable \xB7 idle ${idle} \xB7 ${tokens} ctx`, `resumable ${idle} \xB7 ${tokens} ctx`, `resumable ${idle} \xB7 ${tokens}`, `resumable ${idle}`];
+  return forms.find((f) => [...f].length <= width) ?? forms[forms.length - 1];
 }
 var TILE_H = SPRITE_ROWS;
 var CARD_W = 24;
@@ -52777,7 +52839,7 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
   const pixels = [];
   for (let i = 0; i < shown; i++) {
     const a = view.agents[i];
-    const done = a.status === "done";
+    const done = a.status !== "running";
     const x0 = i % perRow * (cardW + CARD_GAP);
     const y0 = bandY[Math.floor(i / perRow)];
     tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done)).forEach((line, r) => line.forEach((cell, c) => {
@@ -52791,7 +52853,7 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
     const tx = side ? x0 + TILE_COLS + TILE_GAP : x0;
     const ty = side ? y0 : y0 + TILE_H;
     puts.push({ x: tx, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, textW) });
-    const status = `${a.status} \xB7 ${a.contextPct === null ? "?" : `${a.contextPct}%`} ctx`;
+    const status = a.status === "resumable" ? resumableStatus(a, textW) : `${a.status} \xB7 ${a.contextPct === null ? "?" : `${a.contextPct}%`} ctx`;
     puts.push({ x: tx, y: ty + 1, attr: done ? { dim: true } : { color: "green" }, text: clip(status, textW) });
     puts.push({ x: tx, y: ty + 2, attr: { dim: true }, text: clip(a.model ?? "model unknown", textW) });
     if (a.description)
@@ -52915,7 +52977,6 @@ var screen = new termkit.default.ScreenBuffer({ dst: term });
 var subagents = createSubagentTracker(dirname7(dirname7(storePath)));
 var shownView = { availability: "absent", active: 0, agents: [] };
 var bodyTop = 0;
-var ANIMATION_MS = 333;
 function fullBodyLines() {
   return visibleBodyLines(term.height, bannerLines(term.width, showBanner).length);
 }
