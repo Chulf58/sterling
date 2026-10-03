@@ -401,20 +401,29 @@ test('shared lib: queueDepthLine is silent below the threshold, then names the l
 
 test('the root session context states a deep maintenance queue and the reconcile backlog', async () => {
   const dir = makeProject({ project_name: 'fixture-proj', maintenance_queue: { deep_threshold: 2 } });
+  // The npm test preload sets STERLING_MAINTENANCE_WORKER_DISABLE and the context reads process.env; the worker line is asserted against a default launcher state.
+  const workerDisable = process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
+  delete process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
   try {
     const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
     sysItem(store, 'reconcile_needed', '2026-09-29T12:00:00.000Z');
+    sysItem(store, 'capture_owed');
     sysItem(store, 'capture_owed');
     sysItem(store, 'file_parked');
     store.close();
     const h = handler(dir, { sessions: { ses_root: {} } });
     const i = input('ses_root');
     await h.onContext(i);
+    // Counts changed with board 27c87783: the depth counts the conductor's lanes only
+    // (capture_owed 2 here), reconcile_needed being the background worker's.
     assert.match(textOf(i), /MAINTENANCE QUEUE IS DEEP — 2 drainable items/);
     assert.match(textOf(i), /plus 1 file_parked/);
+    assert.match(textOf(i), /1 item in lane reconcile_needed is drained by the background worker/);
     assert.match(textOf(i), /RECONCILE BACKLOG: 1 item in lane reconcile_needed, the oldest open since 2026-09-29T12:00:00\.000Z/);
-    assert.match(textOf(i), /worker not running/);
+    // "worker not running" is replaced by the worker's state: 1 unjudged item, waited long past 30 minutes.
+    assert.match(textOf(i), /worker due to launch at the next Stop or git commit \(1 unjudged, oldest /);
   } finally {
+    if (workerDisable !== undefined) process.env.STERLING_MAINTENANCE_WORKER_DISABLE = workerDisable;
     rmSync(dir, { recursive: true, force: true });
   }
 });

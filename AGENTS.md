@@ -58,7 +58,7 @@ The hook-bundling and store-write invariants are Sterling-bound (they name the M
 
 ## Project facts
 
-Stack: Node.js, TypeScript, Sterling. Stack tags (= domain mount manifest): node, typescript, sterling. Toolchains: node (`**/*.mjs`, `**/*.ts`). npm workspaces monorepo; TypeScript everywhere except `scripts/` (standalone `.mjs`). Local only — SQLite in `.sterling/sterling.db`, no cloud database. Domain stores: `~/.sterling/domains/{node,typescript,sterling}/`, created lazily. Backup path: `.sterling/config.json` → `backup_path` (machine-local, not restated here). WSL2 everywhere: Claude Code, this clone, Codex and every project run under WSL2 (Ubuntu-24.04); the Windows `.bat` launchers open the project inside WSL2.
+Stack: Node.js, TypeScript, Sterling. Stack tags (= domain mount manifest): node, typescript, sterling. Toolchains: node (`**/*.mjs`, `**/*.ts`). npm workspaces monorepo; TypeScript everywhere except `scripts/` (standalone `.mjs`). Local only — SQLite in `.sterling/sterling.db`, no cloud database. Domain stores: `~/.sterling/domains/{node,typescript,sterling}/`, each created by init with a description of what belongs in it; a missing one is skipped with a warning, never created on first use. Backup path: `.sterling/config.json` → `backup_path` (machine-local, not restated here). WSL2 everywhere: Claude Code, this clone, Codex and every project run under WSL2 (Ubuntu-24.04); the Windows `.bat` launchers open the project inside WSL2.
 
 ## Conventions
 

@@ -28773,7 +28773,7 @@ var SterlingTools = class _SterlingTools {
           if (!stat && this.parkedOnRef(rel, tree.root).status !== "parked") {
             const mintFailed = this.mintAtRead({
               reason: "refresh_reference",
-              text: `refresh reference '${r.title}' \u2014 ${rel} no longer exists on disk; repoint location, supersede the reference, or retire it`,
+              text: `refresh reference '${r.title}' \u2014 ${rel} no longer exists on disk; repoint location, supersede it with a closing note (knowledge_supersede with type: 'decision' or 'research_finding'), or retire it into a duplicate`,
               file_keys: [rel],
               feature_link: r.id
             });
@@ -33511,6 +33511,13 @@ ${JSON.stringify(value, null, 2)}` : void 0;
    *  knowledge_update fix-forward (immutable-by-construction, the decision
    *  analog), and the orphan-coverage check below is ruling-prose-shaped. */
   static SUPERSEDE_ALLOWED_TYPES = ["decision", "anti_pattern", "research_finding"];
+  /** The types that may CLOSE a reference_material whose subject is gone
+   *  (decision record-audit-dead-records-superseded-stale-findings-by-age-
+   *  report-arm-plus-sampled-audit: "superseded by a short record saying what
+   *  happened"). A reference's body is a pointer at a location, so a dead one
+   *  has no same-type successor to offer; the closing record is a note of one
+   *  of these types, named by the caller. */
+  static REFERENCE_CLOSING_TYPES = ["decision", "research_finding"];
   /** ruling-write types whose create/update receipts surface SAME-SUBJECT
    *  records (decision foreign_7e3c66c5). Superset of SUPERSEDE_ALLOWED_TYPES since
    *  2026-08-21 (review finding on board 259a455f): a second attestation on
@@ -33657,25 +33664,53 @@ ${JSON.stringify(value, null, 2)}` : void 0;
    * discloses which candidates were accepted. Fewer than 2 units is ordinary
    * single-ruling supersession — no check.
    *
-   * Every refusal below runs before store.supersede is ever called, so a
-   * refused call leaves the store untouched.
+   * A DEAD reference_material IS THE ONE CROSS-TYPE CASE (board 3b5c6877,
+   * decision record-audit-dead-records-superseded-stale-findings-by-age-
+   * report-arm-plus-sampled-audit). A reference whose location is gone had no
+   * exit: knowledge_update can only repoint it, knowledge_retire needs a
+   * surviving duplicate, and the deletion arm of the refresh_reference mint
+   * fires on every read while it stays active. `opts.type` names the closing
+   * record's type (REFERENCE_CLOSING_TYPES); the note is created and the
+   * reference retired in favour of it in one transaction. store.supersede is
+   * same-type by contract, so this branch composes the two store primitives
+   * that already exist for it: create, then retireInFavorOf, which writes the
+   * same (new supersedes old) edge and the same retired lifecycle.
+   *
+   * `opts.resolves` is the explicit claim knowledge_update already takes: full
+   * ids of open items keyed to the old record's chain, validated before the
+   * write and removed inside its transaction. An item not named stays open —
+   * a supersession never drains the queue implicitly.
+   *
+   * Every refusal below runs before the store is written, so a refused call
+   * leaves the store untouched.
    */
-  knowledgeSupersede(oldId, fields, orphansAcknowledged) {
+  knowledgeSupersede(oldId, fields, orphansAcknowledged, opts = {}) {
     const old = this.resolveRecordId(oldId, "knowledge_supersede");
     if (old.type === "todo") {
       throw new Error(`knowledge_supersede: '${oldId}' is a todo \u2014 those leave through board_remove / maintenance_remove (done = removed, P4), not supersession.`);
     }
-    if (old.type === "feature_article" || old.type === "reference_material") {
+    if (old.type === "feature_article") {
       throw new Error(`knowledge_supersede: '${oldId}' is a ${old.type} \u2014 those evolve in place via knowledge_update (fix-forward, same lineage), or for a genuine duplicate, knowledge_retire(id, in_favor_of). knowledge_supersede replaces decision / anti_pattern / research_finding only.`);
     }
-    if (!_SterlingTools.SUPERSEDE_ALLOWED_TYPES.includes(old.type)) {
-      throw new Error(`knowledge_supersede: '${old.type}' records are not supported \u2014 allowed: ${_SterlingTools.SUPERSEDE_ALLOWED_TYPES.join(", ")}.`);
+    const closesReference = old.type === "reference_material";
+    if (closesReference) {
+      if (opts.type === void 0 || !_SterlingTools.REFERENCE_CLOSING_TYPES.includes(opts.type)) {
+        const allowed = _SterlingTools.REFERENCE_CLOSING_TYPES.join(" or ");
+        throw new Error(`knowledge_supersede: '${oldId}' is a reference_material \u2014 one whose subject still exists evolves in place via knowledge_update (fix-forward, same lineage; repoint its location), and a genuine duplicate goes through knowledge_retire(id, in_favor_of). One whose subject is GONE is closed by a short record saying what happened: pass type (${allowed}) with that record's complete fields` + (opts.type === void 0 ? `; no type was given.` : `; type '${opts.type}' is not one of them.`) + ` Nothing was written.`);
+      }
+    } else {
+      if (!_SterlingTools.SUPERSEDE_ALLOWED_TYPES.includes(old.type)) {
+        throw new Error(`knowledge_supersede: '${old.type}' records are not supported \u2014 allowed: ${_SterlingTools.SUPERSEDE_ALLOWED_TYPES.join(", ")}.`);
+      }
+      if (opts.type !== void 0 && opts.type !== old.type) {
+        throw new Error(`knowledge_supersede: '${oldId}' is a ${old.type} and is replaced by a ${old.type} only \u2014 type '${opts.type}' is refused. A different closing type is accepted only when the old record is a reference_material. Nothing was written.`);
+      }
     }
     if (old.status === "superseded") {
       throw new Error(`knowledge_supersede: '${oldId}' is already superseded \u2014 resolve its chain to the live head first (knowledge_get discloses the terminus).`);
     }
     this.refuseServerOwnedFields(fields, "knowledge_supersede");
-    const type = old.type;
+    const type = closesReference ? opts.type : old.type;
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, ...body } = fields;
     const explicitSlug = body.slug;
     let slug;
@@ -33751,7 +33786,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     }
     const supersedeHolder = this.store.scopeOfHolder(old.id);
     if (supersedeHolder.startsWith("domain:")) {
-      const had = new Set(declaredRepoPaths(type, old));
+      const had = new Set(declaredRepoPaths(old.type, old));
       const added = declaredRepoPaths(type, parsed).filter((p) => !had.has(p));
       if (added.length) {
         throw new Error(`knowledge_supersede: ${old.id} is held by the shared domain store '${supersedeHolder}', and its replacement adds repo paths (${added.slice(0, 5).join(", ")}${added.length > 5 ? ", \u2026" : ""}). Repo paths stay in project-scoped records. Nothing was written.`);
@@ -33781,12 +33816,44 @@ Extend fields to carry the surviving ruling(s) forward, or re-call with orphans_
         orphanCandidates = uncovered.map((u) => _SterlingTools.clipExcerpt(u));
       }
     }
-    const chain = /* @__PURE__ */ new Set([old.id]);
-    for (const link of old.links ?? []) {
-      if (link.rel === "supersedes")
-        chain.add(link.target_id);
+    const chain = this.supersedeChain(old);
+    const resolves = opts.resolves ?? [];
+    const seenClaims = /* @__PURE__ */ new Set();
+    const duplicate = resolves.find((rid) => seenClaims.has(rid) ? true : (seenClaims.add(rid), false));
+    if (duplicate !== void 0) {
+      throw new Error(`resolves: '${duplicate}' is named more than once \u2014 an item can only be claimed once; nothing was written.`);
     }
-    const updated = this.store.supersede(old.id, parsed);
+    const claims = resolves.map((rid) => this.validateResolveClaim(rid, chain));
+    if (claims.length > 0) {
+      const fault = _SterlingTools.targetMountFault(old.scope, this.store.projectStoreHolds(old.id));
+      if (fault) {
+        throw new Error(this.mountRefusalMessage({
+          lane: "knowledge_supersede",
+          targetId: old.id,
+          fault,
+          claims,
+          why: `the item's deletion and this write would land on two different SQLite connections and could never commit together.`
+        }));
+      }
+    }
+    const resolvedItems = [];
+    const updated = this.store.withTransactionForRecord(old.id, () => {
+      let head;
+      if (closesReference) {
+        const links = parsed.links.filter((l) => !(l.rel === "supersedes" && l.target_id === old.id));
+        head = this.store.create({ ...parsed, links });
+        this.store.retireInFavorOf(old.id, head.id, ts);
+      } else {
+        head = this.store.supersede(old.id, parsed);
+      }
+      for (const claim of claims) {
+        const atRemoval = this.store.get(claim.id);
+        this.store.remove(claim.id, ts);
+        if (atRemoval)
+          resolvedItems.push({ id: atRemoval.id, system_reason: atRemoval.system_reason, file_keys: atRemoval.file_keys ?? [] });
+      }
+      return head;
+    });
     this.repointPromotionReview(chain, updated.id, ts);
     const sameSubjectExclude = new Set(chain);
     sameSubjectExclude.add(updated.id);
@@ -33797,6 +33864,7 @@ Extend fields to carry the surviving ruling(s) forward, or re-call with orphans_
       type: updated.type,
       slug: updated.slug,
       ...orphanCandidates.length > 0 ? { orphan_candidates: orphanCandidates } : {},
+      ...resolvedItems.length > 0 ? { resolved_items: resolvedItems } : {},
       warnings: citationWarnings,
       same_subject: sameSubject
     };
@@ -33897,7 +33965,7 @@ function createSterlingServer(storePath2) {
     }
     return description ? `${name} ("${description}")` : `${name} (no description)`;
   });
-  const createDomainsNote = bootDomains.length ? ` Mounted domains: ${bootDomains.join("; ")}. A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.` : "";
+  const createDomainsNote = bootDomains.length ? ` Mounted domains at server start: ${bootDomains.join("; ")} (the receipt's mounted_domains is current). A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.` : "";
   const server2 = new McpServer({ name: "sterling", version: "0.1.0" });
   const json = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
   server2.registerTool("knowledge_create", {
@@ -33986,9 +34054,15 @@ function createSterlingServer(storePath2) {
     inputSchema: strict({ id: external_exports.string(), in_favor_of: external_exports.string() })
   }, ({ id, in_favor_of }) => json(tools.knowledgeRetire(id, in_favor_of)));
   server2.registerTool("knowledge_supersede", {
-    description: "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them \u2014 carry them forward, or pass orphans_acknowledged:true. Other types are refused naming their exit path (todo \u2192 board_remove/maintenance_remove; feature_article/reference_material \u2192 knowledge_update/knowledge_retire). Refusals write nothing.",
-    inputSchema: strict({ old_id: external_exports.string(), fields: passthrough, orphans_acknowledged: external_exports.boolean().optional() })
-  }, ({ old_id, fields, orphans_acknowledged }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged)));
+    description: "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them \u2014 carry them forward, or pass orphans_acknowledged:true. A reference_material whose subject is gone (its location was deleted) is closed here too: pass type 'decision' or 'research_finding' and `fields` for a short record of that type saying what happened; the reference is superseded by it and is no longer read, so it raises no further refresh_reference items. A reference whose subject still exists is repointed with knowledge_update; a duplicate goes to knowledge_retire. resolves:[<full item ids>] closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to the old record's chain in the same transaction (validated before the write; unnamed items stay open). Other types are refused naming their exit path (todo \u2192 board_remove/maintenance_remove; feature_article \u2192 knowledge_update/knowledge_retire). Refusals write nothing.",
+    inputSchema: strict({
+      old_id: external_exports.string(),
+      fields: passthrough,
+      orphans_acknowledged: external_exports.boolean().optional(),
+      type: external_exports.string().optional().describe("the closing record's type, 'decision' or 'research_finding' \u2014 required when old_id is a reference_material, otherwise omit it"),
+      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to the old record's chain that this supersession discharges \u2014 full ids, validated before the write")
+    })
+  }, ({ old_id, fields, orphans_acknowledged, type, resolves }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged, { type, resolves })));
   server2.registerTool("knowledge_update", {
     description: "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body \u2014 pass only changed mutable fields; omitted fields are kept (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
     inputSchema: strict({
@@ -34021,7 +34095,7 @@ function createSterlingServer(storePath2) {
     })
   }, ({ id, field, find, replace, resolves, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace, resolves), projection)));
   server2.registerTool("knowledge_line_ref_fix", {
-    description: "Move ONE stale path:line reference inside a feature_article string field, verified by the server \u2014 the background maintenance worker's only store write (decision maintenance-queue-background-haiku-worker-simple-redesign, point 3a). `find` and `replace` are bare line references ([path]:N or [path]:N-M, whitespace trimmed, no other text); `replace` keeps find's path part and changes only the line. `field` takes knowledge_edit's grammar (a string field or 'arr[key=value].sub'). Refused with nothing written, naming the failed check, unless: (1) the record is an active feature_article, the field one of what_it_does, intended_behavior, steps_runbook, current_ac[..].text, files[..].role (never history) and a string, and find matches exactly once as a whole reference; (2) both sides are line references with the same path, replace differs from find, and it is a shift only \u2014 a point stays a point, a range keeps its width (a bare ':N' only when the article owns exactly one files[] entry); (3) the path is one of the article's files[] (exact, or a unique suffix on a '/' boundary); (4) every new line exists in the file AS COMMITTED AT HEAD (not the working tree) and its FIRST line contains `anchor` literally; (5) `anchor` is at least 6 characters, not only punctuation, and is quoted from the field's own text within 120 characters of the reference (the reference itself excluded); (6) nothing but the substitution changes (a write landing while the checks ran refuses). Same versioned write path as knowledge_edit, but it takes NO resolves: a queue item closes only through maintenance_remove. The receipt carries `verification` {path, lines, anchor, head_commit, blob}.",
+    description: "Move ONE stale path:line reference inside a feature_article string field, verified by the server \u2014 the background maintenance worker's only article write (decision maintenance-queue-background-haiku-worker-simple-redesign, point 3a). `find` and `replace` are bare line references ([path]:N or [path]:N-M, whitespace trimmed, no other text); `replace` keeps find's path part and changes only the line. `field` takes knowledge_edit's grammar (a string field or 'arr[key=value].sub'). Refused with nothing written, naming the failed check, unless: (1) the record is an active feature_article, the field one of what_it_does, intended_behavior, steps_runbook, current_ac[..].text, files[..].role (never history) and a string, and find matches exactly once as a whole reference; (2) both sides are line references with the same path, replace differs from find, and it is a shift only \u2014 a point stays a point, a range keeps its width (a bare ':N' only when the article owns exactly one files[] entry); (3) the path is one of the article's files[] (exact, or a unique suffix on a '/' boundary); (4) every new line exists in the file AS COMMITTED AT HEAD (not the working tree) and its FIRST line contains `anchor` literally; (5) `anchor` is at least 6 characters, not only punctuation, and is quoted from the field's own text within 120 characters of the reference (the reference itself excluded); (6) nothing but the substitution changes (a write landing while the checks ran refuses). Same versioned write path as knowledge_edit, but it takes NO resolves: a queue item closes only through maintenance_remove. The receipt carries `verification` {path, lines, anchor, head_commit, blob}.",
     inputSchema: strict({
       id: external_exports.string().describe("the feature_article to fix (full uuid, slug, or unambiguous 8-char prefix)"),
       field: external_exports.string().describe("a string field, or 'arr[key=value].sub' \u2014 knowledge_edit's selector grammar"),
@@ -34042,7 +34116,7 @@ function createSterlingServer(storePath2) {
     })
   }, ({ id, selector, expected_version, resolves, projection }) => json(tools.writeProjected(tools.knowledgeArrayRemove(id, selector, expected_version, resolves), projection)));
   server2.registerTool("knowledge_promote", {
-    description: 'Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article and todo never promote; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The receipt carries domain_description, the target domain\'s description. The echo (`promoted`) defaults to a digest; projection:"full" returns the whole record.',
+    description: 'Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article, todo and attestation never promote; only a project-scoped record the project store holds does; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The receipt carries domain_description, the target domain\'s description. The echo (`promoted`) defaults to a digest; projection:"full" returns the whole record.',
     inputSchema: strict({ id: external_exports.string(), domain: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection)));
   server2.registerTool("board_add", {

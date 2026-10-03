@@ -146,11 +146,21 @@ test('AC1: 250 system maintenance items across lanes — H1 reports the TRUE tot
     assert.ok(r.out, 'H1 must emit parseable JSON');
 
     const ctx = additionalContext(r) ?? '';
-    assert.match(ctx, /\b250\b/, 'the TRUE total (250) appears verbatim in the deep-queue signal — an under-reported (capped) total would not contain this exact number');
+    // Split with board 27c87783: reconcile_needed is the background worker's lane, so the
+    // headline counts only the conductor's lanes (stale_research 100 + article_missing 50 =
+    // 150) and the worker sentence carries the reconcile_needed count (100). Both exact,
+    // neither capped, and together they are the TRUE 250.
+    const headline = ctx.match(/MAINTENANCE QUEUE IS (?:VERY )?DEEP — (\d+) drainable items/);
+    const worker = ctx.match(/The (\d+) items in lane reconcile_needed are drained by the background worker/);
+    assert.ok(headline, 'the deep-queue headline names the conductor-lane total');
+    assert.ok(worker, 'the worker sentence names the reconcile_needed count');
+    assert.equal(Number(headline[1]), 150, 'the headline reports the conductor-lane total exactly (100 + 50), uncapped');
+    assert.equal(Number(worker[1]), 100, 'the worker sentence reports the reconcile_needed count exactly, uncapped');
+    assert.equal(Number(headline[1]) + Number(worker[1]), 250, 'the two reported counts sum to the TRUE total (250) — nothing capped or dropped');
     // guard against the specific, plausible capped-read regression: a default read
     // cap of 100 (used elsewhere in this codebase, e.g. captureOwedItems' cap:100
     // convention) silently truncating the true 250 down to 100
-    assert.doesNotMatch(ctx, /\b100\b(?!\s*items? in lane)/, 'the total is not silently truncated to a common default cap of 100');
+    assert.doesNotMatch(ctx, /\b100\b(?!\s*items? in lane|\s+unjudged)/, 'the total is not silently truncated to a common default cap of 100 (the 100-item reconcile_needed lane is named by its lane and by the worker state line\'s "100 unjudged")');
   } finally {
     cleanup();
   }
