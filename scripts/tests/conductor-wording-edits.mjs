@@ -109,6 +109,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "updated at every slice boundary.\n",
     after: "updated at every slice boundary.\n\nAn approved plan is locked. H31 binds the plan the user approved at ExitPlanMode and H1 prints it as PLAN LOCK at every session start; follow it, and release it with `plan-lock.mjs --release --reason \"<why>\"` only when the user drops the plan.\n",
   },
+  {
+    commit: 'fix/conductor-runs-init-itself',
+    date: '2026-10-03',
+    reason: 'new bullet: the conductor runs Sterling init itself and never hands the init command to the user (user-ruled through the question form, "Add it"; GitHub issue #4)',
+    before: "use only listed skills.\n",
+    after: "use only listed skills.\n- **Run Sterling init yourself.** When a project needs init (a plugin cutover, a new project, a launcher still on `--plugin-dir`), run it; never print the init command for the user to run. Only an interactive login is a `! <command>` case (user-ruled 2026-10-03 through the question form, 'Add it', after a conductor handed the user a broken init command twice; GitHub issue #4).\n",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
