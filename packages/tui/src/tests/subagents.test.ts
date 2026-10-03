@@ -214,14 +214,15 @@ test('block: a corrupt register is one dim line that says the state is unknown',
   assert.ok(b.puts.every((p) => p.attr.dim));
 });
 
-test('block: the agents are cards side by side in ONE row, each an 8x3 tile with its three text lines below; no frame, no avatar numbers', () => {
+test('block: on a wide pane the agents are cards side by side in ONE row, each an 8x3 tile with its text lines to the right of it; no frame, no avatar numbers', () => {
   const b = composeSubagentBlock(view([AGENT('a1', 7), AGENT('a2', 31), AGENT('a3', 2, 'done')]), 160, 30, 0);
-  assert.equal(b.height, SPRITE_ROWS + 4, 'one card row: the tile and four text lines');
+  assert.equal(b.height, 4, 'one card row: the tile and four text lines share the same rows');
+  // 3 cards share 160 columns with a 2-column gap: 52 wide each, so x0 is 0, 54, 108 and the text starts after the 8-column tile and a 1-column gap
   const type = b.puts.filter((p) => p.text === 'implementor');
-  assert.deepEqual(type.map((p) => [p.x, p.y]), [[0, 3], [26, 3], [52, 3]], 'three cards side by side, text on the row under the tile');
-  assert.deepEqual(b.puts.filter((p) => p.y === 4).map((p) => p.text), ['running · 42% ctx', 'running · 42% ctx', 'done · 42% ctx']);
-  assert.deepEqual(b.puts.filter((p) => p.text === 'claude-sonnet-5-5').map((p) => [p.x, p.y]), [[0, 5], [26, 5], [52, 5]], 'the full model name has its own line');
-  assert.deepEqual(b.puts.filter((p) => p.text === 'Build the reader').map((p) => p.y), [6, 6, 6]);
+  assert.deepEqual(type.map((p) => [p.x, p.y]), [[9, 0], [63, 0], [117, 0]], 'text starts right of the tile, on the tile top row');
+  assert.deepEqual(b.puts.filter((p) => p.y === 1).map((p) => [p.x, p.text]), [[9, 'running · 42% ctx'], [63, 'running · 42% ctx'], [117, 'done · 42% ctx']]);
+  assert.deepEqual(b.puts.filter((p) => p.text === 'claude-sonnet-5-5').map((p) => [p.x, p.y]), [[9, 2], [63, 2], [117, 2]], 'the full model name has its own line');
+  assert.deepEqual(b.puts.filter((p) => p.text === 'Build the reader').map((p) => [p.x, p.y]), [[9, 3], [63, 3], [117, 3]]);
   const text = b.puts.map((p) => p.text);
   assert.ok(!text.some((t) => /#\s?\d|\b(7|31)\b/.test(t)), 'no avatar number is printed');
   assert.ok(!text.some((t) => /[┌┐└┘│─]/.test(t)), 'no drawn frame');
@@ -236,6 +237,65 @@ test('block: the agents are cards side by side in ONE row, each an 8x3 tile with
   assert.ok(b.puts.every((p) => p.x + [...p.text].length <= 160));
 });
 
+test('block: one agent on a wide pane is a 4-row card: the tile fills the left columns of rows 0-2, the text starts one column to its right on the same rows', () => {
+  const b = composeSubagentBlock(view([AGENT('a1', 7)]), 120, 30, 0);
+  assert.equal(b.height, 4);
+  assert.deepEqual([...new Set(b.pixels.map((p) => p.y))].sort(), [0, 1, 2]);
+  assert.equal(Math.min(...b.pixels.map((p) => p.x)), 0);
+  assert.equal(Math.max(...b.pixels.map((p) => p.x)), TILE_COLS - 1);
+  assert.deepEqual(b.puts.map((p) => [p.x, p.y, p.text]), [
+    [TILE_COLS + 1, 0, 'implementor'],
+    [TILE_COLS + 1, 1, 'running · 42% ctx'],
+    [TILE_COLS + 1, 2, 'claude-sonnet-5-5'],
+    [TILE_COLS + 1, 3, 'Build the reader'],
+  ]);
+});
+
+test('block: no cell is written by both the tile and the text, wide or narrow', () => {
+  for (const [agents, width] of [[[AGENT('a1', 7)], 120], [[AGENT('a1', 7), AGENT('a2', 9), AGENT('a3', 4)], 100], [[AGENT('a1', 7), AGENT('a2', 9)], 30]] as const) {
+    const b = composeSubagentBlock(view([...agents]), width, 40, 0);
+    const tile = new Set(b.pixels.map((p) => `${p.x},${p.y}`));
+    for (const p of b.puts) {
+      for (let i = 0; i < [...p.text].length; i++) assert.ok(!tile.has(`${p.x + i},${p.y}`), `text "${p.text}" overlaps a tile cell at width ${width}`);
+    }
+  }
+});
+
+test('block: the action line is not cut at 24 columns on a wide pane and is cut at the computed text width', () => {
+  const long = 'Rewrite the dispatch register reader so that a corrupt line no longer hides the rows after it';
+  const wide = composeSubagentBlock(view([{ ...AGENT('a1', 3), description: long }]), 120, 30, 0);
+  assert.ok(wide.puts.some((p) => p.text === long), 'the whole description fits in the 111-column text block');
+  // one card on 60 columns: 60 - 8 tile - 1 gap = 51 text columns
+  const mid = composeSubagentBlock(view([{ ...AGENT('a1', 3), description: long }]), 60, 30, 0);
+  const line = mid.puts.find((p) => p.y === 3)!;
+  assert.equal([...line.text].length, 51);
+  assert.equal(line.text, [...long].slice(0, 50).join('') + '…');
+  assert.ok(mid.puts.every((p) => p.x + [...p.text].length <= 60));
+});
+
+test('block: a card without a description is as tall as its tile, and the band takes the tallest card in it', () => {
+  const bare = { ...AGENT('a1', 3), description: null };
+  assert.equal(composeSubagentBlock(view([bare]), 120, 30, 0).height, SPRITE_ROWS);
+  assert.equal(composeSubagentBlock(view([bare, AGENT('a2', 4)]), 120, 30, 0).height, 4, 'two side by side: the described card sets the band');
+});
+
+test('block: the agents on a wide pane share the row evenly and wrap once a card would be narrower than the minimum', () => {
+  // minimum card = 8 tile + 1 gap + 24 text = 33 columns, 2 between cards
+  const xs = (b: ReturnType<typeof composeSubagentBlock>) => b.puts.filter((p) => p.text === 'implementor').map((p) => [p.x - 9, p.y]);
+  const n = (count: number) => view(Array.from({ length: count }, (_, i) => AGENT(`a${i}`, i + 1)));
+  // 70 columns hold two 34-wide cards: 4 agents wrap onto two bands with a blank row between them
+  const two = composeSubagentBlock(n(4), 70, 30, 0);
+  assert.deepEqual(xs(two), [[0, 0], [36, 0], [0, 5], [36, 5]]);
+  assert.equal(two.height, 4 + 1 + 4);
+  // 33 + 2 + 33 = 68 columns is the smallest pane that holds two cards; 67 holds one per row
+  assert.deepEqual(xs(composeSubagentBlock(n(2), 68, 30, 0)), [[0, 0], [35, 0]]);
+  assert.deepEqual(xs(composeSubagentBlock(n(2), 67, 30, 0)), [[0, 0], [0, 5]], 'one per row, each taking the whole row');
+  // 140 columns hold four 33-wide cards; the fifth starts a new band at the same width
+  const five = composeSubagentBlock(n(5), 140, 30, 0);
+  assert.deepEqual(xs(five), [[0, 0], [35, 0], [70, 0], [105, 0], [0, 5]]);
+  assert.ok(five.puts.every((p) => p.x + [...p.text].length <= 140));
+});
+
 test('block: a done card is dimmed, a running one is not; the same portrait is faded when done', () => {
   const running = composeSubagentBlock(view([AGENT('a1', 5)]), 160, 30, 0);
   const done = composeSubagentBlock(view([AGENT('a1', 5, 'done')]), 160, 30, 0);
@@ -248,13 +308,21 @@ test('block: a done card is dimmed, a running one is not; the same portrait is f
   assert.ok(done.pixels.every((p) => /^#[0-9a-f]{6}$/.test(p.bg ?? '')), 'faded colours stay valid hex');
 });
 
-test('block: the model is shown whole unless longer than the card, and an unknown model says so', () => {
-  const at = (model: string | null) => composeSubagentBlock(view([{ ...AGENT('a1', 3), model }]), 160, 30, 0).puts.filter((p) => p.y === 5);
+test('block: the model is shown whole unless longer than the text block, and an unknown model says so', () => {
+  const at = (model: string | null, width = 160) => composeSubagentBlock(view([{ ...AGENT('a1', 3), model }]), width, 30, 0).puts.filter((p) => p.y === 2);
   assert.deepEqual(at('claude-sonnet-5-5').map((p) => p.text), ['claude-sonnet-5-5']);
   assert.deepEqual(at('claude-opus-5-5').map((p) => p.text), ['claude-opus-5-5']);
   assert.deepEqual(at(null).map((p) => p.text), ['model unknown']);
-  assert.deepEqual(at('claude-a-model-name-longer-than-the-card').map((p) => p.text), ['claude-a-model-name-lon…']);
-  assert.ok(at('claude-a-model-name-longer-than-the-card').every((p) => [...p.text].length <= 24), 'nothing past the 24-column card');
+  // a wide pane no longer cuts a long model name at 24 columns
+  assert.deepEqual(at('claude-a-model-name-longer-than-the-card').map((p) => p.text), ['claude-a-model-name-longer-than-the-card']);
+  // one card on 40 columns has 31 text columns
+  assert.deepEqual(at('claude-a-model-name-longer-than-the-card', 40).map((p) => p.text), ['claude-a-model-name-longer-tha…']);
+});
+
+test('block: a stacked card (pane under 33 columns) still cuts the model at the 24-column card', () => {
+  const b = composeSubagentBlock(view([{ ...AGENT('a1', 3), model: 'claude-a-model-name-longer-than-the-card' }]), 30, 30, 0);
+  assert.deepEqual(b.puts.filter((p) => p.y === 5).map((p) => p.text), ['claude-a-model-name-lon…']);
+  assert.ok(b.puts.every((p) => [...p.text].length <= 24), 'nothing past the 24-column card');
 });
 
 test('block: only running portraits animate; a done portrait rests on frame 0', () => {
@@ -265,23 +333,34 @@ test('block: only running portraits animate; a done portrait rests on frame 0', 
   for (const t of [1, 2, 3, 5]) assert.deepEqual(done(t), done(0));
 });
 
-test('block: a narrow pane wraps cards to the next row, and what does not fit is counted', () => {
+test('block: a pane under 33 columns falls back to the stacked card: tile above four 24-column text lines, one card per row', () => {
   const agents = [AGENT('a1', 1), AGENT('a2', 2), AGENT('a3', 3)];
-  // 60 columns hold two 24-column cards; 15 rows hold two card rows
-  const wrapped = composeSubagentBlock(view(agents), 60, 15, 0);
-  assert.equal(wrapped.height, 2 * (SPRITE_ROWS + 4) + 1, 'two card rows with a blank row between');
-  assert.equal(wrapped.pixels.length, 3 * TILE_COLS * SPRITE_ROWS);
-  assert.deepEqual(wrapped.puts.filter((p) => p.text === 'implementor').map((p) => [p.x, p.y]), [[0, 3], [26, 3], [0, 11]]);
-  // one card row of room: two cards show and the rest is counted below them
-  const one = composeSubagentBlock(view(agents), 60, 8, 0);
-  assert.equal(one.pixels.length, 2 * TILE_COLS * SPRITE_ROWS);
-  assert.ok(one.puts.some((p) => p.text === '1 more not shown' && p.y === 7));
-  assert.ok(one.puts.every((p) => p.x + [...p.text].length <= 60));
+  const stacked = composeSubagentBlock(view(agents), 30, 30, 0);
+  assert.equal(stacked.height, 3 * (SPRITE_ROWS + 4) + 2, 'three stacked cards, a blank row between');
+  assert.equal(stacked.pixels.length, 3 * TILE_COLS * SPRITE_ROWS);
+  assert.deepEqual(stacked.puts.filter((p) => p.text === 'implementor').map((p) => [p.x, p.y]), [[0, 3], [0, 11], [0, 19]]);
+  assert.ok(stacked.puts.every((p) => p.x + [...p.text].length <= 30));
+  assert.equal(composeSubagentBlock(view([AGENT('a1', 1)]), 32, 30, 0).height, SPRITE_ROWS + 4, '32 columns is still stacked');
+  assert.equal(composeSubagentBlock(view([AGENT('a1', 1)]), 33, 30, 0).height, 4, '33 columns is the smallest side-by-side card');
+});
+
+test('block: what does not fit in the height is counted below the cards; no room for a card row is a note', () => {
+  const agents = [AGENT('a1', 1), AGENT('a2', 2), AGENT('a3', 3)];
+  // 40 columns: one card per row, 4 rows each. 9 rows hold two bands (4 + 1 + 4)
+  const wrapped = composeSubagentBlock(view(agents), 40, 9, 0);
+  assert.equal(wrapped.height, 9, 'two card rows with a blank row between');
+  assert.equal(wrapped.pixels.length, 2 * TILE_COLS * SPRITE_ROWS);
+  assert.deepEqual(wrapped.puts.filter((p) => p.text === 'implementor').map((p) => [p.x, p.y]), [[9, 0], [9, 5]]);
+  // one band of room, plus a row for the count of the two that are left out
+  const one = composeSubagentBlock(view(agents), 40, 5, 0);
+  assert.equal(one.pixels.length, 1 * TILE_COLS * SPRITE_ROWS);
+  assert.ok(one.puts.some((p) => p.text === '2 more not shown' && p.y === 4));
+  assert.ok(one.puts.every((p) => p.x + [...p.text].length <= 40));
   // no room for a card row: a note, no portraits
-  const tight = composeSubagentBlock(view(agents), 60, 6, 0);
+  const tight = composeSubagentBlock(view(agents), 40, 3, 0);
   assert.equal(tight.pixels.length, 0);
   assert.deepEqual(tight.puts.map((p) => p.text), ['3 sub-agents, no room to show them']);
-  assert.equal(composeSubagentBlock(view(agents), 60, 0, 0).height, 0);
+  assert.equal(composeSubagentBlock(view(agents), 40, 0, 0).height, 0);
 });
 
 test('animation condition: the timer runs only while the Agents tab shows a running agent', () => {
