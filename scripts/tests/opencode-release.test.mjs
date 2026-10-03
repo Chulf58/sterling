@@ -263,6 +263,35 @@ test('a local tag on a commit origin\'s branch already contains, with origin mis
   assert.match(again.out, /only the tag/i);
 });
 
+test('a failed tag-only push reports failed with the existing commit, keeps the local tag, and the re-run publishes', () => {
+  const fx = fixture();
+  const first = run(fx).result.commit;
+  const next = bump(fx.repo, '1.0.2');
+  const second = run({ ...fx, ...next }).result.commit;
+  git(fx.origin, 'tag', '-d', 'v1.0.1');
+  const pushes = [];
+  const failing = (args, opts) => {
+    if (args[0] !== 'push') return spawnSync('git', args, { ...opts, encoding: 'utf8' });
+    pushes.push(args);
+    return { status: 1, stdout: '', stderr: 'remote: denied' };
+  };
+  const { result, out } = run(fx, { remoteGit: failing });
+  assert.equal(result.status, 'failed', out);
+  assert.equal(result.commit, first, 'the existing commit is reported, not a rebuilt one');
+  assert.match(out, /remote: denied/);
+  assert.match(out, /opencode release FAILED/);
+  assert.deepEqual(pushes, [['push', 'origin', 'refs/tags/v1.0.1:refs/tags/v1.0.1']], 'exactly one push, the tag alone');
+  assert.equal(ref(fx.repo, 'refs/tags/v1.0.1'), first, 'the local tag stays');
+  assert.equal(ref(fx.origin, 'refs/tags/v1.0.1'), null, 'origin has no tag');
+  assert.equal(ref(fx.origin, `refs/heads/${RELEASE_BRANCH}`), second, "origin's branch is unchanged");
+
+  const again = run(fx);
+  assert.equal(again.result.status, 'published', again.out);
+  assert.equal(again.result.commit, first);
+  assert.equal(ref(fx.origin, 'refs/tags/v1.0.1'), first);
+  assert.equal(ref(fx.origin, `refs/heads/${RELEASE_BRANCH}`), second);
+});
+
 test('a local tag at origin\'s branch tip with origin missing only the tag pushes the tag and leaves the branch', () => {
   const fx = fixture();
   const first = run(fx).result.commit;
