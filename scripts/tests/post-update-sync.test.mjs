@@ -278,6 +278,34 @@ test('H1, a plugin version that is not semver: loud SKIP, nothing runs', () => {
   assert.match(r.sys, /post-update sync SKIPPED — the installed plugin's version 'dev' is not a semver version/);
 });
 
+test('postUpdateSync: stamp-contract exit 2 with 0 projects processed and a refusal is a failed step naming the refusal, and the marker is not advanced', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const refusal = `✗ ${project}: not_migrated (no AGENTS.md)`;
+  const contractOut = `${refusal}\n\nDRY-RUN (no writes; pass --apply) — 0 project(s) processed, 0 already in sync, 1 refusal(s).\n`;
+  const runStep = async (root, name) =>
+    name === 'sync-agents.mjs'
+      ? { status: 0, error: null, out: 'up_to_date: implementor', tail: 'up_to_date: implementor' }
+      : { status: 2, error: null, out: contractOut, tail: contractOut.trim().split('\n').slice(-8).join(' | ') };
+  const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep });
+  assert.equal(r.outcome, 'failed');
+  assert.match(r.warning, /checked NOTHING/);
+  assert.ok(r.warning.includes('not_migrated (no AGENTS.md)'), r.warning);
+  assert.ok(r.context.includes('No marker was written'), r.context);
+  assert.equal(markerOf(project), '0.0.1\n');
+});
+
+test('postUpdateSync: stamp-contract exit 2 with some projects processed is still tolerated drift and the marker advances', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const out = `✗ ${project}: HAND_TUNED_REFUSED\n\nDRY-RUN (no writes; pass --apply) — 1 project(s) processed, 0 already in sync, 1 refusal(s).\n`;
+  const runStep = async (root, name) =>
+    name === 'sync-agents.mjs' ? { status: 0, error: null, out: '', tail: '' } : { status: 2, error: null, out, tail: out.trim() };
+  const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep });
+  assert.equal(r.outcome, 'synced');
+  assert.equal(markerOf(project), `${VERSION}\n`);
+});
+
 test('compareVersions: semver precedence, prerelease below release, build metadata ignored, null for non-versions', () => {
   const cases = [
     ['0.18.51', '0.18.50', 1],

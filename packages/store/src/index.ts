@@ -509,6 +509,9 @@ export type ToolStore = Pick<
   // The atomic, single-definition dedup path every maintenance item now takes
   // (board 2ded3b4b). boardAdd routes system-source todos through it.
   | 'enqueueSystemTodo'
+  // The read-only precheck for it: a read-time minter skips the write
+  // transaction when the open item is already current.
+  | 'enqueueWouldBeNoop'
   | 'query'
   | 'count'
   // knowledge_query's min_score ABSENCE QUERY (board a577a69d) — the
@@ -1150,6 +1153,34 @@ export function declaredCaptureTarget(text: string | undefined): string | null {
     return null; // not the H10 trailer: this item keeps the ordinary key
   }
   return typeof target === 'string' && target.length > 0 ? target : null;
+}
+
+type SystemTodoShape = { system_reason?: string; feature_link?: string; file_keys?: string[]; text?: string };
+
+/**
+ * The system-todo identity key, shared by enqueueSystemTodo (the write) and
+ * enqueueWouldBeNoop (the read-only precheck) so the dedupe rule has ONE home.
+ * See the lane notes in enqueueSystemTodo for why each lane is keyed as it is.
+ */
+function systemTodoKey(t: SystemTodoShape): string {
+  // capture_owed minted from a capture_pending declaration: the declared
+  // target is the identity, file_keys are context (declaredCaptureTarget).
+  const declaredTarget = t.system_reason === 'capture_owed' ? declaredCaptureTarget(t.text) : null;
+  if (declaredTarget !== null) return JSON.stringify(['capture_owed', t.feature_link ?? '', [], `declared-target:${declaredTarget}`]);
+  const files = t.system_reason === 'state_review' ? [] : [...(t.file_keys ?? [])].sort();
+  const identified = !!t.feature_link || files.length > 0;
+  return JSON.stringify([t.system_reason ?? '', t.feature_link ?? '', files, identified ? '' : (t.text ?? '')]);
+}
+
+/**
+ * Text equivalence for the escalation check: exact for every lane except
+ * state_review, whose text embeds a volatile live-byte count that is
+ * normalized away (see enqueueSystemTodo).
+ */
+function systemTodoTextsEquivalent(reason: string | undefined, a: string, b: string): boolean {
+  if (reason !== 'state_review') return a === b;
+  const strip = (s: string) => s.replace(/\d+(?= bytes of code on disk)/g, '#');
+  return strip(a) === strip(b);
 }
 
 export function buildReconcileText(owner: { type: 'feature_article' | 'reference_material'; slug?: string; title?: string }, fileKeys: string[]): string {
@@ -2409,6 +2440,40 @@ export class SterlingStore {
   }
 
   /**
+   * READ-ONLY PRECHECK for enqueueSystemTodo: true only when an enqueue of
+   * `input` would change nothing — an open system item with the same identity
+   * key, equivalent text and the same file_keys already exists. A read-time
+   * minter calls this first and takes the write path (a transaction, a git
+   * probe) only on false, so re-reading N overdue records costs N cheap scans
+   * instead of N write transactions. It shares systemTodoKey and
+   * systemTodoTextsEquivalent with the write, so the dedupe rule has one home.
+   *
+   * Conservative by construction: false is "take the write path", never "an
+   * item is absent". The reconcile_needed fold lane always answers false
+   * (its union-and-fold rule lives only in the write), and an input the
+   * write would refuse is not validated here, the write path refuses it.
+   */
+  enqueueWouldBeNoop(input: { system_reason: string; feature_link?: string; file_keys?: string[]; text: string }): boolean {
+    if (input.system_reason === 'reconcile_needed' && input.feature_link) return false;
+    const wantKey = systemTodoKey(input);
+    const rows = (
+      input.feature_link
+        ? this.db
+            .prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0")
+            .all(input.feature_link)
+        : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all()
+    ) as { body: string; scope: string }[];
+    for (const r of rows) {
+      const t = SterlingStore.decodeLiveRecord('enqueueWouldBeNoop', r) as DurableRecord & SystemTodoShape & { source?: string };
+      if (t.source !== 'system' || systemTodoKey(t) !== wantKey) continue;
+      const priorFiles = [...(t.file_keys ?? [])].sort();
+      const nextFiles = [...(input.file_keys ?? [])].sort();
+      return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? '', input.text);
+    }
+    return false;
+  }
+
+  /**
    * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
    * definition, replacing four hand-rolled copies (board 2ded3b4b).
    *
@@ -2506,15 +2571,7 @@ export class SterlingStore {
     // this lane is keyed on {system_reason, feature_link} alone; it is a
     // lane-specific exception at this one choke point, not a universal key
     // change.
-    const keyOf = (t: { system_reason?: string; feature_link?: string; file_keys?: string[]; text?: string }) => {
-      // capture_owed minted from a capture_pending declaration: the declared
-      // target is the identity, file_keys are context (declaredCaptureTarget).
-      const declaredTarget = t.system_reason === 'capture_owed' ? declaredCaptureTarget(t.text) : null;
-      if (declaredTarget !== null) return JSON.stringify(['capture_owed', t.feature_link ?? '', [], `declared-target:${declaredTarget}`]);
-      const files = t.system_reason === 'state_review' ? [] : [...(t.file_keys ?? [])].sort();
-      const identified = !!t.feature_link || files.length > 0;
-      return JSON.stringify([t.system_reason ?? '', t.feature_link ?? '', files, identified ? '' : (t.text ?? '')]);
-    };
+    const keyOf = systemTodoKey;
     const wantKey = keyOf(candidate as unknown as { system_reason?: string; feature_link?: string; file_keys?: string[]; text?: string });
 
     // TEXT EQUIVALENCE FOR THE ESCALATION CHECK, state_review NORMALIZED (board
@@ -2535,11 +2592,7 @@ export class SterlingStore {
     // differs after normalizing this one token and still escalates exactly as
     // before. Every OTHER lane keeps EXACT text equality (decision foreign_194f43e4's
     // escalating-severity behavior, e.g. edited→deleted, is unaffected).
-    const textsEquivalent = (a: string, b: string): boolean => {
-      if (candidate.system_reason !== 'state_review') return a === b;
-      const strip = (s: string) => s.replace(/\d+(?= bytes of code on disk)/g, '#');
-      return strip(a) === strip(b);
-    };
+    const textsEquivalent = (a: string, b: string): boolean => systemTodoTextsEquivalent(candidate.system_reason, a, b);
 
     // ONE OPEN reconcile_needed ITEM PER feature_link (board b0bb9d96 / I-29):
     // unlike every other lane, this identity is NOT the exact file_keys set —

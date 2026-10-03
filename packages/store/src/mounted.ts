@@ -253,6 +253,12 @@ export class MountedStores {
     return target.enqueueSystemTodo(record);
   }
 
+  /** Read-only twin of enqueueSystemTodo: queue items are project-local, so the
+   *  precheck asks the project store only (same reasoning as the enqueue above). */
+  enqueueWouldBeNoop(input: { system_reason: string; feature_link?: string; file_keys?: string[]; text: string }): boolean {
+    return this.project.enqueueWouldBeNoop(input);
+  }
+
   private storeFor(scope: string): SterlingStore {
     if (scope === 'project') return this.project;
     const m = /^domain:(.+)$/.exec(scope);
