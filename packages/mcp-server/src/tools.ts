@@ -566,6 +566,9 @@ export interface KnowledgeQueryResult {
    *  read did not search them. Present only when non-empty. Each record also
    *  carries `source`: 'project' or 'domain:<name>', the store that holds it. */
   missing_domains?: string[];
+  /** Mounted domains whose store failed a read, so this read did not search
+   *  them: each with the error of the failing read. Present only when non-empty. */
+  unreadable_domains?: { name: string; error: string }[];
   /** Read-time maintenance mints the store REFUSED during this read (a write
    *  refusal such as live schema version drift). The records are still served;
    *  each entry names the record, the lane and the error, and the record itself
@@ -611,6 +614,9 @@ export interface KnowledgePreflightResult {
   /** Configured domains not mounted because their store is missing, so this
    *  check did not search them. Present only when non-empty. */
   missing_domains?: string[];
+  /** Mounted domains whose store failed a read, so this read did not search
+   *  them: each with the error of the failing read. Present only when non-empty. */
+  unreadable_domains?: { name: string; error: string }[];
   matches: {
     id: string;
     type: string;
@@ -692,6 +698,9 @@ export interface DomainSurface {
   setDescription(name: string, description: string): void;
   /** Configured domains that are NOT mounted because their store is missing. */
   missing(): string[];
+  /** Mounted domains dropped from reads because their store failed one, each
+   *  with the error of the failing read. */
+  unreadable(): { name: string; error: string }[];
 }
 
 /** The DomainSurface over a MountedStores: every read and the one write go
@@ -703,6 +712,7 @@ export function mountedDomainSurface(stores: MountedStores): DomainSurface {
     description: (name) => stores.domainDescription(name),
     setDescription: (name, description) => stores.setDomainDescription(name, description),
     missing: () => stores.missingDomains.map((m) => m.name),
+    unreadable: () => stores.unreadableDomains.map((d) => ({ name: d.name, error: d.error })),
   };
 }
 
@@ -1686,10 +1696,27 @@ export class SterlingTools {
   }
 
   /** `{ missing_domains }` when a configured domain was skipped for having no
-   *  store, else nothing: a read over fewer stores than configured says so. */
-  private missingDomainsDisclosure(): { missing_domains?: string[] } {
+   *  store, and `{ unreadable_domains }` when a mounted domain's store failed a
+   *  read and was dropped, else nothing: a read over fewer stores than
+   *  configured says so. Call it AFTER the read it discloses for, because a
+   *  domain can be dropped by that read. */
+  private unreadDomainsDisclosure(): { missing_domains?: string[]; unreadable_domains?: { name: string; error: string }[] } {
     const missing = this.domains?.missing() ?? [];
-    return missing.length ? { missing_domains: missing } : {};
+    const unreadable = this.domains?.unreadable() ?? [];
+    return {
+      ...(missing.length ? { missing_domains: missing } : {}),
+      ...(unreadable.length ? { unreadable_domains: unreadable } : {}),
+    };
+  }
+
+  /** Append the unreadable domains to a not-found refusal, in place so the
+   *  error keeps its class: a record held by a dropped domain is not absent. */
+  private withUnreadableDomains<E extends Error>(err: E): E {
+    const unreadable = this.domains?.unreadable() ?? [];
+    if (unreadable.length) {
+      err.message += ` ${unreadable.map((d) => `Mounted domain '${d.name}' was not read (${d.error}), so a record it holds cannot be found here.`).join(' ')}`;
+    }
+    return err;
   }
 
   /** The store a read record came from: 'project' or 'domain:<name>', from the
@@ -5753,7 +5780,7 @@ export class SterlingTools {
         provenance: 'unavailable:count_projection',
         records: [],
         ...(byType ? { by_type: byType } : {}),
-        ...this.missingDomainsDisclosure(),
+        ...this.unreadDomainsDisclosure(),
       };
     }
     const records = this.knowledgeQuery(filter);
@@ -5808,7 +5835,7 @@ export class SterlingTools {
       provenance,
       records: records.map(projectRecord),
       ...(aboveThreshold !== undefined ? { above_threshold: aboveThreshold } : {}),
-      ...this.missingDomainsDisclosure(),
+      ...this.unreadDomainsDisclosure(),
       ...(mintFailures.length > 0 ? { maintenance_mint_failed: mintFailures } : {}),
     };
   }
@@ -5870,7 +5897,7 @@ export class SterlingTools {
   knowledgePreflight(text: string): KnowledgePreflightResult {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) {
-      return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matched_total: 0, matches: [], ...this.missingDomainsDisclosure() };
+      return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matched_total: 0, matches: [], ...this.unreadDomainsDisclosure() };
     }
     // B2G widening (findings f6ada94d and
     // preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
@@ -5945,7 +5972,7 @@ export class SterlingTools {
       ...(capped ? { capped: true as const } : {}),
       matches,
       answerability: matchedTotal ? 'verify_targets' : 'ungoverned',
-      ...this.missingDomainsDisclosure(),
+      ...this.unreadDomainsDisclosure(),
     };
   }
 
@@ -6461,7 +6488,7 @@ export class SterlingTools {
       // superseded body (review finding, 2026-08-20).
       if (!(err instanceof UnresolvedIdentifierError)) throw err;
       const deadSlugCarriers = this.store.supersededRecordsBySlug(id);
-      if (!deadSlugCarriers.length) throw err;
+      if (!deadSlugCarriers.length) throw this.withUnreadableDomains(err);
       record = deadSlugCarriers[0];
     }
     // Additive terminus disclosure (decision foreign_de1a7329): the pinned record's own
@@ -6498,6 +6525,12 @@ export class SterlingTools {
       const inbound = this.inboundSupersedesFor(record.id);
       if (inbound.length) {
         served = { ...served, inbound_supersedes: inbound };
+      }
+      // A whole-record read says which mounted domains its lookups could not
+      // read (same key as knowledge_query). Omitted when every domain was read.
+      const unreadable = this.domains?.unreadable() ?? [];
+      if (unreadable.length) {
+        served = { ...served, unreadable_domains: unreadable };
       }
     }
 
