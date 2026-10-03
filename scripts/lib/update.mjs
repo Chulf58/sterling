@@ -150,6 +150,7 @@ const GENERATED_TRACKED = [
   /^hooks\/[^/]+\.mjs$/,
   /^bin\/[^/]+\.mjs$/,
   /^bin\/contract-history\.json$/,
+  /^bin\/launcher-history\.json$/,
   /^mcp\/sterling-mcp\.mjs$/,
   /^mcp\/\.build-id$/,
   /^tui\/sterling-tui\.mjs$/,

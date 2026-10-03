@@ -52,6 +52,7 @@ import { join } from 'node:path';
 import { SterlingStore, MountedStores, createDomain } from '@sterling/store';
 import { parseConfig } from '@sterling/schemas';
 import { SterlingTools } from '../tools.js';
+import { seedLegacySupersedesEdge } from '../../../store/dist/tests/legacy-supersedes-edge.js';
 
 const NOW = '2026-08-26T12:00:00.000Z';
 
@@ -66,6 +67,24 @@ function harness() {
     rmSync(dir, { recursive: true, force: true });
   };
   return { store, tools, cleanup };
+}
+
+// The pre-ruling raw supersedes shape (target stays active). knowledge_create
+// now refuses a supersedes link (decision
+// a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede), so
+// the record is created without it and the existing-edge shape this file reads
+// is seeded through the store's legacy fixture path.
+function createLegacySuperseder(
+  tools: SterlingTools,
+  store: SterlingStore | MountedStores,
+  type: string,
+  fields: Loose
+): { record: unknown } {
+  const { links, ...rest } = fields as Loose & { links: { rel: string; target_id: string }[] };
+  const res = tools.knowledgeCreate(type, rest);
+  const id = (res.record as unknown as Loose).id as string;
+  for (const l of links) seedLegacySupersedesEdge(store, id, l.target_id);
+  return { ...res, record: store.get(id) };
 }
 
 function mkDecision(tools: SterlingTools, title: string, statement = 's', overrides: Loose = {}): Loose {
@@ -179,11 +198,11 @@ test("CONTROL: a record fully retired via the server-owned supersession path (kn
 // ===========================================================================
 
 test("PIN 1: knowledge_get on record A surfaces record B's id in inbound_supersedes, when B was created carrying links:[{rel:'supersedes', target_id: A.id}]", () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
     const a = mkDecision(tools, 'pin1-old-record', 'old clause-bearing statement');
 
-    const b = tools.knowledgeCreate('decision', {
+    const b = createLegacySuperseder(tools, store, 'decision', {
       title: 'pin1-new-record',
       statement: 'newer statement overriding one clause of A',
       alternatives_rejected: [],
@@ -216,7 +235,7 @@ test("PIN 1: knowledge_get on record A surfaces record B's id in inbound_superse
 // ===========================================================================
 
 test('PIN 2: a record with no inbound supersedes edges reports none — no phantom entry, and unaffected by an unrelated supersedes edge elsewhere in the same store', () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
     const isolated = mkDecision(tools, 'pin2-isolated-record', 'nothing points at this');
 
@@ -224,7 +243,7 @@ test('PIN 2: a record with no inbound supersedes edges reports none — no phant
     // returns "every supersedes edge in the store" rather than genuinely
     // filtering by target_id would leak into `isolated`'s result.
     const unrelatedOld = mkDecision(tools, 'pin2-unrelated-old', 'unrelated old record');
-    tools.knowledgeCreate('decision', {
+    createLegacySuperseder(tools, store, 'decision', {
       title: 'pin2-unrelated-new',
       statement: 'unrelated newer record',
       alternatives_rejected: [],
@@ -274,17 +293,17 @@ test('PIN 2: a record with no inbound supersedes edges reports none — no phant
 // ===========================================================================
 
 test("PIN 5: two DISTINCT holders (B and C), each carrying links:[{rel:'supersedes', target_id: A.id}], both surface on knowledge_get(A) with no duplicates", () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
     const a = mkDecision(tools, 'pin5-old-record', 'old clause-bearing statement, overridden by two later records');
-    const b = tools.knowledgeCreate('decision', {
+    const b = createLegacySuperseder(tools, store, 'decision', {
       title: 'pin5-new-record-b',
       statement: 'first newer statement overriding one clause of A',
       alternatives_rejected: [],
       rationale: 'r',
       links: [{ rel: 'supersedes', target_id: a.id }],
     }).record as unknown as Loose;
-    const c = tools.knowledgeCreate('decision', {
+    const c = createLegacySuperseder(tools, store, 'decision', {
       title: 'pin5-new-record-c',
       statement: 'second, independent newer statement overriding a different clause of A',
       alternatives_rejected: [],
@@ -334,10 +353,10 @@ test("PIN 5: two DISTINCT holders (B and C), each carrying links:[{rel:'supersed
 // ===========================================================================
 
 test("PIN 6: a holder (B) that is later itself RETIRED still surfaces on A's inbound_supersedes, carrying B's own non-active status", () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
     const a = mkDecision(tools, 'pin6-old-record', 'old clause-bearing statement');
-    const b = tools.knowledgeCreate('decision', {
+    const b = createLegacySuperseder(tools, store, 'decision', {
       title: 'pin6-holder-b',
       statement: 'newer statement overriding a clause of A, later retired itself',
       alternatives_rejected: [],
@@ -385,42 +404,28 @@ test("PIN 6: a holder (B) that is later itself RETIRED still surfaces on A's inb
 // array can hold a real, persisted, knowledge_get-readable outbound edge
 // targeting a PROJECT-scoped record's id (`out.promoted.links` holds
 // {rel:'informed_by', target_id: ref.id} where ref is project-scoped) — so
-// the pair this pin needs is not invented. What is NOT independently
-// verified (no execution available) is whether passing `links` directly at
-// knowledge_create time (rather than through knowledge_promote's own
-// internal write) is validated against the TARGET existing in a specific
-// store. Per the review instruction, this is handled by ATTEMPTING the
-// construction and, if knowledge_create itself refuses it, SKIPPING with the
-// refusing message quoted verbatim — never faking reachability.
+// the pair this pin needs is not invented. The holder is created without the
+// link and the edge is seeded in the domain store (createLegacySuperseder);
+// a fixture failure fails this pin, it never skips.
 // ===========================================================================
 
-test("PIN 7: a DOMAIN-scoped holder's inbound rel:'supersedes' edge onto a PROJECT-scoped target surfaces on knowledge_get of the target, fanning across MountedStores", (t) => {
-  const { tools, cleanup } = domainHarness();
+test("PIN 7: a DOMAIN-scoped holder's inbound rel:'supersedes' edge onto a PROJECT-scoped target surfaces on knowledge_get of the target, fanning across MountedStores", () => {
+  const { store, tools, cleanup } = domainHarness();
   try {
     const a = mkDecision(tools, 'pin7-project-old-record', 'project-scoped old clause-bearing statement');
     assert.equal(a.scope, 'project', 'sanity: A is project-scoped by default');
 
-    let b: Loose;
-    try {
-      b = tools.knowledgeCreate('reference_material', {
-        scope: 'domain:genesys',
-        title: 'pin7-domain-holder',
-        kind: 'doc',
-        location: 'docs/pin7-domain-holder.md',
-        summary: 'domain-scoped record overriding one clause of the project-scoped A',
-        source_date: '2026-08-26',
-        capture_date: '2026-08-26',
-        basis: 'platform',
-        links: [{ rel: 'supersedes', target_id: a.id }],
-      }).record as unknown as Loose;
-    } catch (err) {
-      t.skip(
-        `harness cannot express a domain-scoped holder linking directly to a project-scoped target at create time — ` +
-          `knowledge_create refused with: "${(err as Error).message}". Pin left unreachable per review instruction ` +
-          `("check, don't assume"), not faked. The reachable half (PIN 1-6, same-store) still exercises the core fix.`
-      );
-      return;
-    }
+    const b = createLegacySuperseder(tools, store, 'reference_material', {
+      scope: 'domain:genesys',
+      title: 'pin7-domain-holder',
+      kind: 'doc',
+      location: 'docs/pin7-domain-holder.md',
+      summary: 'domain-scoped record overriding one clause of the project-scoped A',
+      source_date: '2026-08-26',
+      capture_date: '2026-08-26',
+      basis: 'platform',
+      links: [{ rel: 'supersedes', target_id: a.id }],
+    }).record as unknown as Loose;
     assert.equal(b.scope, 'domain:genesys', 'sanity: B really landed domain-scoped');
 
     const pinnedA = get(tools, a.id as string);
@@ -447,10 +452,10 @@ test("PIN 7: a DOMAIN-scoped holder's inbound rel:'supersedes' edge onto a PROJE
 // ===========================================================================
 
 test("PIN 4: direction honesty — B (which holds links:[{rel:'supersedes', target_id: A.id}]) does not itself gain inbound_supersedes from that pair", () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
     const a = mkDecision(tools, 'pin4-old-record', 'old clause-bearing statement');
-    const b = tools.knowledgeCreate('decision', {
+    const b = createLegacySuperseder(tools, store, 'decision', {
       title: 'pin4-new-record',
       statement: 'newer statement overriding one clause of A',
       alternatives_rejected: [],

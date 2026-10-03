@@ -27,8 +27,10 @@ const HOOKS = join(root, 'scripts', 'hooks');
 const NOW = '2026-10-02T12:00:00.000Z';
 
 let SterlingStore;
+let seedLegacySupersedesEdge;
 before(async () => {
   ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+  ({ seedLegacySupersedesEdge } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'tests', 'legacy-supersedes-edge.js')).href));
 });
 
 function runHook(input, cwd) {
@@ -115,8 +117,11 @@ function ctxOf(r) {
 function seedPartialSupersession(store) {
   const oldRec = store.create(decisionRecord(OLD_SLUG, OLD_TITLE, OLD_STATEMENT));
   const newRec = store.create(
-    decisionRecord(NEW_SLUG, NEW_TITLE, NEW_STATEMENT, { links: [{ rel: 'supersedes', target_id: oldRec.id }] })
+    decisionRecord(NEW_SLUG, NEW_TITLE, NEW_STATEMENT)
   );
+  // create refuses a supersedes link since decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede;
+  // the incident's existing edge is seeded with a raw relation row (test helper).
+  seedLegacySupersedesEdge(store, newRec.id, oldRec.id);
   const reread = store.get(oldRec.id);
   assert.equal(reread.status, 'active', 'precondition: the incident shape leaves the old record active');
   assert.equal(reread.superseded_by ?? null, null, 'precondition: and with no superseded_by');

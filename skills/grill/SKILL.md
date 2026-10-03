@@ -1,6 +1,6 @@
 ---
 name: grill
-description: Interview the user about a plan or design until every consequential choice is ruled or explicitly deferred, one AskUserQuestion form at a time, capturing each settled choice as a decision record. Use when the user says "grill me", "interview me about this", "poke holes in this plan", or runs /sterling:grill — and when the conductor can NAME a consequential unresolved choice (scope, acceptance, architecture, an expensive commitment) that the store cannot settle.
+description: Interview the user about a plan, design or new ask until every consequential choice is ruled or explicitly deferred, one AskUserQuestion form at a time, capturing each settled choice as a decision record. Use when the user says "grill me", "interview me about this", "poke holes in this plan", or runs /sterling:grill — when a new non-trivial ask is ambiguous at intake (intent, acceptance or scope unstated, or two or more reasonable readings), where a short intake grill runs before the first dispatch — and when the conductor can NAME a consequential unresolved choice (scope, acceptance, architecture, an expensive commitment) that the store cannot settle.
 ---
 
 # Grill — the design interview
@@ -10,7 +10,18 @@ Decision `sterling-grill-skill-design`. The interview and its capture only; no b
 ## 0. Entry
 
 - **User-invoked** (`/sterling:grill`, "grill me"): the subject is what they named; if it is unclear, the first form asks which subject.
-- **Conductor-invoked:** first state, in one line, the consequential choice you cannot settle and why the store does not settle it. No nameable choice, no grill — decide it yourself or ask one ordinary question.
+- **Conductor-invoked at intake:** for every new non-trivial ask, before the first dispatch, the conductor checks whether the intent, the acceptance or the scope is unstated, or whether there are two or more reasonable readings. If any holds, run the intake grill (section 0a). A clear ask starts at once; a vague one always gets the grill (user-ruled 2026-10-03, "On ambiguity, at intake (Recommended)").
+- **Conductor-invoked mid-task:** first state, in one line, the consequential choice you cannot settle and why the store does not settle it. No nameable choice, no grill — decide it yourself or ask one ordinary question.
+
+## 0a. Intake grill
+
+A short shape for an ambiguous new ask. It is the same interview, scaled down:
+
+- **1-3 questions**, one form each, dependency-ready first. Stop when the intent, the acceptance and the scope are each stated; do not grow it into a full tree unless a consequential choice appears.
+- **The first question restates your understanding as an option:** "Proceed as I understand it: ..." (intent, acceptance and scope in a sentence or two), recommended first, with 1-3 alternative readings beside it. If the user picks it, the grill ends there.
+- **Facts still go to lanes** (section 1). Ask only what the ask leaves open and the store cannot settle.
+- **Capture** only a choice that is a real decision (section 4); a restated ask that the user accepts is a board item's acceptance text, not a decision record.
+- Ending the grill is not an order to stop: once the ask is clear, board it and start, unless the user only asked to be grilled.
 
 ## 1. Stage before asking
 
