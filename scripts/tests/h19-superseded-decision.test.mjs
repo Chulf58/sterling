@@ -113,8 +113,11 @@ test('H19 file touch: a decision another record supersedes is never labelled [st
   try {
     const oldRec = store.create(decision(OLD_SLUG, 'One day is 150 seconds and peacetime is 8 days.'));
     const newRec = store.create(
-      decision(NEW_SLUG, 'One day is 900 seconds and peacetime is about 2 days.', { links: [{ rel: 'supersedes', target_id: oldRec.id }] })
+      decision(NEW_SLUG, 'One day is 900 seconds and peacetime is about 2 days.')
     );
+    // create refuses a supersedes link since decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede;
+    // the incident's existing edge is seeded through the store's legacy fixture path.
+    store.addLegacySupersedesEdge(newRec.id, oldRec.id);
     assert.equal(store.get(oldRec.id).status, 'active', 'precondition: the incident shape leaves the old record active');
     const ctx = ctxOf(runHook(postRead(dir), dir));
     const oldLine = lineOf(ctx, oldRec);
@@ -199,8 +202,11 @@ for (const [channel, prompt, fileKeys, oldStatement, newStatement] of [
     try {
       const oldRec = store.create(decision(OLD_SLUG, oldStatement, { file_keys: fileKeys }));
       const newRec = store.create(
-        decision(NEW_SLUG, newStatement, { file_keys: fileKeys, links: [{ rel: 'supersedes', target_id: oldRec.id }] })
+        decision(NEW_SLUG, newStatement, { file_keys: fileKeys })
       );
+      // create refuses a supersedes link since decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede;
+      // the incident's existing edge is seeded through the store's legacy fixture path.
+      store.addLegacySupersedesEdge(newRec.id, oldRec.id);
       const ctx = ctxOf(stage(dir, prompt));
       const oldLine = lineOf(ctx, oldRec);
       assert.ok(oldLine, `the superseded decision is staged:\n${ctx}`);
@@ -253,8 +259,11 @@ test('OpenCode file touch: a superseded decision is never labelled [standing] an
     writeFileSync(join(dir, FILE), 'extends Node\n');
     const oldRec = store.create(decision(OLD_SLUG, 'One day is 150 seconds and peacetime is 8 days.'));
     const newRec = store.create(
-      decision(NEW_SLUG, 'One day is 900 seconds and peacetime is about 2 days.', { links: [{ rel: 'supersedes', target_id: oldRec.id }] })
+      decision(NEW_SLUG, 'One day is 900 seconds and peacetime is about 2 days.')
     );
+    // create refuses a supersedes link since decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede;
+    // the incident's existing edge is seeded through the store's legacy fixture path.
+    store.addLegacySupersedesEdge(newRec.id, oldRec.id);
     const ctx = stubCtx(dir);
     teardown = await server.createSterlingServer({ claudeOnPath: () => false }).setup(ctx);
     const call = { tool: 'read', sessionID: 'ses_1', id: 'c1', input: { path: FILE } };

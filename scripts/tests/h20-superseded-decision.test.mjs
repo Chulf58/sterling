@@ -115,8 +115,11 @@ function ctxOf(r) {
 function seedPartialSupersession(store) {
   const oldRec = store.create(decisionRecord(OLD_SLUG, OLD_TITLE, OLD_STATEMENT));
   const newRec = store.create(
-    decisionRecord(NEW_SLUG, NEW_TITLE, NEW_STATEMENT, { links: [{ rel: 'supersedes', target_id: oldRec.id }] })
+    decisionRecord(NEW_SLUG, NEW_TITLE, NEW_STATEMENT)
   );
+  // create refuses a supersedes link since decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede;
+  // the incident's existing edge is seeded through the store's legacy fixture path.
+  store.addLegacySupersedesEdge(newRec.id, oldRec.id);
   const reread = store.get(oldRec.id);
   assert.equal(reread.status, 'active', 'precondition: the incident shape leaves the old record active');
   assert.equal(reread.superseded_by ?? null, null, 'precondition: and with no superseded_by');

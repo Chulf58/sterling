@@ -539,6 +539,13 @@ export class MountedStores {
     return this.mutatingStoreHolding('addLink', sourceId).addLink(sourceId, rel, targetId, true);
   }
 
+  /** FIXTURE AND LEGACY ONLY (see SterlingStore.addLegacySupersedesEdge): the
+   *  pre-ruling raw supersedes edge, routed and target-checked like addLink. */
+  addLegacySupersedesEdge(sourceId: string, targetId: string): DurableRecord {
+    if (!this.get(targetId)) throw new Error(`addLegacySupersedesEdge: no target record '${targetId}' in the project store or any mounted domain`);
+    return this.mutatingStoreHolding('addLegacySupersedesEdge', sourceId).addLegacySupersedesEdge(sourceId, targetId, true);
+  }
+
   /** EVERY mounted store physically holding `id`, project-first. Ordinarily
    *  exactly one — a record lives in one store — which is precisely why the
    *  cardinality is returned rather than assumed away by a first-hit scan. */

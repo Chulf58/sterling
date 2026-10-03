@@ -31,9 +31,10 @@ import * as viewmodel from '../viewmodel.js';
 //   - insertRecord() writes EVERY link, rel:'supersedes' included, into
 //     record_relations WITHOUT retiring the target (index.ts:2708).
 // So an ACTIVE, query-visible record CAN hold an inbound supersedes edge, and
-// SterlingStore.inboundSupersedes(target) returns its holder. Fixtures here
-// therefore create the holder with `links: [{rel:'supersedes', target_id}]`
-// and NEVER call supersede().
+// SterlingStore.inboundSupersedes(target) returns its holder. Since decision
+// a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede,
+// create refuses that link, so fixtures here seed the existing-edge shape with
+// store.addLegacySupersedesEdge(holder, target) and NEVER call supersede().
 //
 // RENDER SURFACE (verified): the disclosure is appended to `card.body`, which
 // becomes the wrapped kind:'body' lines of an expanded knowledge card. The
@@ -118,9 +119,12 @@ function activeInboundEdge(store: SterlingStore, targetOver: Record<string, unkn
     decisionRec({
       title: 'the clause-level override',
       statement: 'overrides one clause of the target',
-      links: [{ rel: 'supersedes', target_id: target.id }],
     }),
   ) as { id: string };
+  // create refuses a supersedes link since decision
+  // a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede;
+  // the existing-edge shape is seeded through the legacy fixture path.
+  store.addLegacySupersedesEdge(holder.id, target.id);
   return { target, holder };
 }
 
@@ -385,12 +389,12 @@ test('FINDING 2 (d): an expanded card hidden behind a COLLAPSED sub-category cos
       articleRec({ title: 'TUI article', files: [{ path: 'packages/tui/src/state.ts', role: 'impl' }] }),
     ) as { id: string };
     store.create(articleRec({ title: 'Store article', files: [{ path: 'packages/store/src/index.ts', role: 'impl' }] }));
-    store.create(
+    const holder = store.create(
       decisionRec({
         title: 'holder pointing at the TUI article',
-        links: [{ rel: 'supersedes', target_id: tui.id }],
       }),
-    );
+    ) as { id: string };
+    store.addLegacySupersedesEdge(holder.id, tui.id);
 
     const calls: string[] = [];
     const real = store.inboundSupersedes.bind(store);

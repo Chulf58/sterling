@@ -1744,6 +1744,31 @@ export class SterlingStore {
   }
 
   /** Typed edge write — record_relations is the authoritative home (contract 6). */
+  /**
+   * Decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede:
+   * a links entry with rel 'supersedes' that is not already an edge of the
+   * record is refused, with nothing written. Supersession has one write path,
+   * supersede() (knowledge_supersede), which also retires the old record; a raw
+   * edge left the target active, a second write with the same name and a
+   * different effect. `existingTargets` holds the targets the record already
+   * supersedes, so a write that carries an existing edge forward still passes.
+   * Exported for the tool layer, whose attestation update branch reaches
+   * supersede() rather than the in-place path.
+   */
+  static refuseRawSupersedesLinks(
+    op: string,
+    links: readonly { rel: string; target_id: string }[] | undefined,
+    existingTargets: ReadonlySet<string>
+  ): void {
+    const added = (links ?? []).filter((l) => l.rel === 'supersedes' && !existingTargets.has(l.target_id));
+    if (added.length === 0) return;
+    throw new Error(
+      `${op}: a links entry with rel 'supersedes' (target ${added.map((l) => `'${l.target_id}'`).join(', ')}) is refused — ` +
+        `supersession is a lifecycle transition, not a link. Use knowledge_supersede to replace the old record (it retires it), ` +
+        `or write the new record with a rel 'cites' link to the old one for a deliberate partial override. Nothing was written.`
+    );
+  }
+
   private insertRelation(sourceId: string, rel: string, targetId: string, at: string): void {
     if (sourceId === targetId) {
       throw new Error(
@@ -1814,6 +1839,10 @@ export class SterlingStore {
     // envelope fields resolveIdentity itself writes back — status/superseded_by —
     // are on both sides and never read as loss.
     assertNoFieldLoss('create', prepared.input, record);
+    // supersede() and the legacy retired shape write their supersedes edge
+    // through insertRecord directly, never through here, so this refusal binds
+    // only callers asking create for a raw edge.
+    SterlingStore.refuseRawSupersedesLinks('create', record.links, new Set());
     this.tx(() => {
       this.insertRecord(record);
       this.logActivity('created', record, record.created_at);
@@ -2151,6 +2180,16 @@ export class SterlingStore {
       if (validated.type !== current.type) {
         throw new Error(`${op}: type mismatch ('${validated.type}' cannot replace '${current.type}' in place)`);
       }
+      // A supersedes edge the record already holds (a supersede() successor,
+      // or a pre-ruling raw edge) is carried forward; only a NEW one is refused.
+      const existingSupersedes = new Set(
+        (
+          this.db
+            .prepare(`SELECT target_id FROM record_relations WHERE source_id = ? AND rel = 'supersedes'`)
+            .all(id) as { target_id: string }[]
+        ).map((r) => r.target_id)
+      );
+      SterlingStore.refuseRawSupersedesLinks(op, validated.links, existingSupersedes);
       const entry = RECORD_TYPES[validated.type];
       const stored = SterlingStore.storableBody(validated as unknown as Record<string, unknown>);
       const now = new Date().toISOString();
@@ -3641,6 +3680,26 @@ export class SterlingStore {
           `Use supersede(oldId, newRecord) for concept replacement, or retireInFavorOf(id, survivor) for duplicate consolidation. Nothing was written.`
       );
     }
+    return this.writeLink(sourceId, source, parsedRel, targetId);
+  }
+
+  /**
+   * FIXTURE AND LEGACY ONLY. Writes the pre-ruling raw supersedes edge that
+   * knowledge_create/knowledge_update admitted before decision
+   * a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede:
+   * the edge lands and the target stays ACTIVE. Stores still hold such edges
+   * (they are left as they are), so tests of how they are read and delivered
+   * need a way to build one. No tool and no hook calls this.
+   */
+  addLegacySupersedesEdge(sourceId: string, targetId: string, targetValidated = false): DurableRecord {
+    this.assertWritable('addLegacySupersedesEdge');
+    const source = this.get(sourceId);
+    if (!source) throw new Error(`addLegacySupersedesEdge: no record '${sourceId}'`);
+    if (!targetValidated && !this.get(targetId)) throw new Error(`addLegacySupersedesEdge: no target record '${targetId}'`);
+    return this.writeLink(sourceId, source, 'supersedes', targetId);
+  }
+
+  private writeLink(sourceId: string, source: DurableRecord, parsedRel: DurableRecord['links'][number]['rel'], targetId: string): DurableRecord {
     if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId)) return source;
     const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] } as DurableRecord;
     const at = new Date().toISOString();
