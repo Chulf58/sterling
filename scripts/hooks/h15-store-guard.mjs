@@ -2,7 +2,7 @@
 //
 // ONE RULE (decision sterling-claude-code-scale-down-boundary, user-ruled 2026-09-19): nothing but the Sterling MCP server
 // touches the store DATABASE — `.sterling/sterling.db` and its siblings (`sterling.db-wal`, `-shm`, `-journal`,
-// `sterling.db.*` backups). Every other file under `.sterling/` (config.json, transient/*, delivery-audit/*, ...) is
+// `sterling.db.*` backups). Every other file under `.sterling/` (config.json, transient/*, ...) is
 // ordinary project state any tool may read or write.
 //
 // Channels: structured (Edit/Write/MultiEdit/NotebookEdit) resolves the destination against cwd, denies when it carries a
