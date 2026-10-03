@@ -35,9 +35,9 @@ function captureStderr<T>(fn: () => T): { value: T; text: string } {
 }
 
 test('unreadableDomainWarning: one line naming the domain, its path and the error, saying reads skip it', () => {
-  const line = unreadableDomainWarning({ name: 'old', dbPath: '/tmp/domains/old/sterling.db', error: 'no such table: record_relations' });
+  const line = unreadableDomainWarning({ name: 'old', dbPath: '/tmp/domains/old/sterling.db', error: 'no such table: record_relations', note: 'dropped at mount' });
   assert.ok(line.includes("'old'") && line.includes('/tmp/domains/old/sterling.db') && line.includes('no such table: record_relations'), line);
-  assert.match(line, /reads skip it until the store is updated or repaired/);
+  assert.match(line, /reads skip it until the store is repaired and the session restarts/);
   assert.ok(!line.includes('\n'), 'one line');
 });
 
@@ -70,6 +70,7 @@ test('MCP boot with a pre-v2 domain mounted prints one unreadable-domain line, a
       assert.match(description, /missing_domains/, name);
       assert.match(description, /unreadable_domains/, name);
     }
+    assert.match(listed.tools.find((t) => t.name === 'knowledge_get')?.description ?? '', /unreadable_domains/);
 
     const res = payload(await client.callTool({ name: 'knowledge_query', arguments: {} })) as { unreadable_domains?: { name: string; error: string }[] };
     assert.equal(res.unreadable_domains?.[0]?.name, 'old');

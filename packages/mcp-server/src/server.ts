@@ -179,7 +179,7 @@ const strict = <T extends z.ZodRawShape>(shape: T) => z.object(shape).strict();
 export function unreadableDomainWarning(d: MountedStores['unreadableDomains'][number]): string {
   return (
     `sterling: domain '${d.name}' is mounted but its store at '${d.dbPath}' could not be read (${d.error}); ` +
-    `reads skip it until the store is updated or repaired, so its knowledge is not in any result.`
+    `reads skip it until the store is repaired and the session restarts, so its knowledge is not in any result, and writes into it are refused.`
   );
 }
 
@@ -276,7 +276,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_get',
     {
       description:
-        "Fetch one record by id (full uuid, exact slug, or unambiguous 8-char prefix) — the full-fidelity read. version:<n> reads an archived prior version. With `field`: a windowed read of just that field — strings page by characters, arrays by elements (offset/length); returns {kind, total_chars|total_entries, offset, value|entries}; an offset past the end returns empty with the true total. Scalar/object fields return whole and refuse offset/length. Unknown field is refused naming the valid set; offset/length without field is refused.",
+        "Fetch one record by id (full uuid, exact slug, or unambiguous 8-char prefix) — the full-fidelity read. version:<n> reads an archived prior version. With `field`: a windowed read of just that field — strings page by characters, arrays by elements (offset/length); returns {kind, total_chars|total_entries, offset, value|entries}; an offset past the end returns empty with the true total. Scalar/object fields return whole and refuse offset/length. Unknown field is refused naming the valid set; offset/length without field is refused. unreadable_domains (only when a mounted domain could not be read: each with its error) means a record held there cannot be found by this read.",
       inputSchema: strict({
         id: z.string(),
         field: z.string().optional(),
