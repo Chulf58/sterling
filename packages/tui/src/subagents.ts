@@ -82,11 +82,12 @@ export function readCurrentSessionId(projectRoot: string): string | null {
 }
 
 /** Read the register and reduce it to one row per agent_id, the latest round
- *  deciding. With the current session known: only that session's rows, running
- *  when the round has neither `ended` nor `residue_reported_at`, else resumable
- *  with no time limit. With it unknown: every row, an ended one done for
- *  lingerMs. H10 stamps residue_reported_at on a row whose subagent is gone
- *  without a stop event, so the stamp counts as the end. */
+ *  deciding. With the current session known: only that session's rows; a round
+ *  with a real `ended` is resumable with no time limit. With it unknown: every
+ *  row, an ended one done for lingerMs. H10 stamps residue_reported_at on a row
+ *  whose subagent is gone without a stop event: the stamp counts as the end
+ *  (done, lingering lingerMs) but never as resumable, since nothing shows such
+ *  a subagent can be resumed. */
 export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_LINGER_MS): SubagentSource {
   const reg = readRegister(projectRoot);
   if (reg.availability !== 'ok') return { availability: reg.availability, rows: [] };
@@ -106,13 +107,15 @@ export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_
     if (Number.isNaN(startedAt)) continue;
     const endStamp = latest.ended ? latest.ended.at : latest.residue_reported_at ? String(latest.residue_reported_at) : null;
     const endedAt = endStamp === null ? null : Date.parse(endStamp);
-    if (endedAt !== null && (Number.isNaN(endedAt) || (currentSession === null && now - endedAt > lingerMs))) continue;
+    // only a real stop event shows a subagent can be resumed; a residue stamp does not
+    const resumable = currentSession !== null && Boolean(latest.ended);
+    if (endedAt !== null && (Number.isNaN(endedAt) || (!resumable && now - endedAt > lingerMs))) continue;
     const withId = rounds.find((r) => typeof r.tool_use_id === 'string' && r.tool_use_id !== '');
     rows.push({
       agentId,
       sessionId: latest.session_id,
       agentType: typeof latest.agent_type === 'string' && latest.agent_type ? latest.agent_type : null,
-      status: endedAt === null ? 'running' : currentSession === null ? 'done' : 'resumable',
+      status: endedAt === null ? 'running' : resumable ? 'resumable' : 'done',
       startedAt,
       endedAt,
       elapsedMs: Math.max(0, (endedAt ?? now) - startedAt),

@@ -121,7 +121,7 @@ test('register: without a readable session.json the old rule holds: running rows
   }
 });
 
-test('register: a row H10 stamped residue_reported_at is ended at that stamp, never running, and is resumable in the current session', () => {
+test('register: a row H10 stamped residue_reported_at is ended at that stamp, never running, never resumable: done for the linger window, then dropped, even in the current session', () => {
   const root = project();
   try {
     writeSession(root, 's1');
@@ -132,7 +132,7 @@ test('register: a row H10 stamped residue_reported_at is ended at that stamp, ne
       row('a4', 'reviewer', 600_000, { ended: { at: iso(100_000), event: 'subagent-stop' }, residue_reported_at: iso(20_000) }),
     ]);
     const src = readSubagents(root, NOW);
-    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status]), [['a3', 'running'], ['a1', 'resumable'], ['a4', 'resumable'], ['a2', 'resumable']]);
+    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status]), [['a3', 'running'], ['a1', 'done'], ['a4', 'resumable']], 'a 30 s old residue row is done, a 3,000 s old one is not listed, a real ended stays resumable');
     const a1 = src.rows.find((r) => r.agentId === 'a1')!;
     assert.equal(a1.endedAt, NOW - 30_000);
     assert.equal(a1.elapsedMs, 570_000);
@@ -141,7 +141,7 @@ test('register: a row H10 stamped residue_reported_at is ended at that stamp, ne
     writeRegister(root, [row('a1', 'implementor', 600_000, { residue_reported_at: iso(30_000) })]);
     const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: join(root, 'none') }).view(NOW);
     assert.equal(v.active, 0);
-    assert.equal(v.agents[0]!.status, 'resumable');
+    assert.equal(v.agents[0]!.status, 'done');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
