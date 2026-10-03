@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createDomain } from '@sterling/store';
@@ -75,6 +75,49 @@ test('MCP boot with a pre-v2 domain mounted prints one unreadable-domain line, a
     const res = payload(await client.callTool({ name: 'knowledge_query', arguments: {} })) as { unreadable_domains?: { name: string; error: string }[] };
     assert.equal(res.unreadable_domains?.[0]?.name, 'old');
     assert.match(res.unreadable_domains?.[0]?.error ?? '', /record_relations/);
+  } finally {
+    await client.close();
+    await server.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('MCP boot with domain stores that cannot be opened succeeds: one stderr line each, knowledge_query discloses them, knowledge_create into them refuses', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mcp-unopenable-boot-'));
+  const presentDb = join(dir, 'domains', 'present', 'sterling.db');
+  const notdbDb = join(dir, 'domains', 'notdb', 'sterling.db');
+  const newerDb = join(dir, 'domains', 'newer', 'sterling.db');
+  createDomain('present', 'present domain', presentDb);
+  mkdirSync(dirname(notdbDb), { recursive: true });
+  writeFileSync(notdbDb, 'this file is not a SQLite database. '.repeat(40));
+  createDomain('newer', 'newer domain', newerDb);
+  const raw = new DatabaseSync(newerDb);
+  raw.exec('PRAGMA user_version = 99');
+  raw.close();
+  writeFileSync(
+    join(dir, 'config.json'),
+    JSON.stringify({ stack_tags: ['present', 'notdb', 'newer'], domain_paths: { present: presentDb, notdb: notdbDb, newer: newerDb } })
+  );
+
+  const { value, text } = captureStderr(() => createSterlingServer(join(dir, 'sterling.db')));
+  const { server, store, tools } = value;
+  const client = new Client({ name: 'test-client', version: '0.0.1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const lines = text.split('\n').filter((l) => l.includes('could not be read'));
+    assert.equal(lines.length, 2, text);
+    assert.ok(lines[0].includes("'notdb'") && lines[0].includes(notdbDb) && /not a database/.test(lines[0]), lines[0]);
+    assert.ok(lines[1].includes("'newer'") && lines[1].includes(newerDb) && /Unsupported schema version/.test(lines[1]), lines[1]);
+
+    const res = payload(await client.callTool({ name: 'knowledge_query', arguments: {} })) as { unreadable_domains?: { name: string }[] };
+    assert.deepEqual(res.unreadable_domains?.map((d) => d.name), ['notdb', 'newer']);
+
+    const body = { title: 'A decision for a store that cannot be opened', statement: 's', alternatives_rejected: [], rationale: 'r' };
+    assert.throws(() => tools.knowledgeCreate('decision', { ...body, scope: 'domain:notdb' }), /domain 'notdb' cannot be written: this session cannot read it/);
+    assert.throws(() => tools.knowledgeCreate('decision', { ...body, scope: 'domain:newer' }), /domain 'newer' cannot be written: this session cannot read it/);
+    assert.equal(tools.knowledgeCreate('decision', body).record.scope, 'project', 'a project create still works');
   } finally {
     await client.close();
     await server.close();

@@ -11669,9 +11669,13 @@ export class SterlingTools {
       survivor = this.resolveRecordId(inFavorOf, 'knowledge_retire', 'target record');
     } catch (err) {
       if (!(err instanceof UnresolvedIdentifierError)) throw err;
-      throw new Error(
-        `knowledge_retire: no record '${inFavorOf}' to retire in favour of. The survivor must exist first — ` +
-          `retiring into a void leaves the reader nowhere to go, which is the failure this tool exists to prevent.`
+      // The replacement keeps the dropped-domain text: a survivor held by a
+      // domain this session cannot read is not a void.
+      throw this.withUnreadableDomains(
+        new Error(
+          `knowledge_retire: no record '${inFavorOf}' to retire in favour of. The survivor must exist first — ` +
+            `retiring into a void leaves the reader nowhere to go, which is the failure this tool exists to prevent.`
+        )
       );
     }
     // The literal-string self-retire check above cannot see two SPELLINGS of one

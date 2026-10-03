@@ -12,7 +12,7 @@
 import { mkdirSync, existsSync, rmSync, openSync, closeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { SterlingStore, SchemaMigrationRequiredError, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions, type BoardItemReadiness } from './index.js';
+import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions, type BoardItemReadiness } from './index.js';
 import { validateRecord, type DurableRecord, type SterlingConfig } from '@sterling/schemas';
 import { allocateShares } from './shares.js';
 
@@ -67,13 +67,21 @@ const DROPPED_AFTER_MOUNT_NOTE = 'dropped after mount; reads skip it until the s
 /** UnreadableDomain.note for a domain dropped by the mount-time check. */
 const DROPPED_AT_MOUNT_NOTE = 'dropped at mount; restart the session after the store is repaired';
 
-/** True for a failure of the STORE under a read, the only kind that drops a
- *  domain: an error node:sqlite raised (every one carries code
- *  'ERR_SQLITE_ERROR') or the store's own pre-v2 refusal. Anything else (a
- *  ZodError for a bad option, a TypeError or RangeError from a bug here) is the
- *  caller's or this code's fault, so the guard rethrows it and drops nothing. */
+/** True for a failure of the STORE under an open or a read, the only kind that
+ *  drops a domain: an error node:sqlite raised (every one carries code
+ *  'ERR_SQLITE_ERROR'; this includes a file that is not a database), the
+ *  store's own pre-v2 refusal, its refusal to open a newer schema, or a row
+ *  whose body does not decode. Anything else (a ZodError for a bad option, a
+ *  TypeError or RangeError from a bug here, a SyntaxError raised outside the
+ *  row decoder) is the caller's or this code's fault, so the guard rethrows it
+ *  and drops nothing. */
 function isStoreFailure(e: unknown): boolean {
-  return e instanceof SchemaMigrationRequiredError || (e as { code?: unknown } | null)?.code === 'ERR_SQLITE_ERROR';
+  return (
+    e instanceof SchemaMigrationRequiredError ||
+    e instanceof UnsupportedSchemaVersionError ||
+    e instanceof StoreRowDecodeError ||
+    (e as { code?: unknown } | null)?.code === 'ERR_SQLITE_ERROR'
+  );
 }
 
 const errorText = (e: unknown): string => String((e as Error)?.message ?? e);
@@ -204,9 +212,14 @@ export class MountedStores {
    *  throws. */
   readonly unreadableDomains: UnreadableDomain[] = [];
   private readonly domainPaths = new Map<string, string>();
+  /** Every configured domain whose store file exists, in manifest order,
+   *  whether or not it could be opened. */
+  private readonly mountedNames: string[] = [];
 
-  /** The project store is opened, and created when absent. A domain store is
-   *  only ever OPENED here, never created: a mount whose db file does not exist
+  /** The project store is opened, and created when absent; a failure to open
+   *  it throws. A domain store is only ever OPENED here, never created, and one
+   *  that exists but cannot be opened is listed on unreadableDomains instead of
+   *  failing the mount: a mount whose db file does not exist
    *  throws DomainNotCreatedError naming createDomain (board 675daf9d (c)), with
    *  every handle opened so far closed and no file written for the missing
    *  domain. When options.skipMissing is true such a mount is skipped instead,
@@ -223,9 +236,20 @@ export class MountedStores {
           }
           throw new DomainNotCreatedError(m.name, m.dbPath);
         }
-        const store = new SterlingStore(m.dbPath);
-        this.domains.set(m.name, store);
+        this.mountedNames.push(m.name);
         this.domainPaths.set(m.name, m.dbPath);
+        // A domain store that cannot be OPENED is dropped like one that fails
+        // the probe: listed unreadable, skipped by reads, refused by writes.
+        // It has no handle, so nothing can ask it, slug checks included.
+        let store: SterlingStore;
+        try {
+          store = new SterlingStore(m.dbPath);
+        } catch (e) {
+          if (!isStoreFailure(e)) throw e;
+          this.dropDomain(m.name, e, true);
+          continue;
+        }
+        this.domains.set(m.name, store);
         this.probeDomain(m.name, store);
       }
     } catch (e) {
@@ -338,6 +362,7 @@ export class MountedStores {
    *  when that existing store has none. An unmounted name is refused. */
   domainDescription(name: string): string | undefined {
     const store = this.domains.get(name);
+    if (!store && this.isUnreadable(name)) throw new Error(`domainDescription: domain '${name}' cannot be read ${this.droppedReason(name)}`);
     if (!store) throw new Error(`domainDescription: domain '${name}' is not mounted`);
     return store.getMeta(DOMAIN_DESCRIPTION_KEY);
   }
@@ -349,12 +374,12 @@ export class MountedStores {
    *  transaction open on another mount (the same affinity rule as every write
    *  through this class). */
   setDomainDescription(name: string, description: string): void {
+    this.assertWritable(name);
     const store = this.domains.get(name);
     if (!store) throw new Error(`setDomainDescription: domain '${name}' is not mounted`);
     if (typeof description !== 'string' || description.trim().length === 0) {
       throw new Error(`setDomainDescription: the description for domain '${name}' is blank; nothing was written`);
     }
-    this.assertWritable(name);
     this.assertMountAffinity('setDomainDescription', store, `domain '${name}'`);
     store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
   }
@@ -420,9 +445,9 @@ export class MountedStores {
     if (scope === 'project') return this.project;
     const m = /^domain:(.+)$/.exec(scope);
     if (m) {
+      this.assertWritable(m[1]);
       const store = this.domains.get(m[1]);
       if (!store) throw new Error(`scope '${scope}' targets an unmounted domain — not in the project's domains manifest`);
-      this.assertWritable(m[1]);
       return store;
     }
     throw new Error(`unroutable scope '${scope}'`);
@@ -941,7 +966,7 @@ export class MountedStores {
   /** Mounted domain names, in manifest order. Includes a domain listed on
    *  unreadableDomains: it is still configured, though neither read nor written. */
   domainNames(): string[] {
-    return [...this.domains.keys()];
+    return [...this.mountedNames];
   }
 
   close(): void {

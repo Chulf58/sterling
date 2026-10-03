@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { MountedStores, SterlingStore, createDomain } from '../index.js';
@@ -269,6 +269,93 @@ test('the read guard drops a domain only on a database error: a caller-input err
     assert.equal(stores.get(g.id)?.id, g.id, 'the domain is still read');
   } finally {
     stores.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a domain row whose body is not valid JSON drops that domain and names the decode error', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-decode-'));
+  const genesys = { name: 'genesys', dbPath: join(dir, 'domains', 'genesys', 'sterling.db') };
+  createDomain(genesys.name, 'test domain genesys', genesys.dbPath);
+  const stores = new MountedStores(join(dir, '.sterling', 'sterling.db'), [genesys]);
+  try {
+    const p = stores.create(ref('project'));
+    const g = stores.create(ref('domain:genesys'));
+    const raw = new DatabaseSync(genesys.dbPath);
+    raw.prepare("UPDATE records SET body = '{not json' WHERE id = ?").run(g.id);
+    raw.close();
+    assert.deepEqual(stores.query({}).map((r) => r.id), [p.id]);
+    assert.deepEqual(stores.unreadableDomains.map((d) => d.name), ['genesys']);
+    assert.match(stores.unreadableDomains[0].error, /query: a record row's body is not valid JSON/);
+  } finally {
+    stores.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a PROJECT row whose body is not valid JSON still throws, and drops nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-decode-project-'));
+  const projectPath = join(dir, '.sterling', 'sterling.db');
+  const genesys = { name: 'genesys', dbPath: join(dir, 'domains', 'genesys', 'sterling.db') };
+  createDomain(genesys.name, 'test domain genesys', genesys.dbPath);
+  const stores = new MountedStores(projectPath, [genesys]);
+  try {
+    const p = stores.create(ref('project'));
+    const raw = new DatabaseSync(projectPath);
+    raw.prepare("UPDATE records SET body = '{not json' WHERE id = ?").run(p.id);
+    raw.close();
+    assert.throws(() => stores.query({}), (e: Error) => e.name === 'StoreRowDecodeError' && /not valid JSON/.test(e.message));
+    assert.equal(stores.unreadableDomains.length, 0);
+  } finally {
+    stores.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a domain store that cannot be OPENED (not a database, or a newer schema) is listed unreadable: mounting succeeds, reads skip it, writes refuse', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-open-'));
+  const projectPath = join(dir, '.sterling', 'sterling.db');
+  const notdb = { name: 'notdb', dbPath: join(dir, 'domains', 'notdb', 'sterling.db') };
+  const newer = { name: 'newer', dbPath: join(dir, 'domains', 'newer', 'sterling.db') };
+  const genesys = { name: 'genesys', dbPath: join(dir, 'domains', 'genesys', 'sterling.db') };
+  mkdirSync(dirname(notdb.dbPath), { recursive: true });
+  writeFileSync(notdb.dbPath, 'this file is not a SQLite database. '.repeat(40));
+  createDomain(newer.name, 'test domain newer', newer.dbPath);
+  const raw = new DatabaseSync(newer.dbPath);
+  raw.exec('PRAGMA user_version = 99');
+  raw.close();
+  createDomain(genesys.name, 'test domain genesys', genesys.dbPath);
+
+  const stores = new MountedStores(projectPath, [notdb, newer, genesys]);
+  try {
+    assert.deepEqual(stores.unreadableDomains.map((d) => d.name), ['notdb', 'newer']);
+    assert.match(stores.unreadableDomains[0].error, /not a database/);
+    assert.match(stores.unreadableDomains[1].error, /Unsupported schema version/);
+    for (const d of stores.unreadableDomains) assert.match(d.note, /dropped at mount/);
+    assert.deepEqual(stores.domainNames(), ['notdb', 'newer', 'genesys']);
+
+    const p = stores.create(ref('project'));
+    const g = stores.create(ref('domain:genesys'));
+    assert.deepEqual(stores.query({}).map((r) => r.id), [p.id, g.id]);
+    assert.deepEqual(stores.slugHolders('free-slug'), [], 'an unopened domain holds no handle to ask');
+    assert.throws(() => stores.create(ref('domain:notdb')), /domain 'notdb' cannot be written: this session cannot read it \(.*not a database/s);
+    assert.throws(() => stores.create(ref('domain:newer')), /domain 'newer' cannot be written: this session cannot read it \(Unsupported schema version/);
+    assert.throws(() => stores.setDomainDescription('newer', 'x'), /domain 'newer' cannot be written/);
+    assert.throws(() => stores.domainDescription('notdb'), /domain 'notdb' cannot be read/);
+  } finally {
+    stores.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a PROJECT store that cannot be opened still throws out of the constructor', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-open-project-'));
+  const projectPath = join(dir, '.sterling', 'sterling.db');
+  mkdirSync(dirname(projectPath), { recursive: true });
+  writeFileSync(projectPath, 'this file is not a SQLite database. '.repeat(40));
+  try {
+    assert.throws(() => new MountedStores(projectPath, []), /not a database/);
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

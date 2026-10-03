@@ -275,3 +275,13 @@ test('knowledge_get with field or version carries unreadable_domains', () => {
     h.cleanup();
   }
 });
+
+test('knowledge_retire in favour of a record held by a dropped domain names the dropped domain', () => {
+  const h = harness();
+  try {
+    const p = h.tools.knowledgeCreate('decision', decision('Queue overflow retry policy')).record;
+    assert.throws(() => h.tools.knowledgeRetire(p.id, h.oldRecord.id), /to retire in favour of.*domain 'old' was not read \(no such table: record_relations/s);
+  } finally {
+    h.cleanup();
+  }
+});
