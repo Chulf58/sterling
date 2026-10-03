@@ -7,12 +7,18 @@
 // the running Sterling copy.
 //
 // The repo is public, so the scrub is fail-closed for what it can see: the
-// project root and the home dir (with any path below them, spaces included),
-// UUIDs, and every whitespace-free token holding a / or \ that is not a file
-// Sterling ships or a Sterling-owned .sterling/ name. That blanks harmless
-// tokens such as "and/or" too. What it does NOT guarantee: any other path that
-// contains spaces is cut at each space, so the words between them stay
-// ("/mnt/d/Acme Client Billing/x.ts" keeps "Client"). The printed body shows
+// project root and the home dir (replaced whole even when the root itself
+// holds spaces, with the path below it up to the first space or delimiter),
+// UUIDs, and every delimiter-free token holding a / or \ that is not a file
+// Sterling ships, a Sterling-owned .sterling/ name or a slash command standing
+// alone. That blanks harmless tokens such as "and/or" too, and a slash command
+// directly after a bracket, comma, semicolon or pipe. What it does NOT
+// guarantee: a path that contains spaces, below the root and home or anywhere
+// else, is cut at each space, so the words between them stay
+// ("/mnt/d/Acme Client Billing/x.ts" keeps "Client"); and a one-segment
+// lowercase directory outside the project root and home, written on its own
+// ("/acme", "/acme:secret"), has the shape of a slash command and is kept.
+// The printed body shows
 // the result before it is sent. Known residual risk (accepted in the
 // decision): a quoted Sterling message that embeds a project record title
 // passes the scrub.
@@ -87,11 +93,30 @@ function isSterlingPath(token, sterlingPathExists) {
   return STERLING_PREFIXES.some((p) => path.startsWith(p)) && sterlingPathExists(path.replace(/\/+$/, ''));
 }
 
+/** A slash command such as /plugin or /sterling:update: the whole token is one
+ * leading slash, a name of lowercase letters, digits and hyphens that starts
+ * with a letter, and at most one :name of the same shape. Sentence punctuation
+ * after it is ignored. Anything else that holds a slash is treated as a path. */
+function isSlashCommand(token) {
+  return /^\/[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?$/.test(token.replace(/[.,:;!?]+$/, ''));
+}
+
+/** Whether the token starting at `at` in `text` stands alone: it starts the
+ * text or follows whitespace, or follows exactly one opening " ' ` or ( that
+ * itself starts the text or follows whitespace. A token directly after any
+ * other delimiter, a closing mark or a placeholder is the tail of a longer
+ * path that the token split cut apart ("/mnt/d/backup (2)/name"). */
+function standsAlone(text, at) {
+  const atBoundary = (i) => i === 0 || /\s/.test(text[i - 1]);
+  return atBoundary(at) || (/["'`(]/.test(text[at - 1]) && atBoundary(at - 1));
+}
+
 /** Scrub one field. In order: the project root and the home dir (with any
  * path below them, in POSIX and WSL-Windows spellings) become <project-path>;
- * UUIDs become <id>; then every remaining token holding a / or \ that is not a
- * Sterling path becomes <project-path> (absolute POSIX, Windows, UNC, URLs and
- * project-relative paths alike). */
+ * UUIDs become <id>; then every remaining token holding a / or \ that is
+ * neither a Sterling path nor a slash command standing alone becomes
+ * <project-path> (absolute POSIX, Windows, UNC, URLs and project-relative
+ * paths alike). */
 export function scrub(text, { projectRoot, home, sterlingPathExists }) {
   let out = String(text);
   const roots = [...rootVariants(projectRoot), ...rootVariants(home)].sort((a, b) => b.length - a.length);
@@ -100,7 +125,10 @@ export function scrub(text, { projectRoot, home, sterlingPathExists }) {
     out = out.replace(re, PLACEHOLDER);
   }
   out = out.replace(UUID_RE, '<id>');
-  return out.replace(TOKEN_RE, (tok) => (/[\\/]/.test(tok) && !isSterlingPath(tok, sterlingPathExists) ? PLACEHOLDER : tok));
+  return out.replace(TOKEN_RE, (tok, at, whole) => {
+    if (!/[\\/]/.test(tok) || isSterlingPath(tok, sterlingPathExists)) return tok;
+    return isSlashCommand(tok) && standsAlone(whole, at) ? tok : PLACEHOLDER;
+  });
 }
 
 const EVIDENCE_HELP =
