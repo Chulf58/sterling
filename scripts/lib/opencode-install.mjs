@@ -29,6 +29,9 @@
 //    Also once per machine: a `codex` entry under mcp.servers in <config dir>/opencode.json,
 //    written only for a Codex whose `mcp-server --help` prints mcp-server help.
 // 2. PER PROJECT: <project>/.opencode/opencode.json gets the store-guard edit and shell deny rules
+//    (repeated under the bash, write and patch aliases, and placed last, since the last match wins),
+//    plus the same guard under agent.<name>.permission for every agent OpenCode can see
+//    (visibleAgents), because an agent's own rules are evaluated after the top-level block
 //    and default_agent, merged into whatever else the file holds. It gets no `sterling`
 //    MCP entry: the server plugin adds that itself (decision
 //    sterling-opencode-plugin-injects-its-own-mcp-entry), and an entry an earlier init
@@ -612,6 +615,143 @@ export function mcpCommand({ home = homedir() } = {}) {
   return ['node', '--disable-warning=ExperimentalWarning', fwd(mcpLauncherPath({ home })), '--store', '.sterling/sterling.db'];
 }
 
+// The guarded permission keys: edit with its write and patch aliases, shell with its
+// bash alias (2.0.22 binary; anti-pattern
+// opencode-top-level-permission-denies-are-overridden-by-the-running-agents-rules), and
+// "*", whose rules apply to every action, so it can match after a family block.
+const EDIT_FAMILY = ['edit', 'write', 'patch'];
+const SHELL_FAMILY = ['shell', 'bash'];
+
+/** A permission value (string or rule object) with the user's rules kept and `patterns` denied last; null when malformed. */
+function withGuard(value, patterns) {
+  if (typeof value === 'string') value = { '*': value };
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const out = Object.fromEntries(Object.entries(value).filter(([k]) => !patterns.includes(k)));
+  for (const p of patterns) out[p] = 'deny';
+  return out;
+}
+
+/**
+ * A permission block with the store guard, for the top level and for an agent alike.
+ * OpenCode 2.0.22 flattens the block into one rule list in key order (bash is shell,
+ * write and patch are edit, "*" is every action) and the last matching rule wins
+ * (finding opencode-only-machine-live-acceptance-p7-october-2026: a bash block after
+ * shell re-allowed `ls -la .sterling/sterling.db`). So the user's keys stay in their
+ * order with their rules, every block that can match edit or shell ends with the guard,
+ * and edit, shell and bash are appended holding only the guard when absent. No "*"
+ * rule is added, so every verdict for a path or command that is not the store stands.
+ * Returns { value } or { bad: <the malformed key> }.
+ */
+export function guardPermission(permission) {
+  let perm = permission ?? {};
+  if (typeof perm === 'string') perm = { '*': perm };
+  if (typeof perm !== 'object' || perm === null || Array.isArray(perm)) return { bad: '' };
+  const patternsFor = (key) => {
+    if (key === '*') return [...STORE_GUARD_PATTERNS, SHELL_STORE_GUARD_PATTERN];
+    if (EDIT_FAMILY.includes(key)) return STORE_GUARD_PATTERNS;
+    if (SHELL_FAMILY.includes(key)) return [SHELL_STORE_GUARD_PATTERN];
+    return null;
+  };
+  const out = {};
+  for (const [key, value] of Object.entries(perm)) {
+    const patterns = patternsFor(key);
+    if (!patterns) {
+      out[key] = value;
+      continue;
+    }
+    out[key] = withGuard(value, patterns);
+    if (out[key] === null) return { bad: key };
+  }
+  for (const key of ['edit', 'shell', 'bash']) if (out[key] === undefined) out[key] = withGuard({}, patternsFor(key));
+  return { value: out };
+}
+
+/** JSONC text to a value: comments and trailing commas outside strings removed. Throws on invalid input. */
+export function parseJsonc(text) {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j;
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      out += '\n';
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) throw new Error('unterminated /* comment');
+      i = end + 1;
+    } else if (c === ',' && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, ' ')))) {
+      // a trailing comma (only whitespace or comments before the closing bracket): dropped
+    } else out += c;
+  }
+  return JSON.parse(out);
+}
+
+/** Every agent .md under `dir` (recursively unless `flat`), as OpenCode names it: its path below `dir` without .md. */
+function agentFileNames(dir, { flat = false, prefix = '' } = {}) {
+  if (!existsSync(dir)) return [];
+  const names = [];
+  for (const d of readdirSync(dir, { withFileTypes: true })) {
+    if (d.isDirectory() && !flat) names.push(...agentFileNames(join(dir, d.name), { prefix: `${prefix}${d.name}/` }));
+    else if (d.isFile() && d.name.endsWith('.md')) names.push(`${prefix}${d.name.slice(0, -3)}`);
+  }
+  return names;
+}
+
+/**
+ * The agents OpenCode 2.0.22 can see besides the project's .opencode/opencode.json
+ * entries. Read from the binary and probed (each in a fresh directory): in every config
+ * directory (the global one, which OPENCODE_CONFIG_DIR replaces, and <project>/.opencode)
+ * the files {agent,agents}/**\/*.md and {mode,modes}/*.md; the `agent` entries of the
+ * global opencode.json and opencode.jsonc, the project-root opencode.json and
+ * opencode.jsonc, .opencode/opencode.jsonc, the OPENCODE_CONFIG file and
+ * OPENCODE_CONFIG_CONTENT. The environment read is this process's. A config Sterling
+ * cannot read is a `skipped` row and sets `incomplete`; a source whose rules can come
+ * after .opencode/opencode.json is a row too, so no gap is silent.
+ */
+export function visibleAgents({ projectDir, env = process.env, home = homedir() }) {
+  const globalDir = env.OPENCODE_CONFIG_DIR || opencodeConfigDir({ env, home });
+  const dotDir = join(projectDir, '.opencode');
+  const names = new Set();
+  for (const dir of [globalDir, dotDir]) {
+    for (const sub of ['agent', 'agents']) for (const n of agentFileNames(join(dir, sub))) names.add(n);
+    for (const sub of ['mode', 'modes']) for (const n of agentFileNames(join(dir, sub), { flat: true })) names.add(n);
+  }
+  const problems = [];
+  let incomplete = false;
+  const docs = [
+    ...['opencode.json', 'opencode.jsonc'].map((f) => join(globalDir, f)),
+    ...['opencode.json', 'opencode.jsonc'].map((f) => join(projectDir, f)),
+    join(dotDir, 'opencode.jsonc'),
+    ...(env.OPENCODE_CONFIG ? [env.OPENCODE_CONFIG] : []),
+  ].map((path) => ({ label: fwd(path), read: () => (existsSync(path) ? readFileSync(path, 'utf8') : null) }));
+  if (env.OPENCODE_CONFIG_CONTENT) docs.push({ label: 'OPENCODE_CONFIG_CONTENT', read: () => env.OPENCODE_CONFIG_CONTENT });
+  const late = new Set([fwd(join(dotDir, 'opencode.jsonc')), ...(env.OPENCODE_CONFIG ? [fwd(env.OPENCODE_CONFIG)] : []), 'OPENCODE_CONFIG_CONTENT']);
+  for (const doc of docs) {
+    const text = doc.read();
+    if (text === null) continue;
+    let config;
+    try {
+      config = parseJsonc(text);
+    } catch (err) {
+      incomplete = true;
+      problems.push({ item: doc.label, status: 'skipped', detail: `not valid JSONC (${err.message}), so the agents it defines are NOT checked and get no new per-agent guard; earlier per-agent guard entries are kept; fix it, then rerun /sterling:update` });
+      continue;
+    }
+    const agents = config?.agent;
+    const hasAgents = agents && typeof agents === 'object' && !Array.isArray(agents);
+    if (hasAgents) for (const name of Object.keys(agents)) names.add(name);
+    const setsRules = config?.permission !== undefined || (hasAgents && Object.values(agents).some((a) => a?.permission !== undefined));
+    if (late.has(doc.label) && setsRules) {
+      problems.push({ item: doc.label, status: 'skipped', detail: `sets permission rules and is read after (or in an unmeasured order with) ${PROJECT_CONFIG_REL}, so its rules can override the store guard; move them into ${PROJECT_CONFIG_REL}` });
+    }
+  }
+  return { names: [...names].sort(), problems, incomplete };
+}
+
 /**
  * Merge Sterling's keys (store guard, default_agent) into .opencode/opencode.json without
  * touching any other key. Returns one row, or two when an mcp.sterling entry Sterling did
@@ -619,7 +759,7 @@ export function mcpCommand({ home = homedir() } = {}) {
  * adds it (decision sterling-opencode-plugin-injects-its-own-mcp-entry). An entry an
  * earlier init wrote is removed only when it is exactly the entry Sterling wrote.
  */
-export function ensureProjectConfig({ projectDir, home = homedir(), tracked, conductorOk = true }) {
+export function ensureProjectConfig({ projectDir, env = process.env, home = homedir(), tracked, conductorOk = true }) {
   const rel = PROJECT_CONFIG_REL;
   const path = join(projectDir, rel);
   if (tracked.includes(rel)) {
@@ -653,44 +793,51 @@ export function ensureProjectConfig({ projectDir, home = homedir(), tracked, con
       extraRows.push({ item: `${rel} mcp.sterling`, status: 'skipped', detail: `KEPT: ${rel} has an mcp.sterling entry that differs from the entry Sterling wrote, so it is yours and stays; the Sterling plugin now adds its own sterling MCP entry, so remove yours unless you mean it to replace Sterling's` });
     }
   }
-  // Store guard. A string value ("allow"/"ask") becomes the "*" rule so its meaning is
-  // kept; Sterling's deny rules are re-added LAST so they win over any broader rule.
+  // Store guard (guardPermission): the edit deny alone did not cover the shell tool
+  // (`printf >> .sterling/sterling.db` got through, finding
+  // opencode-2-0-21-tool-shapes-execpath-and-shell-store-guard-october-2026).
   const permission = config.permission ?? {};
-  if (typeof permission !== 'object' || Array.isArray(permission)) return [refusal(rel, `${rel}: "permission" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
-  // The shape measured live on 2.0.21 (finding 25892d42): "*": "allow" first, then the
-  // deny rules. An existing "*" (or a bare string, which becomes "*") is kept as is.
-  let edit = permission.edit ?? { '*': 'allow' };
-  if (typeof edit === 'string') edit = { '*': edit };
-  if (typeof edit !== 'object' || Array.isArray(edit)) return [refusal(rel, `${rel}: "permission.edit" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
-  const guarded = { '*': 'allow', ...Object.fromEntries(Object.entries(edit).filter(([k]) => !STORE_GUARD_PATTERNS.includes(k))) };
-  for (const p of STORE_GUARD_PATTERNS) guarded[p] = 'deny';
-  // The edit deny does not cover the shell tool: `printf >> .sterling/sterling.db`
-  // got through until this shell rule was added (finding
-  // opencode-2-0-21-tool-shapes-execpath-and-shell-store-guard-october-2026). Same merge as edit.
-  // With no shell block, "*" is seeded from a bash block (a string, or its "*" rule), so a
-  // user's `bash: "ask"` is not loosened to allow when Sterling adds the shell key.
-  let shell = permission.shell;
-  if (shell === undefined) {
-    const bash = permission.bash;
-    if (bash === undefined) shell = { '*': 'allow' };
-    else if (typeof bash === 'string') shell = { '*': bash };
-    else if (typeof bash === 'object' && bash !== null && !Array.isArray(bash)) shell = bash['*'] === undefined ? { '*': 'allow' } : { '*': bash['*'] };
-    else return [refusal(rel, `${rel}: "permission.bash" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
+  if (typeof permission !== 'object' || permission === null || Array.isArray(permission)) return [refusal(rel, `${rel}: "permission" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+  const top = guardPermission(permission);
+  if (top.bad !== undefined) return [refusal(rel, `${rel}: "permission.${top.bad}" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
+  config.permission = top.value;
+  // Per-agent guard. An agent's own rules (its file's permission block) are evaluated
+  // after the top-level block, so a user agent that allows bash re-allowed the store;
+  // agent.<name>.permission in this file is evaluated after the agent file's rules
+  // (measured on 2.0.22: `opencode debug agents`, and a live shell call denied). An entry
+  // for a name OpenCode does not otherwise know creates an agent (measured), so a
+  // guard-only entry is written only for a visible agent and dropped when it is gone.
+  const agents = config.agent ?? {};
+  if (typeof agents !== 'object' || agents === null || Array.isArray(agents)) return [refusal(rel, `${rel}: "agent" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+  const visible = visibleAgents({ projectDir, env, home });
+  extraRows.push(...visible.problems);
+  const guardOnly = JSON.stringify({ permission: guardPermission(undefined).value });
+  const names = new Set(visible.names);
+  for (const [name, entry] of Object.entries(agents)) {
+    // While a config is unreadable, its agents are unknown: keep every earlier entry.
+    if (visible.incomplete || JSON.stringify(entry) !== guardOnly) names.add(name);
   }
-  if (typeof shell === 'string') shell = { '*': shell };
-  if (typeof shell !== 'object' || shell === null || Array.isArray(shell)) return [refusal(rel, `${rel}: "permission.shell" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
-  const shellGuarded = { '*': 'allow', ...Object.fromEntries(Object.entries(shell).filter(([k]) => k !== SHELL_STORE_GUARD_PATTERN)) };
-  shellGuarded[SHELL_STORE_GUARD_PATTERN] = 'deny';
-  config.permission = { ...permission, edit: guarded, shell: shellGuarded };
+  const nextAgents = {};
+  for (const [name, entry] of Object.entries(agents)) {
+    if (!names.has(name)) continue; // a guard-only entry Sterling wrote for an agent that is gone
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return [refusal(rel, `${rel}: "agent.${name}" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+    const perm = guardPermission(entry.permission);
+    if (perm.bad !== undefined) return [refusal(rel, `${rel}: "agent.${name}.permission${perm.bad ? `.${perm.bad}` : ''}" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
+    nextAgents[name] = { ...entry, permission: perm.value };
+  }
+  for (const name of [...names].sort()) if (!nextAgents[name]) nextAgents[name] = JSON.parse(guardOnly);
+  if (Object.keys(nextAgents).length) config.agent = nextAgents;
+  else delete config.agent;
+  notes.push(`per-agent store guard on ${names.size} agents (agent files in the global config dir and ${fwd('.opencode')}, and the config "agent" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
   if (!conductorOk) {
     if (config.default_agent === undefined) notes.push(`default_agent not set: the ${CONDUCTOR_AGENT} agent file was refused`);
   } else if (config.default_agent === undefined) config.default_agent = CONDUCTOR_AGENT;
   else if (config.default_agent !== CONDUCTOR_AGENT) notes.push(`default_agent kept as ${JSON.stringify(config.default_agent)} (yours), so OpenCode does not start in ${CONDUCTOR_AGENT}`);
   const after = `${JSON.stringify(config, null, 2)}\n`;
-  if (after === before) return [{ item: rel, status: 'matches', detail: notes.join('; ') || undefined }, ...extraRows];
+  if (after === before) return [{ item: rel, status: 'matches', detail: notes.join('; ') }, ...extraRows];
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, after);
-  return [{ item: rel, status: before === null ? 'created' : 'refreshed', detail: notes.join('; ') || 'store-guard edit and shell deny, default_agent' }, ...extraRows];
+  return [{ item: rel, status: before === null ? 'created' : 'refreshed', detail: ['store-guard edit and shell deny, default_agent', ...notes].join('; ') }, ...extraRows];
 }
 
 function excludeLines(wholeDir) {
@@ -894,7 +1041,7 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   const agentRows = ensureFullAgents({ projectDir, pluginRoot, tracked });
   const conductorRow = agentRows.find((r) => r.item === `${STERLING_AGENTS_SUBDIR}/conductor.md`);
   const conductorOk = ['created', 'matches', 'refreshed'].includes(conductorRow?.status);
-  rows.push(...ensureProjectConfig({ projectDir, home, tracked, conductorOk }));
+  rows.push(...ensureProjectConfig({ projectDir, env, home, tracked, conductorOk }));
   rows.push(...agentRows);
   return { rows };
 }

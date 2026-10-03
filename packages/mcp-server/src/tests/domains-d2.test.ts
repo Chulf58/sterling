@@ -23,7 +23,7 @@ const DESCRIPTIONS: Record<string, string> = {
   sterling: 'Sterling plugin: knowledge store, board, hooks, conductor agents',
 };
 
-function harness(domains: string[], opts: { missing?: string[]; descriptions?: Record<string, string> } = {}) {
+function harness(domains: string[], opts: { missing?: string[]; descriptions?: Record<string, string>; now?: () => string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-d2-'));
   const dbPath = (name: string) => join(dir, 'domains', name, 'sterling.db');
   const mounts: DomainMount[] = domains.map((name) => ({ name, dbPath: dbPath(name) }));
@@ -36,7 +36,7 @@ function harness(domains: string[], opts: { missing?: string[]; descriptions?: R
     store,
     config,
     domains: mountedDomainSurface(store),
-    now: () => '2026-10-03T12:00:00.000Z',
+    now: opts.now ?? (() => '2026-10-03T12:00:00.000Z'),
     newId: randomUUID,
   });
   return {
@@ -374,6 +374,43 @@ test('knowledge_query labels each record with its source store, in full and dige
     }
     const counted = tools.knowledgeQueryResult({ types: ['decision'], projection: 'count' });
     assert.deepEqual(counted.missing_domains, ['salesforce']);
+  } finally {
+    cleanup();
+  }
+});
+
+// Board 817b16bc, finding populated-domain-dilution-replay-benchmark-october-2026:
+// preflight used to merge every store's candidates into one sort, so newer domain
+// records tied on central and raw hits with an older project record and pushed it
+// out of the 20-match window. READ SHARE (decision
+// projects-mount-domains-and-sibling-projects): each store ranks its own matches,
+// allocateShares splits the cap, and the project's share comes first.
+test('knowledge_preflight ranks each store on its own and lists the project share first', () => {
+  let clock = Date.parse('2026-10-01T12:00:00.000Z');
+  const { tools, cleanup } = harness(['genesys'], { now: () => new Date(clock).toISOString() });
+  try {
+    const required = tools.knowledgeCreate('decision', decision('Pasture rotation')).record;
+    const domainIds: string[] = [];
+    for (let i = 0; i < 22; i++) {
+      clock += 60_000;
+      domainIds.push(tools.knowledgeCreate('decision', decision(`Grazing change note`, { scope: 'domain:genesys' })).record.id);
+    }
+    const res = tools.knowledgePreflight('pasture rotation grazing change');
+    const project = res.matches.find((m) => m.id === required.id);
+    assert.ok(project, 'the project record must be inside the window');
+    assert.deepEqual([...project.central].sort(), ['pasture', 'rotation']);
+    // The domain records tie with it on central and raw hits and are newer, so a
+    // merged sort put all 22 ahead of it; per-store ranking lists it first.
+    assert.equal(res.matches[0].id, required.id);
+    assert.equal(res.matches.length, 20);
+    const rest = res.matches.slice(1);
+    assert.ok(rest.every((m) => m.source === 'domain:genesys' && m.matched_on.includes('change')));
+    // Within the domain the comparator still holds: newest first.
+    assert.deepEqual(rest.map((m) => m.id), [...domainIds].reverse().slice(0, 19));
+    // The verdict and matched_total still read the full candidate set, not the window.
+    assert.equal(res.matched_total, 23);
+    assert.equal(res.capped, true);
+    assert.equal(res.answerability, 'verify_targets');
   } finally {
     cleanup();
   }

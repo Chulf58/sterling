@@ -29,7 +29,9 @@
 // installer writes it into .opencode/opencode.json (scripts/lib/opencode-install.mjs).
 // Every handler is fenced: a throw is logged to .sterling/transient and turned
 // into a notice, never raised into OpenCode. Outside a Sterling project (no
-// .sterling/sterling.db above the session directory) every handler is a no-op.
+// .sterling/sterling.db above the session directory) every handler is a no-op, and
+// setup registers only the bootstrap commands (config.mjs BOOTSTRAP_COMMANDS), so a
+// new user has /sterling:init; nothing is written into such a project.
 // The handlers live in one module each beside this file; this file wires them
 // (deps injection, the fence, the event chain) and re-exports what tests import:
 //   layer.mjs (render, host blocks, host tail) restore.mjs (rotation restore)
@@ -42,7 +44,7 @@
 //   notices.mjs, log.mjs, store.mjs (shared plumbing)
 import { createAxisHandlers } from './axis.mjs';
 import { createCompactionHandler } from './compaction.mjs';
-import { createConfigHandler } from './config.mjs';
+import { createBootstrapHandler, createConfigHandler } from './config.mjs';
 import { createContextHandler } from './context.mjs';
 import { createDeliveryHandlers } from './delivery.mjs';
 import { createDispatchHandlers, rootSessionGate, sweepStaleDispatches } from './dispatch.mjs';
@@ -73,7 +75,7 @@ export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 
 /**
  * The plugin factory. `deps` exists for tests: openStore(dbPath), now(),
  * claudeOnPath(), launchWorker(opts), sterlingRoot (a path), renderRestore(note, opts),
- * configure(ctx) and syncSession(root, sessionID) (replace the config.mjs and sync.mjs handlers),
+ * configure(ctx), bootstrap(ctx) and syncSession(root, sessionID) (replace the config.mjs and sync.mjs handlers),
  * and env (process.env for the worker-child check and sync.mjs).
  */
 export function createSterlingServer(deps = {}) {
@@ -141,6 +143,7 @@ export function createSterlingServer(deps = {}) {
   const onPrompt = createPromptHandler({ openStore, rootOf, fenced, env: deps.env ?? process.env });
   const onCompaction = createCompactionHandler({ rootOf, fenced });
   const configure = deps.configure ?? createConfigHandler(deps);
+  const bootstrap = deps.bootstrap ?? createBootstrapHandler(deps);
 
   async function onEvent(ev) {
     if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
@@ -192,6 +195,15 @@ export function createSterlingServer(deps = {}) {
       session = ctx.session;
       const root = rootOf();
       if (root) await fenced('config', root, () => configure(ctx));
+      else {
+        // No store yet: register only what works without one (/sterling:init first),
+        // and report a failure on stderr, since there is no .sterling/ to log into.
+        try {
+          await bootstrap(ctx);
+        } catch (e) {
+          process.stderr.write(`[sterling] the bootstrap commands could not be registered (${errText(e)})\n`);
+        }
+      }
       await ctx.session.hook('context', onContext);
       await ctx.session.hook('prompt', onPrompt);
       await ctx.session.hook('compaction', onCompaction);

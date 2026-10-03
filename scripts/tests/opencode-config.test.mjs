@@ -95,6 +95,41 @@ test('every commands/*.md registers as sterling:<name> and every SKILL.md as a s
   assert.deepEqual(noticesOf(project), [], 'every real source renders: no failure notice');
 });
 
+test('outside a Sterling project only the bootstrap commands register (init, projects): no skills, no MCP entry, nothing written', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-occfg-none-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.deepEqual(cfg.BOOTSTRAP_COMMANDS, ['sterling:init', 'sterling:projects']);
+  const ctx = stubCtx(dir, { mcpBase: { other: { type: 'local', command: ['x'] } } });
+  await cfg.createBootstrapHandler({ sterlingRoot: repo })(ctx);
+  const { commands, skills, mcp } = ctx.run();
+  assert.deepEqual([...commands.keys()].sort(), ['sterling:init', 'sterling:projects']);
+  assert.deepEqual([...skills.keys()], ['opencode'], 'no skill is registered without a store');
+  assert.deepEqual([...mcp.keys()], ['other'], 'no sterling MCP entry: there is no store to serve');
+  await commands.get('sterling:init').execute({ sessionID: 'ses_1', prompt: { text: '' }, delivery: 'steer' });
+  assert.ok(ctx.prompts[0].text.includes(`node "${repo}/bin/init.mjs"`), 'the init body names the resolved bin/init.mjs');
+  assert.deepEqual(readdirSync(dir), [], 'nothing is written into the non-Sterling project');
+});
+
+test('outside a Sterling project a bootstrap command that fails to render is skipped with a stderr line, never a project write', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-occfg-none-'));
+  const root = mkdtempSync(join(tmpdir(), 'sterling-occfg-root-'));
+  t.after(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  });
+  mkdirSync(join(root, 'commands'));
+  writeFileSync(join(root, 'commands', 'init.md'), '---\ndescription: init\n---\n\nRun init, then /clear.\n');
+  writeFileSync(join(root, 'commands', 'projects.md'), '---\ndescription: projects\n---\n\nList projects.\n');
+  writeFileSync(join(root, 'commands', 'status.md'), '---\ndescription: status\n---\n\nNeeds the store.\n');
+  const errors = [];
+  const ctx = stubCtx(dir);
+  await cfg.createBootstrapHandler({ sterlingRoot: root, stderr: (s) => errors.push(s) })(ctx);
+  assert.deepEqual([...ctx.run().commands.keys()], ['sterling:projects'], 'the failing init is skipped, projects registers, status is not a bootstrap command');
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /sterling:init.*not registered.*\/clear/);
+  assert.deepEqual(readdirSync(dir), []);
+});
+
 test('a command puts its rendered body into the session through session.prompt, arguments appended', async (t) => {
   const project = tempProject(t);
   const ctx = stubCtx(project);

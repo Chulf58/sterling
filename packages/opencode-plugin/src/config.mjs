@@ -128,6 +128,47 @@ export function commandText(body, args) {
   return a ? `${body}\n\nARGUMENTS: ${a}` : body;
 }
 
+/** Register `commands` (rendered { name, description, body }) through ctx.command.transform. */
+function registerCommands(ctx, commands) {
+  return ctx.command.transform((editor) => {
+    for (const c of commands) {
+      editor.add({
+        name: c.name,
+        description: c.description,
+        execute: (inv) => ctx.session.prompt({ ...inv.prompt, sessionID: inv.sessionID, text: commandText(c.body, inv.prompt?.text), delivery: inv.delivery }).then(() => {}),
+      });
+    }
+  });
+}
+
+// The commands that work before a project has a store: init creates it, and projects
+// reads only the machine registry (~/.sterling/registry.db). Every other command, every
+// skill and the sterling MCP entry need the project's store, so they wait for init.
+export const BOOTSTRAP_COMMANDS = [`${COMMAND_PREFIX}init`, `${COMMAND_PREFIX}projects`];
+
+/**
+ * Returns `bootstrap(ctx)`, called once from setup OUTSIDE a Sterling project, so a
+ * new user has /sterling:init. It writes nothing into the project: a command that
+ * fails to render is skipped with one stderr line (a Sterling defect, not the project's).
+ */
+export function createBootstrapHandler(deps = {}) {
+  const stderr = deps.stderr ?? ((s) => process.stderr.write(s));
+  return async function bootstrap(ctx) {
+    const root = deps.sterlingRoot ?? defaultSterlingRoot();
+    const commands = [];
+    for (const name of BOOTSTRAP_COMMANDS) {
+      const file = `${name.slice(COMMAND_PREFIX.length)}.md`;
+      try {
+        const { description, body } = renderSource(join(root, 'commands', file), root, `commands/${file}`);
+        commands.push({ name, description, body });
+      } catch (e) {
+        stderr(`[sterling] /${name} not registered on OpenCode: ${errText(e)}\n`);
+      }
+    }
+    await registerCommands(ctx, commands);
+  };
+}
+
 /** Returns `configure(ctx)`, called once from setup inside the `config` fence. */
 export function createConfigHandler(deps = {}) {
   const now = deps.now ?? (() => new Date().toISOString());
@@ -141,15 +182,7 @@ export function createConfigHandler(deps = {}) {
       addNotice(project, `Sterling plugin: the ${f.kind} ${f.kind === 'command' ? `/${f.name}` : f.name} is not registered on OpenCode (${f.error}). See ${LOG_REL}.`, now());
     }
 
-    await ctx.command.transform((editor) => {
-      for (const c of commands) {
-        editor.add({
-          name: c.name,
-          description: c.description,
-          execute: (inv) => ctx.session.prompt({ ...inv.prompt, sessionID: inv.sessionID, text: commandText(c.body, inv.prompt?.text), delivery: inv.delivery }).then(() => {}),
-        });
-      }
-    });
+    await registerCommands(ctx, commands);
 
     await ctx.skill.transform((editor) => {
       for (const s of skills) {

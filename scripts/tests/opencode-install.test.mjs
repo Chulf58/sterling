@@ -133,19 +133,19 @@ test('project config: merged into an existing .opencode/opencode.json without cl
   assert.equal(got.theme, 'dark');
   assert.deepEqual(got.mcp.other, { type: 'local', command: ['x'] });
   assert.equal(got.mcp.sterling, undefined, 'no per-project sterling MCP entry: the plugin injects it (decision sterling-opencode-plugin-injects-its-own-mcp-entry)');
-  assert.equal(got.permission.bash, 'ask');
+  assert.deepEqual(got.permission.bash, { '*': 'ask', '*sterling.db*': 'deny' }, 'a string bash value becomes its "*" rule, with the guard after it');
   assert.deepEqual(got.permission.edit, { '*': 'ask', '**/.sterling/sterling.db*': 'deny', '.sterling/sterling.db*': 'deny' });
   assert.equal(got.default_agent, 'build', "the user's default_agent is kept");
   assert.match(r.rows.find((x) => x.item.endsWith('opencode.json')).detail, /default_agent kept as "build"/);
   assert.equal(statusOf(run(dir, home), 'opencode.json'), 'matches');
 });
 
-test('project config: a fresh file gets the measured guard shape and the conductor as default_agent', () => {
+test('project config: a fresh file gets guard-only blocks (no "*" rule, so no verdict but the store changes) and the conductor as default_agent', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   run(dir, home);
   const got = JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8'));
-  assert.deepEqual(Object.entries(got.permission.edit), [['*', 'allow'], ['**/.sterling/sterling.db*', 'deny'], ['.sterling/sterling.db*', 'deny']]);
+  assert.deepEqual(got.permission, { edit: { '**/.sterling/sterling.db*': 'deny', '.sterling/sterling.db*': 'deny' }, shell: { '*sterling.db*': 'deny' }, bash: { '*sterling.db*': 'deny' } });
   assert.equal(got.default_agent, CONDUCTOR_AGENT);
 });
 
@@ -154,7 +154,7 @@ test('project config: the store guard also denies shell commands that name sterl
   const dir = project('hobby');
   run(dir, home);
   const cfg = join(dir, '.opencode', 'opencode.json');
-  assert.deepEqual(Object.entries(JSON.parse(readFileSync(cfg, 'utf8')).permission.shell), [['*', 'allow'], ['*sterling.db*', 'deny']]);
+  assert.deepEqual(Object.entries(JSON.parse(readFileSync(cfg, 'utf8')).permission.shell), [['*sterling.db*', 'deny']]);
   assert.equal(statusOf(run(dir, home), 'opencode.json'), 'matches', 'idempotent');
 });
 
@@ -176,7 +176,7 @@ test('project config: the shell deny is merged into an existing shell block with
   assert.equal(statusOf(run(dir, home), 'opencode.json'), 'refused');
 });
 
-test('project config: with no permission.shell, the shell "*" rule is seeded from permission.bash, so a user\'s bash "ask" is not loosened', () => {
+test('project config: a user bash block keeps its rules and meaning, in place, with the guard last; shell is added holding only the guard', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   mkdirSync(join(dir, '.opencode'));
@@ -188,16 +188,199 @@ test('project config: with no permission.shell, the shell "*" rule is seeded fro
     return { shell: Object.entries(got.shell), bash: got.bash };
   };
   let r = shellAfter({ bash: 'ask' });
-  assert.deepEqual(r.shell, [['*', 'ask'], ['*sterling.db*', 'deny']], 'a string bash value seeds "*"');
-  assert.equal(r.bash, 'ask', 'the bash key itself is left alone');
+  assert.deepEqual(r.shell, [['*sterling.db*', 'deny']], 'the added shell block holds only the guard, so it cannot loosen the bash "ask"');
+  assert.deepEqual(r.bash, { '*': 'ask', '*sterling.db*': 'deny' }, 'the bash value keeps its meaning and gets the guard last');
   r = shellAfter({ bash: { '*': 'deny', 'ls*': 'allow' } });
-  assert.deepEqual(r.shell, [['*', 'deny'], ['*sterling.db*', 'deny']], 'an object bash value seeds "*" from its "*" rule');
-  r = shellAfter({ bash: { 'ls*': 'allow' } });
-  assert.deepEqual(r.shell, [['*', 'allow'], ['*sterling.db*', 'deny']], 'a bash object without "*" leaves the default');
+  assert.deepEqual(r.bash, { '*': 'deny', 'ls*': 'allow', '*sterling.db*': 'deny' });
   r = shellAfter({ bash: 'ask', shell: { '*': 'allow' } });
-  assert.deepEqual(r.shell, [['*', 'allow'], ['*sterling.db*', 'deny']], 'an existing shell block wins over bash');
+  assert.deepEqual(r.shell, [['*', 'allow'], ['*sterling.db*', 'deny']], 'an existing shell block keeps its rules');
   writeFileSync(cfg, JSON.stringify({ permission: { bash: 7 } }));
   assert.equal(statusOf(run(dir, home), 'opencode.json'), 'refused', 'a bash value that is neither a string nor an object is refused');
+});
+
+// OpenCode 2.0.22 flattens the permission object into one rule list in key order,
+// mapping bash to shell and write and patch to edit, and the last matching rule wins
+// (measured with `opencode debug config` and `opencode debug agents`, finding
+// opencode-only-machine-live-acceptance-p7-october-2026). This is that evaluation.
+const ACTION_ALIAS = { bash: 'shell', write: 'edit', patch: 'edit' };
+function effectOf(permission, action, resource) {
+  const glob = (p) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+  let effect;
+  for (const [key, value] of Object.entries(permission)) {
+    const act = ACTION_ALIAS[key] ?? key;
+    if (act !== action && act !== '*') continue;
+    const rules = typeof value === 'string' ? { '*': value } : value;
+    for (const [pattern, e] of Object.entries(rules)) if (glob(pattern).test(resource)) effect = e;
+  }
+  return effect;
+}
+
+test('project config: a user bash block cannot re-allow the store after the shell guard (bash maps to shell, last match wins)', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  mkdirSync(join(dir, '.opencode'));
+  const cfg = join(dir, '.opencode', 'opencode.json');
+  const after = (permission) => {
+    writeFileSync(cfg, JSON.stringify({ permission }));
+    run(dir, home);
+    return JSON.parse(readFileSync(cfg, 'utf8')).permission;
+  };
+  const cases = [
+    // The measured P7 failure: the bash block allowed *sterling.db* and came after shell.
+    { shell: { '*': 'allow', '*sterling.db*': 'deny' }, bash: { '*': 'allow', '*sterling.db*': 'allow' } },
+    { bash: { '*': 'allow' } },
+    { bash: 'allow' },
+    { bash: { '*': 'ask', 'ls *': 'allow' } },
+    { '*': 'allow' },
+    { edit: 'allow', write: { '*': 'allow', '*sterling.db*': 'allow' }, patch: 'allow' },
+    {},
+    // The review cases: a reorder changed these users' verdicts.
+    { write: { '*': 'allow' }, edit: { '*': 'deny' } },
+    { edit: 'allow', '*': 'ask' },
+    { bash: 'allow', '*': 'ask' },
+    { bash: { '*': 'deny' }, shell: { 'git *': 'allow' } },
+    { shell: { '*': 'allow' }, bash: { 'rm *': 'deny' } },
+    // A "*" key after every family block: its rules apply to edit and shell too.
+    { edit: { '*': 'allow' }, shell: { '*': 'allow' }, bash: { '*': 'allow' }, '*': { '*': 'allow', '*sterling.db*': 'allow' } },
+  ];
+  // Every verdict that is not about the store is the user's own, before and after.
+  const probes = [['edit', 'src/a.ts'], ['edit', 'docs/x.md'], ['shell', 'ls'], ['shell', 'git status'], ['shell', 'rm x'], ['shell', 'npm test'], ['read', 'src/a.ts']];
+  for (const c of cases) {
+    const got = after(c);
+    const label = JSON.stringify(c);
+    for (const cmd of ['ls -la .sterling/sterling.db', 'sqlite3 .sterling/sterling.db .tables', 'cat .sterling/sterling.db-wal']) {
+      assert.equal(effectOf(got, 'shell', cmd), 'deny', `${label}: ${cmd}`);
+    }
+    for (const path of ['.sterling/sterling.db', 'sub/.sterling/sterling.db-wal']) assert.equal(effectOf(got, 'edit', path), 'deny', `${label}: edit ${path}`);
+    for (const [action, resource] of probes) assert.equal(effectOf(got, action, resource), effectOf(c, action, resource), `${label}: ${action} ${resource} keeps the user's verdict`);
+    assert.deepEqual(Object.entries(got.bash).at(-1), ['*sterling.db*', 'deny'], `${label}: bash ends with the guard`);
+    assert.deepEqual(Object.keys(got).slice(0, Object.keys(c).length), Object.keys(c), `${label}: the user's keys keep their order`);
+    assert.equal(statusOf(run(dir, home), 'opencode.json'), 'matches', `${label}: idempotent`);
+  }
+  // The user's own verdicts for other commands and paths are kept.
+  let got = after({ bash: { '*': 'ask', 'ls *': 'allow', 'npm publish*': 'deny' } });
+  assert.equal(effectOf(got, 'shell', 'ls src'), 'allow', 'a user bash allow still applies');
+  assert.equal(effectOf(got, 'shell', 'npm publish --tag x'), 'deny', 'a user bash deny still applies');
+  assert.equal(effectOf(got, 'shell', 'rm x'), 'ask', 'the user bash "*" still applies');
+  got = after({ shell: { '*': 'ask', 'npm publish*': 'deny' } });
+  assert.equal(effectOf(got, 'shell', 'npm publish --tag x'), 'deny', 'a user shell rule is not overridden by the bash guard block');
+  assert.deepEqual(got.bash, { '*sterling.db*': 'deny' }, 'with no user bash block, bash holds only the guard, so it changes nothing else');
+  got = after({ edit: { '*': 'ask' }, write: { 'docs/*': 'allow' } });
+  assert.equal(effectOf(got, 'edit', 'docs/a.md'), 'allow', 'a user write rule still applies');
+  assert.deepEqual(Object.entries(got.write).at(-1), ['.sterling/sterling.db*', 'deny'], 'a user write block ends with the edit guard');
+});
+
+// An agent's own rules come after the top-level block, and the project config's
+// agent.<name>.permission comes after the agent file's rules (measured on 2.0.22 with
+// `opencode debug agents`, and live: `ls -la .sterling/sterling.db` ran as a user agent
+// whose file allows bash under a top-level-only guard, and was denied once the
+// per-agent guard was written).
+function agentEffect(config, name, fileRules, action, resource) {
+  const layers = [config.permission, fileRules, config.agent?.[name]?.permission].filter(Boolean);
+  let effect;
+  for (const layer of layers) effect = effectOf(layer, action, resource) ?? effect;
+  return effect;
+}
+
+test('project config: every agent OpenCode can see gets a per-agent store guard, placed last, keeping the user\'s per-agent rules', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  const globalDir = join(home, '.config', 'opencode');
+  mkdirSync(join(globalDir, 'agents', 'team'), { recursive: true });
+  writeFileSync(join(globalDir, 'agents', 'helper.md'), '---\ndescription: h\nmode: primary\npermission:\n  bash:\n    "*": allow\n---\n\nbody\n');
+  writeFileSync(join(globalDir, 'agents', 'team', 'lead.md'), '---\ndescription: l\nmode: subagent\n---\n\nbody\n');
+  writeFileSync(join(globalDir, 'opencode.jsonc'), '{\n  // my agents\n  "agent": { "planner2": { "permission": { "bash": "allow" } }, },\n}\n');
+  mkdirSync(join(dir, '.opencode'));
+  const cfg = join(dir, '.opencode', 'opencode.json');
+  writeFileSync(cfg, JSON.stringify({ agent: { mine: { model: 'openai/x', permission: { bash: { '*': 'allow', 'ls *': 'allow' }, webfetch: 'deny' } } } }));
+  const r = run(dir, home);
+  const got = JSON.parse(readFileSync(cfg, 'utf8'));
+  const names = Object.keys(got.agent).sort();
+  for (const want of ['helper', 'team/lead', 'planner2', 'mine', CONDUCTOR_AGENT, 'sterling/implementor', 'sterling/scout']) assert.ok(names.includes(want), `${want} is guarded (got ${names.join(', ')})`);
+  for (const name of names) {
+    const perm = got.agent[name].permission;
+    for (const key of ['edit', 'shell', 'bash']) assert.ok(perm[key], `${name}: ${key} is guarded`);
+    assert.deepEqual(Object.entries(perm.shell).at(-1), ['*sterling.db*', 'deny'], name);
+    assert.deepEqual(Object.entries(perm.bash).at(-1), ['*sterling.db*', 'deny'], name);
+    assert.deepEqual(Object.entries(perm.edit).at(-1), ['.sterling/sterling.db*', 'deny'], name);
+    assert.equal(perm.edit['*'], undefined, `${name}: no "*" rule is added at agent level, so the agent's own verdicts stand`);
+    assert.equal(perm.shell['*'], undefined, name);
+  }
+  // The P7 shape: an agent file that allows bash after the top-level guard.
+  const fileAllow = { bash: { '*': 'allow' } };
+  assert.equal(agentEffect(got, 'helper', fileAllow, 'shell', 'ls -la .sterling/sterling.db'), 'deny');
+  assert.equal(agentEffect(got, 'helper', fileAllow, 'shell', 'ls src'), 'allow', "the agent's own allow still applies to other commands");
+  assert.equal(agentEffect(got, 'planner2', { bash: 'allow' }, 'shell', 'cat .sterling/sterling.db-wal'), 'deny');
+  assert.equal(agentEffect(got, 'helper', { edit: 'allow' }, 'edit', '.sterling/sterling.db'), 'deny');
+  // The user's own per-agent entry keeps its keys and rules, the guard after them.
+  assert.equal(got.agent.mine.model, 'openai/x');
+  assert.equal(got.agent.mine.permission.webfetch, 'deny');
+  assert.deepEqual(Object.entries(got.agent.mine.permission.bash), [['*', 'allow'], ['ls *', 'allow'], ['*sterling.db*', 'deny']]);
+  assert.match(r.rows.find((x) => x.item.endsWith('opencode.json')).detail, /per-agent store guard on \d+ agents.*an agent added later is covered on the next \/sterling:update/);
+  assert.equal(statusOf(run(dir, home), 'opencode.json'), 'matches', 'idempotent');
+  // An agent that is gone loses its guard-only entry; a user entry stays.
+  rmSync(join(globalDir, 'agents', 'helper.md'));
+  run(dir, home);
+  const after = JSON.parse(readFileSync(cfg, 'utf8'));
+  assert.equal(after.agent.helper, undefined, "the guard-only entry Sterling wrote for a removed agent is dropped");
+  assert.ok(after.agent.mine, 'a user entry is kept');
+});
+
+test('project config: an unreadable global opencode.jsonc is reported, the visible agents are still guarded, and earlier guard entries are kept', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  const globalDir = join(home, '.config', 'opencode');
+  mkdirSync(join(globalDir, 'agents'), { recursive: true });
+  writeFileSync(join(globalDir, 'agents', 'helper.md'), '---\ndescription: h\n---\n\nbody\n');
+  writeFileSync(join(globalDir, 'opencode.jsonc'), '{ "agent": { "planner2": {} } }');
+  run(dir, home);
+  const cfg = join(dir, '.opencode', 'opencode.json');
+  assert.ok(JSON.parse(readFileSync(cfg, 'utf8')).agent.planner2, 'guarded while the config reads');
+  writeFileSync(join(globalDir, 'opencode.jsonc'), '{ "agent": { oops } }');
+  const r = run(dir, home);
+  const got = JSON.parse(readFileSync(cfg, 'utf8'));
+  assert.ok(got.agent.helper, 'the agent file is still guarded');
+  assert.ok(got.agent.planner2, "the guard entry for the unreadable config's agent is kept, not dropped");
+  const row = r.rows.find((x) => x.item.endsWith('opencode.jsonc'));
+  assert.equal(row?.status, 'skipped');
+  assert.match(row.detail, /not valid JSONC.*NOT checked.*earlier per-agent guard entries are kept/);
+});
+
+test('project config: the per-agent guard reads every agent source OpenCode 2.0.22 loads, and names a source whose rules can come after it', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  const md = '---\ndescription: d\nmode: subagent\n---\n\nbody\n';
+  const put = (rel, text) => {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    writeFileSync(join(dir, rel), text);
+  };
+  put('.opencode/agent/singular.md', md);
+  put('.opencode/modes/m1.md', md);
+  put('.opencode/modes/nested/not-a-mode.md', md);
+  put('agents/rootdir.md', md);
+  put('opencode.json', JSON.stringify({ agent: { rootjson: { description: 'd' } } }));
+  put('opencode.jsonc', '// c\n{ "agent": { "rootjsonc": { "description": "d" } } }');
+  put('.opencode/opencode.jsonc', '{ "agent": { "dotjsonc": { "permission": { "bash": "allow" } } } }');
+  const envDir = tmp('oc-envdir-');
+  mkdirSync(join(envDir, 'agents'));
+  writeFileSync(join(envDir, 'agents', 'fromenvdir.md'), md);
+  const envFile = join(tmp('oc-envfile-'), 'cfg.json');
+  writeFileSync(envFile, JSON.stringify({ agent: { fromenvfile: { description: 'd' } } }));
+  mkdirSync(join(home, '.config', 'opencode', 'agents'), { recursive: true });
+  writeFileSync(join(home, '.config', 'opencode', 'agents', 'replaced.md'), md);
+  const r = run(dir, home, { env: { HOME: home, OPENCODE_CONFIG_DIR: envDir, OPENCODE_CONFIG: envFile, OPENCODE_CONFIG_CONTENT: '{"agent":{"fromcontent":{}}}' } });
+  const names = Object.keys(JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).agent);
+  for (const want of ['singular', 'm1', 'rootjson', 'rootjsonc', 'dotjsonc', 'fromenvdir', 'fromenvfile', 'fromcontent']) assert.ok(names.includes(want), `${want} is guarded (got ${names.join(', ')})`);
+  for (const not of ['rootdir', 'nested/not-a-mode', 'replaced']) assert.ok(!names.includes(not), `${not}: OpenCode does not load it, and an entry would create the agent`);
+  const late = r.rows.find((x) => x.item.endsWith('.opencode/opencode.jsonc'));
+  assert.equal(late?.status, 'skipped');
+  assert.match(late.detail, /read after .*can override the store guard/);
+});
+
+test('parseJsonc: comments and trailing commas go only outside strings', async () => {
+  const { parseJsonc } = await import('../lib/opencode-install.mjs');
+  assert.deepEqual(parseJsonc('{"a": "x,}", "b": "// not", "c": "/* no */", "d": [1, 2, /* c */ ], // t\n}'), { a: 'x,}', b: '// not', c: '/* no */', d: [1, 2] });
+  assert.throws(() => parseJsonc('{ oops }'));
 });
 
 test('project config: invalid JSON or a tracked opencode.json is refused and not touched', () => {
