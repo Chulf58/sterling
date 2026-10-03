@@ -23,7 +23,10 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // Moved 2026-10-02 (from 3b6c6d1e…): the deliberate rewrite of the "Stamp Sterling's version when
 // reporting on Sterling" bullet for report-issue.mjs (decision
 // projects-file-sterling-issues-as-scrubbed-github-issues-automatically).
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'cea77543553037c65767bc59ae33a95899f4df0130ada042dc4ba1458b9ba9bc';
+// Moved 2026-10-03 (from cea77543…): one sentence added to each "Codex runs through the MCP tool"
+// bullet, saying every Codex brief forbids reading or writing under .sterling/ (decision
+// codex-reaching-around-the-store-guard-is-documented-and-codex-lanes-stay-narrow).
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = '1a96cf4e0c27fdf1c31318a84642aaae2871c80df340b9cf850c8ebbd51ea0fa';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);
