@@ -1,7 +1,7 @@
 {
   "name": "@chulf58/sterling",
   "type": "module",
-  "version": "0.18.64",
+  "version": "0.18.65",
   "description": "Sterling monorepo — plugin sources. The shipped plugin is described in STERLING-SPEC.md section 2.2.",
   "publishConfig": {
     "access": "public"
@@ -42,7 +42,7 @@
     "build:opencode-tui": "node scripts/build-opencode-tui.mjs",
     "build:bundles": "node scripts/build-hooks.mjs && node scripts/build-tui.mjs && node scripts/build-mcp.mjs && node scripts/build-bin.mjs && node scripts/build-opencode.mjs && node scripts/build-opencode-tui.mjs",
     "test": "node --import ./scripts/tests/lib/lock-root-isolation.mjs --test \"scripts/tests/*.test.mjs\" \"packages/schemas/dist/tests/*.test.js\" \"packages/store/dist/tests/*.test.js\" \"packages/mcp-server/dist/tests/*.test.js\" \"packages/tui/dist/tests/*.test.js\" \"opencode/sterling-tui/tests/*.test.ts\"",
-    "check": "node scripts/check-agent-registry.mjs && node scripts/check-spawn-contracts.mjs && node scripts/check-agent-prompts.mjs && node scripts/check-tool-grants.mjs && node scripts/check-skills.mjs && node scripts/check-bundles-fresh.mjs && node scripts/check-record-citations.mjs && node scripts/check-projection-fresh.mjs && node scripts/check-stale-claims.mjs --base main"
+    "check": "node scripts/check-agent-registry.mjs && node scripts/check-spawn-contracts.mjs && node scripts/check-agent-prompts.mjs && node scripts/check-tool-grants.mjs && node scripts/check-skills.mjs && node scripts/check-bundles-fresh.mjs && node scripts/check-record-citations.mjs && node scripts/check-projection-fresh.mjs && node scripts/check-stale-claims.mjs --base main && node scripts/check-record-hygiene.mjs"
   },
   "devDependencies": {
     "@types/node": "^25.9.2",
