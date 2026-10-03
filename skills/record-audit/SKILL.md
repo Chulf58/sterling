@@ -9,7 +9,7 @@ Decision `record-audit-dead-records-superseded-stale-findings-by-age-report-arm-
 
 ## When to run it
 
-The audit is periodic. The decision does not set the interval or the sample size, so this SOP sets neither. Run it when the user asks, or when the conductor judges the store is due and says why. Whoever starts it states the sample size in the brief, so the finding can report it.
+On demand only (user-ruled 2026-10-03, through the question form). Run it when the user asks, or when the conductor judges the store is due and says why. There is no schedule, no reminder and no mechanism that starts it.
 
 ## 1. Run the report arm first
 
@@ -21,7 +21,7 @@ It reads a snapshot of the store and lists every dead path, missing test ref and
 
 ## 2. Draw the sample
 
-Per record type: `decision`, `anti_pattern`, `research_finding`, `reference_material`, `open_question`, `disconfirmed_hypothesis`, and `feature_article`. Take `knowledge_query` with the type filter and `projection:"digest"`, paging until `capped` is false, because a capped page is a window, not the population. Spread the sample across record age, oldest to newest. Do not take the newest records only. In the first audit every sampled record from before the 2026-09-19 takeover had a defect, so old records are where defects sit.
+Per record type: `decision`, `anti_pattern`, `research_finding`, `reference_material`, `open_question`, `disconfirmed_hypothesis`, and `feature_article`. Take `knowledge_query` with the type filter and `projection:"digest"`, paging until `capped` is false, because a capped page is a window, not the population. Take 8 records per type by default (user-ruled 2026-10-03), so results stay comparable with the first audit. Whoever starts the audit may state a different number in the brief. Spread the sample across record age, oldest to newest. Do not take the newest records only. In the first audit every sampled record from before the 2026-09-19 takeover had a defect, so old records are where defects sit.
 
 Write down the population per type and anything left out (a type with no records, a type skipped). The finding states them in step 5.
 
