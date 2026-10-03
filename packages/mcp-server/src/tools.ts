@@ -567,8 +567,10 @@ export interface KnowledgeQueryResult {
    *  carries `source`: 'project' or 'domain:<name>', the store that holds it. */
   missing_domains?: string[];
   /** Mounted domains whose store failed a read, so this read did not search
-   *  them: each with the error of the failing read. Present only when non-empty. */
-  unreadable_domains?: { name: string; error: string }[];
+   *  them: each with the error of the failing read, and a `note` when it was
+   *  dropped after mount (it stays dropped until the session restarts).
+   *  Present only when non-empty. */
+  unreadable_domains?: { name: string; error: string; note?: string }[];
   /** Read-time maintenance mints the store REFUSED during this read (a write
    *  refusal such as live schema version drift). The records are still served;
    *  each entry names the record, the lane and the error, and the record itself
@@ -615,8 +617,10 @@ export interface KnowledgePreflightResult {
    *  check did not search them. Present only when non-empty. */
   missing_domains?: string[];
   /** Mounted domains whose store failed a read, so this read did not search
-   *  them: each with the error of the failing read. Present only when non-empty. */
-  unreadable_domains?: { name: string; error: string }[];
+   *  them: each with the error of the failing read, and a `note` when it was
+   *  dropped after mount (it stays dropped until the session restarts).
+   *  Present only when non-empty. */
+  unreadable_domains?: { name: string; error: string; note?: string }[];
   matches: {
     id: string;
     type: string;
@@ -699,8 +703,9 @@ export interface DomainSurface {
   /** Configured domains that are NOT mounted because their store is missing. */
   missing(): string[];
   /** Mounted domains dropped from reads because their store failed one, each
-   *  with the error of the failing read. */
-  unreadable(): { name: string; error: string }[];
+   *  with the error of the failing read, and a note when the drop happened
+   *  after mount. */
+  unreadable(): { name: string; error: string; note?: string }[];
 }
 
 /** The DomainSurface over a MountedStores: every read and the one write go
@@ -712,7 +717,7 @@ export function mountedDomainSurface(stores: MountedStores): DomainSurface {
     description: (name) => stores.domainDescription(name),
     setDescription: (name, description) => stores.setDomainDescription(name, description),
     missing: () => stores.missingDomains.map((m) => m.name),
-    unreadable: () => stores.unreadableDomains.map((d) => ({ name: d.name, error: d.error })),
+    unreadable: () => stores.unreadableDomains.map((d) => ({ name: d.name, error: d.error, ...(d.note ? { note: d.note } : {}) })),
   };
 }
 
@@ -1700,7 +1705,7 @@ export class SterlingTools {
    *  read and was dropped, else nothing: a read over fewer stores than
    *  configured says so. Call it AFTER the read it discloses for, because a
    *  domain can be dropped by that read. */
-  private unreadDomainsDisclosure(): { missing_domains?: string[]; unreadable_domains?: { name: string; error: string }[] } {
+  private unreadDomainsDisclosure(): { missing_domains?: string[]; unreadable_domains?: { name: string; error: string; note?: string }[] } {
     const missing = this.domains?.missing() ?? [];
     const unreadable = this.domains?.unreadable() ?? [];
     return {
@@ -1714,7 +1719,7 @@ export class SterlingTools {
   private withUnreadableDomains<E extends Error>(err: E): E {
     const unreadable = this.domains?.unreadable() ?? [];
     if (unreadable.length) {
-      err.message += ` ${unreadable.map((d) => `Mounted domain '${d.name}' was not read (${d.error}), so a record it holds cannot be found here.`).join(' ')}`;
+      err.message += ` ${unreadable.map((d) => `Mounted domain '${d.name}' was not read (${d.error}${d.note ? `; ${d.note}` : ''}), so a record it holds cannot be found here.`).join(' ')}`;
     }
     return err;
   }

@@ -121,6 +121,30 @@ test('knowledge_preflight with a pre-v2 domain mounted names the dropped domain'
   }
 });
 
+test('a domain dropped after mount is disclosed with a note that it stays dropped until the session restarts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-late-tools-'));
+  const mount = { name: 'genesys', dbPath: join(dir, 'domains', 'genesys', 'sterling.db') };
+  createDomain(mount.name, 'genesys domain', mount.dbPath);
+  const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), [mount], { skipMissing: true });
+  try {
+    const tools = new SterlingTools({ store, config: parseConfig({ stack_tags: ['genesys'] }), domains: mountedDomainSurface(store), now: () => '2026-10-03T12:00:00.000Z', newId: randomUUID });
+    const p = tools.knowledgeCreate('decision', decision('Queue overflow retry policy')).record;
+    const g = tools.knowledgeCreate('decision', decision('Queue overflow retry policy for IVR', { scope: 'domain:genesys' })).record;
+    const raw = new DatabaseSync(mount.dbPath);
+    raw.exec('DROP TABLE record_relations');
+    raw.close();
+
+    const res = tools.knowledgeQueryResult({ types: ['decision'] });
+    assert.deepEqual(res.records.map((r) => r.id), [p.id]);
+    assert.equal(res.unreadable_domains?.[0]?.name, 'genesys');
+    assert.match(res.unreadable_domains?.[0]?.note ?? '', /until the session restarts/);
+    assert.throws(() => tools.knowledgeGet(g.id), /domain 'genesys' was not read .*until the session restarts/s);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('with every domain readable, knowledge_query and knowledge_get carry no unreadable_domains key', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-none-'));
   const mount = { name: 'genesys', dbPath: join(dir, 'domains', 'genesys', 'sterling.db') };

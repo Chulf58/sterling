@@ -74,6 +74,7 @@ test('unreadable domain: query returns the project and healthy-domain records an
     assert.equal(dropped.name, 'old');
     assert.equal(dropped.dbPath, h.old.dbPath);
     assert.match(dropped.error, /record_relations/);
+    assert.equal(dropped.note, undefined, 'a domain dropped at mount carries no restart note');
   } finally {
     h.cleanup();
   }
@@ -151,6 +152,8 @@ test('unreadable domain: a domain that breaks after mount is dropped on the read
     assert.deepEqual(stores.inboundSupersedes(p.id), []);
     assert.deepEqual(stores.unreadableDomains.map((d) => d.name), ['genesys']);
     assert.match(stores.unreadableDomains[0].error, /record_relations/);
+    assert.match(stores.unreadableDomains[0].note ?? '', /dropped after mount.*until the session restarts/);
+    assert.throws(() => stores.scopeOfHolder(g.id), /Not read: domain 'genesys'.*until the session restarts/s);
     assert.deepEqual(stores.query({}).map((r) => r.id), [p.id]);
     assert.equal(stores.unreadableDomains.length, 1, 'a dropped domain is listed once');
   } finally {

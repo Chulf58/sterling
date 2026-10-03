@@ -28,6 +28,9 @@ export interface UnreadableDomain {
   name: string;
   dbPath: string;
   error: string;
+  /** Set only when the domain was dropped by a read AFTER mount: says that it
+   *  stays dropped until the session restarts (no read retries the store). */
+  note?: string;
 }
 
 /** §3.3: the project's config.stack_tags list is the domain mount manifest and
@@ -55,6 +58,11 @@ function open(dbPath: string): SterlingStore {
 
 /** An id no record has, for the mount-time read check (probeDomain). */
 const PROBE_ID = '00000000-0000-0000-0000-000000000000';
+
+/** UnreadableDomain.note for a domain dropped by a read after mount. A failure
+ *  at that point may be transient (a locked file), and the drop is not retried,
+ *  so the disclosure says how long it lasts. */
+const DROPPED_AFTER_MOUNT_NOTE = 'dropped after mount; reads skip it until the session restarts';
 
 /** The store_meta key that holds a domain's description. */
 export const DOMAIN_DESCRIPTION_KEY = 'description';
@@ -222,13 +230,18 @@ export class MountedStores {
       store.get(PROBE_ID);
       store.inboundSupersedes(PROBE_ID);
     } catch (e) {
-      this.dropDomain(name, e);
+      this.dropDomain(name, e, true);
     }
   }
 
-  private dropDomain(name: string, e: unknown): void {
+  private dropDomain(name: string, e: unknown, atMount = false): void {
     if (this.isUnreadable(name)) return;
-    this.unreadableDomains.push({ name, dbPath: this.domainPaths.get(name) ?? '', error: String((e as Error)?.message ?? e) });
+    this.unreadableDomains.push({
+      name,
+      dbPath: this.domainPaths.get(name) ?? '',
+      error: String((e as Error)?.message ?? e),
+      ...(atMount ? {} : { note: DROPPED_AFTER_MOUNT_NOTE }),
+    });
   }
 
   private isUnreadable(name: string): boolean {
@@ -635,7 +648,7 @@ export class MountedStores {
    *  was not found, so a miss caused by a dropped domain is not read as absence. */
   private unreadableNote(): string {
     if (!this.unreadableDomains.length) return '';
-    return `. Not read: ${this.unreadableDomains.map((d) => `domain '${d.name}' at '${d.dbPath}' (${d.error})`).join('; ')}`;
+    return `. Not read: ${this.unreadableDomains.map((d) => `domain '${d.name}' at '${d.dbPath}' (${d.error}${d.note ? `; ${d.note}` : ''})`).join('; ')}`;
   }
 
   private storeHolding(id: string): SterlingStore {
