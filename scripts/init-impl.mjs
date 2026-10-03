@@ -17,6 +17,7 @@
 //   node scripts/init.mjs --target <dir> [--project-name <name>]
 //     [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
 //     [--backup-path <p> | --backup-opt-out] [--mode hobby|work]
+//     [--invoking-project <dir>]   (a NEW project takes that Sterling project's mode)
 //     [--domain-description <domain>=<text>]...   (repeatable; one per NEW domain store)
 //     [--update-ensure]   (set only by /sterling:update's re-bake step)
 //   (stack tags ARE the domain mount manifest — §3.3; no separate domains flag)
@@ -84,6 +85,18 @@ try {
 } catch (e) {
   fail(`init REFUSED: ${e.message}`, 2);
 }
+// --invoking-project <dir>: the Sterling project this init was run from (see the
+// inheritance block below). A missing or empty value, or one followed by another
+// flag, refuses like a malformed --mode.
+let invokingGiven;
+let invokingFlag;
+try {
+  invokingGiven = hasFlag('--invoking-project');
+  invokingFlag = arg('--invoking-project');
+} catch (e) {
+  fail(`init REFUSED: ${e.message}`, 2);
+}
+if (invokingGiven && !invokingFlag) fail('init REFUSED: --invoking-project needs a directory value', 2);
 const declaredToolchains = argAll('--toolchain').map((spec) => {
   const [adapter, globs] = spec.split(':');
   return { adapter, path_globs: (globs ?? '').split(',').filter(Boolean) };
@@ -188,28 +201,34 @@ if (!recorded) {
   if (!stackTagsFlag.length) fail(`init REFUSED: --stack-tags is required — ${noConfigAt} (ask, don’t guess — §12 mini-grill)`, 2);
 }
 
-// The mode a NEW project takes from the project this init was run from (board
+// The mode a NEW project takes from the project that is initialising it (board
 // a-project-initialised-from-another-project-inherits-that-pro): a work project that
 // inits another project makes it a work project, a hobby project a hobby one, with no
-// question. The invoking project is CLAUDE_PROJECT_DIR when set, else the shell cwd —
-// the same resolution /sterling:update uses. It applies only to a fresh config, with no
-// explicit --mode, from a directory other than the target that holds a
-// .sterling/config.json; anything else is today's behaviour (--mode, else the hobby
-// default). A missing mode key there is hobby; an invalid value refuses (P5), never
-// defaults.
+// question. The invoking project is EXPLICIT, never ambient: only --invoking-project
+// <dir> names it, because neither CLAUDE_PROJECT_DIR nor the shell cwd reliably says
+// which project the session belongs to (a subdirectory or a linked worktree has no
+// .sterling/config.json). With no flag nothing is inherited, whatever the env or cwd.
+// Flag given: a directory that is not a Sterling project refuses (the caller claimed an
+// invoking project, so silently defaulting would hide the mismatch); the target itself
+// means no inheritance (not an error); --mode wins and the invoking config is not read;
+// an existing target keeps its mode. A missing mode key in the invoking project is
+// hobby; an invalid value refuses (P5), never defaults.
 const sameDir = (a, b) => {
   const real = (d) => { try { return realpathSync(d); } catch { return resolve(d); } };
   return fwd(real(a)) === fwd(real(b));
 };
 let inheritedFrom;
 let inheritedMode;
-if (!recorded && !modeFlagGiven) {
-  const invoking = resolve(process.env.CLAUDE_PROJECT_DIR || process.cwd());
-  if (!sameDir(invoking, target) && existsSync(join(invoking, '.sterling', 'config.json'))) {
+if (invokingGiven && !recorded && !modeFlagGiven) {
+  const invoking = resolve(invokingFlag);
+  if (!sameDir(invoking, target)) {
+    if (!existsSync(join(invoking, '.sterling', 'config.json'))) {
+      fail(`init REFUSED: --invoking-project names a directory that is not a Sterling project — '${fwd(invoking)}' has no .sterling/config.json. Pass the root of the project this session belongs to, or drop the flag and pass --mode hobby|work`, 2);
+    }
     try {
       inheritedMode = readProjectMode(invoking);
     } catch (e) {
-      if (!(e instanceof ProjectModeError)) throw e;
+      if (!(e instanceof ProjectModeError) && !(e instanceof ContainmentError)) throw e;
       fail(`init REFUSED: the invoking project's mode cannot be inherited — ${e.message}. Fix it, or pass --mode hobby|work`, 2);
     }
     inheritedFrom = fwd(invoking);
