@@ -67,6 +67,48 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'a dependency the user states is given, never re-derived or second-guessed.',
     after: "a dependency the user states is given, never re-derived or second-guessed. When an ask spans several areas, do not board it as one bundle: board it as several items, each one reviewable and mergeable change touching one area's files with its own acceptance, linked by `blocked_by` in dependency order and sharing one `objective`, with the user's words verbatim on the first item. Split at natural dependency points and no finer, since each item costs one task-end review, one version bump and one merge. Smaller items block less, because blocking comes from dependencies and shared write paths and a bundle maximises both (decision `board-asks-split-at-intake-into-mergeable-one-area-items`, user-ruled 2026-10-03).",
   },
+  {
+    commit: '08476117',
+    date: '2026-10-03',
+    reason: "instruction audit (finding instruction-file-audit-against-code-and-rulings-october-2026): a subagent also gets hook-staged knowledge, only when one dispatch of its type is pending",
+    before: "and your brief. Under-specified",
+    after: "and your brief. A hook also stages the store's knowledge for the files the brief names, but only when exactly one dispatch of that agent type is pending; for parallel lanes of the same type, put the record ids in each brief (decision `h22-start-staging-only-when-attribution-is-unambiguous-no-sidecar`). Under-specified",
+  },
+  {
+    commit: '08476117',
+    date: '2026-10-03',
+    reason: "instruction audit (finding instruction-file-audit-against-code-and-rulings-october-2026): a code-touching brief carries the REVIEW-TERRITORY line H22 reads",
+    before: "**Return** (the exact shape you want).",
+    after: "**Return** (the exact shape you want). **Territory**: a code-touching brief also carries one `REVIEW-TERRITORY: [\"path\", …]` line of repo-relative paths; H22 reads it to record which files the lane owns.",
+  },
+  {
+    commit: '08476117',
+    date: '2026-10-03',
+    reason: "instruction audit (finding instruction-file-audit-against-code-and-rulings-october-2026): the conductor scopes each record at creation (decision projects-mount-domains-and-sibling-projects)",
+    before: "so the record is findable by the words a user would say.",
+    after: "so the record is findable by the words a user would say. Scope each new record when you create it. A record about a subject one of the mounted domains describes takes `scope: domain:<name>`; a record about this repo, or one that carries `file_keys`, stays `project` (decision `projects-mount-domains-and-sibling-projects`). Promotion is a backstop for a record that was scoped wrong, not the normal path.",
+  },
+  {
+    commit: '08476117',
+    date: '2026-10-03',
+    reason: "instruction audit (finding instruction-file-audit-against-code-and-rulings-october-2026): only the reconcile lane has a background worker; every other lane is the conductor's",
+    before: "minted by the event that found it, removed by the artifact that closes it. Never hand-park",
+    after: "minted by the event that found it, removed by the artifact that closes it. A background worker closes already-paid `reconcile_needed` items by itself, in batches of 5 or after 30 minutes, so \"worker not running\" at session start is normal. Every other lane (`state_review`, `promotion_review`, `refresh_reference`, `stale_research`, the capture and article lanes) and every `reconcile_needed` item the worker judged \"owes prose\" is yours. When H1 says the queue is deep, read the lane split before draining: only the reconcile lane has a worker. Never hand-park",
+  },
+  {
+    commit: '08476117',
+    date: '2026-10-03',
+    reason: "instruction audit (finding instruction-file-audit-against-code-and-rulings-october-2026): H10 has a soft note at 35% as well as the 50% warning",
+    before: "At 50% of the model's real window H10 warns you to **finish the open work and commit it** — not stop, not clear.",
+    after: "H10 notes pressure at 35% and warns at 50% of the model's real window (the `context_watch.conductor` defaults); both mean **finish the open work and commit it** — not stop, not clear.",
+  },
+  {
+    commit: '08476117',
+    date: '2026-10-03',
+    reason: "instruction audit (finding instruction-file-audit-against-code-and-rulings-october-2026): the H31 plan lock is stated for Claude Code",
+    before: "updated at every slice boundary.\n",
+    after: "updated at every slice boundary.\n\nAn approved plan is locked. H31 binds the plan the user approved at ExitPlanMode and H1 prints it as PLAN LOCK at every session start; follow it, and release it with `plan-lock.mjs --release --reason \"<why>\"` only when the user drops the plan.\n",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
@@ -76,6 +118,20 @@ export const IMPLEMENTOR_WORDING_EDITS = [
     reason: 'new MCP tool domain_describe (Domains D2) is denied to the implementor under both prefixes; store writes stay the conductor\'s',
     before: ', mcp__sterling__capture_pending, mcp__plugin_sterling_sterling__capture_pending\n',
     after: ', mcp__sterling__capture_pending, mcp__plugin_sterling_sterling__capture_pending, mcp__sterling__domain_describe, mcp__plugin_sterling_sterling__domain_describe\n',
+  },
+  {
+    commit: '08476117',
+    date: '2026-10-03',
+    reason: "instruction audit (finding instruction-file-audit-against-code-and-rulings-october-2026): a capture candidate names its scope",
+    before: "the conductor decides whether to write it, and writes it directly — never through you.\n",
+    after: "the conductor decides whether to write it, and writes it directly — never through you. A capture candidate names its scope: `project` when it is about this repo's files, `domain:<subject>` when it is a fact about a subject other projects share (domain-scoped records carry no file_keys).\n",
+  },
+  {
+    commit: '08476117',
+    date: '2026-10-03',
+    reason: "instruction audit (finding instruction-file-audit-against-code-and-rulings-october-2026): the output contract states the complete/blocked first line the Inputs section already requires",
+    before: "# Output contract\n\n```text\nChanges:",
+    after: "# Output contract\n\nThe first line is `complete` or `blocked`, followed by this block:\n\n```text\nChanges:",
   },
 ];
 

@@ -203,7 +203,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     return description ? `${name} ("${description}")` : `${name} (no description)`;
   });
   const createDomainsNote = bootDomains.length
-    ? ` Mounted domains: ${bootDomains.join('; ')}. A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.`
+    ? ` Mounted domains at server start: ${bootDomains.join('; ')} (the receipt's mounted_domains is current). A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.`
     : '';
   const server = new McpServer({ name: 'sterling', version: '0.1.0' });
 
@@ -384,10 +384,22 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_supersede',
     {
       description:
-        "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them — carry them forward, or pass orphans_acknowledged:true. Other types are refused naming their exit path (todo → board_remove/maintenance_remove; feature_article/reference_material → knowledge_update/knowledge_retire). Refusals write nothing.",
-      inputSchema: strict({ old_id: z.string(), fields: passthrough, orphans_acknowledged: z.boolean().optional() }),
+        "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them — carry them forward, or pass orphans_acknowledged:true. A reference_material whose subject is gone (its location was deleted) is closed here too: pass type 'decision' or 'research_finding' and `fields` for a short record of that type saying what happened; the reference is superseded by it and is no longer read, so it raises no further refresh_reference items. A reference whose subject still exists is repointed with knowledge_update; a duplicate goes to knowledge_retire. resolves:[<full item ids>] closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to the old record's chain in the same transaction (validated before the write; unnamed items stay open). Other types are refused naming their exit path (todo → board_remove/maintenance_remove; feature_article → knowledge_update/knowledge_retire). Refusals write nothing.",
+      inputSchema: strict({
+        old_id: z.string(),
+        fields: passthrough,
+        orphans_acknowledged: z.boolean().optional(),
+        type: z
+          .string()
+          .optional()
+          .describe("the closing record's type, 'decision' or 'research_finding' — required when old_id is a reference_material, otherwise omit it"),
+        resolves: z
+          .array(z.string())
+          .optional()
+          .describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to the old record's chain that this supersession discharges — full ids, validated before the write"),
+      }),
     },
-    ({ old_id, fields, orphans_acknowledged }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged))
+    ({ old_id, fields, orphans_acknowledged, type, resolves }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged, { type, resolves }))
   );
 
   server.registerTool(
@@ -458,7 +470,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_line_ref_fix',
     {
       description:
-        "Move ONE stale path:line reference inside a feature_article string field, verified by the server — the background maintenance worker's only store write (decision maintenance-queue-background-haiku-worker-simple-redesign, point 3a). `find` and `replace` are bare line references ([path]:N or [path]:N-M, whitespace trimmed, no other text); `replace` keeps find's path part and changes only the line. `field` takes knowledge_edit's grammar (a string field or 'arr[key=value].sub'). Refused with nothing written, naming the failed check, unless: (1) the record is an active feature_article, the field one of what_it_does, intended_behavior, steps_runbook, current_ac[..].text, files[..].role (never history) and a string, and find matches exactly once as a whole reference; (2) both sides are line references with the same path, replace differs from find, and it is a shift only — a point stays a point, a range keeps its width (a bare ':N' only when the article owns exactly one files[] entry); (3) the path is one of the article's files[] (exact, or a unique suffix on a '/' boundary); (4) every new line exists in the file AS COMMITTED AT HEAD (not the working tree) and its FIRST line contains `anchor` literally; (5) `anchor` is at least 6 characters, not only punctuation, and is quoted from the field's own text within 120 characters of the reference (the reference itself excluded); (6) nothing but the substitution changes (a write landing while the checks ran refuses). Same versioned write path as knowledge_edit, but it takes NO resolves: a queue item closes only through maintenance_remove. The receipt carries `verification` {path, lines, anchor, head_commit, blob}.",
+        "Move ONE stale path:line reference inside a feature_article string field, verified by the server — the background maintenance worker's only article write (decision maintenance-queue-background-haiku-worker-simple-redesign, point 3a). `find` and `replace` are bare line references ([path]:N or [path]:N-M, whitespace trimmed, no other text); `replace` keeps find's path part and changes only the line. `field` takes knowledge_edit's grammar (a string field or 'arr[key=value].sub'). Refused with nothing written, naming the failed check, unless: (1) the record is an active feature_article, the field one of what_it_does, intended_behavior, steps_runbook, current_ac[..].text, files[..].role (never history) and a string, and find matches exactly once as a whole reference; (2) both sides are line references with the same path, replace differs from find, and it is a shift only — a point stays a point, a range keeps its width (a bare ':N' only when the article owns exactly one files[] entry); (3) the path is one of the article's files[] (exact, or a unique suffix on a '/' boundary); (4) every new line exists in the file AS COMMITTED AT HEAD (not the working tree) and its FIRST line contains `anchor` literally; (5) `anchor` is at least 6 characters, not only punctuation, and is quoted from the field's own text within 120 characters of the reference (the reference itself excluded); (6) nothing but the substitution changes (a write landing while the checks ran refuses). Same versioned write path as knowledge_edit, but it takes NO resolves: a queue item closes only through maintenance_remove. The receipt carries `verification` {path, lines, anchor, head_commit, blob}.",
       inputSchema: strict({
         id: z.string().describe('the feature_article to fix (full uuid, slug, or unambiguous 8-char prefix)'),
         field: z.string().describe("a string field, or 'arr[key=value].sub' — knowledge_edit's selector grammar"),
@@ -500,7 +512,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_promote',
     {
       description:
-        "Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article and todo never promote; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The receipt carries domain_description, the target domain's description. The echo (`promoted`) defaults to a digest; projection:\"full\" returns the whole record.",
+        "Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article, todo and attestation never promote; only a project-scoped record the project store holds does; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The receipt carries domain_description, the target domain's description. The echo (`promoted`) defaults to a digest; projection:\"full\" returns the whole record.",
       inputSchema: strict({ id: z.string(), domain: z.string(), projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection))

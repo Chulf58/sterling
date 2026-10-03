@@ -1,6 +1,6 @@
 ---
 name: review-brief
-description: Use before dispatching a review of a finished diff — the brief for the `reviewer` agent (Claude Opus or Fable) and for a Codex Sol review call. Triggers on "review this before I commit", "get a review", "second opinion on this diff". The rubric lives in the reviewer agent's body, not here.
+description: Use before dispatching a review of a finished diff — the brief for the `reviewer` agent (Claude Opus) and for a Codex Sol review call. Triggers on "review this before I commit", "get a review", "second opinion on this diff". The rubric lives in the reviewer agent's body, not here.
 ---
 
 # Review brief
