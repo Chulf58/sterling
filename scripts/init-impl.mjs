@@ -1206,7 +1206,7 @@ const pluginPkg = (() => {
   }
 })();
 const registry = new ProjectRegistry(registryPath());
-let liveProjectPaths = null; // null until the registry is read: cloneCleanupLines then treats every clone as live
+let liveProjectPaths = null; // a registry failure stops init before the hint; null (every clone treated as live) is for a caller that could not read it
 try {
   const already = registry.list().some((p) => p.repo_path === fwd(target));
   registry.register({

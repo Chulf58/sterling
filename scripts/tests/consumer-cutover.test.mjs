@@ -212,7 +212,7 @@ test('autoUpdateWarning: every form says what settings.json lacks and that a /pl
 
 test('cloneCleanupLines: a Sterling clone is named for manual deletion; a path that is gone or not a clone says so', () => {
   const clone = fakeClone();
-  const lines = cloneCleanupLines([clone, clone, '/nonexistent/sterling-old']).join('\n');
+  const lines = cloneCleanupLines([clone, clone, '/nonexistent/sterling-old'], []).join('\n');
   assert.equal(lines.split('\n').filter((l) => l.includes(clone)).length, 1, 'each clone gets one line');
   assert.match(lines, /delete it by hand/);
   assert.match(lines, /\/nonexistent\/sterling-old.*not a Sterling clone on this machine/);
@@ -223,7 +223,7 @@ test('cloneCleanupLines: a clone whose own config declares machine_role authorin
   const clone = fakeClone();
   mkdirSync(join(clone, '.sterling'));
   writeFileSync(join(clone, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring' }));
-  const lines = cloneCleanupLines([clone]).join('\n');
+  const lines = cloneCleanupLines([clone], []).join('\n');
   assert.match(lines, /authoring clone .*keep it/);
   assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
 });
@@ -232,14 +232,14 @@ test('cloneCleanupLines: a read failure other than ENOENT is printed as "could n
   const clone = fakeClone();
   mkdirSync(join(clone, '.sterling', 'config.json'), { recursive: true }); // a directory: reading it is EISDIR
   let lines;
-  assert.doesNotThrow(() => { lines = cloneCleanupLines([clone]).join('\n'); });
+  assert.doesNotThrow(() => { lines = cloneCleanupLines([clone], []).join('\n'); });
   assert.ok(lines.includes(`could not inspect ${clone}: EISDIR`), lines);
   assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
 });
 
 test('cloneCleanupLines: paths differing only by a trailing slash are one clone', () => {
   const clone = fakeClone();
-  const lines = cloneCleanupLines([clone, `${clone}/`, `${clone}//`]);
+  const lines = cloneCleanupLines([clone, `${clone}/`, `${clone}//`], []);
   assert.equal(lines.filter((l) => l.includes(clone)).length, 1, lines.join('\n'));
   assert.ok(!lines.join('\n').includes(`${clone}/ `), 'the printed path carries no trailing slash');
 });
@@ -286,6 +286,59 @@ test('cloneCleanupLines: an unreadable registry (null) treats every clone path a
   assert.match(lines, /project registry could not be read/);
   assert.ok(lines.includes(clone));
   assert.match(lines, /treated as a live project/);
+  assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
+});
+
+test('cloneCleanupLines: an omitted live-project list means unknown, not none: no rm -rf', () => {
+  const clone = fakeClone();
+  const lines = cloneCleanupLines([clone]).join('\n');
+  assert.match(lines, /project registry could not be read/);
+  assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
+});
+
+test('cloneCleanupLines: a clone that CONTAINS a live project is kept; a clone inside a live project, or a name-prefix sibling, keeps the hint', () => {
+  const clone = fakeClone();
+  const nested = join(clone, 'projects', 'app');
+  mkdirSync(nested, { recursive: true });
+  const containing = cloneCleanupLines([clone], [nested]).join('\n');
+  assert.match(containing, /contains a live Sterling project on this machine; keep it/);
+  assert.doesNotMatch(containing, /rm -rf|delete it by hand/);
+
+  const parent = tmp('sterling-cut-liveparent-');
+  const inside = join(parent, 'clone');
+  mkdirSync(join(inside, '.git'), { recursive: true });
+  mkdirSync(join(inside, '.claude-plugin'));
+  writeFileSync(join(inside, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling' }));
+  assert.match(cloneCleanupLines([inside], [parent]).join('\n'), /rm -rf/, 'a clone inside a live project is still a clone to delete');
+
+  assert.match(cloneCleanupLines([clone], [`${clone}2`]).join('\n'), /rm -rf/, 'a name-prefix sibling is not inside the clone');
+});
+
+test('cloneCleanupLines: a symlinked clone path, a path through a symlinked parent and a `..` spelling all match the real live path', () => {
+  const clone = fakeClone();
+  const holder = tmp('sterling-cut-links-');
+  const link = join(holder, 'clone-link');
+  symlinkSync(clone, link, 'dir');
+  const parentLink = join(holder, 'parent-link');
+  symlinkSync(dirname(clone), parentLink, 'dir');
+  const dotdot = join(clone, 'projects', '..');
+  mkdirSync(join(clone, 'projects'));
+  const spellings = [link, join(parentLink, clone.split('/').pop()), dotdot];
+  for (const spelling of spellings) {
+    const asClone = cloneCleanupLines([spelling], [clone]).join('\n');
+    assert.match(asClone, /live Sterling project/, `clone spelled ${spelling}`);
+    assert.doesNotMatch(asClone, /rm -rf/, `clone spelled ${spelling}`);
+    const asLive = cloneCleanupLines([clone], [spelling]).join('\n');
+    assert.doesNotMatch(asLive, /rm -rf/, `live spelled ${spelling}`);
+  }
+});
+
+test('cloneCleanupLines: a clone directory holding its own .sterling/sterling.db is a live project even when no registry lists it', () => {
+  const clone = fakeClone();
+  mkdirSync(join(clone, '.sterling'));
+  writeFileSync(join(clone, '.sterling', 'sterling.db'), 'not a database: existence is the only thing checked');
+  const lines = cloneCleanupLines([clone], []).join('\n');
+  assert.match(lines, /holds its own project store \(\.sterling\/sterling\.db\).*keep it/);
   assert.doesNotMatch(lines, /rm -rf|delete it by hand/);
 });
 

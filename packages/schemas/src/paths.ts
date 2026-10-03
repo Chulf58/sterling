@@ -138,17 +138,41 @@ export function isAbsolutePathAnyHost(p: string): boolean {
  * (a symbolic working_tree name such as a branch is foreign by construction).
  */
 export function sameLocationAnyHost(a: string, b: string): boolean {
-  const drvfs = (p: string): string | undefined => {
-    const s = String(p ?? '').replace(/\\/g, '/');
-    if (!isAbsolutePathAnyHost(s)) return undefined;
-    const drive = /^([A-Za-z]):\/(.*)$/.exec(s);
-    return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s).replace(/\/+$/, '');
-  };
-  const x = drvfs(a);
-  const y = drvfs(b);
+  const x = drvfsForm(a);
+  const y = drvfsForm(b);
   if (x === undefined || y === undefined) return false;
+  const [fx, fy] = foldDrvfs(x, y);
+  return fx === fy;
+}
+
+/**
+ * Is `child` STRICTLY inside `parent` (a segment-boundary descendant, never the same
+ * location)? Same folding as sameLocationAnyHost: separators, trailing slashes, drive
+ * versus /mnt/<drive> spelling, case-insensitive only when both land on DrvFs. '/a/clone2'
+ * is not under '/a/clone'. A pure string question, like sameLocationAnyHost: no symlinks,
+ * no '..'. A relative or empty value is never a location and never matches.
+ */
+export function isUnderLocationAnyHost(child: string, parent: string): boolean {
+  const x = drvfsForm(child);
+  const y = drvfsForm(parent);
+  if (x === undefined || y === undefined) return false;
+  const [c, p] = foldDrvfs(x, y);
+  return c.startsWith(p + '/');
+}
+
+// An absolute path in its WSL DrvFs spelling, slashes forward, no trailing slash; undefined
+// for a relative or empty value.
+function drvfsForm(p: string): string | undefined {
+  const s = String(p ?? '').replace(/\\/g, '/');
+  if (!isAbsolutePathAnyHost(s)) return undefined;
+  const drive = /^([A-Za-z]):\/(.*)$/.exec(s);
+  return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s).replace(/\/+$/, '');
+}
+
+// Lower-case both sides only when both are on DrvFs (case-insensitive NTFS by default).
+function foldDrvfs(x: string, y: string): [string, string] {
   const onDrvfs = (p: string) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
-  return onDrvfs(x) && onDrvfs(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
+  return onDrvfs(x) && onDrvfs(y) ? [x.toLowerCase(), y.toLowerCase()] : [x, y];
 }
 
 /** Helper for callers holding an absolute path plus repo-root context. */
