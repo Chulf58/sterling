@@ -4,7 +4,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, appendFileSync, unlinkSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, appendFileSync, unlinkSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -102,7 +102,7 @@ function withDomainDescriptions(dir, args) {
   return [...args, ...extra];
 }
 
-function init(dir, args = [], extraEnv = {}) {
+function init(dir, args = [], extraEnv = {}, { cwd = dir } = {}) {
   if ('STERLING_PLUGIN_ROOT_MATCH' in extraEnv && extraEnv.STERLING_PLUGIN_ROOT_MATCH === undefined) {
     throw new Error('init(): STERLING_PLUGIN_ROOT_MATCH must never be deleted — unset means init ensures THIS clone\'s live .claude-plugin/sterling-mcp.json (see the containment note above). Pass a scratch dir, or omit the key to take the helper default.');
   }
@@ -114,7 +114,7 @@ function init(dir, args = [], extraEnv = {}) {
   const claudeConfigDir = extraEnv.CLAUDE_CONFIG_DIR ?? scratchPluginRoot();
   const r = spawnSync(process.execPath, [join(root, 'scripts', 'init.mjs'), '--target', dir, ...withDomainDescriptions(dir, args)], {
     encoding: 'utf8',
-    cwd: dir,
+    cwd,
     timeout: 180_000,
     // isolate the machine-global project registry to this test's temp dir, so
     // init's registration never pollutes the real ~/.sterling/registry.db.
@@ -1565,6 +1565,166 @@ test('an existing config\'s mode is never overwritten by --mode: kept, with a lo
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
+});
+
+// A new project initialised from a session in another Sterling project takes that
+// invoking project's mode without asking (board a-project-initialised-from-another-
+// project-inherits-that-pro). The invoking project is EXPLICIT: only
+// --invoking-project names it. Nothing ambient (CLAUDE_PROJECT_DIR, the shell cwd) is
+// read, because neither says reliably which project the session belongs to.
+const INHERIT_LINE = (mode, from) => new RegExp(`^mode: ${mode} \\(inherited from the invoking project ${from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)$`, 'm');
+const withTwoDirs = (fn) => {
+  const invoking = mkdtempSync(join(tmpdir(), 'sterling-mode-inherit-from-'));
+  const fresh = mkdtempSync(join(tmpdir(), 'sterling-mode-inherit-new-'));
+  try {
+    fn(invoking, fresh);
+  } finally {
+    rmSync(invoking, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(fresh, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+};
+const modeOf = (dir) => JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).mode;
+const INVOKING = '--invoking-project';
+
+for (const mode of ['work', 'hobby']) {
+  test(`--invoking-project: a new project initialised from a ${mode} project inherits ${mode}, with one line naming the source`, () => {
+    withTwoDirs((invoking, fresh) => {
+      assert.equal(init(invoking, [...FRESH_FLAGS, '--mode', mode]).code, 0);
+      const r = init(fresh, [...FRESH_FLAGS, INVOKING, invoking]);
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      assert.equal(modeOf(fresh), mode);
+      assert.match(r.stdout, INHERIT_LINE(mode, invoking));
+      assert.equal(r.stdout.split('\n').filter((l) => /^mode: /.test(l)).length, 1, 'exactly one mode line');
+      assert.doesNotMatch(r.stdout, /defaulted/);
+    });
+  });
+}
+
+test('--invoking-project: an invoking project with no mode key is hobby, as everywhere else', () => {
+  withTwoDirs((invoking, fresh) => {
+    assert.equal(init(invoking, [...FRESH_FLAGS, '--mode', 'work']).code, 0);
+    const p = join(invoking, '.sterling', 'config.json');
+    const cfg = JSON.parse(readFileSync(p, 'utf8'));
+    delete cfg.mode;
+    writeFileSync(p, JSON.stringify(cfg, null, 2));
+    const r = init(fresh, [...FRESH_FLAGS, INVOKING, invoking]);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.equal(modeOf(fresh), 'hobby');
+    assert.match(r.stdout, INHERIT_LINE('hobby', invoking));
+  });
+});
+
+test('--invoking-project: an explicit --mode wins and the invoking config is not read', () => {
+  withTwoDirs((invoking, fresh) => {
+    assert.equal(init(invoking, [...FRESH_FLAGS, '--mode', 'work']).code, 0);
+    const r = init(fresh, [...FRESH_FLAGS, '--mode', 'hobby', INVOKING, invoking]);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.equal(modeOf(fresh), 'hobby');
+    assert.match(r.stdout, MODE_LINE('hobby \\(set by --mode\\)'));
+    assert.doesNotMatch(r.stdout, /inherited/);
+    // not read: an invalid invoking mode does not stop an explicit --mode
+    const p = join(invoking, '.sterling', 'config.json');
+    writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf8')), mode: 'Work' }, null, 2));
+    const other = mkdtempSync(join(tmpdir(), 'sterling-mode-inherit-explicit-'));
+    try {
+      const r2 = init(other, [...FRESH_FLAGS, '--mode', 'work', INVOKING, invoking]);
+      assert.equal(r2.code, 0, r2.stdout + r2.stderr);
+      assert.equal(modeOf(other), 'work');
+    } finally {
+      rmSync(other, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  });
+});
+
+test('--invoking-project on an existing project never changes its mode', () => {
+  withTwoDirs((invoking, existing) => {
+    assert.equal(init(invoking, [...FRESH_FLAGS, '--mode', 'work']).code, 0);
+    assert.equal(init(existing, [...FRESH_FLAGS, '--mode', 'hobby']).code, 0);
+    const before = readFileSync(join(existing, '.sterling', 'config.json'), 'utf8');
+    const r = init(existing, [INVOKING, invoking]);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.equal(readFileSync(join(existing, '.sterling', 'config.json'), 'utf8'), before, 'config byte-identical');
+    assert.match(r.stdout, MODE_LINE('hobby \\(kept — the recorded config wins\\)'));
+    assert.doesNotMatch(r.stdout, /inherited/);
+  });
+});
+
+test('--invoking-project equal to the target behaves as no flag: hobby with the defaulted line', () => {
+  withTwoDirs((_invoking, fresh) => {
+    const r = init(fresh, [...FRESH_FLAGS, INVOKING, fresh]);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.equal(modeOf(fresh), 'hobby');
+    assert.match(r.stdout, MODE_LINE('hobby \\(defaulted — no --mode was given; change it in the TUI System tab\\)'));
+    assert.doesNotMatch(r.stdout, /inherited/);
+  });
+});
+
+test('--invoking-project naming a directory that is not a Sterling project refuses with exit 2 and writes nothing', () => {
+  withTwoDirs((bare, fresh) => {
+    for (const named of [bare, join(bare, 'no-such-dir')]) {
+      const r = init(fresh, [...FRESH_FLAGS, INVOKING, named]);
+      assert.equal(r.code, 2, r.stdout + r.stderr);
+      const out = r.stdout + r.stderr;
+      assert.match(out, /--invoking-project names a directory that is not a Sterling project/);
+      assert.ok(out.includes(named.replace(/\\/g, '/')), out);
+      assert.ok(!existsSync(join(fresh, '.sterling')), 'nothing written');
+    }
+  });
+});
+
+test('--invoking-project with no value, or followed by another flag, refuses with exit 2 and writes nothing', () => {
+  withTwoDirs((invoking, fresh) => {
+    for (const bad of [[INVOKING], [`${INVOKING}=`], [INVOKING, '--backup-opt-out']]) {
+      const r = init(fresh, [...FRESH_FLAGS, ...bad]);
+      assert.equal(r.code, 2, `${bad.join(' ')}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /--invoking-project/);
+      assert.doesNotMatch(r.stderr, /^\s+at /m, 'no stack trace');
+      assert.ok(!existsSync(join(fresh, '.sterling')), `${bad.join(' ')}: nothing written`);
+    }
+  });
+});
+
+test('--invoking-project whose project has an invalid mode refuses with exit 2 naming the file and the value, and writes nothing', () => {
+  withTwoDirs((invoking, fresh) => {
+    assert.equal(init(invoking, [...FRESH_FLAGS, '--mode', 'work']).code, 0);
+    const p = join(invoking, '.sterling', 'config.json');
+    writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf8')), mode: 'Work' }, null, 2));
+    const r = init(fresh, [...FRESH_FLAGS, INVOKING, invoking]);
+    assert.equal(r.code, 2, r.stdout + r.stderr);
+    const out = r.stdout + r.stderr;
+    assert.match(out, /init REFUSED/);
+    assert.ok(out.includes(`${invoking.replace(/\\/g, '/')}/.sterling/config.json`), out);
+    assert.ok(out.includes('"Work"'), out);
+    assert.ok(!existsSync(join(fresh, '.sterling')), 'nothing written');
+  });
+});
+
+test('--invoking-project whose .sterling is a symlink leaving the project refuses with exit 2, not a stack trace', () => {
+  withTwoDirs((invoking, fresh) => {
+    const outside = mkdtempSync(join(tmpdir(), 'sterling-mode-inherit-outside-'));
+    try {
+      writeFileSync(join(outside, 'config.json'), JSON.stringify({ mode: 'work' }));
+      symlinkSync(outside, join(invoking, '.sterling'), 'dir');
+      const r = init(fresh, [...FRESH_FLAGS, INVOKING, invoking]);
+      assert.equal(r.code, 2, r.stdout + r.stderr);
+      assert.match(r.stdout + r.stderr, /init REFUSED/);
+      assert.doesNotMatch(r.stderr, /^\s+at /m, 'no stack trace');
+      assert.ok(!existsSync(join(fresh, '.sterling')), 'nothing written');
+    } finally {
+      rmSync(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  });
+});
+
+test('without --invoking-project nothing ambient is read: a cwd inside a work project and CLAUDE_PROJECT_DIR naming it still default to hobby', () => {
+  withTwoDirs((invoking, fresh) => {
+    assert.equal(init(invoking, [...FRESH_FLAGS, '--mode', 'work']).code, 0);
+    const r = init(fresh, FRESH_FLAGS, { CLAUDE_PROJECT_DIR: invoking }, { cwd: invoking });
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.equal(modeOf(fresh), 'hobby');
+    assert.match(r.stdout, MODE_LINE('hobby \\(defaulted — no --mode was given; change it in the TUI System tab\\)'));
+    assert.doesNotMatch(r.stdout, /inherited/);
+  });
 });
 
 test('a malformed --mode (given twice, or followed by another flag) refuses with exit 2, never a stack trace', () => {
