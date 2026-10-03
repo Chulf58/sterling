@@ -5303,10 +5303,25 @@ function repoRel(toolPath, cwd) {
 }
 
 // scripts/hooks/lib/dispatch-prompt.mjs
+import { posix } from "node:path";
 var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
 function extractPathCandidates(text) {
   const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
   return [...new Set(found)];
+}
+var TOKEN_DELIMITER_RE = /[\s'"`()[\]{}<>,;*|=]/;
+var RELATIVE_PATH_CHARS_RE = /^[\w./-]+$/;
+function extractPathCandidatesRooted(text) {
+  const s = String(text ?? "");
+  const found = /* @__PURE__ */ new Set();
+  for (const m of s.matchAll(PATH_CANDIDATE_RE)) {
+    if (s[m.index + m[0].length] === "/") continue;
+    let start = m.index;
+    while (start > 0 && !TOKEN_DELIMITER_RE.test(s[start - 1])) start -= 1;
+    const candidate = s.slice(start, m.index) + m[0];
+    if (candidate.startsWith("/") || RELATIVE_PATH_CHARS_RE.test(candidate)) found.add(posix.normalize(candidate));
+  }
+  return [...found];
 }
 var REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
 var GLOB_METACHAR_RE = /[*?[\]]/;
@@ -6791,7 +6806,7 @@ function loadExclusiveResourceNames(cwd) {
   }
 }
 function candidatesFromBlocks(blocks) {
-  return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
+  return [...new Set(blocks.flatMap((b) => extractPathCandidatesRooted(b.prompt)))];
 }
 function normalizeRegisterPaths(cands, cwd) {
   return [...new Set(cands.map((c) => repoRel(c, cwd)).filter(Boolean))].filter(

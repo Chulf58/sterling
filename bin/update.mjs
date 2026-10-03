@@ -6778,6 +6778,9 @@ function unionCentralTerms(record, topK) {
     .../* @__PURE__ */ new Set([...narrowCentralTerms(record, topK), ...extractAxisTerms(axisTitleText(record), topK)])
   ];
 }
+function recordCentralTerms(record, opts2 = {}) {
+  return unionCentralTerms(record, opts2.topK ?? AXIS_RECORD_TOP_K);
+}
 function coveredCentralTerms(central, outgoingText) {
   const words = [
     ...new Set(String(outgoingText ?? "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length >= AXIS_MIN_TERM_LEN))
@@ -7173,6 +7176,7 @@ __export(dist_exports2, {
   missingDomainWarning: () => missingDomainWarning,
   rankTermDedupeKey: () => rankTermDedupeKey,
   rankTerms: () => rankTerms,
+  recordCentralTerms: () => recordCentralTerms,
   recordCentralityHits: () => recordCentralityHits,
   registryPath: () => registryPath,
   renderCappedPathList: () => renderCappedPathList,

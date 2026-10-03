@@ -181,3 +181,107 @@ test("(c) an unattributable Start (no prior Pre registration) writes files: [] a
     cleanup();
   }
 });
+
+// ===========================================================================
+// (d) ABSOLUTE PATHS IN FREE PROSE (decision h22-dispatch-files-from-review-
+// territory-and-resume-inherits-prior-round, finding 79e20118's probe follow-
+// up 2026-10-03): the extractor's segments are [\w-]+, so a brief naming
+// `/abs/project/probe.txt` used to register `abs/project/probe.txt`, a path
+// that exists nowhere. An absolute path inside the project becomes repo-
+// relative POSIX (AGENTS.md invariant 2); one outside the project is dropped.
+// A './' or '../' prefix stays relative.
+// ===========================================================================
+
+test('(d) a free-prose absolute path inside the project is stored repo-relative; one outside the project is dropped', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const prompt = [
+      `Write ${dir}/probe-fixb-agent-id.txt and edit ${dir}/src/lane/alpha.mjs.`,
+      'Read /usr/share/doc/outside/readme.txt for context.',
+      'Also touch ./src/rel/beta.mjs.',
+    ].join('\n');
+    stagePre(dir, prompt);
+    const s = subagentStart(dir, { agent_id: 'sub-d' });
+    assert.equal(s.code, 0, `SubagentStart must exit 0; stderr: ${s.stderr}`);
+
+    const entry = entryFor(dir, 'sub-d');
+    assert.equal(entry.files_source, 'free-prose-fallback');
+    assert.deepEqual(
+      [...entry.files].sort(),
+      ['probe-fixb-agent-id.txt', 'src/lane/alpha.mjs', 'src/rel/beta.mjs'],
+      'in-project absolute paths are repo-relative, the outside path is gone, and the ./ path is unchanged'
+    );
+    for (const f of entry.files) assert.ok(!f.startsWith('/') && !f.includes(dir.slice(1)), `no mangled absolute remnant: ${f}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// (e) The whole token is classified, never a path SUFFIX inside it (Codex Sol
+// task-end review of (d)): a URL, a drive-letter path, a '~/' path, an
+// absolute path whose '..' leaves the project, and a relative '../' path that
+// escapes the project are all DROPPED. Before this fix each of them left a
+// repo-shaped suffix (`com/docs/file.mjs`, `src/drive.mjs`, `outside/...`) in
+// `files`, which H10 then deferred. An absolute path whose '..' stays inside
+// the project resolves and is kept; plain, './' and markdown-bold paths are
+// unchanged.
+// ===========================================================================
+
+test('(e) URL, drive-letter, tilde and escaping ".." tokens are dropped whole; in-project ".." resolves; plain paths are unchanged', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const prompt = [
+      'See https://example.com/docs/file.mjs for background.',
+      'Windows form C:/Users/chulf/sterling-main/src/drive.mjs is not ours.',
+      'Home form ~/projects/x/src/tilde.mjs is not ours.',
+      `Escape ${dir}/../outside/deep/escape.mjs and ../sibling/src/rel-escape.mjs are not ours.`,
+      `Resolve ${dir}/src/../lib/inrepo.mjs inside the project.`,
+      'Own scripts/plain.mjs, ./src/dot.mjs and **scripts/bold.mjs**.',
+    ].join('\n');
+    stagePre(dir, prompt);
+    const s = subagentStart(dir, { agent_id: 'sub-e' });
+    assert.equal(s.code, 0, `SubagentStart must exit 0; stderr: ${s.stderr}`);
+
+    const entry = entryFor(dir, 'sub-e');
+    assert.equal(entry.files_source, 'free-prose-fallback');
+    assert.deepEqual(
+      [...entry.files].sort(),
+      ['lib/inrepo.mjs', 'scripts/bold.mjs', 'scripts/plain.mjs', 'src/dot.mjs'],
+      'no suffix of a URL, drive, tilde or escaping token is owned'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// (f) A dotted DIRECTORY is never taken as a filename (Codex Sol re-check of
+// (e)): the extractor's filename group accepts 'foo.bar', so a match that
+// stops at a '/' is only part of the path. Owning `foo.bar` as a directory
+// entry would hand the lane all of foo.bar/** through pathOwnedBy. Each token
+// yields exactly its one complete path.
+// ===========================================================================
+
+test('(f) a path through a dotted directory yields only the complete path, never the dotted directory', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const prompt = [
+      `Edit ${dir}/foo.bar/src/a.ts and pkg.v2/src/b.ts.`,
+      'Also ./v1.2/x.mjs.',
+    ].join('\n');
+    stagePre(dir, prompt);
+    const s = subagentStart(dir, { agent_id: 'sub-f' });
+    assert.equal(s.code, 0, `SubagentStart must exit 0; stderr: ${s.stderr}`);
+
+    const entry = entryFor(dir, 'sub-f');
+    assert.equal(entry.files_source, 'free-prose-fallback');
+    assert.deepEqual(
+      [...entry.files].sort(),
+      ['foo.bar/src/a.ts', 'pkg.v2/src/b.ts', 'v1.2/x.mjs'],
+      'only the complete paths are owned; no dotted directory becomes an entry'
+    );
+  } finally {
+    cleanup();
+  }
+});

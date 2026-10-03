@@ -23707,6 +23707,9 @@ function unionCentralTerms(record2, topK) {
     .../* @__PURE__ */ new Set([...narrowCentralTerms(record2, topK), ...extractAxisTerms(axisTitleText(record2), topK)])
   ];
 }
+function recordCentralTerms(record2, opts = {}) {
+  return unionCentralTerms(record2, opts.topK ?? AXIS_RECORD_TOP_K);
+}
 function coveredCentralTerms(central, outgoingText) {
   const words = [
     ...new Set(String(outgoingText ?? "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length >= AXIS_MIN_TERM_LEN))
@@ -28489,10 +28492,13 @@ var SterlingTools = class _SterlingTools {
       citationWarnings.push(promotionWarning);
     const mountedDomains = this.mountedDomainList();
     const sameSubject = _SterlingTools.SAME_SUBJECT_TYPES.includes(type) ? this.sameSubjectDigest(registered ? registered.fts(parsed) : "", /* @__PURE__ */ new Set([record2.id])) : void 0;
+    const findability = this.findabilityDisclosure(record2);
+    citationWarnings.push(...findability.warnings);
     return {
       record: record2,
       check_skipped: skipped,
       warnings: citationWarnings,
+      ...findability.central,
       ...sameSubject ? { same_subject: sameSubject } : {},
       ...mountedDomains.length ? { mounted_domains: mountedDomains } : {},
       ...claimsCheck
@@ -29425,6 +29431,34 @@ var SterlingTools = class _SterlingTools {
     ];
   }
   /**
+   * FINDABILITY DISCLOSURE for knowledge_create/knowledge_update receipts
+   * (decision make-records-findable-authoring-rule-disclosure-lint-then-blind-
+   * experiment, part 2). Reports the record's central terms — recordCentralTerms
+   * in packages/store/src/axis.ts, the same set knowledge_preflight reports as
+   * `central` and H20 prints as "central to the record" — and warns when a
+   * path-carrying type has no file paths, because push-by-file can then never
+   * surface it. "Missing" is absent or empty; whether listed paths exist on
+   * disk is not checked. Disclosure only: it never refuses or alters a write.
+   * todo/board items and the types the decision does not name are skipped.
+   */
+  findabilityDisclosure(record2) {
+    const r = record2;
+    const central = recordCentralTerms(r);
+    const pathField = {
+      feature_article: "files[].path",
+      decision: "file_keys",
+      anti_pattern: "file_keys",
+      research_finding: "file_keys",
+      reference_material: "location"
+    };
+    const field = pathField[record2.type];
+    const hasPaths = record2.type === "reference_material" ? typeof r.location === "string" && r.location.length > 0 : (RECORD_TYPES[record2.type]?.fileKeys(r) ?? []).length > 0;
+    return {
+      central: central.length > 0 ? { central_terms: central } : {},
+      warnings: field && !hasPaths ? [`no file paths: push by file will never surface this record (set ${field}; knowledge_preflight and subject matching still can)`] : []
+    };
+  }
+  /**
    * History rotation disclosure (board 0697c6bd; middle-out since ab87fe24).
    * knowledgeUpdate bounds a feature_article's history to the first
    * article_history_genesis_entries plus the newest remainder at the
@@ -29489,7 +29523,9 @@ var SterlingTools = class _SterlingTools {
     warnings.push(...this.citedIdWarnings(JSON.stringify(body)));
     if (before)
       warnings.push(...this.openReconcileLaneWarnings(this.supersedeChain(before)));
-    return { record: record2, warnings, ...same_subject ? { same_subject } : {}, ...claims_check ? { claims_check } : {} };
+    const findability = this.findabilityDisclosure(record2);
+    warnings.push(...findability.warnings);
+    return { record: record2, warnings, ...findability.central, ...same_subject ? { same_subject } : {}, ...claims_check ? { claims_check } : {} };
   }
   /**
    * Digest projection for WRITE responses (2026-08-09 consuming-project
