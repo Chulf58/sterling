@@ -35,7 +35,13 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // territory" bullet cites the live decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round
 // in place of a slug no store holds, and "Knowledge is born structured" says the background worker
 // closes already-paid reconcile_needed items and /sterling:drain works the rest.
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'ca88355fd97b098b66275f4a2cd4cc37869663f92a415e76b4470b0fc1c97c32';
+// Moved 2026-10-03 (from ca88355f…): three changes the user ruled through the question form.
+// A new bullet, "A ruling exists only if it came through the question form". The preflight bullet
+// gains the phrasing rule (decision
+// pull-quality-closed-at-the-floor-of-retrieval-mechanics-phrasing-rule-no-new-mechanism). The
+// sparring bullet says one consult before a non-trivial design settles and that a diff goes to one
+// reviewer, and the "TWO-ROUND ADVERSARIAL DESIGN SPARRING" bullet is removed.
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'b37e87bf9971547ac531cecf21c6d100f6328b35218c7f9020460918d81bef70';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);
