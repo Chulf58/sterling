@@ -17,11 +17,10 @@ import { createSignal, For, Index, Show, untrack } from 'solid-js';
 import { useKeyboard, useTerminalDimensions } from '@opentui/solid';
 import { openDashboard, type DashboardController } from '@sterling/tui/dist/controller.js';
 import { TASKS_TAB, type DashboardState } from '@sterling/tui/dist/state.js';
+import { ANIMATION_MS } from '@sterling/tui/dist/avatars/index.js';
 import { SIDEBAR_WIDTH, bodyLinesFor, emptyAvatars, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, readSubagents, sidebarLines, stepAvatars, subagentSpanLines, type AvatarState, type Guarded, type KeyLike, type ModelRefLike, type Span, type SpanLine, type SubagentRow, type SubagentSession, type TokenUsageLike } from './view.ts';
 
 const ROUTE = 'sterling';
-/** the portraits animate at about 3 Hz; everything else follows the 1 Hz tick */
-const FRAME_MS = 333;
 /** OpenCode events that change a sub-agent row: a child appears, starts or ends a run, finishes a step. */
 const SUBAGENT_EVENTS = ['session.created', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.step.ended'];
 const COMMAND = 'sterling.open';
@@ -350,7 +349,7 @@ export default {
     // the portraits move at about 3 Hz, and only while a sub-agent is running
     const animation = setInterval(() => {
       if (anyRunning) setFrame((n) => n + 1);
-    }, FRAME_MS);
+    }, ANIMATION_MS);
     return () => {
       clearInterval(timer);
       clearInterval(animation);

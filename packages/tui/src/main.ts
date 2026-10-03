@@ -9,6 +9,7 @@ import { bannerLines } from './banner.js';
 import { clearPixels, draw, keyToEvent, mouseToEvent, paintPixels } from './render.js';
 import { composeSubagentBlock, createSubagentTracker, type BlockPixel, type SubagentBlock, type SubagentView } from './subagents.js';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
+import { ANIMATION_MS } from './avatars/sprite.js';
 
 const smoke = process.env.STERLING_TUI_SMOKE === '1';
 if (!process.stdout.isTTY && !smoke) {
@@ -63,7 +64,6 @@ const subagents = createSubagentTracker(dirname(dirname(storePath)));
 let shownView: SubagentView = { availability: 'absent', active: 0, agents: [] };
 // the screen row the body starts on, taken from the last drawn state: the cards start there
 let bodyTop = 0;
-const ANIMATION_MS = 333; // about 3 Hz, only while a subagent is running
 
 function fullBodyLines(): number {
   return visibleBodyLines(term.height, bannerLines(term.width, showBanner).length);
