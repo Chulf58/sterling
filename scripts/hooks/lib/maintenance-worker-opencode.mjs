@@ -56,6 +56,28 @@ export const OPENCODE_DENIED_MCP = [
 export const OPENCODE_PROMPT_NOTE =
   '\nHOST NOTE (OpenCode): the sterling tools named above are called inside the execute tool as tools.sterling.<name>, for example tools.sterling.knowledge_get({ id }). Make exactly ONE sterling call per execute call, so the runner can pair each call with its own result. Read is the read tool ({ path }) and Grep is the grep tool ({ pattern, path }).\n';
 
+/** The tools sentence of templates/maintenance-worker-prompt.md, which the
+ *  claude host sends unchanged. */
+export const CLAUDE_TOOLS_LINE =
+  'Tools you may use: mcp__sterling__maintenance_query, mcp__sterling__knowledge_get, mcp__sterling__maintenance_remove, mcp__sterling__knowledge_line_ref_fix, Read and Grep. Nothing else is granted, so do not try other tools.';
+/** Its OpenCode replacement. The model sees no mcp__sterling__* tool here, only
+ *  `execute`: told "nothing else is granted" with the execute route mentioned
+ *  only in the trailing note, openai/gpt-6-luna made no tool call in 2 of 2 live
+ *  runs (board item d1149d0e), so the route comes first. */
+export const OPENCODE_TOOLS_LINE =
+  "Tools you may use: OpenCode's `execute` tool, which is the one permitted way to reach the Sterling tools. Inside execute, call them as tools.sterling.maintenance_query, tools.sterling.knowledge_get, tools.sterling.maintenance_remove and tools.sterling.knowledge_line_ref_fix, one Sterling call per execute call; the mcp__sterling__<name> names below are these same tools. Read is the read tool ({ path }) and Grep is the grep tool ({ pattern, path }). Nothing else is granted, so do not try other tools.";
+
+/** The OpenCode prompt: the shipped prompt with its tools line rewritten for
+ *  this host, plus the host note. A prompt without the shipped tools line is
+ *  refused rather than sent with only the note. */
+export function opencodePrompt(prompt) {
+  const parts = String(prompt).split(CLAUDE_TOOLS_LINE);
+  if (parts.length !== 2) {
+    throw new Error(`the worker prompt must hold the shipped tools line exactly once for the OpenCode runner to rewrite it (found ${parts.length - 1}): "${CLAUDE_TOOLS_LINE}"`);
+  }
+  return parts.join(OPENCODE_TOOLS_LINE) + OPENCODE_PROMPT_NOTE;
+}
+
 /** The OpenCode config for the child (passed as OPENCODE_CONFIG_CONTENT):
  *  the sterling MCP server from the plugin's wiring (`mcpConfig` is the JSON
  *  resolveMcpConfig returns), the deny list, and the model. runWorker refuses

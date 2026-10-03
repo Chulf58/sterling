@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { judgedVerdicts, maybeLaunchMaintenanceWorker, runWorker, workerPaths } from '../hooks/lib/maintenance-worker.mjs';
-import { OPENCODE_DENIED_MCP, opencodeStreamJournal } from '../hooks/lib/maintenance-worker-opencode.mjs';
+import { CLAUDE_TOOLS_LINE, OPENCODE_DENIED_MCP, OPENCODE_PROMPT_NOTE, OPENCODE_TOOLS_LINE, opencodePrompt, opencodeStreamJournal } from '../hooks/lib/maintenance-worker-opencode.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -31,7 +31,8 @@ function fixture() {
     join(plugin, '.claude-plugin', 'sterling-mcp.json'),
     JSON.stringify({ mcpServers: { sterling: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/mcp/sterling-mcp.mjs', '--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db'] } } })
   );
-  writeFileSync(join(plugin, 'templates', 'maintenance-worker-prompt.md'), 'PROMPT BODY');
+  // The shipped tools line is in the stub: the OpenCode runner rewrites it and refuses a prompt without it.
+  writeFileSync(join(plugin, 'templates', 'maintenance-worker-prompt.md'), `PROMPT BODY\n${CLAUDE_TOOLS_LINE}\n`);
   writeFileSync(join(plugin, 'scripts', 'maintenance-worker-run.mjs'), '// runner stub, never executed by these tests\n');
   mkdirSync(join(project, '.sterling', 'transient'), { recursive: true });
   return { base, plugin, project, paths: workerPaths(project), cleanup: () => rmSync(base, { recursive: true, force: true }) };
@@ -114,6 +115,8 @@ test('[gate] an OpenCode run with knowledge_get on the article and a read of its
     assert.deepEqual(call.args.slice(0, 7), ['run', '--standalone', '--format', 'json', '--auto', '--model', 'anthropic/claude-sonnet-5-5']);
     assert.match(call.args[7], /^PROMPT BODY/);
     assert.match(call.args[7], /HOST NOTE \(OpenCode\)/);
+    assert.ok(call.args[7].includes(OPENCODE_TOOLS_LINE), 'the OpenCode tools line replaces the shipped one');
+    assert.ok(!call.args[7].includes(CLAUDE_TOOLS_LINE), 'the claude tools line does not reach the OpenCode run');
     assert.match(call.args[7], /item-a/, 'the eligible list reaches the prompt');
     assert.equal(call.opts.env.PWD, fx.project, 'the session directory follows PWD (measured)');
     assert.equal(call.opts.env.STERLING_MAINTENANCE_WORKER, '1');
@@ -411,6 +414,54 @@ test('--dry-run with an unknown host or no recorded opencode binary prints a ref
       assert.equal(dry.dry_run, true);
       assert.match(dry.refused, re);
     }
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// ------------------------------------------------------------ prompt (board item d1149d0e)
+
+const shippedPrompt = () => readFileSync(join(repo, 'templates', 'maintenance-worker-prompt.md'), 'utf8');
+
+test('[d1149d0e] on the OpenCode host the shipped tools line says up front that the Sterling tools are reached only through execute, as tools.sterling.<name>; the rest of the prompt is unchanged', () => {
+  const shipped = shippedPrompt();
+  assert.equal(shipped.split(CLAUDE_TOOLS_LINE).length, 2, 'the shipped prompt holds the claude tools line exactly once');
+  const p = opencodePrompt(shipped);
+  assert.ok(!p.includes(CLAUDE_TOOLS_LINE));
+  const toolsLine = p.split('\n').find((l) => l.startsWith('Tools you may use:'));
+  assert.ok(toolsLine.startsWith(OPENCODE_TOOLS_LINE));
+  assert.match(toolsLine, /^Tools you may use: OpenCode's `execute` tool/, 'execute is named first');
+  assert.match(toolsLine, /one permitted way to reach the Sterling tools/);
+  for (const name of ['maintenance_query', 'knowledge_get', 'maintenance_remove', 'knowledge_line_ref_fix']) assert.ok(toolsLine.includes(`tools.sterling.${name}`), name);
+  assert.equal(p, shipped.replace(CLAUDE_TOOLS_LINE, () => OPENCODE_TOOLS_LINE) + OPENCODE_PROMPT_NOTE, 'only the tools line changes, and the host note is appended');
+});
+
+test('[d1149d0e] a prompt without the shipped tools line is refused on the OpenCode host: nothing spawned, a failed run naming the line', async () => {
+  const fx = fixture();
+  try {
+    assert.throws(() => opencodePrompt('PROMPT BODY'), /tools line/);
+    writeFileSync(join(fx.plugin, 'templates', 'maintenance-worker-prompt.md'), 'PROMPT BODY');
+    const child = fakeOpencode([text(owes())]);
+    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: child.fn }), 1);
+    assert.equal(child.calls.length, 0, 'no opencode run starts with a prompt that would mislead it');
+    assert.equal(lastRun(fx).ok, false);
+    assert.match(lastRun(fx).error, /tools line/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[d1149d0e] the claude host prompt is byte-identical to the shipped prompt file: the OpenCode rewrite never reaches it', async () => {
+  const fx = fixture();
+  try {
+    const shipped = shippedPrompt();
+    writeFileSync(join(fx.plugin, 'templates', 'maintenance-worker-prompt.md'), shipped);
+    const printed = [];
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, dryRun: true, spawn: () => assert.fail('dry run must not spawn'), out: (s) => printed.push(s) }), 0);
+    const dry = JSON.parse(printed[0]);
+    assert.equal(dry.host, 'claude');
+    assert.equal(dry.argv[0], '-p');
+    assert.equal(dry.argv[1], shipped);
   } finally {
     fx.cleanup();
   }
