@@ -46,6 +46,7 @@ If nothing exists, say so and offer to record one once the discussion resolves.
 
 - **The old decision was simply wrong or incomplete** → `knowledge_update` (fix-forward, same id — ids are permanent across updates; only the version bumps). For a long string field, prefer `knowledge_edit(id, field, find, replace)` over a full retransmit — `find` must match exactly once. `status`/`superseded_by` are server-owned and refused if you pass them.
 - **A genuine duplicate** (two records describe the same thing) → `knowledge_retire(id, in_favor_of)`, pointing at the survivor. This is narrow — it is not a way to discard a merely-wrong record; use `knowledge_update` for that. Never create a replacement beside the original and leave both live: two records under one slug is worse than one wrong record, because retrieval serves both and they contradict.
+- **A ruling replaced by a later one** (decision, anti_pattern, research_finding) → `knowledge_supersede(old_id, fields)`; a slugless `fields` inherits the slug.
 
 ## What makes a good decision record
 
