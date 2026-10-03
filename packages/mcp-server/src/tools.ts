@@ -4167,7 +4167,7 @@ export class SterlingTools {
           if (!stat && this.parkedOnRef(rel, tree.root).status !== 'parked') {
             const mintFailed = this.mintAtRead({
               reason: 'refresh_reference',
-              text: `refresh reference '${r.title}' — ${rel} no longer exists on disk; repoint location, supersede the reference, or retire it`,
+              text: `refresh reference '${r.title}' — ${rel} no longer exists on disk; repoint location, supersede it with a closing note (knowledge_supersede with type: 'decision' or 'research_finding'), or retire it into a duplicate`,
               file_keys: [rel],
               feature_link: r.id,
             });
