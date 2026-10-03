@@ -9679,7 +9679,7 @@ var init_resolve = __esm({
 // scripts/init-impl.mjs
 init_dist();
 init_dist2();
-import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync14, writeFileSync as writeFileSync6, appendFileSync as appendFileSync3, statSync as statSync5, unlinkSync as unlinkSync5, renameSync as renameSync2 } from "node:fs";
+import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync14, writeFileSync as writeFileSync6, appendFileSync as appendFileSync3, statSync as statSync5, unlinkSync as unlinkSync5, renameSync as renameSync2, realpathSync as realpathSync6 } from "node:fs";
 import { spawnSync as spawnSync10 } from "node:child_process";
 import { join as join21, resolve as resolve6, dirname as dirname9, basename as basename2 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
@@ -10698,6 +10698,8 @@ function isSterlingClone(root, pluginRoot2) {
   return JSON.parse(readContained(root, manifest)).name === "sterling";
 }
 var PROJECT_MODES = ["hobby", "work"];
+var ProjectModeError = class extends Error {
+};
 var CONFIG_REL = ".sterling/config.json";
 function readRawConfig(root, ErrorClass, subject) {
   const where = `${fwd(resolve3(root))}/${CONFIG_REL}`;
@@ -10712,6 +10714,14 @@ function readRawConfig(root, ErrorClass, subject) {
     throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
   }
   return { where, parsed };
+}
+function readProjectMode(root) {
+  const { where, parsed } = readRawConfig(root, ProjectModeError, "the project mode");
+  if (parsed === void 0 || parsed.mode === void 0) return "hobby";
+  if (!PROJECT_MODES.includes(parsed.mode)) {
+    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  }
+  return parsed.mode;
 }
 var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
 var HANDOFF_OFF_DETAIL = "handoff files are off (config.handoff.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted)";
@@ -12794,6 +12804,15 @@ try {
 } catch (e) {
   fail(`init REFUSED: ${e.message}`, 2);
 }
+var invokingGiven;
+var invokingFlag;
+try {
+  invokingGiven = hasFlag("--invoking-project");
+  invokingFlag = arg("--invoking-project");
+} catch (e) {
+  fail(`init REFUSED: ${e.message}`, 2);
+}
+if (invokingGiven && !invokingFlag) fail("init REFUSED: --invoking-project needs a directory value", 2);
 var declaredToolchains = argAll("--toolchain").map((spec) => {
   const [adapter, globs] = spec.split(":");
   return { adapter, path_globs: (globs ?? "").split(",").filter(Boolean) };
@@ -12856,6 +12875,33 @@ if (!recorded) {
   if (!declaredToolchains.length) fail(`init REFUSED: at least one --toolchain <adapter>:<globs> declaration is required \u2014 ${noConfigAt} (\xA79.1)`, 2);
   if (!stackTagsFlag.length) fail(`init REFUSED: --stack-tags is required \u2014 ${noConfigAt} (ask, don\u2019t guess \u2014 \xA712 mini-grill)`, 2);
 }
+var sameDir = (a, b) => {
+  const real2 = (d) => {
+    try {
+      return realpathSync6(d);
+    } catch {
+      return resolve6(d);
+    }
+  };
+  return fwd6(real2(a)) === fwd6(real2(b));
+};
+var inheritedFrom;
+var inheritedMode;
+if (invokingGiven && !recorded && !modeFlagGiven) {
+  const invoking = resolve6(invokingFlag);
+  if (!sameDir(invoking, target)) {
+    if (!existsSync12(join21(invoking, ".sterling", "config.json"))) {
+      fail(`init REFUSED: --invoking-project names a directory that is not a Sterling project \u2014 '${fwd6(invoking)}' has no .sterling/config.json. Pass the root of the project this session belongs to, or drop the flag and pass --mode hobby|work`, 2);
+    }
+    try {
+      inheritedMode = readProjectMode(invoking);
+    } catch (e) {
+      if (!(e instanceof ProjectModeError) && !(e instanceof ContainmentError)) throw e;
+      fail(`init REFUSED: the invoking project's mode cannot be inherited \u2014 ${e.message}. Fix it, or pass --mode hobby|work`, 2);
+    }
+    inheritedFrom = fwd6(invoking);
+  }
+}
 var baked = recorded ? recorded.toolchains : await resolveToolchains(declaredToolchains);
 var eff = recorded ? {
   stackTags: recorded.stack_tags,
@@ -12895,7 +12941,7 @@ var expectedConfig = parseConfig({
   // recorded declaration like the ones above, switched in the TUI System tab: a
   // work project's config is not "hand-edited" for carrying it. A fresh config
   // takes --mode, else the explicit 'hobby' default.
-  mode: recorded ? recorded.mode : modeFlag ?? "hobby",
+  mode: recorded ? recorded.mode : modeFlag ?? inheritedMode ?? "hobby",
   // the handoff setting (decision
   // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) is
   // a recorded declaration too, switched in the TUI System tab. A fresh config
@@ -12956,7 +13002,7 @@ if (recorded) {
 }
 var modeLines = [];
 if (!recorded) {
-  modeLines.push(modeFlagGiven ? `mode: ${modeFlag} (set by --mode)` : "mode: hobby (defaulted \u2014 no --mode was given; change it in the TUI System tab)");
+  modeLines.push(modeFlagGiven ? `mode: ${modeFlag} (set by --mode)` : inheritedFrom !== void 0 ? `mode: ${inheritedMode} (inherited from the invoking project ${inheritedFrom})` : "mode: hobby (defaulted \u2014 no --mode was given; change it in the TUI System tab)");
 } else {
   const recordedMode = PROJECT_MODES.includes(recorded.mode) ? recorded.mode : JSON.stringify(recorded.mode);
   modeLines.push(`mode: ${recordedMode} (kept \u2014 the recorded config wins)`);
