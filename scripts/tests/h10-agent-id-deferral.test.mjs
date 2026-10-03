@@ -116,7 +116,7 @@ function writeTouches(dir, touches) {
   }
   writeFileSync(
     join(dir, '.sterling', 'transient', 'touches.json'),
-    JSON.stringify(touches.map(({ path, agent_id }) => (agent_id ? { path, at: NOW, agent_id } : { path, at: NOW })))
+    JSON.stringify(touches.map(({ path, agent_id, at }) => (agent_id ? { path, at: at ?? NOW, agent_id } : { path, at: at ?? NOW })))
   );
 }
 
@@ -132,9 +132,9 @@ const row = (agentId, over = {}) => ({
   ...over,
 });
 
-const laneAndMainTouches = (agentId = LANE) => [
-  { path: ALPHA, agent_id: agentId },
-  { path: BETA, agent_id: agentId },
+const laneAndMainTouches = (agentId = LANE, laneAt) => [
+  { path: ALPHA, agent_id: agentId, at: laneAt },
+  { path: BETA, agent_id: agentId, at: laneAt },
   { path: GAMMA },
   { path: DELTA },
 ];
@@ -192,6 +192,103 @@ test('(2b) the same agent_id on a row past the lease (status unknown, not presum
     assert.equal(r.code, 2, `an expired lease is not a licence to defer; stderr: ${r.stderr}`);
     const s = demandSection(r);
     for (const p of [ALPHA, BETA]) assert.match(s, re(p), `${p} is demanded`);
+  } finally {
+    cleanup();
+  }
+});
+
+// Decision h10-lane-liveness-from-recent-touches-past-the-lease: the register's
+// `at` is never refreshed, so a lane running past the lease is kept alive by its
+// own recent H7 touches (stale_minutes defaults to 60). (2b) above is the
+// control: its touches are months old, so the lane still ages out.
+test('(2c) a row past the lease whose agent_id has a RECENT touch counts as running: its touches defer, with no unknown note', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeTouches(dir, laneAndMainTouches(LANE, agoISO(2)));
+    const reg = [row(LANE, { at: agoISO(120) })];
+    writeRegister(dir, reg);
+
+    const r = stopOnce(dir);
+    assert.equal(r.code, 0, `ALPHA and BETA belong to a lane that is still writing; stderr: ${r.stderr}`);
+    assert.doesNotMatch(out(r), /article demand/i);
+    const d = disclosed(r, dir);
+    assert.match(d, /deferred: 2 file\(s\)/);
+    assert.match(d, new RegExp(LANE));
+    assert.doesNotMatch(d, /dispatch_status_unknown/, 'a lane kept alive by its writes is not an unknown-status dispatch');
+    assert.deepEqual(JSON.parse(readFileSync(registerPath(dir), 'utf8')), reg, 'H10 never mutates the dispatch register');
+  } finally {
+    cleanup();
+  }
+});
+
+test('(2d) a row past the lease whose newest touch is itself older than the lease still ages out', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeTouches(dir, laneAndMainTouches(LANE, agoISO(90)));
+    writeRegister(dir, [row(LANE, { at: agoISO(120) })]);
+
+    const r = stopOnce(dir);
+    assert.equal(r.code, 2, `a lane that stopped writing loses its deferral; stderr: ${r.stderr}`);
+    const s = demandSection(r);
+    for (const p of [ALPHA, BETA]) assert.match(s, re(p), `${p} is demanded`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('(2e) a recent touch by ANOTHER agent_id does not keep this lane alive', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeTouches(dir, laneAndMainTouches('some-other-agent', agoISO(2)));
+    writeRegister(dir, [row(LANE, { at: agoISO(120) })]);
+
+    const r = stopOnce(dir);
+    assert.equal(r.code, 2, `stderr: ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// The liveness evidence is read from the claimed touches BEFORE H10's git
+// filter drops a tracked, unchanged path. A lane whose recent write (ALPHA) was
+// committed has no touch left after the filter; its older uncommitted write
+// (BETA) must still be deferred to it, because the lane is still running.
+test('(2f) a lane whose RECENT write was committed (dropped by the git filter) is still running: its older uncommitted touch defers', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const git = (...args) => {
+      const g = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+      assert.equal(g.status, 0, `git ${args.join(' ')}: ${g.stderr}`);
+      return g.stdout.trim();
+    };
+    writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
+    git('init', '-q');
+    git('config', 'user.email', 'h10@sterling.test');
+    git('config', 'user.name', 'H10 Test');
+    git('config', 'commit.gpgsign', 'false');
+    git('config', 'core.autocrlf', 'false');
+    writeTouches(dir, [{ path: ALPHA }]);
+    git('add', '-A');
+    git('commit', '-q', '-m', 'lane commits alpha');
+    writeFileSync(
+      join(dir, '.sterling', 'transient', 'git-settled.json'),
+      JSON.stringify({ sha: git('rev-parse', 'HEAD'), dirty: {}, at: agoISO(30) })
+    );
+    writeTouches(dir, [
+      { path: ALPHA, agent_id: LANE, at: agoISO(2) },
+      { path: BETA, agent_id: LANE, at: agoISO(90) },
+      { path: GAMMA },
+      { path: DELTA },
+    ]);
+    writeRegister(dir, [row(LANE, { at: agoISO(120) })]);
+
+    const r = stopOnce(dir);
+    const d = disclosed(r, dir);
+    assert.match(d, new RegExp(`deferred: 1 file\\(s\\) owned by live dispatch\\(es\\) \\[${LANE}\\]: ${BETA.replace(/[.]/g, '\\.')}`), `BETA is deferred to the lane that is still writing: ${d}`);
+    const demanded = r.stderr.includes('article demand') ? demandSection(r) : '';
+    assert.doesNotMatch(demanded, re(BETA), 'BETA is not demanded');
+    assert.match(demanded, re(GAMMA), 'the conductor-written files are still demanded (the demand ran)');
+    assert.doesNotMatch(d, /dispatch_status_unknown/, 'a lane kept alive by its committed writes is not an unknown-status dispatch');
   } finally {
     cleanup();
   }

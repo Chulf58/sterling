@@ -4720,7 +4720,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, openQuestionSchema, attestationSchema, SYSTEM_REASONS, DRAIN_VERBS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, DIGEST_CLIP, clipped, RECORD_TYPES, HEADLINE_CLIP, NAME_CLIP, clipName, displayHandle, EXAMPLE_MAX_DEPTH, EXAMPLE_MAX_CHARS;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, DRAIN_VERBS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, DIGEST_CLIP, clipped, RECORD_TYPES, HEADLINE_CLIP, NAME_CLIP, clipName, displayHandle, EXAMPLE_MAX_DEPTH, EXAMPLE_MAX_CHARS;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -5059,6 +5059,7 @@ var init_records = __esm({
       notes: external_exports.string().optional(),
       file_keys: external_exports.array(repoPath).optional()
     }).superRefine(refineSupersession);
+    BOARD_NEEDS = ["user", "grill", "investigation"];
     SYSTEM_REASONS = [
       "reconcile_needed",
       "stale_research",
@@ -5176,7 +5177,13 @@ var init_records = __esm({
       // like every other todo field, so it needs no migration. Existence of each
       // blocker is checked at the tool layer when written; a blocker removed later
       // reads as closed, it is never rewritten out of this list.
-      blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+      blocked_by: external_exports.array(external_exports.string().min(1)).optional(),
+      // What a user item waits on besides its blockers (decision
+      // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+      // 'investigation' still auto-starts, as a researcher lane; 'user' and
+      // 'grill' wait for the user. Not a progress status: `status` keeps meaning
+      // supersession only. Absent means nothing beyond the blockers.
+      needs: external_exports.enum(BOARD_NEEDS).optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       if (rec.source === "system" && !rec.system_reason) {
@@ -5187,6 +5194,13 @@ var init_records = __esm({
           code: external_exports.ZodIssueCode.custom,
           path: ["blocked_by"],
           message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+        });
+      }
+      if (rec.needs !== void 0 && rec.source === "system") {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["needs"],
+          message: "needs marks source:'user' board tasks only \u2014 maintenance-queue items never carry it"
         });
       }
       if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
@@ -5973,6 +5987,7 @@ __export(dist_exports, {
   AGENT_MODEL_KEY: () => AGENT_MODEL_KEY,
   AGENT_TOOL_NAME_RE: () => AGENT_TOOL_NAME_RE,
   AUTHOR_RE: () => AUTHOR_RE,
+  BOARD_NEEDS: () => BOARD_NEEDS,
   BUILD_ID_FILE: () => BUILD_ID_FILE,
   DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS: () => DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS,
   DIGEST_CLIP: () => DIGEST_CLIP,
@@ -6275,6 +6290,11 @@ var init_mounted = __esm({
        *  precheck asks the project store only (same reasoning as the enqueue above). */
       enqueueWouldBeNoop(input) {
         return this.project.enqueueWouldBeNoop(input);
+      }
+      /** Board readiness is project-local like the board itself, so the project
+       *  store answers it (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start). */
+      boardReadiness(items) {
+        return this.project.boardReadiness(items);
       }
       storeFor(scope) {
         if (scope === "project")
@@ -7167,6 +7187,7 @@ __export(dist_exports2, {
   buildReconcileText: () => buildReconcileText,
   catalogStatus: () => catalogStatus,
   classifyClaimPath: () => classifyClaimPath,
+  compareBoardReadiness: () => compareBoardReadiness,
   createDomain: () => createDomain,
   declaredCaptureTarget: () => declaredCaptureTarget,
   decodeLiveRecordRow: () => decodeLiveRecordRow,
@@ -7244,6 +7265,19 @@ function deepReplaceString(value, from, to) {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
   }
   return value;
+}
+function compareBoardReadiness(a, b) {
+  const pa = PRIORITY_RANK[a.priority ?? "normal"] ?? 1;
+  const pb = PRIORITY_RANK[b.priority ?? "normal"] ?? 1;
+  if (pa !== pb)
+    return pa - pb;
+  if (a.updated_at !== b.updated_at)
+    return a.updated_at < b.updated_at ? 1 : -1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+function boardItemHandle(rec) {
+  const label = boardDisplayLabel(rec.text, rec.slug);
+  return label ? displayHandle(label, rec.id) : `(unnamed board item) (${rec.id.slice(0, 8)})`;
 }
 function rankTermDedupeKey(term) {
   const isPrefix = term.endsWith("*") && term.length > 1;
@@ -7421,7 +7455,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var DDL, SUPPORTED_SCHEMA_VERSION, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, JournalDemotionRefusedError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var DDL, SUPPORTED_SCHEMA_VERSION, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, JournalDemotionRefusedError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -7579,6 +7613,7 @@ CREATE TABLE IF NOT EXISTS store_meta (
       }
     };
     CATALOG_DAY_MS = 864e5;
+    PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
     MAX_RANK_TERMS = 16;
     rankTerms = external_exports.array(external_exports.string().regex(new RegExp(`^\\S{1,${AXIS_MAX_TERM_LEN}}$`), `rank_terms must be single keywords (no whitespace, \u2264${AXIS_MAX_TERM_LEN} chars)`)).transform((terms) => {
       const seen = /* @__PURE__ */ new Set();
@@ -8831,6 +8866,64 @@ CREATE TABLE IF NOT EXISTS store_meta (
           WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
         return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
+      }
+      /**
+       * THE ONE READINESS FUNCTION (decision
+       * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start,
+       * AMENDED (a)). board_get/board_query's blocked_by_state, H1's three groups,
+       * H20's ready line, the TUI cards and the OpenCode plugin all read this, so
+       * "open blocker" and "ready" have one definition.
+       *
+       * `items` defaults to every live user board item (a system item is never
+       * returned). Passed explicitly, each user todo given is judged against the
+       * LIVE board: a blocker is open while a live todo carries its slug, and
+       * `unblocks` lists live user items whose blocked_by names the item. Read
+       * only; the stored blocked_by is never rewritten. No cycle detection.
+       */
+      boardReadiness(items) {
+        const total = this.count({ types: ["todo"], source: "user" });
+        const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+        const bySlug = /* @__PURE__ */ new Map();
+        for (const t of live)
+          if (t.slug)
+            bySlug.set(t.slug, t);
+        const dependents = /* @__PURE__ */ new Map();
+        for (const t of live) {
+          for (const slug of new Set(t.blocked_by ?? [])) {
+            const list = dependents.get(slug);
+            if (list)
+              list.push(t);
+            else
+              dependents.set(slug, [t]);
+          }
+        }
+        const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
+        const targets = items ?? live;
+        return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+          const blockers = [];
+          const blockersOpen = [];
+          for (const slug of t.blocked_by ?? []) {
+            const holder = openBlocker(slug);
+            blockers.push({ slug, state: holder ? "open" : "closed" });
+            if (holder)
+              blockersOpen.push(boardItemHandle(holder));
+          }
+          const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+          const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+          return {
+            id: t.id,
+            ...t.slug ? { slug: t.slug } : {},
+            name: boardItemHandle(t),
+            ...t.priority ? { priority: t.priority } : {},
+            updated_at: t.updated_at,
+            file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+            ...t.needs ? { needs: t.needs } : {},
+            blockers,
+            blockers_open: blockersOpen,
+            unblocks,
+            state
+          };
+        });
       }
       /**
        * Every SUPERSEDED record carrying this exact slug, newest first — the

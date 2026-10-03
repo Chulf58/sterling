@@ -256,7 +256,7 @@ export type BoardProjection = Projection | 'headline' | 'text';
  */
 export const BOARD_TEXT_CLIP = 240;
 
-const BOARD_TEXT_FIELDS = ['id', 'slug', 'objective', 'source', 'system_reason', 'status', 'priority', 'feature_link', 'blocked_by', 'updated_at'] as const;
+const BOARD_TEXT_FIELDS = ['id', 'slug', 'objective', 'source', 'system_reason', 'status', 'priority', 'feature_link', 'blocked_by', 'needs', 'updated_at'] as const;
 
 function textRowRecord(record: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -382,7 +382,7 @@ export interface ArtifactEvidence {
  * `slug`, if present on the record, is untouched — this type adds a field,
  * it never widens or reshapes an existing one.
  */
-export type BoardGetResult = DurableRecord & { label?: string; blocked_by_state?: BlockerState[] };
+export type BoardGetResult = DurableRecord & { label?: string; blocked_by_state?: BlockerState[]; unblocks?: string[] };
 
 /**
  * One `blocked_by` entry as a reader sees it (decision
@@ -9703,22 +9703,34 @@ export class SterlingTools {
     return slugs;
   }
 
-  /**
-   * Each stored blocker's CURRENT state: open while a live board item still
-   * carries the slug, closed once it has been removed. Read-time only; the
-   * stored list is never rewritten when a blocker closes.
-   */
-  private blockerStates(slugs: readonly string[]): BlockerState[] {
-    return slugs.map((slug) => ({
-      slug,
-      state: this.store.recordsBySlug(slug).some((r) => r.type === 'todo') ? 'open' : 'closed',
-    }));
+  /** The one refusal for needs on a maintenance item, shared by board_add and board_update. */
+  private static needsSystemRefusal(toolName: string): Error {
+    return new Error(
+      `${toolName}: 'needs' marks source:'user' board tasks only — maintenance-queue items are lane-keyed by system_reason and never carry needs`
+    );
   }
 
-  /** blocked_by_state for a record that carries a non-empty blocked_by, else nothing. */
-  private blockedByStateOf(record: DurableRecord): { blocked_by_state?: BlockerState[] } {
-    const list = (record as unknown as { blocked_by?: unknown }).blocked_by;
-    return Array.isArray(list) && list.length ? { blocked_by_state: this.blockerStates(list as string[]) } : {};
+  /**
+   * The read-time board fields for each given record, from the store's ONE
+   * readiness function (store.boardReadiness, decision
+   * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+   * blocked_by_state (each stored blocker slug, open while a live board item
+   * carries it, closed once removed; the stored list is never rewritten) and
+   * unblocks (the live items waiting on this one, as `name (id8)`, decision
+   * 11b8b08c). Each key is present only when non-empty. Computed once per call
+   * over the whole set, never per row.
+   */
+  private boardDerived(records: readonly DurableRecord[]): Map<string, { blocked_by_state?: BlockerState[]; unblocks?: string[] }> {
+    const out = new Map<string, { blocked_by_state?: BlockerState[]; unblocks?: string[] }>();
+    const users = records.filter((r) => (r as unknown as { source?: string }).source === 'user');
+    if (!users.length) return out;
+    for (const r of this.store.boardReadiness(users)) {
+      out.set(r.id, {
+        ...(r.blockers.length ? { blocked_by_state: r.blockers } : {}),
+        ...(r.unblocks.length ? { unblocks: r.unblocks } : {}),
+      });
+    }
+    return out;
   }
 
   boardAdd(
@@ -9731,7 +9743,7 @@ export class SterlingTools {
      */
     opts?: { internalMint?: boolean }
   ): CreateResult & { notice?: string } {
-    const { text, source, objective, measured_at_head, blocked_by, ...rest } = args;
+    const { text, source, objective, measured_at_head, blocked_by, needs, ...rest } = args;
     // Objective grouping (decision foreign_a8d2ce6c): a grouping key for the human's
     // board only — maintenance items are lane-keyed by system_reason.
     if (objective !== undefined && source === 'system') {
@@ -9740,6 +9752,7 @@ export class SterlingTools {
       );
     }
     if (blocked_by !== undefined && source === 'system') throw SterlingTools.blockedBySystemRefusal('board_add');
+    if (needs !== undefined && source === 'system') throw SterlingTools.needsSystemRefusal('board_add');
     // Resolved BEFORE the write, so a refused entry leaves nothing behind.
     const blockers = blocked_by !== undefined ? this.resolveBlockedBy(blocked_by, 'board_add') : [];
     // 'standalone' (exact lowercase) is the declared answer for "not a slice";
@@ -9785,6 +9798,7 @@ export class SterlingTools {
         ...(normalized !== undefined ? { objective: normalized } : {}),
         ...(stampedHead !== undefined ? { measured_at_head: stampedHead } : {}),
         ...(blockers.length ? { blocked_by: blockers } : {}),
+        ...(needs !== undefined ? { needs } : {}),
         ...rest,
       },
       // Forwarded, never derived from `args`: a board_add from the TOOL SURFACE
@@ -10361,6 +10375,8 @@ export class SterlingTools {
           `file_key_check:'unavailable:budget' themselves and their count is a CITATION-ONLY floor; narrow the page (a smaller cap, or offset/cursor) to check them`
       );
     }
+    // blocked_by_state and unblocks for the page, from one readiness read.
+    const boardFields = projection === 'text' || projection === 'full' ? this.boardDerived(records) : new Map();
     const projectRecord = (r: DurableRecord): Record<string, unknown> => {
       const projected =
         projection === 'text'
@@ -10372,7 +10388,7 @@ export class SterlingTools {
               : { ...(r as unknown as Record<string, unknown>) };
       // text and full rows carry each blocker's current state beside the stored
       // blocked_by list (rule 6); headline and digest stay one compact line.
-      const base = projection === 'text' || projection === 'full' ? { ...projected, ...this.blockedByStateOf(r) } : projected;
+      const base = projection === 'text' || projection === 'full' ? { ...projected, ...boardFields.get((r as unknown as { id: string }).id) } : projected;
       const id = (r as unknown as { id: string }).id;
       const warning = warnings.get(id);
       // COMPOSED AFTER THE PROJECTION CLIP, like the provenance warning beside
@@ -10459,7 +10475,7 @@ export class SterlingTools {
    * changed nothing the caller asked for. An empty patch is refused for the
    * same reason: nothing to update is not a no-op success.
    */
-  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective', 'measured_at_head', 'blocked_by'] as const;
+  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective', 'measured_at_head', 'blocked_by', 'needs'] as const;
 
   boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord & { claims_check?: string } {
     // Resolves through the SAME ladder as knowledge_get/board_get (full uuid,
@@ -10488,6 +10504,7 @@ export class SterlingTools {
       if ((old as unknown as { source?: string }).source === 'system') throw SterlingTools.blockedBySystemRefusal('board_update');
       patch = { ...patch, blocked_by: this.resolveBlockedBy(patch.blocked_by, 'board_update', old.id) };
     }
+    if ('needs' in patch && (old as unknown as { source?: string }).source === 'system') throw SterlingTools.needsSystemRefusal('board_update');
     // board-provenance-measured-at-head: a text/file_keys rewrite carries new
     // evidence, so it re-stamps measured_at_head to the CURRENT HEAD — unless
     // the caller explicitly named a measured_at_head in this same patch, which
@@ -10517,6 +10534,8 @@ export class SterlingTools {
     if (next.objective === 'standalone') delete next.objective;
     // An empty blocked_by clears the field to absent, like 'standalone' above.
     if (Array.isArray(next.blocked_by) && next.blocked_by.length === 0) delete next.blocked_by;
+    // needs:'' clears the field to absent, the same way.
+    if (next.needs === '') delete next.needs;
     // old.id (the resolved canonical id), not the caller's possibly-short
     // citation — a mounted domain store's routing (storeHolding) keys off the
     // real id, and a bare prefix would not resolve there.
@@ -10607,8 +10626,8 @@ export class SterlingTools {
   private withDisplayLabel(record: DurableRecord): BoardGetResult {
     const r = record as unknown as { slug?: string; text?: string };
     const label = boardDisplayLabel(r.text, r.slug);
-    const blockers = this.blockedByStateOf(record);
-    return label ? { ...record, label, ...blockers } : { ...record, ...blockers };
+    const derived = this.boardDerived([record]).get(record.id) ?? {};
+    return label ? { ...record, label, ...derived } : { ...record, ...derived };
   }
 
   /**

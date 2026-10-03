@@ -53,6 +53,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "the librarian's grant is for text you drafted, never for a new record.",
     after: "the librarian's grant is for text you drafted, never for a new record. Write every title, trigger and statement to the CLAUDE.md rule \"Author records to be found\", so the record is findable by the words a user would say.",
   },
+  {
+    commit: 'bebb276',
+    date: '2026-10-03',
+    reason: 'plan-the-order-at-intake gains needs, the three H1 groups and the delegation.max_concurrent ceiling (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start)',
+    before: 'Then dispatch every item that is not blocked and shares no write path with another, all in the same response.',
+    after: 'Then dispatch every item that is not blocked and shares no write path with another, all in the same response, up to the lane ceiling `delegation.max_concurrent` (a ceiling, never a quota). An item\'s `needs` says what it waits on besides its blockers: `investigation` still starts, as a researcher lane only, never an implementor; `user` and `grill` wait for the user; absent means nothing. Set `needs` at intake when an item cannot start on its own, and clear it (`needs: ""`) once the user has answered. H1 prints three groups at session start and after a clear (READY, READY FOR RESEARCH, WAITING ON YOU), and H20 adds one `BOARD READY` line at your next dispatch when the ready set has changed. At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling, never past it (decision `board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start`).',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

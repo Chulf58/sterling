@@ -567,7 +567,7 @@ export function presumedActiveEntries(root, ctx) {
   return { availability: 'ok', entries: classified.entries.filter((r) => r.status === 'presumed-active').map((r) => r.entry) };
 }
 
-function formatAge(ageMs) {
+export function formatAge(ageMs) {
   if (ageMs === null || ageMs === undefined || Number.isNaN(ageMs)) return 'age unreadable';
   const mins = Math.floor(ageMs / 60_000);
   if (mins < 1) return '<1m';

@@ -118,15 +118,23 @@ export function probeDirtyPaths(projectDir, files, fileEntries = []) {
 }
 
 /**
- * The one residue line, shared verbatim across H10/H1/H22 so the shape is
- * pinned once: `dispatch <type>:<id> stopped holding uncommitted edits to
- * <paths>; its gates did not complete.` — with a `[tree-state-unverified: …]`
- * marker inserted when the git probe could not run.
+ * The one residue line, shared across H10/H1/H22 so the shape is pinned once:
+ * `dispatch <type>:<id> stopped holding uncommitted edits to <paths>; its gates
+ * did not complete.` — with a `[tree-state-unverified: …]` marker inserted when
+ * the git probe could not run. `stopSeen: false` is H10's orphan path (board
+ * 526710de): the entry outlived its lease but no SubagentStop or kill signature
+ * was seen, and age proves nothing about a lane that may still be running, so
+ * the line says so and keeps "gates did not complete" conditional on a stop.
+ * `registeredAgo` is that entry's age, already formatted.
  */
-export function formatResidueLine(entry, paths, { verified = true, reason = '' } = {}) {
+export function formatResidueLine(entry, paths, { verified = true, reason = '', stopSeen = true, registeredAgo = '' } = {}) {
   const identity = `${entry?.agent_type ?? 'unknown'}:${entry?.agent_id ?? 'unknown'}`;
   const list = (Array.isArray(paths) && paths.length ? paths : ['<no declared files>']).join(', ');
   const marker = verified ? '' : ` [tree-state-unverified${reason ? `: ${reason}` : ''}]`;
+  if (!stopSeen) {
+    const since = registeredAgo ? `registered ${registeredAgo} ago with` : 'registered with';
+    return `dispatch ${identity} holds uncommitted edits to ${list}${marker}; ${since} no SubagentStop seen, it may still be running (check ListAgents) — if it has stopped, its gates did not complete.`;
+  }
   return `dispatch ${identity} stopped holding uncommitted edits to ${list}${marker}; its gates did not complete.`;
 }
 

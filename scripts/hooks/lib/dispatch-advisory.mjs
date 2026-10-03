@@ -187,8 +187,8 @@ const PLURAL_ANAPHOR_TEST = /^(?:those|these|them)$/i;
 // need can go unwarned. Pragmatic tradeoff (board a6b76e8c): a narrower
 // bound would also start missing "no Bash" said one word apart, the
 // measured shape this negator exists to catch.
-const PROHIBITION_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
-const BARE_NEGATOR_RE = String.raw`\b(?:never|no|without)\b`;
+export const PROHIBITION_RE = String.raw`(?:\bdo\s*not\b|\bdon['’]?t\b|\bforbid(?:s|den)?\b|\bdenies\b|\bdenied\b|⛔)`;
+export const BARE_NEGATOR_RE = String.raw`\b(?:never|no|without)\b`;
 const SUBJECT_VERB_RE = String.raw`(?:\bimplement(?:ing|ed|s)?\b|\bfix(?:ing|ed|es)?\b|\breview(?:ing|ed|s)?\b)`;
 
 const PROHIBITION_TEST = new RegExp(PROHIBITION_RE, 'i');

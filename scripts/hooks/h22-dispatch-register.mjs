@@ -40,7 +40,7 @@ import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
 import { extractPathCandidatesRooted, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
 import { deriveAgentTranscript } from './lib/transcript.mjs';
-import { isReviewerClass } from './lib/dispatch-advisory.mjs';
+import { isReviewerClass, hasUnsuppressedMatch, escapeRe, scanClauses, PROHIBITION_RE, BARE_NEGATOR_RE } from './lib/dispatch-advisory.mjs';
 import { probeDirtyPaths, formatResidueLine, claimedResources, fileEntriesOf } from './lib/dispatch-residue.mjs';
 import {
   readRegister,
@@ -81,7 +81,8 @@ function loadExclusiveResourceNames(cwd) {
 //      (files_source 'review-territory');
 //   2. otherwise free-prose extraction over the brief ('free-prose-fallback',
 //      or 'free-prose-malformed-territory' plus a stderr disclosure when a
-//      declaration was present but malformed);
+//      declaration was present but malformed, in which case a path named only
+//      under a prohibition marker is dropped);
 //   3. for a resume, which has no brief, the same agent's most recent prior
 //      round in this session ('resume-inherited');
 //   4. otherwise nothing ('unattributable'), until the Post that binds the
@@ -94,8 +95,50 @@ function loadExclusiveResourceNames(cwd) {
 
 // An absolute candidate keeps its leading '/', so normalizeRegisterPaths makes
 // an in-project one repo-relative and drops one outside the project.
-function candidatesFromBlocks(blocks) {
-  return [...new Set(blocks.flatMap((b) => extractPathCandidatesRooted(b.prompt)))];
+function candidatesFromBlocks(blocks, { skipNegated = false } = {}) {
+  const found = blocks.flatMap((b) =>
+    extractPathCandidatesRooted(b.prompt).filter((c) => !(skipNegated && isOnlyProhibited(b.prompt, c)))
+  );
+  return [...new Set(found)];
+}
+
+// A candidate that appears in the brief and never outside a prohibition marker
+// ('NEVER write', 'do not touch', ...), by the negation rules H25/H26 share
+// (decision malformed-review-territory-fallback-skips-negated-paths). A
+// candidate whose normalised form is not literally in the text ('./a' read as
+// 'a') cannot be located, so it is kept.
+function isOnlyProhibited(prompt, candidate) {
+  const pattern = new RegExp(escapeRe(candidate));
+  return (
+    pattern.test(prompt) &&
+    !hasUnsuppressedMatch(prompt, pattern, { checkSubjectVerb: false }) &&
+    !namedByException(prompt, pattern)
+  );
+}
+
+// "Do not touch anything except src/a.mjs", "Never write outside src/a.mjs",
+// "Do not edit files other than src/a.mjs": an exception word between the
+// prohibition marker and the path (same clause) names the lane's OWN file,
+// so the path is not a prohibited one.
+const PROHIBITION_MARKER_RE = new RegExp(`${PROHIBITION_RE}|${BARE_NEGATOR_RE}`, 'gi');
+// The exception word sits directly before the path (at most two filler words
+// between), so "outside your territory such as src/x.mjs" and "do not modify
+// the only copy of src/x.mjs" do not name src/x.mjs as the lane's own file.
+const EXCEPTION_BEFORE_PATH_RE = /(?:except|other\s+than|outside|besides|apart\s+from)\s+(?:[^\s,;:]+\s+){0,2}$/i;
+function namedByException(prompt, pattern) {
+  const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+  for (const { text } of scanClauses(prompt)) {
+    global.lastIndex = 0;
+    let m;
+    while ((m = global.exec(text))) {
+      const before = text.slice(0, m.index);
+      let markerEnd = -1;
+      for (const mk of before.matchAll(PROHIBITION_MARKER_RE)) markerEnd = mk.index + mk[0].length;
+      if (markerEnd >= 0 && EXCEPTION_BEFORE_PATH_RE.test(before.slice(markerEnd))) return true;
+      if (m.index === global.lastIndex) global.lastIndex++;
+    }
+  }
+  return false;
 }
 
 function normalizeRegisterPaths(cands, cwd) {
@@ -361,7 +404,7 @@ try {
           files = normalizeRegisterPaths(territory.files, input.cwd);
           filesSource = 'review-territory';
         } else {
-          files = normalizeRegisterPaths(candidatesFromBlocks(matchedBlocks), input.cwd);
+          files = normalizeRegisterPaths(candidatesFromBlocks(matchedBlocks, { skipNegated: territory.present }), input.cwd);
           filesSource = territory.present ? 'free-prose-malformed-territory' : 'free-prose-fallback';
           if (territory.present) {
             lines.push(
@@ -369,7 +412,7 @@ try {
                 disclosure(
                   'territory_declaration_malformed',
                   { line: territory.raw, reason: territory.reason },
-                  `H22: malformed REVIEW-TERRITORY declaration ignored (${territory.reason}), so dispatch '${input.agent_id}' (${input.agent_type}) owns its free-prose paths instead, including any it was told not to write: ${territory.raw}`
+                  `H22: malformed REVIEW-TERRITORY declaration ignored (${territory.reason}), so dispatch '${input.agent_id}' (${input.agent_type}) owns its free-prose paths instead, except those named only under a prohibition marker ('NEVER write', 'do not touch'): ${territory.raw}`
                 )
               )
             );

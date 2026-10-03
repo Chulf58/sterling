@@ -12,7 +12,7 @@
 import { mkdirSync, existsSync, rmSync, openSync, closeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { SterlingStore, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions } from './index.js';
+import { SterlingStore, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions, type BoardItemReadiness } from './index.js';
 import { validateRecord, type DurableRecord, type SterlingConfig } from '@sterling/schemas';
 import { allocateShares } from './shares.js';
 
@@ -257,6 +257,12 @@ export class MountedStores {
    *  precheck asks the project store only (same reasoning as the enqueue above). */
   enqueueWouldBeNoop(input: { system_reason: string; feature_link?: string; file_keys?: string[]; text: string }): boolean {
     return this.project.enqueueWouldBeNoop(input);
+  }
+
+  /** Board readiness is project-local like the board itself, so the project
+   *  store answers it (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start). */
+  boardReadiness(items?: readonly DurableRecord[]): BoardItemReadiness[] {
+    return this.project.boardReadiness(items);
   }
 
   private storeFor(scope: string): SterlingStore {

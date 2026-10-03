@@ -538,6 +538,10 @@ export const attestationSchema = base
   })
   .superRefine(refineSupersession);
 
+/** A user board item's `needs` values (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start). */
+export const BOARD_NEEDS = ['user', 'grill', 'investigation'] as const;
+export type BoardNeeds = (typeof BOARD_NEEDS)[number];
+
 export const SYSTEM_REASONS = [
   'reconcile_needed',
   'stale_research',
@@ -663,6 +667,12 @@ export const todoSchema = base
     // blocker is checked at the tool layer when written; a blocker removed later
     // reads as closed, it is never rewritten out of this list.
     blocked_by: z.array(z.string().min(1)).optional(),
+    // What a user item waits on besides its blockers (decision
+    // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+    // 'investigation' still auto-starts, as a researcher lane; 'user' and
+    // 'grill' wait for the user. Not a progress status: `status` keeps meaning
+    // supersession only. Absent means nothing beyond the blockers.
+    needs: z.enum(BOARD_NEEDS).optional(),
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
@@ -674,6 +684,13 @@ export const todoSchema = base
         code: z.ZodIssueCode.custom,
         path: ['blocked_by'],
         message: "blocked_by orders source:'user' board tasks only — maintenance-queue items never carry it",
+      });
+    }
+    if (rec.needs !== undefined && rec.source === 'system') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['needs'],
+        message: "needs marks source:'user' board tasks only — maintenance-queue items never carry it",
       });
     }
     if (rec.slug !== undefined && rec.blocked_by?.includes(rec.slug)) {
