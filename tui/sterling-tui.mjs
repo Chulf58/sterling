@@ -52724,6 +52724,8 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
 var TILE_H = SPRITE_ROWS;
 var CARD_W = 24;
 var CARD_H = TILE_H + 4;
+var TILE_GAP = 1;
+var SIDE_MIN_W = TILE_COLS + TILE_GAP + CARD_W;
 var CARD_GAP = 2;
 var ROW_GAP = 1;
 var DONE_FADE = 0.55;
@@ -52751,10 +52753,22 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
     return note("Sub-agents: unknown \u2014 the dispatch register could not be read");
   if (view.agents.length === 0)
     return note("(no sub-agents)");
-  const cardW = Math.min(CARD_W, width);
-  const perRow = Math.max(1, Math.floor((width + CARD_GAP) / (cardW + CARD_GAP)));
-  const rowsFit = Math.floor((maxHeight + ROW_GAP) / (CARD_H + ROW_GAP));
-  const cardRows = Math.max(0, Math.min(Math.ceil(view.agents.length / perRow), rowsFit));
+  const side = width >= SIDE_MIN_W;
+  const perRow = side ? Math.min(view.agents.length, Math.floor((width + CARD_GAP) / (SIDE_MIN_W + CARD_GAP))) : 1;
+  const cardW = side ? Math.floor((width - (perRow - 1) * CARD_GAP) / perRow) : Math.min(CARD_W, width);
+  const textW = side ? cardW - TILE_COLS - TILE_GAP : cardW;
+  const textLines = (a) => a.description ? 4 : 3;
+  const bandH = (first) => side ? Math.max(...view.agents.slice(first, first + perRow).map((a) => Math.max(TILE_H, textLines(a)))) : CARD_H;
+  const bandY = [];
+  let used = 0;
+  for (let first = 0; first < view.agents.length; first += perRow) {
+    const y = bandY.length === 0 ? 0 : used + ROW_GAP;
+    if (y + bandH(first) > maxHeight)
+      break;
+    bandY.push(y);
+    used = y + bandH(first);
+  }
+  const cardRows = bandY.length;
   if (cardRows === 0)
     return note(`${view.agents.length} sub-agents, no room to show them`);
   const shown = Math.min(view.agents.length, cardRows * perRow);
@@ -52765,7 +52779,7 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
     const a = view.agents[i];
     const done = a.status === "done";
     const x0 = i % perRow * (cardW + CARD_GAP);
-    const y0 = Math.floor(i / perRow) * (CARD_H + ROW_GAP);
+    const y0 = bandY[Math.floor(i / perRow)];
     tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done)).forEach((line, r) => line.forEach((cell, c) => {
       const px = { x: x0 + c, y: y0 + r, ch: cell.ch };
       if (cell.fg !== void 0)
@@ -52774,15 +52788,16 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
         px.bg = done ? fadeToTile(cell.bg, DONE_FADE) : cell.bg;
       pixels.push(px);
     }));
-    const ty = y0 + TILE_H;
-    puts.push({ x: x0, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, cardW) });
+    const tx = side ? x0 + TILE_COLS + TILE_GAP : x0;
+    const ty = side ? y0 : y0 + TILE_H;
+    puts.push({ x: tx, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, textW) });
     const status = `${a.status} \xB7 ${a.contextPct === null ? "?" : `${a.contextPct}%`} ctx`;
-    puts.push({ x: x0, y: ty + 1, attr: done ? { dim: true } : { color: "green" }, text: clip(status, cardW) });
-    puts.push({ x: x0, y: ty + 2, attr: { dim: true }, text: clip(a.model ?? "model unknown", cardW) });
+    puts.push({ x: tx, y: ty + 1, attr: done ? { dim: true } : { color: "green" }, text: clip(status, textW) });
+    puts.push({ x: tx, y: ty + 2, attr: { dim: true }, text: clip(a.model ?? "model unknown", textW) });
     if (a.description)
-      puts.push({ x: x0, y: ty + 3, attr: { dim: true }, text: clip(a.description, cardW) });
+      puts.push({ x: tx, y: ty + 3, attr: { dim: true }, text: clip(a.description, textW) });
   }
-  const height = cardRows * CARD_H + (cardRows - 1) * ROW_GAP;
+  const height = used;
   if (hidden > 0 && height + 1 <= maxHeight) {
     puts.push({ x: 0, y: height, attr: { dim: true }, text: clip(`${hidden} more not shown`, width) });
     return { height: height + 1, puts, pixels };

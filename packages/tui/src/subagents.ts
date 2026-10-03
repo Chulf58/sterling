@@ -25,7 +25,7 @@ import { AGENT_MODEL_KEY, parseConfig } from '@sterling/schemas';
 import { readRegister, dispatchStateDir, dispatchStateKey, type RegisterEntry } from '../../../scripts/lib/dispatch-register.mjs';
 import { deriveAgentTranscript, fillPct, latestUsage } from '../../../scripts/hooks/lib/transcript.mjs';
 import { sterlingRootFrom } from '../../../scripts/lib/opencode-install.mjs';
-import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_BG, type AssignState } from './avatars/index.js';
+import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_BG, TILE_COLS, type AssignState } from './avatars/index.js';
 
 /** How long a missing subagent transcript is left unsearched before the next look. */
 const TRANSCRIPT_RETRY_MS = 10_000;
@@ -353,10 +353,13 @@ export function formatElapsed(ms: number): string {
 
 // ---------------------------------------------------------------------------
 // Composition. Coordinates are relative to the block's top-left corner, which
-// the renderer puts at the top of the Agents tab's body. The agents are cards
-// side by side in one row, wrapping to the next row only when the pane is too
-// narrow: each card is the 8x3 portrait tile with four text lines below it
-// (type, `status · N% ctx`, model, description), clipped to the card.
+// the renderer puts at the top of the Agents tab's body. Each card is the 8x3
+// portrait tile with the text lines (type, `status · N% ctx`, model,
+// description) to its right, one column apart, so a card is 3-4 rows tall.
+// The pane's width is shared evenly by as many cards as fit side by side at
+// SIDE_MIN_W columns each, wrapping to the next band when there are more; the
+// text is clipped to its own block only. A pane narrower than SIDE_MIN_W falls
+// back to the stacked card: the tile with the text lines below it, 24 columns.
 // ---------------------------------------------------------------------------
 
 export interface BlockAttr {
@@ -385,8 +388,14 @@ export interface SubagentBlock {
 }
 
 const TILE_H = SPRITE_ROWS;
+/** the stacked card's width, and the narrowest text block a side-by-side card gets */
 const CARD_W = 24;
+/** a stacked card: the tile, then four text lines */
 const CARD_H = TILE_H + 4;
+/** columns between the tile and its text */
+const TILE_GAP = 1;
+/** the narrowest side-by-side card: the tile, the gap and CARD_W columns of text */
+const SIDE_MIN_W = TILE_COLS + TILE_GAP + CARD_W;
 const CARD_GAP = 2;
 const ROW_GAP = 1;
 /** a done card's portrait is blended this far toward the tile colour */
@@ -419,10 +428,26 @@ export function composeSubagentBlock(view: SubagentView, width: number, maxHeigh
   if (view.availability === 'corrupt') return note('Sub-agents: unknown — the dispatch register could not be read');
   if (view.agents.length === 0) return note('(no sub-agents)');
 
-  const cardW = Math.min(CARD_W, width);
-  const perRow = Math.max(1, Math.floor((width + CARD_GAP) / (cardW + CARD_GAP)));
-  const rowsFit = Math.floor((maxHeight + ROW_GAP) / (CARD_H + ROW_GAP));
-  const cardRows = Math.max(0, Math.min(Math.ceil(view.agents.length / perRow), rowsFit));
+  // side by side when a pane holds one card at SIDE_MIN_W; the cards then share the row evenly
+  const side = width >= SIDE_MIN_W;
+  const perRow = side
+    ? Math.min(view.agents.length, Math.floor((width + CARD_GAP) / (SIDE_MIN_W + CARD_GAP)))
+    : 1;
+  const cardW = side ? Math.floor((width - (perRow - 1) * CARD_GAP) / perRow) : Math.min(CARD_W, width);
+  const textW = side ? cardW - TILE_COLS - TILE_GAP : cardW;
+  const textLines = (a: SubagentView['agents'][number]): number => (a.description ? 4 : 3);
+  // a band is a row of cards: as tall as its tallest card
+  const bandH = (first: number): number =>
+    side ? Math.max(...view.agents.slice(first, first + perRow).map((a) => Math.max(TILE_H, textLines(a)))) : CARD_H;
+  const bandY: number[] = [];
+  let used = 0;
+  for (let first = 0; first < view.agents.length; first += perRow) {
+    const y = bandY.length === 0 ? 0 : used + ROW_GAP;
+    if (y + bandH(first) > maxHeight) break;
+    bandY.push(y);
+    used = y + bandH(first);
+  }
+  const cardRows = bandY.length;
   if (cardRows === 0) return note(`${view.agents.length} sub-agents, no room to show them`);
   const shown = Math.min(view.agents.length, cardRows * perRow);
   const hidden = view.agents.length - shown;
@@ -433,7 +458,7 @@ export function composeSubagentBlock(view: SubagentView, width: number, maxHeigh
     const a = view.agents[i]!;
     const done = a.status === 'done';
     const x0 = (i % perRow) * (cardW + CARD_GAP);
-    const y0 = Math.floor(i / perRow) * (CARD_H + ROW_GAP);
+    const y0 = bandY[Math.floor(i / perRow)]!;
     // the tile: every cell carries a bg, so the tint covers the padding and the transparent pixels.
     // A done agent rests on frame 0 and its portrait is faded.
     tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done)).forEach((line, r) =>
@@ -444,14 +469,16 @@ export function composeSubagentBlock(view: SubagentView, width: number, maxHeigh
         pixels.push(px);
       }),
     );
-    const ty = y0 + TILE_H;
-    puts.push({ x: x0, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, cardW) });
+    // side by side the text starts right of the tile on the tile's top row; stacked it starts under the tile
+    const tx = side ? x0 + TILE_COLS + TILE_GAP : x0;
+    const ty = side ? y0 : y0 + TILE_H;
+    puts.push({ x: tx, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, textW) });
     const status = `${a.status} · ${a.contextPct === null ? '?' : `${a.contextPct}%`} ctx`;
-    puts.push({ x: x0, y: ty + 1, attr: done ? { dim: true } : { color: 'green' }, text: clip(status, cardW) });
-    puts.push({ x: x0, y: ty + 2, attr: { dim: true }, text: clip(a.model ?? 'model unknown', cardW) });
-    if (a.description) puts.push({ x: x0, y: ty + 3, attr: { dim: true }, text: clip(a.description, cardW) });
+    puts.push({ x: tx, y: ty + 1, attr: done ? { dim: true } : { color: 'green' }, text: clip(status, textW) });
+    puts.push({ x: tx, y: ty + 2, attr: { dim: true }, text: clip(a.model ?? 'model unknown', textW) });
+    if (a.description) puts.push({ x: tx, y: ty + 3, attr: { dim: true }, text: clip(a.description, textW) });
   }
-  const height = cardRows * CARD_H + (cardRows - 1) * ROW_GAP;
+  const height = used;
   if (hidden > 0 && height + 1 <= maxHeight) {
     puts.push({ x: 0, y: height, attr: { dim: true }, text: clip(`${hidden} more not shown`, width) });
     return { height: height + 1, puts, pixels };
