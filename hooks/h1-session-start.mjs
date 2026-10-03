@@ -8099,9 +8099,9 @@ var init_agent_distribution = __esm({
 
 // scripts/hooks/h1-session-start.mjs
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { readFileSync as readFileSync12, existsSync as existsSync15, mkdirSync as mkdirSync10, readdirSync as readdirSync6, renameSync as renameSync6, statSync as statSync5, writeFileSync as writeFileSync8, rmSync as rmSync5 } from "node:fs";
+import { readFileSync as readFileSync13, existsSync as existsSync15, mkdirSync as mkdirSync10, readdirSync as readdirSync6, renameSync as renameSync6, statSync as statSync5, writeFileSync as writeFileSync8, rmSync as rmSync5 } from "node:fs";
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { basename as basename2, join as join17 } from "node:path";
+import { basename as basename2, join as join18 } from "node:path";
 
 // scripts/hooks/lib/plugin-root-walk.mjs
 import { existsSync } from "node:fs";
@@ -10372,6 +10372,10 @@ function probeSchemaVersion(dbPath) {
   return walUserVersion(dbPath) ?? header.readUInt32BE(60);
 }
 
+// scripts/hooks/lib/maintenance-state.mjs
+import { readFileSync as readFileSync12 } from "node:fs";
+import { join as join17 } from "node:path";
+
 // scripts/hooks/lib/maintenance-worker.mjs
 import { closeSync as closeSync4, existsSync as existsSync14, mkdirSync as mkdirSync9, openSync as openSync4, readFileSync as readFileSync11, renameSync as renameSync5, rmSync as rmSync4, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync7, appendFileSync } from "node:fs";
 import { dirname as dirname10, isAbsolute as isAbsolute2, join as join16, resolve as resolve4, sep as sep2 } from "node:path";
@@ -10381,11 +10385,13 @@ var SERVER = "sterling";
 var OPENCODE_ALLOWED_TOOLS = ["execute", "mcp", "read", "grep", ...["maintenance_query", "knowledge_get", "maintenance_remove", "knowledge_line_ref_fix"].map((v) => `${SERVER}_${v}`)];
 
 // scripts/hooks/lib/maintenance-worker.mjs
+var BATCH_MIN_ITEMS = 5;
 var BATCH_MAX_WAIT_MS = 30 * 6e4;
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;
 var WORKER_TIMEOUT_MS = 20 * 6e4;
 var LOCK_STALE_MS = 30 * 6e4;
+var WORKER_DISABLE_ENV = "STERLING_MAINTENANCE_WORKER_DISABLE";
 var SERVER2 = "sterling";
 var mcp = (name) => `mcp__${SERVER2}__${name}`;
 var mcpPlugin = (name) => `mcp__plugin_sterling_sterling__${name}`;
@@ -10499,21 +10505,26 @@ function ageText(iso, nowMs = Date.now()) {
 }
 
 // scripts/hooks/lib/maintenance-state.mjs
+var WORKER_LANE = "reconcile_needed";
 function readMaintenanceState(store2, cwd) {
-  const reconcile2 = { count: 0, owesProse: 0, oldest: null };
+  const reconcile2 = { count: 0, owesProse: 0, oldest: null, unjudged: 0, oldestUnjudged: null };
   let queueReasonEntries2 = [];
   let queueReasons2 = [];
   let drainable2 = 0;
   let parked2 = 0;
   const systemTotal = store2.count({ types: ["todo"], source: "system" });
   const system = systemTotal > 0 ? store2.query({ types: ["todo"], source: "system", cap: systemTotal }) : [];
-  const reconcileItems = system.filter((t) => t.system_reason === "reconcile_needed");
+  const reconcileItems = system.filter((t) => t.system_reason === WORKER_LANE);
   reconcile2.count = reconcileItems.length;
   try {
     const verdicts = owesProseVerdicts(cwd);
-    reconcile2.owesProse = reconcileItems.filter((t) => isJudgedOwesProse(t, verdicts)).length;
+    const unjudged = reconcileItems.filter((t) => !isJudgedOwesProse(t, verdicts));
+    reconcile2.owesProse = reconcileItems.length - unjudged.length;
+    reconcile2.unjudged = unjudged.length;
+    reconcile2.oldestUnjudged = unjudged.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
   } catch {
     reconcile2.owesProse = null;
+    reconcile2.unjudged = null;
   }
   reconcile2.oldest = reconcileItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
   const drainableItems = system.filter((t) => t.system_reason !== "file_parked");
@@ -10529,42 +10540,113 @@ function queueDepthLine({ drainable: drainable2, parked: parked2, queueReasons: 
   const TOO_DEEP_MULTIPLIER = 10;
   let queueContext2 = "";
   const deepThreshold = Math.max(1, rawThreshold ?? 15);
-  if (drainable2 >= deepThreshold) {
+  const workerEntry = queueReasonEntries2.find(([r]) => r === WORKER_LANE);
+  const workerCount = workerEntry ? workerEntry[1] : 0;
+  const conductorEntries = queueReasonEntries2.filter(([r]) => r !== WORKER_LANE);
+  const conductorLanes = queueReasonEntries2.length ? queueReasons2.filter((_, i) => queueReasonEntries2[i][0] !== WORKER_LANE) : queueReasons2;
+  const conductorCount = queueReasonEntries2.length ? conductorEntries.reduce((s2, [, n]) => s2 + n, 0) : drainable2;
+  const workerNote = workerCount ? `The ${workerCount} item${workerCount === 1 ? "" : "s"} in lane ${WORKER_LANE} ${workerCount === 1 ? "is" : "are"} drained by the background worker, not by you (its state is on the RECONCILE BACKLOG line). ` : "";
+  if (conductorCount >= deepThreshold) {
     const parkedNote = parked2 > 0 ? ` plus ${parked2} file_parked (close at branch merge, not by drain \u2014 excluded from this count)` : "";
-    if (drainable2 >= deepThreshold * TOO_DEEP_MULTIPLIER && queueReasonEntries2.length) {
-      const topLanes = queueReasons2.slice(0, 3);
-      const [topReason, topCount] = queueReasonEntries2[0];
+    if (conductorCount >= deepThreshold * TOO_DEEP_MULTIPLIER && conductorEntries.length) {
+      const topLanes = conductorLanes.slice(0, 3);
+      const [topReason, topCount] = conductorEntries[0];
       const topPhrase = `${topCount} item${topCount === 1 ? "" : "s"} in lane ${topReason}`;
-      const laneLead = queueReasonEntries2.length > topLanes.length ? `Too many lanes to name in full, and "drain it all before new work" is not a workable ask at this size. The biggest lanes: ${topLanes.join(", ")}. ` : `"Drain it all before new work" is not a workable ask at this size. The lane split: ${topLanes.join(", ")}. `;
+      const laneLead = conductorEntries.length > topLanes.length ? `Too many lanes to name in full, and "drain it all before new work" is not a workable ask at this size. The biggest lanes: ${topLanes.join(", ")}. ` : `"Drain it all before new work" is not a workable ask at this size. The lane split: ${topLanes.join(", ")}. `;
       queueContext2 = `
 
-MAINTENANCE QUEUE IS VERY DEEP \u2014 ${drainable2} drainable items across ${queueReasonEntries2.length} lane(s)${parkedNote}.
-` + laneLead + `Drain the biggest lane now (${topPhrase}), or board a dedicated drain slice for the rest \u2014 don't try to clear the whole queue in one pass. Expect much of it to be ALREADY DONE work never closed, so verify each item against HEAD before writing anything back (an already-paid item closes with board_remove and NO knowledge_update). A queue this deep is itself a signal: items are arriving faster than anyone is closing them.`;
+MAINTENANCE QUEUE IS VERY DEEP \u2014 ${conductorCount} drainable items across ${conductorEntries.length} lane(s)${parkedNote}.
+` + workerNote + laneLead + `Drain the biggest lane now (${topPhrase}), or board a dedicated drain slice for the rest \u2014 don't try to clear the whole queue in one pass. Expect much of it to be ALREADY DONE work never closed, so verify each item against HEAD before writing anything back (an already-paid item closes with board_remove and NO knowledge_update). A queue this deep is itself a signal: items are arriving faster than anyone is closing them.`;
     } else {
       queueContext2 = `
 
-MAINTENANCE QUEUE IS DEEP \u2014 ${drainable2} drainable items (${queueReasons2.join(", ")})${parkedNote}.
-Drain it with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first (an already-paid item closes with board_remove and NO knowledge_update \u2014 a version bump claiming a reconcile that added nothing is itself drift). A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
+MAINTENANCE QUEUE IS DEEP \u2014 ${conductorCount} drainable items (${conductorLanes.join(", ")})${parkedNote}.
+` + workerNote + `Drain the lanes listed above with /sterling:drain before taking new work, and expect much of it to be ALREADY DONE: the queue records debt the mechanism detected, not debt that is necessarily still owed, so each item is verified against HEAD first (an already-paid item closes with board_remove and NO knowledge_update \u2014 a version bump claiming a reconcile that added nothing is itself drift). A deep queue is also a signal in its own right: items that keep arriving faster than they close mean either the drain is being skipped or a hook is over-firing.`;
     }
     queueContext2 += " This is a persistent visibility count by design \u2014 items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.";
   }
   return queueContext2.replace(/^\n\n/, "");
 }
-function reconcileBacklog({ reconcile: reconcile2, cwd }) {
+function stateUnknownReason(e) {
+  if (typeof e?.stableReason === "string") return e.stableReason;
+  return typeof e?.code === "string" ? `internal error: ${e.code}` : "internal error";
+}
+function readProjectConfig2(cwd) {
+  let raw;
+  try {
+    raw = readFileSync12(join17(cwd, ".sterling", "config.json"), "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    throw Object.assign(new Error("config.json unreadable"), { stableReason: `config.json unreadable: ${typeof e?.code === "string" ? e.code : "read error"}` });
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw Object.assign(new Error("config.json unreadable"), { stableReason: "config.json unreadable: invalid JSON" });
+  }
+}
+function workerStateFileProblem(cwd) {
+  const path = workerPaths(cwd).state;
+  const shown = ".sterling/transient/maintenance-worker.state.json";
+  let raw;
+  try {
+    raw = readFileSync12(path, "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    return `worker state file ${shown} unreadable: ${typeof e?.code === "string" ? e.code : "read error"}`;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return `worker state file ${shown} unreadable: invalid JSON`;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return `worker state file ${shown} unreadable: not a JSON object`;
+  return null;
+}
+function workerStateText({ ws, reconcile: reconcile2, cwd, config: config2, nowMs, env }) {
+  try {
+    if (ws.running) return `worker running (pid ${ws.pid}, since ${ws.since})`;
+    const cfg = config2 === void 0 ? readProjectConfig2(cwd) : config2;
+    const byHand = "reconcile items wait for /sterling:drain";
+    if (cfg?.maintenance_worker?.enabled === false) return `worker disabled by config (${byHand})`;
+    if (env[WORKER_DISABLE_ENV] === "1") return `worker disabled by ${WORKER_DISABLE_ENV} (${byHand})`;
+    const stateProblem = workerStateFileProblem(cwd);
+    if (stateProblem) return `worker state unknown (${stateProblem})`;
+    const last = ws.lastRun;
+    const stalledAt = last && (last.ok === false || last.no_progress === true) ? Date.parse(last.at ?? "") : NaN;
+    if (Number.isFinite(stalledAt) && nowMs - stalledAt < BACKOFF_MS) {
+      const mins = Math.ceil((BACKOFF_MS - (nowMs - stalledAt)) / 6e4);
+      return `worker backing off after ${last.ok === false ? "a failed run" : "a run that made no progress"} (next launch in ${mins}m)`;
+    }
+    if (reconcile2.unjudged === null || reconcile2.unjudged === void 0) return "worker state unknown (verdict journal unreadable)";
+    if (reconcile2.unjudged === 0) return "worker idle, nothing to judge (every open item is already judged 'owes prose')";
+    const created = Date.parse(reconcile2.oldestUnjudged ?? "");
+    const waitedMs = Number.isFinite(created) ? nowMs - created : Infinity;
+    const waited = ageText(reconcile2.oldestUnjudged, nowMs);
+    if (reconcile2.unjudged < BATCH_MIN_ITEMS && waitedMs < BATCH_MAX_WAIT_MS) {
+      return `worker waiting to batch: ${reconcile2.unjudged} of ${BATCH_MIN_ITEMS} unjudged, oldest ${waited} of ${Math.round(BATCH_MAX_WAIT_MS / 6e4)}m`;
+    }
+    return `worker due to launch at the next Stop or git commit (${reconcile2.unjudged} unjudged, oldest ${waited})`;
+  } catch (e) {
+    return `worker state unknown (${stateUnknownReason(e)})`;
+  }
+}
+function reconcileBacklog({ reconcile: reconcile2, cwd, config: config2, nowMs = Date.now(), env = process.env }) {
   let reconcileBanner2 = "";
   let reconcileContext2 = "";
   if (reconcile2.count > 0) {
-    let worker = "worker not running";
+    let worker;
     let lastRunNote = "";
     try {
-      const ws = workerStatus(cwd);
-      if (ws.running) worker = `worker running (pid ${ws.pid}, since ${ws.since})`;
+      const ws = workerStatus(cwd, nowMs);
+      worker = workerStateText({ ws, reconcile: reconcile2, cwd, config: config2, nowMs, env });
       const broken = workerBreakage(ws.lastRun);
       if (broken) lastRunNote = `; last worker run FAILED at ${broken.at}: ${broken.reason} (log: .sterling/maintenance-worker.log)`;
     } catch (e) {
-      worker = `worker state unreadable (${e?.message ?? e})`;
+      worker = `worker state unknown (${stateUnknownReason(e)})`;
     }
-    const age = ageText(reconcile2.oldest);
+    const age = ageText(reconcile2.oldest, nowMs);
     const inLane = (n) => `${n} item${n === 1 ? "" : "s"} in lane reconcile_needed`;
     reconcileBanner2 = ` \xB7 ${inLane(reconcile2.count)}, oldest ${age}, ${worker}${lastRunNote}`;
     reconcileContext2 = `
@@ -10654,7 +10736,7 @@ function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP 
 
 // scripts/hooks/h1-session-start.mjs
 async function deleteRegisterUnderLock(cwd) {
-  const transientDir = join17(cwd, ".sterling", "transient");
+  const transientDir = join18(cwd, ".sterling", "transient");
   try {
     mkdirSync10(transientDir, { recursive: true });
     await withRegisterLock(
@@ -10668,7 +10750,7 @@ async function deleteRegisterUnderLock(cwd) {
         rmSync5(registerPath(cwd), { force: true });
         const registerBasename = basename2(registerPath(cwd));
         for (const f of readdirSync6(transientDir)) {
-          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync5(join17(transientDir, f), { force: true });
+          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync5(join18(transientDir, f), { force: true });
         }
       },
       { retryMs: 1e3, timeoutMs: 1e4 }
@@ -10712,7 +10794,7 @@ function pluginVersion() {
   try {
     const root = pluginRoot2();
     if (!root) return null;
-    const v = JSON.parse(readFileSync12(join17(root, ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync13(join18(root, ".claude-plugin", "plugin.json"), "utf8")).version;
     return typeof v === "string" && v.length ? v : null;
   } catch {
   }
@@ -10744,11 +10826,11 @@ if (input.source === "startup" || input.source === "clear") {
   } catch {
   }
 }
-var sessionMarkerPath = join17(input.cwd, ".sterling", "transient", "session.json");
-var sessionMarkerTmp = join17(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
+var sessionMarkerPath = join18(input.cwd, ".sterling", "transient", "session.json");
+var sessionMarkerTmp = join18(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
 try {
-  if (existsSync15(join17(input.cwd, ".sterling", "config.json"))) {
-    mkdirSync10(join17(input.cwd, ".sterling", "transient"), { recursive: true });
+  if (existsSync15(join18(input.cwd, ".sterling", "config.json"))) {
+    mkdirSync10(join18(input.cwd, ".sterling", "transient"), { recursive: true });
     writeFileSync8(
       sessionMarkerTmp,
       JSON.stringify({ session_id: input.session_id ?? null, source: input.source ?? null, at: (/* @__PURE__ */ new Date()).toISOString() })
@@ -10783,7 +10865,7 @@ var storeVersionWarning = "";
 var storeVersionContext = "";
 var projectStoreBlocked = false;
 try {
-  const projectDb = join17(input.cwd, ".sterling", "sterling.db");
+  const projectDb = join18(input.cwd, ".sterling", "sterling.db");
   const behind = [];
   const other = [];
   for (const db of machineStores(input.cwd)) {
@@ -10893,11 +10975,11 @@ var currencyWarning = "";
 var currencyContext = "";
 try {
   const root = process.env.STERLING_CURRENCY_DISABLE === "1" ? null : pluginRoot2();
-  const gitDir = root ? join17(root, ".git") : null;
+  const gitDir = root ? join18(root, ".git") : null;
   if (gitDir && existsSync15(gitDir) && statSync5(gitDir).isDirectory()) {
     let role = null;
     try {
-      role = JSON.parse(readFileSync12(join17(root, ".sterling", "config.json"), "utf8")).machine_role;
+      role = JSON.parse(readFileSync13(join18(root, ".sterling", "config.json"), "utf8")).machine_role;
     } catch {
     }
     if (role !== "authoring") {
@@ -10909,11 +10991,11 @@ try {
       const hasOrigin = (git(["remote"]) ?? "").split("\n").includes("origin");
       const defaultBranch = hasOrigin ? (git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]) ?? "").replace(/^origin\//, "") || "main" : null;
       if (hasOrigin && branch && branch === defaultBranch) {
-        const cachePath = join17(gitDir, "sterling-update-check.json");
+        const cachePath = join18(gitDir, "sterling-update-check.json");
         const ttl = Number(process.env.STERLING_CURRENCY_TTL_MS ?? 24 * 60 * 60 * 1e3);
         let fresh = false;
         try {
-          fresh = Date.now() - Date.parse(JSON.parse(readFileSync12(cachePath, "utf8")).checked_at) < ttl;
+          fresh = Date.now() - Date.parse(JSON.parse(readFileSync13(cachePath, "utf8")).checked_at) < ttl;
         } catch {
         }
         if (!fresh) {
@@ -10942,8 +11024,8 @@ function planLockSection(ctx) {
   const STALE_DAYS = 14;
   const DAY_MS = 24 * 60 * 60 * 1e3;
   const clean = sanitizeForContext;
-  const sterlingDir = join17(ctx.cwd, ".sterling");
-  const transientDir = join17(sterlingDir, "transient");
+  const sterlingDir = join18(ctx.cwd, ".sterling");
+  const transientDir = join18(sterlingDir, "transient");
   const blocks = [];
   const MARKERS = [
     {
@@ -10963,7 +11045,7 @@ function planLockSection(ctx) {
   for (const marker of MARKERS) {
     let raw = null;
     try {
-      raw = claimMarker(join17(transientDir, marker.file));
+      raw = claimMarker(join18(transientDir, marker.file));
     } catch {
       raw = null;
     }
@@ -11048,7 +11130,7 @@ try {
 }
 try {
   if (input.source === "compact" || input.source === "startup" || input.source === "clear") {
-    const conductorLedger = join17(input.cwd, ".sterling", "transient", "conductor-reads.json");
+    const conductorLedger = join18(input.cwd, ".sterling", "transient", "conductor-reads.json");
     rmSync5(conductorLedger, { force: true });
   }
 } catch {
@@ -11061,8 +11143,8 @@ await deleteRegisterUnderLock(input.cwd);
 var residueContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {
-    const transient = join17(input.cwd, ".sterling", "transient");
-    const regPaths = [join17(transient, "touches.json"), join17(transient, "session-events.json"), join17(transient, "capture-nagged.json")];
+    const transient = join18(input.cwd, ".sterling", "transient");
+    const regPaths = [join18(transient, "touches.json"), join18(transient, "session-events.json"), join18(transient, "capture-nagged.json")];
     const [touchesPath, eventsPath] = regPaths;
     if (regPaths.some((p) => existsSync15(p))) {
       let touches = [];
@@ -11070,7 +11152,7 @@ try {
       let malformed = false;
       try {
         if (existsSync15(touchesPath)) {
-          const raw = JSON.parse(readFileSync12(touchesPath, "utf8"));
+          const raw = JSON.parse(readFileSync13(touchesPath, "utf8"));
           if (Array.isArray(raw)) touches = raw;
           else malformed = true;
         }
@@ -11079,7 +11161,7 @@ try {
       }
       try {
         if (existsSync15(eventsPath)) {
-          const raw = JSON.parse(readFileSync12(eventsPath, "utf8"));
+          const raw = JSON.parse(readFileSync13(eventsPath, "utf8"));
           if (Array.isArray(raw)) events = raw;
           else malformed = true;
         }
@@ -11199,7 +11281,7 @@ function markerWriterAlive(pid) {
   }
   if (process.platform !== "linux") return true;
   try {
-    const cmdline = readFileSync12(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
+    const cmdline = readFileSync13(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
     if (cmdline && !cmdline.includes("mcp-server")) return false;
   } catch (err) {
     if (err?.code === "ENOENT" || err?.code === "ESRCH") return false;
@@ -11209,12 +11291,12 @@ function markerWriterAlive(pid) {
 var staleWarning = "";
 try {
   const root = pluginRoot2();
-  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? existsSync15(join17(root, "mcp")) ? join17(root, "mcp") : join17(root, "packages", "mcp-server", "dist") : null);
-  const currentBuildId = serverDist && existsSync15(buildIdPath(serverDist)) ? readFileSync12(buildIdPath(serverDist), "utf8").trim() || null : null;
+  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? existsSync15(join18(root, "mcp")) ? join18(root, "mcp") : join18(root, "packages", "mcp-server", "dist") : null);
+  const currentBuildId = serverDist && existsSync15(buildIdPath(serverDist)) ? readFileSync13(buildIdPath(serverDist), "utf8").trim() || null : null;
   let marker = null;
-  const markerPath = runtimeMarkerPath(join17(input.cwd, ".sterling", "sterling.db"));
+  const markerPath = runtimeMarkerPath(join18(input.cwd, ".sterling", "sterling.db"));
   if (existsSync15(markerPath)) {
-    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync12(markerPath, "utf8")));
+    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync13(markerPath, "utf8")));
     if (parsed.success) marker = parsed.data;
   }
   const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerWriterAlive(marker.pid) : null);
@@ -11226,7 +11308,7 @@ try {
 var machineWarning = "";
 var machineContext = "";
 try {
-  const agentsDir = join17(input.cwd, ".claude", "agents");
+  const agentsDir = join18(input.cwd, ".claude", "agents");
   const dead = [];
   const unknown = [];
   let dirEntries = null;
@@ -11242,7 +11324,7 @@ try {
   for (const f of (dirEntries ?? []).filter((n) => n.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync12(join17(agentsDir, f), "utf8");
+      content = readFileSync13(join18(agentsDir, f), "utf8");
     } catch (err) {
       unknown.push(`- ${f} \u2014 activation UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -11269,7 +11351,7 @@ MACHINE-CONTEXT DRIFT (H1): ` + (dead.length ? `${dead.length} inactive (${dead.
 var agentCurrencyWarning = "";
 var agentCurrencyContext = "";
 try {
-  const agentsDir = join17(input.cwd, ".claude", "agents");
+  const agentsDir = join18(input.cwd, ".claude", "agents");
   const installed = [];
   const unknown = [];
   let dirEntries = null;
@@ -11285,7 +11367,7 @@ try {
   for (const n of (dirEntries ?? []).filter((x) => x.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync12(join17(agentsDir, n), "utf8");
+      content = readFileSync13(join18(agentsDir, n), "utf8");
     } catch (err) {
       unknown.push(`- ${n} \u2014 currency UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -11304,11 +11386,11 @@ try {
   const unreadableBeforeClassification = unknown.length;
   if (installed.length || unknown.length) {
     const root = pluginRoot2();
-    const templatesDir = root ? join17(root, "agent-templates") : null;
+    const templatesDir = root ? join18(root, "agent-templates") : null;
     let templateFor = null;
     let cloneProblem = null;
     try {
-      templateFor = new Map(loadRegistry(join17(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
+      templateFor = new Map(loadRegistry(join18(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
     } catch (err) {
       cloneProblem = `the clone's agent templates at ${templatesDir ?? "(plugin root unresolved)"} could not be read: ${err?.message ?? err}`;
     }
@@ -11335,7 +11417,7 @@ try {
       }
       let templateContent = null;
       try {
-        templateContent = readFileSync12(join17(templatesDir, templateFile), "utf8");
+        templateContent = readFileSync13(join18(templatesDir, templateFile), "utf8");
       } catch (err) {
         unknown.push(`- ${file} \u2014 currency UNKNOWN: the clone template ${templateFile} could not be read (${err?.code ?? err?.message ?? err})`);
         continue;
@@ -11395,16 +11477,16 @@ ${versionLine}`);
 }
 var conductorActivationContext = "";
 try {
-  const settingsPath = join17(input.cwd, ".claude", "settings.json");
+  const settingsPath = join18(input.cwd, ".claude", "settings.json");
   let settingsAgent;
   if (existsSync15(settingsPath)) {
     try {
-      const parsed = JSON.parse(readFileSync12(settingsPath, "utf8"));
+      const parsed = JSON.parse(readFileSync13(settingsPath, "utf8"));
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) settingsAgent = parsed.agent;
     } catch {
     }
   }
-  const conductorFileMissing = !existsSync15(join17(input.cwd, ".claude", "agents", "conductor.md"));
+  const conductorFileMissing = !existsSync15(join18(input.cwd, ".claude", "agents", "conductor.md"));
   let reason = null;
   if (settingsAgent !== "conductor") {
     reason = settingsAgent === void 0 ? "settings key missing" : `settings key is ${JSON.stringify(settingsAgent)}`;
@@ -11414,7 +11496,7 @@ try {
   if (reason !== null) {
     const root = pluginRoot2();
     const clone = root ?? "<clone>";
-    const syncScript = root && existsSync15(join17(root, "bin", "sync-agents.mjs")) ? "bin/sync-agents.mjs" : "scripts/sync-agents.mjs";
+    const syncScript = root && existsSync15(join18(root, "bin", "sync-agents.mjs")) ? "bin/sync-agents.mjs" : "scripts/sync-agents.mjs";
     const shq = (value) => `'${String(value).split("'").join(`'\\''`)}'`;
     conductorActivationContext = `
 
