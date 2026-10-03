@@ -35,12 +35,14 @@ const reconcileItem = (store, createdAt, text = "reconcile article 'x' — owned
   });
 
 function h1(dir) {
+  const env = { ...process.env, STERLING_CURRENCY_DISABLE: '1', NO_COLOR: '1', STERLING_PLUGIN_ROOT: root };
+  delete env.STERLING_MAINTENANCE_WORKER_DISABLE; // the npm test preload's guard is lifted: the banner is asserted against a default launcher state
   const r = spawnSync(process.execPath, [HOOK], {
     input: JSON.stringify({ session_id: 's1', transcript_path: join(dir, 't.jsonl'), cwd: dir, hook_event_name: 'SessionStart', source: 'startup' }),
     encoding: 'utf8',
     cwd: dir,
     timeout: 60_000,
-    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1', NO_COLOR: '1', STERLING_PLUGIN_ROOT: root },
+    env,
   });
   assert.equal(r.status, 0, r.stderr);
   return JSON.parse(r.stdout);
