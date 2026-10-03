@@ -33511,13 +33511,34 @@ ${JSON.stringify(value, null, 2)}` : void 0;
    *  knowledge_update fix-forward (immutable-by-construction, the decision
    *  analog), and the orphan-coverage check below is ruling-prose-shaped. */
   static SUPERSEDE_ALLOWED_TYPES = ["decision", "anti_pattern", "research_finding"];
-  /** The types that may CLOSE a reference_material whose subject is gone
-   *  (decision record-audit-dead-records-superseded-stale-findings-by-age-
-   *  report-arm-plus-sampled-audit: "superseded by a short record saying what
-   *  happened"). A reference's body is a pointer at a location, so a dead one
-   *  has no same-type successor to offer; the closing record is a note of one
-   *  of these types, named by the caller. */
-  static REFERENCE_CLOSING_TYPES = ["decision", "research_finding"];
+  /** The types that may CLOSE a record whose subject is gone (decision
+   *  record-audit-dead-records-superseded-stale-findings-by-age-report-arm-
+   *  plus-sampled-audit: "superseded by a short record saying what happened").
+   *  The old types in CLOSED_BY_NOTE have no same-type successor to offer once
+   *  dead; the closing record is a note of one of these types, named by the
+   *  caller. */
+  static CLOSING_NOTE_TYPES = ["decision", "research_finding"];
+  /** The old-record types a closing note of another type may close, each with
+   *  the sentence its refusal prints for the record that is NOT dead (its
+   *  in-place path and its duplicate path). reference_material came first
+   *  (decision a-dead-reference-material-is-superseded-by-a-closing-note-of-
+   *  another-type): its body is a pointer at a location. open_question and
+   *  disconfirmed_hypothesis joined by user ruling 2026-10-03 (board bdd80e1a,
+   *  "Supersede for the two small types, articles stay as today"): a question
+   *  or a refuted trail about code that no longer exists has nothing of its
+   *  own type to be replaced by. feature_article is deliberately absent — it
+   *  keeps its own lifecycle. */
+  static CLOSED_BY_NOTE = {
+    reference_material: `one whose subject still exists evolves in place via knowledge_update (fix-forward, same lineage; repoint its location), and a genuine duplicate goes through knowledge_retire(id, in_favor_of).`,
+    open_question: `one that is still open evolves in place via knowledge_update (fix-forward, same lineage; an answered one sets resolution_status 'closed' with closed_into), and a genuine duplicate goes through knowledge_retire(id, in_favor_of).`,
+    disconfirmed_hypothesis: `one whose refuted trail still applies is corrected in place via knowledge_update (fix-forward, same lineage), and a genuine duplicate goes through knowledge_retire(id, in_favor_of).`
+  };
+  /** The refusal sentence for an old-record type a closing note may close, or
+   *  undefined when the type is not one of them. Own-key check, so an
+   *  inherited Object.prototype name never reads as a member. */
+  static closedByNoteSentence(type) {
+    return Object.hasOwn(_SterlingTools.CLOSED_BY_NOTE, type) ? _SterlingTools.CLOSED_BY_NOTE[type] : void 0;
+  }
   /** ruling-write types whose create/update receipts surface SAME-SUBJECT
    *  records (decision foreign_7e3c66c5). Superset of SUPERSEDE_ALLOWED_TYPES since
    *  2026-08-21 (review finding on board 259a455f): a second attestation on
@@ -33664,14 +33685,17 @@ ${JSON.stringify(value, null, 2)}` : void 0;
    * discloses which candidates were accepted. Fewer than 2 units is ordinary
    * single-ruling supersession — no check.
    *
-   * A DEAD reference_material IS THE ONE CROSS-TYPE CASE (board 3b5c6877,
+   * A DEAD reference_material WAS THE FIRST CROSS-TYPE CASE (board 3b5c6877,
    * decision record-audit-dead-records-superseded-stale-findings-by-age-
    * report-arm-plus-sampled-audit). A reference whose location is gone had no
    * exit: knowledge_update can only repoint it, knowledge_retire needs a
    * surviving duplicate, and the deletion arm of the refresh_reference mint
-   * fires on every read while it stays active. `opts.type` names the closing
-   * record's type (REFERENCE_CLOSING_TYPES); the note is created and the
-   * reference retired in favour of it in one transaction. store.supersede is
+   * fires on every read while it stays active. A dead open_question and a dead
+   * disconfirmed_hypothesis take the same path (board bdd80e1a); the set is
+   * CLOSED_BY_NOTE. `opts.type` names the closing record's type
+   * (CLOSING_NOTE_TYPES); the note is created and the old record retired in
+   * favour of it in one transaction. An open_question's slug passes to its
+   * closing note like any superseded record's. store.supersede is
    * same-type by contract, so this branch composes the two store primitives
    * that already exist for it: create, then retireInFavorOf, which writes the
    * same (new supersedes old) edge and the same retired lifecycle.
@@ -33692,25 +33716,26 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     if (old.type === "feature_article") {
       throw new Error(`knowledge_supersede: '${oldId}' is a ${old.type} \u2014 those evolve in place via knowledge_update (fix-forward, same lineage), or for a genuine duplicate, knowledge_retire(id, in_favor_of). knowledge_supersede replaces decision / anti_pattern / research_finding only.`);
     }
-    const closesReference = old.type === "reference_material";
-    if (closesReference) {
-      if (opts.type === void 0 || !_SterlingTools.REFERENCE_CLOSING_TYPES.includes(opts.type)) {
-        const allowed = _SterlingTools.REFERENCE_CLOSING_TYPES.join(" or ");
-        throw new Error(`knowledge_supersede: '${oldId}' is a reference_material \u2014 one whose subject still exists evolves in place via knowledge_update (fix-forward, same lineage; repoint its location), and a genuine duplicate goes through knowledge_retire(id, in_favor_of). One whose subject is GONE is closed by a short record saying what happened: pass type (${allowed}) with that record's complete fields` + (opts.type === void 0 ? `; no type was given.` : `; type '${opts.type}' is not one of them.`) + ` Nothing was written.`);
+    const closedByNoteSentence = _SterlingTools.closedByNoteSentence(old.type);
+    const closedByNote = closedByNoteSentence !== void 0;
+    if (closedByNote) {
+      if (opts.type === void 0 || !_SterlingTools.CLOSING_NOTE_TYPES.includes(opts.type)) {
+        const allowed = _SterlingTools.CLOSING_NOTE_TYPES.join(" or ");
+        throw new Error(`knowledge_supersede: '${oldId}' is ${/^[aeiou]/.test(old.type) ? "an" : "a"} ${old.type} \u2014 ${closedByNoteSentence} One whose subject is GONE is closed by a short record saying what happened: pass type (${allowed}) with that record's complete fields` + (opts.type === void 0 ? `; no type was given.` : `; type '${opts.type}' is not one of them.`) + ` Nothing was written.`);
       }
     } else {
       if (!_SterlingTools.SUPERSEDE_ALLOWED_TYPES.includes(old.type)) {
         throw new Error(`knowledge_supersede: '${old.type}' records are not supported \u2014 allowed: ${_SterlingTools.SUPERSEDE_ALLOWED_TYPES.join(", ")}.`);
       }
       if (opts.type !== void 0 && opts.type !== old.type) {
-        throw new Error(`knowledge_supersede: '${oldId}' is a ${old.type} and is replaced by a ${old.type} only \u2014 type '${opts.type}' is refused. A different closing type is accepted only when the old record is a reference_material. Nothing was written.`);
+        throw new Error(`knowledge_supersede: '${oldId}' is a ${old.type} and is replaced by a ${old.type} only \u2014 type '${opts.type}' is refused. A different closing type is accepted only when the old record is one of ${Object.keys(_SterlingTools.CLOSED_BY_NOTE).join(", ")}. Nothing was written.`);
       }
     }
     if (old.status === "superseded") {
       throw new Error(`knowledge_supersede: '${oldId}' is already superseded \u2014 resolve its chain to the live head first (knowledge_get discloses the terminus).`);
     }
     this.refuseServerOwnedFields(fields, "knowledge_supersede");
-    const type = closesReference ? opts.type : old.type;
+    const type = closedByNote ? opts.type : old.type;
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, ...body } = fields;
     const explicitSlug = body.slug;
     let slug;
@@ -33839,7 +33864,7 @@ Extend fields to carry the surviving ruling(s) forward, or re-call with orphans_
     const resolvedItems = [];
     const updated = this.store.withTransactionForRecord(old.id, () => {
       let head;
-      if (closesReference) {
+      if (closedByNote) {
         const links = parsed.links.filter((l) => !(l.rel === "supersedes" && l.target_id === old.id));
         head = this.store.create({ ...parsed, links });
         this.store.retireInFavorOf(old.id, head.id, ts);
@@ -34054,12 +34079,12 @@ function createSterlingServer(storePath2) {
     inputSchema: strict({ id: external_exports.string(), in_favor_of: external_exports.string() })
   }, ({ id, in_favor_of }) => json(tools.knowledgeRetire(id, in_favor_of)));
   server2.registerTool("knowledge_supersede", {
-    description: "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them \u2014 carry them forward, or pass orphans_acknowledged:true. A reference_material whose subject is gone (its location was deleted) is closed here too: pass type 'decision' or 'research_finding' and `fields` for a short record of that type saying what happened; the reference is superseded by it and is no longer read, so it raises no further refresh_reference items. A reference whose subject still exists is repointed with knowledge_update; a duplicate goes to knowledge_retire. resolves:[<full item ids>] closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to the old record's chain in the same transaction (validated before the write; unnamed items stay open). Other types are refused naming their exit path (todo \u2192 board_remove/maintenance_remove; feature_article \u2192 knowledge_update/knowledge_retire). Refusals write nothing.",
+    description: "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them \u2014 carry them forward, or pass orphans_acknowledged:true. A reference_material whose subject is gone (its location was deleted) is closed here too: pass type 'decision' or 'research_finding' and `fields` for a short record of that type saying what happened; the reference is superseded by it and is no longer read, so it raises no further refresh_reference items. A reference whose subject still exists is repointed with knowledge_update; a duplicate goes to knowledge_retire. An open_question or disconfirmed_hypothesis whose subject is gone is closed the same way, with the same two closing types; one that still applies is updated with knowledge_update, and an answered open_question is closed there with resolution_status 'closed' and closed_into. resolves:[<full item ids>] closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to the old record's chain in the same transaction (validated before the write; unnamed items stay open). Other types are refused naming their exit path (todo \u2192 board_remove/maintenance_remove; feature_article \u2192 knowledge_update/knowledge_retire). Refusals write nothing.",
     inputSchema: strict({
       old_id: external_exports.string(),
       fields: passthrough,
       orphans_acknowledged: external_exports.boolean().optional(),
-      type: external_exports.string().optional().describe("the closing record's type, 'decision' or 'research_finding' \u2014 required when old_id is a reference_material, otherwise omit it"),
+      type: external_exports.string().optional().describe("the closing record's type, 'decision' or 'research_finding' \u2014 required when old_id is a reference_material, open_question or disconfirmed_hypothesis, otherwise omit it"),
       resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to the old record's chain that this supersession discharges \u2014 full ids, validated before the write")
     })
   }, ({ old_id, fields, orphans_acknowledged, type, resolves }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged, { type, resolves })));

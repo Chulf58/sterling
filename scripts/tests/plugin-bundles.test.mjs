@@ -241,3 +241,67 @@ test('bin/stamp-contract.mjs from a .git-less plugin root (an installed copy): n
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test('bin/check-record-hygiene.mjs: the record-audit skill calls the bundle, and the committed bundle audits the INVOKING project from a tree with no node_modules', () => {
+  // The script imports @sterling/schemas and @sterling/store (scripts/lib/project.mjs,
+  // scripts/lib/record-hygiene.mjs), so the scripts/ source cannot run from an installed
+  // copy; and its default root is the plugin tree, so the skill passes `.` explicitly.
+  assert.ok('check-record-hygiene' in BIN_ENTRIES, 'check-record-hygiene is a BIN_ENTRIES member');
+  const skill = readFileSync(join(root, 'skills', 'record-audit', 'SKILL.md'), 'utf8');
+  assert.ok(skill.includes('node "${CLAUDE_PLUGIN_ROOT}/bin/check-record-hygiene.mjs" . --all'), 'the skill names the bundled entry and passes the project root');
+  assert.ok(!/node scripts\/check-record-hygiene\.mjs/.test(skill), 'and no longer runs the source that needs node_modules');
+
+  const base = mkdtempSync(join(tmpdir(), 'sterling-bin-hygiene-'));
+  const git = (cwd, ...args) => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  };
+  try {
+    // The plugin tree is what git tracks at HEAD, as a marketplace install copies it
+    // (anti_pattern shipping-a-plugin-entry-as-source-that-imports-workspace-build-output):
+    // the bundle, plus the one scripts/ file its source identity reads at run time.
+    const plugin = join(base, 'plugin');
+    mkdirSync(plugin);
+    const tar = join(base, 'plugin.tar');
+    git(root, 'archive', '--format=tar', '-o', tar, 'HEAD', 'bin/check-record-hygiene.mjs', 'scripts/lib/record-hygiene-filler.json');
+    const untar = spawnSync('tar', ['-xf', tar, '-C', plugin], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(untar.status, 0, untar.stderr);
+
+    const project = join(base, 'project');
+    mkdirSync(join(project, '.sterling'), { recursive: true });
+    git(project, 'init', '-q');
+    git(project, '-c', 'core.autocrlf=false', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'seed');
+    const store = new SterlingStore(join(project, '.sterling', 'sterling.db'));
+    store.create({
+      id: '11111111-1111-4111-8111-111111111111',
+      type: 'decision',
+      created_at: '2026-10-03T12:00:00.000Z',
+      updated_at: '2026-10-03T12:00:00.000Z',
+      author: 'conductor',
+      status: 'active',
+      superseded_by: null,
+      links: [],
+      scope: 'project',
+      stack_tags: [],
+      title: 'A ruling about a deleted file',
+      statement: 'The helper stays in one module.',
+      alternatives_rejected: [],
+      rationale: 'r',
+      file_keys: ['src/gone-helper.mjs'],
+    });
+    store.close();
+
+    const r = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(plugin, 'bin', 'check-record-hygiene.mjs'), '.', '--all'], {
+      encoding: 'utf8',
+      cwd: project,
+      timeout: 60_000,
+      env: { ...process.env, GIT_CEILING_DIRECTORIES: base },
+    });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.doesNotMatch(r.stdout + r.stderr, /ERR_MODULE_NOT_FOUND|Cannot find|could not run/, 'the bundle loaded and ran');
+    assert.match(r.stdout, /record hygiene: \d+ finding\(s\) across 1 record\(s\)/, `it audited the invoking project's one record: ${r.stdout}`);
+    assert.match(r.stdout, /src\/gone-helper\.mjs/, "and reported that record's dead path");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});

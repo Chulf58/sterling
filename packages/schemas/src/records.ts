@@ -1141,6 +1141,7 @@ export type DurableRecord =
   | z.infer<typeof researchFindingSchema>
   | z.infer<typeof referenceMaterialSchema>
   | z.infer<typeof disconfirmedHypothesisSchema>
+  | z.infer<typeof openQuestionSchema>
   | z.infer<typeof attestationSchema>
   | z.infer<typeof featureArticleSchema>
   | z.infer<typeof todoSchema>
