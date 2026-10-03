@@ -53,7 +53,7 @@ The hook-bundling and store-write invariants are Sterling-bound (they name the M
 - **Canonical naming:** one name per concept, from the registries; no dead terms ("Forge", "wave").
 - **Source attribution:** user-stated content and conductor proposals stay structurally distinct in every artifact; an unanswered recommendation is not an accepted one.
 - **Ask, don't guess — one question at a time**, with options and a recommendation; never batch questions. A prose question reads as rhetorical and gets missed (user-stated 2026-08-11) — not asked.
-- **Never touch `.sterling/` directly:** never read or write anything under `.sterling/`; store access goes through the Sterling MCP tools only. Every Codex brief says so.
+- **A Codex run never touches `.sterling/`:** Codex never reads or writes anything under `.sterling/`; store access goes through the Sterling MCP tools only. Every Codex brief says so.
 - **Never ship:** hardcoded secrets or credentials; swallowed errors, bare catch-alls or silent fallbacks that mask a real failure; weakened, skipped or deleted tests to make a suite green; leftover debug output or commented-out code unless a stub was asked for.
 
 ## Project facts
