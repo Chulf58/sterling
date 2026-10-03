@@ -5182,6 +5182,13 @@ var ProjectRegistry = class {
   touchLastSeen(repoPath2, at) {
     return this.db.prepare("UPDATE projects SET last_seen_at = ? WHERE repo_path = ?").run(at, repoPath2).changes > 0;
   }
+  /** Mount-change refresh (/sterling:domains --apply): replace stack_tags of an
+   *  EXISTING row and nothing else, so the row's init dates and version still
+   *  say when and by which Sterling the project was last initialized. Never
+   *  creates a row. Returns whether a row was updated. */
+  updateStackTags(repoPath2, stackTags) {
+    return this.db.prepare("UPDATE projects SET stack_tags = ? WHERE repo_path = ?").run(JSON.stringify(stackTags), repoPath2).changes > 0;
+  }
   /** All registered projects, name-ordered. Stale-at-read (existence of
    *  repo_path) is the caller's lazy check — the registry stores no liveness. */
   list() {

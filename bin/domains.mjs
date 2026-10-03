@@ -7,10 +7,9 @@ var __export = (target, all) => {
 };
 
 // scripts/domains.mjs
-import { existsSync as existsSync4, readFileSync as readFileSync2, readdirSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync2, readdirSync, writeFileSync, renameSync, realpathSync as realpathSync4 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { basename as basename3, dirname as dirname5, join as join6, resolve as resolve3 } from "node:path";
-import { fileURLToPath } from "node:url";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 
 // node_modules/zod/v3/external.js
@@ -5396,6 +5395,13 @@ var ProjectRegistry = class {
   touchLastSeen(repoPath2, at) {
     return this.db.prepare("UPDATE projects SET last_seen_at = ? WHERE repo_path = ?").run(at, repoPath2).changes > 0;
   }
+  /** Mount-change refresh (/sterling:domains --apply): replace stack_tags of an
+   *  EXISTING row and nothing else, so the row's init dates and version still
+   *  say when and by which Sterling the project was last initialized. Never
+   *  creates a row. Returns whether a row was updated. */
+  updateStackTags(repoPath2, stackTags) {
+    return this.db.prepare("UPDATE projects SET stack_tags = ? WHERE repo_path = ?").run(JSON.stringify(stackTags), repoPath2).changes > 0;
+  }
   /** All registered projects, name-ordered. Stale-at-read (existence of
    *  repo_path) is the caller's lazy check — the registry stores no liveness. */
   list() {
@@ -7990,9 +7996,12 @@ function buildDomainMap({ stores, projects: projects2, current: current2, notes:
     const shared = me ? me.mounts.filter((t) => p.mounts.includes(t)) : [];
     return { name: p.name, path: p.path, mounts: p.mounts, shared, shared_subjects: shared.filter((t) => t !== UNIVERSAL_DOMAIN).sort() };
   });
+  const spellings = /* @__PURE__ */ new Map();
+  for (const d of domains) spellings.set(lower(d.name), [...spellings.get(lower(d.name)) ?? [], { name: d.name, has_store: d.has_store, mounted_by: d.mounted_by }]);
   return {
     current: me ? { ...me, registered } : null,
     domains,
+    near_names: [...spellings.values()].filter((group) => group.length > 1),
     unmounted: domains.filter((d) => d.has_store && d.mounted_by.length === 0).map((d) => d.name),
     tags_without_store: domains.filter((d) => !d.has_store).map((d) => ({ tag: d.name, projects: d.mounted_by })),
     undescribed: domains.filter((d) => d.has_store && !d.unreadable && d.format === "current" && !d.description).map((d) => d.name),
@@ -8007,14 +8016,15 @@ function buildDomainMap({ stores, projects: projects2, current: current2, notes:
 }
 function propose(me, siblings, domains) {
   const mine = namesOf(me);
+  const mountedAnyCase = (p, tag) => p.mounts.some((t) => lower(t) === lower(tag));
   const add = /* @__PURE__ */ new Map();
   const sibling_steps = [];
-  const hasStore = (name) => domains.some((d) => d.name === name && d.has_store);
+  const hasStore2 = (name) => domains.some((d) => d.name === name && d.has_store);
   const offer = (domain, reason) => {
-    if (!add.has(domain)) add.set(domain, { domain, reason, has_store: hasStore(domain) });
+    if (!add.has(domain)) add.set(domain, { domain, reason, has_store: hasStore2(domain) });
   };
   for (const d of domains) {
-    if (d.name === UNIVERSAL_DOMAIN || !mine.has(lower(d.name)) || me.mounts.includes(d.name)) continue;
+    if (d.name === UNIVERSAL_DOMAIN || !mine.has(lower(d.name)) || mountedAnyCase(me, d.name)) continue;
     const users = d.mounted_by.filter((n) => n !== me.name);
     offer(
       d.name,
@@ -8027,10 +8037,11 @@ function propose(me, siblings, domains) {
     const namedLikeMe = s2.mounts.filter((t) => t !== UNIVERSAL_DOMAIN && mine.has(lower(t)));
     const namedLikeThem = me.mounts.filter((t) => t !== UNIVERSAL_DOMAIN && theirs.has(lower(t)));
     if (!namedLikeMe.length || !namedLikeThem.length) continue;
-    for (const t of namedLikeMe) {
+    for (const t of namedLikeMe.filter((t2) => !mountedAnyCase(me, t2))) {
       offer(t, `'${t}' is this project's own subject and ${s2.name} mounts it, but this project does not, so the two projects share no subject domain.`);
     }
-    sibling_steps.push({ project: s2.name, path: s2.path, add: namedLikeThem });
+    const theirAdds = namedLikeThem.filter((t) => !mountedAnyCase(s2, t));
+    if (theirAdds.length) sibling_steps.push({ project: s2.name, path: s2.path, add: theirAdds });
   }
   return { add: [...add.values()], sibling_steps };
 }
@@ -8062,7 +8073,11 @@ function renderDomainMap(map, { applyCommand = "/sterling:domains" } = {}) {
   }
   out.push(`Stores in the old format: ${list(map.old_format)}`);
   if (map.old_format.length) {
-    out.push("  In a project that mounts an old-format store, knowledge_query and knowledge_get fail. This command does not migrate a store; the defect is tracked on the Sterling board as item 06f72a10.");
+    out.push("  In a project that mounts an old-format store, knowledge_query and knowledge_get fail until Sterling is updated to a version that isolates it. This command does not migrate a store. If it persists after /sterling:update, report it with /sterling:report-issue.");
+  }
+  for (const group of map.near_names) {
+    out.push(`Names that differ only by case: ${group.map((g) => `'${g.name}' (${g.has_store ? "store" : "no store"}; ${list(g.mounted_by)})`).join(" and ")}`);
+    out.push("  These are separate domains, so the projects share nothing through them. Settle on one spelling: this command adds a tag but never renames or removes one, so the other spelling is changed by hand in the stack_tags of the projects that use it.");
   }
   if (map.unreadable.length) out.push(`Stores that could not be read: ${map.unreadable.map((u) => `${u.name} (${u.error})`).join(", ")}`);
   out.push("", `Other projects (${map.siblings.length}):`);
@@ -8099,7 +8114,6 @@ function renderDomainMap(map, { applyCommand = "/sterling:domains" } = {}) {
 }
 
 // scripts/domains.mjs
-var pluginRoot = join6(dirname5(fileURLToPath(new URL("../scripts/domains.mjs", import.meta.url).href)), "..");
 var fwd = (p) => p.replace(/\\/g, "/");
 var USAGE = "usage: domains.mjs [--target <dir>] [--json] | --apply --add <domain> [--add <domain> ...] [--description <domain>=<text> ...]";
 function refuse(reason) {
@@ -8134,8 +8148,22 @@ if (opts.add.length && !opts.apply) refuse("--add changes the project only toget
 if (opts.descriptions.size && !opts.apply) refuse("--description is used only together with --apply --add <domain>");
 if (opts.apply && !opts.add.length) refuse("--apply needs at least one --add <domain>");
 if (opts.apply && opts.json) refuse("--json prints the map; it cannot be combined with --apply");
-var startDir = resolve3(opts.target ?? process.cwd());
-var projectDir = resolveLinkedWorktree(startDir)?.mainRoot ?? startDir;
+var projectRootOf = (dir) => resolveLinkedWorktree(dir)?.mainRoot ?? dir;
+var projectDir = projectRootOf(resolve3(opts.target ?? process.cwd()));
+var hasConfig = (dir) => existsSync4(join6(dir, ".sterling", "config.json"));
+function enclosingProject(dir) {
+  for (let d = dir; ; d = dirname5(d)) {
+    if (hasConfig(d)) return d;
+    if (dirname5(d) === d) return null;
+  }
+}
+var real = (p) => existsSync4(p) ? realpathSync4(p) : p;
+if (opts.apply && opts.target !== void 0) {
+  const here = enclosingProject(projectRootOf(process.cwd()));
+  if (!here || !sameLocationAnyHost(real(here), real(projectDir))) {
+    refuse(`--apply changes only the project the command runs in (${here ? fwd(here) : `${fwd(process.cwd())}, which is in no Sterling project`}), and --target names ${fwd(projectDir)}. Run the command from that project instead. --target is for report runs. Nothing was written.`);
+  }
+}
 function readProject(dir) {
   const configPath = resolveStoreWritePath(dir, ".sterling", "config.json");
   if (!existsSync4(configPath)) return null;
@@ -8182,40 +8210,34 @@ function listStores() {
   }
   return [...found].map(([name, dbPath]) => inspectStore(name, dbPath));
 }
-function pluginVersion() {
-  try {
-    const v = JSON.parse(readFileSync2(join6(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
-    return typeof v === "string" ? v : null;
-  } catch (e) {
-    if (e?.code === "ENOENT") return null;
-    throw e;
-  }
-}
-function registerCurrent(registry, repoPath2, name) {
-  registry.register({
-    repo_path: repoPath2,
-    name,
-    stack_tags: project.config.stack_tags,
-    toolchains: project.config.toolchains.map((t) => t.adapter),
-    sterling_version: pluginVersion(),
-    at: (/* @__PURE__ */ new Date()).toISOString()
-  });
-}
 var notes = [];
 var projectName = project ? project.config.project_name ?? basename3(projectDir) : null;
 var currentPath = fwd(projectDir);
+var isCurrent = (row) => Boolean(project) && sameLocationAnyHost(row.repo_path, currentPath);
+if (!project) {
+  const parent = enclosingProject(dirname5(projectDir));
+  if (parent) notes.push(`this folder is inside the Sterling project at ${fwd(parent)}. Run the command from there, or pass --target "${fwd(parent)}" for a report on it.`);
+}
 var rows = [];
-if (project || existsSync4(registryPath())) {
+var hasStore = project ? existsSync4(join6(projectDir, ".sterling", "sterling.db")) : false;
+if (existsSync4(registryPath()) || hasStore) {
   const registry = new ProjectRegistry(registryPath());
   try {
     rows = registry.list();
-    if (project) {
-      const mine = rows.find((p) => sameLocationAnyHost(p.repo_path, currentPath));
-      if (mine) currentPath = mine.repo_path;
-      else {
-        registerCurrent(registry, currentPath, projectName);
+    if (project && !rows.some(isCurrent)) {
+      if (hasStore) {
+        registry.register({
+          repo_path: currentPath,
+          name: projectName,
+          stack_tags: project.config.stack_tags,
+          toolchains: project.config.toolchains.map((t) => t.adapter),
+          sterling_version: null,
+          at: (/* @__PURE__ */ new Date()).toISOString()
+        });
         rows = registry.list();
-        notes.push(`${projectName} was not in the project registry (it was initialized by a Sterling version from before the registry, or on another machine or user). It is now registered, so other projects' maps list it.`);
+        notes.push(`${projectName} was not in the project registry (it was initialized by a Sterling version from before the registry, or on another machine or user). It is now registered by this command, so other projects' maps list it; its init dates in /sterling:projects are the time of this registration.`);
+      } else {
+        notes.push(`${projectName} is not registered: it has no .sterling/sterling.db, so it is not an initialized project. Run /sterling:init here to register it.`);
       }
     }
   } finally {
@@ -8223,21 +8245,23 @@ if (project || existsSync4(registryPath())) {
   }
 }
 var projects = rows.map((p) => {
-  const exists = existsSync4(p.repo_path);
+  if (isCurrent(p)) return { name: p.name, path: currentPath, stack_tags: project.config.stack_tags, exists: true };
+  const path = fwd(p.repo_path);
+  const exists = existsSync4(path);
   let stack_tags = p.stack_tags;
-  if (exists && p.repo_path !== currentPath) {
+  if (exists) {
     try {
-      const sibling = readProject(p.repo_path);
+      const sibling = readProject(path);
       if (sibling) {
         stack_tags = sibling.config.stack_tags;
         const overrides = Object.keys(sibling.config.domain_paths);
         if (overrides.length) notes.push(`${p.name} sets its own store path for ${overrides.join(", ")}; this map shows the store at the default location.`);
-      } else notes.push(`${p.name} has no .sterling/config.json; its mounts are the tags the registry recorded at its last init.`);
+      } else notes.push(`${p.name} has no .sterling/config.json; its mounts are the tags the registry recorded.`);
     } catch (e) {
-      notes.push(`${p.name}: its config could not be read (${e.message}); its mounts are the tags the registry recorded at its last init.`);
+      notes.push(`${p.name}: its config could not be read (${e.message}); its mounts are the tags the registry recorded.`);
     }
   }
-  return { name: p.name, path: fwd(p.repo_path), stack_tags, exists };
+  return { name: p.name, path, stack_tags, exists };
 });
 var current = project ? { name: projectName, path: currentPath, stack_tags: project.config.stack_tags } : null;
 if (!opts.apply) {
@@ -8250,7 +8274,11 @@ if (!opts.apply) {
   }
   process.exit(0);
 }
-if (!project) refuse(`${fwd(projectDir)} is not an initialized Sterling project (no .sterling/config.json). Run /sterling:init there first.`);
+if (!project) {
+  const parent = enclosingProject(dirname5(projectDir));
+  if (parent) refuse(`${fwd(projectDir)} is inside the Sterling project at ${fwd(parent)}. Run the command from there. Nothing was written.`);
+  refuse(`${fwd(projectDir)} is not an initialized Sterling project (no .sterling/config.json). Run /sterling:init there first.`);
+}
 for (const name of opts.add) {
   if (!name.trim() || name !== name.trim() || /[\\/]/.test(name) || name === "." || name === "..") {
     refuse(`'${name}' is not a domain name: a domain name is one folder name under ~/.sterling/domains/, with no slash`);
@@ -8260,6 +8288,20 @@ for (const name of opts.descriptions.keys()) {
   if (!opts.add.includes(name)) refuse(`--description names '${name}', which is not one of the --add domains (${opts.add.join(", ")})`);
 }
 var mounted = project.config.stack_tags;
+{
+  const stores = listStores().map((st) => st.name);
+  for (const name of opts.add) {
+    const differs = (other) => other !== name && other.toLowerCase() === name.toLowerCase();
+    const exact = stores.includes(name) || projects.some((p) => p.exists && p.stack_tags.includes(name));
+    if (exact) continue;
+    const store = stores.find(differs);
+    const user = projects.filter((p) => p.exists).map((p) => ({ p, tag: p.stack_tags.find(differs) })).find((x) => x.tag);
+    if (store || user) {
+      const existing = store ? `a store named '${store}' exists` : `${user.p.name} mounts '${user.tag}'`;
+      refuse(`'${name}' differs only by case from an existing domain: ${existing}. Use that spelling (--add ${store ?? user.tag}) so there is one store for the subject. Nothing was written.`);
+    }
+  }
+}
 var wanted = [...new Set(opts.add)];
 var toAdd = wanted.filter((name) => !mounted.includes(name));
 var plan = resolveDomainMounts({ stack_tags: wanted, domain_paths: project.config.domain_paths }).map((m) => ({
@@ -8276,9 +8318,16 @@ if (undescribed.length) {
 }
 var done = [];
 var created = 0;
+var createdNames = [];
+var partial = () => `${createdNames.length ? `Already created in this run: ${createdNames.map((n) => `'${n}'`).join(", ")} (the stores stay, with their descriptions).` : "No store was created in this run."}`;
 for (const m of plan) {
   if (!m.exists) {
-    createDomain(m.name, m.description, m.dbPath);
+    try {
+      createDomain(m.name, m.description, m.dbPath);
+    } catch (e) {
+      refuse(`the domain store '${m.name}' could not be created at ${fwd(m.dbPath)} (${e?.message ?? e}). ${partial()} stack_tags was not changed.`);
+    }
+    createdNames.push(m.name);
     created++;
     done.push(`created the domain store '${m.name}' at ${fwd(m.dbPath)}: ${m.description}`);
     if (m.listed) done.push(`'${m.name}' was already in stack_tags; it had no store until now`);
@@ -8293,17 +8342,24 @@ if (toAdd.length) {
   const next = universalLast ? [...tags.slice(0, -1), ...toAdd, UNIVERSAL_DOMAIN] : [...tags, ...toAdd];
   const nextRaw = { ...project.raw, stack_tags: next };
   project.config = parseConfig(nextRaw);
-  const tmpPath = resolveStoreWritePath(project.dir, ".sterling", `config.json.tmp-${process.pid}`);
-  writeFileSync(tmpPath, JSON.stringify(nextRaw, null, 2) + (project.text.endsWith("\n") ? "\n" : ""));
-  renameSync(tmpPath, project.configPath);
-  done.push(`stack_tags in .sterling/config.json: ${next.join(", ")}`);
-  const registry = new ProjectRegistry(registryPath());
   try {
-    registerCurrent(registry, currentPath, projectName);
-  } finally {
-    registry.close();
+    const tmpPath = resolveStoreWritePath(project.dir, ".sterling", `config.json.tmp-${process.pid}`);
+    writeFileSync(tmpPath, JSON.stringify(nextRaw, null, 2) + (project.text.endsWith("\n") ? "\n" : ""));
+    renameSync(tmpPath, project.configPath);
+  } catch (e) {
+    refuse(`.sterling/config.json could not be written (${e?.message ?? e}). ${partial()} stack_tags was not changed.`);
   }
-  done.push("refreshed this project in the project registry");
+  done.push(`stack_tags in .sterling/config.json: ${next.join(", ")}`);
+  const mine = rows.filter(isCurrent);
+  if (mine.length) {
+    const registry = new ProjectRegistry(registryPath());
+    try {
+      for (const row of mine) registry.updateStackTags(row.repo_path, next);
+    } finally {
+      registry.close();
+    }
+    done.push("updated this project's tags in the project registry");
+  } else done.push("this project has no registry row, so the registry was not changed (run /sterling:init to register it)");
 }
 console.log(`Applied to ${projectName} (${currentPath}):`);
 for (const line of done) console.log(`  ${line}`);
