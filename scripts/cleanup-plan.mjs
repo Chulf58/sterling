@@ -14,8 +14,9 @@
 //   delete   on disk, no live owner, no reference from any other file.
 // A reference is a mention of the filename, the stem, the stem's PascalCase or
 // camelCase form, or (for a .gd file) the class_name the file declares. A
-// generic basename (README, index, main) names every such file in the repo, so
-// only a path-qualified mention counts for it.
+// document basename (README, CHANGELOG, LICENSE, CONTRIBUTING) names every
+// such file in the repo, so only a path-qualified mention counts for it, plus
+// the bare name inside its own directory.
 // The paths of one deletable article die together: a reference from another
 // path of the same article that is itself being deleted does not keep a path.
 // A reference from any other file does, and a path that stays (keep, release)
@@ -36,15 +37,15 @@ import { arg, openProjectReadOnly } from './lib/project.mjs';
 const ARTICLE_CAP = 10000;
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 const LIST_LIMIT = 5;
-// Stems (compared case-insensitively) that name a role, not a feature: a
-// mention of the bare name says nothing about one particular file. Below the
-// repo root they are searched path-qualified everywhere and by bare name or
-// stem only inside their own directory; at the root they keep the bare-name
-// search everywhere, because a root file is imported from any directory.
-// mod and __init__ are not here: they never appear in a reference at all (a
-// reference is `mod oldfeat;` or `import oldpkg`), so they keep the bare-name
-// search and gain the directory name below.
-const GENERIC_STEMS = new Set(['readme', 'index', 'main', 'changelog', 'license', 'contributing']);
+// Stems (compared case-insensitively) of files that are documents and never
+// imported: a mention of the bare name says nothing about one particular file.
+// Below the repo root they are searched path-qualified everywhere and by bare
+// name or stem only inside their own directory; at the root they keep the
+// bare-name search everywhere. Code names (index, main, mod, __init__) are NOT
+// here: an importer in another directory reaches them by a dotted module path,
+// an alias or a bare module name with no slash (`from app import main`,
+// `@core/main`), so only the old repo-wide bare-name search keeps them safe.
+const GENERIC_STEMS = new Set(['readme', 'changelog', 'license', 'contributing']);
 // Stems whose file is reached through its directory's name (`mod oldfeat;`,
 // `import oldpkg`, `from './legacy'`) rather than through a path: the directory
 // name is a needle too. It only widens the search, so it can only keep more.
@@ -97,7 +98,7 @@ function needlesFor(path) {
   if (GENERIC_STEMS.has(lower) && !inRoot) {
     needles = [path, `${dirSegment}/${base}`, `${dirSegment}/${stem}`];
     local = [base, stem];
-    what = `its path (a generic name, so searched path-qualified everywhere and by bare name or stem only in its own directory ${dirPath}/)`;
+    what = `its path (a generic document name, so searched path-qualified everywhere and by bare name or stem only in its own directory ${dirPath}/)`;
   } else {
     const words = stem.split(/[^A-Za-z0-9]+/).filter(Boolean);
     const pascal = words.map((w) => w[0].toUpperCase() + w.slice(1)).join('');

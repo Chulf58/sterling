@@ -423,25 +423,108 @@ test('cleanup-plan: a candidate README.md is keep when another file names its di
   }
 });
 
-test('cleanup-plan: a generic stem such as index is not matched by the bare stem or its PascalCase form either', () => {
+test('cleanup-plan: a document name such as CHANGELOG is not matched by the bare stem from another directory', () => {
   const { dir, store, cleanup } = makeProject({
-    'src/legacy/index.mjs': 'export const legacy = 1;\n',
-    'src/app.mjs': "import { x } from './index';\nconst Index = 1;\nconst index = 2;\n",
+    'src/legacy/CHANGELOG.md': '# Changes\n',
+    'src/app.mjs': "// see the CHANGELOG.md and the CHANGELOG\nconst changelog = 1;\n",
   });
   try {
-    const dead = store.create(articleRec('legacy-feat', ['src/legacy/index.mjs'], { state: 'deprecated' }));
+    const dead = store.create(articleRec('legacy-feat', ['src/legacy/CHANGELOG.md'], { state: 'deprecated' }));
     const p = plan(dir);
-    const i = bucketOf(p.candidates.find((x) => x.article === dead.id), 'src/legacy/index.mjs');
-    assert.equal(i.bucket, 'delete', i.reason);
+    const c = bucketOf(p.candidates.find((x) => x.article === dead.id), 'src/legacy/CHANGELOG.md');
+    assert.equal(c.bucket, 'delete', c.reason);
   } finally {
     cleanup();
   }
 });
 
-// A generic name is still reached by the bare name from inside its own
-// directory (and by the directory name for index, mod and __init__), so those
-// forms must keep the file; a false 'delete' is the one answer the planner must
-// never give.
+// index and main are code names: an importer in another directory reaches them
+// by a bare stem, a dotted module path or an alias, never by a slash path, so
+// the old repo-wide bare-name search must keep them.
+test('cleanup-plan: an index file referenced from another directory by the bare stem is keep', () => {
+  const { dir, store, cleanup } = makeProject({
+    'src/legacy/index.mjs': 'export const legacy = 1;\n',
+    'src/app.mjs': "import { x } from './index';\n",
+  });
+  try {
+    const dead = store.create(articleRec('legacy-feat', ['src/legacy/index.mjs'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const i = bucketOf(p.candidates.find((x) => x.article === dead.id), 'src/legacy/index.mjs');
+    assert.equal(i.bucket, 'keep');
+    assert.match(i.reason, /src\/app\.mjs/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: main.py imported by a dotted module path from another directory is keep', () => {
+  const { dir, store, cleanup } = makeProject({
+    'src/app/main.py': 'def run(): pass\n',
+    'tools/start.py': 'from src.app.main import run\n',
+  });
+  try {
+    const dead = store.create(articleRec('app-main', ['src/app/main.py'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const m = bucketOf(p.candidates.find((x) => x.article === dead.id), 'src/app/main.py');
+    assert.equal(m.bucket, 'keep');
+    assert.match(m.reason, /tools\/start\.py/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: main.py imported as a module of its package from another directory is keep', () => {
+  const { dir, store, cleanup } = makeProject({
+    'app/main.py': 'def run(): pass\n',
+    'tools/start.py': 'from app import main\n',
+  });
+  try {
+    const dead = store.create(articleRec('app-main', ['app/main.py'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const m = bucketOf(p.candidates.find((x) => x.article === dead.id), 'app/main.py');
+    assert.equal(m.bucket, 'keep');
+    assert.match(m.reason, /tools\/start\.py/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cleanup-plan: main.ts imported through a tsconfig alias from another directory is keep', () => {
+  const { dir, store, cleanup } = makeProject({
+    'src/corelib/main.ts': 'export const m = 1;\n',
+    'src/ui/view.ts': "import { m } from '@core/main';\n",
+  });
+  try {
+    const dead = store.create(articleRec('core-main', ['src/corelib/main.ts'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const m = bucketOf(p.candidates.find((x) => x.article === dead.id), 'src/corelib/main.ts');
+    assert.equal(m.bucket, 'keep');
+    assert.match(m.reason, /src\/ui\/view\.ts/);
+  } finally {
+    cleanup();
+  }
+});
+
+// A document name is still reached by the bare name from inside its own
+// directory, and index, mod and __init__ by the directory name, so those forms
+// must keep the file; a false 'delete' is the one answer the planner must never
+// give.
+test('cleanup-plan: a README.md named by bare name from a file in its own directory is keep', () => {
+  const { dir, store, cleanup } = makeProject({
+    'docs/old_feature/README.md': '# Old feature\n',
+    'docs/old_feature/guide.md': 'Start with the README.md next to this file.\n',
+  });
+  try {
+    const dead = store.create(articleRec('old-feature', ['docs/old_feature/README.md'], { state: 'deprecated' }));
+    const p = plan(dir);
+    const r = bucketOf(p.candidates.find((x) => x.article === dead.id), 'docs/old_feature/README.md');
+    assert.equal(r.bucket, 'keep');
+    assert.match(r.reason, /docs\/old_feature\/guide\.md/);
+  } finally {
+    cleanup();
+  }
+});
+
 test('cleanup-plan: a generic-named file imported by bare name from a sibling is keep, and the reason says what was searched', () => {
   const { dir, store, cleanup } = makeProject({
     'src/legacy/index.mjs': 'export const legacy = 1;\n',
@@ -554,7 +637,7 @@ test('cleanup-plan: the delete reason of a generic-named file says it was search
     const p = plan(dir);
     const r = bucketOf(p.candidates.find((x) => x.article === dead.id), 'docs/old_feature/README.md');
     assert.equal(r.bucket, 'delete');
-    assert.match(r.reason, /generic name/);
+    assert.match(r.reason, /generic document name/);
     assert.match(r.reason, /path-qualified/);
     assert.match(r.reason, /its own directory/);
     assert.doesNotMatch(r.reason, /filename, stem or declared class/, 'the plain-name reason would be untrue here');
