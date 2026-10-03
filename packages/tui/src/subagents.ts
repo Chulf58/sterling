@@ -9,6 +9,14 @@
 // A file that does not parse is "corrupt" and is shown as unknown, never as an
 // empty list.
 //
+// The current session: H1 writes .sterling/transient/session.json at every
+// SessionStart. A row from another session is not listed. In the current
+// session an ended agent stays listed as `resumable` for as long as the
+// session lasts (the host resumes a subagent only inside the session that
+// started it), with its idle time and the context a resume would re-send.
+// Without a readable session.json nothing can be told apart by session, so
+// the old rule holds: ended rows linger DONE_LINGER_MS as `done`.
+//
 // Live means a register row with no `ended`. A resumed agent keeps its
 // agent_id across rounds, so rows are grouped by agent_id and the latest round
 // decides the status; the portrait assignment is keyed by agent_id as well.
@@ -30,7 +38,7 @@ import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_BG, 
 /** How long a missing subagent transcript is left unsearched before the next look. */
 const TRANSCRIPT_RETRY_MS = 10_000;
 
-/** How long an ended agent stays in the block, shown as done. */
+/** How long an ended agent stays in the block, shown as done, when the current session is unknown. */
 export const DONE_LINGER_MS = 5 * 60_000;
 
 export type RegisterAvailability = 'ok' | 'absent' | 'corrupt';
@@ -40,7 +48,8 @@ export interface SubagentRow {
   /** the latest round's session, which names the transcript directory */
   sessionId: string;
   agentType: string | null;
-  status: 'running' | 'done';
+  /** done is the fallback for an ended row when the current session is unknown */
+  status: 'running' | 'resumable' | 'done';
   /** the latest round's start */
   startedAt: number;
   endedAt: number | null;
@@ -58,13 +67,31 @@ function roundOf(e: RegisterEntry): number {
   return typeof e.round === 'number' ? e.round : 1;
 }
 
-/** Read the register and reduce it to one row per agent_id: running when its
- *  latest round has neither `ended` nor `residue_reported_at`, done when that
- *  round ended within lingerMs. H10 stamps residue_reported_at on a row whose
- *  subagent is gone without a stop event, so the stamp counts as the end. */
+/** The current session id from H1's session.json; null when the file is
+ *  missing, unreadable or names no session. scripts/ cannot be imported here
+ *  for this one function's sake (readSessionId in dispatch-register.mjs reads
+ *  the same file the same way), and a degraded read is announced by the
+ *  fallback rule in readSubagents, not hidden. */
+export function readCurrentSessionId(projectRoot: string): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(projectRoot, '.sterling', 'transient', 'session.json'), 'utf8')) as { session_id?: unknown };
+    return typeof parsed?.session_id === 'string' && parsed.session_id ? parsed.session_id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read the register and reduce it to one row per agent_id, the latest round
+ *  deciding. With the current session known: only that session's rows; a round
+ *  with a real `ended` is resumable with no time limit. With it unknown: every
+ *  row, an ended one done for lingerMs. H10 stamps residue_reported_at on a row
+ *  whose subagent is gone without a stop event: the stamp counts as the end
+ *  (done, lingering lingerMs) but never as resumable, since nothing shows such
+ *  a subagent can be resumed. */
 export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_LINGER_MS): SubagentSource {
   const reg = readRegister(projectRoot);
   if (reg.availability !== 'ok') return { availability: reg.availability, rows: [] };
+  const currentSession = readCurrentSessionId(projectRoot);
   const byAgent = new Map<string, RegisterEntry[]>();
   for (const e of reg.entries) {
     const list = byAgent.get(e.agent_id) ?? [];
@@ -75,17 +102,20 @@ export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_
   for (const [agentId, rounds] of byAgent) {
     rounds.sort((a, b) => roundOf(b) - roundOf(a) || Date.parse(b.at) - Date.parse(a.at));
     const latest = rounds[0]!;
+    if (currentSession !== null && latest.session_id !== currentSession) continue;
     const startedAt = Date.parse(latest.at);
     if (Number.isNaN(startedAt)) continue;
     const endStamp = latest.ended ? latest.ended.at : latest.residue_reported_at ? String(latest.residue_reported_at) : null;
     const endedAt = endStamp === null ? null : Date.parse(endStamp);
-    if (endedAt !== null && (Number.isNaN(endedAt) || now - endedAt > lingerMs)) continue;
+    // only a real stop event shows a subagent can be resumed; a residue stamp does not
+    const resumable = currentSession !== null && Boolean(latest.ended);
+    if (endedAt !== null && (Number.isNaN(endedAt) || (!resumable && now - endedAt > lingerMs))) continue;
     const withId = rounds.find((r) => typeof r.tool_use_id === 'string' && r.tool_use_id !== '');
     rows.push({
       agentId,
       sessionId: latest.session_id,
       agentType: typeof latest.agent_type === 'string' && latest.agent_type ? latest.agent_type : null,
-      status: endedAt === null ? 'running' : 'done',
+      status: endedAt === null ? 'running' : resumable ? 'resumable' : 'done',
       startedAt,
       endedAt,
       elapsedMs: Math.max(0, (endedAt ?? now) - startedAt),
@@ -220,10 +250,14 @@ export interface SubagentAgentView {
   type: string;
   description: string | null;
   model: string | null;
-  status: 'running' | 'done';
+  status: 'running' | 'resumable' | 'done';
   elapsedMs: number;
   /** context fill, or null while unknown */
   contextPct: number | null;
+  /** tokens in context at the transcript's latest turn (what a resume re-sends), or null while unknown */
+  contextTokens: number | null;
+  /** time since the agent ended; null while it runs */
+  idleMs: number | null;
 }
 
 export interface SubagentView {
@@ -264,11 +298,11 @@ export function createSubagentTracker(
   // per agent: the transcript's size and mtime at the last tail read, so an
   // unchanged transcript is not read again
   const usage = new Map<string, { stamp: string; value: { tokens: number; model: string | null } | null }>();
-  let context = new Map<string, { model: string | null; pct: number | null }>();
+  let context = new Map<string, { model: string | null; pct: number | null; tokens: number | null }>();
 
   const keyOf = (r: SubagentRow): string => `${r.sessionId}\0${r.agentId}`;
 
-  function contextOf(r: SubagentRow, windows: Record<string, number>, now: number): { model: string | null; pct: number | null } {
+  function contextOf(r: SubagentRow, windows: Record<string, number>, now: number): { model: string | null; pct: number | null; tokens: number | null } {
     const key = keyOf(r);
     let path = transcripts.get(key);
     if (!path && now >= (missing.get(key) ?? -Infinity)) {
@@ -278,13 +312,13 @@ export function createSubagentTracker(
         missing.delete(key);
       } else missing.set(key, now + TRANSCRIPT_RETRY_MS);
     }
-    if (!path) return { model: null, pct: null };
+    if (!path) return { model: null, pct: null, tokens: null };
     let stamp: string;
     try {
       const st = statSync(path);
       stamp = `${st.size}:${st.mtimeMs}`;
     } catch {
-      return { model: null, pct: null };
+      return { model: null, pct: null, tokens: null };
     }
     let cached = usage.get(r.agentId);
     if (cached?.stamp !== stamp) {
@@ -292,10 +326,10 @@ export function createSubagentTracker(
       usage.set(r.agentId, cached);
     }
     const u = cached.value;
-    if (!u) return { model: null, pct: null };
+    if (!u) return { model: null, pct: null, tokens: null };
     const model = u.model ?? (r.agentType ? models.get(r.agentType) ?? null : null);
     const window = model ? contextWindowFor(model, windows, sharedWindows) : null;
-    return { model: u.model, pct: window ? contextPercent(u.tokens, window) : null };
+    return { model: u.model, pct: window ? contextPercent(u.tokens, window) : null, tokens: u.tokens };
   }
 
   function refresh(now: number): void {
@@ -337,10 +371,35 @@ export function createSubagentTracker(
         status: r.status,
         elapsedMs: r.status === 'running' ? Math.max(0, now - r.startedAt) : r.elapsedMs,
         contextPct: context.get(r.agentId)?.pct ?? null,
+        contextTokens: context.get(r.agentId)?.tokens ?? null,
+        idleMs: r.endedAt === null ? null : Math.max(0, now - r.endedAt),
       }));
       return { availability: source.availability, active: agents.filter((a) => a.status === 'running').length, agents };
     },
   };
+}
+
+/** Compact time since an agent ended: 45s, 12m, 2h 05m. */
+export function formatIdle(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+function formatTokens(tokens: number | null): string {
+  if (tokens === null) return '?';
+  return tokens < 1000 ? String(tokens) : `${Math.round(tokens / 1000)}k`;
+}
+
+/** The status line of a resumable card: the fullest of these that fits the text block. */
+function resumableStatus(a: SubagentView['agents'][number], width: number): string {
+  const idle = formatIdle(a.idleMs ?? 0);
+  const tokens = formatTokens(a.contextTokens);
+  const pct = a.contextPct === null ? [] : [`resumable · idle ${idle} · ${tokens} ctx (${a.contextPct}%)`];
+  const forms = [...pct, `resumable · idle ${idle} · ${tokens} ctx`, `resumable ${idle} · ${tokens} ctx`, `resumable ${idle} · ${tokens}`, `resumable ${idle}`];
+  return forms.find((f) => [...f].length <= width) ?? forms[forms.length - 1]!;
 }
 
 export function formatElapsed(ms: number): string {
@@ -354,7 +413,7 @@ export function formatElapsed(ms: number): string {
 // ---------------------------------------------------------------------------
 // Composition. Coordinates are relative to the block's top-left corner, which
 // the renderer puts at the top of the Agents tab's body. Each card is the 8x3
-// portrait tile with the text lines (type, `status · N% ctx`, model,
+// portrait tile with the text lines (type, `status · N% ctx` or, resumable, `resumable · idle 12m · 78k ctx`, model,
 // description) to its right, one column apart, so a card is 3-4 rows tall.
 // The pane's width is shared evenly by as many cards as fit side by side at
 // SIDE_MIN_W columns each, wrapping to the next band when there are more; the
@@ -456,7 +515,7 @@ export function composeSubagentBlock(view: SubagentView, width: number, maxHeigh
   const pixels: BlockPixel[] = [];
   for (let i = 0; i < shown; i++) {
     const a = view.agents[i]!;
-    const done = a.status === 'done';
+    const done = a.status !== 'running';
     const x0 = (i % perRow) * (cardW + CARD_GAP);
     const y0 = bandY[Math.floor(i / perRow)]!;
     // the tile: every cell carries a bg, so the tint covers the padding and the transparent pixels.
@@ -473,7 +532,7 @@ export function composeSubagentBlock(view: SubagentView, width: number, maxHeigh
     const tx = side ? x0 + TILE_COLS + TILE_GAP : x0;
     const ty = side ? y0 : y0 + TILE_H;
     puts.push({ x: tx, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, textW) });
-    const status = `${a.status} · ${a.contextPct === null ? '?' : `${a.contextPct}%`} ctx`;
+    const status = a.status === 'resumable' ? resumableStatus(a, textW) : `${a.status} · ${a.contextPct === null ? '?' : `${a.contextPct}%`} ctx`;
     puts.push({ x: tx, y: ty + 1, attr: done ? { dim: true } : { color: 'green' }, text: clip(status, textW) });
     puts.push({ x: tx, y: ty + 2, attr: { dim: true }, text: clip(a.model ?? 'model unknown', textW) });
     if (a.description) puts.push({ x: tx, y: ty + 3, attr: { dim: true }, text: clip(a.description, textW) });
