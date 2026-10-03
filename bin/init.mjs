@@ -6213,9 +6213,33 @@ function axisHits(record, terms) {
     return [];
   return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
 }
+function candidateBases(term) {
+  const bases = /* @__PURE__ */ new Set([term]);
+  for (const suffix of ["ing", "ed", "es", "s"]) {
+    if (!term.endsWith(suffix) || suffix === "s" && term.endsWith("ss"))
+      continue;
+    const rest = term.slice(0, -suffix.length);
+    for (const base2 of [rest, `${rest}e`])
+      if (base2.length >= 3)
+        bases.add(base2);
+  }
+  return bases;
+}
 function hasDiscriminatingHit(hits, minDiscriminating = 1) {
-  const distinct = new Set(hits.map((t) => String(t).toLowerCase()).filter((t) => !GENERIC_DEV_TERMS.has(t)));
-  return distinct.size >= minDiscriminating;
+  const terms = [...new Set(hits.map((t) => String(t).toLowerCase()).filter((t) => !GENERIC_DEV_TERMS.has(t)))];
+  const groups = [];
+  for (const term of terms) {
+    const merged = candidateBases(term);
+    for (let i = groups.length - 1; i >= 0; i--) {
+      if ([...groups[i]].some((b) => merged.has(b))) {
+        for (const b of groups[i])
+          merged.add(b);
+        groups.splice(i, 1);
+      }
+    }
+    groups.push(merged);
+  }
+  return groups.length >= minDiscriminating;
 }
 function narrowCentralTerms(record, topK) {
   return extractAxisTerms(axisNarrowText(record), topK);
