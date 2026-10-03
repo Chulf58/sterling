@@ -1,13 +1,13 @@
 ---
 name: delegating-to-subagents
-description: Use before dispatching a subagent or choosing which agent should do a piece of work — "delegate this", "use a subagent", "which agent should I use", "run these in parallel", "get a second opinion". Covers the delegation brief contract, the implementor/researcher/scout/librarian roster, warm-agent reuse, one-writer-per-file, and the failure modes that make delegation lose to just doing the work yourself.
+description: Use before dispatching a subagent or choosing which agent should do a piece of work — "delegate this", "use a subagent", "which agent should I use", "run these in parallel", "get a second opinion". Covers the delegation brief contract, the implementor/researcher/scout/reviewer/librarian roster, warm-agent reuse, one-writer-per-file, and the failure modes that make delegation lose to just doing the work yourself.
 ---
 
 # Delegating to subagents
 
 ## The one thing to get right
 
-A subagent starts with a **fresh, empty context window**. It cannot see your conversation, the files you already read, the user's corrections, or the constraint you settled three turns ago. It gets its own system prompt, `AGENTS.md` and `CLAUDE.md`, and *your brief*. Nothing else.
+A subagent starts with a **fresh, empty context window**. It cannot see your conversation, the files you already read, the user's corrections, or the constraint you settled three turns ago. It gets its own system prompt, `AGENTS.md` and `CLAUDE.md`, and *your brief*. A hook also stages the store's knowledge for the files the brief names, but only when exactly one dispatch of that agent type is pending; for parallel lanes of the same type, put the record ids in each brief (decision `h22-start-staging-only-when-attribution-is-unambiguous-no-sidecar`). It sees nothing of the conversation.
 
 Under-specified briefs are the single largest source of wasted delegation. Agents duplicate each other, answer a subtly different question, or return something unusable — and you pay full price for it.
 
@@ -45,7 +45,7 @@ Return: files changed, the diff rationale, pasted pytest output, blockers.
 
 The roster, each role's return shape, and the escalate-on-evidence rule are in `agent-templates/conductor.md`, "The roster"; each role's shipped default model and effort are in `templates/default-config.json` (`models`), and a project's own values in `.sterling/config.json`. In short: `scout` locates, `researcher` traces and answers web facts (it has WebSearch and WebFetch; the scout has no web tools), `implementor` changes code and owns its tests (Sonnet 5.5 by default; pin Opus 5.5 on a dispatch for a lane that needs careful judgment), `librarian` applies conductor-drafted store writes, and **Terra** (`gpt-5.6-terra`, through the `codex` MCP tool) is an alternative to the implementor's default. Every dispatch carries an explicitly pinned model.
 
-Reviews are not a roster role: dispatch them per the `review-brief` skill. Who reviews what — the cross-family pairing, and in a WORK-mode project Sol before the PR, which takes precedence over the Terra→Opus pairing — is in `agent-templates/conductor.md`, "Review sparsely, and only before a commit".
+`reviewer` (read-only, one review rubric, model pinned per dispatch) takes review, re-check and sparring lanes; brief it per the `review-brief` skill. Who reviews what — the cross-family pairing, and in a WORK-mode project Sol before the PR, which takes precedence over the Terra→Opus pairing — is in `agent-templates/conductor.md`, "Review sparsely, and only when a task is done".
 
 ## Parallel lanes, warm agents, reading results back
 

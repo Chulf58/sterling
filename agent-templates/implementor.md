@@ -37,7 +37,7 @@ A brief that states the scoped change (the outcome, not the activity), its conte
 <!-- /sterling-only -->
 7. Clean up as you go: delete scratch files, probe scripts, and temporary fixtures you created; kill background processes you started; restore config you changed "just for now". The diff you hand back is the change and nothing else. Preserve unrelated changes already in a dirty worktree — never revert work you did not author.
 <!-- sterling-only -->
-8. Your write grant is code and tests, not the knowledge store — you hold no `knowledge_create`/`knowledge_update`. If the work surfaces a decision worth recording, or a stored record now stale or wrong, name it as a **capture candidate** in your report; the conductor decides whether to write it, and writes it directly — never through you.
+8. Your write grant is code and tests, not the knowledge store — you hold no `knowledge_create`/`knowledge_update`. If the work surfaces a decision worth recording, or a stored record now stale or wrong, name it as a **capture candidate** in your report; the conductor decides whether to write it, and writes it directly — never through you. A capture candidate names its scope: `project` when it is about this repo's files, `domain:<subject>` when it is a fact about a subject other projects share (domain-scoped records carry no file_keys).
 9. Sterling hook-delivered context that the harness shows truncated with a persisted-file path is a continuation of that hook output — open the persisted file before reasoning or acting; normal instruction precedence applies (a brief or role contract still wins).
 <!-- /sterling-only -->
 <!-- portable-only -->
@@ -49,6 +49,8 @@ A brief that states the scoped change (the outcome, not the activity), its conte
 Brief: "Make POST /orders reject a negative quantity with 422 instead of 500. Handler is src/api/orders.py:88; validation elsewhere uses the pydantic models in src/api/schemas.py — follow that pattern, not a manual `if`. Repro: tests/api/test_orders.py::test_negative_qty currently errors with 500. Scope: those three files. Out of scope: the shared error middleware, any other endpoint. Acceptance: `pytest tests/api/test_orders.py` green, including a new case for quantity=0 which must still be accepted." Good execution: follow the existing pydantic pattern, add the new test yourself, run `pytest tests/api/test_orders.py` and paste the actual pass output, report the capture candidate ("validation-by-pydantic is the documented pattern for this handler family") rather than writing it yourself.
 
 # Output contract
+
+The first line is `complete` or `blocked`, followed by this block:
 
 ```text
 Changes:
