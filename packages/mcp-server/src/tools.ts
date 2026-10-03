@@ -11634,6 +11634,14 @@ export class SterlingTools {
    *  analog), and the orphan-coverage check below is ruling-prose-shaped. */
   private static readonly SUPERSEDE_ALLOWED_TYPES = ['decision', 'anti_pattern', 'research_finding'];
 
+  /** The types that may CLOSE a reference_material whose subject is gone
+   *  (decision record-audit-dead-records-superseded-stale-findings-by-age-
+   *  report-arm-plus-sampled-audit: "superseded by a short record saying what
+   *  happened"). A reference's body is a pointer at a location, so a dead one
+   *  has no same-type successor to offer; the closing record is a note of one
+   *  of these types, named by the caller. */
+  private static readonly REFERENCE_CLOSING_TYPES = ['decision', 'research_finding'];
+
   /** ruling-write types whose create/update receipts surface SAME-SUBJECT
    *  records (decision foreign_7e3c66c5). Superset of SUPERSEDE_ALLOWED_TYPES since
    *  2026-08-21 (review finding on board 259a455f): a second attestation on
@@ -11744,33 +11752,84 @@ export class SterlingTools {
    * discloses which candidates were accepted. Fewer than 2 units is ordinary
    * single-ruling supersession — no check.
    *
-   * Every refusal below runs before store.supersede is ever called, so a
-   * refused call leaves the store untouched.
+   * A DEAD reference_material IS THE ONE CROSS-TYPE CASE (board 3b5c6877,
+   * decision record-audit-dead-records-superseded-stale-findings-by-age-
+   * report-arm-plus-sampled-audit). A reference whose location is gone had no
+   * exit: knowledge_update can only repoint it, knowledge_retire needs a
+   * surviving duplicate, and the deletion arm of the refresh_reference mint
+   * fires on every read while it stays active. `opts.type` names the closing
+   * record's type (REFERENCE_CLOSING_TYPES); the note is created and the
+   * reference retired in favour of it in one transaction. store.supersede is
+   * same-type by contract, so this branch composes the two store primitives
+   * that already exist for it: create, then retireInFavorOf, which writes the
+   * same (new supersedes old) edge and the same retired lifecycle.
+   *
+   * `opts.resolves` is the explicit claim knowledge_update already takes: full
+   * ids of open items keyed to the old record's chain, validated before the
+   * write and removed inside its transaction. An item not named stays open —
+   * a supersession never drains the queue implicitly.
+   *
+   * Every refusal below runs before the store is written, so a refused call
+   * leaves the store untouched.
    */
-  knowledgeSupersede(oldId: string, fields: Record<string, unknown>, orphansAcknowledged?: boolean): { superseded: string; id: string; type: string; slug?: string; orphan_candidates?: string[]; warnings: string[]; same_subject: SameSubjectEntry[] } {
+  knowledgeSupersede(
+    oldId: string,
+    fields: Record<string, unknown>,
+    orphansAcknowledged?: boolean,
+    opts: { type?: string; resolves?: string[] } = {}
+  ): {
+    superseded: string;
+    id: string;
+    type: string;
+    slug?: string;
+    orphan_candidates?: string[];
+    resolved_items?: { id: string; system_reason?: string; file_keys?: string[] }[];
+    warnings: string[];
+    same_subject: SameSubjectEntry[];
+  } {
     const old = this.resolveRecordId(oldId, 'knowledge_supersede');
     if (old.type === 'todo') {
       throw new Error(
         `knowledge_supersede: '${oldId}' is a todo — those leave through board_remove / maintenance_remove (done = removed, P4), not supersession.`
       );
     }
-    if (old.type === 'feature_article' || old.type === 'reference_material') {
+    if (old.type === 'feature_article') {
       throw new Error(
         `knowledge_supersede: '${oldId}' is a ${old.type} — those evolve in place via knowledge_update (fix-forward, same lineage), or for a genuine ` +
           `duplicate, knowledge_retire(id, in_favor_of). knowledge_supersede replaces decision / anti_pattern / research_finding only.`
       );
     }
-    if (!SterlingTools.SUPERSEDE_ALLOWED_TYPES.includes(old.type)) {
-      throw new Error(
-        `knowledge_supersede: '${old.type}' records are not supported — allowed: ${SterlingTools.SUPERSEDE_ALLOWED_TYPES.join(', ')}.`
-      );
+    const closesReference = old.type === 'reference_material';
+    if (closesReference) {
+      if (opts.type === undefined || !SterlingTools.REFERENCE_CLOSING_TYPES.includes(opts.type)) {
+        const allowed = SterlingTools.REFERENCE_CLOSING_TYPES.join(' or ');
+        throw new Error(
+          `knowledge_supersede: '${oldId}' is a reference_material — one whose subject still exists evolves in place via knowledge_update ` +
+            `(fix-forward, same lineage; repoint its location), and a genuine duplicate goes through knowledge_retire(id, in_favor_of). ` +
+            `One whose subject is GONE is closed by a short record saying what happened: pass type (${allowed}) with that record's complete fields` +
+            (opts.type === undefined ? `; no type was given.` : `; type '${opts.type}' is not one of them.`) +
+            ` Nothing was written.`
+        );
+      }
+    } else {
+      if (!SterlingTools.SUPERSEDE_ALLOWED_TYPES.includes(old.type)) {
+        throw new Error(
+          `knowledge_supersede: '${old.type}' records are not supported — allowed: ${SterlingTools.SUPERSEDE_ALLOWED_TYPES.join(', ')}.`
+        );
+      }
+      if (opts.type !== undefined && opts.type !== old.type) {
+        throw new Error(
+          `knowledge_supersede: '${oldId}' is a ${old.type} and is replaced by a ${old.type} only — type '${opts.type}' is refused. ` +
+            `A different closing type is accepted only when the old record is a reference_material. Nothing was written.`
+        );
+      }
     }
     if (old.status === 'superseded') {
       throw new Error(`knowledge_supersede: '${oldId}' is already superseded — resolve its chain to the live head first (knowledge_get discloses the terminus).`);
     }
 
     this.refuseServerOwnedFields(fields, 'knowledge_supersede');
-    const type = old.type;
+    const type = closesReference ? (opts.type as string) : old.type;
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, ...body } = fields;
 
     // Slug continuity (decision foreign_de1a7329): fields with no slug inherit the old
@@ -11878,7 +11937,7 @@ export class SterlingTools {
     // bring repo paths the old row did not have.
     const supersedeHolder = this.store.scopeOfHolder(old.id);
     if (supersedeHolder.startsWith('domain:')) {
-      const had = new Set(declaredRepoPaths(type, old as unknown as Record<string, unknown>));
+      const had = new Set(declaredRepoPaths(old.type, old as unknown as Record<string, unknown>));
       const added = declaredRepoPaths(type, parsed).filter((p) => !had.has(p));
       if (added.length) {
         throw new Error(
@@ -11920,16 +11979,62 @@ export class SterlingTools {
       }
     }
 
-    const chain = new Set<string>([old.id]);
-    for (const link of (old.links ?? []) as { rel: string; target_id: string }[]) {
-      if (link.rel === 'supersedes') chain.add(link.target_id);
+    const chain = this.supersedeChain(old);
+
+    // RESOLVES CLAIMS, validated before the write with the same rules and the
+    // same messages as knowledgeUpdate: no duplicate, an open system item in a
+    // resolvable lane whose feature_link is in this record's chain, and a
+    // target the PROJECT store holds (queue items are project-local, so a
+    // domain-held record's items close in a second step).
+    const resolves = opts.resolves ?? [];
+    const seenClaims = new Set<string>();
+    const duplicate = resolves.find((rid) => (seenClaims.has(rid) ? true : (seenClaims.add(rid), false)));
+    if (duplicate !== undefined) {
+      throw new Error(`resolves: '${duplicate}' is named more than once — an item can only be claimed once; nothing was written.`);
     }
-    const updated = this.store.supersede(old.id, parsed);
+    const claims = resolves.map((rid) => this.validateResolveClaim(rid, chain));
+    if (claims.length > 0) {
+      const fault = SterlingTools.targetMountFault((old as unknown as { scope?: unknown }).scope, this.store.projectStoreHolds(old.id));
+      if (fault) {
+        throw new Error(
+          this.mountRefusalMessage({
+            lane: 'knowledge_supersede',
+            targetId: old.id,
+            fault,
+            claims: claims as unknown as { id: string; system_reason?: string }[],
+            why: `the item's deletion and this write would land on two different SQLite connections and could never commit together.`,
+          })
+        );
+      }
+    }
+
+    // ONE TRANSACTION on the old record's own mount: the new record, the old
+    // record's retirement and every claimed item's removal commit together or
+    // not at all.
+    const resolvedItems: { id: string; system_reason?: string; file_keys?: string[] }[] = [];
+    const updated = this.store.withTransactionForRecord(old.id, () => {
+      let head: DurableRecord;
+      if (closesReference) {
+        // retireInFavorOf writes the supersedes edge itself, so a copy of it in
+        // the caller's links is dropped rather than written twice.
+        const links = (parsed.links as { rel: string; target_id: string }[]).filter((l) => !(l.rel === 'supersedes' && l.target_id === old.id));
+        head = this.store.create({ ...parsed, links });
+        this.store.retireInFavorOf(old.id, head.id, ts);
+      } else {
+        head = this.store.supersede(old.id, parsed);
+      }
+      for (const claim of claims) {
+        const atRemoval = this.store.get(claim.id) as (DurableRecord & { system_reason?: string; file_keys?: string[] }) | undefined;
+        this.store.remove(claim.id, ts);
+        if (atRemoval) resolvedItems.push({ id: atRemoval.id, system_reason: atRemoval.system_reason, file_keys: atRemoval.file_keys ?? [] });
+      }
+      return head;
+    });
     this.repointPromotionReview(chain, updated.id, ts);
 
-    // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): knowledge_supersede only
-    // ever operates on the three ruling types (SUPERSEDE_ALLOWED_TYPES,
-    // enforced above), so this always applies here. Excludes the old,
+    // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): the new record is
+    // always one of the three ruling types (SUPERSEDE_ALLOWED_TYPES, of which
+    // REFERENCE_CLOSING_TYPES is a subset), so this always applies here. Excludes the old,
     // just-superseded record and its own supersede chain, plus the new
     // record's own id — never the write's own lineage.
     const sameSubjectExclude = new Set(chain);
@@ -11942,6 +12047,7 @@ export class SterlingTools {
       type: updated.type,
       slug: (updated as unknown as { slug?: string }).slug,
       ...(orphanCandidates.length > 0 ? { orphan_candidates: orphanCandidates } : {}),
+      ...(resolvedItems.length > 0 ? { resolved_items: resolvedItems } : {}),
       warnings: citationWarnings,
       same_subject: sameSubject,
     };

@@ -384,10 +384,22 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_supersede',
     {
       description:
-        "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them — carry them forward, or pass orphans_acknowledged:true. Other types are refused naming their exit path (todo → board_remove/maintenance_remove; feature_article/reference_material → knowledge_update/knowledge_retire). Refusals write nothing.",
-      inputSchema: strict({ old_id: z.string(), fields: passthrough, orphans_acknowledged: z.boolean().optional() }),
+        "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them — carry them forward, or pass orphans_acknowledged:true. A reference_material whose subject is gone (its location was deleted) is closed here too: pass type 'decision' or 'research_finding' and `fields` for a short record of that type saying what happened; the reference is superseded by it and is no longer read, so it raises no further refresh_reference items. A reference whose subject still exists is repointed with knowledge_update; a duplicate goes to knowledge_retire. resolves:[<full item ids>] closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to the old record's chain in the same transaction (validated before the write; unnamed items stay open). Other types are refused naming their exit path (todo → board_remove/maintenance_remove; feature_article → knowledge_update/knowledge_retire). Refusals write nothing.",
+      inputSchema: strict({
+        old_id: z.string(),
+        fields: passthrough,
+        orphans_acknowledged: z.boolean().optional(),
+        type: z
+          .string()
+          .optional()
+          .describe("the closing record's type, 'decision' or 'research_finding' — required when old_id is a reference_material, otherwise omit it"),
+        resolves: z
+          .array(z.string())
+          .optional()
+          .describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to the old record's chain that this supersession discharges — full ids, validated before the write"),
+      }),
     },
-    ({ old_id, fields, orphans_acknowledged }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged))
+    ({ old_id, fields, orphans_acknowledged, type, resolves }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged, { type, resolves }))
   );
 
   server.registerTool(
