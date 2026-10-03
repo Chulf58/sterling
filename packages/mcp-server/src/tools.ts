@@ -21,6 +21,7 @@ import {
   classifyClaimPath,
   fitDomains,
   MountedStores,
+  allocateShares,
   type QueryOptions,
   type ToolStore,
 } from '@sterling/store';
@@ -5683,7 +5684,10 @@ export class SterlingTools {
    * PREFLIGHT_MATCH_CAP after sorting (see below) — the sort itself is now
    * centrality-hit-count DESC, then raw-hits DESC, then the existing
    * recency/id tie-break, so a central match always outranks a merely-hitting
-   * one regardless of which side has more raw hits. `matched_total` always
+   * one regardless of which side has more raw hits. With domains mounted, that
+   * sort runs inside each store and the cap is split by read share
+   * (preflightWindow), so the order holds within a store, never across.
+   * `matched_total` always
    * reports the pre-cap count of CENTRALITY-PASSING records AMONG THE
    * CANDIDATES ACTUALLY EVALUATED (not a true/exact/full count: each type's
    * own query is itself capped at 40 FTS candidates, so a qualifying record
@@ -5734,19 +5738,17 @@ export class SterlingTools {
     // count desc, then raw hits desc, then the existing recency/id
     // tie-break — a central match always outranks a merely-hitting one, over
     // the WIDENED list (not just the centrality-passing subset above).
-    const sorted = [...withCentrality].sort(
-      (a, b) =>
-        b.centralHits.length - a.centralHits.length ||
-        b.hits.length - a.hits.length ||
-        b.at - a.at ||
-        (a.record.id < b.record.id ? -1 : a.record.id > b.record.id ? 1 : 0)
-    );
+    const byRank = (a: (typeof withCentrality)[number], b: (typeof withCentrality)[number]) =>
+      b.centralHits.length - a.centralHits.length ||
+      b.hits.length - a.hits.length ||
+      b.at - a.at ||
+      (a.record.id < b.record.id ? -1 : a.record.id > b.record.id ? 1 : 0);
     // Cap AFTER the sort, over the WIDENED list — `matched_total` above
     // already reports the true centrality-passing count; `capped`/`matches`
     // reflect the full (possibly non-central) survivor set, so a large
     // widened list can cap even when matched_total itself is small.
-    const windowed = sorted.slice(0, SterlingTools.PREFLIGHT_MATCH_CAP);
-    const capped = sorted.length > windowed.length;
+    const windowed = this.preflightWindow(withCentrality, byRank);
+    const capped = withCentrality.length > windowed.length;
     const matches = windowed.map(({ record, hits, centralHits }) => {
       // board c6e3561f disclosure-carry: a matched record carries the same
       // inbound-supersedes disclosure as knowledge_get / knowledge_query-full,
@@ -5775,6 +5777,37 @@ export class SterlingTools {
       answerability: matchedTotal ? 'verify_targets' : 'ungoverned',
       ...this.missingDomainsDisclosure(),
     };
+  }
+
+  /** knowledgePreflight's listed window under the READ SHARE ruling (decision
+   *  projects-mount-domains-and-sibling-projects: each store ranks its own
+   *  results, and scores are never merged across databases; board 817b16bc,
+   *  finding populated-domain-dilution-replay-benchmark-october-2026 measured
+   *  the merge pushing project records out of the window). Each source store's
+   *  survivors are sorted by `byRank` on their own, allocateShares splits
+   *  PREFLIGHT_MATCH_CAP across them, and the slices are concatenated project
+   *  first, then domains in manifest order. With no mounted domain there is one
+   *  database, so its sorted list is cut to the cap as before. The window is
+   *  always min(cap, survivors) long, because allocateShares spills unused
+   *  share, so `capped` keeps its meaning. A source outside the mounted set is
+   *  refused, since it would have no share to land in. */
+  private preflightWindow<T extends { record: DurableRecord }>(survivors: T[], byRank: (a: T, b: T) => number): T[] {
+    const cap = SterlingTools.PREFLIGHT_MATCH_CAP;
+    const domainNames = this.domains?.names() ?? [];
+    if (domainNames.length === 0) return [...survivors].sort(byRank).slice(0, cap);
+    const sources = ['project', ...domainNames.map((name) => `domain:${name}`)];
+    const groups = sources.map(() => [] as T[]);
+    for (const s of survivors) {
+      const source = this.sourceOf(s.record.id);
+      const i = sources.indexOf(source);
+      if (i < 0) {
+        throw new Error(`knowledge_preflight: record '${s.record.id}' comes from '${source}', which is not a mounted store (${sources.join(', ')})`);
+      }
+      groups[i].push(s);
+    }
+    for (const g of groups) g.sort(byRank);
+    const shares = allocateShares(groups.map((g) => g.length), cap);
+    return groups.flatMap((g, i) => g.slice(0, shares[i]));
   }
 
   /** PULL floor (knowledgePreflight only): one matched term suffices once
