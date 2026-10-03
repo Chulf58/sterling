@@ -106,8 +106,9 @@ test('the plugin raises the notice at an execution end, with or without git, unt
     const ctx = {
       location: { directory: p.dir },
       // ses_1 is a root session (no parentID): only a root session settles (dispatch.mjs rootSessionGate).
-      session: { hook: async () => {}, get: async ({ sessionID }) => ({ id: sessionID }) },
+      session: { hook: async () => {}, get: async ({ sessionID }) => ({ id: sessionID, location: { directory: p.dir } }) },
       tool: { hook: async () => {} },
+      permission: { hook: async () => {} },
       event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {} }) },
     };
     const cleanup = await plugin.setup(ctx);

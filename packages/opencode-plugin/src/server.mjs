@@ -25,8 +25,12 @@
 //      the store and appended to the next prompt, as H2 does on Claude Code;
 //   5. the compaction hook: the session's delivery receipts are removed, so
 //      delivery fires again after compaction drops context.
-// The store guard (edit and shell deny on .sterling/sterling.db) is not here: the
-// installer writes it into .opencode/opencode.json (scripts/lib/opencode-install.mjs).
+//   6. the store guard: a permission evaluate hook that denies shell, edit, write and
+//      patch requests on .sterling/sterling.db whatever the agent's rules say
+//      (store-guard.mjs). It is registered at every location, outside a Sterling
+//      project too (a project init'd while OpenCode runs is guarded at once) and in
+//      the maintenance worker's child. The installer's config guard in
+//      .opencode/opencode.json (scripts/lib/opencode-install.mjs) stays as a second layer.
 // Every handler is fenced: a throw is logged to .sterling/transient and turned
 // into a notice, never raised into OpenCode. Outside a Sterling project (no
 // .sterling/sterling.db above the session directory) every handler is a no-op, and
@@ -40,24 +44,27 @@
 //   selection.mjs (prompt hook)               compaction.mjs (receipt reset)
 //   research.mjs (research_tool and agent_dispatch events)  pr-loop.mjs (the PR review loop owed notice)
 //   axis.mjs (H20 and H23)                    dispatch.mjs (H22 and the root-session gate)
-//   config.mjs (registration), sync.mjs (post-update sync)
+//   config.mjs (registration), sync.mjs (post-update sync), store-guard.mjs (the store guard)
 //   notices.mjs, log.mjs, store.mjs (shared plumbing)
 import { createAxisHandlers } from './axis.mjs';
 import { createCompactionHandler } from './compaction.mjs';
 import { createBootstrapHandler, createConfigHandler } from './config.mjs';
 import { createContextHandler } from './context.mjs';
 import { createDeliveryHandlers } from './delivery.mjs';
-import { createDispatchHandlers, rootSessionGate, sweepStaleDispatches } from './dispatch.mjs';
+import { createDispatchHandlers, liveChildInRegister, rootSessionGate, sweepStaleDispatches } from './dispatch.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { NOTICES_REL, addNotice } from './notices.mjs';
 import { createPrLoopNotice } from './pr-loop.mjs';
 import { createRotationRestore } from './restore.mjs';
 import { createResearchRecorder } from './research.mjs';
 import { createPromptHandler } from './selection.mjs';
+import { remember } from './bounded.mjs';
 import { createSettle, liveDispatch } from './settle.mjs';
+import { onEvaluate as storeGuard } from './store-guard.mjs';
 import { BUSY_TIMEOUT_MS, openProjectStore } from './store.mjs';
 import { createSessionSync } from './sync.mjs';
 import { createWorkerLaunch, inWorkerChild } from './worker.mjs';
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
 
@@ -72,6 +79,26 @@ const EXECUTION_END_EVENTS = new Set(['session.execution.succeeded', 'session.ex
 // Per-handler budgets. The store calls are synchronous and cannot be cut off
 // mid-call; the budget bounds the awaited part and logs any overrun.
 export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 10000, research: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000 };
+
+
+/**
+ * Whether two directories are the same place: realpaths when both resolve (so a symlinked
+ * checkout matches), else the lexically resolved paths. `unresolved` names the path whose
+ * realpath could not be read, so the caller can tell a plain mismatch from a blind one.
+ */
+function sameDirectory(a, b) {
+  let unresolved = '';
+  const real = (p) => {
+    try {
+      return realpathSync(p);
+    } catch (e) {
+      unresolved ||= `${p}: ${errText(e)}`;
+      return resolve(p);
+    }
+  };
+  const equal = real(a) === real(b);
+  return { equal, unresolved };
+}
 
 /**
  * The plugin factory. `deps` exists for tests: openStore(dbPath), now(),
@@ -139,6 +166,26 @@ export function createSterlingServer(deps = {}) {
     // Each session's parentID, shared by the context handler and the settlement gate (bounded, bounded.mjs).
     const parents = new Map();
     const rootOf = () => projectRoot(directory);
+    // Each session's directory (session.get -> location.directory), and the sessions whose
+    // failed lookup is already logged; both bounded (bounded.mjs). A failure is not cached,
+    // so the next execution end of that session looks it up again.
+    const sessionDirs = new Map();
+    const lookupLogged = new Map();
+
+    /** The directory session `sessionID` lives in, as { dir }, or { why } when it cannot be read. */
+    async function sessionDirectory(sessionID) {
+      if (sessionDirs.has(sessionID)) return { dir: sessionDirs.get(sessionID) };
+      let info;
+      try {
+        if (typeof session?.get !== 'function') throw new Error('ctx.session.get is unavailable');
+        info = await session.get({ sessionID });
+      } catch (e) {
+        return { why: errText(e) };
+      }
+      const dir = info?.location?.directory;
+      if (info?.id !== sessionID || typeof dir !== 'string' || !dir) return { why: `session.get gave no location.directory for session ${sessionID}` };
+      return { dir: remember(sessionDirs, sessionID, dir) };
+    }
 
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
@@ -179,8 +226,42 @@ export function createSterlingServer(deps = {}) {
       if (!root) return;
       const sessionID = ev.data?.sessionID;
       // Noted before the gate reads the register, so a background child that ends
-      // before its subagent call binds it is ended at that bind (dispatch.mjs).
+      // before its subagent call binds it is ended at that bind (dispatch.mjs). The map
+      // is per location and keyed by this location's own children, so a foreign id is harmless.
       dispatch.noteExecutionEnd(sessionID);
+      // OpenCode 2.0.22 execution events carry no location and reach every location's
+      // subscription (finding opencode-execution-events-carry-no-location-cross-project-settlement-october-2026),
+      // so the session's own directory decides: only that location handles the event.
+      // A child bound in THIS project's dispatch register is this location's by construction,
+      // so it needs no directory lookup (a failed lookup must not leave its dispatch live).
+      // Any other session whose directory cannot be read is not handled here, and is logged once.
+      if (typeof sessionID === 'string' && sessionID) {
+        let mine = false;
+        await fenced('dispatch', root, async () => {
+          if (liveChildInRegister(root, sessionID)) {
+            mine = true;
+            return;
+          }
+          const owner = await sessionDirectory(sessionID);
+          if (owner.why) {
+            if (!lookupLogged.has(sessionID)) {
+              remember(lookupLogged, sessionID, true);
+              logLine(root, `settle skipped: ${ev.type} of session ${sessionID} not handled at ${directory}: could not read which directory the session belongs to (${owner.why})`);
+              addNotice(root, `Sterling settlement skipped: could not read which project session ${sessionID} belongs to (${owner.why}); only the session's own project settles, and the next settlement there covers this range.`, now());
+            }
+            return;
+          }
+          const same = sameDirectory(owner.dir, directory);
+          mine = same.equal;
+          // A foreign session is the normal case and stays quiet; only a path that could not be
+          // resolved to its real location is worth one line, since it may hide a symlink mismatch.
+          if (!mine && same.unresolved && !lookupLogged.has(sessionID)) {
+            remember(lookupLogged, sessionID, true);
+            logLine(root, `settle skipped: ${ev.type} of session ${sessionID} not handled at ${directory}: its directory ${owner.dir} differs after normalisation and a real path could not be read (${same.unresolved})`);
+          }
+        });
+        if (!mine) return;
+      }
       // Any execution end of a child ends its background dispatch; only a root
       // session's successful end settles (dispatch.mjs rootSessionGate): a child's
       // execution end is not the end of the user's turn.
@@ -206,9 +287,17 @@ export function createSterlingServer(deps = {}) {
     const handlers = { context: onContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };
 
     /** Registers this location's hooks on its ctx and starts its event subscription; returns the cleanup. */
-    async function bind(ctx) {
+    async function bind(ctx, guarded) {
       session = ctx.session;
       const root = rootOf();
+      if (!guarded) {
+        const why = `this OpenCode has no ctx.permission.hook (it needs 2.0.22 or later), so the Sterling store guard (deny on .sterling/sterling.db) is NOT registered at ${directory}; only the config guard in .opencode/opencode.json holds, and project agent files in .opencode/agents/ with their own shell or edit rules are unguarded`;
+        process.stderr.write(`[sterling] ${why}\n`);
+        if (root) {
+          logLine(root, `store guard: ${why}`);
+          addNotice(root, `Sterling plugin: ${why}.`, now());
+        }
+      }
       if (root) await fenced('config', root, () => configure(ctx));
       else {
         // No store yet: register only what works without one (/sterling:init first),
@@ -262,8 +351,14 @@ export function createSterlingServer(deps = {}) {
       await Promise.all([...locations.values()].map((l) => l.idle()));
     },
     async setup(ctx) {
+      // The store guard comes first, before anything that can return early: a location
+      // whose directory is unknown still runs tools. Not fenced: the fence turns a throw
+      // into a notice and lets the call through, which would fail open.
+      const guarded = typeof ctx?.permission?.hook === 'function';
+      if (guarded) await ctx.permission.hook('evaluate', storeGuard);
       const directory = ctx?.location?.directory;
       if (typeof directory !== 'string' || !directory) {
+        if (!guarded) process.stderr.write('[sterling] this OpenCode has no ctx.permission.hook (it needs 2.0.22 or later), so the Sterling store guard is NOT registered\n');
         // No handler could tell which project it is in. The service cwd is not the
         // session's project, so nothing is registered rather than guessed.
         process.stderr.write('[sterling] setup received no ctx.location.directory, so this location cannot be tied to a project; no Sterling hook is registered for it\n');
@@ -276,7 +371,7 @@ export function createSterlingServer(deps = {}) {
         locations.set(key, loc);
       }
       last = loc;
-      return loc.bind(ctx);
+      return loc.bind(ctx, guarded);
     },
   };
 }

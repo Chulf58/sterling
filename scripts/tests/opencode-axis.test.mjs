@@ -101,10 +101,12 @@ function stubCtx(directory, sessions) {
         const s = sessions[sessionID];
         if (s instanceof Error) throw s;
         if (!s) throw new Error(`no session ${sessionID}`);
-        return { id: sessionID, ...s };
+        // 2.0.22: a session carries its location; settlement handles only this location's sessions.
+        return { id: sessionID, location: { directory }, ...s };
       },
     },
     tool: { hook: async (name, fn) => void (hooks.tool[name] = fn) },
+    permission: { hook: async () => {} },
     command: { transform: async () => ({ dispose: async () => {} }) },
     skill: { transform: async () => ({ dispose: async () => {} }) },
     mcp: { transform: async () => ({ dispose: async () => {} }) },
@@ -399,10 +401,27 @@ test('settlement runs only on the root session: a child-session event, a live ch
 
     await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_broken' } });
     assert.equal(readFileSync(settledPath(p.dir), 'utf8'), baseline, 'a session that cannot be checked does not settle');
-    assert.match(noticeTexts(p.dir).join('\n'), /could not check whether session ses_broken is a child.*session store down/s);
+    // The session's directory is read first (finding opencode-execution-events-carry-no-location-cross-project-settlement-october-2026), so that read is what fails.
+    assert.match(noticeTexts(p.dir).join('\n'), /could not read which project session ses_broken belongs to.*session store down/s);
 
     await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
     assert.notEqual(readFileSync(settledPath(p.dir), 'utf8'), baseline, 'the root session settles');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('a background child whose session.get throws still closes its dispatch and raises no settlement-skipped notice', async () => {
+  const p = makeProject({ records: [] });
+  try {
+    const { ctx, plugin, cleanup } = await setup(p.dir, { ses_root: {}, ses_bg: new Error('session store down') });
+    const bg = { tool: 'subagent', sessionID: 'ses_root', agent: 'build', messageID: 'm', id: 'call_bg', input: { agent: 'sterling/scout', description: 'bg', prompt: 'x', background: true } };
+    await ctx.hooks.tool['execute.before'](bg);
+    await ctx.hooks.tool['execute.after']({ ...bg, status: 'completed', result: { content: 'started', metadata: { sessionID: 'ses_bg', status: 'running' } } });
+    await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_bg' } });
+    assert.ok(stateRecords(p.dir).every((r) => r.tool_use_id !== 'call_bg'), 'the register owns the child, so its end closes the dispatch without a directory lookup');
+    assert.doesNotMatch(noticeTexts(p.dir).join('\n'), /settlement skipped/, 'no settlement-skipped notice for a child session');
     await cleanup?.();
   } finally {
     p.cleanup();
@@ -562,7 +581,7 @@ test('a torn notices file cannot reject the event handler, so the subscription l
     mkdirSync(join(p.dir, '.sterling', 'transient'), { recursive: true });
     writeFileSync(join(p.dir, server.NOTICES_REL), '[{"torn"');
     await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_unknown' } });
-    assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /settle skipped: could not check whether session ses_unknown is a child/);
+    assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /settle skipped: .*session ses_unknown .*could not read which directory the session belongs to/);
     await cleanup?.();
   } finally {
     p.cleanup();
