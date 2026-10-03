@@ -48,6 +48,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
+import { seedLegacySupersedesEdge } from '../../../store/dist/tests/legacy-supersedes-edge.js';
 
 const NOW = '2026-08-26T12:00:00.000Z';
 
@@ -74,15 +75,20 @@ function mkDecision(tools: SterlingTools, title: string, statement = 's', overri
   }).record as unknown as Loose;
 }
 
-// A holder B that carries an INBOUND rel:'supersedes' edge onto `targetId`.
-function mkSuperseder(tools: SterlingTools, title: string, targetId: string): Loose {
-  return tools.knowledgeCreate('decision', {
+// A holder B that carries an INBOUND rel:'supersedes' edge onto `targetId`:
+// the pre-ruling raw shape (target stays active). knowledge_create now refuses
+// a supersedes link (decision
+// a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede), so
+// the edge is seeded through the store's legacy fixture path.
+function mkSuperseder(tools: SterlingTools, store: SterlingStore, title: string, targetId: string): Loose {
+  const created = tools.knowledgeCreate('decision', {
     title,
     statement: 'newer statement overriding one clause of the target',
     alternatives_rejected: [],
     rationale: 'r',
-    links: [{ rel: 'supersedes', target_id: targetId }],
   }).record as unknown as Loose;
+  seedLegacySupersedesEdge(store, created.id as string, targetId);
+  return store.get(created.id as string) as unknown as Loose;
 }
 
 // Same absent-is-empty tolerance the part-(a) test uses for its membership
@@ -155,10 +161,10 @@ function preflight(tools: SterlingTools, text: string): PreflightResult {
 // ===========================================================================
 
 test('AC1: knowledge_query (default/full projection) surfaces inbound_supersedes on record A, containing holder B — same shape as knowledge_get', () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
     const a = mkDecision(tools, 'ac1-old-record', 'old clause-bearing statement');
-    const b = mkSuperseder(tools, 'ac1-new-record', a.id as string);
+    const b = mkSuperseder(tools, store, 'ac1-new-record', a.id as string);
 
     // Default projection is 'full' (tools.test.ts: "'full' is still the default
     // and still carries bodies"). No projection param == full.
@@ -208,10 +214,10 @@ test('AC1: knowledge_query (default/full projection) surfaces inbound_supersedes
 // ===========================================================================
 
 test('AC2 CONTROL: knowledge_query projection:"digest" does NOT carry inbound_supersedes, even for a record that HAS inbound superseders', () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
     const a = mkDecision(tools, 'ac2-old-record', 'old clause-bearing statement');
-    mkSuperseder(tools, 'ac2-new-record', a.id as string);
+    mkSuperseder(tools, store, 'ac2-new-record', a.id as string);
 
     const digest = tools.knowledgeQueryResult({ types: ['decision'], projection: 'digest' }) as unknown as {
       records: Loose[];
@@ -239,13 +245,13 @@ test('AC2 CONTROL: knowledge_query projection:"digest" does NOT carry inbound_su
 // ===========================================================================
 
 test('AC3: knowledge_preflight — a matched record A that HAS an inbound superseder B carries inbound_supersedes (containing B) on its match entry', () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
     const a = seedCentralAntiPattern(tools, 'ac3-central-target');
     // B supersedes A. B's vocabulary is deliberately unrelated to the probe
     // text, so B itself does not become a spurious preflight match — but that
     // is irrelevant to the assertion, which locates A's match by id.
-    const b = mkSuperseder(tools, 'ac3-superseder', a.id as string);
+    const b = mkSuperseder(tools, store, 'ac3-superseder', a.id as string);
 
     const result = preflight(tools, MATCHING_TEXT);
     assert.equal(result.answerability, 'verify_targets', 'precondition: the store governs this subject');
@@ -285,7 +291,7 @@ test('AC3: knowledge_preflight — a matched record A that HAS an inbound supers
 // ===========================================================================
 
 test('AC4 CONTROL: a record with NO inbound superseders OMITS inbound_supersedes entirely on query-full (not []/null), unaffected by an unrelated supersedes edge elsewhere', () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
     const isolated = mkDecision(tools, 'ac4-isolated-query', 'nothing points at this');
 
@@ -293,7 +299,7 @@ test('AC4 CONTROL: a record with NO inbound superseders OMITS inbound_supersedes
     // edge in the store" sabotage (unfiltered by target_id) would leak into
     // `isolated`'s result.
     const unrelatedOld = mkDecision(tools, 'ac4-unrelated-old', 'unrelated old record');
-    mkSuperseder(tools, 'ac4-unrelated-new', unrelatedOld.id as string);
+    mkSuperseder(tools, store, 'ac4-unrelated-new', unrelatedOld.id as string);
 
     const result = tools.knowledgeQueryResult({ types: ['decision'] }) as unknown as { records: Loose[] };
     const row = result.records.find((r) => r.id === isolated.id);
@@ -318,14 +324,14 @@ test('AC4 CONTROL: a record with NO inbound superseders OMITS inbound_supersedes
 });
 
 test('AC4 CONTROL: a matched record with NO inbound superseders OMITS inbound_supersedes entirely on its preflight match (not []/null)', () => {
-  const { tools, cleanup } = harness();
+  const { store, tools, cleanup } = harness();
   try {
     const isolated = seedCentralAntiPattern(tools, 'ac4-isolated-preflight');
 
     // Unrelated supersedes pair, distinct vocabulary so it does not itself
     // match the probe text — present only to catch a store-wide-edge leak.
     const unrelatedOld = mkDecision(tools, 'ac4-pf-unrelated-old', 'unrelated old record');
-    mkSuperseder(tools, 'ac4-pf-unrelated-new', unrelatedOld.id as string);
+    mkSuperseder(tools, store, 'ac4-pf-unrelated-new', unrelatedOld.id as string);
 
     const result = preflight(tools, MATCHING_TEXT);
     const match = result.matches.find((m) => m.id === isolated.id);

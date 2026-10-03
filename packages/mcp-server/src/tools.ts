@@ -21,6 +21,7 @@ import {
   classifyClaimPath,
   fitDomains,
   MountedStores,
+  SterlingStore,
   allocateShares,
   type QueryOptions,
   type ToolStore,
@@ -7966,6 +7967,14 @@ export class SterlingTools {
     // needs this pass.
     if (overrides.links !== undefined) {
       overrides.links = this.resolveLinksTargets(overrides.links, toolName);
+      // Checked here as well as in the store's in-place path because an
+      // attestation update reaches store.supersede, which writes every link it
+      // is given (decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede).
+      SterlingStore.refuseRawSupersedesLinks(
+        toolName,
+        overrides.links as { rel: string; target_id: string }[],
+        new Set(old.links.filter((l) => l.rel === 'supersedes').map((l) => l.target_id))
+      );
     }
     // The item's feature_link points to whatever version was current when it
     // was raised, which may now be an ancestor, so match the whole supersede
