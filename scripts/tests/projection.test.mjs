@@ -85,6 +85,34 @@ test('§15 projection: every extensible set sectioned; owning articles quoted; g
   }
 });
 
+test('§15 projection: each set heading carries its owning article state, with state_reason on the next line when set', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-proj-state-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), '{}');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  try {
+    store.create({ ...articleRec('record-schemas-registry', 'g'), state: 'built', state_reason: 'registry not yet wired into the check' });
+    store.create({ ...articleRec('agent-roster-and-skills', 'g'), state: 'active' });
+    store.close();
+    assert.equal(runScript([], dir).code, 0);
+    const md = readFileSync(join(dir, 'architecture.md'), 'utf8');
+    const lines = md.split('\n');
+    const records = lines.findIndex((l) => l.startsWith('## Extensible set: record-types'));
+    assert.match(lines[records], /^## Extensible set: record-types — .*  \[state: built\]$/, 'state on the heading line');
+    assert.equal(lines[records + 1], 'State reason: registry not yet wired into the check', 'state_reason follows the heading');
+    const agents = lines.findIndex((l) => l.startsWith('## Extensible set: agents'));
+    assert.match(lines[agents], /\[state: active\]$/);
+    assert.ok(!lines[agents + 1].startsWith('State reason:'), 'no state_reason line when none is set');
+    const hooks = lines.find((l) => l.startsWith('## Extensible set: hooks'));
+    assert.doesNotMatch(hooks, /\[state:/, 'a set with no owning article carries no state');
+    // the freshness check still passes against the new format
+    const fresh = spawnSync(process.execPath, [join(root, 'scripts', 'check-projection-fresh.mjs'), dir], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+    assert.equal(fresh.status, 0, `freshness check passes: ${fresh.stderr}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('§15 projection: refuses outside an initialized project', () => {
   const bare = mkdtempSync(join(tmpdir(), 'sterling-proj-bare-'));
   try {
