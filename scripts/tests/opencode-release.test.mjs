@@ -51,6 +51,7 @@ function fixture({ name = RELEASE_PACKAGE, from = '1.0.0', to = '1.0.1' } = {}) 
   git(repo, 'init', '-q', '-b', 'main');
   identity(repo);
   git(repo, 'config', 'core.filemode', 'false');
+  git(repo, 'config', 'core.autocrlf', 'false');
   git(repo, 'remote', 'add', 'origin', origin);
   const write = (v) => writeFileSync(join(repo, 'package.json'), JSON.stringify(PKG(name, v), null, 2) + '\n');
   write(from);
@@ -237,6 +238,42 @@ test('a release kept after a failed push is rebuilt onto origin\'s newer tip, ne
   assert.equal(ref(fx.repo, 'refs/tags/v1.0.4'), rebuilt, 'the local tag moved');
   assert.equal(ref(fx.repo, `refs/heads/${RELEASE_BRANCH}`), rebuilt, 'the local branch moved');
   assert.match(again.out, /rebuil/i);
+});
+
+test('a local tag on a commit origin\'s branch already contains, with origin missing only the tag, pushes just the tag', () => {
+  // v1.0.1 is released, v1.0.2 moves origin's branch past it, then v1.0.1's tag is
+  // deleted on origin. The re-run re-tags the existing commit: no second commit with
+  // the same tree, and origin's branch tip does not move.
+  const fx = fixture();
+  const first = run(fx).result.commit;
+  const next = bump(fx.repo, '1.0.2');
+  const second = run({ ...fx, ...next }).result.commit;
+  git(fx.origin, 'tag', '-d', 'v1.0.1');
+  assert.equal(ref(fx.origin, 'refs/tags/v1.0.1'), null, 'precondition: origin lacks the tag');
+  const commitsBefore = git(fx.origin, 'rev-list', '--count', `refs/heads/${RELEASE_BRANCH}`);
+
+  const again = run(fx);
+  assert.equal(again.result.status, 'published', again.out);
+  assert.equal(again.result.commit, first, 'the existing commit is re-tagged, not rebuilt');
+  assert.equal(ref(fx.origin, 'refs/tags/v1.0.1'), first);
+  assert.equal(ref(fx.origin, `refs/heads/${RELEASE_BRANCH}`), second, "origin's branch tip is unchanged");
+  assert.equal(git(fx.origin, 'rev-list', '--count', `refs/heads/${RELEASE_BRANCH}`), commitsBefore, 'no new commit on the branch');
+  assert.equal(ref(fx.repo, 'refs/tags/v1.0.1'), first, 'the local tag stays');
+  assert.equal(ref(fx.repo, `refs/heads/${RELEASE_BRANCH}`), second, 'the local branch stays');
+  assert.match(again.out, /only the tag/i);
+});
+
+test('a local tag at origin\'s branch tip with origin missing only the tag pushes the tag and leaves the branch', () => {
+  const fx = fixture();
+  const first = run(fx).result.commit;
+  git(fx.origin, 'tag', '-d', 'v1.0.1');
+  const again = run(fx);
+  assert.equal(again.result.status, 'published', again.out);
+  assert.equal(again.result.commit, first);
+  assert.equal(ref(fx.origin, 'refs/tags/v1.0.1'), first);
+  assert.equal(ref(fx.origin, `refs/heads/${RELEASE_BRANCH}`), first);
+  assert.equal(git(fx.origin, 'rev-list', '--count', `refs/heads/${RELEASE_BRANCH}`), '1');
+  assert.match(again.out, /only the tag/i);
 });
 
 test('an annotated tag on origin and a lightweight local tag on the same commit is the same release', () => {
