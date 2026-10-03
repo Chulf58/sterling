@@ -566,6 +566,17 @@ export interface KnowledgeQueryResult {
    *  read did not search them. Present only when non-empty. Each record also
    *  carries `source`: 'project' or 'domain:<name>', the store that holds it. */
   missing_domains?: string[];
+  /** Read-time maintenance mints the store REFUSED during this read (a write
+   *  refusal such as live schema version drift). The records are still served;
+   *  each entry names the record, the lane and the error, and the record itself
+   *  carries the same note. Present only when non-empty. */
+  maintenance_mint_failed?: { record_id: string; reason: string; error: string }[];
+}
+
+/** A read-time maintenance mint the store refused (see SterlingTools.mintAtRead). */
+export interface MintFailure {
+  reason: string;
+  error: string;
 }
 
 /** knowledge_preflight's disclosed result (H20/H19 relevance slice 4b; scope
@@ -4061,12 +4072,33 @@ export class SterlingTools {
   }
 
   /**
+   * A READ-TIME MINT (stale_research, refresh_reference): never throws and never
+   * pays for a no-op. The contract on maintenanceEnqueue is that a mint must not
+   * make a READ throw, but the write itself can be refused (live schema version
+   * drift, a locked database), so the refusal is caught and RETURNED for the
+   * caller to disclose on the record and the envelope. The write path (a
+   * transaction plus a git probe) is taken only when the store's read-only
+   * precheck says the open item is absent or out of date, so re-reading N
+   * overdue records costs N scans, not N write transactions. The dedupe rule
+   * itself stays in the store (enqueueWouldBeNoop shares enqueueSystemTodo's key).
+   */
+  private mintAtRead(args: { reason: string; text: string; file_keys?: string[]; feature_link?: string }): MintFailure | undefined {
+    try {
+      if (this.store.enqueueWouldBeNoop({ system_reason: args.reason, text: args.text, file_keys: args.file_keys, feature_link: args.feature_link })) return undefined;
+      this.maintenanceEnqueue(args);
+      return undefined;
+    } catch (err) {
+      return { reason: args.reason, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
    * Retrieval (§3.4): records pass through with lazy stale-at-read
    * annotations — research findings get both clocks + a staleness flag;
    * platform/external-basis records past threshold get verify_before_use.
    * Annotations are computed at read, never persisted (P4: no sweeps).
    */
-  knowledgeQuery(opts: QueryOptions): (DurableRecord & { staleness?: object; verify_before_use?: boolean })[] {
+  knowledgeQuery(opts: QueryOptions): (DurableRecord & { staleness?: object; verify_before_use?: boolean; maintenance_mint_failed?: MintFailure })[] {
     const nowMs = Date.parse(this.now());
     const ageDays = (iso: string) => Math.floor((nowMs - Date.parse(iso)) / DAY_MS);
     // One registry reader per tree root for this call, so the state check below
@@ -4083,8 +4115,23 @@ export class SterlingTools {
         const threshold = this.config.staleness.research_days[r.volatility_hint ?? 'medium'];
         const sourceAge = ageDays(r.source_date);
         const stale = r.status === 'flagged_stale' || sourceAge > threshold;
+        // Decision record-audit-dead-records-superseded-stale-findings-by-age-
+        // report-arm-plus-sampled-audit: a finding whose volatility clock has run
+        // out (age only — a flagged_stale status does not mint) raises ONE
+        // stale_research item, keyed on the finding. The text carries no age
+        // number, so a daily re-read leaves the open item byte-identical.
+        let mintFailed: MintFailure | undefined;
+        if (sourceAge > threshold) {
+          const f = record as unknown as { id: string; slug?: string; question: string; volatility_hint?: string };
+          mintFailed = this.mintAtRead({
+            reason: 'stale_research',
+            text: `re-verify research finding '${f.slug ?? f.question}' — source_date ${r.source_date.slice(0, 10)} is past its ${r.volatility_hint ?? 'medium'} clock of ${threshold} days; re-measure it, then close this item: knowledge_update the finding with a new source_date and resolves:[this item], or supersede it and maintenance_remove this item`,
+            feature_link: f.id,
+          });
+        }
         return {
           ...record,
+          ...(mintFailed ? { maintenance_mint_failed: mintFailed } : {}),
           staleness: {
             source_age_days: sourceAge,
             capture_age_days: ageDays(r.capture_date),
@@ -4112,12 +4159,25 @@ export class SterlingTools {
         }
         if (rel && tree.root) {
           const stat = statSync(join(tree.root, rel), { throwIfNoEntry: false });
+          // DELETION IS DRIFT (decision record-audit-dead-records-superseded-
+          // stale-findings-by-age-report-arm-plus-sampled-audit): a repo-located
+          // doc whose file is gone mints the same refresh_reference item, unless
+          // git shows the path alive on another ref (parked on an unmerged
+          // branch, the feature-article arm's reading of absence).
+          if (!stat && this.parkedOnRef(rel, tree.root).status !== 'parked') {
+            const mintFailed = this.mintAtRead({
+              reason: 'refresh_reference',
+              text: `refresh reference '${r.title}' — ${rel} no longer exists on disk; repoint location, supersede the reference, or retire it`,
+              file_keys: [rel],
+              feature_link: r.id,
+            });
+            return { ...record, verify_before_use: true, ...(mintFailed ? { maintenance_mint_failed: mintFailed } : {}) };
+          }
           // mtime > source_date is the cheap pre-filter; confirm a real content
           // change against the baseline before flagging (an mtime-only bump from
           // a merge is not an out-of-band edit). No baseline → abstain. A
           // registered generated projection never content-flags (regen churn is
-          // by design; this wire has no deletion arm — that is the feature-
-          // article check's job for files an article owns).
+          // by design; deletion is the arm above, which does not exempt them).
           if (stat && stat.mtimeMs > Date.parse(r.source_date) && !this.isGeneratedProjection(rel) && this.contentChanged(rel, r.file_baselines, tree.root)) {
             // NO PRE-CHECK (board e939fd21): maintenanceEnqueue's atomic choke
             // point (SterlingStore.enqueueSystemTodo) already keys on
@@ -4130,13 +4190,13 @@ export class SterlingTools {
             // the second SUBJECT's finding, and duplicating the dedup rule
             // here is exactly how the four hand-rolled copies drifted apart
             // (decision foreign_194f43e4).
-            this.maintenanceEnqueue({
+            const mintFailed = this.mintAtRead({
               reason: 'refresh_reference',
               text: `refresh reference '${r.title}' — ${rel} changed on disk after source_date (out-of-band edit); refresh summary + source_date`,
               file_keys: [rel],
               feature_link: r.id,
             });
-            return { ...record, verify_before_use: true };
+            return { ...record, verify_before_use: true, ...(mintFailed ? { maintenance_mint_failed: mintFailed } : {}) };
           }
         }
       }
@@ -5697,6 +5757,7 @@ export class SterlingTools {
       };
     }
     const records = this.knowledgeQuery(filter);
+    const mintFailures = records.flatMap((r) => (r.maintenance_mint_failed ? [{ record_id: r.id, ...r.maintenance_mint_failed }] : []));
     const cap = filter.cap ?? DEFAULT_QUERY_CAP;
     // count() shares query()'s base filter but is rank-BLIND (rank_terms is a
     // no-op there), so this is "records matching the filter", which is exactly
@@ -5748,6 +5809,7 @@ export class SterlingTools {
       records: records.map(projectRecord),
       ...(aboveThreshold !== undefined ? { above_threshold: aboveThreshold } : {}),
       ...this.missingDomainsDisclosure(),
+      ...(mintFailures.length > 0 ? { maintenance_mint_failed: mintFailures } : {}),
     };
   }
 

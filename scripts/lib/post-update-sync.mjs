@@ -142,8 +142,8 @@ export function runStepAsync(root, name, args, { nodeBin = process.execPath } = 
 
 /**
  * The two steps and their verdicts: sync-agents exit 2 is a refusal and any other
- * non-zero a failure; stamp-contract exit 2 is tolerated drift, and a green
- * "0 project(s) processed" checked nothing, which is a failure (P5).
+ * non-zero a failure; stamp-contract exit 2 is tolerated drift, but any
+ * "0 project(s) processed" (exit 0 or a refusal-only exit 2) checked nothing, which is a failure (P5).
  * Returns { ok, detail } or { ok, restart, drift, driftOut }.
  */
 export async function runPostUpdateSteps(root, project, runStep) {
@@ -157,7 +157,11 @@ export async function runPostUpdateSteps(root, project, runStep) {
   const contract = await runStep(root, 'stamp-contract.mjs', ['--project', project]);
   if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
   if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
-  if (contract.status === 0 && /—\s*0 project\(s\) processed/.test(contract.out)) {
+  if (/—\s*0 project\(s\) processed/.test(contract.out)) {
+    // Exit 0 or 2: either way nothing was checked. A refusal that processed nothing
+    // (e.g. not_migrated, no AGENTS.md) is not drift in a synced project; its reason is named.
+    const refusals = contract.out.split('\n').filter((l) => l.startsWith('✗')).map((l) => l.trim());
+    if (refusals.length) return { ok: false, restart, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join('; ')})` };
     return { ok: false, restart, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) — the project is not reachable through the project registry; run /sterling:init here to register it` };
   }
   return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail };
