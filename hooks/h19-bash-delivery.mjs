@@ -8746,13 +8746,27 @@ function assembleOnce(parts, capBytes, { sep: sep2 = "\n\n", aggregateLabel } = 
     }
     return out;
   };
-  const creditsFor = (survivors2) => {
+  const creditedEntries = (part, { full, keptLines }) => {
+    if (full) return idsOf(part);
+    if (part.contentClass !== "discovery" || !Number.isInteger(keptLines)) return [];
+    if (!Number.isInteger(part.headingLines) || part.headingLines < 0) return [];
+    const credited = [];
+    let used = part.headingLines;
+    for (const entry of idsOf(part)) {
+      if (!Number.isInteger(entry?.lines) || entry.lines < 1) break;
+      used += entry.lines;
+      if (used > keptLines) break;
+      credited.push(entry);
+    }
+    return credited;
+  };
+  const creditsFor = (rendered2) => {
     const emittedSubstance2 = [];
     const emittedDiscovery2 = [];
-    for (const part of survivors2) {
+    for (const [part, selection] of rendered2) {
       if (part.contentClass !== "substance" && part.contentClass !== "discovery") continue;
       const bucket = part.contentClass === "substance" ? emittedSubstance2 : emittedDiscovery2;
-      for (const entry of idsOf(part)) {
+      for (const entry of creditedEntries(part, selection)) {
         if (entry?.identity) bucket.push({ identity: entry.identity, revision: entry.revision });
       }
     }
@@ -8803,7 +8817,7 @@ ${line}` : line;
         return;
       }
       if (best) {
-        selected.set(part, { text: best, full: false });
+        selected.set(part, { text: best, full: false, keptLines: bestLines });
         return;
       }
       selected.delete(part);
@@ -8871,15 +8885,15 @@ ${line}` : line;
     omitted.length = 0;
     omitted.push(...baseOmitted);
     reserved.clear();
-    let rendered = selected.size;
+    let rendered2 = selected.size;
     let room = Math.min(ordinaryCeiling - ordinaryBytesUsed(), DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes());
     for (const part of ordinaryParts) {
       const ptr = pointerFor(part);
       if (!ptr) continue;
-      const cost = bytes(ptr) + sepCost(rendered);
+      const cost = bytes(ptr) + sepCost(rendered2);
       if (cost > room) continue;
       reserved.set(part, cost);
-      rendered += 1;
+      rendered2 += 1;
       room -= cost;
     }
     const roomFor = (size) => size > 0 ? Math.max(0, Math.min(room, size + bytes(sep2))) : 0;
@@ -8962,8 +8976,8 @@ ${line}` : line;
       break;
     }
   }
-  const survivors = items.filter((part) => selected.has(part) && selected.get(part).full);
-  const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
+  const rendered = items.filter((part) => selected.has(part)).map((part) => [part, selected.get(part)]);
+  const { emittedSubstance, emittedDiscovery } = creditsFor(rendered);
   const omittedEntries = dedupeEntries(omitted.flatMap(disclosureIdsOf));
   const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
   const result = {

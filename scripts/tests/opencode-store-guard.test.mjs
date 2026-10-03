@@ -1,7 +1,11 @@
 // The OpenCode store guard (packages/opencode-plugin/src/store-guard.mjs): the
-// permission evaluate hook that denies shell, edit, write and patch requests on
-// .sterling/sterling.db whatever the agent's own rules say (decision
-// opencode-store-guard-uses-the-plugin-permission-evaluate-hook). The request shapes
+// permission evaluate hook that denies edit, write and patch requests on
+// .sterling/sterling.db, and shell requests with a write shape aimed at it, whatever
+// the agent's own rules say (decision
+// opencode-store-guard-uses-the-plugin-permission-evaluate-hook). A shell command that
+// only reads or names the store passes, as it does through H15 (decision
+// opencode-store-guard-allows-read-only-shell-commands-like-h15); the table both hosts
+// share is in store-guard-parity.test.mjs. The request shapes
 // below are the ones OpenCode 2.0.22 passed to a probe plugin's evaluate hook, live.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,22 +19,39 @@ const server = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugi
 /** An evaluate input as 2.0.22 builds it, with the verdict the agent's rules reached. */
 const req = (action, resources, effect = 'allow') => ({ sessionID: 'ses_1', agent: 'probeagent', action, resources, metadata: {}, source: { type: 'tool' }, effect });
 
-test('shell: each simple command naming the store is denied (live shapes: cd is dropped, a ; line is split)', () => {
+test('shell: each simple command with a write shape on the store is denied (live shapes: cd is dropped, a ; line is split)', () => {
   for (const resources of [
-    ['ls -la .sterling/sterling.db'],
-    ['cat sterling.db'], // `cd .sterling && cat sterling.db` reaches the hook as this
+    ['rm sterling.db'], // `cd .sterling && rm sterling.db` reaches the hook as this
     ['cat x', 'rm .sterling/sterling.db'], // `cat x; rm .sterling/sterling.db`
-    ['ls -la ./.sterling/../.sterling/sterling.db'],
+    ['rm ./.sterling/../.sterling/sterling.db'],
     ['sqlite3 .sterling/sterling.db-wal .tables'],
     ['cp /tmp/evil .sterling/STERLING.DB'], // the case-insensitive file systems of Windows and macOS
     ["rm .sterling/sterling''.db"], // quotes the shell removes before the command runs
-    ['cat sterl"ing.db"'],
-    ['cat .sterling/sterling\\.db'],
+    ['rm sterl"ing.db"'],
+    ['rm .sterling/sterling\\.db'],
   ]) {
     const p = req('shell', resources);
     guard.onEvaluate(p);
     assert.equal(p.effect, 'deny', JSON.stringify(resources));
     assert.equal(p.message, guard.STORE_GUARD_MESSAGE);
+  }
+});
+
+// Until decision opencode-store-guard-allows-read-only-shell-commands-like-h15 (2026-10-03) these
+// read shapes were pinned as denied; they now pass, as they do through H15.
+test('shell: a command that only reads or names the store keeps its verdict', () => {
+  for (const resources of [
+    ['ls -la .sterling/sterling.db'],
+    ['cat sterling.db'], // `cd .sterling && cat sterling.db` reaches the hook as this
+    ['ls -la ./.sterling/../.sterling/sterling.db'],
+    ['cat sterl"ing.db"'],
+    ['cat .sterling/sterling\\.db'],
+    ['sqlite3 -readonly .sterling/sterling.db "select 1"'],
+  ]) {
+    const p = req('shell', resources);
+    guard.onEvaluate(p);
+    assert.equal(p.effect, 'allow', JSON.stringify(resources));
+    assert.equal(p.message, undefined);
   }
 });
 
@@ -151,7 +172,7 @@ test('setup registers the evaluate hook in every location, outside a Sterling pr
       const plugin = server.createSterlingServer({ env, bootstrap: async () => {}, configure: async () => {} });
       const cleanup = await plugin.setup(stubCtx(dir, { hook: async (name, fn) => void hooks.push([name, fn]) }));
       assert.deepEqual(hooks.map(([n]) => n), ['evaluate']);
-      const p = req('shell', ['cat sterling.db']);
+      const p = req('shell', ['rm sterling.db']);
       await hooks[0][1](p);
       assert.equal(p.effect, 'deny');
       cleanup?.();
@@ -194,7 +215,10 @@ test('setup without ctx.permission.hook inside a Sterling project logs it and ra
     assert.match(log, /store guard: .*no ctx\.permission\.hook/);
     const notices = readFileSync(join(dir, server.NOTICES_REL), 'utf8');
     assert.match(notices, /store guard .*NOT registered/);
-    assert.match(notices, /project agent files .*own shell or edit rules .*unguarded/);
+    // The config no longer carries a shell deny (decision opencode-store-guard-allows-read-only-shell-commands-like-h15),
+    // so the notice says shell is unguarded instead of naming a config guard behind it.
+    assert.match(notices, /shell commands are NOT guarded at all, only the edit, write and patch deny/);
+    assert.match(notices, /project agent files .*own edit rules .*unguarded/);
   } finally {
     process.stderr.write = orig;
     rmSync(dir, { recursive: true, force: true });

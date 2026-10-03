@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { addWorktree, aggregateMetricValues, DEFAULT_PROJECTS, emittedLevel, mrrFromHistogram, parseCaseDirectives, resolveProjects, scoreEventIndexes, caseProject, pluginTree, removeWorktrees, replayCommit, runWithCleanup, scorePull, scorePush, withWorktreeLedger } from '../knowledge-eval.mjs';
+import { addWorktree, aggregateMetricValues, DEFAULT_PROJECTS, emittedLevel, linkNodeModules, lockfilesEquivalent, mrrFromHistogram, parseCaseDirectives, resolveProjects, scoreEventIndexes, caseProject, pluginTree, removeWorktrees, replayCommit, runWithCleanup, scorePull, scorePush, withWorktreeLedger } from '../knowledge-eval.mjs';
 const id = '11111111-1111-4111-8111-111111111111';
 const r = { id, title: 'Hazard', trigger: 'exact trigger text', right_way: 'exact right way text', guidance: 'distinctive guidance passage' };
 test('pointer-only is not substance', () => assert.deepEqual(emittedLevel(id, r), { pointer: true, substance: false, whole: false, clipped: false, withheldOversize: false }));
@@ -14,7 +14,22 @@ test('H20 rendered decision pointers remain discovery, not substance', () => {
   const score = scorePush({ envelopes: [envelope], labels: { required: [{ id: record.id, level: 'pointer' }] }, recordsById: { [record.id]: record } });
   assert.deepEqual(score.timely.discovery, [1, 1]); assert.deepEqual(score.timely.substance, [0, 0]);
 });
-test('MRR derives from rank histogram, not summed ranks', () => assert.equal(mrrFromHistogram({ 2: 1, 4: 1 }), 0.375));
+const h20Header = 'STERLING MECHANISM-AXIS DELIVERY (H20) — you have just dispatched an agent; the brief has already gone out.';
+const h20DecisionBlock = (statement, decisionId) => `▸ DECISIONS for this subject (1) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:\n  → ${statement} (knowledge_get ${decisionId})`;
+test('a hazard rendered whole scores substance even when the same H20 envelope carries a decision pointer block', () => {
+  const envelope = `${h20Header}\n\n⚠ ANTI-PATTERN [WARN] for this subject — '${r.title}' [hazard-slug] (full record: knowledge_get ${id})\nTRIGGER: ${r.trigger}\nRIGHT WAY: ${r.right_way}\n\n${h20DecisionBlock('Some other ruling, clipped…', '22222222-2222-4222-8222-222222222222')}`;
+  assert.deepEqual(emittedLevel(envelope, r), { pointer: true, substance: true, whole: true, clipped: false, withheldOversize: false });
+  const score = scorePush({ envelopes: [envelope], labels: { required: [{ id, level: 'hazard_whole' }] }, recordsById: { [id]: r } });
+  assert.deepEqual(score.timely.substance, [1, 1]); assert.deepEqual(score.wholeHazard, [1, 1]);
+});
+test('a decision shown only as an H20 pointer excerpt scores no substance, with or without a whole hazard beside it', () => {
+  const ruling = { id: '22222222-2222-4222-8222-222222222222', slug: 'some-ruling', title: 'Some ruling', statement: 'A ruling whose opening passage is long enough to count as a passage.' };
+  const pointerOnly = `${h20Header}\n\n${h20DecisionBlock(ruling.statement, ruling.id)}`;
+  assert.deepEqual(emittedLevel(pointerOnly, ruling), { pointer: true, substance: false, whole: false, clipped: false, withheldOversize: false });
+  const besideHazard = `${h20Header}\n\n⚠ ANTI-PATTERN [WARN] for this subject — '${r.title}' [hazard-slug] (full record: knowledge_get ${id})\nTRIGGER: ${r.trigger}\nRIGHT WAY: ${r.right_way}\n\n${h20DecisionBlock(ruling.statement, ruling.id)}`;
+  assert.equal(emittedLevel(besideHazard, ruling).substance, false);
+});
+test('MRR derives from rank histogram, not summed ranks',() => assert.equal(mrrFromHistogram({ 2: 1, 4: 1 }), 0.375));
 test('MRR counts positive misses in its denominator', () => assert.equal(mrrFromHistogram({ 1: 1, miss: 1 }), 0.5));
 test('knowledge get bare record is normalized for pull scoring', () => assert.deepEqual(scorePull({ id }, { required: [{ id }] }).recall.at1, [1, 1]));
 test('Agent input score selects both dispatch hooks, ending at child start', () => assert.deepEqual(scoreEventIndexes([{ tool: 'Read' }, { tool: 'Agent' }], 1), [1, 2]));
@@ -241,4 +256,33 @@ test('runWithCleanup aggregates an execution failure with a cleanup failure and 
   assert.ok(err instanceof AggregateError);
   assert.deepEqual(err.errors.map((e) => e.message), ['run broke', 'remove broke']);
   assert.equal(ran, true);
+});
+test('v2 gold set: ids are unique, every required label is a uuid, and each dilution case names a required record', () => {
+  const cases = readFileSync(new URL('./fixtures/knowledge-eval/v2/cases.jsonl', import.meta.url), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  assert.equal(new Set(cases.map((c) => c.id)).size, cases.length);
+  const dilution = cases.filter((c) => c.id.startsWith('d-'));
+  assert.equal(dilution.length, 13);
+  for (const c of dilution) {
+    assert.ok(['preflight', 'dispatch'].includes(c.kind), c.id);
+    assert.ok(c.labels.required.length > 0 && c.labels.required.every((l) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(l.id)), c.id);
+    assert.equal(c.negative, false);
+  }
+});
+test('lockfilesEquivalent ignores the package version bump but not a dependency change', () => {
+  const lock = (version, dep) => JSON.stringify({ name: 'x', version, packages: { '': { name: 'x', version }, 'node_modules/typescript': { version: dep } } });
+  assert.equal(lockfilesEquivalent(lock('0.18.59', '5.9.2'), lock('0.18.61', '5.9.2')), true);
+  assert.equal(lockfilesEquivalent(lock('0.18.59', '5.9.2'), lock('0.18.59', '5.9.3')), false);
+});
+test('linkNodeModules points @sterling at the tree\'s own packages and every other entry at the source', () => {
+  const base = mkdtempSync(join(tmpdir(), 'kev-nm-'));
+  try {
+    const source = join(base, 'main', 'node_modules'); const tree = join(base, 'tree');
+    mkdirSync(join(source, '@sterling'), { recursive: true }); mkdirSync(join(source, 'left-pad'), { recursive: true }); mkdirSync(join(source, '.bin'), { recursive: true });
+    symlinkSync('../../packages/store', join(source, '@sterling', 'store'), 'dir');
+    mkdirSync(join(tree, 'packages', 'store'), { recursive: true });
+    linkNodeModules(source, tree);
+    assert.equal(realpathSync(join(tree, 'node_modules', '@sterling', 'store')), realpathSync(join(tree, 'packages', 'store')));
+    assert.equal(realpathSync(join(tree, 'node_modules', 'left-pad')), realpathSync(join(source, 'left-pad')));
+    assert.equal(realpathSync(join(tree, 'node_modules', '.bin')), realpathSync(join(source, '.bin')));
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });

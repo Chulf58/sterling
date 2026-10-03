@@ -60,6 +60,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'Then dispatch every item that is not blocked and shares no write path with another, all in the same response.',
     after: 'Then dispatch every item that is not blocked and shares no write path with another, all in the same response, up to the lane ceiling `delegation.max_concurrent` (a ceiling, never a quota). An item\'s `needs` says what it waits on besides its blockers: `investigation` still starts, as a researcher lane only, never an implementor; `user` and `grill` wait for the user; absent means nothing. Set `needs` at intake when an item cannot start on its own, and clear it (`needs: ""`) once the user has answered. H1 prints three groups at session start and after a clear (READY, READY FOR RESEARCH, WAITING ON YOU), and H20 adds one `BOARD READY` line at your next dispatch when the ready set has changed. At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling, never past it (decision `board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start`).',
   },
+  {
+    commit: 'bf3c13f7',
+    date: '2026-10-03',
+    reason: 'plan-the-order-at-intake gains the split-at-intake rule for a multi-area ask (decision board-asks-split-at-intake-into-mergeable-one-area-items)',
+    before: 'a dependency the user states is given, never re-derived or second-guessed.',
+    after: "a dependency the user states is given, never re-derived or second-guessed. When an ask spans several areas, do not board it as one bundle: board it as several items, each one reviewable and mergeable change touching one area's files with its own acceptance, linked by `blocked_by` in dependency order and sharing one `objective`, with the user's words verbatim on the first item. Split at natural dependency points and no finer, since each item costs one task-end review, one version bump and one merge. Smaller items block less, because blocking comes from dependencies and shared write paths and a bundle maximises both (decision `board-asks-split-at-intake-into-mergeable-one-area-items`, user-ruled 2026-10-03).",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

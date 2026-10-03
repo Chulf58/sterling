@@ -14,7 +14,7 @@
 // The comments below moved here with the code from the two hook files.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { MAX_RANK_TERMS } from '@sterling/store';
+import { MAX_RANK_TERMS, allocateShares } from '@sterling/store';
 import { loadConfig } from './common.mjs';
 import { isForeignTree } from './working-tree.mjs';
 import {
@@ -30,6 +30,8 @@ import {
   isKnownDelivered,
   isSubstanceDelivered,
   hazardParts,
+  cappedHazards,
+  HAZARD_CAP,
   recordRevision,
   DENY_RULING_TYPES,
   subQuestionText,
@@ -66,6 +68,41 @@ const HOST_TEXT = {
 // since board a470046d slice 1, H19's path-scoped hazard block caps at the
 // same count, so the two channels share the bound.
 const MAX_DECISIONS = 5;
+
+/**
+ * READ SHARES AT A DISPLAY CAP (user ruling
+ * h20-subject-fan-applies-domain-read-shares, board 817b16bc; the READ SHARE
+ * ruling in projects-mount-domains-and-sibling-projects: each store ranks its
+ * own results and nothing is compared across databases). `items` arrive in one
+ * list sorted by hit count over every store; cutting that list at a cap let
+ * domain records with more hits take every slot (the fault ef27764c fixed in
+ * knowledge_preflight). Here each store's items keep their own order (or
+ * `rank`'s), allocateShares splits `cap` across the stores, and the slices
+ * are joined project first, then the domains in the order the subject fan
+ * returned them (manifest order).
+ *
+ * Only stores that HAVE an item take part: a store with nothing to show has
+ * no use for a share, and at a cap of 3 a quota parked on four empty domains
+ * would spill to the project first and shut the one matching domain out.
+ * A record with no source_store (a plain store, no fan) counts as the
+ * project's, so a single-store list comes back in its own order.
+ *
+ * Returns { shown, rest }: `shown` is at most `cap` long; `rest` is what the
+ * cap held back, in the incoming order, for the disclosure counts.
+ */
+function shareWindow(items, cap, recordOf, rank = (group) => group) {
+  const groups = new Map([['project', []]]);
+  for (const item of items) {
+    const source = recordOf(item).source_store ?? 'project';
+    if (!groups.has(source)) groups.set(source, []);
+    groups.get(source).push(item);
+  }
+  const lists = [...groups.values()].filter((group, i) => i === 0 || group.length).map(rank);
+  const shares = allocateShares(lists.map((list) => list.length), cap);
+  const shown = lists.flatMap((list, i) => list.slice(0, shares[i]));
+  const kept = new Set(shown);
+  return { shown, rest: items.filter((item) => !kept.has(item)) };
+}
 
 // PROMPT-SHAPE RANKING (consuming-project retro 2026-08-17-2111): a QUESTION
 // ("where is X", "does X exist", "how many...") is the reader asking the
@@ -341,20 +378,31 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
   // fire even when the true match count was higher (decision 92088a62:
   // "at most 3 per package... with the omitted count stated").
   const hazards = fresh.filter((x) => x.record.type === 'anti_pattern');
+  // The hazards that take the HAZARD_CAP slots, by read share. Each store's
+  // own rank is cappedHazards' (severity first, then its hit order).
+  // hazardParts runs cappedHazards once more over this slice, so the LEAD is
+  // the most severe of the selected hazards, and among equals the project's
+  // top hazard, because the slice is joined project first and hit counts are
+  // not compared across stores. A domain hazard leads only when it is more
+  // severe than every selected project hazard, or the project has none.
+  const hazardWindow = shareWindow(hazards.map((x) => x.record), HAZARD_CAP, (r) => r, (group) => cappedHazards(group, group.length));
   // NOT sliced to MAX_DECISIONS here either (board 6c0c848f item 3): an
   // early slice silently dropped the sixth match with no count and no
   // degraded flag. decisionPointerPart caps the rendered pointers AND the
   // credited identities at MAX_DECISIONS and discloses the rest.
   // Each decision carries its inbound supersedes edges (board 7e4850cf (c)),
   // so a record another one supersedes is never rendered as [standing].
-  const decisions = fresh
-    .filter((x) => x.record.type === 'decision')
+  // Reordered by read share, not cut: the first MAX_DECISIONS are the stores'
+  // shares, project first, and the rest follow for the disclosure.
+  const decisions = ((w) => [...w.shown, ...w.rest])(shareWindow(fresh.filter((x) => x.record.type === 'decision'), MAX_DECISIONS, (x) => x.record))
     .map((x) => ({ ...x, record: withInboundSupersedes(store, x.record) }));
   // NOT sliced here — renderArticlePointers itself caps at ARTICLE_POINTER_CAP
   // and discloses the overflow, the same shape as renderHazards/
   // renderDecisionPointers; slicing early would lose the true matched count
   // the disclosure line needs.
-  const articles = fresh.filter((x) => x.record.type === 'feature_article');
+  // Reordered by read share the same way, so the slice the renderer shows is
+  // the stores' shares.
+  const articles = ((w) => [...w.shown, ...w.rest])(shareWindow(fresh.filter((x) => x.record.type === 'feature_article'), ARTICLE_POINTER_CAP, (x) => x.record));
   // open_question shares this bucket (board a9be48f2) rather than minting a
   // fourth block: it answers the same reader question — "has someone been here
   // already?" — and a candidate type queried above but rendered by no bucket
@@ -417,23 +465,24 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
   // quote to the user as-is when it re-affirms. The id8 resolves in
   // knowledge_get. Hazards and article pointers are unchanged here.
   const pointerHead = (r, name) => `  → ${clip(name, 80)} (${String(r.id).slice(0, 8)})`;
+  // The rejected options ride the SAME line (review MEDIUM-2): they are
+  // exactly what a user's pick may collide with, so dropping them loses
+  // the signal; a second line would break the one-line form.
+  const questionDecisionLine = (d) => {
+    const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : [])
+      .map((a) => (typeof a?.option === 'string' ? a.option.trim() : ''))
+      .filter(Boolean)
+      .join('; ');
+    return (
+      `${pointerHead(d, d.slug || d.title || d.statement)} — ${authorityMarker(d)}${clip(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` +
+      (rejected ? ` — rejected: ${clip(rejected, DECISION_REJECTED_CLIP)}` : '')
+    );
+  };
   const questionDecisionText = (records, remedy) => {
     const shown = records.slice(0, MAX_DECISIONS);
     return [
       `▸ DECISIONS for this subject (${records.length}) — one may already settle the question you just put; the user's pick must not silently contradict it. One line each, knowledge_get the id for the full ruling:`,
-      ...shown.map((d) => {
-        // The rejected options ride the SAME line (review MEDIUM-2): they are
-        // exactly what a user's pick may collide with, so dropping them loses
-        // the signal; a second line would break the one-line form.
-        const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : [])
-          .map((a) => (typeof a?.option === 'string' ? a.option.trim() : ''))
-          .filter(Boolean)
-          .join('; ');
-        return (
-          `${pointerHead(d, d.slug || d.title || d.statement)} — ${authorityMarker(d)}${clip(d.statement, DECISION_STATEMENT_CLIP)}${statusAnnotation(d)}` +
-          (rejected ? ` — rejected: ${clip(rejected, DECISION_REJECTED_CLIP)}` : '')
-        );
-      }),
+      ...shown.map(questionDecisionLine),
       ...(records.length > shown.length ? [`  … ${records.length - shown.length} more NOT shown (cap ${MAX_DECISIONS}) — ${remedy} for the full set`] : []),
     ].join('\n');
   };
@@ -465,7 +514,11 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
   // renderer as 'whole'/'pointer' mode, never a second one built here.
   // Decisions stay pointer-only on both surfaces — discovery.
   const hazardBlocks = [
-    ...hazardParts(hazards.map((x) => x.record), {
+    // Only the read-share slice is handed over; `total` and `suppressed`
+    // restate the true counts so the '+N more' line still names every match.
+    ...hazardParts(hazardWindow.shown, {
+      total: hazards.length,
+      suppressed: hazardWindow.rest.length,
       remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
       // Matched on the prompt's SUBJECT, not a file path (the H19 label).
       matchLabel: 'for this subject',
@@ -476,10 +529,19 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
   // The question surface keeps the part's identities and disclosure (the SAME
   // capped slice, anti-pattern one-identity-list-for-credit-and-disclosure…)
   // and swaps only its TEXT for one-line pointers (see questionDecisionText).
+  // Each identity's line span is restated from the line that text gives it,
+  // so a block the cap cuts to an excerpt credits the decisions whose line
+  // rendered (see `assembleDelivery`). The part's identities are the same
+  // leading slice questionDecisionText shows, in the same order.
+  const asQuestionPart = (part) => ({
+    ...part,
+    text: questionDecisionText(decisions.map((x) => x.record), decisionRemedy),
+    identities: part.identities.map((e, i) => ({ ...e, lines: questionDecisionLine(decisions[i].record).split('\n').length })),
+  });
   const decisionBlocks = [
     ...(decisions.length
       ? [
-          ((part) => (isQuestion ? { ...part, text: questionDecisionText(decisions.map((x) => x.record), decisionRemedy) } : part))(
+          ((part) => (isQuestion ? asQuestionPart(part) : part))(
             decisionPointerPart('(subject match)', decisions.map((x) => x.record), {
               widen: decisionRemedy, cap: MAX_DECISIONS, remedy: decisionRemedy, matchLabel: 'for this subject',
             })

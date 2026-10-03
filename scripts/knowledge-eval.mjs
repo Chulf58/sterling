@@ -123,9 +123,14 @@ export function emittedLevel(envelope, record) {
   });
   const hazardSubstance = !!r.trigger && !!r.right_way && text.includes(normalise(r.trigger)) && text.includes(normalise(r.right_way));
   // H20's rendered decision/article pointer blocks deliberately include a
-  // clipped orienting excerpt. They are discovery contracts, never body delivery.
+  // clipped orienting excerpt. They are discovery contracts, never body delivery,
+  // so a PASSAGE match in an envelope carrying one is not substance. A hazard
+  // whose full trigger and right_way are both present was delivered whole, and
+  // is credited whatever else the envelope carries (user-ruled 2026-10-03, board
+  // 817b16bc: the envelope-wide gate scored a whole hazard as 0 whenever a
+  // decision pointer block rode beside it).
   const h20PointerBlock = /STERLING MECHANISM-AXIS DELIVERY \(H20\)[\s\S]*?Pointers only;/.test(text);
-  const substance = pointer && !h20PointerBlock && (passages.some((x) => text.includes(x)) || hazardSubstance);
+  const substance = pointer && (hazardSubstance || (!h20PointerBlock && passages.some((x) => text.includes(x))));
   // WHOLE / CLIPPED / WITHHELD-OVERSIZE are three distinct, mutually exclusive
   // outcomes for a selected hazard (board `knowledge-eval-scorer-wholehazard-
   // credits-a-clipped-hazard-a`): a clipped block is never credited whole, and
@@ -147,11 +152,9 @@ export function emittedLevel(envelope, record) {
   const blockElided = !!block && block.includes('…');
   const whole = substance && hazardSubstance && !withheldOversize && !blockElided;
   // `clipped` is keyed on hazardSubstance/blockElided directly, NOT on the
-  // broader `whole`/`substance` composite: `substance` is also gated by the
-  // unrelated h20PointerBlock check (a global, envelope-wide scan for an H20
-  // pointer contract elsewhere in the same text), which can legitimately hold
-  // a hazard's own OWN block back from `whole` for a reason that has nothing
-  // to do with clipping. `block !== null` requires the record's own hazard
+  // broader `whole`/`substance` composite: `substance` also needs a pointer
+  // (id, slug or title) and can come from a passage match, neither of which
+  // says anything about clipping. `block !== null` requires the record's own hazard
   // header to have actually rendered (TRIGGER: and RIGHT WAY: labels present)
   // — a bare pointer mention with no rendered block is silence, not clipped.
   const clipped = isHazardLabel && block !== null && !withheldOversize && (blockElided || !hazardSubstance);
@@ -332,10 +335,27 @@ export async function replayCommit({ workDir, repos, cases, setup, runCase, onCa
   });
 }
 export function pluginTree(repo, commit, workDir, ledger) { return addWorktree(ledger, repo, join(workDir, 'worktrees', commit), commit); }
+// A wholesale node_modules symlink makes the workspace links (@sterling/*)
+// resolve to the SOURCE tree's packages, so the tree under test compiles against
+// another tree's store types (two private `db` declarations, tsc exit 2). Link
+// every entry to the source except @sterling, which points at the tree's own.
+// A plugin version bump rewrites two lockfile lines (the root version and its
+// packages[""] entry) and nothing a build depends on; comparing bytes made every
+// older commit rebuild without node_modules, so npx fetched an unrelated `tsc`.
+export function lockfilesEquivalent(a, b) {
+  const strip = (text) => { const lock = JSON.parse(text); delete lock.version; if (lock.packages?.['']) delete lock.packages[''].version; return JSON.stringify(lock); };
+  return strip(a) === strip(b);
+}
+export function linkNodeModules(source, tree) {
+  const dest = join(tree, 'node_modules'); mkdirSync(dest);
+  for (const name of readdirSync(source)) if (name !== '@sterling') symlinkSync(join(source, name), join(dest, name));
+  mkdirSync(join(dest, '@sterling'));
+  for (const pkg of readdirSync(join(source, '@sterling'))) symlinkSync(`../../packages/${pkg}`, join(dest, '@sterling', pkg), 'dir');
+}
 function worktree(commit, workDir, ledger) {
   const tree = pluginTree(root, commit, workDir, ledger);
-  const lockMatch = existsSync(join(root, 'package-lock.json')) && readFileSync(join(root, 'package-lock.json'), 'utf8') === readFileSync(join(tree, 'package-lock.json'), 'utf8');
-  if (lockMatch && !existsSync(join(tree, 'node_modules'))) symlinkSync(join(root, 'node_modules'), join(tree, 'node_modules'), 'dir');
+  const lockMatch = existsSync(join(root, 'package-lock.json')) && lockfilesEquivalent(readFileSync(join(root, 'package-lock.json'), 'utf8'), readFileSync(join(tree, 'package-lock.json'), 'utf8'));
+  if (lockMatch && !existsSync(join(tree, 'node_modules'))) linkNodeModules(join(root, 'node_modules'), tree);
   if (!existsSync(join(tree, 'packages/schemas/dist/index.js'))) run(['npx', 'tsc', '-p', 'packages/schemas/tsconfig.json'], tree);
   if (!existsSync(join(tree, 'packages/store/dist/index.js'))) run(['npx', 'tsc', '-p', 'packages/store/tsconfig.json'], tree);
   const diff = patchAdapter(tree);
@@ -343,7 +363,7 @@ function worktree(commit, workDir, ledger) {
   // package against the patched store artifact; no product source is changed.
   if (!existsSync(join(tree, 'packages/mcp-server/dist/tools.js'))) run(['npx', 'tsc', '-p', 'packages/mcp-server/tsconfig.json'], tree);
   const toolsAdapter = patchReadOnlyTools(tree);
-  return { tree, build: lockMatch ? 'MCP dist compiled; main node_modules symlinked (lockfile matched)' : 'MCP dist compiled', adapter_sha256: diff, tools_adapter_sha256: toolsAdapter };
+  return { tree, build: lockMatch ? 'MCP dist compiled; main node_modules linked, @sterling to this tree (lockfile matched)' : 'MCP dist compiled', adapter_sha256: diff, tools_adapter_sha256: toolsAdapter };
 }
 function run(argv, cwd, input) { const r = spawnSync(argv[0], argv.slice(1), { cwd, input, encoding: 'utf8', env: { ...process.env, STERLING_PLUGIN_ROOT: cwd, CLAUDE_PLUGIN_ROOT: cwd }, timeout: 120000 }); if (r.status !== 0) throw new Error(`${argv.join(' ')}: ${r.stderr}`); return r; }
 function transientState(project) {

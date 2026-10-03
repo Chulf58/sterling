@@ -440,6 +440,72 @@ test('residual 3 (H20 E2E): a sixth matching decision is counted and disclosed, 
 });
 
 // ---------------------------------------------------------------------------
+// Clipped block, same session (board 56d571a3). A decision block the cap cut
+// to an excerpt credited nothing, so the next dispatch of the same brief
+// showed the same decisions again (measured: one decision 19 times in one session).
+// A pointer whose lines all rendered now earns its discovery mark.
+// ---------------------------------------------------------------------------
+
+/** Ids of the decisions whose pointer rendered COMPLETELY in `ctx`. `isWhole`
+ *  judges one decision's pointer from the block's lines and its line index. */
+function wholeDecisionIds(ctx, ids, isWhole) {
+  const lines = ctx.split('\n');
+  return ids.filter((id) => {
+    const at = lines.findIndex((l) => /^ {2}→ /.test(l) && l.includes(id.slice(0, 8)) && !/HAZARD: /.test(l));
+    return at >= 0 && isWhole(lines, at);
+  });
+}
+
+// `cap` leaves room for part of the block under each surface's own header.
+for (const [surface, cap, toInput, isWhole] of [
+  [
+    'dispatches', 1200,
+    (dir) => ({ hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'researcher', prompt: BRIEF }, session_id: 's1', cwd: dir }),
+    // Two lines per decision here: the pointer is whole only with its ALREADY REJECTED line.
+    (lines, at) => /^ {4}✗ ALREADY REJECTED: /.test(lines[at + 1] ?? ''),
+  ],
+  [
+    'questions', 2000,
+    (dir) => ({
+      hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', session_id: 's1', cwd: dir,
+      tool_input: { questions: [{ question: BRIEF, header: 'Treasury', multiSelect: false, options: [{ label: 'Half split', description: 'Quorumite treasury credits split half to each ledger wallet' }, { label: 'Shared', description: 'One shared quorumite treasury wallet' }] }] },
+    }),
+    () => true, // one line per decision
+  ],
+]) {
+  test(`H20 two ${surface}, one session: a decision fully rendered in a clipped block is not shown again`, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-h20-crowd-'));
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { total_cap_bytes: cap } }));
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const run = () => {
+      const r = spawnSync(process.execPath, [join(HOOKS, 'h20-mechanism-axis.mjs')], { input: JSON.stringify(toInput(dir)), encoding: 'utf8', cwd: dir, timeout: 60_000 });
+      assert.equal(r.status, 0, r.stderr);
+      return r.stdout.trim() ? JSON.parse(r.stdout).hookSpecificOutput.additionalContext : '';
+    };
+    try {
+      const ids = [];
+      for (let i = 0; i < 5; i += 1) {
+        ids.push(store.create(decision(`quorumite-treasury-wallet-ledger-rule-${i}`, `Quorumite treasury wallet ledger rule ${i}`,
+          `Quorumite treasury credits split rule ${i}: each ledger wallet settles its quorumite credits when the ledger settles.`)).id);
+      }
+      const first = run();
+      assert.match(first, /the rest held back by the delivery cap/, `control: the decision block is clipped to an excerpt:\n${first}`);
+      const whole = wholeDecisionIds(first, ids, isWhole);
+      assert.ok(whole.length >= 1 && whole.length < ids.length, `control: some decisions rendered whole, not all (${whole.length} of ${ids.length})`);
+
+      const second = run();
+      for (const id of whole) assert.ok(!second.includes(id.slice(0, 8)), `decision ${id.slice(0, 8)} was fully rendered in the first payload and must not return:\n${second}`);
+      const cut = ids.filter((id) => !whole.includes(id));
+      assert.ok(cut.some((id) => second.includes(id.slice(0, 8))), `a decision the first payload cut is delivered by the second:\n${second}`);
+    } finally {
+      store.close?.();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 3. Named hold-back waste (board 6c0c848f sub-item 4, decision
 // delivery-total-cap-and-axis-generic-floor, "Known residual"). The room held
 // back from excerpts for the '+N more' line was sized from the line carrying

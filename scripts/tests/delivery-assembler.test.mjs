@@ -33,6 +33,7 @@ import {
   renderArticle,
   ownerPointer,
   hazardHeaderLine,
+  decisionPointerPart,
 } from '../hooks/lib/delivery.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -1023,4 +1024,81 @@ test('assembler: question-mode and pointer-mode lines carry no degrade notice ei
       assert.equal(part.pointerWhenFull, undefined, `${mode} part has no package-full notice`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// CLIPPED MULTI-RECORD POINTER BLOCK (board 56d571a3). A decision block the cap
+// cuts to an excerpt used to credit none of the pointers it did show, so the
+// same decisions ranked top again on every later dispatch (one measured session:
+// 74 of 87 decision blocks clipped, one decision shown 19 times). A pointer
+// whose lines all rendered is a whole discovery delivery of that record.
+// ---------------------------------------------------------------------------
+
+const utf8 = (s) => Buffer.byteLength(s, 'utf8');
+function fiveDecisions() {
+  return Array.from({ length: 5 }, (_, i) => ({
+    id: randomUUID(), slug: `clip-dec-${i}`, statement: `clipped block statement ${i}`,
+    alternatives_rejected: [{ option: `rejected option ${i}`, reason: 'r' }], updated_at: NOW,
+  }));
+}
+/** Bytes of the block's first `n` text lines plus its suffix line. */
+function excerptBytes(part, n) {
+  return utf8(`${part.text.split('\n').slice(0, n).join('\n')}\n${part.suffix}`);
+}
+
+test('assembler: a 5-decision block clipped to 3 credits exactly those 3 — a fully rendered pointer earns its discovery mark', () => {
+  const ds = fiveDecisions();
+  const part = decisionPointerPart('src/a.mjs', ds, { widen: 'WIDEN' });
+  assert.equal(part.text.split('\n').length, 11, 'fixture control: a heading plus two lines per decision');
+  // Heading + 3 decisions (2 lines each) + the suffix fit; nothing more does.
+  const assembled = assembleDelivery([part], excerptBytes(part, 7));
+  for (const d of ds.slice(0, 3)) assert.ok(assembled.text.includes(d.id), 'control: the first three pointers render');
+  for (const d of ds.slice(3)) assert.ok(!assembled.text.includes(d.id), 'control: the last two do not');
+  assert.match(assembled.text, /the rest held back by the delivery cap — WIDEN$/, 'the cut is still disclosed');
+  assert.deepEqual(
+    assembled.emittedDiscovery,
+    ds.slice(0, 3).map((d) => ({ identity: d.id, revision: recordRevision(d) })),
+    'exactly the three fully rendered decisions are credited'
+  );
+  assert.deepEqual(assembled.emittedSubstance, []);
+  assert.deepEqual(assembled.omitted, [], 'a credited record is never reported as withheld');
+  assert.ok(assembled.degraded, 'the block is still reported clipped');
+});
+
+test('assembler: a decision whose second line was cut earns no mark', () => {
+  const ds = fiveDecisions();
+  const part = decisionPointerPart('src/a.mjs', ds, { widen: 'WIDEN' });
+  // One more line than three whole decisions: the fourth pointer's first line
+  // renders, its ALREADY REJECTED line does not.
+  const assembled = assembleDelivery([part], excerptBytes(part, 8));
+  assert.ok(assembled.text.includes(ds[3].id), 'control: the fourth pointer line renders');
+  assert.doesNotMatch(assembled.text, /rejected option 3/, 'control: its second line was cut');
+  assert.deepEqual(assembled.emittedDiscovery.map((e) => e.identity), ds.slice(0, 3).map((d) => d.id), 'the half-rendered fourth is not credited');
+});
+
+test('assembler: a clipped block that declares no line spans credits nothing (whole-or-nothing stays the default)', () => {
+  const ds = fiveDecisions();
+  const { headingLines, ...rest } = decisionPointerPart('src/a.mjs', ds, { widen: 'WIDEN' });
+  assert.equal(headingLines, 1, 'fixture control: the helper declares its heading');
+  const noHeading = assembleDelivery([rest], excerptBytes(rest, 7));
+  assert.deepEqual(noHeading.emittedDiscovery, [], 'no declared heading span: no partial credit');
+  const noSpans = { ...rest, headingLines: 1, identities: rest.identities.map(({ lines, ...e }) => e) };
+  assert.deepEqual(assembleDelivery([noSpans], excerptBytes(rest, 7)).emittedDiscovery, [], 'no per-record span: no partial credit');
+});
+
+test('assembler: a clipped SUBSTANCE part still earns no mark, even with line spans declared', () => {
+  const ds = fiveDecisions();
+  const part = { ...decisionPointerPart('src/a.mjs', ds, { widen: 'WIDEN' }), contentClass: 'substance' };
+  const assembled = assembleDelivery([part], excerptBytes(part, 7));
+  assert.ok(assembled.text.includes(ds[0].id), 'control: the excerpt renders');
+  assert.deepEqual(assembled.emittedSubstance, [], 'a partial rendering never spends a substance mark');
+  assert.deepEqual(assembled.emittedDiscovery, []);
+});
+
+test('assembler: a decision block cut to its heading falls to its pointer and credits nothing', () => {
+  const ds = fiveDecisions();
+  const part = decisionPointerPart('src/a.mjs', ds, { widen: 'WIDEN' });
+  const assembled = assembleDelivery([part], utf8(part.pointer));
+  assert.equal(assembled.text, part.pointer, 'control: the block renders as its pointer');
+  assert.deepEqual(assembled.emittedDiscovery, [], 'pointer-only never spends a mark');
 });
