@@ -37,9 +37,9 @@
 //    sterling-opencode-plugin-injects-its-own-mcp-entry), and an entry an earlier init
 //    wrote is removed when it is exactly Sterling's. What Sterling writes under .opencode/ is kept out of git through a
 //    managed block in .git/info/exclude (the committed .gitignore is never edited):
-//    the whole /.opencode/ in a hobby project with nothing tracked there, otherwise
-//    only Sterling's own paths, so a work project's committed portable agents
-//    (.opencode/agents/<name>.md) stay committed.
+//    the whole /.opencode/ in a project with the handoff files off
+//    (config.handoff.enabled) and nothing tracked there, otherwise only Sterling's
+//    own paths, so committed portable agents (.opencode/agents/<name>.md) stay committed.
 // 3. The Sterling-FULL conductor (mode primary) and roster (implementor, researcher,
 //    scout, reviewer, librarian) go to .opencode/agents/sterling/, which OpenCode 2.0.21 loads as
 //    sterling/<name> (measured: {agent,agents}/**/*.md, the subdirectory becomes a name
@@ -63,7 +63,7 @@ import { sha256, loadRegistry } from './agent-distribution.mjs';
 import { renderOpenCodeFullText } from './agent-fences.mjs';
 import { renderOpenCodeAgent, parseOpenCodeHeader } from './opencode-agents.mjs';
 import { ignoredPaths } from './git-ignore-check.mjs';
-import { readProjectMode } from './handoff-projection.mjs';
+import { readHandoffEnabled } from './handoff-projection.mjs';
 
 export const STERLING_AGENTS_SUBDIR = '.opencode/agents/sterling';
 export const PROJECT_CONFIG_REL = '.opencode/opencode.json';
@@ -959,10 +959,13 @@ function excludeLines(wholeDir) {
   return wholeDir ? ['/.opencode/'] : [`/${PROJECT_CONFIG_REL}`, `/${STERLING_AGENTS_SUBDIR}/`];
 }
 
-/** Keep Sterling's .opencode files out of git via a managed block in .git/info/exclude. */
-export function ensureExcluded({ projectDir, mode, tracked }) {
+/** Keep Sterling's .opencode files out of git via a managed block in .git/info/exclude.
+ *  `handoff` is the project's handoff setting: false excludes the whole directory when
+ *  nothing is tracked there; true, or null for a setting that could not be read, excludes
+ *  only Sterling's own paths, so portable agents stay visible to git. */
+export function ensureExcluded({ projectDir, handoff, tracked }) {
   const label = '.git/info/exclude';
-  const wholeDir = mode === 'hobby' && tracked.length === 0;
+  const wholeDir = handoff === false && tracked.length === 0;
   const want = [EXCLUDE_BEGIN, ...excludeLines(wholeDir), EXCLUDE_END].join('\n');
   const gp = git(projectDir, ['rev-parse', '--git-path', 'info/exclude']);
   if (gp.status !== 0) return { item: label, status: 'skipped', detail: `not a git work tree (${(gp.stderr || '').trim().split('\n')[0]}) — nothing to keep untracked` };
@@ -1142,16 +1145,16 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   rows.push(ensureCodexServer({ env, home }));
   const ls = git(projectDir, ['ls-files', '--', '.opencode']);
   const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];
-  let mode;
+  let handoff;
   try {
-    mode = readProjectMode(projectDir);
+    handoff = readHandoffEnabled(projectDir);
   } catch (err) {
-    // Unknown mode: exclude only Sterling's own paths, the choice that can never hide
+    // Unknown setting: exclude only Sterling's own paths, the choice that can never hide
     // committed portable agents. Said, not silent.
-    mode = null;
-    rows.push({ item: '.sterling/config.json mode', status: 'skipped', detail: `${err.message} — excluding only Sterling's own .opencode paths` });
+    handoff = null;
+    rows.push({ item: '.sterling/config.json handoff', status: 'skipped', detail: `${err.message} — excluding only Sterling's own .opencode paths` });
   }
-  rows.push(ensureExcluded({ projectDir, mode, tracked }));
+  rows.push(ensureExcluded({ projectDir, handoff, tracked }));
   // The agents render first so default_agent is set only when the conductor file is Sterling's.
   const agentRows = ensureFullAgents({ projectDir, pluginRoot, tracked });
   const conductorRow = agentRows.find((r) => r.item === `${STERLING_AGENTS_SUBDIR}/conductor.md`);

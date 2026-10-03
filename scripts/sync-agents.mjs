@@ -16,7 +16,7 @@ import { parseConfig } from '@sterling/schemas';
 import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
-import { isSterlingClone, readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './lib/handoff-projection.mjs';
+import { isSterlingClone, readProjectMode, ProjectModeError, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { probeClaudeWithOverride } from './lib/claude-probe.mjs';
 
@@ -30,15 +30,26 @@ const targetDir = targetIdx !== -1 ? resolve(args[targetIdx + 1]) : process.cwd(
 const pluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
 
 // Project mode (decision project-mode-hobby-work-toggle-decides-flow), read
-// from the TARGET's own config BEFORE the schema parse below: an invalid value
-// would otherwise surface as a raw zod throw. It is a refusal (exit 2) naming
-// the value, and nothing is synced until it is fixed.
-let projectMode;
+// from the TARGET's own config. Nothing below depends on which mode it is (the
+// mode decides only how work ships); an INVALID value is still a refusal
+// (exit 2) naming the value, and nothing is synced until it is fixed.
 try {
-  projectMode = readProjectMode(targetDir);
+  readProjectMode(targetDir);
 } catch (err) {
   if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
   console.log(`refused_project_mode: ${err.message}; nothing synced`);
+  process.exit(2);
+}
+// The handoff setting (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting)
+// gates the portable copies below. A value that is not true or false is refused
+// the same way, before anything is written.
+let handoffEnabled;
+try {
+  handoffEnabled = readHandoffEnabled(targetDir);
+} catch (err) {
+  if (!(err instanceof HandoffSettingError) && !(err instanceof ContainmentError)) throw err;
+  console.log(`refused_handoff_setting: ${err.message}; nothing synced`);
   process.exit(2);
 }
 
@@ -101,7 +112,7 @@ if (!claudeHost) {
 // Sterling on OpenCode 2 (decision
 // sterling-on-opencode-installs-global-plugins-plus-untracked-project-config): global
 // shims, this project's untracked .opencode/opencode.json and the Sterling-full roster.
-// Before the portable copies, so a hobby→work switch narrows the exclude block first.
+// Before the portable copies, so turning the handoff files on narrows the exclude block first.
 // Lines start "OpenCode", which /sterling:update's agent-status parser does not count.
 const opencodeSetup = setupOpenCode({ projectDir: targetDir, pluginRoot });
 for (const line of formatOpenCodeRows(opencodeSetup)) console.log(line);
@@ -121,11 +132,11 @@ for (const r of opencodeSetup.rows ?? []) {
 // target and gets none (said, not silent).
 // A containment failure in that probe (a symlinked plugin.json) is a refusal,
 // never a guessed answer either way.
-// Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-// portable copies are WORK-ONLY (projectMode, read above from the TARGET's own
-// config). Hobby is a loud skip that deletes nothing. Every
-// run provisions a work target, so a hobby→work switch is realized by the next
-// sync whatever the plugin HEAD is.
+// The handoff setting: the portable copies follow config.handoff.enabled
+// (handoffEnabled, read above from the TARGET's own config), in hobby and work
+// mode alike. Off is a loud skip that deletes nothing. Every run provisions a
+// target that has it on, so turning it on is realized by the next sync whatever
+// the plugin HEAD is.
 let cloneTarget;
 try {
   cloneTarget = isSterlingClone(targetDir, pluginRoot);
@@ -136,9 +147,9 @@ try {
   cloneTarget = null;
 }
 if (cloneTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED — the target is a Sterling clone, not a handoff target`);
-const workTarget = cloneTarget === false && projectMode === 'work';
-if (cloneTarget === false && !workTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED — ${HOBBY_SKIP_DETAIL}`);
-const { report: opencodeReport } = !workTarget
+const handoffTarget = cloneTarget === false && handoffEnabled;
+if (cloneTarget === false && !handoffTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED — ${HANDOFF_OFF_DETAIL}`);
+const { report: opencodeReport } = !handoffTarget
   ? { report: [] }
   : syncOpenCodeAgents({
       templatesDir: join(pluginRoot, 'agent-templates'),

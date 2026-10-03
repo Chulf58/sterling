@@ -42,8 +42,46 @@ function context(dir) {
 
 const modeLines = (ctx) => ctx.split('\n').filter((l) => l.startsWith('Project mode:'));
 
-const WORK_LINE = 'Project mode: WORK (config.mode — TUI System tab) — the OpenCode agents and handoff files are written and maintained.';
-const HOBBY_LINE = 'Project mode: HOBBY (config.mode — TUI System tab) — the OpenCode agents and handoff files are not written or maintained in hobby mode; existing ones may remain from an earlier work period.';
+// CHANGED (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+// the mode line used to say whether the OpenCode agents and handoff files were
+// written. It now says only how work ships; the Handoff files line below it
+// carries the other fact.
+const WORK_LINE = 'Project mode: WORK (config.mode — TUI System tab) — work ships as a pull request through /sterling:merge, followed by the review loop; nothing is merged directly.';
+const HOBBY_LINE = 'Project mode: HOBBY (config.mode — TUI System tab) — work ships by direct merge through /sterling:merge.';
+const handoffLines = (ctx) => ctx.split('\n').filter((l) => l.startsWith('Handoff files:'));
+const HANDOFF_ON_LINE = 'Handoff files: ON (config.handoff.enabled — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are written and maintained.';
+const HANDOFF_OFF_LINE = 'Handoff files: OFF (config.handoff.enabled — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.';
+
+for (const [mode, modeLine] of [['hobby', HOBBY_LINE], ['work', WORK_LINE]]) {
+  for (const [on, handoffLine] of [[true, HANDOFF_ON_LINE], [false, HANDOFF_OFF_LINE]]) {
+    test(`H1 (${mode}, handoff ${on ? 'on' : 'off'}): the mode line says only how work ships, and the handoff line follows it`, () => {
+      const dir = project({ ...BASE_CONFIG, mode, handoff: { enabled: on } });
+      try {
+        const ctx = context(dir);
+        assert.deepEqual(modeLines(ctx), [modeLine]);
+        assert.deepEqual(handoffLines(ctx), [handoffLine]);
+        assert.doesNotMatch(ctx, /work-only/);
+        assert.equal(ctx.slice(ctx.indexOf('Project mode:'), ctx.indexOf('Handoff files:')).split('\n\n').length, 2, 'nothing sits between the two lines');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+test('H1 reads a missing handoff key as OFF, a non-boolean as INVALID and an unreadable config as UNKNOWN', () => {
+  const missing = project({ ...BASE_CONFIG, mode: 'work' });
+  const invalid = project({ ...BASE_CONFIG, mode: 'work', handoff: { enabled: 'yes' } });
+  const broken = project('{ not json');
+  try {
+    assert.deepEqual(handoffLines(context(missing)), [HANDOFF_OFF_LINE], 'work mode does not turn the handoff files on');
+    assert.deepEqual(handoffLines(context(invalid)), ["Handoff files: INVALID ('yes') — config.handoff.enabled must be true or false; init, sync-agents, /sterling:update and the handoff projection refuse to act on it until it is fixed (TUI System tab)."]);
+    assert.deepEqual(handoffLines(context(broken)), ['Handoff files: UNKNOWN — the project config could not be read, so config.handoff.enabled could not be determined. This is NOT the off default: repair the config.']);
+  } finally {
+    for (const dir of [missing, invalid, broken]) rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 for (const [label, cfg, expected] of [
   ['work', { ...BASE_CONFIG, mode: 'work' }, WORK_LINE],
@@ -66,7 +104,7 @@ test('H1 reads an invalid mode as INVALID, never as either flow', () => {
   try {
     const lines = modeLines(context(dir));
     assert.equal(lines.length, 1);
-    assert.equal(lines[0], "Project mode: INVALID ('Work') — config.mode must be 'hobby' or 'work'; init, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).");
+    assert.equal(lines[0], "Project mode: INVALID ('Work') — config.mode must be 'hobby' or 'work'; /sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).");
     assert.doesNotMatch(lines[0], /HOBBY|WORK/);
   } finally {
     rmSync(dir, { recursive: true, force: true });

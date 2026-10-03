@@ -9,13 +9,14 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { MountedStores, resolveDomainMounts, catalogStatus, type DomainMount, type SterlingStore } from '@sterling/store';
 import { parseConfig, AGENT_MODEL_KEY } from '@sterling/schemas';
-import { buildDashboardState, initialUi, reduce, runEffects, SYSTEM_TAB, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect } from './state.js';
-import { applyModeToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
+import { buildDashboardState, initialUi, reduce, runEffects, SYSTEM_TAB, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect } from './state.js';
+import { applyHandoffToggle, applyModeToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
 // Static, so esbuild inlines both into the bundles: an installed copy has no
 // node_modules and no packages/*/dist, so a run-time import of the scripts/lib
 // SOURCE (which imports @sterling/schemas) cannot load there.
 import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/lib/agent-distribution.mjs';
 import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
+import { handoffSettingOf, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
 import { sterlingRootFrom, swapFullAgentModel } from '../../../scripts/lib/opencode-install.mjs';
 
 /** Effect types a host may decline to execute. A string value is the notice
@@ -138,6 +139,29 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     }
   }
 
+  /** The handoff setting (decision
+   *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting),
+   *  resolved from the RAW config by the same function the writers use, so the
+   *  row shows what init and /sterling:update will act on: config.handoff.enabled,
+   *  or on when the key is absent and portable agents are tracked in git. A value
+   *  that is not a boolean comes back as its JSON text, which the row shows as
+   *  INVALID; an unreadable config → null (UNKNOWN; readRawMode states the error). */
+  function readHandoff(): boolean | string | null {
+    let raw: { handoff?: unknown } | null;
+    try {
+      raw = JSON.parse(readFileSync(configPath, 'utf8')) as { handoff?: unknown } | null;
+    } catch {
+      return null;
+    }
+    try {
+      return handoffSettingOf(raw, projectRoot).enabled;
+    } catch (err) {
+      if (!(err instanceof HandoffSettingError)) throw err;
+      const block = raw?.handoff;
+      return JSON.stringify(block !== null && typeof block === 'object' && !Array.isArray(block) ? (block as { enabled?: unknown }).enabled : block);
+    }
+  }
+
   /** Build the AgentRosterSnapshot at tab activation: installed frontmatter +
    *  config.models + a bootstrapped catalog with its precomputed status. Enqueues
    *  a deduped refresh when the catalog is stale (decision foreign_98064d77). */
@@ -159,6 +183,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.model };
     const tdd = { enabled: cfg.tdd?.enabled ?? true };
     const mode = readRawMode();
+    const handoff = readHandoff();
     const codexWired = probeCodexWired();
     const agents: RosterAgent[] = Object.keys(AGENT_MODEL_KEY)
       .filter((name) => existsSync(join(agentsDir, `${name}.md`)))
@@ -185,7 +210,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // finding 41/43) — surface it as a visible System-tab notice instead.
       ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, handoff };
   }
 
   /** Execute a sparring_model effect: config.sparring_partner.model write. An
@@ -286,13 +311,14 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     const notice = (msg: string) => { ui = { ...ui, notice: msg }; };
     const sparringModels = effects.filter((e): e is SparringModelEffect => e.type === 'sparring_model');
     for (const e of sparringModels) applySparringModel(e);
-    // sparring/tdd/mode toggle writes (board a0714d0b, decision foreign_752caf98):
+    // sparring/tdd/mode/handoff toggle writes (board a0714d0b, decision foreign_752caf98):
     // run every applier, then compose ONE notice from their {ok} outcomes — a
     // failure wins over a success (review fix, board 09f05fca half 2), so a
     // later success in this same batch can never clobber an earlier failure.
     const sparringToggles = effects.filter((e): e is SparringToggleEffect => e.type === 'sparring_toggle');
     const tddToggles = effects.filter((e): e is TddToggleEffect => e.type === 'tdd_toggle');
     const modeToggles = effects.filter((e): e is ModeToggleEffect => e.type === 'mode_toggle');
+    const handoffToggles = effects.filter((e): e is HandoffToggleEffect => e.type === 'handoff_toggle');
     let toggleWrote = false;
     let toggleFailure: string | undefined;
     const collectFailure = (msg: string) => { toggleFailure = msg; };
@@ -300,20 +326,27 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     for (const e of tddToggles) { if (applyTddToggle(e, collectFailure, configPath)) toggleWrote = true; }
     let modeWritten: ModeToggleEffect['mode'] | undefined;
     for (const e of modeToggles) { if (applyModeToggle(e, collectFailure, configPath)) { toggleWrote = true; modeWritten = e.mode; } }
+    let handoffWritten: boolean | undefined;
+    for (const e of handoffToggles) { if (applyHandoffToggle(e, collectFailure, configPath)) { toggleWrote = true; handoffWritten = e.enabled; } }
     if (toggleFailure !== undefined) {
       notice(toggleFailure);
     } else if (modeWritten !== undefined) {
-      // what the switch does to the files, said at the moment it is made
+      // what the switch changes, said at the moment it is made: only how work ships
       notice(modeWritten === 'work'
-        ? 'project mode set to work — run /sterling:update (or init) to write the OpenCode agents and handoff files; sync-agents refreshes only the OpenCode agents.'
-        : 'project mode set to hobby — OpenCode agents and handoff files are no longer maintained; existing files were NOT deleted.');
+        ? 'project mode set to work — /sterling:merge now opens a pull request and the review loop follows; nothing is merged directly.'
+        : 'project mode set to hobby — /sterling:merge now merges directly into the base branch.');
+    } else if (handoffWritten !== undefined) {
+      // what the switch does to the files, said at the moment it is made
+      notice(handoffWritten
+        ? 'handoff files turned on — run /sterling:update (or init) to write the portable OpenCode agents and the handoff projection; sync-agents refreshes only the portable agents.'
+        : 'handoff files turned off — the portable OpenCode agents and the handoff projection are no longer maintained; existing files were NOT deleted.');
     } else if (toggleWrote) {
       // Hooks re-read config.json from disk on every invocation, so they see
       // this write immediately; the MCP server is the one long-lived reader
       // that does not — restart the session to pick the new value up there.
       notice('config.json updated — hooks pick this up on their next invocation; restart the session to reload the MCP server.');
     }
-    if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length) roster = loadRoster();
+    if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length) roster = loadRoster();
     return runEffects(store, effects);
   }
 

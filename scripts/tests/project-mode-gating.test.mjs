@@ -1,11 +1,19 @@
-// Project mode gating (decision project-mode-hobby-work-toggle-decides-flow,
-// slice S1): OpenCode agents and the handoff projection are WORK-ONLY. Every
-// surface reads the TARGET project's own .sterling/config.json `mode`:
-//   - a missing key means hobby; an invalid value is refused, never guessed;
-//   - hobby prints a loud skip line and writes nothing;
-//   - work→hobby deletes nothing (the skip line says so);
-//   - hobby→work is provisioned by sync-agents, init, and every /sterling:update
-//     (HEAD unchanged too): each run visits every registered target once.
+// Handoff-file gating across sync-agents, the projection CLI and /sterling:update.
+// REWRITTEN for decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting: this
+// file used to pin that the portable OpenCode agents and the handoff projection
+// were WORK-ONLY (decision project-mode-hobby-work-toggle-decides-flow, slice S1).
+// They now follow config.handoff.enabled, and the mode decides only how work
+// ships. Every surface reads the TARGET project's own .sterling/config.json:
+//   - handoff off prints a loud skip line and writes nothing;
+//   - turning it off deletes nothing (the skip line says so);
+//   - turning it on is provisioned by sync-agents, init, and every /sterling:update
+//     (HEAD unchanged too): each run visits every registered target once;
+//   - an invalid MODE is still refused by sync-agents and /sterling:update.
+// The fixtures are crossed on purpose: ON is a HOBBY project with handoff on, OFF
+// is a WORK project with handoff off, so every assertion below also shows the
+// files do not follow the mode. The four-combination matrix, the reader and the
+// refusal for a non-boolean setting are in handoff-setting.test.mjs.
 // init's own arms live in init-ensure.test.mjs (they need its harness).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,15 +31,18 @@ const { SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'sto
 const PORTABLE = ['implementor', 'researcher', 'scout'];
 const HANDOFF_FILES = ['architecture.md', 'rulings.md'];
 
-function project(mode, { store = true } = {}) {
+const ON = { mode: 'hobby', handoff: true };
+const OFF = { mode: 'work', handoff: false };
+function project(cfg = {}, { store = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-gate-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
-  writeConfig(dir, mode);
+  writeConfig(dir, cfg);
   if (store) new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
   return dir;
 }
-function writeConfig(dir, mode) {
-  const cfg = { project_name: 'fixture', ...(mode === undefined ? {} : { mode }) };
+// `mode` and `handoff` are each left out of the file when undefined.
+function writeConfig(dir, { mode, handoff } = {}) {
+  const cfg = { project_name: 'fixture', ...(mode === undefined ? {} : { mode }), ...(handoff === undefined ? {} : { handoff: { enabled: handoff } }) };
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(cfg, null, 2) + '\n');
 }
 const opencodeFiles = (dir) => (existsSync(join(dir, '.opencode', 'agents')) ? readdirSync(join(dir, '.opencode', 'agents')).sort() : []);
@@ -49,7 +60,7 @@ const handoff = (dir) => spawnSync(process.execPath, [join(root, 'scripts', 'han
 
 test('readProjectMode: missing config or missing key → hobby; hobby/work as declared', () => {
   const none = mkdtempSync(join(tmpdir(), 'sterling-mode-none-'));
-  const dirs = [none, project(undefined, { store: false }), project('hobby', { store: false }), project('work', { store: false })];
+  const dirs = [none, project({}, { store: false }), project({ mode: 'hobby' }, { store: false }), project({ mode: 'work' }, { store: false })];
   try {
     assert.deepEqual(dirs.map((d) => readProjectMode(d)), ['hobby', 'hobby', 'hobby', 'work']);
   } finally {
@@ -58,8 +69,8 @@ test('readProjectMode: missing config or missing key → hobby; hobby/work as de
 });
 
 test('readProjectMode: an invalid value or unparseable config is refused loudly, naming the value', () => {
-  const bad = project('Work', { store: false });
-  const broken = project('work', { store: false });
+  const bad = project({ mode: 'Work' }, { store: false });
+  const broken = project({ mode: 'work' }, { store: false });
   writeFileSync(join(broken, '.sterling', 'config.json'), '{ not json');
   try {
     assert.throws(() => readProjectMode(bad), (e) => e instanceof ProjectModeError && /"Work"/.test(e.message) && /'hobby' or 'work'/.test(e.message));
@@ -77,13 +88,13 @@ test('readProjectMode: an invalid value or unparseable config is refused loudly,
 
 // ---------------------------------------------------------------- handoff-projection CLI
 
-test('handoff CLI: a hobby target is a STANDING refusal (exit 2) — nothing written', () => {
-  for (const mode of ['hobby', undefined]) {
-    const dir = project(mode);
+test('handoff CLI: a target with handoff off, or with no handoff key, is a STANDING refusal (exit 2) — nothing written', () => {
+  for (const cfg of [OFF, { mode: 'work' }, { mode: 'hobby' }, {}]) {
+    const dir = project(cfg);
     try {
       const r = handoff(dir);
       assert.equal(r.status, 2, r.stdout + r.stderr);
-      assert.match(r.stdout, /^handoff projection: REFUSED — project mode is hobby \(OpenCode and handoff files are work-only/m);
+      assert.match(r.stdout, /^handoff projection: REFUSED — handoff files are off \(config\.handoff\.enabled/m);
       assert.deepEqual(handoffFiles(dir), []);
       assert.ok(!existsSync(join(dir, 'docs')));
     } finally {
@@ -92,20 +103,28 @@ test('handoff CLI: a hobby target is a STANDING refusal (exit 2) — nothing wri
   }
 });
 
-test('handoff CLI: an invalid mode is an ACTIONABLE refusal (exit 3) naming the value — nothing written', () => {
-  const dir = project('hobbyist');
+// CHANGED (the CLI no longer reads the mode): this pinned an invalid mode as an
+// ACTIONABLE refusal (exit 3). The exit-3 refusal now belongs to a non-boolean
+// config.handoff.enabled; an invalid mode is not the projection's business.
+test('handoff CLI: a non-boolean handoff setting is an ACTIONABLE refusal (exit 3) naming the value; an invalid mode does not refuse', () => {
+  const dir = project({ mode: 'work', handoff: 'yes' });
+  const badMode = project({ mode: 'hobbyist', handoff: true });
   try {
     const r = handoff(dir);
     assert.equal(r.status, 3, r.stdout + r.stderr);
-    assert.match(r.stdout, /^handoff projection: REFUSED — .*"hobbyist"/m);
+    assert.match(r.stdout, /^handoff projection: REFUSED — .*"yes"/m);
     assert.deepEqual(handoffFiles(dir), []);
+    const m = handoff(badMode);
+    assert.equal(m.status, 0, m.stdout + m.stderr);
+    assert.deepEqual(handoffFiles(badMode), HANDOFF_FILES);
   } finally {
     cleanup(dir);
+    cleanup(badMode);
   }
 });
 
-test('handoff CLI: a work target is projected', () => {
-  const dir = project('work');
+test('handoff CLI: a handoff-on target is projected', () => {
+  const dir = project(ON);
   try {
     const r = handoff(dir);
     assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -118,12 +137,12 @@ test('handoff CLI: a work target is projected', () => {
 
 // ---------------------------------------------------------------- sync-agents
 
-test('sync-agents: a hobby target gets no OpenCode agents and a loud skip line; Claude agents still sync', () => {
-  const dir = project('hobby');
+test('sync-agents: a handoff-off target gets no OpenCode agents and a loud skip line; Claude agents still sync', () => {
+  const dir = project(OFF);
   try {
     const r = syncAgents(dir);
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.match(r.stdout, /^portable agents \(\.opencode\/agents\/\) SKIPPED — project mode is hobby \(OpenCode and handoff files are work-only/m);
+    assert.match(r.stdout, /^portable agents \(\.opencode\/agents\/\) SKIPPED — handoff files are off \(config\.handoff\.enabled/m);
     assert.doesNotMatch(r.stdout, /\.opencode\/agents\/\w+\.md/);
     assert.deepEqual(opencodeFiles(dir), []);
     assert.match(r.stdout, /^installed: implementor$/m, 'the Claude Code agents are not mode-gated');
@@ -132,8 +151,8 @@ test('sync-agents: a hobby target gets no OpenCode agents and a loud skip line; 
   }
 });
 
-test('sync-agents: a work target gets the portable OpenCode agents', () => {
-  const dir = project('work');
+test('sync-agents: a handoff-on target gets the portable OpenCode agents', () => {
+  const dir = project(ON);
   try {
     const r = syncAgents(dir);
     assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -145,7 +164,7 @@ test('sync-agents: a work target gets the portable OpenCode agents', () => {
 });
 
 test('sync-agents: an invalid mode refuses the whole sync (exit 2), naming the value — never a raw schema throw', () => {
-  const dir = project('both');
+  const dir = project({ mode: 'both', handoff: true });
   try {
     const r = syncAgents(dir);
     assert.equal(r.status, 2, r.stdout + r.stderr);
@@ -156,21 +175,21 @@ test('sync-agents: an invalid mode refuses the whole sync (exit 2), naming the v
   }
 });
 
-test('sync-agents: work→hobby deletes nothing and says the files are no longer maintained; hobby→work provisions', () => {
-  const dir = project('hobby');
+test('sync-agents: on→off deletes nothing and says the files are no longer maintained; off→on provisions', () => {
+  const dir = project(OFF);
   try {
     assert.equal(syncAgents(dir).status, 0);
-    assert.deepEqual(opencodeFiles(dir), [], 'hobby: nothing yet');
-    writeConfig(dir, 'work');
+    assert.deepEqual(opencodeFiles(dir), [], 'handoff off: nothing yet');
+    writeConfig(dir, ON);
     const toWork = syncAgents(dir);
     assert.equal(toWork.status, 0, toWork.stdout + toWork.stderr);
-    assert.deepEqual(opencodeFiles(dir), PORTABLE.map((n) => `${n}.md`), 'hobby→work: provisioned on the next sync');
+    assert.deepEqual(opencodeFiles(dir), PORTABLE.map((n) => `${n}.md`), 'off→on: provisioned on the next sync');
     const before = snapshot(dir);
-    writeConfig(dir, 'hobby');
+    writeConfig(dir, OFF);
     const toHobby = syncAgents(dir);
     assert.equal(toHobby.status, 0, toHobby.stdout + toHobby.stderr);
-    assert.match(toHobby.stdout, /SKIPPED — project mode is hobby .*existing files are no longer maintained.*nothing is deleted/);
-    assert.deepEqual(snapshot(dir), before, 'work→hobby: every file byte-identical');
+    assert.match(toHobby.stdout, /SKIPPED — handoff files are off .*existing files are no longer maintained.*nothing is deleted/);
+    assert.deepEqual(snapshot(dir), before, 'on→off: every file byte-identical');
   } finally {
     cleanup(dir);
   }
@@ -227,22 +246,22 @@ const seedMarker = (cwd, sha) => {
   writeFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), JSON.stringify({ sha, completed_at: new Date().toISOString(), handoff_retry: [] }));
 };
 
-test('update fan-out: a hobby project gets a loud skip line and no files; a work project gets both file sets', async () => {
+test('update fan-out: a handoff-off project gets a loud skip line and no files; a handoff-on project gets both file sets', async () => {
   const cwd = scratch();
-  const hobby = project('hobby');
-  const work = project('work');
+  const off = project(OFF);
+  const on = project(ON);
   try {
-    const { report, log, handoffCalls } = await update({ behind: 2, projects: [hobby, work], cwd });
+    const { report, log, handoffCalls } = await update({ behind: 2, projects: [off, on], cwd });
     assert.equal(report.exit, 0, log);
-    assert.deepEqual(handoffCalls.map((c) => c.split(' ').pop()), [work], 'the projection runs only for the work project');
-    assert.match(log, /skipped — project mode is hobby \(OpenCode and handoff files are work-only/);
-    assert.deepEqual(opencodeFiles(hobby), []);
-    assert.deepEqual(handoffFiles(hobby), []);
-    assert.deepEqual(opencodeFiles(work), PORTABLE.map((n) => `${n}.md`));
-    assert.deepEqual(handoffFiles(work), HANDOFF_FILES);
+    assert.deepEqual(handoffCalls.map((c) => c.split(' ').pop()), [on], 'the projection runs only for the handoff-on project');
+    assert.match(log, /skipped — handoff files are off \(config\.handoff\.enabled/);
+    assert.deepEqual(opencodeFiles(off), []);
+    assert.deepEqual(handoffFiles(off), []);
+    assert.deepEqual(opencodeFiles(on), PORTABLE.map((n) => `${n}.md`));
+    assert.deepEqual(handoffFiles(on), HANDOFF_FILES);
     assert.deepEqual(report.projects.map((p) => p.handoff), ['skipped', 0]);
   } finally {
-    [cwd, hobby, work].forEach(cleanup);
+    [cwd, off, on].forEach(cleanup);
   }
 });
 
@@ -255,7 +274,7 @@ test('update fan-out: a hobby project gets a loud skip line and no files; a work
 // run after that.
 test('update fan-out: an invalid mode is its own refusal; the marker is stamped; every run refuses it again until fixed, then refreshes it', async () => {
   const cwd = scratch();
-  const bad = project('WORK');
+  const bad = project({ mode: 'WORK', handoff: true });
   try {
     const full = await update({ behind: 2, projects: [bad], cwd });
     assert.equal(full.report.exit, 2, full.log);
@@ -271,7 +290,7 @@ test('update fan-out: an invalid mode is its own refusal; the marker is stamped;
     assert.equal(still.syncCalls.length + still.handoffCalls.length, 0, 'still nothing synced while the mode is invalid');
     assert.doesNotMatch(still.log, /Already current — nothing to do/, 'a refused project never reads as "nothing to do"');
 
-    writeConfig(bad, 'work');
+    writeConfig(bad, ON);
     const fixed = await update({ behind: 0, projects: [bad], cwd });
     assert.equal(fixed.report.exit, 0, fixed.log);
     assert.equal(fixed.syncCalls.length, 1, 'the agent sync runs');
@@ -285,10 +304,10 @@ test('update fan-out: an invalid mode is its own refusal; the marker is stamped;
 
 test('update, HEAD unchanged: a mode made invalid after a full update exits non-zero', async () => {
   const cwd = scratch();
-  const dir = project('work');
+  const dir = project(ON);
   try {
     await update({ behind: 2, projects: [dir], cwd });
-    writeConfig(dir, 'Work');
+    writeConfig(dir, { mode: 'Work', handoff: true });
     const r = await update({ behind: 0, projects: [dir], cwd });
     assert.equal(r.report.exit, 2, r.log);
     assert.match(r.log, /✗ .*REFUSED — project mode: config\.mode is "Work"/);
@@ -297,53 +316,53 @@ test('update, HEAD unchanged: a mode made invalid after a full update exits non-
   }
 });
 
-test('update, HEAD unchanged: hobby→work is provisioned; a refreshed work project and a hobby project keep their bytes', async () => {
+test('update, HEAD unchanged: off→on is provisioned; a refreshed handoff-on project and a handoff-off project keep their bytes', async () => {
   const cwd = scratch();
-  const switched = project('hobby');
-  const hobby = project('hobby');
+  const switched = project(OFF);
+  const off = project(OFF);
   try {
-    // a full update while the project is still hobby: nothing written
-    await update({ behind: 2, projects: [switched, hobby], cwd });
+    // a full update while handoff is still off: nothing written
+    await update({ behind: 2, projects: [switched, off], cwd });
     assert.deepEqual(opencodeFiles(switched), []);
     assert.deepEqual(handoffFiles(switched), []);
-    // the user flips it to work in the TUI; the clone is already current
-    writeConfig(switched, 'work');
+    // the user turns Handoff files on in the TUI; the clone is already current
+    writeConfig(switched, ON);
     seedMarker(cwd, HEAD_B);
-    const first = await update({ behind: 0, projects: [switched, hobby], cwd });
+    const first = await update({ behind: 0, projects: [switched, off], cwd });
     assert.equal(first.report.exit, 0, first.log);
     assert.deepEqual(opencodeFiles(switched), PORTABLE.map((n) => `${n}.md`), 'OpenCode agents provisioned with HEAD unchanged');
     assert.deepEqual(handoffFiles(switched), HANDOFF_FILES, 'handoff projection provisioned with HEAD unchanged');
-    assert.deepEqual(first.handoffCalls.map((c) => c.split(' ').pop()), [switched], 'the projection runs only for the work project');
-    assert.deepEqual(opencodeFiles(hobby), [], 'the hobby project gets no portable files');
-    assert.deepEqual(handoffFiles(hobby), []);
+    assert.deepEqual(first.handoffCalls.map((c) => c.split(' ').pop()), [switched], 'the projection runs only for the handoff-on project');
+    assert.deepEqual(opencodeFiles(off), [], 'the handoff-off project gets no portable files');
+    assert.deepEqual(handoffFiles(off), []);
     assert.match(first.log, /already current at \w+; refreshing 2 registered project\(s\)/);
     // REWRITTEN (scheduling rebuild): this used to pin ZERO generator calls on the
     // second run — the dropped provisioning cache. The contract is now "every run
     // visits every target once; the generators leave unchanged bytes alone".
-    const before = { switched: snapshot(switched), hobby: snapshot(hobby) };
-    const second = await update({ behind: 0, projects: [switched, hobby], cwd });
+    const before = { switched: snapshot(switched), off: snapshot(off) };
+    const second = await update({ behind: 0, projects: [switched, off], cwd });
     assert.equal(second.report.exit, 0, second.log);
-    assert.deepEqual({ switched: snapshot(switched), hobby: snapshot(hobby) }, before, 'a second run leaves every file byte-identical');
+    assert.deepEqual({ switched: snapshot(switched), off: snapshot(off) }, before, 'a second run leaves every file byte-identical');
     assert.equal(second.syncCalls.length, 2, 'each registered target is visited once');
-    assert.equal(second.handoffCalls.length, 1, 'the projection runs once, for the work target only');
+    assert.equal(second.handoffCalls.length, 1, 'the projection runs once, for the handoff-on target only');
     assert.match(second.log, /Already current — nothing to do for the core update/);
   } finally {
-    [cwd, switched, hobby].forEach(cleanup);
+    [cwd, switched, off].forEach(cleanup);
   }
 });
 
-test('update: work→hobby keeps every file byte-identical and says they are no longer maintained', async () => {
+test('update: on→off keeps every file byte-identical and says they are no longer maintained', async () => {
   const cwd = scratch();
-  const dir = project('work');
+  const dir = project(ON);
   try {
     await update({ behind: 2, projects: [dir], cwd });
     const before = snapshot(dir);
     assert.equal(Object.keys(before).length, PORTABLE.length + HANDOFF_FILES.length);
-    writeConfig(dir, 'hobby');
+    writeConfig(dir, OFF);
     for (const behind of [2, 0]) {
       const { log, handoffCalls } = await update({ behind, projects: [dir], cwd });
       assert.equal(handoffCalls.length, 0);
-      assert.match(log, /skipped — project mode is hobby .*existing files are no longer maintained.*nothing is deleted/);
+      assert.match(log, /skipped — handoff files are off .*existing files are no longer maintained.*nothing is deleted/);
       assert.deepEqual(snapshot(dir), before, `behind=${behind}: nothing deleted or rewritten`);
     }
   } finally {
@@ -373,16 +392,16 @@ function addArticle(dir, slug) {
 const docsFiles = (dir) => (existsSync(join(dir, 'docs', 'sterling', 'articles')) ? readdirSync(join(dir, 'docs', 'sterling', 'articles')).sort() : []);
 const markerOf = (cwd) => JSON.parse(readFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), 'utf8'));
 
-test('update, HEAD unchanged: a work→hobby→work cycle re-projects stale files even though every file exists', async () => {
+test('update, HEAD unchanged: a on→off→on cycle re-projects stale files even though every file exists', async () => {
   const cwd = scratch();
-  const dir = project('work');
+  const dir = project(ON);
   try {
     addArticle(dir, 'first');
     await update({ behind: 2, projects: [dir], cwd });
-    writeConfig(dir, 'hobby');
-    await update({ behind: 2, projects: [dir], cwd }); // a full update while hobby: the files go stale
+    writeConfig(dir, OFF);
+    await update({ behind: 2, projects: [dir], cwd }); // a full update with handoff off: the files go stale
     addArticle(dir, 'second');
-    writeConfig(dir, 'work');
+    writeConfig(dir, ON);
     const r = await update({ behind: 0, projects: [dir], cwd });
     assert.equal(r.report.exit, 0, r.log);
     assert.deepEqual(r.handoffCalls.map((c) => c.split(' ').pop()), [dir], 'the stale project is re-projected');
@@ -394,7 +413,7 @@ test('update, HEAD unchanged: a work→hobby→work cycle re-projects stale file
 
 test('update, HEAD unchanged: a PARTIAL portable-agent set is restored', async () => {
   const cwd = scratch();
-  const dir = project('work');
+  const dir = project(ON);
   try {
     await update({ behind: 2, projects: [dir], cwd });
     rmSync(join(dir, '.opencode', 'agents', 'scout.md'));
@@ -408,7 +427,7 @@ test('update, HEAD unchanged: a PARTIAL portable-agent set is restored', async (
 
 test('update, HEAD unchanged: a missing registered docs/sterling file is restored', async () => {
   const cwd = scratch();
-  const dir = project('work');
+  const dir = project(ON);
   try {
     addArticle(dir, 'kept');
     await update({ behind: 2, projects: [dir], cwd });
@@ -424,11 +443,11 @@ test('update, HEAD unchanged: a missing registered docs/sterling file is restore
 });
 
 // REWRITTEN (scheduling rebuild): this pinned ZERO generator invocations for a
-// fully provisioned work project — the dropped provisioning cache. It now pins the
+// fully provisioned handoff-on project — the dropped provisioning cache. It now pins the
 // property that cache stood in for: the refresh is byte-preserving.
-test('update, HEAD unchanged: a fully provisioned work project is refreshed once and keeps every byte', async () => {
+test('update, HEAD unchanged: a fully provisioned handoff-on project is refreshed once and keeps every byte', async () => {
   const cwd = scratch();
-  const dir = project('work');
+  const dir = project(ON);
   try {
     addArticle(dir, 'steady');
     await update({ behind: 2, projects: [dir], cwd });
@@ -453,9 +472,9 @@ const setConfig = (dir, cfg) => writeFileSync(join(dir, '.sterling', 'config.jso
 // non-fatal ⚠ skip that writes nothing.
 test('update, HEAD unchanged: a standing refusal is a visible, non-fatal skip on every run', async () => {
   const cwd = scratch();
-  const dir = project('work');
+  const dir = project(ON);
   try {
-    setConfig(dir, { project_name: 'fixture', mode: 'work', store_authority: 'secondary' });
+    setConfig(dir, { project_name: 'fixture', mode: 'hobby', handoff: { enabled: true }, store_authority: 'secondary' });
     const full = await update({ behind: 2, projects: [dir], cwd });
     assert.equal(full.report.exit, 0, full.log);
     assert.match(full.log, /⚠ handoff projection: REFUSED — store_authority is 'secondary'/);
@@ -489,7 +508,7 @@ for (const [label, breakIt] of [
 ]) {
   test(`update, HEAD unchanged: ${label} is a reported refusal, never a throw, and nothing is written through it`, async () => {
     const cwd = scratch();
-    const dir = project('work');
+    const dir = project(ON);
     const outside = mkdtempSync(join(tmpdir(), 'sterling-mode-outside-'));
     try {
       await update({ behind: 2, projects: [dir], cwd });
@@ -509,16 +528,16 @@ for (const [label, breakIt] of [
 // the retry set (handoff_retry, "not scanned a second time"). Its behaviour stays:
 // a stuck project keeps the run loud while every other target is still refreshed,
 // and each target is visited exactly once.
-test('update, HEAD unchanged: a stuck project does not block another — a project switched to work is provisioned in the same run', async () => {
+test('update, HEAD unchanged: a stuck project does not block another — a project with handoff switched on is provisioned in the same run', async () => {
   const cwd = scratch();
-  const stuck = project('work');
-  const switched = project('hobby');
+  const stuck = project(ON);
+  const switched = project(OFF);
   try {
     writeFileSync(join(stuck, 'architecture.md'), '# ours, hand-written\n'); // a foreign file: actionable refusal
     const full = await update({ behind: 2, projects: [stuck, switched], cwd });
     assert.equal(full.report.exit, 2, full.log);
     assert.equal(markerOf(cwd).sha, HEAD_B, 'an actionable refusal never withholds the core marker');
-    writeConfig(switched, 'work');
+    writeConfig(switched, ON);
     const r = await update({ behind: 0, projects: [stuck, switched], cwd });
     assert.equal(r.report.exit, 2, 'the stuck project keeps the run loud');
     assert.equal(readFileSync(join(stuck, 'architecture.md'), 'utf8'), '# ours, hand-written\n', 'the foreign file is never overwritten');
@@ -532,9 +551,9 @@ test('update, HEAD unchanged: a stuck project does not block another — a proje
 
 test('update, HEAD unchanged: a standing project that lost a portable agent gets it restored', async () => {
   const cwd = scratch();
-  const dir = project('work');
+  const dir = project(ON);
   try {
-    setConfig(dir, { project_name: 'fixture', mode: 'work', store_authority: 'secondary' });
+    setConfig(dir, { project_name: 'fixture', mode: 'hobby', handoff: { enabled: true }, store_authority: 'secondary' });
     await update({ behind: 2, projects: [dir], cwd });
     rmSync(join(dir, '.opencode', 'agents', 'scout.md'));
     const r = await update({ behind: 0, projects: [dir], cwd });
@@ -550,24 +569,24 @@ test('update, HEAD unchanged: a standing project that lost a portable agent gets
 // sha; the extra fields are ignored — they neither schedule nor suppress a refresh.
 test('update, HEAD unchanged: an old marker carrying projects/project_retry/handoff_retry parses and its extra fields are ignored', async () => {
   const cwd = scratch();
-  const work = project('work');
+  const on = project(ON);
   const gone = '/nonexistent/sterling-retired-project';
   try {
-    await update({ behind: 2, projects: [work], cwd });
+    await update({ behind: 2, projects: [on], cwd });
     writeFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), JSON.stringify({
       sha: HEAD_B, completed_at: NOW,
       handoff_retry: [gone], project_retry: [gone],
-      projects: { [work]: { mode: 'work', head: HEAD_B, outcome: 'ok', config: 'deadbeef' } },
+      projects: { [on]: { mode: 'work', head: HEAD_B, outcome: 'ok', config: 'deadbeef' } },
     }));
-    rmSync(join(work, '.opencode', 'agents', 'scout.md'));
-    const r = await update({ behind: 0, projects: [work], cwd });
+    rmSync(join(on, '.opencode', 'agents', 'scout.md'));
+    const r = await update({ behind: 0, projects: [on], cwd });
     assert.equal(r.report.exit, 0, r.log);
     assert.doesNotMatch(r.log, /corrupt/, 'the old marker is trusted, not degraded');
     assert.equal(r.calls.filter((c) => c.startsWith('npm ')).length, 0, 'the core is not rebuilt');
-    assert.deepEqual(opencodeFiles(work), PORTABLE.map((n) => `${n}.md`), 'a recorded "ok" state does not suppress the refresh');
+    assert.deepEqual(opencodeFiles(on), PORTABLE.map((n) => `${n}.md`), 'a recorded "ok" state does not suppress the refresh');
     assert.equal(r.calls.filter((c) => c.includes(gone)).length, 0, 'an old retry entry schedules nothing');
   } finally {
-    [cwd, work].forEach(cleanup);
+    [cwd, on].forEach(cleanup);
   }
 });
 
@@ -578,8 +597,8 @@ test('update, HEAD unchanged: an old marker carrying projects/project_retry/hand
 // which is the path that used to abort the run.
 test('update: an unreadable project .sterling/ is a per-project refusal; the other projects proceed', { skip: process.getuid?.() === 0 ? 'running as root: chmod 000 does not deny reads' : false }, async () => {
   const cwd = scratch();
-  const locked = project('work');
-  const fine = project('work');
+  const locked = project(ON);
+  const fine = project(ON);
   const cfg = join(locked, '.sterling');
   try {
     chmodSync(cfg, 0o000);

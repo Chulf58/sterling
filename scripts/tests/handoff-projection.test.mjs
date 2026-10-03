@@ -61,10 +61,10 @@ const ANTI_PATTERN = {
 function fixture({ records = [ARTICLE, DECISION, ANTI_PATTERN], config = {}, store = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-handoff-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
-  // mode 'work': the projection is work-only (decision
-  // project-mode-hobby-work-toggle-decides-flow); the hobby refusal is pinned in
-  // project-mode-gating.test.mjs.
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'fixture', mode: 'work', ...config }, null, 2) + '\n');
+  // handoff on: the projection follows config.handoff.enabled (decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting); the off refusal is pinned in
+  // handoff-setting.test.mjs and project-mode-gating.test.mjs.
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'fixture', handoff: { enabled: true }, ...config }, null, 2) + '\n');
   if (store) {
     const s = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
     for (const r of records) s.create(r);

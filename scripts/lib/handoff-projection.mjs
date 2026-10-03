@@ -18,6 +18,7 @@
 // Deterministic: no timestamps, stable filenames and ordering, so an unchanged
 // store reproduces the same bytes and the CLI writes nothing.
 
+import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { existsContained, readContained, readdirContained } from './contained-fs.mjs';
 
@@ -38,34 +39,82 @@ export function isSterlingClone(root, pluginRoot) {
   return JSON.parse(readContained(root, manifest)).name === 'sterling';
 }
 
-// Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-// OpenCode agents and this projection are WORK-ONLY. Every surface that writes
-// them (init, sync-agents, the /sterling:update fan-out, the projection CLI)
-// reads the TARGET project's own config through this one function, never the
-// caller's. A missing config or a missing key is hobby, the schema default. An
-// invalid value, or a config that is not a JSON object, throws: the mode is
-// never guessed. Reads go through contained-fs like every other target read.
+// Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed by
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+// config.mode decides only how work ships, a direct merge (hobby) or a pull
+// request with the review loop (work). Every surface that acts on it reads the
+// TARGET project's own config through this one function, never the caller's. A
+// missing config or a missing key is hobby, the schema default. An invalid
+// value, or a config that is not a JSON object, throws: the mode is never
+// guessed. Reads go through contained-fs like every other target read.
 export const PROJECT_MODES = ['hobby', 'work'];
-export const HOBBY_SKIP_DETAIL = 'project mode is hobby (OpenCode and handoff files are work-only; existing files are no longer maintained, and nothing is deleted)';
 export class ProjectModeError extends Error {}
-export function readProjectMode(root) {
-  const rel = '.sterling/config.json';
-  const where = `${fwd(resolve(root))}/${rel}`;
-  if (!existsContained(root, rel, 'file')) return 'hobby';
+const CONFIG_REL = '.sterling/config.json';
+// The target's raw config object (undefined when the file is absent) and its
+// path for messages. A file that is not a JSON object throws `ErrorClass`,
+// naming the `subject` that could not be read.
+function readRawConfig(root, ErrorClass, subject) {
+  const where = `${fwd(resolve(root))}/${CONFIG_REL}`;
+  if (!existsContained(root, CONFIG_REL, 'file')) return { where, parsed: undefined };
   let parsed;
   try {
-    parsed = JSON.parse(readContained(root, rel));
+    parsed = JSON.parse(readContained(root, CONFIG_REL));
   } catch (err) {
-    throw new ProjectModeError(`${where} is not valid JSON (${err.message}) — the project mode cannot be read`);
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) — ${subject} cannot be read`);
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new ProjectModeError(`${where} is not a JSON object — the project mode cannot be read`);
+    throw new ErrorClass(`${where} is not a JSON object — ${subject} cannot be read`);
   }
-  if (parsed.mode === undefined) return 'hobby';
+  return { where, parsed };
+}
+export function readProjectMode(root) {
+  const { where, parsed } = readRawConfig(root, ProjectModeError, 'the project mode');
+  if (parsed === undefined || parsed.mode === undefined) return 'hobby';
   if (!PROJECT_MODES.includes(parsed.mode)) {
     throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} — it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
   }
   return parsed.mode;
+}
+
+// The handoff setting (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+// config.handoff.enabled decides whether Sterling writes the files for
+// colleagues who do not have Sterling, the portable OpenCode agents and this
+// projection. It is independent of the mode and off by default. Every surface
+// that writes those files (init, sync-agents, the /sterling:update fan-out, the
+// projection CLI, the git exclude block) reads the TARGET's own config through
+// readHandoffEnabled.
+// An absent key is off, with one exception: when a portable agent is already
+// tracked in git the answer is on, so a project that committed these files
+// before the setting existed keeps having them maintained. An explicit false
+// always wins. A value that is not a boolean throws: it is never guessed.
+export const PORTABLE_AGENT_PATHS = ['.opencode/agents/implementor.md', '.opencode/agents/researcher.md', '.opencode/agents/scout.md'];
+export const HANDOFF_OFF_DETAIL = 'handoff files are off (config.handoff.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted)';
+export class HandoffSettingError extends Error {}
+// True when git tracks at least one portable agent in `root`. Outside a git work
+// tree, or without git, nothing is tracked.
+export function portableAgentsTracked(root) {
+  const r = spawnSync('git', ['ls-files', '--', ...PORTABLE_AGENT_PATHS], { cwd: root, encoding: 'utf8' });
+  return r.status === 0 && r.stdout.trim() !== '';
+}
+// The setting for an already-parsed raw config object (undefined or null when
+// the project has none): { enabled, source }. source is 'config' (the key is
+// set), 'tracked' (no key, portable agents tracked) or 'default' (no key).
+export function handoffSettingOf(parsed, root, where = CONFIG_REL) {
+  const block = parsed?.handoff;
+  if (block !== undefined && (block === null || typeof block !== 'object' || Array.isArray(block))) {
+    throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} — it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
+  }
+  const value = block?.enabled;
+  if (value === undefined) return portableAgentsTracked(root) ? { enabled: true, source: 'tracked' } : { enabled: false, source: 'default' };
+  if (typeof value !== 'boolean') {
+    throw new HandoffSettingError(`config.handoff.enabled is ${JSON.stringify(value)} in ${where} — it must be true or false; switch it in the TUI System tab or fix the file`);
+  }
+  return { enabled: value, source: 'config' };
+}
+export function readHandoffEnabled(root) {
+  const { where, parsed } = readRawConfig(root, HandoffSettingError, 'the handoff setting');
+  return handoffSettingOf(parsed, root, where).enabled;
 }
 
 export const HANDOFF_DOCS_DIR = 'docs/sterling';

@@ -39,7 +39,7 @@ import { DEFAULT_DOMAIN_DESCRIPTIONS } from './lib/domain-defaults.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
-import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL, PROJECT_MODES } from './lib/handoff-projection.mjs';
+import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL, portableAgentsTracked, PROJECT_MODES } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -236,6 +236,13 @@ const expectedConfig = parseConfig({
   // work project's config is not "hand-edited" for carrying it. A fresh config
   // takes --mode, else the explicit 'hobby' default.
   mode: recorded ? recorded.mode : (modeFlag ?? 'hobby'),
+  // the handoff setting (decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) is
+  // a recorded declaration too, switched in the TUI System tab. A fresh config
+  // starts with it off, unless the project already has portable agents tracked
+  // in git (a clone of a project that commits them): then it starts on, so the
+  // first init on a new machine does not stop maintaining committed files.
+  handoff: recorded ? recorded.handoff : { enabled: portableAgentsTracked(target) },
 });
 if (eff.splitRatio === undefined) eff.splitRatio = expectedConfig.tui_split_ratio;
 
@@ -979,24 +986,26 @@ try {
   handoffCloneTarget = null;
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'refused', detail: `${err.message} — nothing written` });
 }
-// Project mode (decision project-mode-hobby-work-toggle-decides-flow): both are
-// WORK-ONLY, read from this target's own config. Hobby is a loud skip row that
-// deletes nothing; every init run provisions a work target, so re-running init
-// after a hobby→work switch writes the files.
-let handoffMode = null;
+// The handoff setting (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+// both follow config.handoff.enabled, read from this target's own config, in
+// hobby and work mode alike. Off is a loud skip row that deletes nothing; every
+// init run provisions a target that has it on, so re-running init after turning
+// it on writes the files.
+let handoffEnabled = null;
 if (handoffCloneTarget === false) {
   try {
-    handoffMode = readProjectMode(target);
+    handoffEnabled = readHandoffEnabled(target);
   } catch (err) {
-    if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
+    if (!(err instanceof HandoffSettingError) && !(err instanceof ContainmentError)) throw err;
     items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'refused', detail: `${err.message} — nothing written` });
   }
 }
 if (handoffCloneTarget === true) {
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'skipped', detail: 'the target is a Sterling clone — it has its own projections and is not a handoff target' });
-} else if (handoffMode === 'hobby') {
-  items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'skipped', detail: HOBBY_SKIP_DETAIL });
-} else if (handoffMode === 'work') {
+} else if (handoffEnabled === false) {
+  items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'skipped', detail: HANDOFF_OFF_DETAIL });
+} else if (handoffEnabled === true) {
   const { report: opencodeReport } = syncOpenCodeAgents({
     templatesDir: join(pluginRoot, 'agent-templates'),
     registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),

@@ -1,6 +1,6 @@
 // The host-neutral operating-state lines H1 states at SessionStart: the project
-// config read with its three states, MACHINE ROLE, TDD posture, Project mode and
-// the pending Sterling issue-report count, and the mounted domain lines.
+// config read with its three states, MACHINE ROLE, TDD posture, Project mode,
+// Handoff files and the pending Sterling issue-report count, and the mounted domain lines.
 // Extracted from h1-session-start.mjs so the OpenCode context hook
 // (packages/opencode-plugin/src/context.mjs) renders the SAME text from the SAME
 // code (board cbee2b3d, audit f2ba68c2 row 2). Each line function returns the
@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { missingDomainWarning } from '@sterling/store';
 import { loadConfig } from './common.mjs';
+import { handoffSettingOf, HandoffSettingError } from '../../lib/handoff-projection.mjs';
 import { describeMountedDomains } from './subject-fan.mjs';
 
 /**
@@ -97,6 +98,9 @@ export function tddPostureLine({ config, configUnreadable }) {
  * informational only. Same three states as the TDD line: an absent key IS the
  * schema default (hobby); an unreadable config is UNKNOWN, never the default; a
  * value outside hobby/work reads INVALID, never as either flow.
+ * The line says only how work ships. Whether the handoff files are written is a
+ * separate setting with its own line, handoffFilesLine below (decision
+ * project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting).
  */
 export function projectModeLine({ config, configUnreadable }) {
   if (configUnreadable) {
@@ -110,13 +114,50 @@ export function projectModeLine({ config, configUnreadable }) {
     return (
       `Project mode: ${mode === 'work' ? 'WORK' : 'HOBBY'} (config.mode — TUI System tab) — ` +
       (mode === 'work'
-        ? 'the OpenCode agents and handoff files are written and maintained.'
-        : 'the OpenCode agents and handoff files are not written or maintained in hobby mode; existing ones may remain from an earlier work period.')
+        ? 'work ships as a pull request through /sterling:merge, followed by the review loop; nothing is merged directly.'
+        : 'work ships by direct merge through /sterling:merge.')
     );
   }
   return (
     `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) — config.mode must be 'hobby' or 'work'; ` +
-    'init, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).'
+    '/sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).'
+  );
+}
+
+const HANDOFF_SET = 'the portable OpenCode agents and the handoff projection for colleagues without Sterling';
+
+/**
+ * HANDOFF FILES (decision
+ * project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+ * informational only. States the EFFECTIVE setting, through the same resolver
+ * the writers use (handoffSettingOf): config.handoff.enabled when it is set;
+ * otherwise ON when portable agents are already tracked in git in `root`, else
+ * OFF. An unreadable config is UNKNOWN, never the default; a value that is not a
+ * boolean reads INVALID, never as on or off.
+ */
+export function handoffFilesLine({ config, configUnreadable, root }) {
+  if (configUnreadable) {
+    return (
+      'Handoff files: UNKNOWN — the project config could not be read, so config.handoff.enabled could not be determined. ' +
+      'This is NOT the off default: repair the config.'
+    );
+  }
+  let setting;
+  try {
+    setting = handoffSettingOf(config, root);
+  } catch (err) {
+    if (!(err instanceof HandoffSettingError)) throw err;
+    const block = config.handoff;
+    const raw = block !== null && typeof block === 'object' && !Array.isArray(block) ? block.enabled : block;
+    return (
+      `Handoff files: INVALID (${JSON.stringify(raw).replace(/^"|"$/g, "'")}) — config.handoff.enabled must be true or false; ` +
+      'init, sync-agents, /sterling:update and the handoff projection refuse to act on it until it is fixed (TUI System tab).'
+    );
+  }
+  const where = setting.source === 'tracked' ? 'config.handoff.enabled is not set; portable agents are tracked in git' : 'config.handoff.enabled';
+  return (
+    `Handoff files: ${setting.enabled ? 'ON' : 'OFF'} (${where} — TUI System tab) — ` +
+    (setting.enabled ? `${HANDOFF_SET} are written and maintained.` : `${HANDOFF_SET} are not written; existing ones are left in place.`)
   );
 }
 
