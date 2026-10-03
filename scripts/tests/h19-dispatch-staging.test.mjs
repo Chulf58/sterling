@@ -778,7 +778,7 @@ test('GAP: config has NO tdd key at all -> still defaults ON', () => {
 // positive half (which of UNKNOWN-vs-absent) is pinned only as an explicit
 // disjunction, flagged for tightening once the coder's actual choice is
 // known — the same discipline this dispatch already applied to
-// scripts/tests/delivery-oracle.mjs's expected_reason arms rather than
+// an earlier audit's expected_reason arms rather than
 // guessing.
 // ===========================================================================
 

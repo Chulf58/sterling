@@ -40,8 +40,8 @@ export type ClaimPathVerdict = 'leaf' | 'absent' | 'real_directory' | { kind: 'u
 
 /**
  * THE ONE CLASSIFIER for a path a knowledge record CLAIMS — shared by the MCP
- * tool layer's write boundary and scripts/delivery-oracle.mjs's census, so the
- * gate and the census can never disagree about what a directory claim is
+ * tool layer's write boundary and any script that audits claimed paths, so the
+ * gate and the audit can never disagree about what a directory claim is
  * (decision [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]).
  *
  * It CLASSIFIES ONLY; the tool layer decides that 'real_directory' refuses a
@@ -68,7 +68,7 @@ export function classifyClaimPath(repoRoot: string, path: string): ClaimPathVerd
  * THE COLUMN-AUTHORITATIVE LIVE-RECORD DECODER, as a standalone export — the
  * body of SterlingStore.decodeLiveRecord (see its full contract there), lifted
  * so a reader OUTSIDE this class that materialises a live DurableRecord from a
- * `records` row (scripts/delivery-oracle.mjs's read-only fallback reader) can
+ * `records` row (a read-only fallback reader, for example) can
  * decode IDENTICALLY instead of parsing `body` alone and inheriting whatever
  * scope the body happens to carry.
  */
@@ -1820,7 +1820,7 @@ export class SterlingStore {
    * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
    *
    * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
-   * above, so an out-of-class reader (the delivery oracle's read-only fallback)
+   * above, so an out-of-class reader (a script outside the store with a read-only fallback)
    * decodes through the same function rather than re-parsing `body` alone.
    */
   private static decodeLiveRecord(op: string, row: { body: string; scope: string }): DurableRecord {
