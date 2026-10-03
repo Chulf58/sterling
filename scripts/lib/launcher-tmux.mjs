@@ -41,6 +41,9 @@ const INSTALLED_PATHS = [
   'STERLING_RESOLVER',
   ')"',
 ].join('\n');
+// Exported for scripts/lib/launcher-history.mjs: today's installed block is always a
+// known {{PLUGIN_PATHS}} value when matching an older launcher.
+export { INSTALLED_PATHS };
 
 /**
  * @param {string} pluginRoot

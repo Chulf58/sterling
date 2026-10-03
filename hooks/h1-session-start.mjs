@@ -6324,6 +6324,23 @@ CREATE TABLE IF NOT EXISTS store_meta (
       static decodeLiveRecords(op, rows) {
         return rows.map((r) => _SterlingStore.decodeLiveRecord(op, r));
       }
+      /**
+       * Decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede:
+       * a links entry with rel 'supersedes' that is not already an edge of the
+       * record is refused, with nothing written. Supersession has one write path,
+       * supersede() (knowledge_supersede), which also retires the old record; a raw
+       * edge left the target active, a second write with the same name and a
+       * different effect. `existingTargets` holds the targets the record already
+       * supersedes, so a write that carries an existing edge forward still passes.
+       * Exported for the tool layer, whose attestation update branch reaches
+       * supersede() rather than the in-place path.
+       */
+      static refuseRawSupersedesLinks(op, links, existingTargets) {
+        const added = (links ?? []).filter((l) => l.rel === "supersedes" && !existingTargets.has(l.target_id));
+        if (added.length === 0)
+          return;
+        throw new Error(`${op}: a links entry with rel 'supersedes' (target ${added.map((l) => `'${l.target_id}'`).join(", ")}) is refused \u2014 supersession is a lifecycle transition, not a link. Use knowledge_supersede to replace the old record (it retires it), or write the new record with a rel 'cites' link to the old one for a deliberate partial override. Nothing was written.`);
+      }
       /** Typed edge write — record_relations is the authoritative home (contract 6). */
       insertRelation(sourceId, rel, targetId, at) {
         if (sourceId === targetId) {
@@ -6358,6 +6375,7 @@ CREATE TABLE IF NOT EXISTS store_meta (
           throw new Error(`create: record type '${type}' does not define ${refused.length === 1 ? "this field" : "these fields"}, and the schema REFUSED the write rather than storing ${refused.length === 1 ? "it" : "them"}: ${refused.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`, { cause: err });
         }
         assertNoFieldLoss("create", prepared.input, record);
+        _SterlingStore.refuseRawSupersedesLinks("create", record.links, /* @__PURE__ */ new Set());
         this.tx(() => {
           this.insertRecord(record);
           this.logActivity("created", record, record.created_at);
@@ -6599,6 +6617,8 @@ CREATE TABLE IF NOT EXISTS store_meta (
           if (validated.type !== current.type) {
             throw new Error(`${op}: type mismatch ('${validated.type}' cannot replace '${current.type}' in place)`);
           }
+          const existingSupersedes = new Set(this.db.prepare(`SELECT target_id FROM record_relations WHERE source_id = ? AND rel = 'supersedes'`).all(id).map((r) => r.target_id));
+          _SterlingStore.refuseRawSupersedesLinks(op, validated.links, existingSupersedes);
           const entry = RECORD_TYPES[validated.type];
           const stored = _SterlingStore.storableBody(validated);
           const now = (/* @__PURE__ */ new Date()).toISOString();

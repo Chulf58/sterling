@@ -62,7 +62,11 @@ const sections = SETS.map(({ key, title, article, registry, checks }) => {
   const extending = owner
     ? `**Extending this:** ${owner.intended_behavior}\n\nFull article: \`${article}\` (v${owner.version}, ${owner.updated_at}) — Articles tab or \`knowledge_query\`.`
     : `**ARTICLE GAP** — no owning feature article \`${article}\` in the store. The projection cannot describe extension obligations for this set; run the coverage sweep and create the article.`;
-  return `## Extensible set: ${key} — ${title}\n\n- Registry: ${registry}\n- Checks: ${checks}\n\n${extending}\n`;
+  // the owning article's lifecycle state rides the heading line (state_reason, when
+  // set, on the line below); a set with no owning article has no state to show.
+  const stateTag = owner ? `  [state: ${owner.state}]` : '';
+  const stateReason = owner?.state_reason ? `State reason: ${owner.state_reason}\n` : '';
+  return `## Extensible set: ${key} — ${title}${stateTag}\n${stateReason}\n- Registry: ${registry}\n- Checks: ${checks}\n\n${extending}\n`;
 });
 
 const newest = articles.map((a) => a.updated_at).sort().at(-1) ?? 'empty store';

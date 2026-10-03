@@ -39,6 +39,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: '(Fable while Sol is capped, Opus when Terra executed the work)',
     after: '(Opus while Sol is capped and when Terra executed the work; user-ruled 2026-10-02 through the question form, "Opus as fallback": *"Fable is quite overkill"*)',
   },
+  {
+    commit: 'e82a184',
+    date: '2026-10-03',
+    reason: 'the grill skill also runs at intake on an ambiguous ask (user-ruled, "On ambiguity, at intake (Recommended)")',
+    before: 'A consequential choice (scope, acceptance, architecture, an expensive commitment) that the store cannot settle goes to the user through the `grill` skill (`/sterling:grill`), and you name that choice before starting it (decision `sterling-grill-skill-design`).',
+    after: 'For every new non-trivial ask, before the first dispatch, check whether the intent, the acceptance or the scope is unstated, or whether the ask has two or more reasonable readings. If any holds, run a short `grill` first (`/sterling:grill`, usually 1-3 questions, one at a time through the question form); its first question restates your understanding as an option, "Proceed as I understand it: ...". A clear ask starts at once; a vague one always gets the grill (user-ruled 2026-10-03 through the question form, "On ambiguity, at intake (Recommended)", after *"TGhe grill-me skills is super good. How do we use it more often to also drill intro requests/new tasks, understand intent, explain something vague"*). The older trigger still applies: a consequential choice (scope, acceptance, architecture, an expensive commitment) that the store cannot settle, met mid-task, goes to the same skill, and you name that choice before starting it (decision `sterling-grill-skill-design`).',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
