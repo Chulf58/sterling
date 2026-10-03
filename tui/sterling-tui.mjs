@@ -45748,6 +45748,23 @@ var SterlingStore = class _SterlingStore {
   static decodeLiveRecords(op, rows) {
     return rows.map((r) => _SterlingStore.decodeLiveRecord(op, r));
   }
+  /**
+   * Decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede:
+   * a links entry with rel 'supersedes' that is not already an edge of the
+   * record is refused, with nothing written. Supersession has one write path,
+   * supersede() (knowledge_supersede), which also retires the old record; a raw
+   * edge left the target active, a second write with the same name and a
+   * different effect. `existingTargets` holds the targets the record already
+   * supersedes, so a write that carries an existing edge forward still passes.
+   * Exported for the tool layer, whose attestation update branch reaches
+   * supersede() rather than the in-place path.
+   */
+  static refuseRawSupersedesLinks(op, links, existingTargets) {
+    const added = (links ?? []).filter((l) => l.rel === "supersedes" && !existingTargets.has(l.target_id));
+    if (added.length === 0)
+      return;
+    throw new Error(`${op}: a links entry with rel 'supersedes' (target ${added.map((l) => `'${l.target_id}'`).join(", ")}) is refused \u2014 supersession is a lifecycle transition, not a link. Use knowledge_supersede to replace the old record (it retires it), or write the new record with a rel 'cites' link to the old one for a deliberate partial override. Nothing was written.`);
+  }
   /** Typed edge write — record_relations is the authoritative home (contract 6). */
   insertRelation(sourceId, rel, targetId, at) {
     if (sourceId === targetId) {
@@ -45782,6 +45799,7 @@ var SterlingStore = class _SterlingStore {
       throw new Error(`create: record type '${type}' does not define ${refused.length === 1 ? "this field" : "these fields"}, and the schema REFUSED the write rather than storing ${refused.length === 1 ? "it" : "them"}: ${refused.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`, { cause: err });
     }
     assertNoFieldLoss("create", prepared.input, record);
+    _SterlingStore.refuseRawSupersedesLinks("create", record.links, /* @__PURE__ */ new Set());
     this.tx(() => {
       this.insertRecord(record);
       this.logActivity("created", record, record.created_at);
@@ -46023,6 +46041,8 @@ var SterlingStore = class _SterlingStore {
       if (validated.type !== current.type) {
         throw new Error(`${op}: type mismatch ('${validated.type}' cannot replace '${current.type}' in place)`);
       }
+      const existingSupersedes = new Set(this.db.prepare(`SELECT target_id FROM record_relations WHERE source_id = ? AND rel = 'supersedes'`).all(id).map((r) => r.target_id));
+      _SterlingStore.refuseRawSupersedesLinks(op, validated.links, existingSupersedes);
       const entry = RECORD_TYPES[validated.type];
       const stored = _SterlingStore.storableBody(validated);
       const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -47326,6 +47346,7 @@ ${a.what_it_does}
 
 Intended behaviour:
 ${a.intended_behavior}${acSection}`,
+        state: a.state,
         detail: `${a.slug} \xB7 ${a.state} \xB7 v${a.version} \xB7 ${a.files.length} file(s) \xB7 relies on ${a.dependencies.relies_on.length}`
       };
     }
@@ -47610,6 +47631,7 @@ var KNOWLEDGE_TAB = TABS.indexOf("Knowledge");
 var QUEUE_TAB = TABS.indexOf("Queue");
 var AGENTS_TAB = TABS.indexOf("Agents");
 var SYSTEM_TAB = TABS.indexOf("System");
+var ARTICLE_STATE_FILTERS = ["all", "planned", "built", "wired_in", "active", "dormant", "deprecated"];
 var initialUi = { tab: 0, cursor: 0, expanded: [], searchQuery: "", scroll: 0 };
 var EMPTY_ROSTER = {
   agents: [],
@@ -47630,6 +47652,10 @@ function effortOptions(key) {
 var MODEL_VALUE_RE = /^claude-/;
 function visibleTabs(agents) {
   return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== void 0);
+}
+var STATE_COLUMN_WIDTH = Math.max(...ARTICLE_STATE_FILTERS.slice(1).map((n) => n.length)) + 2;
+function stateColumn(card) {
+  return card.state ? `${`[${card.state}]`.padEnd(STATE_COLUMN_WIDTH)} ` : "";
 }
 function cardsFor(store, tab, expanded = []) {
   if (tab === 0)
@@ -47665,14 +47691,19 @@ function nodesFor(store, ui, knowledge) {
     return cardsFor(store, ui.tab, ui.expanded).map((card) => ({ kind: "card", card, depth: card.depth ?? 0, knowledge: false }));
   const cap = 500;
   const query = ui.searchQuery.trim();
+  const inState = (r) => {
+    const rec = r;
+    return !ui.stateFilter || rec.type !== "feature_article" || rec.state === ui.stateFilter;
+  };
+  const cardInState = (c) => !ui.stateFilter || c.type !== "feature_article" || c.state === ui.stateFilter;
   if (query) {
     const terms = rankTermsOf(query);
     if (terms.length) {
       if (knowledge) {
-        return knowledgeSearch(knowledge, terms).map((card) => ({ kind: "card", card: hydrateInbound(card, ui, knowledge), depth: 0, knowledge: true }));
+        return knowledgeSearch(knowledge, terms).filter(cardInState).map((card) => ({ kind: "card", card: hydrateInbound(card, ui, knowledge), depth: 0, knowledge: true }));
       }
       const types = KNOWLEDGE_CATEGORIES.map((c) => c.type);
-      return store.query({ types, rank_terms: terms, match_all: true, cap }).map((r) => ({ kind: "card", card: hydrateInbound({ ...toCard(r), source: "project" }, ui, store), depth: 0, knowledge: true }));
+      return store.query({ types, rank_terms: terms, match_all: true, cap }).filter(inState).map((r) => ({ kind: "card", card: hydrateInbound({ ...toCard(r), source: "project" }, ui, store), depth: 0, knowledge: true }));
     }
   }
   const nodes = [];
@@ -47689,7 +47720,7 @@ function nodesFor(store, ui, knowledge) {
       if (!ui.expanded.includes(srcId(cat.type, sc.source)))
         continue;
       const records = knowledge ? knowledge.querySource(sc.source, { types: [cat.type], cap }) : store.query({ types: [cat.type], cap });
-      const groups = knowledgeSubgroups(records);
+      const groups = knowledgeSubgroups(records.filter(inState));
       const reader = knowledge ?? store;
       if (groups.length <= 1) {
         for (const card of groups[0]?.cards ?? []) {
@@ -47944,7 +47975,7 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
       } else if (expanded && knowledge2) {
         const indent = " ".repeat(2 + pad.length);
         const wrapWidth = Number.isFinite(width) ? Math.max(1, width - indent.length) : width;
-        lines = [{ text: clipEllipsis(marker + pad + card.title, width), kind: "title" }, { text: "", kind: "body" }];
+        lines = [{ text: clipEllipsis(marker + pad + stateColumn(card) + card.title, width), kind: "title" }, { text: "", kind: "body" }];
         for (const text of wrapText(card.body, wrapWidth))
           lines.push({ text: indent + text, kind: "body" });
         lines.push({ text: clipEllipsis(`${indent}${card.detail}`, width), kind: "meta" });
@@ -47960,7 +47991,7 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
         if (card.blocked)
           lines.push({ text: `    ${pad}${card.blocked}`, kind: "meta" });
       } else {
-        lines = [{ text: clipEllipsis(marker + pad + card.title, width), kind: "title" }];
+        lines = [{ text: clipEllipsis(marker + pad + stateColumn(card) + card.title, width), kind: "title" }];
       }
     }
     rows.push({ id, type, selected, expanded, lines, screenRow });
@@ -48012,9 +48043,9 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
       // state.footer unconditionally, so this is the one line available to
       // this scope's two files without touching render.ts. Mirrors the
       // System tab's own '⚠ ' convention (buildSystemTab's banner).
-      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : ui.tab === AGENTS_TAB ? `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 q quit` : `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
+      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : ui.tab === AGENTS_TAB ? `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 q quit` : `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears \xB7 ctrl-f article state" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
     ),
-    searchLine: searchActive ? `search: ${ui.searchQuery}` : void 0,
+    searchLine: searchActive ? `search: ${ui.searchQuery}${ui.stateFilter ? `  state: ${ui.stateFilter}` : ""}` : void 0,
     queueCompleted,
     queueActivity,
     banner,
@@ -48241,6 +48272,13 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
             return { ui: { ...ui, searchQuery: "", cursor: 0, scroll: 0 }, effects };
           }
           return { ui, effects };
+        case "STATE_FILTER": {
+          if (ui.tab !== KNOWLEDGE_TAB)
+            return { ui, effects };
+          const at = ARTICLE_STATE_FILTERS.indexOf(ui.stateFilter ?? "all");
+          const next = ARTICLE_STATE_FILTERS[(at + 1) % ARTICLE_STATE_FILTERS.length];
+          return { ui: { ...ui, stateFilter: next === "all" ? void 0 : next, cursor: 0, scroll: 0 }, effects };
+        }
         case "BACKSPACE":
           if (ui.tab === KNOWLEDGE_TAB) {
             return { ui: { ...ui, searchQuery: ui.searchQuery.slice(0, -1), cursor: 0, scroll: 0 }, effects };
@@ -49335,6 +49373,8 @@ function keyToEvent(name) {
       return { kind: "key", name: "BACKSPACE" };
     case "CTRL_C":
       return { kind: "key", name: "QUIT" };
+    case "CTRL_F":
+      return { kind: "key", name: "STATE_FILTER" };
     default:
       if (name.length === 1 && name >= " ")
         return { kind: "char", ch: name };

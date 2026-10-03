@@ -24550,6 +24550,23 @@ var SterlingStore = class _SterlingStore {
   static decodeLiveRecords(op, rows) {
     return rows.map((r) => _SterlingStore.decodeLiveRecord(op, r));
   }
+  /**
+   * Decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede:
+   * a links entry with rel 'supersedes' that is not already an edge of the
+   * record is refused, with nothing written. Supersession has one write path,
+   * supersede() (knowledge_supersede), which also retires the old record; a raw
+   * edge left the target active, a second write with the same name and a
+   * different effect. `existingTargets` holds the targets the record already
+   * supersedes, so a write that carries an existing edge forward still passes.
+   * Exported for the tool layer, whose attestation update branch reaches
+   * supersede() rather than the in-place path.
+   */
+  static refuseRawSupersedesLinks(op, links, existingTargets) {
+    const added = (links ?? []).filter((l) => l.rel === "supersedes" && !existingTargets.has(l.target_id));
+    if (added.length === 0)
+      return;
+    throw new Error(`${op}: a links entry with rel 'supersedes' (target ${added.map((l) => `'${l.target_id}'`).join(", ")}) is refused \u2014 supersession is a lifecycle transition, not a link. Use knowledge_supersede to replace the old record (it retires it), or write the new record with a rel 'cites' link to the old one for a deliberate partial override. Nothing was written.`);
+  }
   /** Typed edge write — record_relations is the authoritative home (contract 6). */
   insertRelation(sourceId, rel, targetId, at) {
     if (sourceId === targetId) {
@@ -24584,6 +24601,7 @@ var SterlingStore = class _SterlingStore {
       throw new Error(`create: record type '${type}' does not define ${refused.length === 1 ? "this field" : "these fields"}, and the schema REFUSED the write rather than storing ${refused.length === 1 ? "it" : "them"}: ${refused.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`, { cause: err });
     }
     assertNoFieldLoss("create", prepared.input, record2);
+    _SterlingStore.refuseRawSupersedesLinks("create", record2.links, /* @__PURE__ */ new Set());
     this.tx(() => {
       this.insertRecord(record2);
       this.logActivity("created", record2, record2.created_at);
@@ -24825,6 +24843,8 @@ var SterlingStore = class _SterlingStore {
       if (validated.type !== current.type) {
         throw new Error(`${op}: type mismatch ('${validated.type}' cannot replace '${current.type}' in place)`);
       }
+      const existingSupersedes = new Set(this.db.prepare(`SELECT target_id FROM record_relations WHERE source_id = ? AND rel = 'supersedes'`).all(id).map((r) => r.target_id));
+      _SterlingStore.refuseRawSupersedesLinks(op, validated.links, existingSupersedes);
       const entry = RECORD_TYPES[validated.type];
       const stored = _SterlingStore.storableBody(validated);
       const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -30890,6 +30910,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     this.refuseUnknownFields(old.type, overrides);
     if (overrides.links !== void 0) {
       overrides.links = this.resolveLinksTargets(overrides.links, toolName);
+      SterlingStore.refuseRawSupersedesLinks(toolName, overrides.links, new Set(old.links.filter((l) => l.rel === "supersedes").map((l) => l.target_id)));
     }
     const chain = this.supersedeChain(old);
     if (resolves) {
@@ -33421,7 +33442,7 @@ function createSterlingServer(storePath2) {
   const server2 = new McpServer({ name: "sterling", version: "0.1.0" });
   const json = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
   server2.registerTool("knowledge_create", {
-    description: "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." + createDomainsNote,
+    description: "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. A links entry with rel 'supersedes' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel 'cites' for a deliberate partial override. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." + createDomainsNote,
     inputSchema: strict({ type: external_exports.string(), fields: knowledgeCreateFieldsSchema, projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ type, fields, projection }) => {
     const { type: fieldsType, ...restFields } = fields;
@@ -33510,7 +33531,7 @@ function createSterlingServer(storePath2) {
     inputSchema: strict({ old_id: external_exports.string(), fields: passthrough, orphans_acknowledged: external_exports.boolean().optional() })
   }, ({ old_id, fields, orphans_acknowledged }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged)));
   server2.registerTool("knowledge_update", {
-    description: 'Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body \u2014 pass only changed mutable fields; omitted fields are kept (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused; a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review items keyed to this record\'s chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.',
+    description: "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body \u2014 pass only changed mutable fields; omitted fields are kept (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research, wire_in_dormant or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
     inputSchema: strict({
       id: external_exports.string(),
       body: passthrough,
