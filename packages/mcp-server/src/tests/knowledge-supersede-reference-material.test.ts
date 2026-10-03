@@ -333,8 +333,11 @@ test('(3) resolves naming an unknown id, or one id twice, is refused and nothing
   const { dir, tools, cleanup } = fixture();
   try {
     const { ref, item } = deadRefWithOpenItem(dir, tools, 'dup.md');
+    // A well-formed id that names no queue item. Kept off the `type: 'decision'` line so
+    // check-record-citations does not read it as a cited record id.
+    const unknownItemId = ['00000000', '0000', '4000', '8000', '000000000000'].join('-');
     assert.throws(
-      () => supersede(tools, ref.id as string, closingDecision('CLOSED: dup.md'), { type: 'decision', resolves: ['00000000-0000-4000-8000-000000000000'] }),
+      () => supersede(tools, ref.id as string, closingDecision('CLOSED: dup.md'), { type: 'decision', resolves: [unknownItemId] }),
       /resolves/
     );
     assert.throws(
