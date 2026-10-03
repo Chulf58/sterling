@@ -171,6 +171,58 @@ test('BACKLOG worker state: a failed run older than the back-off no longer backs
   });
 });
 
+const STATE_UNKNOWN = /worker state unknown \(worker state file \.sterling\/transient\/maintenance-worker\.state\.json unreadable: [^)]+\)/;
+
+test('BACKLOG worker state: a malformed state file gives "state unknown", never a waiting/due guess', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeFileSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'), '{"last_run": {"ok": false, ');
+    // one hour-old unjudged item: without the state file this reads "due to launch"
+    const b = backlog(dir, reconcile(now, { ageMin: 60 }), now);
+    assert.match(b.banner, STATE_UNKNOWN);
+    assert.match(b.line, STATE_UNKNOWN);
+    assert.doesNotMatch(b.banner, /due to launch|waiting to batch|backing off|idle/);
+  });
+});
+
+test('BACKLOG worker state: a state file that cannot be read (a directory at its path) gives "state unknown"', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    mkdirSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'));
+    const b = backlog(dir, reconcile(now, { ageMin: 60 }), now);
+    assert.match(b.banner, STATE_UNKNOWN);
+    assert.doesNotMatch(b.banner, /due to launch|waiting to batch|backing off|idle/);
+  });
+});
+
+test('BACKLOG worker state: an absent state file means no run recorded, so due is still inferred', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    const b = backlog(dir, reconcile(now, { ageMin: 60 }), now);
+    assert.match(b.banner, /worker due to launch at the next Stop or git commit \(1 unjudged, oldest 1h\)$/);
+    assert.doesNotMatch(b.banner, /state unknown/);
+  });
+});
+
+test('BACKLOG worker state: disabled still wins over an unreadable state file', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeFileSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'), 'not json');
+    const b = backlog(dir, reconcile(now), now, { env: { STERLING_MAINTENANCE_WORKER_DISABLE: '1' } });
+    assert.match(b.banner, /worker disabled by STERLING_MAINTENANCE_WORKER_DISABLE/);
+  });
+});
+
+test('BACKLOG worker state: running wins over an unreadable state file', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeFileSync(join(dir, '.sterling', 'transient', 'maintenance-worker.lock'), JSON.stringify({ pid: process.pid, started_at: iso(now - MIN) }));
+    writeFileSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'), 'not json');
+    const b = backlog(dir, reconcile(now), now);
+    assert.match(b.banner, /worker running \(pid /);
+  });
+});
+
 test('BACKLOG worker state: running keeps its pid and start time, and wins over a recorded back-off', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {

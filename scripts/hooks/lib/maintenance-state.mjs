@@ -16,6 +16,7 @@ import {
   isJudgedOwesProse,
   owesProseVerdicts,
   workerBreakage,
+  workerPaths,
   workerStatus,
 } from './maintenance-worker.mjs';
 
@@ -187,6 +188,32 @@ function readProjectConfig(cwd) {
 }
 
 /**
+ * Why the worker's state file cannot be trusted, or null when it is absent (no
+ * run recorded yet) or a readable JSON object. workerStatus folds an unreadable
+ * file into lastRun: null, which would read as "no run" and let the line guess
+ * waiting or due although a failed run may require back-off; H1 asks the file
+ * itself so a degraded state says so (P5).
+ */
+function workerStateFileProblem(cwd) {
+  const path = workerPaths(cwd).state;
+  const shown = '.sterling/transient/maintenance-worker.state.json';
+  let raw;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (e) {
+    if (e?.code === 'ENOENT') return null;
+    return `worker state file ${shown} unreadable: ${e?.message ?? e}`;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return `worker state file ${shown} unreadable: not a JSON object`;
+  } catch (e) {
+    return `worker state file ${shown} unreadable: ${e?.message ?? e}`;
+  }
+  return null;
+}
+
+/**
  * What the background worker is doing right now, as one phrase for the RECONCILE
  * BACKLOG line (board 27c87783). It replaces a bare "worker not running", which
  * read as "the worker is broken" and sent the conductor to drain by hand. The
@@ -202,6 +229,9 @@ function workerStateText({ ws, reconcile, cwd, config, nowMs, env }) {
     const byHand = 'reconcile items wait for /sterling:drain';
     if (cfg?.maintenance_worker?.enabled === false) return `worker disabled by config (${byHand})`;
     if (env[WORKER_DISABLE_ENV] === '1') return `worker disabled by ${WORKER_DISABLE_ENV} (${byHand})`;
+    // Back-off is derived from the state file, so an unreadable one leaves it unknown.
+    const stateProblem = workerStateFileProblem(cwd);
+    if (stateProblem) return `worker state unknown (${stateProblem})`;
     const last = ws.lastRun;
     const stalledAt = last && (last.ok === false || last.no_progress === true) ? Date.parse(last.at ?? '') : NaN;
     if (Number.isFinite(stalledAt) && nowMs - stalledAt < BACKOFF_MS) {
