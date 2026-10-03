@@ -40,7 +40,7 @@ import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
 import { extractPathCandidatesRooted, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
 import { deriveAgentTranscript } from './lib/transcript.mjs';
-import { isReviewerClass, hasUnsuppressedMatch, escapeRe, scanClauses } from './lib/dispatch-advisory.mjs';
+import { isReviewerClass, hasUnsuppressedMatch, escapeRe, scanClauses, PROHIBITION_RE, BARE_NEGATOR_RE } from './lib/dispatch-advisory.mjs';
 import { probeDirtyPaths, formatResidueLine, claimedResources, fileEntriesOf } from './lib/dispatch-residue.mjs';
 import {
   readRegister,
@@ -120,8 +120,11 @@ function isOnlyProhibited(prompt, candidate) {
 // "Do not edit files other than src/a.mjs": an exception word between the
 // prohibition marker and the path (same clause) names the lane's OWN file,
 // so the path is not a prohibited one.
-const PROHIBITION_MARKER_RE = /\b(?:do\s*not|don['’]?t|never|no|without|forbid(?:s|den)?|denies|denied)\b|⛔/gi;
-const EXCEPTION_WORD_RE = /\b(?:except|other\s+than|outside|besides|apart\s+from|only)\b/i;
+const PROHIBITION_MARKER_RE = new RegExp(`${PROHIBITION_RE}|${BARE_NEGATOR_RE}`, 'gi');
+// The exception word sits directly before the path (at most two filler words
+// between), so "outside your territory such as src/x.mjs" and "do not modify
+// the only copy of src/x.mjs" do not name src/x.mjs as the lane's own file.
+const EXCEPTION_BEFORE_PATH_RE = /(?:except|other\s+than|outside|besides|apart\s+from)\s+(?:[^\s,;:]+\s+){0,2}$/i;
 function namedByException(prompt, pattern) {
   const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
   for (const { text } of scanClauses(prompt)) {
@@ -131,7 +134,7 @@ function namedByException(prompt, pattern) {
       const before = text.slice(0, m.index);
       let markerEnd = -1;
       for (const mk of before.matchAll(PROHIBITION_MARKER_RE)) markerEnd = mk.index + mk[0].length;
-      if (markerEnd >= 0 && EXCEPTION_WORD_RE.test(before.slice(markerEnd))) return true;
+      if (markerEnd >= 0 && EXCEPTION_BEFORE_PATH_RE.test(before.slice(markerEnd))) return true;
       if (m.index === global.lastIndex) global.lastIndex++;
     }
   }

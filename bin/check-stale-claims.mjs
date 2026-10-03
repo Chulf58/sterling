@@ -4242,7 +4242,7 @@ var init_envelope = __esm({
 });
 
 // packages/schemas/dist/records.js
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, openQuestionSchema, attestationSchema, SYSTEM_REASONS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4581,6 +4581,7 @@ var init_records = __esm({
       notes: external_exports.string().optional(),
       file_keys: external_exports.array(repoPath).optional()
     }).superRefine(refineSupersession);
+    BOARD_NEEDS = ["user", "grill", "investigation"];
     SYSTEM_REASONS = [
       "reconcile_needed",
       "stale_research",
@@ -4674,7 +4675,13 @@ var init_records = __esm({
       // like every other todo field, so it needs no migration. Existence of each
       // blocker is checked at the tool layer when written; a blocker removed later
       // reads as closed, it is never rewritten out of this list.
-      blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+      blocked_by: external_exports.array(external_exports.string().min(1)).optional(),
+      // What a user item waits on besides its blockers (decision
+      // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+      // 'investigation' still auto-starts, as a researcher lane; 'user' and
+      // 'grill' wait for the user. Not a progress status: `status` keeps meaning
+      // supersession only. Absent means nothing beyond the blockers.
+      needs: external_exports.enum(BOARD_NEEDS).optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       if (rec.source === "system" && !rec.system_reason) {
@@ -4685,6 +4692,13 @@ var init_records = __esm({
           code: external_exports.ZodIssueCode.custom,
           path: ["blocked_by"],
           message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+        });
+      }
+      if (rec.needs !== void 0 && rec.source === "system") {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: ["needs"],
+          message: "needs marks source:'user' board tasks only \u2014 maintenance-queue items never carry it"
         });
       }
       if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {

@@ -21537,6 +21537,7 @@ var attestationSchema = base.extend({
   notes: external_exports.string().optional(),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
+var BOARD_NEEDS = ["user", "grill", "investigation"];
 var SYSTEM_REASONS = [
   "reconcile_needed",
   "stale_research",
@@ -21630,7 +21631,13 @@ var todoSchema = base.extend({
   // like every other todo field, so it needs no migration. Existence of each
   // blocker is checked at the tool layer when written; a blocker removed later
   // reads as closed, it is never rewritten out of this list.
-  blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+  blocked_by: external_exports.array(external_exports.string().min(1)).optional(),
+  // What a user item waits on besides its blockers (decision
+  // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+  // 'investigation' still auto-starts, as a researcher lane; 'user' and
+  // 'grill' wait for the user. Not a progress status: `status` keeps meaning
+  // supersession only. Absent means nothing beyond the blockers.
+  needs: external_exports.enum(BOARD_NEEDS).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -21641,6 +21648,13 @@ var todoSchema = base.extend({
       code: external_exports.ZodIssueCode.custom,
       path: ["blocked_by"],
       message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+    });
+  }
+  if (rec.needs !== void 0 && rec.source === "system") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      path: ["needs"],
+      message: "needs marks source:'user' board tasks only \u2014 maintenance-queue items never carry it"
     });
   }
   if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
@@ -23019,6 +23033,11 @@ var MountedStores = class {
   enqueueWouldBeNoop(input) {
     return this.project.enqueueWouldBeNoop(input);
   }
+  /** Board readiness is project-local like the board itself, so the project
+   *  store answers it (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start). */
+  boardReadiness(items) {
+    return this.project.boardReadiness(items);
+  }
   storeFor(scope) {
     if (scope === "project")
       return this.project;
@@ -23978,6 +23997,10 @@ function deepReplaceString(value, from, to) {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
   }
   return value;
+}
+function boardItemHandle(rec) {
+  const label = boardDisplayLabel(rec.text, rec.slug);
+  return label ? displayHandle(label, rec.id) : `(unnamed board item) (${rec.id.slice(0, 8)})`;
 }
 var MAX_RANK_TERMS = 16;
 function rankTermDedupeKey(term) {
@@ -25409,6 +25432,64 @@ var SterlingStore = class _SterlingStore {
     return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
   }
   /**
+   * THE ONE READINESS FUNCTION (decision
+   * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start,
+   * AMENDED (a)). board_get/board_query's blocked_by_state, H1's three groups,
+   * H20's ready line, the TUI cards and the OpenCode plugin all read this, so
+   * "open blocker" and "ready" have one definition.
+   *
+   * `items` defaults to every live user board item (a system item is never
+   * returned). Passed explicitly, each user todo given is judged against the
+   * LIVE board: a blocker is open while a live todo carries its slug, and
+   * `unblocks` lists live user items whose blocked_by names the item. Read
+   * only; the stored blocked_by is never rewritten. No cycle detection.
+   */
+  boardReadiness(items) {
+    const total = this.count({ types: ["todo"], source: "user" });
+    const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+    const bySlug = /* @__PURE__ */ new Map();
+    for (const t of live)
+      if (t.slug)
+        bySlug.set(t.slug, t);
+    const dependents = /* @__PURE__ */ new Map();
+    for (const t of live) {
+      for (const slug of new Set(t.blocked_by ?? [])) {
+        const list = dependents.get(slug);
+        if (list)
+          list.push(t);
+        else
+          dependents.set(slug, [t]);
+      }
+    }
+    const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
+    const targets = items ?? live;
+    return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+      const blockers = [];
+      const blockersOpen = [];
+      for (const slug of t.blocked_by ?? []) {
+        const holder = openBlocker(slug);
+        blockers.push({ slug, state: holder ? "open" : "closed" });
+        if (holder)
+          blockersOpen.push(boardItemHandle(holder));
+      }
+      const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+      const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+      return {
+        id: t.id,
+        ...t.slug ? { slug: t.slug } : {},
+        name: boardItemHandle(t),
+        ...t.priority ? { priority: t.priority } : {},
+        updated_at: t.updated_at,
+        file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+        ...t.needs ? { needs: t.needs } : {},
+        blockers,
+        blockers_open: blockersOpen,
+        unblocks,
+        state
+      };
+    });
+  }
+  /**
    * Every SUPERSEDED record carrying this exact slug, newest first — the
    * dead-slug counterpart of recordsBySlug (decision foreign_df361a0f, board 2b9f2f1a
    * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
@@ -26529,7 +26610,7 @@ var EntryReachability = class {
 
 // packages/mcp-server/dist/tools.js
 var BOARD_TEXT_CLIP = 240;
-var BOARD_TEXT_FIELDS = ["id", "slug", "objective", "source", "system_reason", "status", "priority", "feature_link", "blocked_by", "updated_at"];
+var BOARD_TEXT_FIELDS = ["id", "slug", "objective", "source", "system_reason", "status", "priority", "feature_link", "blocked_by", "needs", "updated_at"];
 function textRowRecord(record2) {
   const out = {};
   for (const f of BOARD_TEXT_FIELDS) {
@@ -32183,29 +32264,42 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     }
     return slugs;
   }
-  /**
-   * Each stored blocker's CURRENT state: open while a live board item still
-   * carries the slug, closed once it has been removed. Read-time only; the
-   * stored list is never rewritten when a blocker closes.
-   */
-  blockerStates(slugs) {
-    return slugs.map((slug) => ({
-      slug,
-      state: this.store.recordsBySlug(slug).some((r) => r.type === "todo") ? "open" : "closed"
-    }));
+  /** The one refusal for needs on a maintenance item, shared by board_add and board_update. */
+  static needsSystemRefusal(toolName) {
+    return new Error(`${toolName}: 'needs' marks source:'user' board tasks only \u2014 maintenance-queue items are lane-keyed by system_reason and never carry needs`);
   }
-  /** blocked_by_state for a record that carries a non-empty blocked_by, else nothing. */
-  blockedByStateOf(record2) {
-    const list = record2.blocked_by;
-    return Array.isArray(list) && list.length ? { blocked_by_state: this.blockerStates(list) } : {};
+  /**
+   * The read-time board fields for each given record, from the store's ONE
+   * readiness function (store.boardReadiness, decision
+   * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+   * blocked_by_state (each stored blocker slug, open while a live board item
+   * carries it, closed once removed; the stored list is never rewritten) and
+   * unblocks (the live items waiting on this one, as `name (id8)`, decision
+   * 11b8b08c). Each key is present only when non-empty. Computed once per call
+   * over the whole set, never per row.
+   */
+  boardDerived(records) {
+    const out = /* @__PURE__ */ new Map();
+    const users = records.filter((r) => r.source === "user");
+    if (!users.length)
+      return out;
+    for (const r of this.store.boardReadiness(users)) {
+      out.set(r.id, {
+        ...r.blockers.length ? { blocked_by_state: r.blockers } : {},
+        ...r.unblocks.length ? { unblocks: r.unblocks } : {}
+      });
+    }
+    return out;
   }
   boardAdd(args2, opts) {
-    const { text, source, objective, measured_at_head, blocked_by, ...rest } = args2;
+    const { text, source, objective, measured_at_head, blocked_by, needs, ...rest } = args2;
     if (objective !== void 0 && source === "system") {
       throw new Error(`board_add: 'objective' groups source:'user' board tasks only \u2014 maintenance-queue items are lane-keyed by system_reason, never objective-grouped`);
     }
     if (blocked_by !== void 0 && source === "system")
       throw _SterlingTools.blockedBySystemRefusal("board_add");
+    if (needs !== void 0 && source === "system")
+      throw _SterlingTools.needsSystemRefusal("board_add");
     const blockers = blocked_by !== void 0 ? this.resolveBlockedBy(blocked_by, "board_add") : [];
     const normalized = objective === "standalone" ? void 0 : objective;
     let stampedHead;
@@ -32227,6 +32321,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         ...normalized !== void 0 ? { objective: normalized } : {},
         ...stampedHead !== void 0 ? { measured_at_head: stampedHead } : {},
         ...blockers.length ? { blocked_by: blockers } : {},
+        ...needs !== void 0 ? { needs } : {},
         ...rest
       },
       // Forwarded, never derived from `args`: a board_add from the TOOL SURFACE
@@ -32614,9 +32709,10 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     if (artifact_evidence_provenance === "checked:budget_truncated") {
       notes.push(`the artifact_evidence FILE-KEY arm hit its per-call query budget on this page \u2014 the items it could not reach say file_key_check:'unavailable:budget' themselves and their count is a CITATION-ONLY floor; narrow the page (a smaller cap, or offset/cursor) to check them`);
     }
+    const boardFields = projection === "text" || projection === "full" ? this.boardDerived(records) : /* @__PURE__ */ new Map();
     const projectRecord = (r) => {
       const projected = projection === "text" ? textRowRecord(r) : projection === "headline" ? headlineRecord(r) : projection === "digest" ? digestRecord(r) : { ...r };
-      const base2 = projection === "text" || projection === "full" ? { ...projected, ...this.blockedByStateOf(r) } : projected;
+      const base2 = projection === "text" || projection === "full" ? { ...projected, ...boardFields.get(r.id) } : projected;
       const id = r.id;
       const warning = warnings.get(id);
       const note = reconcileNotes.get(id);
@@ -32684,7 +32780,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
    * changed nothing the caller asked for. An empty patch is refused for the
    * same reason: nothing to update is not a no-op success.
    */
-  static BOARD_UPDATABLE_FIELDS = ["text", "priority", "file_keys", "objective", "measured_at_head", "blocked_by"];
+  static BOARD_UPDATABLE_FIELDS = ["text", "priority", "file_keys", "objective", "measured_at_head", "blocked_by", "needs"];
   boardUpdate(id, patch) {
     const old = this.resolveRecordId(id, "board_update");
     if (old.type !== "todo")
@@ -32702,6 +32798,8 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         throw _SterlingTools.blockedBySystemRefusal("board_update");
       patch = { ...patch, blocked_by: this.resolveBlockedBy(patch.blocked_by, "board_update", old.id) };
     }
+    if ("needs" in patch && old.source === "system")
+      throw _SterlingTools.needsSystemRefusal("board_update");
     if ("measured_at_head" in patch) {
       const candidate = String(patch.measured_at_head);
       if (!MEASURED_AT_HEAD_RE.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
@@ -32717,6 +32815,8 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       delete next.objective;
     if (Array.isArray(next.blocked_by) && next.blocked_by.length === 0)
       delete next.blocked_by;
+    if (next.needs === "")
+      delete next.needs;
     const claimsCheck = this.assertClaimedPaths("board_update", next);
     try {
       const updated = this.store.updateTodo(old.id, next);
@@ -32779,8 +32879,8 @@ ${JSON.stringify(value, null, 2)}` : void 0;
   withDisplayLabel(record2) {
     const r = record2;
     const label = boardDisplayLabel(r.text, r.slug);
-    const blockers = this.blockedByStateOf(record2);
-    return label ? { ...record2, label, ...blockers } : { ...record2, ...blockers };
+    const derived = this.boardDerived([record2]).get(record2.id) ?? {};
+    return label ? { ...record2, label, ...derived } : { ...record2, ...derived };
   }
   /**
    * board_edit(id, find, replace) — knowledge_edit's exactly-once find/replace
@@ -33946,7 +34046,7 @@ function createSterlingServer(storePath2) {
     inputSchema: strict({ id: external_exports.string(), domain: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection)));
   server2.registerTool("board_add", {
-    description: 'Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare `objective`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. measured_at_head is stamped to HEAD unless you pass a resolvable 40-hex sha (an unresolvable one is refused). The echo defaults to a digest; projection:"full" returns the stored record.',
+    description: 'Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare `objective`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a resolvable 40-hex sha (an unresolvable one is refused). The echo defaults to a digest; projection:"full" returns the stored record.',
     inputSchema: strict({
       text: external_exports.string(),
       source: external_exports.enum(["user", "system"]),
@@ -33958,11 +34058,12 @@ function createSterlingServer(storePath2) {
       stack_tags: external_exports.array(external_exports.string()).optional(),
       measured_at_head: external_exports.string().optional(),
       blocked_by: external_exports.array(external_exports.string()).optional(),
+      needs: external_exports.enum(BOARD_NEEDS).optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ projection, ...args2 }) => json(tools.writeProjected(tools.boardAdd(args2), projection)));
   server2.registerTool("board_query", {
-    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane.`,
+    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, unblocks (live items waiting on this one, as \`name (id8)\`), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane.`,
     inputSchema: strict({
       source: external_exports.enum(["user", "system"]).optional(),
       objective: external_exports.string().optional(),
@@ -33983,7 +34084,7 @@ function createSterlingServer(storePath2) {
     inputSchema: strict({ id: external_exports.string() })
   }, ({ id }) => json(tools.maintenanceRemove(id)));
   server2.registerTool("board_update", {
-    description: 'Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). A text or file_keys change re-stamps measured_at_head to HEAD; pass a resolvable 40-hex sha to set it explicitly (unresolvable is refused). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:"full" returns the stored record.',
+    description: 'Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation (user items only; "" clears it). A text or file_keys change re-stamps measured_at_head to HEAD; pass a resolvable 40-hex sha to set it explicitly (unresolvable is refused). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:"full" returns the stored record.',
     inputSchema: strict({
       id: external_exports.string(),
       text: external_exports.string().optional(),
@@ -33992,11 +34093,12 @@ function createSterlingServer(storePath2) {
       objective: external_exports.string().optional(),
       measured_at_head: external_exports.string().optional(),
       blocked_by: external_exports.array(external_exports.string()).optional(),
+      needs: external_exports.union([external_exports.enum(BOARD_NEEDS), external_exports.literal("")]).optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, projection, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch), projection)));
   server2.registerTool("board_get", {
-    description: "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` \u2014 the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed).",
+    description: "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` \u2014 the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`.",
     inputSchema: strict({ id: external_exports.string() })
   }, ({ id }) => json(tools.boardGet(id)));
   server2.registerTool("board_edit", {

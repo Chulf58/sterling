@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h20-mechanism-axis.mjs
-import { existsSync as existsSync7 } from "node:fs";
-import { join as join8 } from "node:path";
+import { existsSync as existsSync8 } from "node:fs";
+import { join as join9 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -4480,6 +4480,7 @@ var attestationSchema = base.extend({
   notes: external_exports.string().optional(),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
+var BOARD_NEEDS = ["user", "grill", "investigation"];
 var SYSTEM_REASONS = [
   "reconcile_needed",
   "stale_research",
@@ -4573,7 +4574,13 @@ var todoSchema = base.extend({
   // like every other todo field, so it needs no migration. Existence of each
   // blocker is checked at the tool layer when written; a blocker removed later
   // reads as closed, it is never rewritten out of this list.
-  blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+  blocked_by: external_exports.array(external_exports.string().min(1)).optional(),
+  // What a user item waits on besides its blockers (decision
+  // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+  // 'investigation' still auto-starts, as a researcher lane; 'user' and
+  // 'grill' wait for the user. Not a progress status: `status` keeps meaning
+  // supersession only. Absent means nothing beyond the blockers.
+  needs: external_exports.enum(BOARD_NEEDS).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -4584,6 +4591,13 @@ var todoSchema = base.extend({
       code: external_exports.ZodIssueCode.custom,
       path: ["blocked_by"],
       message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+    });
+  }
+  if (rec.needs !== void 0 && rec.source === "system") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      path: ["needs"],
+      message: "needs marks source:'user' board tasks only \u2014 maintenance-queue items never carry it"
     });
   }
   if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
@@ -4783,6 +4797,14 @@ var RECORD_TYPES = {
     digest: { slug: "plain", title: "plain", problem: "clip" }
   }
 };
+var NAME_CLIP = 48;
+var clipName = (name) => name.length <= NAME_CLIP ? name : `${name.slice(0, NAME_CLIP - 1)}\u2026`;
+var displayHandle = (name, id) => `${clipName(name)} (${id.slice(0, 8)})`;
+function boardDisplayLabel(text, slug) {
+  const line = s(text).split("\n").find((l) => l.trim().length > 0);
+  const normalized = line ? line.trim().replace(/\s+/g, " ") : "";
+  return normalized || s(slug).trim();
+}
 function validateRecord(input2) {
   if (typeof input2 !== "object" || input2 === null || typeof input2.type !== "string") {
     throw new Error("validateRecord: input has no record type");
@@ -5796,6 +5818,20 @@ function deepReplaceString(value, from, to) {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
   }
   return value;
+}
+var PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
+function compareBoardReadiness(a, b) {
+  const pa = PRIORITY_RANK[a.priority ?? "normal"] ?? 1;
+  const pb = PRIORITY_RANK[b.priority ?? "normal"] ?? 1;
+  if (pa !== pb)
+    return pa - pb;
+  if (a.updated_at !== b.updated_at)
+    return a.updated_at < b.updated_at ? 1 : -1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+function boardItemHandle(rec) {
+  const label = boardDisplayLabel(rec.text, rec.slug);
+  return label ? displayHandle(label, rec.id) : `(unnamed board item) (${rec.id.slice(0, 8)})`;
 }
 var MAX_RANK_TERMS = 16;
 function rankTermDedupeKey(term) {
@@ -7227,6 +7263,64 @@ var SterlingStore = class _SterlingStore {
     return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
   }
   /**
+   * THE ONE READINESS FUNCTION (decision
+   * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start,
+   * AMENDED (a)). board_get/board_query's blocked_by_state, H1's three groups,
+   * H20's ready line, the TUI cards and the OpenCode plugin all read this, so
+   * "open blocker" and "ready" have one definition.
+   *
+   * `items` defaults to every live user board item (a system item is never
+   * returned). Passed explicitly, each user todo given is judged against the
+   * LIVE board: a blocker is open while a live todo carries its slug, and
+   * `unblocks` lists live user items whose blocked_by names the item. Read
+   * only; the stored blocked_by is never rewritten. No cycle detection.
+   */
+  boardReadiness(items) {
+    const total = this.count({ types: ["todo"], source: "user" });
+    const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+    const bySlug = /* @__PURE__ */ new Map();
+    for (const t of live)
+      if (t.slug)
+        bySlug.set(t.slug, t);
+    const dependents = /* @__PURE__ */ new Map();
+    for (const t of live) {
+      for (const slug of new Set(t.blocked_by ?? [])) {
+        const list = dependents.get(slug);
+        if (list)
+          list.push(t);
+        else
+          dependents.set(slug, [t]);
+      }
+    }
+    const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
+    const targets = items ?? live;
+    return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+      const blockers = [];
+      const blockersOpen = [];
+      for (const slug of t.blocked_by ?? []) {
+        const holder = openBlocker(slug);
+        blockers.push({ slug, state: holder ? "open" : "closed" });
+        if (holder)
+          blockersOpen.push(boardItemHandle(holder));
+      }
+      const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+      const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+      return {
+        id: t.id,
+        ...t.slug ? { slug: t.slug } : {},
+        name: boardItemHandle(t),
+        ...t.priority ? { priority: t.priority } : {},
+        updated_at: t.updated_at,
+        file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+        ...t.needs ? { needs: t.needs } : {},
+        blockers,
+        blockers_open: blockersOpen,
+        unblocks,
+        state
+      };
+    });
+  }
+  /**
    * Every SUPERSEDED record carrying this exact slug, newest first — the
    * dead-slug counterpart of recordsBySlug (decision foreign_df361a0f, board 2b9f2f1a
    * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
@@ -8069,6 +8163,10 @@ function loadConfig(cwd) {
   const p = join3(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
+function openStore(cwd) {
+  const p = join3(cwd, ".sterling", "sterling.db");
+  return existsSync2(p) ? new SterlingStore(p) : null;
+}
 function repoRel(toolPath, cwd) {
   if (!toolPath) return null;
   const fwd = String(toolPath).replace(/\\/g, "/");
@@ -8080,153 +8178,466 @@ function repoRel(toolPath, cwd) {
   }
 }
 
-// scripts/hooks/lib/subject-fan.mjs
-import { existsSync as existsSync3 } from "node:fs";
-import { join as join4 } from "node:path";
-var defaultOpener = (dbPath) => new SterlingStore(dbPath);
-function domainMountsFromConfig(config) {
-  if (config === null || config === void 0) return [];
-  return resolveDomainMounts(parseConfig({ stack_tags: config.stack_tags, domain_paths: config.domain_paths }));
-}
-var tag = (records, source) => records.map((r) => ({ ...r, source_store: source }));
-var errorText = (e) => String(e && e.message || e);
-function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
-  const projectPath = join4(cwd, ".sterling", "sterling.db");
-  if (!existsSync3(projectPath)) return null;
-  let mounts = [];
-  let configError = null;
-  try {
-    mounts = domainMountsFromConfig(loadConfig(cwd));
-  } catch (e) {
-    configError = errorText(e);
+// scripts/hooks/lib/board-ready.mjs
+import { createHash as createHash2 } from "node:crypto";
+import { existsSync as existsSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join6 } from "node:path";
+
+// scripts/lib/dispatch-register.mjs
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync3, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join4, resolve as resolve2, dirname as dirname4, isAbsolute } from "node:path";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { randomBytes, createHash } from "node:crypto";
+
+// scripts/lib/review-errors.mjs
+var CODES = /* @__PURE__ */ new Set([
+  // §1.4 ledger verbs
+  "ledger_corrupt",
+  "ledger_absent",
+  "ledger_digest_mismatch",
+  "compatibility_lock_held",
+  "entry_not_found",
+  "entry_selector_ambiguous",
+  "entry_not_active",
+  "class_unknown",
+  "class_not_applicable",
+  "superseder_not_found",
+  "superseder_not_reviewer_class",
+  "superseder_not_newer",
+  "superseder_branch_mismatch",
+  "superseder_lifecycle_unacceptable",
+  "superseder_coverage_incomplete",
+  "superseder_commit_not_ancestor",
+  "superseder_commit_trailer_not_roster",
+  "superseder_commit_receipt_unbound",
+  "superseder_commit_blob_mismatch",
+  "covering_not_allowed",
+  "covering_receipt_invalid",
+  "no_live_territory_disproved",
+  "reconcile_no_match",
+  "reconcile_ambiguous",
+  "reconcile_nonce_split",
+  "reconcile_unresolved",
+  "record_external_duplicate",
+  "argument_invalid",
+  // commit operation
+  "nothing_staged",
+  "message_missing",
+  "no_spendable_receipt",
+  "receipt_bytes_mismatch",
+  "coverage_incomplete",
+  "reservation_conflict",
+  "commit_failed",
+  "finalize_failed",
+  "waiver_reason_missing",
+  // A13 additions
+  "target_sha_prior_receipt_unbound",
+  "commit_verify_failed",
+  "not_sterling_project",
+  "receipt_unscoped",
+  // §1.4 disclosures (never refuse)
+  "receipt_unattributable",
+  "receipt_foreign",
+  "receipt_identity_unknown",
+  "receipt_deferred",
+  "receipt_stale",
+  "receipt_age_unverifiable",
+  "receipt_no_overlap",
+  "multi_spend",
+  "bytes_waived",
+  "legacy_entries_present",
+  "receipt_not_spent_stale_bytes",
+  "register_unavailable",
+  "dispatch_status_unknown",
+  // A9 register/ledger additions
+  "register_entry_malformed",
+  "register_agent_id_duplicate",
+  "register_lock_held",
+  "receipt_not_active",
+  "receipt_foreign_session",
+  "receipt_foreign_branch",
+  // A9 --target-sha amend mode
+  "target_sha_unresolvable",
+  "target_sha_not_head",
+  "target_sha_tree_dirty",
+  "target_sha_published",
+  "target_sha_publication_unprovable",
+  // A11 additions
+  "territory_declaration_missing",
+  "territory_declaration_malformed",
+  "dispatch_overlap",
+  "dispatch_residue",
+  // ledger entry classification
+  "ledger_entry_malformed",
+  // A19 (security review): an env override of identity is disclosed, never silent
+  "session_identity_override",
+  // dispatch state machine (decision dispatch-state-machine-pre-slot-post-
+  // binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
+  "dispatch_state_collision",
+  "dispatch_post_late",
+  "dispatch_post_mismatch",
+  "dispatch_post_refused",
+  "dispatch_state_poisoned",
+  "dispatch_unattributable",
+  "dispatch_lock_held",
+  "dispatch_post_only"
+]);
+function assertCode(code) {
+  if (!CODES.has(code)) {
+    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
   }
-  const project = opener(projectPath);
-  let domains = [];
-  const missingDomains = [];
-  const unreadableDomains = [];
-  const drop = (d, e) => {
-    unreadableDomains.push({ name: d.name, dbPath: d.dbPath, error: errorText(e) });
-    domains = domains.filter((x) => x !== d);
-    try {
-      d.store.close();
-    } catch {
-    }
-  };
-  for (const m of mounts) {
-    if (!existsSync3(m.dbPath)) {
-      missingDomains.push({ name: m.name, dbPath: m.dbPath });
-      continue;
-    }
-    try {
-      domains.push({ name: m.name, dbPath: m.dbPath, store: opener(m.dbPath) });
-    } catch (e) {
-      unreadableDomains.push({ name: m.name, dbPath: m.dbPath, error: errorText(e) });
-    }
-  }
-  const eachDomain = (fn) => {
-    const out = [];
-    for (const d of [...domains]) {
-      try {
-        out.push([d, fn(d.store)]);
-      } catch (e) {
-        drop(d, e);
-      }
-    }
-    return out;
-  };
-  return {
-    project,
-    get domainNames() {
-      return domains.map((d) => d.name);
-    },
-    missingDomains,
-    unreadableDomains,
-    configError,
-    query(opts = {}) {
-      if (opts.file_keys !== void 0 || !domains.length) return tag(project.query(opts), "project");
-      const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-      const perStore = [["project", project.query({ ...opts, cap })], ...eachDomain((s2) => s2.query({ ...opts, cap })).map(([d, r]) => [d.name, r])];
-      const shares = allocateShares(perStore.map(([, r]) => r.length), cap);
-      return perStore.flatMap(([name, records], i) => tag(records.slice(0, shares[i]), name));
-    },
-    /** Supersedes edges live with their SOURCE record, so every mount is read; first seen wins. */
-    inboundSupersedes(id) {
-      const seen = /* @__PURE__ */ new Set();
-      const out = [];
-      const lists = [["project", project.inboundSupersedes(id)], ...eachDomain((s2) => s2.inboundSupersedes(id)).map(([d, r]) => [d.name, r])];
-      for (const [name, records] of lists) {
-        for (const r of records) {
-          if (seen.has(r.id)) continue;
-          seen.add(r.id);
-          out.push({ ...r, source_store: name });
-        }
-      }
-      return out;
-    },
-    articlesBySlug(slug) {
-      return project.articlesBySlug(slug);
-    },
-    close() {
-      let first;
-      for (const s2 of [project, ...domains.map((d) => d.store)]) {
-        try {
-          s2.close();
-        } catch (e) {
-          first ??= e;
-        }
-      }
-      if (first) throw first;
-    }
-  };
 }
-function fanDegradedLine(fan, who) {
-  if (!fan) return null;
-  const parts = [];
-  if (fan.configError) parts.push(`config.json unreadable, no domains mounted (${fan.configError})`);
-  for (const d of fan.unreadableDomains) parts.push(`domain '${d.name}' unreadable at ${d.dbPath} (${d.error})`);
-  if (!parts.length) return null;
-  return `${who}: DEGRADED subject fan: ${parts.join("; ")}. Delivering from the project store only.`;
+function disclosure(code, facts = {}, message = code) {
+  assertCode(code);
+  return { kind: "disclosure", code, facts, message };
 }
-function warnFanDegraded(fan, who) {
-  const line = fanDegradedLine(fan, who);
-  if (!line) return;
-  try {
-    process.stderr.write(`${line}
-`);
-  } catch {
-  }
+function render(x) {
+  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
+  return `${label} [${x?.code}] ${x?.message ?? ""}`;
 }
 
-// scripts/hooks/lib/advisory-counter.mjs
-import { appendFileSync, existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "node:fs";
-import { join as join5 } from "node:path";
-function recordAdvisoryFire(root, hook, sessionId) {
+// scripts/lib/dispatch-register.mjs
+function registerPath(root) {
+  return join4(root, ".sterling", "transient", "dispatch-register.json");
+}
+function configPath(root) {
+  return join4(root, ".sterling", "config.json");
+}
+function readStaleMinutesDefault(root) {
   try {
-    if (!root || !hook) return;
-    if (!existsSync4(join5(root, ".sterling"))) return;
-    const dir = join5(root, ".sterling", "transient");
-    mkdirSync2(dir, { recursive: true });
-    let session = typeof sessionId === "string" && sessionId ? sessionId : null;
-    if (!session) {
-      try {
-        const parsed = JSON.parse(readFileSync2(join5(dir, "session.json"), "utf8"));
-        session = typeof parsed?.session_id === "string" ? parsed.session_id : null;
-      } catch {
-      }
-    }
-    appendFileSync(
-      join5(dir, "advisory-fires.ndjson"),
-      JSON.stringify({ hook, session, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n"
-    );
+    const cfg = JSON.parse(readFileSync2(configPath(root), "utf8"));
+    const v = cfg?.dispatch_register?.stale_minutes;
+    return typeof v === "number" && v > 0 ? v : 60;
   } catch {
+    return 60;
   }
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync3(p)) return { availability: "absent", arr: [] };
+  let raw;
+  try {
+    raw = readFileSync2(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+function statusReason(entry, ctx) {
+  if (!entry) return "clock-unreadable";
+  const t = Date.parse(entry.at);
+  if (Number.isNaN(t)) return "clock-unreadable";
+  if (ctx.sessionId !== null && entry.session_id !== ctx.sessionId) return "other-session";
+  const age = ctx.now - t;
+  const lease = ctx.staleMinutes * 6e4;
+  if (age >= 0 && age < lease) return null;
+  return "lease-expired";
+}
+function dispatchStatus(entry, ctx) {
+  if (entry?.ended) return "inactive-confirmed";
+  return statusReason(entry, ctx) === null ? "presumed-active" : "unknown";
+}
+function classifyRegister(root, ctx) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return { availability, entries: [] };
+  const rows = entries.map((entry) => {
+    const status = dispatchStatus(entry, ctx);
+    const reason = statusReason(entry, ctx);
+    const t = Date.parse(entry.at);
+    const ageMs = Number.isNaN(t) ? null : ctx.now - t;
+    return { entry, status, reason, ageMs };
+  });
+  return { availability: "ok", entries: rows };
+}
+function presumedActiveEntries(root, ctx) {
+  const classified = classifyRegister(root, {
+    now: ctx.now ?? Date.now(),
+    sessionId: ctx.sessionId,
+    staleMinutes: ctx.staleMinutes ?? readStaleMinutesDefault(root)
+  });
+  if (classified.availability !== "ok") return { availability: classified.availability, entries: [] };
+  return { availability: "ok", entries: classified.entries.filter((r) => r.status === "presumed-active").map((r) => r.entry) };
+}
+var MAX_PROMPT_BYTES = 512 * 1024;
+var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
+var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
+var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+function dispatchStateDir(root) {
+  return join4(root, ".sterling", "transient", "dispatch-state");
+}
+var LIVE_PREFIX = "live-";
+var DONE_PREFIX = "done-";
+var IDS_DELIMITER = "~";
+var ID_SEPARATOR = ".";
+var EMPTY_IDS = "none";
+var MAX_FILENAME_LENGTH = 254;
+var STATE_KEY_RE = /^(?:raw-[A-Za-z0-9_-]{1,80}|sha256-[0-9a-f]{64})$/;
+var ID_HASH_RE = /^[A-Za-z0-9_-]{43}$/;
+function liveFileName(key) {
+  return `${LIVE_PREFIX}${key}.json`;
+}
+function agentIdHash(agentId) {
+  return createHash("sha256").update(String(agentId), "utf8").digest("base64url");
+}
+function recordAgentIds(record) {
+  return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
+}
+function terminalFileName(key, record) {
+  const hashes = [...new Set(recordAgentIds(record).map(agentIdHash))].sort();
+  const name = `${DONE_PREFIX}${key}${IDS_DELIMITER}${hashes.length ? hashes.join(ID_SEPARATOR) : EMPTY_IDS}.json`;
+  if (name.length > MAX_FILENAME_LENGTH) throw new Error(`dispatch-state: terminal filename for ${key} is ${name.length} characters \u2014 over the ${MAX_FILENAME_LENGTH} limit`);
+  return name;
+}
+function parseStateFileName(name) {
+  if (name.includes(".json.tmp-")) return { kind: "tmp" };
+  if (!name.endsWith(".json")) return { kind: "other" };
+  const stem = name.slice(0, -".json".length);
+  if (stem.startsWith(LIVE_PREFIX)) {
+    const key = stem.slice(LIVE_PREFIX.length);
+    return STATE_KEY_RE.test(key) ? { kind: "live", key } : { kind: "malformed-live" };
+  }
+  if (stem.startsWith(DONE_PREFIX)) {
+    const parts = stem.slice(DONE_PREFIX.length).split(IDS_DELIMITER);
+    const malformed = STATE_KEY_RE.test(parts[0]) ? { kind: "malformed-done", key: parts[0] } : { kind: "malformed-done" };
+    if (parts.length !== 2 || !STATE_KEY_RE.test(parts[0])) return malformed;
+    const idHashes = parts[1] === EMPTY_IDS ? [] : parts[1].split(ID_SEPARATOR);
+    const canonical = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
+    return canonical ? { kind: "done", key: parts[0], idHashes } : malformed;
+  }
+  return STATE_KEY_RE.test(stem) ? { kind: "legacy", key: stem } : { kind: "unknown-json" };
+}
+var warnedStateFiles = /* @__PURE__ */ new Set();
+function warnStateFile(file, text) {
+  const tag2 = `${file}\0${text}`;
+  if (warnedStateFiles.has(tag2)) return;
+  warnedStateFiles.add(tag2);
+  process.stderr.write(`${render(disclosure("dispatch_state_poisoned", { file }, text))}
+`);
+}
+function dispatchStateKey(toolUseId) {
+  if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
+  return `sha256-${createHash("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+}
+function isNonEmptyString(v) {
+  return typeof v === "string" && v !== "";
+}
+function isPlainObject(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function validatePostBinding(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at);
+}
+function validateDerivedBinding(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && isNonEmptyString(v.by);
+}
+function validateStarted(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && Array.isArray(v.by) && v.by.every((x) => typeof x === "string");
+}
+function validateTerminal(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.at) && isNonEmptyString(v.reason);
+}
+function validateRecordShape(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) return { ok: false, reason: "not-an-object" };
+  if (r.schema !== 1) return { ok: false, reason: "unknown-schema-version" };
+  if (typeof r.tool_use_id !== "string" || !r.tool_use_id) return { ok: false, reason: "tool_use_id" };
+  if (typeof r.session_id !== "string" && r.session_id !== null) return { ok: false, reason: "session_id" };
+  if (!ORIGINS.has(r.origin)) return { ok: false, reason: "origin" };
+  if (typeof r.prompt_bytes !== "number") return { ok: false, reason: "prompt_bytes" };
+  if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
+  if (typeof r.prompt === "string") {
+    const bytes = Buffer.byteLength(r.prompt, "utf8");
+    const sha = createHash("sha256").update(r.prompt, "utf8").digest("hex");
+    if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
+  } else if (r.prompt !== null) {
+    return { ok: false, reason: "prompt-type" };
+  }
+  if (!validatePostBinding(r.post_binding)) return { ok: false, reason: "post_binding-shape" };
+  if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
+  if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
+  if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
+  return { ok: true };
+}
+function classifyRecordFile(file) {
+  let st;
+  try {
+    st = lstatSync(file);
+  } catch {
+    return { exists: false };
+  }
+  if (st.isSymbolicLink()) return { exists: true, poisoned: true, reason: "symlink" };
+  if (!st.isFile()) return { exists: true, poisoned: true, reason: "non-regular-file" };
+  let buf;
+  try {
+    buf = readFileSync2(file);
+  } catch {
+    return { exists: true, poisoned: true, reason: "unreadable" };
+  }
+  const text = buf.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(buf)) return { exists: true, poisoned: true, reason: "invalid-utf8" };
+  let record;
+  try {
+    record = JSON.parse(text);
+  } catch {
+    return { exists: true, poisoned: true, reason: "unparseable-json" };
+  }
+  const v = validateRecordShape(record);
+  if (!v.ok) return { exists: true, poisoned: true, reason: v.reason };
+  return { exists: true, poisoned: false, record };
+}
+function checkDispatchStateContainment(root, { create }) {
+  const dir = dispatchStateDir(root);
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch (e) {
+    if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
+    if (!create) return { ok: true, availability: "absent" };
+    mkdirSync2(dir, { recursive: true });
+    return { ok: true, availability: "ok" };
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    return { ok: false, availability: "poisoned", reason: st.isSymbolicLink() ? "symlink" : "non-regular-file" };
+  }
+  return { ok: true, availability: "ok" };
+}
+function finishTerminalRename(root, key, record) {
+  const dir = dispatchStateDir(root);
+  const from = liveFileName(key);
+  const to = terminalFileName(key, record);
+  let occupied = false;
+  try {
+    lstatSync(join4(dir, to));
+    occupied = true;
+  } catch (e) {
+    if (e?.code !== "ENOENT") occupied = true;
+  }
+  if (occupied) {
+    warnStateFile(from, `dispatch-state: terminal record ${from} NOT renamed \u2014 ${to} already exists; never overwritten, the live source is kept for an operator`);
+    return from;
+  }
+  try {
+    renameSync(join4(dir, from), join4(dir, to));
+    return to;
+  } catch (e) {
+    warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
+    return from;
+  }
+}
+function listStateDir(root) {
+  const containment = checkDispatchStateContainment(root, { create: false });
+  if (!containment.ok) return { availability: "unavailable", reason: "containment", names: [] };
+  if (containment.availability === "absent") return { availability: "absent", names: [] };
+  try {
+    return { availability: "ok", names: readdirSync(dispatchStateDir(root)) };
+  } catch (e) {
+    return { availability: "unavailable", reason: "unlistable", code: e?.code, names: [] };
+  }
+}
+function readDispatchState(root) {
+  return scanLiveState(root, { repair: false });
+}
+function scanLiveState(root, { repair }) {
+  const dir = dispatchStateDir(root);
+  const listing = listStateDir(root);
+  if (listing.availability !== "ok") return { availability: listing.availability, ...listing.reason ? { reason: listing.reason } : {}, records: [], poisoned: [], done: [] };
+  const records = [];
+  const poisoned = [];
+  const done = [];
+  for (const name of listing.names) {
+    const parsed = parseStateFileName(name);
+    if (parsed.kind === "other") continue;
+    if (parsed.kind === "tmp") {
+      poisoned.push({ file: name, reason: "orphan-tmp-file" });
+      continue;
+    }
+    if (parsed.kind === "legacy") {
+      poisoned.push({ file: name, reason: "legacy-unmigrated" });
+      continue;
+    }
+    if (parsed.kind === "malformed-live") {
+      poisoned.push({ file: name, reason: "malformed-filename" });
+      continue;
+    }
+    if (parsed.kind === "malformed-done" || parsed.kind === "unknown-json") {
+      warnStateFile(name, `dispatch-state: '${name}' is not a live-<key>.json or done-<key>~<ids>.json name \u2014 ignored by the live scan, never read as a record`);
+      continue;
+    }
+    if (parsed.kind === "done") {
+      done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
+      continue;
+    }
+    const classified = classifyRecordFile(join4(dir, name));
+    if (!classified.exists) continue;
+    if (classified.poisoned) {
+      poisoned.push({ file: name, reason: classified.reason });
+      continue;
+    }
+    if (dispatchStateKey(classified.record.tool_use_id) !== parsed.key) {
+      poisoned.push({ file: name, reason: "key-mismatch" });
+      continue;
+    }
+    records.push({ key: parsed.key, file: name, record: classified.record });
+  }
+  const doneKeys = new Set(done.map((d) => d.key));
+  const kept = [];
+  for (const entry of records) {
+    if (doneKeys.has(entry.key)) {
+      if (!entry.record.terminal) {
+        poisoned.push({ file: entry.file, reason: "duplicate-key" });
+        continue;
+      }
+      warnStateFile(entry.file, `dispatch-state: terminal record ${entry.file} cannot be renamed: a done- file for the same key already exists \u2014 left under its live name for an operator, never renamed over it`);
+      kept.push(entry);
+      continue;
+    }
+    if (repair && entry.record.terminal) entry.file = finishTerminalRename(root, entry.key, entry.record);
+    kept.push(entry);
+  }
+  return { availability: "ok", records: kept, poisoned, done };
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync5, renameSync, openSync, closeSync } from "node:fs";
-import { join as join6, dirname as dirname4 } from "node:path";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, existsSync as existsSync4, renameSync as renameSync2, openSync, closeSync } from "node:fs";
+import { join as join5, dirname as dirname5 } from "node:path";
 function deliveryDir(cwd) {
-  return join6(cwd, ".sterling", "transient", "delivery");
+  return join5(cwd, ".sterling", "transient", "delivery");
 }
 var HEADER_TERM_CAP = 6;
 function boundedTermClause(terms, cap = HEADER_TERM_CAP) {
@@ -8270,11 +8681,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join6(deliveryDir(cwd), component);
+  return join5(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join6(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join5(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -8313,7 +8724,7 @@ function markDiscoveryDelivered(guard, emittedDiscovery) {
 function readGuard(path) {
   if (!path) return emptyDeliveryGuard();
   try {
-    if (!existsSync5(path)) return emptyDeliveryGuard();
+    if (!existsSync4(path)) return emptyDeliveryGuard();
     const parsed = JSON.parse(readFileSync3(path, "utf8"));
     if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
     return { ...emptyDeliveryGuard(), ...parsed };
@@ -8325,10 +8736,10 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync3(dirname4(path), { recursive: true });
+  mkdirSync3(dirname5(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, JSON.stringify(guard));
-  renameSync(tmp, path);
+  writeFileSync2(tmp, JSON.stringify(guard));
+  renameSync2(tmp, path);
 }
 var DENY_RULING_TYPES = ["decision", "anti_pattern"];
 function subQuestionText(q) {
@@ -8887,6 +9298,240 @@ function decisionPointerPart(rel, decisions, { widen, cap = DECISION_POINTER_CAP
   };
 }
 
+// scripts/hooks/lib/board-ready.mjs
+var BOARD_GROUP_CAP = 8;
+function boardGroups(readiness) {
+  const sorted = [...readiness].sort(compareBoardReadiness);
+  return {
+    ready: sorted.filter((r) => r.state === "ready"),
+    research: sorted.filter((r) => r.state === "research"),
+    waiting: sorted.filter((r) => r.state === "waiting"),
+    blocked: sorted.filter((r) => r.state === "blocked").length
+  };
+}
+function laneCeiling(config) {
+  const parsed = configSchema.shape.delegation.safeParse(config?.delegation ?? {});
+  if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join("; ") };
+  return { value: parsed.data.max_concurrent };
+}
+function liveLanes(root, sessionId) {
+  const { availability, entries } = presumedActiveEntries(root, { sessionId });
+  if (availability === "absent") return { availability: "ok", count: 0, descriptions: [] };
+  const toolUseIds = new Set(entries.map((e) => e.tool_use_id).filter((t) => typeof t === "string" && t));
+  const descriptions = [];
+  if (toolUseIds.size) {
+    for (const { record } of readDispatchState(root).records) {
+      if (!toolUseIds.has(record.tool_use_id)) continue;
+      for (const text of [record.description, record.prompt]) if (typeof text === "string" && text) descriptions.push(text);
+    }
+  }
+  return { availability, count: entries.length, descriptions };
+}
+function lanesText(live, ceiling) {
+  const k = live.availability === "ok" ? String(live.count) : `? (dispatch register ${live.availability})`;
+  const n = ceiling.error ? `? (delegation.max_concurrent unreadable: ${ceiling.error})` : String(ceiling.value);
+  return `live lanes ${k}/${n}`;
+}
+function namedIn(text, r) {
+  const hay = String(text ?? "").toLowerCase();
+  const esc = (t) => t.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const id8 = new RegExp(`(^|[^a-z0-9-])${esc(r.id.slice(0, 8))}(?![a-z0-9])`);
+  const slug = r.slug ? new RegExp(`(^|[^a-z0-9-])${esc(r.slug)}(?![a-z0-9-])`) : null;
+  return id8.test(hay) || slug !== null && slug.test(hay);
+}
+function boardReadyNotice(readiness, outgoing, live, ceiling, cap = BOARD_GROUP_CAP) {
+  const g = boardGroups(readiness);
+  const all = [...g.ready.map((r) => ({ r, tag: "" })), ...g.research.map((r) => ({ r, tag: " [research]" }))];
+  if (!all.length) return null;
+  const inFlight = Array.isArray(live?.descriptions) ? live.descriptions : [];
+  const pending = all.filter(({ r }) => !namedIn(outgoing, r) && !inFlight.some((d) => namedIn(d, r)));
+  if (!pending.length) return null;
+  const shown = pending.slice(0, cap).map(({ r, tag: tag2 }) => `${r.name}${tag2}`);
+  const more = pending.length > cap ? `, \u2026 ${pending.length - cap} more` : "";
+  const hash = createHash2("sha256").update(all.map(({ r }) => r.id).sort().join("\n")).digest("hex").slice(0, 16);
+  return {
+    line: `BOARD READY: ${shown.join(", ")}${more} \u2014 ${lanesText(live, ceiling)}; fill free lanes up to the ceiling (a ceiling, never a quota).`,
+    hash
+  };
+}
+function noticePath(root, sessionId) {
+  const dir = deliverySessionDir(root, sessionId);
+  return dir ? join6(dir, "board-ready.json") : null;
+}
+function boardReadyNoticeDue(root, sessionId, hash) {
+  const p = noticePath(root, sessionId);
+  if (!p || !existsSync5(p)) return true;
+  try {
+    return JSON.parse(readFileSync4(p, "utf8")).hash !== hash;
+  } catch {
+    return true;
+  }
+}
+function markBoardReadyNoticed(root, sessionId, hash) {
+  const p = noticePath(root, sessionId);
+  if (!p) return;
+  mkdirSync4(join6(p, ".."), { recursive: true });
+  writeFileSync3(p, JSON.stringify({ hash }));
+}
+
+// scripts/hooks/lib/subject-fan.mjs
+import { existsSync as existsSync6 } from "node:fs";
+import { join as join7 } from "node:path";
+var defaultOpener = (dbPath) => new SterlingStore(dbPath);
+function domainMountsFromConfig(config) {
+  if (config === null || config === void 0) return [];
+  return resolveDomainMounts(parseConfig({ stack_tags: config.stack_tags, domain_paths: config.domain_paths }));
+}
+var tag = (records, source) => records.map((r) => ({ ...r, source_store: source }));
+var errorText = (e) => String(e && e.message || e);
+function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
+  const projectPath = join7(cwd, ".sterling", "sterling.db");
+  if (!existsSync6(projectPath)) return null;
+  let mounts = [];
+  let configError = null;
+  try {
+    mounts = domainMountsFromConfig(loadConfig(cwd));
+  } catch (e) {
+    configError = errorText(e);
+  }
+  const project = opener(projectPath);
+  let domains = [];
+  const missingDomains = [];
+  const unreadableDomains = [];
+  const drop = (d, e) => {
+    unreadableDomains.push({ name: d.name, dbPath: d.dbPath, error: errorText(e) });
+    domains = domains.filter((x) => x !== d);
+    try {
+      d.store.close();
+    } catch {
+    }
+  };
+  for (const m of mounts) {
+    if (!existsSync6(m.dbPath)) {
+      missingDomains.push({ name: m.name, dbPath: m.dbPath });
+      continue;
+    }
+    try {
+      domains.push({ name: m.name, dbPath: m.dbPath, store: opener(m.dbPath) });
+    } catch (e) {
+      unreadableDomains.push({ name: m.name, dbPath: m.dbPath, error: errorText(e) });
+    }
+  }
+  const eachDomain = (fn) => {
+    const out = [];
+    for (const d of [...domains]) {
+      try {
+        out.push([d, fn(d.store)]);
+      } catch (e) {
+        drop(d, e);
+      }
+    }
+    return out;
+  };
+  return {
+    project,
+    get domainNames() {
+      return domains.map((d) => d.name);
+    },
+    missingDomains,
+    unreadableDomains,
+    configError,
+    query(opts = {}) {
+      if (opts.file_keys !== void 0 || !domains.length) return tag(project.query(opts), "project");
+      const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+      const perStore = [["project", project.query({ ...opts, cap })], ...eachDomain((s2) => s2.query({ ...opts, cap })).map(([d, r]) => [d.name, r])];
+      const shares = allocateShares(perStore.map(([, r]) => r.length), cap);
+      return perStore.flatMap(([name, records], i) => tag(records.slice(0, shares[i]), name));
+    },
+    /** Supersedes edges live with their SOURCE record, so every mount is read; first seen wins. */
+    inboundSupersedes(id) {
+      const seen = /* @__PURE__ */ new Set();
+      const out = [];
+      const lists = [["project", project.inboundSupersedes(id)], ...eachDomain((s2) => s2.inboundSupersedes(id)).map(([d, r]) => [d.name, r])];
+      for (const [name, records] of lists) {
+        for (const r of records) {
+          if (seen.has(r.id)) continue;
+          seen.add(r.id);
+          out.push({ ...r, source_store: name });
+        }
+      }
+      return out;
+    },
+    articlesBySlug(slug) {
+      return project.articlesBySlug(slug);
+    },
+    close() {
+      let first;
+      for (const s2 of [project, ...domains.map((d) => d.store)]) {
+        try {
+          s2.close();
+        } catch (e) {
+          first ??= e;
+        }
+      }
+      if (first) throw first;
+    }
+  };
+}
+function fanDegradedLine(fan, who) {
+  if (!fan) return null;
+  const parts = [];
+  if (fan.configError) parts.push(`config.json unreadable, no domains mounted (${fan.configError})`);
+  for (const d of fan.unreadableDomains) parts.push(`domain '${d.name}' unreadable at ${d.dbPath} (${d.error})`);
+  if (!parts.length) return null;
+  return `${who}: DEGRADED subject fan: ${parts.join("; ")}. Delivering from the project store only.`;
+}
+function warnFanDegraded(fan, who) {
+  const line = fanDegradedLine(fan, who);
+  if (!line) return;
+  try {
+    process.stderr.write(`${line}
+`);
+  } catch {
+  }
+}
+
+// scripts/hooks/lib/operating-state.mjs
+function readProjectConfig(cwd) {
+  let config = null;
+  let configUnreadable = false;
+  try {
+    config = loadConfig(cwd);
+  } catch {
+    config = null;
+    configUnreadable = true;
+  }
+  if (config !== null && (typeof config !== "object" || Array.isArray(config))) {
+    configUnreadable = true;
+  }
+  return { config, configUnreadable };
+}
+
+// scripts/hooks/lib/advisory-counter.mjs
+import { appendFileSync, existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync5 } from "node:fs";
+import { join as join8 } from "node:path";
+function recordAdvisoryFire(root, hook, sessionId) {
+  try {
+    if (!root || !hook) return;
+    if (!existsSync7(join8(root, ".sterling"))) return;
+    const dir = join8(root, ".sterling", "transient");
+    mkdirSync5(dir, { recursive: true });
+    let session = typeof sessionId === "string" && sessionId ? sessionId : null;
+    if (!session) {
+      try {
+        const parsed = JSON.parse(readFileSync5(join8(dir, "session.json"), "utf8"));
+        session = typeof parsed?.session_id === "string" ? parsed.session_id : null;
+      } catch {
+      }
+    }
+    appendFileSync(
+      join8(dir, "advisory-fires.ndjson"),
+      JSON.stringify({ hook, session, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n"
+    );
+  } catch {
+  }
+}
+
 // scripts/hooks/lib/dispatch-prompt.mjs
 var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
 function extractPathCandidates(text) {
@@ -9038,456 +9683,6 @@ function extractGlobPrefixCandidates(text) {
 }
 function isReviewerClass(type) {
   return !!type && type.startsWith("reviewer-");
-}
-
-// scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync2, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync6, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { join as join7, resolve as resolve2, dirname as dirname5, isAbsolute } from "node:path";
-import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
-import { randomBytes, createHash } from "node:crypto";
-
-// scripts/lib/review-errors.mjs
-var CODES = /* @__PURE__ */ new Set([
-  // §1.4 ledger verbs
-  "ledger_corrupt",
-  "ledger_absent",
-  "ledger_digest_mismatch",
-  "compatibility_lock_held",
-  "entry_not_found",
-  "entry_selector_ambiguous",
-  "entry_not_active",
-  "class_unknown",
-  "class_not_applicable",
-  "superseder_not_found",
-  "superseder_not_reviewer_class",
-  "superseder_not_newer",
-  "superseder_branch_mismatch",
-  "superseder_lifecycle_unacceptable",
-  "superseder_coverage_incomplete",
-  "superseder_commit_not_ancestor",
-  "superseder_commit_trailer_not_roster",
-  "superseder_commit_receipt_unbound",
-  "superseder_commit_blob_mismatch",
-  "covering_not_allowed",
-  "covering_receipt_invalid",
-  "no_live_territory_disproved",
-  "reconcile_no_match",
-  "reconcile_ambiguous",
-  "reconcile_nonce_split",
-  "reconcile_unresolved",
-  "record_external_duplicate",
-  "argument_invalid",
-  // commit operation
-  "nothing_staged",
-  "message_missing",
-  "no_spendable_receipt",
-  "receipt_bytes_mismatch",
-  "coverage_incomplete",
-  "reservation_conflict",
-  "commit_failed",
-  "finalize_failed",
-  "waiver_reason_missing",
-  // A13 additions
-  "target_sha_prior_receipt_unbound",
-  "commit_verify_failed",
-  "not_sterling_project",
-  "receipt_unscoped",
-  // §1.4 disclosures (never refuse)
-  "receipt_unattributable",
-  "receipt_foreign",
-  "receipt_identity_unknown",
-  "receipt_deferred",
-  "receipt_stale",
-  "receipt_age_unverifiable",
-  "receipt_no_overlap",
-  "multi_spend",
-  "bytes_waived",
-  "legacy_entries_present",
-  "receipt_not_spent_stale_bytes",
-  "register_unavailable",
-  "dispatch_status_unknown",
-  // A9 register/ledger additions
-  "register_entry_malformed",
-  "register_agent_id_duplicate",
-  "register_lock_held",
-  "receipt_not_active",
-  "receipt_foreign_session",
-  "receipt_foreign_branch",
-  // A9 --target-sha amend mode
-  "target_sha_unresolvable",
-  "target_sha_not_head",
-  "target_sha_tree_dirty",
-  "target_sha_published",
-  "target_sha_publication_unprovable",
-  // A11 additions
-  "territory_declaration_missing",
-  "territory_declaration_malformed",
-  "dispatch_overlap",
-  "dispatch_residue",
-  // ledger entry classification
-  "ledger_entry_malformed",
-  // A19 (security review): an env override of identity is disclosed, never silent
-  "session_identity_override",
-  // dispatch state machine (decision dispatch-state-machine-pre-slot-post-
-  // binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
-  "dispatch_state_collision",
-  "dispatch_post_late",
-  "dispatch_post_mismatch",
-  "dispatch_post_refused",
-  "dispatch_state_poisoned",
-  "dispatch_unattributable",
-  "dispatch_lock_held",
-  "dispatch_post_only"
-]);
-function assertCode(code) {
-  if (!CODES.has(code)) {
-    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
-  }
-}
-function disclosure(code, facts = {}, message = code) {
-  assertCode(code);
-  return { kind: "disclosure", code, facts, message };
-}
-function render(x) {
-  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
-  return `${label} [${x?.code}] ${x?.message ?? ""}`;
-}
-
-// scripts/lib/dispatch-register.mjs
-function registerPath(root) {
-  return join7(root, ".sterling", "transient", "dispatch-register.json");
-}
-function configPath(root) {
-  return join7(root, ".sterling", "config.json");
-}
-function readStaleMinutesDefault(root) {
-  try {
-    const cfg = JSON.parse(readFileSync4(configPath(root), "utf8"));
-    const v = cfg?.dispatch_register?.stale_minutes;
-    return typeof v === "number" && v > 0 ? v : 60;
-  } catch {
-    return 60;
-  }
-}
-function parseRegisterEntry(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
-  }
-  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
-  }
-  if (typeof raw.session_id !== "string" || !raw.session_id) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
-  }
-  if (!Array.isArray(raw.files)) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
-  }
-  if (typeof raw.at !== "string" || !raw.at) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
-  }
-  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
-}
-function readRawArray(root) {
-  const p = registerPath(root);
-  if (!existsSync6(p)) return { availability: "absent", arr: [] };
-  let raw;
-  try {
-    raw = readFileSync4(p, "utf8");
-  } catch {
-    return { availability: "corrupt", arr: [] };
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { availability: "corrupt", arr: [] };
-  }
-  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
-  return { availability: "ok", arr: parsed };
-}
-function readRegister(root) {
-  const { availability, arr } = readRawArray(root);
-  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
-  let dropped = 0;
-  const entries = [];
-  for (const raw of arr) {
-    const r = parseRegisterEntry(raw);
-    if (r.ok) entries.push(r.entry);
-    else dropped += 1;
-  }
-  return { availability: "ok", entries, dropped };
-}
-function statusReason(entry, ctx) {
-  if (!entry) return "clock-unreadable";
-  const t = Date.parse(entry.at);
-  if (Number.isNaN(t)) return "clock-unreadable";
-  if (ctx.sessionId !== null && entry.session_id !== ctx.sessionId) return "other-session";
-  const age = ctx.now - t;
-  const lease = ctx.staleMinutes * 6e4;
-  if (age >= 0 && age < lease) return null;
-  return "lease-expired";
-}
-function dispatchStatus(entry, ctx) {
-  if (entry?.ended) return "inactive-confirmed";
-  return statusReason(entry, ctx) === null ? "presumed-active" : "unknown";
-}
-function classifyRegister(root, ctx) {
-  const { availability, entries } = readRegister(root);
-  if (availability !== "ok") return { availability, entries: [] };
-  const rows = entries.map((entry) => {
-    const status = dispatchStatus(entry, ctx);
-    const reason = statusReason(entry, ctx);
-    const t = Date.parse(entry.at);
-    const ageMs = Number.isNaN(t) ? null : ctx.now - t;
-    return { entry, status, reason, ageMs };
-  });
-  return { availability: "ok", entries: rows };
-}
-function presumedActiveEntries(root, ctx) {
-  const classified = classifyRegister(root, {
-    now: ctx.now ?? Date.now(),
-    sessionId: ctx.sessionId,
-    staleMinutes: ctx.staleMinutes ?? readStaleMinutesDefault(root)
-  });
-  if (classified.availability !== "ok") return { availability: classified.availability, entries: [] };
-  return { availability: "ok", entries: classified.entries.filter((r) => r.status === "presumed-active").map((r) => r.entry) };
-}
-var MAX_PROMPT_BYTES = 512 * 1024;
-var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
-var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
-var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
-function dispatchStateDir(root) {
-  return join7(root, ".sterling", "transient", "dispatch-state");
-}
-var LIVE_PREFIX = "live-";
-var DONE_PREFIX = "done-";
-var IDS_DELIMITER = "~";
-var ID_SEPARATOR = ".";
-var EMPTY_IDS = "none";
-var MAX_FILENAME_LENGTH = 254;
-var STATE_KEY_RE = /^(?:raw-[A-Za-z0-9_-]{1,80}|sha256-[0-9a-f]{64})$/;
-var ID_HASH_RE = /^[A-Za-z0-9_-]{43}$/;
-function liveFileName(key) {
-  return `${LIVE_PREFIX}${key}.json`;
-}
-function agentIdHash(agentId) {
-  return createHash("sha256").update(String(agentId), "utf8").digest("base64url");
-}
-function recordAgentIds(record) {
-  return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
-}
-function terminalFileName(key, record) {
-  const hashes = [...new Set(recordAgentIds(record).map(agentIdHash))].sort();
-  const name = `${DONE_PREFIX}${key}${IDS_DELIMITER}${hashes.length ? hashes.join(ID_SEPARATOR) : EMPTY_IDS}.json`;
-  if (name.length > MAX_FILENAME_LENGTH) throw new Error(`dispatch-state: terminal filename for ${key} is ${name.length} characters \u2014 over the ${MAX_FILENAME_LENGTH} limit`);
-  return name;
-}
-function parseStateFileName(name) {
-  if (name.includes(".json.tmp-")) return { kind: "tmp" };
-  if (!name.endsWith(".json")) return { kind: "other" };
-  const stem = name.slice(0, -".json".length);
-  if (stem.startsWith(LIVE_PREFIX)) {
-    const key = stem.slice(LIVE_PREFIX.length);
-    return STATE_KEY_RE.test(key) ? { kind: "live", key } : { kind: "malformed-live" };
-  }
-  if (stem.startsWith(DONE_PREFIX)) {
-    const parts = stem.slice(DONE_PREFIX.length).split(IDS_DELIMITER);
-    const malformed = STATE_KEY_RE.test(parts[0]) ? { kind: "malformed-done", key: parts[0] } : { kind: "malformed-done" };
-    if (parts.length !== 2 || !STATE_KEY_RE.test(parts[0])) return malformed;
-    const idHashes = parts[1] === EMPTY_IDS ? [] : parts[1].split(ID_SEPARATOR);
-    const canonical = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
-    return canonical ? { kind: "done", key: parts[0], idHashes } : malformed;
-  }
-  return STATE_KEY_RE.test(stem) ? { kind: "legacy", key: stem } : { kind: "unknown-json" };
-}
-var warnedStateFiles = /* @__PURE__ */ new Set();
-function warnStateFile(file, text) {
-  const tag2 = `${file}\0${text}`;
-  if (warnedStateFiles.has(tag2)) return;
-  warnedStateFiles.add(tag2);
-  process.stderr.write(`${render(disclosure("dispatch_state_poisoned", { file }, text))}
-`);
-}
-function dispatchStateKey(toolUseId) {
-  if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
-  return `sha256-${createHash("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
-}
-function isNonEmptyString(v) {
-  return typeof v === "string" && v !== "";
-}
-function isPlainObject(v) {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
-function validatePostBinding(v) {
-  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at);
-}
-function validateDerivedBinding(v) {
-  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && isNonEmptyString(v.by);
-}
-function validateStarted(v) {
-  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && Array.isArray(v.by) && v.by.every((x) => typeof x === "string");
-}
-function validateTerminal(v) {
-  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.at) && isNonEmptyString(v.reason);
-}
-function validateRecordShape(r) {
-  if (!r || typeof r !== "object" || Array.isArray(r)) return { ok: false, reason: "not-an-object" };
-  if (r.schema !== 1) return { ok: false, reason: "unknown-schema-version" };
-  if (typeof r.tool_use_id !== "string" || !r.tool_use_id) return { ok: false, reason: "tool_use_id" };
-  if (typeof r.session_id !== "string" && r.session_id !== null) return { ok: false, reason: "session_id" };
-  if (!ORIGINS.has(r.origin)) return { ok: false, reason: "origin" };
-  if (typeof r.prompt_bytes !== "number") return { ok: false, reason: "prompt_bytes" };
-  if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
-  if (typeof r.prompt === "string") {
-    const bytes = Buffer.byteLength(r.prompt, "utf8");
-    const sha = createHash("sha256").update(r.prompt, "utf8").digest("hex");
-    if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
-  } else if (r.prompt !== null) {
-    return { ok: false, reason: "prompt-type" };
-  }
-  if (!validatePostBinding(r.post_binding)) return { ok: false, reason: "post_binding-shape" };
-  if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
-  if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
-  if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
-  return { ok: true };
-}
-function classifyRecordFile(file) {
-  let st;
-  try {
-    st = lstatSync(file);
-  } catch {
-    return { exists: false };
-  }
-  if (st.isSymbolicLink()) return { exists: true, poisoned: true, reason: "symlink" };
-  if (!st.isFile()) return { exists: true, poisoned: true, reason: "non-regular-file" };
-  let buf;
-  try {
-    buf = readFileSync4(file);
-  } catch {
-    return { exists: true, poisoned: true, reason: "unreadable" };
-  }
-  const text = buf.toString("utf8");
-  if (!Buffer.from(text, "utf8").equals(buf)) return { exists: true, poisoned: true, reason: "invalid-utf8" };
-  let record;
-  try {
-    record = JSON.parse(text);
-  } catch {
-    return { exists: true, poisoned: true, reason: "unparseable-json" };
-  }
-  const v = validateRecordShape(record);
-  if (!v.ok) return { exists: true, poisoned: true, reason: v.reason };
-  return { exists: true, poisoned: false, record };
-}
-function checkDispatchStateContainment(root, { create }) {
-  const dir = dispatchStateDir(root);
-  let st;
-  try {
-    st = lstatSync(dir);
-  } catch (e) {
-    if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
-    if (!create) return { ok: true, availability: "absent" };
-    mkdirSync4(dir, { recursive: true });
-    return { ok: true, availability: "ok" };
-  }
-  if (st.isSymbolicLink() || !st.isDirectory()) {
-    return { ok: false, availability: "poisoned", reason: st.isSymbolicLink() ? "symlink" : "non-regular-file" };
-  }
-  return { ok: true, availability: "ok" };
-}
-function finishTerminalRename(root, key, record) {
-  const dir = dispatchStateDir(root);
-  const from = liveFileName(key);
-  const to = terminalFileName(key, record);
-  let occupied = false;
-  try {
-    lstatSync(join7(dir, to));
-    occupied = true;
-  } catch (e) {
-    if (e?.code !== "ENOENT") occupied = true;
-  }
-  if (occupied) {
-    warnStateFile(from, `dispatch-state: terminal record ${from} NOT renamed \u2014 ${to} already exists; never overwritten, the live source is kept for an operator`);
-    return from;
-  }
-  try {
-    renameSync2(join7(dir, from), join7(dir, to));
-    return to;
-  } catch (e) {
-    warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
-    return from;
-  }
-}
-function listStateDir(root) {
-  const containment = checkDispatchStateContainment(root, { create: false });
-  if (!containment.ok) return { availability: "unavailable", reason: "containment", names: [] };
-  if (containment.availability === "absent") return { availability: "absent", names: [] };
-  try {
-    return { availability: "ok", names: readdirSync(dispatchStateDir(root)) };
-  } catch (e) {
-    return { availability: "unavailable", reason: "unlistable", code: e?.code, names: [] };
-  }
-}
-function readDispatchState(root) {
-  return scanLiveState(root, { repair: false });
-}
-function scanLiveState(root, { repair }) {
-  const dir = dispatchStateDir(root);
-  const listing = listStateDir(root);
-  if (listing.availability !== "ok") return { availability: listing.availability, ...listing.reason ? { reason: listing.reason } : {}, records: [], poisoned: [], done: [] };
-  const records = [];
-  const poisoned = [];
-  const done = [];
-  for (const name of listing.names) {
-    const parsed = parseStateFileName(name);
-    if (parsed.kind === "other") continue;
-    if (parsed.kind === "tmp") {
-      poisoned.push({ file: name, reason: "orphan-tmp-file" });
-      continue;
-    }
-    if (parsed.kind === "legacy") {
-      poisoned.push({ file: name, reason: "legacy-unmigrated" });
-      continue;
-    }
-    if (parsed.kind === "malformed-live") {
-      poisoned.push({ file: name, reason: "malformed-filename" });
-      continue;
-    }
-    if (parsed.kind === "malformed-done" || parsed.kind === "unknown-json") {
-      warnStateFile(name, `dispatch-state: '${name}' is not a live-<key>.json or done-<key>~<ids>.json name \u2014 ignored by the live scan, never read as a record`);
-      continue;
-    }
-    if (parsed.kind === "done") {
-      done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
-      continue;
-    }
-    const classified = classifyRecordFile(join7(dir, name));
-    if (!classified.exists) continue;
-    if (classified.poisoned) {
-      poisoned.push({ file: name, reason: classified.reason });
-      continue;
-    }
-    if (dispatchStateKey(classified.record.tool_use_id) !== parsed.key) {
-      poisoned.push({ file: name, reason: "key-mismatch" });
-      continue;
-    }
-    records.push({ key: parsed.key, file: name, record: classified.record });
-  }
-  const doneKeys = new Set(done.map((d) => d.key));
-  const kept = [];
-  for (const entry of records) {
-    if (doneKeys.has(entry.key)) {
-      if (!entry.record.terminal) {
-        poisoned.push({ file: entry.file, reason: "duplicate-key" });
-        continue;
-      }
-      warnStateFile(entry.file, `dispatch-state: terminal record ${entry.file} cannot be renamed: a done- file for the same key already exists \u2014 left under its live name for an operator, never renamed over it`);
-      kept.push(entry);
-      continue;
-    }
-    if (repair && entry.record.terminal) entry.file = finishTerminalRename(root, entry.key, entry.record);
-    kept.push(entry);
-  }
-  return { availability: "ok", records: kept, poisoned, done };
 }
 
 // scripts/hooks/lib/dispatch-overlap.mjs
@@ -9950,8 +10145,8 @@ var input = readStdin();
 function buildModelPin(inp) {
   if (typeof inp.tool_name !== "string" || !inp.tool_name.startsWith("mcp__codex__")) return null;
   const root = inp.cwd ? String(inp.cwd) : "";
-  const sterling = join8(root, ".sterling");
-  if (!existsSync7(join8(sterling, "sterling.db")) && !existsSync7(join8(sterling, "config.json"))) return null;
+  const sterling = join9(root, ".sterling");
+  if (!existsSync8(join9(sterling, "sterling.db")) && !existsSync8(join9(sterling, "config.json"))) return null;
   const pin = codexModelPin(root, { opener: inp.tool_name === "mcp__codex__codex", toolInput: inp.tool_input });
   if (!pin.model) return { line: pin.line };
   return { line: pin.line, updatedInput: { ...inp.tool_input && typeof inp.tool_input === "object" ? inp.tool_input : {}, model: pin.model } };
@@ -9971,14 +10166,51 @@ function envelopeFor(extraContext) {
   if (parts.length) hookSpecificOutput.additionalContext = parts.join("\n\n");
   return { hookSpecificOutput };
 }
-function emitEnvelope(extraContext, opts) {
-  return exitAfterWrite(JSON.stringify(envelopeFor(extraContext)), 0, opts);
+function emitEnvelope(extraContext, opts = {}) {
+  return exitAfterWrite(JSON.stringify(envelopeFor(extraContext)), 0, {
+    ...opts,
+    onWritten: () => {
+      markBoardReadyShown();
+      opts.onWritten?.();
+    }
+  });
+}
+var boardMemo;
+function boardReady() {
+  if (boardMemo !== void 0) return boardMemo;
+  boardMemo = null;
+  const onDispatch = !Array.isArray(input.tool_input?.questions) && !(typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__"));
+  if (!onDispatch || input.agent_id) return boardMemo;
+  try {
+    const store = openStore(input.cwd);
+    if (!store) return boardMemo;
+    let readiness;
+    try {
+      readiness = store.boardReadiness();
+    } finally {
+      store.close();
+    }
+    const notice = boardReadyNotice(readiness, outgoingProposalText(input.tool_input), liveLanes(input.cwd, input.session_id), laneCeiling(readProjectConfig(input.cwd).config));
+    if (notice && boardReadyNoticeDue(input.cwd, input.session_id, notice.hash)) boardMemo = notice;
+  } catch (e) {
+    boardMemo = { line: `BOARD READY line unavailable (${e && e.message || e}) \u2014 read the board with board_query before dispatching more.`, hash: null };
+  }
+  return boardMemo;
+}
+function markBoardReadyShown() {
+  const b = boardMemo;
+  if (!b?.hash) return;
+  try {
+    markBoardReadyNoticed(input.cwd, input.session_id, b.hash);
+  } catch (e) {
+    process.stderr.write(`H20: the BOARD READY line was written but its dedupe mark failed (${e && e.message || e}) \u2014 it may repeat on the next dispatch.`);
+  }
 }
 var overlapMemo;
 function overlapNotice() {
   if (overlapMemo === void 0) {
     const onDispatch = !Array.isArray(input.tool_input?.questions) && !(typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__"));
-    overlapMemo = onDispatch ? dispatchOverlapNotice(input) : null;
+    overlapMemo = [onDispatch ? dispatchOverlapNotice(input) : null, boardReady()?.line].filter(Boolean).join("\n\n") || null;
   }
   return overlapMemo;
 }
@@ -10018,6 +10250,7 @@ function main(input2) {
     if (carriage) hookSpecificOutput.additionalContext = carriage;
     return exitAfterWrite(JSON.stringify({ hookSpecificOutput }), 0, {
       onWritten: () => {
+        markBoardReadyShown();
         recordAdvisoryFire(input2.cwd, "h20", input2.session_id);
         try {
           markSubstanceDelivered(guard, assembled.emittedSubstance);

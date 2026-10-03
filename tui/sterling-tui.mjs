@@ -43534,6 +43534,7 @@ var attestationSchema = base.extend({
   notes: external_exports.string().optional(),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
+var BOARD_NEEDS = ["user", "grill", "investigation"];
 var SYSTEM_REASONS = [
   "reconcile_needed",
   "stale_research",
@@ -43651,7 +43652,13 @@ var todoSchema = base.extend({
   // like every other todo field, so it needs no migration. Existence of each
   // blocker is checked at the tool layer when written; a blocker removed later
   // reads as closed, it is never rewritten out of this list.
-  blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+  blocked_by: external_exports.array(external_exports.string().min(1)).optional(),
+  // What a user item waits on besides its blockers (decision
+  // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+  // 'investigation' still auto-starts, as a researcher lane; 'user' and
+  // 'grill' wait for the user. Not a progress status: `status` keeps meaning
+  // supersession only. Absent means nothing beyond the blockers.
+  needs: external_exports.enum(BOARD_NEEDS).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.source === "system" && !rec.system_reason) {
@@ -43662,6 +43669,13 @@ var todoSchema = base.extend({
       code: external_exports.ZodIssueCode.custom,
       path: ["blocked_by"],
       message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
+    });
+  }
+  if (rec.needs !== void 0 && rec.source === "system") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      path: ["needs"],
+      message: "needs marks source:'user' board tasks only \u2014 maintenance-queue items never carry it"
     });
   }
   if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
@@ -44548,6 +44562,11 @@ var MountedStores = class {
   enqueueWouldBeNoop(input) {
     return this.project.enqueueWouldBeNoop(input);
   }
+  /** Board readiness is project-local like the board itself, so the project
+   *  store answers it (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start). */
+  boardReadiness(items) {
+    return this.project.boardReadiness(items);
+  }
   storeFor(scope) {
     if (scope === "project")
       return this.project;
@@ -45172,6 +45191,10 @@ function deepReplaceString(value, from, to) {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
   }
   return value;
+}
+function boardItemHandle(rec) {
+  const label = boardDisplayLabel(rec.text, rec.slug);
+  return label ? displayHandle(label, rec.id) : `(unnamed board item) (${rec.id.slice(0, 8)})`;
 }
 var MAX_RANK_TERMS = 16;
 function rankTermDedupeKey(term2) {
@@ -46603,6 +46626,64 @@ var SterlingStore = class _SterlingStore {
     return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
   }
   /**
+   * THE ONE READINESS FUNCTION (decision
+   * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start,
+   * AMENDED (a)). board_get/board_query's blocked_by_state, H1's three groups,
+   * H20's ready line, the TUI cards and the OpenCode plugin all read this, so
+   * "open blocker" and "ready" have one definition.
+   *
+   * `items` defaults to every live user board item (a system item is never
+   * returned). Passed explicitly, each user todo given is judged against the
+   * LIVE board: a blocker is open while a live todo carries its slug, and
+   * `unblocks` lists live user items whose blocked_by names the item. Read
+   * only; the stored blocked_by is never rewritten. No cycle detection.
+   */
+  boardReadiness(items) {
+    const total = this.count({ types: ["todo"], source: "user" });
+    const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+    const bySlug = /* @__PURE__ */ new Map();
+    for (const t of live)
+      if (t.slug)
+        bySlug.set(t.slug, t);
+    const dependents = /* @__PURE__ */ new Map();
+    for (const t of live) {
+      for (const slug of new Set(t.blocked_by ?? [])) {
+        const list = dependents.get(slug);
+        if (list)
+          list.push(t);
+        else
+          dependents.set(slug, [t]);
+      }
+    }
+    const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
+    const targets = items ?? live;
+    return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+      const blockers = [];
+      const blockersOpen = [];
+      for (const slug of t.blocked_by ?? []) {
+        const holder = openBlocker(slug);
+        blockers.push({ slug, state: holder ? "open" : "closed" });
+        if (holder)
+          blockersOpen.push(boardItemHandle(holder));
+      }
+      const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+      const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+      return {
+        id: t.id,
+        ...t.slug ? { slug: t.slug } : {},
+        name: boardItemHandle(t),
+        ...t.priority ? { priority: t.priority } : {},
+        updated_at: t.updated_at,
+        file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+        ...t.needs ? { needs: t.needs } : {},
+        blockers,
+        blockers_open: blockersOpen,
+        unblocks,
+        state
+      };
+    });
+  }
+  /**
    * Every SUPERSEDED record carrying this exact slug, newest first — the
    * dead-slug counterpart of recordsBySlug (decision foreign_df361a0f, board 2b9f2f1a
    * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
@@ -47549,13 +47630,15 @@ function knowledgeSubgroups(records) {
   };
   return [...buckets.entries()].sort((a, b) => sortKey(a[0]) < sortKey(b[0]) ? -1 : sortKey(a[0]) > sortKey(b[0]) ? 1 : 0).map(([key, cards]) => ({ key, label: subcatLabel(key), cards }));
 }
-function blockedByLine(openSlugs) {
-  return openSlugs.length ? `blocked by: ${openSlugs.join(", ")}` : void 0;
+function blockedByLine(openNames) {
+  return openNames.length ? `blocked by: ${openNames.join(", ")}` : void 0;
 }
 function todoCards(store, expanded = []) {
   const groups = /* @__PURE__ */ new Map();
   const flat = [];
-  for (const t of store.query({ types: ["todo"], source: "user", cap: 500 })) {
+  const todos = store.query({ types: ["todo"], source: "user", cap: 500 });
+  const readiness = new Map(store.boardReadiness(todos).map((r) => [r.id, r]));
+  for (const t of todos) {
     const todo = t;
     const label = boardDisplayLabel(todo.text, todo.slug);
     const card = {
@@ -47565,11 +47648,14 @@ function todoCards(store, expanded = []) {
       // and selection effects plus every destroying call need the whole thing.
       title: label ? displayHandle(label, todo.id) : todo.text.split("\n")[0],
       body: todo.text,
-      detail: [todo.priority && `priority: ${todo.priority}`, todo.file_keys?.length && `files: ${todo.file_keys.join(", ")}`].filter(Boolean).join(" \xB7 ")
+      detail: [todo.priority && `priority: ${todo.priority}`, todo.needs && `needs: ${todo.needs}`, todo.file_keys?.length && `files: ${todo.file_keys.join(", ")}`].filter(Boolean).join(" \xB7 ")
     };
-    const blocked = blockedByLine((todo.blocked_by ?? []).filter((slug) => store.recordsBySlug(slug).some((r) => r.type === "todo")));
+    const ready = readiness.get(todo.id);
+    const blocked = blockedByLine(ready?.blockers_open ?? []);
     if (blocked)
       card.blocked = blocked;
+    if (ready?.unblocks.length)
+      card.unblocks = `unblocks: ${ready.unblocks.join(", ")}`;
     if (todo.objective) {
       const list = groups.get(todo.objective) ?? [];
       list.push(card);
@@ -48036,6 +48122,8 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
           lines.push({ text: `    ${pad}${card.detail}`, kind: "meta" });
         if (card.blocked)
           lines.push({ text: `    ${pad}${card.blocked}`, kind: "meta" });
+        if (card.unblocks)
+          lines.push({ text: `    ${pad}${card.unblocks}`, kind: "meta" });
       } else {
         lines = [{ text: clipEllipsis(marker + pad + stateColumn(card) + card.title, width), kind: "title" }];
       }

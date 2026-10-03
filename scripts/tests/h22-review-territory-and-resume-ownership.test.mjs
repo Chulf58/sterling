@@ -215,6 +215,31 @@ test('a MALFORMED REVIEW-TERRITORY fallback keeps a path named by an exception p
   }
 });
 
+// The exception word has to sit directly before the path: "only" is not an
+// exception word, and an exception phrase in a different object ("outside your
+// territory such as src/x.mjs") does not name src/x.mjs as the lane's own.
+test('a MALFORMED REVIEW-TERRITORY fallback still drops a path under a prohibition when no exception word sits directly before it', () => {
+  const cases = [
+    'Do not edit, only read, src/x.mjs.',
+    'Do not modify the only copy of src/x.mjs.',
+    'Do not write files outside your territory such as src/x.mjs or src/z.mjs.',
+    'NEVER write outside the worktree: src/x.mjs belongs to lane B.',
+  ];
+  for (const sentence of cases) {
+    const { dir, cleanup } = makeProject();
+    try {
+      const prompt = ['Lane D.', 'REVIEW-TERRITORY: ["/abs/game"]', sentence, 'Edit src/y.mjs.'].join('\n');
+      dispatch(dir, { tool_use_id: 'toolu_laneD', agent_id: 'lane-d', prompt });
+      const [entry] = roundsFor(dir, 'lane-d');
+      assert.equal(entry.files_source, 'free-prose-malformed-territory');
+      assert.ok(!entry.files.includes('src/x.mjs'), `${sentence} must drop src/x.mjs: ${JSON.stringify(entry.files)}`);
+      assert.ok(entry.files.includes('src/y.mjs'), `${sentence} keeps the normal path: ${JSON.stringify(entry.files)}`);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
 test('REVIEW-TERRITORY entries that are not canonical repo-relative paths (absolute, parent escape, glob, doubled trailing slash) are malformed, never partially honoured', () => {
   for (const bad of ['["/abs/game"]', '["../game"]', '["game/**"]', '["game/farm//"]', '{"files":["game"]}', '["game", 3]']) {
     const { dir, cleanup } = makeProject();

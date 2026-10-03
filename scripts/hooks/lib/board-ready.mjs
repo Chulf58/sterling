@@ -43,7 +43,8 @@ export function laneCeiling(config) {
 /**
  * Live lanes for this session from the dispatch register; availability is passed
  * through so a corrupt register never reads as zero. `descriptions` are the
- * Agent descriptions of the live lanes, joined from the dispatch-state record
+ * Agent descriptions and prompts of the live lanes (a brief can name its board
+ * item in either), joined from the dispatch-state record
  * each live entry's tool_use_id names (register entries carry no description of
  * their own); a lane with no state record contributes none.
  */
@@ -55,7 +56,9 @@ export function liveLanes(root, sessionId) {
   const descriptions = [];
   if (toolUseIds.size) {
     for (const { record } of readDispatchState(root).records) {
-      if (toolUseIds.has(record.tool_use_id) && typeof record.description === 'string' && record.description) descriptions.push(record.description);
+      if (!toolUseIds.has(record.tool_use_id)) continue;
+      // The prompt is null when oversize or cleared at Stop; the description alone then stands.
+      for (const text of [record.description, record.prompt]) if (typeof text === 'string' && text) descriptions.push(text);
     }
   }
   return { availability, count: entries.length, descriptions };

@@ -193,6 +193,22 @@ test('boardReadyNotice: an item named in a live dispatch description is not list
   }
 });
 
+test('liveLanes: a lane whose Agent prompt names an item (description silent) still marks it in flight', async () => {
+  const p = project();
+  try {
+    const reg = await import(pathToFileURL(join(root, 'scripts', 'lib', 'dispatch-register.mjs')).href);
+    const a = mk(p.store, { text: 'Alpha', slug: 'alpha' });
+    const b = mk(p.store, { text: 'Beta' });
+    await reg.recordDispatchPre(p.dir, { tool_use_id: 'toolu_live2', session_id: 's-prompt', tool_input: { subagent_type: 'implementor', description: 'build a slice', prompt: `Implement board item ${a.id.slice(0, 8)} end to end.` } });
+    await reg.registerStart(p.dir, { agent_id: 'ag1', agent_type: 'implementor', session_id: 's-prompt', files: [], tool_use_id: 'toolu_live2', at: new Date().toISOString() });
+    const live = lib.liveLanes(p.dir, 's-prompt');
+    const n = lib.boardReadyNotice(p.store.boardReadiness(), 'x', live, { value: 4 });
+    assert.ok(!n.line.includes('Alpha') && n.line.includes(h('Beta', b)), `item named by id8 only in the prompt is not listed: ${n.line}`);
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('liveLanes: carries the descriptions of the live lanes, joined from dispatch-state through tool_use_id', async () => {
   const p = project();
   try {
@@ -203,7 +219,7 @@ test('liveLanes: carries the descriptions of the live lanes, joined from dispatc
     await reg.registerStart(p.dir, { agent_id: 'ag2', agent_type: 'implementor', session_id: 's-live', files: [], tool_use_id: null, at: new Date().toISOString() });
     const live = lib.liveLanes(p.dir, 's-live');
     assert.equal(live.count, 2);
-    assert.deepEqual(live.descriptions, ['build alpha slice'], 'a lane with no state record contributes no description');
+    assert.deepEqual(live.descriptions, ['build alpha slice', 'work'], 'description then prompt; a lane with no state record contributes none');
     assert.equal(lib.liveLanes(p.dir, 's-other').count, 0, 'another session holds no lanes of this one');
   } finally {
     p.cleanup();
