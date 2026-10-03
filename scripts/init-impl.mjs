@@ -1146,7 +1146,9 @@ if (initIsPluginRepo) {
   // (it double-registers); remove a stale init-generated one, keep foreign servers.
   const mcp = existsSync(mcpPath) ? readMcp() : undefined;
   if (!existsSync(mcpPath)) {
-    items.push({ item: '.mcp.json', status: 'matches', detail: 'not written — the plugin declares sterling, bound to this project via ${CLAUDE_PROJECT_DIR}' });
+    items.push(claudeHost
+      ? { item: '.mcp.json', status: 'matches', detail: 'not written — the plugin declares sterling, bound to this project via ${CLAUDE_PROJECT_DIR}' }
+      : { item: '.mcp.json', status: 'skipped', detail: 'not applicable — Claude Code is not installed on this machine, and the Claude Code plugin is what declares sterling there' });
   } else if (!mcp) {
     items.push({ item: '.mcp.json', status: 'differs', detail: 'exists but is not a parseable object — left untouched' });
   } else if (isOurMcpEntry(mcp.mcpServers?.sterling)) {
@@ -1162,7 +1164,9 @@ if (initIsPluginRepo) {
 
 // hook registrations: the project-level §6 set ships in the PLUGIN's
 // hooks.json and activates with the plugin — init does not duplicate it.
-items.push({ item: 'hooks (§6 set)', status: 'matches', detail: 'active via the plugin (hooks/hooks.json) — not duplicated into the project' });
+items.push(claudeHost
+  ? { item: 'hooks (§6 set)', status: 'matches', detail: 'active via the plugin (hooks/hooks.json) — not duplicated into the project' }
+  : { item: 'hooks (§6 set)', status: 'skipped', detail: 'not applicable — Claude Code is not installed on this machine, and the Claude Code plugin is what activates these hooks (OpenCode runs its own plugin hooks)' });
 
 // gitignore entries (§2.3/§11/§12): per-entry ensure — appending is non-destructive
 const gitignorePath = join(target, '.gitignore');

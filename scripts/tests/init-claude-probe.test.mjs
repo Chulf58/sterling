@@ -98,6 +98,11 @@ test('(a) claude absent: no Claude-only file is written, ONE loud line names the
   }
   assert.ok(!/codex/i.test(r.stdout.replace(lines[0], '')), 'the ~/.claude.json Codex probe did not run');
   assert.ok(!/RESTART REQUIRED/.test(r.stdout), 'no agent was installed, so no restart is owed');
+  // the Claude-only plugin wiring is not applicable here: init must not report it as matching (P5)
+  assert.match(r.stdout, /^\.mcp\.json\s+skipped\b.*not applicable/m);
+  assert.match(r.stdout, /^hooks \(§6 set\)\s+skipped\b.*not applicable/m);
+  assert.ok(!/^\.mcp\.json\s+matches\b/m.test(r.stdout), '.mcp.json is not reported as matching without Claude Code');
+  assert.ok(!/^hooks \(§6 set\)\s+matches\b/m.test(r.stdout), 'the hooks are not reported as matching without Claude Code');
   // the host-independent and OpenCode side is intact
   for (const f of ['.sterling/config.json', 'AGENTS.md', 'sterling-update.bat', '.opencode/agents/scout.md']) {
     assert.ok(existsSync(join(dir, f)), `${f} is still written`);
@@ -116,6 +121,8 @@ test('(b) claude present: every Claude file is written and no skip line is print
   assert.match(r.stdout, /^sterling-launch\.sh\s+created\b/m);
   assert.match(r.stdout, /^\.claude\/agents\/librarian\.md\s+created\b/m);
   assert.match(r.stdout, /^\.claude\/settings\.json \(conductor activation\)\s+created\b/m);
+  assert.match(r.stdout, /^\.mcp\.json\s+matches\b/m, '.mcp.json is reported as matching with Claude Code present');
+  assert.match(r.stdout, /^hooks \(§6 set\)\s+matches\b/m, 'the hooks are reported as matching with Claude Code present');
   assert.match(r.stdout, /RESTART REQUIRED/);
   assert.match(r.stdout, /codex/i, 'the codex user-scope check ran');
 });

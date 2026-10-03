@@ -50,8 +50,8 @@ const HOST_TEXT = {
 // copy. The OpenCode copy updates through `opencode plugin update` (decision
 // sterling-on-opencode-installs-from-a-git-release-branch-v2).
 const UPDATE_ROUTE = {
-  'claude-code': 'update it through /plugin (Installed tab → Update)',
-  opencode: `update it with ${sterlingUpdateRemedy('opencode')}`,
+  'claude-code': () => 'update it through /plugin (Installed tab → Update)',
+  opencode: (env, home, root) => `update it with ${sterlingUpdateRemedy('opencode', { env, home, root })}`,
 };
 // A copy under neither install root (installed, so not a git clone, but somewhere the
 // resolver does not scan) takes the asking host's own install route.
@@ -214,7 +214,7 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
   const order = previous === null ? 1 : compareVersions(current, previous) ?? 1;
   if (order === 0) return null;
   if (order < 0) {
-    const update = UPDATE_ROUTE[installHostOf(root, { env, home }) ?? ASKING_HOST_INSTALL[host]];
+    const update = UPDATE_ROUTE[installHostOf(root, { env, home }) ?? ASKING_HOST_INSTALL[host]](env, home, root);
     return {
       outcome: 'refused-older',
       warning: `✗ Sterling ${current} is OLDER than this project's sync marker ${previous}: post-update sync REFUSED, nothing downgraded — ${update}. `,

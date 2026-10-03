@@ -56,7 +56,8 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isInstalledCopy } from './installed-copy.mjs';
-import { RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, installHostOf, readCopyVersion, compareSterlingVersions, scanInstalledSterling, sterlingInstallRemedy } from './sterling-roots.mjs';
+import { RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, STERLING_NPM_PACKAGE, installHostOf, readCopyVersion, compareSterlingVersions, scanInstalledSterling, sterlingInstallRemedy, sterlingPluginSpecs } from './sterling-roots.mjs';
+import { parseJsonc } from './jsonc.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
 import { sha256, loadRegistry } from './agent-distribution.mjs';
 import { renderOpenCodeFullText } from './agent-fences.mjs';
@@ -68,8 +69,7 @@ export const STERLING_AGENTS_SUBDIR = '.opencode/agents/sterling';
 export const PROJECT_CONFIG_REL = '.opencode/opencode.json';
 export const CONDUCTOR_AGENT = 'sterling/conductor';
 export const ROSTER = ['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'librarian'];
-/** The package name of the copy `opencode plugin add` installs from STERLING_GIT_SPEC (decision sterling-on-opencode-installs-from-a-git-release-branch-v2). */
-export const STERLING_NPM_PACKAGE = '@chulf58/sterling';
+export { STERLING_NPM_PACKAGE, parseJsonc };
 export const STORE_GUARD_PATTERNS =['**/.sterling/sterling.db*', '.sterling/sterling.db*'];
 export const SHELL_STORE_GUARD_PATTERN = '*sterling.db*';
 /** The store named by path inside a shell command, for a "*" block that also matches read, grep, webfetch and edit. */
@@ -443,19 +443,12 @@ function ensureTuiShim(tuiDir, shim) {
   ];
 }
 
-// A `plugins` entry is the spec as typed (finding e18e1c71): the Git spec in any of the
-// forms npm-package-arg reads as Chulf58/sterling on GitHub, with any #committish or
-// #semver range, or the package name as a registry spec.
-const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;
-const namesNpmPackage = (s) =>
-  typeof s === 'string' && (s === STERLING_NPM_PACKAGE || s.startsWith(`${STERLING_NPM_PACKAGE}@`) || STERLING_GIT_REPO.test(s.split('#')[0]));
-
 /**
  * The `opencode plugin add` copy as this MACHINE has it, whichever host runs init:
  * { root, configured, row? }. root is the newest npm copy the resolver scan finds in
  * OpenCode's cache (null when none); configured is true when the global opencode.json
- * `plugins` list names the package (a string, or an entry with a string field naming
- * it). A global config that cannot be read is configured: false plus a loud row.
+ * `plugins` list names the package (sterlingPluginSpecs: a string, a [spec, options]
+ * tuple, or an object's `package` field). A global config that cannot be read is configured: false plus a loud row.
  */
 export function npmCopyOnMachine({ env = process.env, home = homedir() } = {}) {
   const copies = scanInstalledSterling(env, home).copies.filter((c) => c.host === 'opencode');
@@ -466,13 +459,12 @@ export function npmCopyOnMachine({ env = process.env, home = homedir() } = {}) {
   const item = `${fwd(path)} plugins`;
   let config;
   try {
-    config = JSON.parse(readFileSync(path, 'utf8'));
+    config = parseJsonc(readFileSync(path, 'utf8'));
   } catch (err) {
     return { root, configured: false, row: { item, status: 'skipped', detail: `${fwd(path)} is not valid JSON (${err.message}), so whether it registers ${STERLING_NPM_PACKAGE} is unknown; the server shim is written unless the npm copy is in OpenCode's cache. Fix the file, then rerun /sterling:update` } };
   }
   const plugins = config && typeof config === 'object' && !Array.isArray(config) ? config.plugins : undefined;
-  const configured = Array.isArray(plugins) && plugins.some((e) => namesNpmPackage(e) || (e && typeof e === 'object' && Object.values(e).some(namesNpmPackage)));
-  return { root, configured };
+  return { root, configured: sterlingPluginSpecs(plugins).length > 0 };
 }
 
 /**
@@ -674,30 +666,6 @@ export function guardPermission(permission) {
   }
   for (const key of ['edit', 'shell', 'bash']) if (out[key] === undefined) out[key] = withGuard({}, patternsFor(key));
   return { value: out };
-}
-
-/** JSONC text to a value: comments and trailing commas outside strings removed. Throws on invalid input. */
-export function parseJsonc(text) {
-  let out = '';
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"') {
-      let j = i + 1;
-      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
-      out += text.slice(i, j + 1);
-      i = j;
-    } else if (c === '/' && text[i + 1] === '/') {
-      while (i < text.length && text[i] !== '\n') i++;
-      out += '\n';
-    } else if (c === '/' && text[i + 1] === '*') {
-      const end = text.indexOf('*/', i + 2);
-      if (end === -1) throw new Error('unterminated /* comment');
-      i = end + 1;
-    } else if (c === ',' && /^\s*[}\]]/.test(text.slice(i + 1).replace(/^(\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*/, (m) => m.replace(/\S/g, ' ')))) {
-      // a trailing comma (only whitespace or comments before the closing bracket): dropped
-    } else out += c;
-  }
-  return JSON.parse(out);
 }
 
 /**

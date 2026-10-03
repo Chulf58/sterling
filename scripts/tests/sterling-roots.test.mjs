@@ -192,17 +192,102 @@ test('a Git-spec install (cache key git-<slug>-<sha12>, measured on OpenCode 2.0
   }
 });
 
+test('sterlingUpdateRemedy(opencode) names the spec the global opencode.json configures; a pinned tag or commit is flagged as never updating; no entry keeps the shipped spec', () => {
+  const home = tmp('sterling-roots-spec-');
+  try {
+    const conf = join(home, '.config', 'opencode', 'opencode.json');
+    const remedy = () => sterlingUpdateRemedy('opencode', { env: {}, home });
+    assert.equal(remedy(), `\`opencode plugin update "${STERLING_GIT_SPEC}"\``, 'no opencode.json: the shipped spec');
+    touch(conf, JSON.stringify({ plugins: ['other-plugin'] }));
+    assert.equal(remedy(), `\`opencode plugin update "${STERLING_GIT_SPEC}"\``, 'no Sterling entry: the shipped spec');
+    touch(conf, JSON.stringify({ plugins: ['x', '@chulf58/sterling@latest'] }));
+    assert.equal(remedy(), '`opencode plugin update "@chulf58/sterling@latest"`', 'a registry spec is named as typed');
+    touch(conf, JSON.stringify({ plugins: [['github:Chulf58/sterling#semver:>=0.18.0', { some: 'option' }]] }));
+    assert.equal(remedy(), `\`opencode plugin update "${STERLING_GIT_SPEC}"\``, 'a tuple entry names its spec');
+    touch(conf, JSON.stringify({ plugins: ['github:Chulf58/sterling#v0.18.58'] }));
+    assert.match(remedy(), /^`opencode plugin update "github:Chulf58\/sterling#v0\.18\.58"`/);
+    assert.match(remedy(), new RegExp(`pinned to #v0\\.18\\.58 and never updates.*${STERLING_GIT_SPEC.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    touch(conf, '{\n  // global plugins\n  "plugins": [\n    "other", // trailing comment\n    "github:Chulf58/sterling#v0.18.58",\n  ],\n}\n');
+    assert.match(remedy(), /^`opencode plugin update "github:Chulf58\/sterling#v0\.18\.58"`/, 'a JSONC config (comments, trailing commas) is read, not skipped');
+    assert.match(remedy(), /pinned to #v0\.18\.58 and never updates/);
+    touch(conf, '{ not json');
+    const unreadable = remedy();
+    assert.ok(unreadable.includes(`could not read ${conf}: `), unreadable);
+    assert.ok(unreadable.includes(`the shipped spec`) && unreadable.includes(`"${STERLING_GIT_SPEC}"`), 'the shipped spec is named as the fallback');
+  } finally {
+    rm(home);
+  }
+});
+
+test('sterlingUpdateRemedy(opencode): an object entry is read only through its package field; with both an npm and a Git entry the one matching the refused copy\'s cache wins', () => {
+  const home = tmp('sterling-roots-kind-');
+  try {
+    const conf = join(home, '.config', 'opencode', 'opencode.json');
+    const remedy = (root) => sterlingUpdateRemedy('opencode', { env: {}, home, root });
+    const SHIPPED = `\`opencode plugin update "${STERLING_GIT_SPEC}"\``;
+    touch(conf, JSON.stringify({ plugins: [{ path: 'github:Chulf58/sterling#v0.18.58', name: '@chulf58/sterling' }] }));
+    assert.equal(remedy(), SHIPPED, 'a path or name field is not the spec');
+    touch(conf, JSON.stringify({ plugins: [{ package: '@chulf58/sterling@1.2.3' }] }));
+    assert.equal(remedy(), '`opencode plugin update "@chulf58/sterling@1.2.3"`', 'the package field is');
+    touch(conf, JSON.stringify({ plugins: ['github:Chulf58/sterling-other', 'x/chulf58/sterling-fork'] }));
+    assert.equal(remedy(), SHIPPED, 'a different repo that merely contains the name is not Sterling');
+
+    touch(conf, JSON.stringify({ plugins: ['@chulf58/sterling@latest', 'github:Chulf58/sterling#semver:>=0.19.0'] }));
+    const npmRoot = opencodeCopy(home, '1', '1.0.0');
+    const gitRoot = opencodeCopy(home, '2', '1.0.0', ['git-github-chulf58-sterling-0123456789ab']);
+    assert.equal(remedy(npmRoot), '`opencode plugin update "@chulf58/sterling@latest"`', 'the npm copy takes the npm entry');
+    assert.equal(remedy(gitRoot), '`opencode plugin update "github:Chulf58/sterling#semver:>=0.19.0"`', 'the Git copy takes the Git entry');
+    assert.equal(remedy(), '`opencode plugin update "@chulf58/sterling@latest"`', 'no refused copy: list order');
+    touch(conf, JSON.stringify({ plugins: ['github:Chulf58/sterling#semver:>=0.19.0'] }));
+    assert.equal(remedy(npmRoot), '`opencode plugin update "github:Chulf58/sterling#semver:>=0.19.0"`', 'only one kind configured: that one');
+  } finally {
+    rm(home);
+  }
+});
+
+test('sterlingUpdateRemedy(opencode): only a tag or a commit is flagged as never updating; a branch ref is not; a spec with shell-special characters is not echoed', () => {
+  const home = tmp('sterling-roots-pin-');
+  try {
+    const conf = join(home, '.config', 'opencode', 'opencode.json');
+    const remedy = () => sterlingUpdateRemedy('opencode', { env: {}, home });
+    for (const ref of ['v0.18.58', '0.18.58', 'abc1234', '0123456789abcdef0123456789abcdef01234567']) {
+      touch(conf, JSON.stringify({ plugins: [`github:Chulf58/sterling#${ref}`] }));
+      assert.match(remedy(), new RegExp(`pinned to #${ref} and never updates`), ref);
+    }
+    for (const ref of ['main', 'opencode-release', 'semver:>=0.18.0']) {
+      touch(conf, JSON.stringify({ plugins: [`github:Chulf58/sterling#${ref}`] }));
+      assert.match(remedy(), new RegExp(`^\`opencode plugin update "github:Chulf58/sterling#${ref}"\``), ref);
+      assert.doesNotMatch(remedy(), /never updates/, `#${ref} is not a measured pin`);
+    }
+    for (const bad of ['github:Chulf58/sterling#v1"; echo hi; "', 'github:Chulf58/sterling#$(id)', 'github:Chulf58/sterling#`id`']) {
+      touch(conf, JSON.stringify({ plugins: [bad] }));
+      const out = remedy();
+      assert.ok(out.includes(`"${STERLING_GIT_SPEC}"`), 'the shipped spec is printed');
+      assert.match(out, /not echoed/);
+      assert.ok(!out.includes('echo hi') && !out.includes('$(id)') && !out.includes('`id`'), out);
+    }
+  } finally {
+    rm(home);
+  }
+});
+
 test('remedies per host; an unknown host names both; a misspelt host is a loud error', () => {
   assert.equal(sterlingInstallRemedy('claude-code'), 'claude plugin install sterling@sterling');
   assert.equal(STERLING_GIT_SPEC, 'github:Chulf58/sterling#semver:>=0.18.0', 'a range with no upper bound, so 0.19 and 1.0 are found too');
   assert.equal(sterlingInstallRemedy('opencode'), `opencode plugin add "${STERLING_GIT_SPEC}"`, 'the inlined RESOLVER_SOURCE literal matches the exported spec, quoted for the shell');
   assert.ok(sterlingInstallRemedy(null).includes(`opencode plugin add "${STERLING_GIT_SPEC}" for OpenCode`));
   assert.match(sterlingInstallRemedy(null), /^claude plugin install sterling@sterling for Claude Code, or /);
-  assert.match(sterlingUpdateRemedy('claude-code'), /\/plugin .*claude plugin update sterling@/);
-  assert.equal(sterlingUpdateRemedy('opencode'), `\`opencode plugin update "${STERLING_GIT_SPEC}"\``, 'plugin update takes the target as configured in opencode.json');
-  assert.match(sterlingUpdateRemedy(null), /claude plugin update.*opencode plugin update/);
+  const home = tmp('sterling-roots-remedy-');
+  try {
+    const hermetic = { env: {}, home };
+    assert.match(sterlingUpdateRemedy('claude-code', hermetic), /\/plugin .*claude plugin update sterling@/);
+    assert.equal(sterlingUpdateRemedy('opencode', hermetic), `\`opencode plugin update "${STERLING_GIT_SPEC}"\``, 'plugin update takes the target as configured in opencode.json');
+    assert.match(sterlingUpdateRemedy(null, hermetic), /claude plugin update.*opencode plugin update/);
+    assert.throws(() => sterlingUpdateRemedy('vscode', hermetic), /unknown host/);
+  } finally {
+    rm(home);
+  }
   assert.throws(() => sterlingInstallRemedy('claude'), /unknown host/);
-  assert.throws(() => sterlingUpdateRemedy('vscode'), /unknown host/);
 });
 
 test('installHostOf: which install root a path lies under, by realpath; null outside both', () => {

@@ -49,6 +49,11 @@ export function opencodeBinDefault(execPath = process.execPath) {
   return !isNodeBinary(execPath) && /opencode/i.test(String(execPath ?? '').split(/[\\/]/).pop()) ? execPath : null;
 }
 
+// The notice for an unset OpenCode worker model: the exact key and shape to set, because the
+// notice is all a user sees (decision opencode-maintenance-worker-refuses-without-a-configured-model).
+export const MODEL_UNSET_TEXT =
+  'Sterling: the maintenance worker did not run. config maintenance_worker.opencode_model is not set, and the OpenCode worker never falls back to OpenCode\'s default one. To enable it, add this to .sterling/config.json (any provider/model you can run): "maintenance_worker": { "opencode_model": "<provider>/<model>" }. Until then the queue drains by hand with /sterling:drain.';
+
 export const NO_RUNNER_TEXT =
   'Sterling: the maintenance worker did not run. No maintenance runner exists on this machine: the worker runs `claude -p` or `opencode run`, and neither `claude` nor an OpenCode binary was found (this plugin is not running inside an OpenCode binary). The maintenance queue drains only by hand (/sterling:drain) until one is installed.';
 
@@ -87,7 +92,7 @@ export function createWorkerLaunch({
     // opencode-maintenance-worker-refuses-without-a-configured-model): one loud
     // notice per process, like the no-runner skip, never OpenCode's default model.
     if (ocBin && opencodeModelOf(config) === null) {
-      skipOnce(root, at, `maintenance worker skipped: ${OPENCODE_MODEL_UNSET}`, `Sterling: the maintenance worker did not run. ${OPENCODE_MODEL_UNSET}.`);
+      skipOnce(root, at, `maintenance worker skipped: ${OPENCODE_MODEL_UNSET}`, MODEL_UNSET_TEXT);
       return;
     }
     const nodeCmd = isNodeBinary(execPath) ? execPath : nodeOnPath() ? 'node' : null;
