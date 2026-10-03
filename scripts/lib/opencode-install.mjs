@@ -51,7 +51,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -700,15 +700,55 @@ export function parseJsonc(text) {
   return JSON.parse(out);
 }
 
-/** Every agent .md under `dir` (recursively unless `flat`), as OpenCode names it: its path below `dir` without .md. */
-function agentFileNames(dir, { flat = false, prefix = '' } = {}) {
+/**
+ * Every agent .md under `dir` (recursively unless `flat`), as OpenCode names it: its path
+ * below `dir` without .md, with its absolute path. Symlinks are followed, as OpenCode
+ * follows them; a directory already walked (by real path) is not walked again, and a
+ * dangling link is skipped. A directory that cannot be read throws.
+ */
+function agentFiles(dir, { flat = false, prefix = '', seen = new Set() } = {}) {
   if (!existsSync(dir)) return [];
-  const names = [];
-  for (const d of readdirSync(dir, { withFileTypes: true })) {
-    if (d.isDirectory() && !flat) names.push(...agentFileNames(join(dir, d.name), { prefix: `${prefix}${d.name}/` }));
-    else if (d.isFile() && d.name.endsWith('.md')) names.push(`${prefix}${d.name.slice(0, -3)}`);
+  const real = realpathSync(dir);
+  if (seen.has(real)) return [];
+  seen.add(real);
+  const files = [];
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    let st;
+    try {
+      st = statSync(path);
+    } catch (err) {
+      if (err.code === 'ENOENT') continue; // a dangling symlink
+      throw err;
+    }
+    if (st.isDirectory() && !flat) files.push(...agentFiles(path, { prefix: `${prefix}${name}/`, seen }));
+    else if (st.isFile() && name.endsWith('.md')) files.push({ name: `${prefix}${name.slice(0, -3)}`, path });
   }
-  return names;
+  return files;
+}
+
+const GUARDED_KEYS = new Set(['*', ...EDIT_FAMILY, ...SHELL_FAMILY]);
+
+/** True when an agent file's frontmatter has permission rules that can allow edit or shell (any value but deny for "*", edit, write, patch, shell or bash). */
+function agentFileLoosensGuard(text) {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1];
+  if (!fm) return false;
+  const lines = fm.split(/\r?\n/);
+  const at = lines.findIndex((l) => /^permission:/.test(l));
+  if (at === -1) return false;
+  const scalar = lines[at].slice('permission:'.length).trim();
+  if (scalar) return scalar !== 'deny';
+  const block = [];
+  for (const l of lines.slice(at + 1)) {
+    if (l.trim() && !/^\s/.test(l)) break;
+    if (l.trim()) block.push(l);
+  }
+  const indent = Math.min(...block.map((l) => l.length - l.trimStart().length));
+  return block.some((l) => {
+    if (l.length - l.trimStart().length !== indent) return false;
+    const m = /^\s*(["']?)([^"':]+)\1\s*:\s*(.*)$/.exec(l);
+    return m !== null && GUARDED_KEYS.has(m[2].trim()) && m[3].trim() !== 'deny';
+  });
 }
 
 /**
@@ -735,15 +775,41 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir() 
   }
   const names = new Set();
   const envNames = new Set();
-  const fileNames = (dir) => [
-    ...['agent', 'agents'].flatMap((sub) => agentFileNames(join(dir, sub))),
-    ...['mode', 'modes'].flatMap((sub) => agentFileNames(join(dir, sub), { flat: true })),
-  ];
-  for (const dir of [globalDir, dotDir, ...ancestors.map((a) => join(a, '.opencode'))]) {
-    for (const n of fileNames(dir)) (dir === env.OPENCODE_CONFIG_DIR ? envNames : names).add(n);
-  }
   const problems = [];
   let incomplete = false;
+  const unreadable = (label, err) => {
+    incomplete = true;
+    problems.push({ item: label, status: 'skipped', detail: `cannot be read (${err.code ?? err.message}), so the agents it defines are NOT checked and get no new per-agent guard; earlier per-agent guard entries are kept; fix it, then rerun /sterling:update` });
+  };
+  for (const dir of [globalDir, dotDir, ...ancestors.map((a) => join(a, '.opencode'))]) {
+    for (const [sub, flat] of [['agent', false], ['agents', false], ['mode', true], ['modes', true]]) {
+      let files;
+      try {
+        files = agentFiles(join(dir, sub), { flat });
+      } catch (err) {
+        unreadable(fwd(join(dir, sub)), err);
+        continue;
+      }
+      for (const { name, path } of files) {
+        (dir === env.OPENCODE_CONFIG_DIR ? envNames : names).add(name);
+        if (dir !== dotDir) continue;
+        // Measured on 2.0.22 (GET /api/agent/<name> lists the rules in order, and a live
+        // `ls -la .sterling/sterling.db` ran): a project agent file's own rules come AFTER
+        // agent.<name>.permission in .opencode/opencode.json, so the per-agent guard does
+        // not hold for it. Agent files in the global dir and in ancestors come before it.
+        let text;
+        try {
+          text = readFileSync(path, 'utf8');
+        } catch (err) {
+          unreadable(fwd(path), err);
+          continue;
+        }
+        if (agentFileLoosensGuard(text)) {
+          problems.push({ item: fwd(path), status: 'skipped', detail: `its permission rules can allow edit or shell, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name}"; move its edit, write, patch, shell, bash and "*" rules into agent.${JSON.stringify(name)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
+        }
+      }
+    }
+  }
   const docs = [
     ...['opencode.json', 'opencode.jsonc'].map((f) => join(globalDir, f)),
     ...['opencode.json', 'opencode.jsonc'].map((f) => join(projectDir, f)),
@@ -755,7 +821,14 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir() 
   const fromEnv = new Set([...(env.OPENCODE_CONFIG_DIR ? ['opencode.json', 'opencode.jsonc'].map((f) => fwd(join(globalDir, f))) : []), ...(env.OPENCODE_CONFIG ? [fwd(env.OPENCODE_CONFIG)] : []), 'OPENCODE_CONFIG_CONTENT']);
   const late = new Set([fwd(join(dotDir, 'opencode.jsonc')), ...(env.OPENCODE_CONFIG ? [fwd(env.OPENCODE_CONFIG)] : []), 'OPENCODE_CONFIG_CONTENT']);
   for (const doc of docs) {
-    const text = doc.read();
+    // A source that exists but cannot be read (a directory named opencode.json, EACCES) is a row, never a crash.
+    let text;
+    try {
+      text = doc.read();
+    } catch (err) {
+      unreadable(doc.label, err);
+      continue;
+    }
     if (text === null) continue;
     let config;
     try {
@@ -828,8 +901,11 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   config.permission = top.value;
   // Per-agent guard. An agent's own rules (its file's permission block) are evaluated
   // after the top-level block, so a user agent that allows bash re-allowed the store;
-  // agent.<name>.permission in this file is evaluated after the agent file's rules
-  // (measured on 2.0.22: `opencode debug agents`, and a live shell call denied). An entry
+  // agent.<name>.permission in this file is evaluated after the rules of an agent file in
+  // the global config dir or an ancestor's .opencode (measured on 2.0.22: `opencode debug
+  // agents`, and a live shell call denied), but BEFORE those of a project agent file in
+  // .opencode/ (measured: GET /api/agent/<name>, and a live call that ran), so
+  // visibleAgents reports such a file whose rules can allow edit or shell. An entry
   // for a name OpenCode does not otherwise know creates an agent (measured), so a
   // guard-only entry is written only for a visible agent and dropped when it is gone.
   const agents = config.agent ?? {};

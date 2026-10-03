@@ -3,7 +3,7 @@
 // Every test runs against a temp HOME and temp git projects, with OpenCode stubbed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, cpSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, cpSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -46,6 +46,7 @@ function run(dir, home, extra = {}) {
   return setupOpenCode({ projectDir: dir, pluginRoot: repoRoot, env: { HOME: home }, home, installed: false, probe: OC2, ...extra });
 }
 
+const fwdPath = (p) => p.replaceAll('\\', '/');
 const statusOf = (result, suffix) => result.rows.find((r) => r.item.endsWith(suffix))?.status;
 const untracked = (dir) => git(dir, ['status', '--porcelain', '--untracked-files=all']).split('\n').filter(Boolean);
 
@@ -431,6 +432,66 @@ test('project config: agents in an ancestor directory\'s .opencode and opencode.
   const agents = JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).agent;
   for (const want of ['ancfile', 'ancdot', 'ancroot']) assert.ok(agents[want], `${want} is guarded (got ${Object.keys(agents).join(', ')})`);
   assert.ok(!r.rows.some((x) => x.item.startsWith(parent.replaceAll('\\', '/')) && x.status === 'skipped'), 'ancestor sources are read before the project config, so their rules raise no row');
+});
+
+test('project config: an ancestor source that cannot be read is a skipped row and keeps earlier guard entries, never a crash', () => {
+  const home = tmp('oc-home-');
+  const parent = tmp('oc-anc-');
+  const dir = project('hobby', parent);
+  mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
+  writeFileSync(join(dir, '.opencode', 'agents', 'mine.md'), '---\ndescription: d\n---\n\nbody\n');
+  writeFileSync(join(parent, 'opencode.jsonc'), '{ "agent": { "ancold": {} } }');
+  run(dir, home);
+  rmSync(join(parent, 'opencode.jsonc'));
+  mkdirSync(join(parent, 'opencode.json'));
+  mkdirSync(join(parent, 'opencode.jsonc'));
+  const r = run(dir, home);
+  const rows = r.rows.filter((x) => x.item.startsWith(fwdPath(parent)) && x.status === 'skipped');
+  assert.deepEqual(rows.map((x) => x.item).sort(), [`${fwdPath(parent)}/opencode.json`, `${fwdPath(parent)}/opencode.jsonc`]);
+  assert.match(rows[0].detail, /cannot be read \(EISDIR\).*NOT checked.*earlier per-agent guard entries are kept/);
+  const agents = JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).agent;
+  assert.ok(agents.mine && agents.ancold, 'the guard entries stay while a source is unreadable');
+});
+
+test('project config: symlinked agent files and directories count as agents, and a symlink loop ends', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  const elsewhere = tmp('oc-agents-src-');
+  const md = '---\ndescription: d\n---\n\nbody\n';
+  writeFileSync(join(elsewhere, 'linkedfile.md'), md);
+  mkdirSync(join(elsewhere, 'team'));
+  writeFileSync(join(elsewhere, 'team', 'member.md'), md);
+  const agentsDir = join(dir, '.opencode', 'agents');
+  mkdirSync(agentsDir, { recursive: true });
+  symlinkSync(join(elsewhere, 'linkedfile.md'), join(agentsDir, 'linkedfile.md'));
+  symlinkSync(join(elsewhere, 'team'), join(agentsDir, 'team'));
+  symlinkSync(agentsDir, join(agentsDir, 'team', 'loop'));
+  symlinkSync(join(elsewhere, 'missing.md'), join(agentsDir, 'dangling.md'));
+  run(dir, home);
+  const names = Object.keys(JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).agent);
+  for (const want of ['linkedfile', 'team/member']) assert.ok(names.includes(want), `${want} is guarded (got ${names.join(', ')})`);
+  assert.ok(!names.includes('dangling'), 'a dangling link is not an agent');
+  assert.ok(!names.some((n) => n.includes('loop/')), 'the loop is walked once');
+});
+
+test('project config: a project agent file whose rules can allow edit or shell gets a row, because its rules come after the per-agent guard', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  const put = (rel, text) => {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    writeFileSync(join(dir, rel), text);
+  };
+  put('.opencode/agents/loose.md', '---\ndescription: d\nmode: primary\npermission:\n  bash:\n    "*": allow\n---\n\nbody\n');
+  put('.opencode/agents/star.md', '---\ndescription: d\npermission:\n  "*": ask\n---\n\nbody\n');
+  put('.opencode/agents/scalar.md', '---\ndescription: d\npermission: allow\n---\n\nbody\n');
+  put('.opencode/agents/denies.md', '---\ndescription: d\npermission:\n  edit: deny\n  bash: deny\n  webfetch: allow\n  sterling_board_add: deny\n---\n\nbody\n');
+  put('.opencode/agents/plain.md', '---\ndescription: d\n---\n\npermission: allow in the body is not frontmatter\n');
+  mkdirSync(join(home, '.config', 'opencode', 'agents'), { recursive: true });
+  writeFileSync(join(home, '.config', 'opencode', 'agents', 'globalloose.md'), '---\ndescription: d\npermission:\n  bash: allow\n---\n\nbody\n');
+  const r = run(dir, home);
+  const flagged = r.rows.filter((x) => x.status === 'skipped' && /store guard does NOT hold/.test(x.detail)).map((x) => x.item.split('/').pop()).sort();
+  assert.deepEqual(flagged, ['loose.md', 'scalar.md', 'star.md'], 'only project agent files that can allow edit or shell; a global agent file comes before the guard');
+  assert.match(r.rows.find((x) => x.item.endsWith('loose.md')).detail, /move its .* rules into agent\."loose"\.permission in \.opencode\/opencode\.json/);
 });
 
 test('parseJsonc: comments and trailing commas go only outside strings', async () => {
