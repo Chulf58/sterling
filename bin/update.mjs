@@ -6126,7 +6126,7 @@ var init_shares = __esm({
 });
 
 // packages/store/dist/mounted.js
-import { mkdirSync as mkdirSync2, existsSync as existsSync5, rmSync, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
+import { mkdirSync as mkdirSync2, existsSync as existsSync6, rmSync, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
 import { dirname as dirname2, join as join9 } from "node:path";
 import { homedir as homedir3 } from "node:os";
 function resolveDomainMounts(config) {
@@ -6237,7 +6237,7 @@ var init_mounted = __esm({
         this.project = open(projectDbPath);
         try {
           for (const m of mounts) {
-            if (!existsSync5(m.dbPath)) {
+            if (!existsSync6(m.dbPath)) {
               if (options?.skipMissing) {
                 this.missingDomains.push({ name: m.name, dbPath: m.dbPath });
                 continue;
@@ -7252,7 +7252,7 @@ __export(dist_exports2, {
   unrecognizedKeyPaths: () => unrecognizedKeyPaths
 });
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync as mkdirSync4, existsSync as existsSync6, realpathSync as realpathSync3, statSync } from "node:fs";
+import { mkdirSync as mkdirSync4, existsSync as existsSync7, realpathSync as realpathSync3, statSync } from "node:fs";
 import { dirname as dirname4, basename, join as join11, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 function classifyClaimPath(repoRoot, path) {
@@ -9347,7 +9347,7 @@ CREATE TABLE IF NOT EXISTS store_meta (
       /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */
       snapshot(targetPath) {
         const target2 = targetPath.replace(/\\/g, "/");
-        if (existsSync6(target2)) {
+        if (existsSync7(target2)) {
           throw new Error(`snapshot: target already exists, refusing to overwrite: '${target2}'`);
         }
         mkdirSync4(dirname4(target2), { recursive: true });
@@ -9840,13 +9840,13 @@ var init_agent_coverage = __esm({
 
 // scripts/update.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync8 } from "node:fs";
+import { existsSync as existsSync9 } from "node:fs";
 import { dirname as dirname6, join as join14, resolve as resolve6 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/lib/update.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { closeSync as closeSync3, existsSync as existsSync7, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, readSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync8, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, readSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname5, join as join13 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10289,6 +10289,7 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
 
 // scripts/lib/handoff-projection.mjs
 import { spawnSync } from "node:child_process";
+import { existsSync as existsSync5 } from "node:fs";
 import { join as join7, resolve as resolve4 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
@@ -10499,9 +10500,54 @@ var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents
 var HANDOFF_OFF_DETAIL = "handoff files are off (config.handoff.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted)";
 var HandoffSettingError = class extends Error {
 };
-function portableAgentsTracked(root) {
-  const r = spawnSync("git", ["ls-files", "--", ...PORTABLE_AGENT_PATHS], { cwd: root, encoding: "utf8" });
-  return r.status === 0 && r.stdout.trim() !== "";
+var HandoffGitError = class extends HandoffSettingError {
+  constructor(message, reason) {
+    super(message);
+    this.reason = reason;
+  }
+};
+var GIT_TIMEOUT_MS = 3e4;
+function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
+  const run = (args) => {
+    const r = spawn("git", args, { cwd: root, encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
+    const name = `git ${args[0]}`;
+    if (r.error) return { failed: r.error.code === "ETIMEDOUT" ? `${name} timed out after ${GIT_TIMEOUT_MS / 1e3}s` : `${name} did not run (${r.error.message})` };
+    if (r.status !== 0) {
+      const stderr = (r.stderr || "").trim().split("\n")[0];
+      return { failed: `${name} exited ${r.status ?? `on signal ${r.signal}`}: ${stderr || "no error output"}`, notARepo: r.status === 128 && /not a git repository/i.test(stderr) };
+    }
+    return { stdout: r.stdout || "" };
+  };
+  if (!existsSync5(root)) return { files: [], unknown: null };
+  const inside = run(["rev-parse", "--is-inside-work-tree"]);
+  if (inside.failed) {
+    if (inside.notARepo && !existsSync5(join7(root, ".git"))) return { files: [], unknown: null };
+    return { files: [], unknown: inside.failed };
+  }
+  if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
+  const ls = run(["ls-files", "-z", "--", ...PORTABLE_AGENT_PATHS, HANDOFF_DOCS_DIR, ...HANDOFF_ROOT_FILES]);
+  if (ls.failed) return { files: [], unknown: ls.failed };
+  const files = [];
+  for (const rel of ls.stdout.split("\0").filter(Boolean)) {
+    if (!HANDOFF_ROOT_FILES.includes(rel)) {
+      files.push(rel);
+      continue;
+    }
+    try {
+      if (existsContained(root, rel, "file") && readContained(root, rel).startsWith(HANDOFF_MARKER)) files.push(rel);
+    } catch (err) {
+      return { files: [], unknown: `${rel} is tracked but could not be read (${err.message})` };
+    }
+  }
+  return { files, unknown: null };
+}
+function handoffFilesOnDisk(root) {
+  const found = PORTABLE_AGENT_PATHS.filter((rel) => existsContained(root, rel, "file"));
+  if (existsContained(root, HANDOFF_DOCS_DIR, "dir")) found.push(`${HANDOFF_DOCS_DIR}/`);
+  for (const rel of HANDOFF_ROOT_FILES) {
+    if (existsContained(root, rel, "file") && readContained(root, rel).startsWith(HANDOFF_MARKER)) found.push(rel);
+  }
+  return found;
 }
 function handoffSettingOf(parsed, root, where = CONFIG_REL) {
   const block = parsed?.handoff;
@@ -10509,17 +10555,28 @@ function handoffSettingOf(parsed, root, where = CONFIG_REL) {
     throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
   }
   const value = block?.enabled;
-  if (value === void 0) return portableAgentsTracked(root) ? { enabled: true, source: "tracked" } : { enabled: false, source: "default" };
+  if (value === void 0) {
+    const tracked = trackedHandoffFiles(root);
+    if (tracked.unknown !== null) {
+      throw new HandoffGitError(`config.handoff.enabled is not set in ${where} and git could not say whether handoff files are committed (${tracked.unknown}) \u2014 the setting is not guessed; repair the repository, or set config.handoff.enabled to true or false (TUI System tab)`, tracked.unknown);
+    }
+    return tracked.files.length ? { enabled: true, source: "tracked" } : { enabled: false, source: "default" };
+  }
   if (typeof value !== "boolean") {
     throw new HandoffSettingError(`config.handoff.enabled is ${JSON.stringify(value)} in ${where} \u2014 it must be true or false; switch it in the TUI System tab or fix the file`);
   }
   return { enabled: value, source: "config" };
 }
-function readHandoffEnabled(root) {
+function readHandoffSetting(root) {
   const { where, parsed } = readRawConfig(root, HandoffSettingError, "the handoff setting");
-  return handoffSettingOf(parsed, root, where).enabled;
+  const setting = handoffSettingOf(parsed, root, where);
+  return { ...setting, unmaintained: setting.source === "default" ? handoffFilesOnDisk(root) : [] };
+}
+function handoffUnmaintainedNotice(files) {
+  return `handoff files NOT MAINTAINED \u2014 ${files.join(", ")} ${files.length === 1 ? "exists" : "exist"} on disk, not tracked in git, and config.handoff.enabled is not set: Sterling no longer maintains them and deletes nothing. Turn on the Handoff files row in the TUI System tab to keep them maintained.`;
 }
 var HANDOFF_DOCS_DIR = "docs/sterling";
+var HANDOFF_ROOT_FILES = ["architecture.md", "rulings.md"];
 var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
 var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
      Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
@@ -10665,7 +10722,7 @@ function refusalFor(c) {
 }
 function stampConsumerRoleIfAbsent(cwd, log) {
   const configPath = join13(cwd, ".sterling", "config.json");
-  if (!existsSync7(configPath)) {
+  if (!existsSync8(configPath)) {
     log(
       "\n\u25B8 machine-role stamp \u2014 SKIPPED: no .sterling/config.json in the clone. Normal for a consumer machine (the clone is not init'd as a project). H1 reports MACHINE ROLE: UNDECLARED, which is treated as CONSUMER \u2014 declare machine_role explicitly only on the authoring machine."
     );
@@ -10727,7 +10784,7 @@ function preScaleDownMarkers(text) {
 var UPDATE_MARKER_RELATIVE_PATH = join13(".sterling", "update-complete.json");
 function readUpdateMarker(cwd, log) {
   const p = join13(cwd, UPDATE_MARKER_RELATIVE_PATH);
-  if (!existsSync7(p)) return null;
+  if (!existsSync8(p)) return null;
   try {
     const parsed = JSON.parse(readFileSync6(p, "utf8"));
     if (typeof parsed?.sha !== "string" || !parsed.sha) throw new Error('missing or invalid "sha" field');
@@ -10751,7 +10808,7 @@ function handoffRefusalRemedy(repoPath2) {
 function ownPluginRoot() {
   let dir = dirname5(fileURLToPath(new URL("../scripts/lib/update.mjs", import.meta.url).href));
   for (let i = 0; i < 4; i++) {
-    if (existsSync7(join13(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync8(join13(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname5(dir);
   }
   return null;
@@ -10763,16 +10820,16 @@ function installedCopyRefusal(host, { env = process.env, home = homedir5(), root
 function machineStores(cwd) {
   const stores = [join13(cwd, ".sterling", "sterling.db")];
   const domains = join13(homedir5(), ".sterling", "domains");
-  if (existsSync7(domains)) {
+  if (existsSync8(domains)) {
     for (const name of readdirSync4(domains).sort()) {
       stores.push(join13(domains, name, "sterling.db"));
     }
   }
-  return stores.filter((store) => existsSync7(store));
+  return stores.filter((store) => existsSync8(store));
 }
 function walUserVersion(dbPath) {
   const walPath = `${dbPath}-wal`;
-  if (!existsSync7(walPath)) return null;
+  if (!existsSync8(walPath)) return null;
   const wal = readFileSync6(walPath);
   if (wal.length < 32) return null;
   const magic = wal.readUInt32BE(0);
@@ -10850,11 +10907,12 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         continue;
       }
       let handoffEnabled;
+      let handoffUnmaintained;
       try {
-        handoffEnabled = readHandoffEnabled(p.repo_path);
+        ({ enabled: handoffEnabled, unmaintained: handoffUnmaintained } = readHandoffSetting(p.repo_path));
       } catch (err) {
         if (!isProjectReadRefusal(err)) throw err;
-        log(`  \u2717 ${p.name}: REFUSED \u2014 handoff setting: ${err.message}. Nothing was synced or projected for this project; fix config.handoff.enabled (true or false, TUI System tab) and rerun /sterling:update.`);
+        log(`  \u2717 ${p.name}: REFUSED \u2014 handoff setting: ${err.message}. Nothing was synced or projected for this project; set config.handoff.enabled to true or false (TUI System tab) and rerun /sterling:update.`);
         entry.handoff = "refused_handoff_setting";
         fail(2);
         failures++;
@@ -10883,6 +10941,7 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         for (const line of driftedAgents) log(`      \u26A0 ${line}`);
         for (const line of autoMemoryNotices) log(`      \u26A0 ${line}`);
       }
+      if (handoffUnmaintained.length) log(`      \u26A0 ${handoffUnmaintainedNotice(handoffUnmaintained)}`);
       if (!withHandoff) {
         entry.handoff = "not_run";
       } else if (!handoffEnabled) {
@@ -10985,7 +11044,7 @@ AUTHORING clone \u2014 nothing to pull; syncing ${project.repo_path} only`);
     refreshProjects([project], { launchers: false, handoff: false });
     if (normPath(project.repo_path) === normPath(cwd)) {
       log("\u25B8 the clone's contract files are hand-maintained \u2014 not checked");
-    } else if (existsSync7(join13(cwd, "scripts", "stamp-contract.mjs"))) {
+    } else if (existsSync8(join13(cwd, "scripts", "stamp-contract.mjs"))) {
       const contract = step("contract drift in the invoking project (stamp-contract, dry run)", nodeBin, [join13(cwd, "scripts", "stamp-contract.mjs"), "--project", project.repo_path], {
         show: true,
         tolerate: true
@@ -11090,7 +11149,7 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
       if (!p.clone) {
         const claudePath = join13(p.repo_path, "CLAUDE.md");
         try {
-          if (existsSync7(claudePath)) {
+          if (existsSync8(claudePath)) {
             const markers = preScaleDownMarkers(readFileSync6(claudePath, "utf8"));
             if (markers.length) lines.push(`  \u26A0 ${p.name}: CLAUDE.md predates the scale-down (mentions ${markers.join(", ")}) \u2014 run /sterling:init there (${p.repo_path}) to migrate it`);
           }
@@ -11100,7 +11159,7 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
       }
       if (!describe) continue;
       const configPath = join13(p.repo_path, ".sterling", "config.json");
-      if (!existsSync7(configPath)) continue;
+      if (!existsSync8(configPath)) continue;
       let raw;
       try {
         raw = JSON.parse(readFileSync6(configPath, "utf8"));
@@ -11161,7 +11220,7 @@ Already current \u2014 nothing to do for the core update at ${before.head_short}
         report2.exit = 1;
         return report2;
       };
-      if (!existsSync7(script)) return failed(`${script} not found after the fast-forward`);
+      if (!existsSync8(script)) return failed(`${script} not found after the fast-forward`);
       log(`
 \u25B8 re-running the UPDATED updater (${script}) so the rest of this update runs the code just pulled`);
       const r = await reexec2(script, { from: before.head });
@@ -11241,7 +11300,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   } else {
     log("\n\u25B8 store migration (this clone) \u2014 SKIPPED (red test battery)");
   }
-  if (existsSync7(join13(cwd, ".sterling", "config.json"))) {
+  if (existsSync8(join13(cwd, ".sterling", "config.json"))) {
     step("re-bake machine artifacts (init ensure pass)", nodeBin, [join13(cwd, "scripts", "init.mjs"), "--target", cwd, "--update-ensure"], { show: true, tolerate: true });
   } else {
     log(
@@ -11261,7 +11320,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   } else if (opts2.projects !== false && projectList.length) {
     for (const p of projectList) {
       const projStore = join13(p.repo_path, ".sterling", "sterling.db");
-      if (!existsSync7(projStore)) continue;
+      if (!existsSync8(projStore)) continue;
       let projVersion;
       try {
         projVersion = probeSchemaVersion(projStore);
@@ -11297,7 +11356,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   }
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
-  if (opts2.projects !== false && existsSync7(join13(cwd, "scripts", "stamp-contract.mjs"))) {
+  if (opts2.projects !== false && existsSync8(join13(cwd, "scripts", "stamp-contract.mjs"))) {
     const contract = step("contract drift in sibling projects (stamp-contract, dry run)", nodeBin, [join13(cwd, "scripts", "stamp-contract.mjs")], {
       show: true,
       tolerate: true
@@ -11358,7 +11417,7 @@ async function loadProjects({ includeClone = false } = {}) {
   const store = await loadStoreModule();
   const registry = new store.ProjectRegistry(store.registryPath());
   try {
-    return registry.list().filter((p) => existsSync8(p.repo_path) && (includeClone || norm(p.repo_path) !== norm(target))).map((p) => ({ name: p.name, repo_path: p.repo_path }));
+    return registry.list().filter((p) => existsSync9(p.repo_path) && (includeClone || norm(p.repo_path) !== norm(target))).map((p) => ({ name: p.name, repo_path: p.repo_path }));
   } finally {
     registry.close();
   }
