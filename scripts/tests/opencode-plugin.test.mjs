@@ -75,7 +75,7 @@ function makeProject({ withGit = true } = {}) {
 
 /** A stub of the OpenCode 2 plugin context: records hook registrations and feeds events. */
 function stubCtx(directory, sessions = {}) {
-  const hooks = { session: {}, tool: {}, transforms: { command: [], skill: [], mcp: [] } };
+  const hooks = { session: {}, tool: {}, permission: {}, transforms: { command: [], skill: [], mcp: [] } };
   const queue = [];
   let wake = null;
   return {
@@ -83,15 +83,18 @@ function stubCtx(directory, sessions = {}) {
     location: { directory },
     session: {
       hook: async (name, fn) => void (hooks.session[name] = fn),
-      // OpenCode 2.0.21: session.get({ sessionID }) -> SessionInfo { id, parentID?, time: { created } }.
+      // OpenCode 2.0.21: session.get({ sessionID }) -> SessionInfo { id, parentID?, time: { created }, location }.
+      // A session lives in this stub's directory unless its entry names another location.
       get: async ({ sessionID }) => {
         const s = sessions[sessionID];
         if (s instanceof Error) throw s;
         if (!s) throw new Error(`no session ${sessionID}`);
-        return { id: sessionID, ...s };
+        return { id: sessionID, location: { directory }, ...s };
       },
     },
     tool: { hook: async (name, fn) => void (hooks.tool[name] = fn) },
+    // OpenCode 2.0.22: permission.hook('evaluate', fn) is the store guard's surface (store-guard.mjs).
+    permission: { hook: async (name, fn) => void (hooks.permission[name] = fn) },
     // Registration surfaces (config.mjs): each transform callback is kept; tests run them when they need to.
     command: { transform: async (cb) => (hooks.transforms.command.push(cb), { dispose: async () => {} }) },
     skill: { transform: async (cb) => (hooks.transforms.skill.push(cb), { dispose: async () => {} }) },
@@ -202,8 +205,10 @@ test('a service whose cwd is project A acts only on the session\'s project B: no
     process.chdir(a.dir);
     const synced = [];
     const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async (root, sid) => void synced.push([root, sid]) });
-    const ctxB = stubCtx(b.dir, { ses_b: {} });
-    const ctxA = stubCtx(a.dir, { ses_a: {} });
+    // One session service: each location can look up the other's session and sees its location.
+    const sessions = { ses_a: { location: { directory: a.dir } }, ses_b: { location: { directory: b.dir } } };
+    const ctxB = stubCtx(b.dir, sessions);
+    const ctxA = stubCtx(a.dir, sessions);
     const before = treeSnapshot(a.dir);
     // The session's location is set up first, the service cwd's location after it (the measured order).
     const cleanB = await plugin.setup(ctxB);
@@ -266,7 +271,55 @@ test('a session in a non-Sterling directory writes nothing anywhere, even with a
   }
 });
 
-test('a setup without ctx.location.directory registers nothing and says so on stderr; it never falls back to the cwd', async () => {
+// Measured on 2.0.22 (finding opencode-execution-events-carry-no-location-cross-project-settlement-october-2026):
+// session.execution.* events carry only data.sessionID, no location, and reach every
+// location's subscription, so B's session end settled A. Each location now settles only
+// a session whose own directory (session.get -> location.directory) is its directory.
+test('a location-less execution end of B\'s session settles B only, never A', async () => {
+  const a = makeProject();
+  const b = makeProject();
+  try {
+    const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async () => {} });
+    const sessions = { ses_a: { location: { directory: a.dir } }, ses_b: { location: { directory: b.dir } } };
+    const ctxA = stubCtx(a.dir, sessions);
+    const ctxB = stubCtx(b.dir, sessions);
+    const cleanA = await plugin.setup(ctxA);
+    const cleanB = await plugin.setup(ctxB);
+    const ended = { type: 'session.execution.succeeded', data: { sessionID: 'ses_b' } };
+    ctxA.emit(ended);
+    ctxB.emit(ended);
+    await plugin.idle();
+    assert.equal(existsSync(settledPath(a.dir)), false, 'A does not settle on B\'s session end');
+    assert.ok(existsSync(settledPath(b.dir)), 'B settles');
+    await cleanA?.();
+    await cleanB?.();
+  } finally {
+    a.cleanup();
+    b.cleanup();
+  }
+});
+
+test('an execution end whose session cannot be looked up settles nothing and is logged once per session', async () => {
+  const a = makeProject();
+  try {
+    const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async () => {} });
+    const ctxA = stubCtx(a.dir, { ses_a: {}, ses_gone: new Error('session not found') });
+    const cleanA = await plugin.setup(ctxA);
+    ctxA.emit({ type: 'session.execution.succeeded', data: { sessionID: 'ses_gone' } });
+    ctxA.emit({ type: 'session.execution.succeeded', data: { sessionID: 'ses_gone' } });
+    await plugin.idle();
+    assert.equal(existsSync(settledPath(a.dir)), false, 'nothing settles');
+    const log = readFileSync(join(a.dir, server.LOG_REL), 'utf8');
+    assert.equal(log.split('\n').filter((l) => /ses_gone/.test(l) && /session not found/.test(l)).length, 1, log);
+    const notices = readFileSync(join(a.dir, server.NOTICES_REL), 'utf8');
+    assert.equal(notices.split('ses_gone').length - 1, 1, 'one notice for the session, not one per event');
+    await cleanA?.();
+  } finally {
+    a.cleanup();
+  }
+});
+
+test('a setup without ctx.location.directory registers only the store guard and says so on stderr; it never falls back to the cwd', async () => {
   const a = makeProject();
   const cwd = process.cwd();
   const writes = [];
@@ -286,6 +339,7 @@ test('a setup without ctx.location.directory registers nothing and says so on st
     }
     assert.deepEqual(ctx.hooks.session, {}, 'no session hook is registered');
     assert.deepEqual(ctx.hooks.tool, {}, 'no tool hook is registered');
+    assert.deepEqual(Object.keys(ctx.hooks.permission), ['evaluate'], 'the store guard is registered, since tools still run there');
     assert.deepEqual(configured, [], 'neither configure nor bootstrap runs');
     assert.ok(writes.some((w) => /ctx\.location\.directory/.test(w)), 'the skip is reported on stderr');
     assert.deepEqual(treeSnapshot(a.dir), before, 'the cwd project is untouched');

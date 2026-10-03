@@ -751,6 +751,20 @@ function agentFileLoosensGuard(text) {
   });
 }
 
+// The first OpenCode with the plugin permission evaluate hook the server plugin's store
+// guard uses (store-guard.mjs; measured on 2.0.22). Below it, a project agent file's own
+// edit or shell rules override the config guard and nothing else denies the store.
+export const EVALUATE_HOOK_MIN_VERSION = '2.0.22';
+
+/** True when OpenCode `version` (x.y.z) has the permission evaluate hook; false when below it or unreadable. */
+export function hasEvaluateHook(version) {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(version ?? ''));
+  if (!m) return false;
+  const want = EVALUATE_HOOK_MIN_VERSION.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if (Number(m[i + 1]) !== want[i]) return Number(m[i + 1]) > want[i];
+  return true;
+}
+
 /**
  * The agents OpenCode 2.0.22 can see besides the project's .opencode/opencode.json
  * entries. Read from the binary and probed (each in a fresh directory): in every config
@@ -765,7 +779,7 @@ function agentFileLoosensGuard(text) {
  * config Sterling cannot read is a `skipped` row and sets `incomplete`; a source whose
  * rules can come after .opencode/opencode.json is a row too, so no gap is silent.
  */
-export function visibleAgents({ projectDir, env = process.env, home = homedir() }) {
+export function visibleAgents({ projectDir, env = process.env, home = homedir(), checkAgentFiles = true }) {
   const globalDir = env.OPENCODE_CONFIG_DIR || opencodeConfigDir({ env, home });
   const dotDir = join(projectDir, '.opencode');
   const ancestors = [];
@@ -792,11 +806,13 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir() 
       }
       for (const { name, path } of files) {
         (dir === env.OPENCODE_CONFIG_DIR ? envNames : names).add(name);
-        if (dir !== dotDir) continue;
+        if (dir !== dotDir || !checkAgentFiles) continue;
         // Measured on 2.0.22 (GET /api/agent/<name> lists the rules in order, and a live
         // `ls -la .sterling/sterling.db` ran): a project agent file's own rules come AFTER
-        // agent.<name>.permission in .opencode/opencode.json, so the per-agent guard does
-        // not hold for it. Agent files in the global dir and in ancestors come before it.
+        // agent.<name>.permission in .opencode/opencode.json, so the config guard does not
+        // hold for it. From 2.0.22 the server plugin's evaluate hook denies the store after
+        // every agent rule (store-guard.mjs), so the row is written only for an older or
+        // unreadable OpenCode version (checkAgentFiles). It misses the deprecated tools: form.
         let text;
         try {
           text = readFileSync(path, 'utf8');
@@ -805,7 +821,7 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir() 
           continue;
         }
         if (agentFileLoosensGuard(text)) {
-          problems.push({ item: fwd(path), status: 'skipped', detail: `its permission rules can allow edit or shell, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name}"; move its edit, write, patch, shell, bash and "*" rules into agent.${JSON.stringify(name)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
+          problems.push({ item: fwd(path), status: 'skipped', detail: `its permission rules can allow edit or shell, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name}" on this OpenCode (the plugin store guard needs ${EVALUATE_HOOK_MIN_VERSION} or later); upgrade OpenCode, or move its edit, write, patch, shell, bash and "*" rules into agent.${JSON.stringify(name)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
         }
       }
     }
@@ -857,7 +873,7 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir() 
  * adds it (decision sterling-opencode-plugin-injects-its-own-mcp-entry). An entry an
  * earlier init wrote is removed only when it is exactly the entry Sterling wrote.
  */
-export function ensureProjectConfig({ projectDir, env = process.env, home = homedir(), tracked, conductorOk = true }) {
+export function ensureProjectConfig({ projectDir, env = process.env, home = homedir(), tracked, conductorOk = true, opencodeVersion }) {
   const rel = PROJECT_CONFIG_REL;
   const path = join(projectDir, rel);
   if (tracked.includes(rel)) {
@@ -904,13 +920,14 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   // agent.<name>.permission in this file is evaluated after the rules of an agent file in
   // the global config dir or an ancestor's .opencode (measured on 2.0.22: `opencode debug
   // agents`, and a live shell call denied), but BEFORE those of a project agent file in
-  // .opencode/ (measured: GET /api/agent/<name>, and a live call that ran), so
-  // visibleAgents reports such a file whose rules can allow edit or shell. An entry
+  // .opencode/ (measured: GET /api/agent/<name>, and a live call that ran); for those
+  // the server plugin's permission evaluate hook holds the guard from 2.0.22 (store-guard.mjs),
+  // and below that visibleAgents reports such a file whose rules can allow edit or shell. An entry
   // for a name OpenCode does not otherwise know creates an agent (measured), so a
   // guard-only entry is written only for a visible agent and dropped when it is gone.
   const agents = config.agent ?? {};
   if (typeof agents !== 'object' || agents === null || Array.isArray(agents)) return [refusal(rel, `${rel}: "agent" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
-  const visible = visibleAgents({ projectDir, env, home });
+  const visible = visibleAgents({ projectDir, env, home, checkAgentFiles: !hasEvaluateHook(opencodeVersion) });
   extraRows.push(...visible.problems);
   const guardOnly = JSON.stringify({ permission: guardPermission(undefined).value });
   const names = new Set(visible.names);
@@ -1148,7 +1165,7 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   const agentRows = ensureFullAgents({ projectDir, pluginRoot, tracked });
   const conductorRow = agentRows.find((r) => r.item === `${STERLING_AGENTS_SUBDIR}/conductor.md`);
   const conductorOk = ['created', 'matches', 'refreshed'].includes(conductorRow?.status);
-  rows.push(...ensureProjectConfig({ projectDir, env, home, tracked, conductorOk }));
+  rows.push(...ensureProjectConfig({ projectDir, env, home, tracked, conductorOk, opencodeVersion: oc.version }));
   rows.push(...agentRows);
   return { rows };
 }
