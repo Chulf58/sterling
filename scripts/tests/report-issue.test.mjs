@@ -97,6 +97,111 @@ test('scrub: a path with spaces outside the project root and home is NOT fully s
   assert.equal(scrub('read /mnt/d/Acme Client Billing/src/x.ts failed', ctx), 'read <project-path> Client <project-path> failed');
 });
 
+test('scrub: a slash command is kept (GitHub issue #6)', () => {
+  assert.equal(scrub('run /sterling:update or /plugin, then /clear', ctx), 'run /sterling:update or /plugin, then /clear');
+  assert.equal(scrub('/plugin install failed\n/sterling:update did too', ctx), '/plugin install failed\n/sterling:update did too', 'at the start of a line');
+  assert.equal(scrub('ran `/sterling:update` and `/plugin`', ctx), 'ran `/sterling:update` and `/plugin`', 'inside backticks');
+  assert.equal(scrub(`said "/sterling:update" and '/plugin'`, ctx), `said "/sterling:update" and '/plugin'`, 'inside quotes');
+  assert.equal(scrub('Run /sterling:update. Then /plugin: done? Try /clear!', ctx), 'Run /sterling:update. Then /plugin: done? Try /clear!', 'before sentence punctuation');
+  assert.equal(scrub('use /sterling:sync-agents and /pr-review2', ctx), 'use /sterling:sync-agents and /pr-review2', 'hyphens and digits after the first letter');
+});
+
+test('scrub: a slash command next to real paths is kept while every path is scrubbed', () => {
+  assert.equal(
+    scrub('/sterling:update and /plugin failed in /home/someone/proj/src/a.ts and /mnt/c/Users/someone/x', ctx),
+    '/sterling:update and /plugin failed in <project-path> and <project-path>',
+  );
+  assert.equal(scrub('/plugin broke /tmp/a.txt, C:\\Users\\someone\\x and \\\\server\\share', ctx), '/plugin broke <project-path>, <project-path> and <project-path>');
+  const r = validateReport({ ...good(), evidence: ['"Run /sterling:update or /plugin (see /home/someone/proj/src/a.ts)"'] }, ctx);
+  assert.deepEqual(r.evidence, ['"Run /sterling:update or /plugin (see <project-path>)"']);
+});
+
+test('scrub: a slash token that is not exactly command-shaped is still scrubbed', () => {
+  for (const tok of [
+    '/home/x',
+    '/plugin/',
+    '/sterling:update/x',
+    '/plugin/install',
+    '/Acme',
+    '/acme_client',
+    '/acme.txt',
+    '/.env',
+    '/2024',
+    '/-x',
+    '/a:b:c',
+    '/:update',
+    '/sterling:Update',
+    '//plugin',
+    '\\plugin',
+    'cwd=/plugin',
+    'x/plugin',
+    '~/plugin',
+    './plugin',
+    '/plugin\\x',
+    '/',
+  ]) {
+    assert.equal(scrub(`saw ${tok} here`, ctx), 'saw <project-path> here', tok);
+  }
+});
+
+test('scrub: a command-shaped token that does not stand alone is the tail of a longer path and is scrubbed', () => {
+  const someone = { projectRoot: '/home/someone/proj', home: '/home/someone', sterlingPathExists };
+  for (const [input, expected] of [
+    ['in /home/someone/Dropbox (Personal)/acme-client', 'in <project-path> (Personal)<project-path>'],
+    ['read /mnt/d/projects/backup (2)/acme-billing failed', 'read <project-path> (2)<project-path> failed'],
+    ['C:\\Users\\bob\\Dropbox (Work)/clientname', '<project-path> (Work)<project-path>'],
+    ['paths: /mnt/d/a,/clientname', 'paths: <project-path>,<project-path>'],
+    ['/srv/x|/clientname', '<project-path>|<project-path>'],
+    ['"/mnt/d/My Stuff"/clientname', '"<project-path> Stuff"<project-path>'],
+    ['see [log](/clientname)', 'see [log](<project-path>)'],
+    ['</clientname>', '<<project-path>>'],
+    ['https://x.io/a(/token)', '<project-path>(<project-path>)'],
+    ['src/app/(dashboard)/acme-billing', '<project-path>(dashboard)<project-path>'],
+    ['app/[tenant]/acme', '<project-path>[tenant]<project-path>'],
+    ['<project-path>/clientname', '<project-path><project-path>'],
+    ['/home/someone/proj;/clientname', '<project-path>;<project-path>'],
+    ["it's/clientname", "it'<project-path>"],
+    ['x`/clientname', 'x`<project-path>'],
+  ]) {
+    assert.equal(scrub(input, someone), expected, input);
+  }
+});
+
+test('scrub: a slash command directly after a bracket, comma, semicolon, pipe or a second opening mark is scrubbed (accepted loss)', () => {
+  for (const [input, expected] of [
+    ['[/plugin]', '[<project-path>]'],
+    ['{/plugin}', '{<project-path>}'],
+    ['a,/plugin', 'a,<project-path>'],
+    ['a;/plugin', 'a;<project-path>'],
+    ['a|/plugin', 'a|<project-path>'],
+    ['("/plugin")', '("<project-path>")'],
+    ['"`/plugin`"', '"`<project-path>`"'],
+  ]) {
+    assert.equal(scrub(input, ctx), expected, input);
+  }
+  assert.equal(scrub('try (/plugin) or see `/plugin`.', ctx), 'try (/plugin) or see `/plugin`.', 'one opening mark after a space is still a command');
+  assert.equal(scrub('(/plugin) and "/sterling:update" first', ctx), '(/plugin) and "/sterling:update" first', 'an opening mark at the start of the text');
+});
+
+test('scrub: a path below the root or home is taken only up to its first space or delimiter (documented limit)', () => {
+  assert.equal(scrub('in /home/alice/work/acme-secret/My Docs (old)/secretname/x.ts', ctx), 'in <project-path> Docs (old)<project-path>');
+});
+
+test('scrub: a project root or home that is one command-shaped segment is still scrubbed', () => {
+  const flat = { projectRoot: '/acme', home: '/root', sterlingPathExists };
+  assert.equal(scrub('cwd /acme, home /root, sub /acme/src/a.ts', flat), 'cwd <project-path>, home <project-path>, sub <project-path>');
+  assert.equal(scrub('ran /acme:deploy and /plugin', flat), 'ran <project-path>:deploy and /plugin', 'the root pass runs first, so a root is never read as a command');
+});
+
+test('scrub: a one-segment lowercase directory outside the root and home is read as a slash command and kept (documented limit)', () => {
+  assert.equal(scrub('ls /acme failed', ctx), 'ls /acme failed');
+  assert.equal(scrub('open /acme:secret now', ctx), 'open /acme:secret now', 'the colon form is kept whole');
+});
+
+test('fingerprint: a slash command in the title does not change it', () => {
+  assert.equal(normalizeTitle('/sterling:update fails'), normalizeTitle('<project-path> fails'));
+});
+
 test('scrub: a UUID becomes <id>', () => {
   assert.equal(scrub('record 630e54e6-8c61-4b73-beee-de569a5ec852 missing', ctx), 'record <id> missing');
 });

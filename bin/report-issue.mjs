@@ -390,6 +390,13 @@ function isSterlingPath(token, sterlingPathExists) {
   if (path.startsWith(".sterling/")) return STERLING_STATE_NAMES.includes(path.slice(".sterling/".length).replace(/\/$/, ""));
   return STERLING_PREFIXES.some((p) => path.startsWith(p)) && sterlingPathExists(path.replace(/\/+$/, ""));
 }
+function isSlashCommand(token) {
+  return /^\/[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?$/.test(token.replace(/[.,:;!?]+$/, ""));
+}
+function standsAlone(text, at) {
+  const atBoundary = (i) => i === 0 || /\s/.test(text[i - 1]);
+  return atBoundary(at) || /["'`(]/.test(text[at - 1]) && atBoundary(at - 1);
+}
 function scrub(text, { projectRoot: projectRoot2, home, sterlingPathExists }) {
   let out = String(text);
   const roots = [...rootVariants(projectRoot2), ...rootVariants(home)].sort((a, b) => b.length - a.length);
@@ -398,7 +405,10 @@ function scrub(text, { projectRoot: projectRoot2, home, sterlingPathExists }) {
     out = out.replace(re, PLACEHOLDER);
   }
   out = out.replace(UUID_RE, "<id>");
-  return out.replace(TOKEN_RE, (tok) => /[\\/]/.test(tok) && !isSterlingPath(tok, sterlingPathExists) ? PLACEHOLDER : tok);
+  return out.replace(TOKEN_RE, (tok, at, whole) => {
+    if (!/[\\/]/.test(tok) || isSterlingPath(tok, sterlingPathExists)) return tok;
+    return isSlashCommand(tok) && standsAlone(whole, at) ? tok : PLACEHOLDER;
+  });
 }
 var EVIDENCE_HELP = `Each --evidence line is either a Sterling repo-relative path:line under ${STERLING_PREFIXES.join(" ")} that Sterling ships (e.g. scripts/lib/work-pr.mjs:99 or scripts/lib/work-pr.mjs:99-109), or a "double-quoted message" Sterling printed.`;
 function checkEvidenceLine(line, n, ctx) {

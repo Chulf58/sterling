@@ -10795,10 +10795,6 @@ function openDashboard(storePath, options = {}) {
   };
 }
 
-// opencode/sterling-tui/view.ts
-import { existsSync as existsSync8 } from "node:fs";
-import { dirname as dirname5, join as join11 } from "node:path";
-
 // packages/tui/dist/avatars/assign.js
 function assign(liveIds, current, rng, { poolSize = 48, freed = [] } = {}) {
   const live = new Set(liveIds);
@@ -13111,9 +13107,35 @@ function tileCells(avatarIndex, frame2) {
     return [pad, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), pad];
   });
 }
-var SEQUENCE = [0, 0, 1, 0, 2, 0, 3, 0];
+var ANIMATION_MS = 333;
+var SEQUENCE = [
+  0,
+  0,
+  0,
+  0,
+  1,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  2,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  3,
+  0,
+  0,
+  0
+];
 function phaseFor(avatarIndex) {
-  return (avatarIndex * 3 % SEQUENCE.length + SEQUENCE.length) % SEQUENCE.length;
+  return (avatarIndex * 5 % SEQUENCE.length + SEQUENCE.length) % SEQUENCE.length;
 }
 function frameAt(tick2, phase, running) {
   if (!running)
@@ -13123,6 +13145,8 @@ function frameAt(tick2, phase, running) {
 }
 
 // opencode/sterling-tui/view.ts
+import { existsSync as existsSync8 } from "node:fs";
+import { dirname as dirname5, join as join11 } from "node:path";
 var SIDEBAR_WIDTH = 34;
 var TOP_TASKS = 5;
 var QUEUE_CAP = 1e3;
@@ -13295,7 +13319,6 @@ function findStorePath(start, env) {
 
 // opencode/sterling-tui/tui.tsx
 var ROUTE = "sterling";
-var FRAME_MS = 333;
 var SUBAGENT_EVENTS = ["session.created", "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.step.ended"];
 var COMMAND = "sterling.open";
 var [tick, setTick] = createSignal(0);
@@ -13524,7 +13547,7 @@ var tui_default = {
     const timer = setInterval(() => setTick((n) => n + 1), 1e3);
     const animation = setInterval(() => {
       if (anyRunning) setFrame((n) => n + 1);
-    }, FRAME_MS);
+    }, ANIMATION_MS);
     return () => {
       clearInterval(timer);
       clearInterval(animation);
