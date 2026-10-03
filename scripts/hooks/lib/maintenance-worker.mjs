@@ -50,7 +50,7 @@ import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildOpencodeArgs, buildOpencodeConfig, opencodeEnv, opencodeStreamJournal, OPENCODE_PROMPT_NOTE } from './maintenance-worker-opencode.mjs';
+import { buildOpencodeArgs, buildOpencodeConfig, opencodeEnv, opencodePrompt, opencodeStreamJournal } from './maintenance-worker-opencode.mjs';
 
 export const WORKER_MODEL = 'claude-sonnet-5-5';
 export const WORKER_EFFORT = 'medium';
@@ -867,7 +867,7 @@ export async function runWorker(opts) {
       const model = opts.opencodeModel ?? eligible?.opencode_model ?? null;
       if (typeof model !== 'string' || !model.trim()) throw new Error(OPENCODE_MODEL_UNSET);
       const config = buildOpencodeConfig({ mcpConfig, model });
-      return { host, bin: ocBin, args: buildOpencodeArgs({ prompt: prompt + OPENCODE_PROMPT_NOTE, model }), env: opencodeEnv({ root: opts.root, config }) };
+      return { host, bin: ocBin, args: buildOpencodeArgs({ prompt: opencodePrompt(prompt), model }), env: opencodeEnv({ root: opts.root, config }) };
     }
     if (host !== 'claude') throw new Error(`unknown runner host '${host}'`);
     return { host, bin, args: buildWorkerArgs({ prompt, mcpConfig, budgetUsd: budgetOk ? budgetUsd : rawBudget }), env: {} };
