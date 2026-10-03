@@ -55,7 +55,9 @@
 // clear on its own.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStdin, allow, warnNonBlocking, exitAfterWrite } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore } from './lib/common.mjs';
+import { boardReadyNotice, boardReadyNoticeDue, markBoardReadyNoticed, laneCeiling, liveLanes } from './lib/board-ready.mjs';
+import { readProjectConfig } from './lib/operating-state.mjs';
 import { openSubjectFan, warnFanDegraded } from './lib/subject-fan.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import {
@@ -159,8 +161,58 @@ function envelopeFor(extraContext) {
  *  on stderr (P5) — and, the reason it exists, exits inside the write callback
  *  so the envelope is never truncated by the exit. The local `emitted` flag is
  *  gone: two mechanisms for one rule can disagree, one cannot. */
-function emitEnvelope(extraContext, opts) {
-  return exitAfterWrite(JSON.stringify(envelopeFor(extraContext)), 0, opts);
+function emitEnvelope(extraContext, opts = {}) {
+  return exitAfterWrite(JSON.stringify(envelopeFor(extraContext)), 0, {
+    ...opts,
+    onWritten: () => {
+      markBoardReadyShown();
+      opts.onWritten?.();
+    },
+  });
+}
+
+/** BOARD READY LINE (decision
+ *  board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start,
+ *  AMENDED (e)): on the conductor's own Task|Agent dispatch, one line naming
+ *  the READY and READY FOR RESEARCH items the brief does not name, deduped per
+ *  session on a hash of that set (lib/board-ready.mjs). It exists because
+ *  H22's SubagentStop stderr may never reach the model and H10's Stop notices
+ *  drain only at the user's next prompt; this widens WHERE the list prints, not
+ *  WHETHER. A subagent's own dispatch (agent_id set) gets no line. Memoized:
+ *  every output path below carries it through overlapNotice(). */
+let boardMemo;
+function boardReady() {
+  if (boardMemo !== undefined) return boardMemo;
+  boardMemo = null;
+  const onDispatch = !Array.isArray(input.tool_input?.questions) && !(typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__'));
+  if (!onDispatch || input.agent_id) return boardMemo;
+  try {
+    const store = openStore(input.cwd);
+    if (!store) return boardMemo;
+    let readiness;
+    try {
+      readiness = store.boardReadiness();
+    } finally {
+      store.close();
+    }
+    const notice = boardReadyNotice(readiness, outgoingProposalText(input.tool_input), liveLanes(input.cwd, input.session_id), laneCeiling(readProjectConfig(input.cwd).config));
+    if (notice && boardReadyNoticeDue(input.cwd, input.session_id, notice.hash)) boardMemo = notice;
+  } catch (e) {
+    // Loud, and repeated on each dispatch until it reads again: no hash, so nothing is marked shown.
+    boardMemo = { line: `BOARD READY line unavailable (${(e && e.message) || e}) — read the board with board_query before dispatching more.`, hash: null };
+  }
+  return boardMemo;
+}
+
+/** After the envelope landed: record that this session saw the line for this ready set. */
+function markBoardReadyShown() {
+  const b = boardMemo;
+  if (!b?.hash) return;
+  try {
+    markBoardReadyNoticed(input.cwd, input.session_id, b.hash);
+  } catch (e) {
+    process.stderr.write(`H20: the BOARD READY line was written but its dedupe mark failed (${(e && e.message) || e}) — it may repeat on the next dispatch.`);
+  }
 }
 
 /** DISPATCH OVERLAP (decision h20-warns-on-dispatch-file-overlap-with-live-
@@ -174,7 +226,7 @@ let overlapMemo;
 function overlapNotice() {
   if (overlapMemo === undefined) {
     const onDispatch = !Array.isArray(input.tool_input?.questions) && !(typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__'));
-    overlapMemo = onDispatch ? dispatchOverlapNotice(input) : null;
+    overlapMemo = [onDispatch ? dispatchOverlapNotice(input) : null, boardReady()?.line].filter(Boolean).join('\n\n') || null;
   }
   return overlapMemo;
 }
@@ -271,6 +323,7 @@ function main(input) {
     if (carriage) hookSpecificOutput.additionalContext = carriage;
     return exitAfterWrite(JSON.stringify({ hookSpecificOutput }), 0, {
       onWritten: () => {
+        markBoardReadyShown();
         recordAdvisoryFire(input.cwd, 'h20', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
         // POST-ENVELOPE BOOKKEEPING IS ITS OWN FAILURE DOMAIN (outside-family
         // review, 2026-09-05). These marks cannot run before the write — that

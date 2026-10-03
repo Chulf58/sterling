@@ -8,6 +8,7 @@ import { opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs
 import { errText, logLine } from './log.mjs';
 import { takeNotices } from './notices.mjs';
 import { readMaintenanceState } from '../../../scripts/hooks/lib/maintenance-state.mjs';
+import { laneCeiling, liveLanes, renderBoardReadiness } from '../../../scripts/hooks/lib/board-ready.mjs';
 import { maintenanceLines, operatingStateLines, undeclaredSourceBlock } from './operating-state.mjs';
 import { composeContext, dispatchChrome } from '../../../scripts/hooks/lib/stage-brief.mjs';
 import { briefOf, notStagedLine, stageChild } from './staging.mjs';
@@ -37,6 +38,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   const maintenanceCache = new Map();
   // A child session's staged text, kept for its later requests (bounded, bounded.mjs).
   const stagedCache = new Map();
+  // H1's board readiness block, per project root, refreshed on the status line's TTL.
+  const boardCache = new Map();
 
   function statusLine(root) {
     const hit = statusCache.get(root);
@@ -119,6 +122,45 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     return hit.state ? maintenanceLines(hit.state, config, root) : [];
   }
 
+  /**
+   * H1's READY / READY FOR RESEARCH / WAITING ON YOU block (decision
+   * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start;
+   * full-parity ruling 7f83f57e), from the same shared lib and the store's one
+   * readiness function. The system prompt is rebuilt per request, so this also
+   * covers what H20's mid-session line does on Claude Code.
+   */
+  function boardBlock(root, config, sessionID) {
+    // The cache holds the readiness read per ROOT; the live-lane count is per
+    // SESSION, so it is computed on every call and never cached with the text.
+    let hit = boardCache.get(root);
+    if (!hit || Date.now() - hit.at >= STATUS_TTL_MS) {
+      try {
+        const store = openStore(join(root, '.sterling', 'sterling.db'));
+        let readiness;
+        try {
+          readiness = store.boardReadiness();
+        } finally {
+          store.close();
+        }
+        hit = { at: Date.now(), readiness };
+      } catch (e) {
+        logLine(root, `context: board readiness unreadable: ${errText(e)}`);
+        hit = {
+          at: Date.now(),
+          unavailable: `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`,
+        };
+      }
+      boardCache.set(root, hit);
+    }
+    if (hit.unavailable) return hit.unavailable;
+    try {
+      return renderBoardReadiness({ readiness: hit.readiness, live: liveLanes(root, sessionID), ceiling: laneCeiling(config) });
+    } catch (e) {
+      logLine(root, `context: board readiness unreadable: ${errText(e)}`);
+      return `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
+    }
+  }
+
   async function onContext(input) {
     const root = rootOf();
     if (!root) return;
@@ -163,6 +205,12 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         }
         const undeclared = undeclaredBlock(root, state.config);
         if (undeclared) blocks.push(undeclared);
+        // Root sessions only, and never inside the maintenance worker's own child
+        // (anti-pattern e40bf982): the worker is not the conductor filling lanes.
+        if (!inWorkerChild(env)) {
+          const board = boardBlock(root, state.config, input.sessionID);
+          if (board) blocks.push(board);
+        }
       } else {
         const staged = await childStaging(root, input);
         if (staged) blocks.push(staged);
@@ -175,5 +223,5 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     });
   }
 
-  return { onContext, resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root)) };
+  return { onContext, resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root), boardCache.delete(root)) };
 }

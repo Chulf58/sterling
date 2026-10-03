@@ -1046,6 +1046,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
         }));
         if (card.detail) lines.push({ text: `    ${pad}${card.detail}`, kind: 'meta' });
         if (card.blocked) lines.push({ text: `    ${pad}${card.blocked}`, kind: 'meta' });
+        if (card.unblocks) lines.push({ text: `    ${pad}${card.unblocks}`, kind: 'meta' });
       } else {
         lines = [{ text: clipEllipsis(marker + pad + stateColumn(card) + card.title, width), kind: 'title' }];
       }
