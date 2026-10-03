@@ -17,6 +17,7 @@
 //   node scripts/init.mjs --target <dir> [--project-name <name>]
 //     [--stack-tags a,b] [--toolchain <adapter>:<glob>[,<glob>...]]
 //     [--backup-path <p> | --backup-opt-out] [--mode hobby|work]
+//     [--invoking-project <dir>]   (a NEW project takes that Sterling project's mode)
 //     [--domain-description <domain>=<text>]...   (repeatable; one per NEW domain store)
 //     [--update-ensure]   (set only by /sterling:update's re-bake step)
 //   (stack tags ARE the domain mount manifest — §3.3; no separate domains flag)
@@ -27,7 +28,7 @@
 //   pass (--update-ensure) a recorded domain with no store and no description is
 //   skipped with a loud line instead, so it cannot fail the whole re-bake.)
 //   (declaration flags are required only when no recorded config exists)
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, unlinkSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, unlinkSync, renameSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,7 +40,7 @@ import { DEFAULT_DOMAIN_DESCRIPTIONS } from './lib/domain-defaults.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
-import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL, trackedHandoffFiles, PROJECT_MODES } from './lib/handoff-projection.mjs';
+import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL, trackedHandoffFiles, PROJECT_MODES, readProjectMode, ProjectModeError } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -84,6 +85,18 @@ try {
 } catch (e) {
   fail(`init REFUSED: ${e.message}`, 2);
 }
+// --invoking-project <dir>: the Sterling project this init was run from (see the
+// inheritance block below). A missing or empty value, or one followed by another
+// flag, refuses like a malformed --mode.
+let invokingGiven;
+let invokingFlag;
+try {
+  invokingGiven = hasFlag('--invoking-project');
+  invokingFlag = arg('--invoking-project');
+} catch (e) {
+  fail(`init REFUSED: ${e.message}`, 2);
+}
+if (invokingGiven && !invokingFlag) fail('init REFUSED: --invoking-project needs a directory value', 2);
 const declaredToolchains = argAll('--toolchain').map((spec) => {
   const [adapter, globs] = spec.split(':');
   return { adapter, path_globs: (globs ?? '').split(',').filter(Boolean) };
@@ -188,6 +201,40 @@ if (!recorded) {
   if (!stackTagsFlag.length) fail(`init REFUSED: --stack-tags is required — ${noConfigAt} (ask, don’t guess — §12 mini-grill)`, 2);
 }
 
+// The mode a NEW project takes from the project that is initialising it (board
+// a-project-initialised-from-another-project-inherits-that-pro): a work project that
+// inits another project makes it a work project, a hobby project a hobby one, with no
+// question. The invoking project is EXPLICIT, never ambient: only --invoking-project
+// <dir> names it, because neither CLAUDE_PROJECT_DIR nor the shell cwd reliably says
+// which project the session belongs to (a subdirectory or a linked worktree has no
+// .sterling/config.json). With no flag nothing is inherited, whatever the env or cwd.
+// Flag given: a directory that is not a Sterling project refuses (the caller claimed an
+// invoking project, so silently defaulting would hide the mismatch); the target itself
+// means no inheritance (not an error); --mode wins and the invoking config is not read;
+// an existing target keeps its mode. A missing mode key in the invoking project is
+// hobby; an invalid value refuses (P5), never defaults.
+const sameDir = (a, b) => {
+  const real = (d) => { try { return realpathSync(d); } catch { return resolve(d); } };
+  return fwd(real(a)) === fwd(real(b));
+};
+let inheritedFrom;
+let inheritedMode;
+if (invokingGiven && !recorded && !modeFlagGiven) {
+  const invoking = resolve(invokingFlag);
+  if (!sameDir(invoking, target)) {
+    if (!existsSync(join(invoking, '.sterling', 'config.json'))) {
+      fail(`init REFUSED: --invoking-project names a directory that is not a Sterling project — '${fwd(invoking)}' has no .sterling/config.json. Pass the root of the project this session belongs to, or drop the flag and pass --mode hobby|work`, 2);
+    }
+    try {
+      inheritedMode = readProjectMode(invoking);
+    } catch (e) {
+      if (!(e instanceof ProjectModeError) && !(e instanceof ContainmentError)) throw e;
+      fail(`init REFUSED: the invoking project's mode cannot be inherited — ${e.message}. Fix it, or pass --mode hobby|work`, 2);
+    }
+    inheritedFrom = fwd(invoking);
+  }
+}
+
 // effective declarations: recorded config wins; flags only seed a fresh config
 const baked = recorded ? recorded.toolchains : await resolveToolchains(declaredToolchains); // throws loudly on unregistered adapters
 const eff = recorded
@@ -236,7 +283,7 @@ const expectedConfig = parseConfig({
   // recorded declaration like the ones above, switched in the TUI System tab: a
   // work project's config is not "hand-edited" for carrying it. A fresh config
   // takes --mode, else the explicit 'hobby' default.
-  mode: recorded ? recorded.mode : (modeFlag ?? 'hobby'),
+  mode: recorded ? recorded.mode : (modeFlag ?? inheritedMode ?? 'hobby'),
   // the handoff setting (decision
   // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) is
   // a recorded declaration too, switched in the TUI System tab. A fresh config
@@ -316,13 +363,16 @@ if (recorded) {
 }
 
 // the summary's mode line: set (a fresh config took --mode), defaulted (a fresh
-// config with no --mode) or kept (an existing config's mode always wins; a
+// config with no --mode and no invoking project), inherited (a fresh config from the
+// invoking project's mode) or kept (an existing config's mode always wins; a
 // differing --mode is a loud notice, never a write)
 const modeLines = [];
 if (!recorded) {
   modeLines.push(modeFlagGiven
     ? `mode: ${modeFlag} (set by --mode)`
-    : 'mode: hobby (defaulted — no --mode was given; change it in the TUI System tab)');
+    : inheritedFrom !== undefined
+      ? `mode: ${inheritedMode} (inherited from the invoking project ${inheritedFrom})`
+      : 'mode: hobby (defaulted — no --mode was given; change it in the TUI System tab)');
 } else {
   const recordedMode = PROJECT_MODES.includes(recorded.mode) ? recorded.mode : JSON.stringify(recorded.mode);
   modeLines.push(`mode: ${recordedMode} (kept — the recorded config wins)`);
