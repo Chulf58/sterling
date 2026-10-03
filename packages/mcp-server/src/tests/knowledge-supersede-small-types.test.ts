@@ -249,6 +249,7 @@ for (const oldType of SMALL_TYPES) {
         () => supersede(tools, old.id as string, closingDecision('CLOSED: untyped')),
         (err: Error) => {
           assert.match(err.message, new RegExp(`is an? ${oldType}`));
+          assert.match(err.message, new RegExp(`${oldType} — one `), 'the dash is spaced on both sides');
           assert.match(err.message, /type/);
           assert.match(err.message, /decision/);
           assert.match(err.message, /research_finding/);

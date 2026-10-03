@@ -11652,7 +11652,7 @@ export class SterlingTools {
    *  or a refuted trail about code that no longer exists has nothing of its
    *  own type to be replaced by. feature_article is deliberately absent — it
    *  keeps its own lifecycle. */
-  private static readonly CLOSED_BY_NOTE: Readonly<Record<string, string>> = {
+  private static readonly CLOSED_BY_NOTE: Readonly<Partial<Record<DurableRecord['type'], string>>> = {
     reference_material:
       `one whose subject still exists evolves in place via knowledge_update ` +
       `(fix-forward, same lineage; repoint its location), and a genuine duplicate goes through knowledge_retire(id, in_favor_of).`,
@@ -11663,6 +11663,13 @@ export class SterlingTools {
       `one whose refuted trail still applies is corrected in place via knowledge_update (fix-forward, same lineage), ` +
       `and a genuine duplicate goes through knowledge_retire(id, in_favor_of).`,
   };
+
+  /** The refusal sentence for an old-record type a closing note may close, or
+   *  undefined when the type is not one of them. Own-key check, so an
+   *  inherited Object.prototype name never reads as a member. */
+  private static closedByNoteSentence(type: DurableRecord['type']): string | undefined {
+    return Object.hasOwn(SterlingTools.CLOSED_BY_NOTE, type) ? SterlingTools.CLOSED_BY_NOTE[type] : undefined;
+  }
 
   /** ruling-write types whose create/update receipts surface SAME-SUBJECT
    *  records (decision foreign_7e3c66c5). Superset of SUPERSEDE_ALLOWED_TYPES since
@@ -11824,12 +11831,13 @@ export class SterlingTools {
           `duplicate, knowledge_retire(id, in_favor_of). knowledge_supersede replaces decision / anti_pattern / research_finding only.`
       );
     }
-    const closedByNote = Object.hasOwn(SterlingTools.CLOSED_BY_NOTE, old.type);
+    const closedByNoteSentence = SterlingTools.closedByNoteSentence(old.type);
+    const closedByNote = closedByNoteSentence !== undefined;
     if (closedByNote) {
       if (opts.type === undefined || !SterlingTools.CLOSING_NOTE_TYPES.includes(opts.type)) {
         const allowed = SterlingTools.CLOSING_NOTE_TYPES.join(' or ');
         throw new Error(
-          `knowledge_supersede: '${oldId}' is ${/^[aeiou]/.test(old.type) ? 'an' : 'a'} ${old.type} —${SterlingTools.CLOSED_BY_NOTE[old.type]} ` +
+          `knowledge_supersede: '${oldId}' is ${/^[aeiou]/.test(old.type) ? 'an' : 'a'} ${old.type} — ${closedByNoteSentence} ` +
             `One whose subject is GONE is closed by a short record saying what happened: pass type (${allowed}) with that record's complete fields` +
             (opts.type === undefined ? `; no type was given.` : `; type '${opts.type}' is not one of them.`) +
             ` Nothing was written.`
