@@ -49028,8 +49028,7 @@ function git(projectDir, args2) {
   return r;
 }
 var EDIT_FAMILY = ["edit", "write", "patch"];
-var SHELL_FAMILY = ["shell", "bash"];
-var GUARDED_KEYS = /* @__PURE__ */ new Set(["*", ...EDIT_FAMILY, ...SHELL_FAMILY]);
+var GUARDED_KEYS = /* @__PURE__ */ new Set(["*", ...EDIT_FAMILY]);
 var CONDUCTOR_OPENCODE_DESCRIPTION = `Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Activated by default_agent "sterling/conductor" in the project's .opencode/opencode.json (written by /sterling:init and /sterling:update); never dispatched as a subagent.`;
 var FULL_PERMISSIONS = {
   reviewer: { edit: "deny", webfetch: "deny", task: "deny" },

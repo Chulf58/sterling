@@ -123,9 +123,14 @@ export function emittedLevel(envelope, record) {
   });
   const hazardSubstance = !!r.trigger && !!r.right_way && text.includes(normalise(r.trigger)) && text.includes(normalise(r.right_way));
   // H20's rendered decision/article pointer blocks deliberately include a
-  // clipped orienting excerpt. They are discovery contracts, never body delivery.
+  // clipped orienting excerpt. They are discovery contracts, never body delivery,
+  // so a PASSAGE match in an envelope carrying one is not substance. A hazard
+  // whose full trigger and right_way are both present was delivered whole, and
+  // is credited whatever else the envelope carries (user-ruled 2026-10-03, board
+  // 817b16bc: the envelope-wide gate scored a whole hazard as 0 whenever a
+  // decision pointer block rode beside it).
   const h20PointerBlock = /STERLING MECHANISM-AXIS DELIVERY \(H20\)[\s\S]*?Pointers only;/.test(text);
-  const substance = pointer && !h20PointerBlock && (passages.some((x) => text.includes(x)) || hazardSubstance);
+  const substance = pointer && (hazardSubstance || (!h20PointerBlock && passages.some((x) => text.includes(x))));
   // WHOLE / CLIPPED / WITHHELD-OVERSIZE are three distinct, mutually exclusive
   // outcomes for a selected hazard (board `knowledge-eval-scorer-wholehazard-
   // credits-a-clipped-hazard-a`): a clipped block is never credited whole, and
@@ -147,11 +152,9 @@ export function emittedLevel(envelope, record) {
   const blockElided = !!block && block.includes('…');
   const whole = substance && hazardSubstance && !withheldOversize && !blockElided;
   // `clipped` is keyed on hazardSubstance/blockElided directly, NOT on the
-  // broader `whole`/`substance` composite: `substance` is also gated by the
-  // unrelated h20PointerBlock check (a global, envelope-wide scan for an H20
-  // pointer contract elsewhere in the same text), which can legitimately hold
-  // a hazard's own OWN block back from `whole` for a reason that has nothing
-  // to do with clipping. `block !== null` requires the record's own hazard
+  // broader `whole`/`substance` composite: `substance` also needs a pointer
+  // (id, slug or title) and can come from a passage match, neither of which
+  // says anything about clipping. `block !== null` requires the record's own hazard
   // header to have actually rendered (TRIGGER: and RIGHT WAY: labels present)
   // — a bare pointer mention with no rendered block is silence, not clipped.
   const clipped = isHazardLabel && block !== null && !withheldOversize && (blockElided || !hazardSubstance);

@@ -1284,6 +1284,19 @@ export const DECISION_REJECTED_CLIP = 140;
  *  untouched: it ruled on rendering decision BODIES, not on which field is
  *  clipped. alternatives_rejected needs no wider read — SterlingStore.query
  *  rehydrates whole bodies (packages/store/src/index.ts:289). */
+/** One decision's pointer lines, as `renderDecisionPointers` shows them: the
+ *  statement line, then its ALREADY REJECTED line when it has rejected options.
+ *  `decisionPointerPart` counts these same lines for the record's line span. */
+function decisionPointerLines(d) {
+  const lines = [`  → ${authorityMarker(d)}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ''} (knowledge_get ${d.id})${statusAnnotation(d)}`];
+  const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : [])
+    .map((a) => (typeof a?.option === 'string' ? a.option.trim() : ''))
+    .filter(Boolean)
+    .join('; ');
+  if (rejected) lines.push(`    ✗ ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
+  return lines;
+}
+
 export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed, matchLabel = 'for this path' } = {}) {
   const shown = decisions.slice(0, cap);
   // `total` / `suppressed` (fixer F3) — see renderHazards' note: the drain holds
@@ -1293,14 +1306,7 @@ export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CA
   const lines = [
     `▸ DECISIONS ${matchLabel} (${fullTotal}) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
   ];
-  for (const d of shown) {
-    lines.push(`  → ${authorityMarker(d)}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ''} (knowledge_get ${d.id})${statusAnnotation(d)}`);
-    const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : [])
-      .map((a) => (typeof a?.option === 'string' ? a.option.trim() : ''))
-      .filter(Boolean)
-      .join('; ');
-    if (rejected) lines.push(`    ✗ ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
-  }
+  for (const d of shown) lines.push(...decisionPointerLines(d));
   if (dropped > 0) {
     // Same remedy override as renderHazards: a subject match has no file_keys
     // answer, so the widening query must come from the caller there.
@@ -1518,10 +1524,21 @@ export function resolveTotalCap(cwd) {
  * `identities: [{identity, revision}, ...]`) name the record(s) the part is
  * about; a part with none (chrome framing) never earns a mark regardless of
  * how it renders. A record earns a mark in `emittedSubstance`/
- * `emittedDiscovery` ONLY when its part's FULL text survived un-clipped —
- * never for an excerpt, a bare pointer, or an aggregated omission (decision
- * 92088a62: "Omitted, pointer-only, unavailable and transport-overflow
- * content never consumes a substance-delivery mark").
+ * `emittedDiscovery` when its part's FULL text survived un-clipped — never
+ * for a bare pointer or an aggregated omission, and never a SUBSTANCE mark
+ * for an excerpt (decision 92088a62: "Omitted, pointer-only, unavailable and
+ * transport-overflow content never consumes a substance-delivery mark").
+ *
+ * ONE EXCEPTION, DISCOVERY ONLY (board 56d571a3): a `discovery` part that
+ * speaks for several records and declares where each one's lines sit —
+ * `headingLines` on the part and `lines` on every `identities` entry, in
+ * text order — credits, when it is cut to an excerpt, exactly the leading
+ * records whose lines ALL rendered. A pointer line shown complete is a whole
+ * discovery delivery of that record; the record whose last line was cut, and
+ * every one after it, earns nothing. Without both declarations the part is
+ * whole-or-nothing. Measured before the change (session 43286f59): 74 of 87
+ * decision blocks were clipped and credited nothing, so the same decisions
+ * ranked top on every later dispatch.
  */
 export function assembleDelivery(parts, capBytes, options = {}) {
   // NAMED HOLD-BACK, TWO PLACEMENTS (decision delivery-total-cap-and-axis-
@@ -1585,13 +1602,31 @@ function assembleOnce(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}, re
     }
     return out;
   };
-  const creditsFor = (survivors) => {
+  // The identities a rendered part credits. Whole: all of them. An excerpt of
+  // `keptLines` text lines: for a discovery part that declares its line spans,
+  // the leading identities whose lines all sit inside the excerpt; otherwise
+  // none. A pointer-only rendering carries no `keptLines` and credits none.
+  const creditedEntries = (part, { full, keptLines }) => {
+    if (full) return idsOf(part);
+    if (part.contentClass !== 'discovery' || !Number.isInteger(keptLines)) return [];
+    if (!Number.isInteger(part.headingLines) || part.headingLines < 0) return [];
+    const credited = [];
+    let used = part.headingLines;
+    for (const entry of idsOf(part)) {
+      if (!Number.isInteger(entry?.lines) || entry.lines < 1) break;
+      used += entry.lines;
+      if (used > keptLines) break;
+      credited.push(entry);
+    }
+    return credited;
+  };
+  const creditsFor = (rendered) => {
     const emittedSubstance = [];
     const emittedDiscovery = [];
-    for (const part of survivors) {
+    for (const [part, selection] of rendered) {
       if (part.contentClass !== 'substance' && part.contentClass !== 'discovery') continue;
       const bucket = part.contentClass === 'substance' ? emittedSubstance : emittedDiscovery;
-      for (const entry of idsOf(part)) {
+      for (const entry of creditedEntries(part, selection)) {
         if (entry?.identity) bucket.push({ identity: entry.identity, revision: entry.revision });
       }
     }
@@ -1611,7 +1646,7 @@ function assembleOnce(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}, re
   // meant "the platform transport limit does not apply either".
   const ordinaryCeiling = capBytes > 0 ? Math.min(capBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES) : DELIVERY_TRANSPORT_VISIBLE_BYTES;
 
-  const selected = new Map(); // part -> { text, full }
+  const selected = new Map(); // part -> { text, full, keptLines? }
   const omitted = [];
   const output = () => items.flatMap((part) => (selected.has(part) ? [selected.get(part).text] : []));
   const totalBytes = () => bytes(output().join(sep));
@@ -1670,7 +1705,7 @@ function assembleOnce(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}, re
         return;
       }
       if (best) {
-        selected.set(part, { text: best, full: false });
+        selected.set(part, { text: best, full: false, keptLines: bestLines });
         return;
       }
       selected.delete(part);
@@ -1969,8 +2004,8 @@ function assembleOnce(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}, re
     }
   }
 
-  const survivors = items.filter((part) => selected.has(part) && selected.get(part).full);
-  const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
+  const rendered = items.filter((part) => selected.has(part)).map((part) => [part, selected.get(part)]);
+  const { emittedSubstance, emittedDiscovery } = creditsFor(rendered);
   const omittedEntries = dedupeEntries(omitted.flatMap(disclosureIdsOf));
   const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
   const result = {
@@ -2012,14 +2047,20 @@ export function decisionBlockPointer(count, widen, top) {
  *  and stays eligible for a later, real delivery. Callers pass the FULL fresh
  *  list, never a pre-sliced one, so the renderer's count stays true. Each
  *  identity carries its `name` and the pointer names the top record, so the
- *  '+N more' disclosure and a pointer-only fallback both read `name (id8)`. */
+ *  '+N more' disclosure and a pointer-only fallback both read `name (id8)`.
+ *  Each identity also carries `lines`, the text lines its pointer occupies
+ *  under the one-line heading (`headingLines`), so a block the cap cuts to an
+ *  excerpt credits the decisions whose lines all rendered (see
+ *  `assembleDelivery`). A caller that swaps the part's `text` must restate
+ *  `lines` to match what it renders. */
 export function decisionPointerPart(rel, decisions, { widen, cap = DECISION_POINTER_CAP, remedy, matchLabel } = {}) {
   const shown = decisions.slice(0, cap);
   const entry = (d) => ({ identity: d.id, revision: recordRevision(d), name: d.slug || d.title });
   return {
     kind: 'ordinary',
     contentClass: 'discovery',
-    identities: shown.map(entry),
+    headingLines: 1,
+    identities: shown.map((d) => ({ ...entry(d), lines: decisionPointerLines(d).join('\n').split('\n').length })),
     // Every decision the block represents: if the whole block is omitted, its
     // '+N more' disclosure counts and names all of them, not only the slice.
     disclosureIdentities: decisions.map(entry),

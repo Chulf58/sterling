@@ -14,7 +14,22 @@ test('H20 rendered decision pointers remain discovery, not substance', () => {
   const score = scorePush({ envelopes: [envelope], labels: { required: [{ id: record.id, level: 'pointer' }] }, recordsById: { [record.id]: record } });
   assert.deepEqual(score.timely.discovery, [1, 1]); assert.deepEqual(score.timely.substance, [0, 0]);
 });
-test('MRR derives from rank histogram, not summed ranks', () => assert.equal(mrrFromHistogram({ 2: 1, 4: 1 }), 0.375));
+const h20Header = 'STERLING MECHANISM-AXIS DELIVERY (H20) — you have just dispatched an agent; the brief has already gone out.';
+const h20DecisionBlock = (statement, decisionId) => `▸ DECISIONS for this subject (1) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:\n  → ${statement} (knowledge_get ${decisionId})`;
+test('a hazard rendered whole scores substance even when the same H20 envelope carries a decision pointer block', () => {
+  const envelope = `${h20Header}\n\n⚠ ANTI-PATTERN [WARN] for this subject — '${r.title}' [hazard-slug] (full record: knowledge_get ${id})\nTRIGGER: ${r.trigger}\nRIGHT WAY: ${r.right_way}\n\n${h20DecisionBlock('Some other ruling, clipped…', '22222222-2222-4222-8222-222222222222')}`;
+  assert.deepEqual(emittedLevel(envelope, r), { pointer: true, substance: true, whole: true, clipped: false, withheldOversize: false });
+  const score = scorePush({ envelopes: [envelope], labels: { required: [{ id, level: 'hazard_whole' }] }, recordsById: { [id]: r } });
+  assert.deepEqual(score.timely.substance, [1, 1]); assert.deepEqual(score.wholeHazard, [1, 1]);
+});
+test('a decision shown only as an H20 pointer excerpt scores no substance, with or without a whole hazard beside it', () => {
+  const ruling = { id: '22222222-2222-4222-8222-222222222222', slug: 'some-ruling', title: 'Some ruling', statement: 'A ruling whose opening passage is long enough to count as a passage.' };
+  const pointerOnly = `${h20Header}\n\n${h20DecisionBlock(ruling.statement, ruling.id)}`;
+  assert.deepEqual(emittedLevel(pointerOnly, ruling), { pointer: true, substance: false, whole: false, clipped: false, withheldOversize: false });
+  const besideHazard = `${h20Header}\n\n⚠ ANTI-PATTERN [WARN] for this subject — '${r.title}' [hazard-slug] (full record: knowledge_get ${id})\nTRIGGER: ${r.trigger}\nRIGHT WAY: ${r.right_way}\n\n${h20DecisionBlock(ruling.statement, ruling.id)}`;
+  assert.equal(emittedLevel(besideHazard, ruling).substance, false);
+});
+test('MRR derives from rank histogram, not summed ranks',() => assert.equal(mrrFromHistogram({ 2: 1, 4: 1 }), 0.375));
 test('MRR counts positive misses in its denominator', () => assert.equal(mrrFromHistogram({ 1: 1, miss: 1 }), 0.5));
 test('knowledge get bare record is normalized for pull scoring', () => assert.deepEqual(scorePull({ id }, { required: [{ id }] }).recall.at1, [1, 1]));
 test('Agent input score selects both dispatch hooks, ending at child start', () => assert.deepEqual(scoreEventIndexes([{ tool: 'Read' }, { tool: 'Agent' }], 1), [1, 2]));
@@ -246,7 +261,7 @@ test('v2 gold set: ids are unique, every required label is a uuid, and each dilu
   const cases = readFileSync(new URL('./fixtures/knowledge-eval/v2/cases.jsonl', import.meta.url), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
   assert.equal(new Set(cases.map((c) => c.id)).size, cases.length);
   const dilution = cases.filter((c) => c.id.startsWith('d-'));
-  assert.equal(dilution.length, 12);
+  assert.equal(dilution.length, 13);
   for (const c of dilution) {
     assert.ok(['preflight', 'dispatch'].includes(c.kind), c.id);
     assert.ok(c.labels.required.length > 0 && c.labels.required.every((l) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(l.id)), c.id);

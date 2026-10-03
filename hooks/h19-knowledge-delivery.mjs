@@ -8431,6 +8431,12 @@ function rankFileDecisionPointers(decisions) {
 }
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
+function decisionPointerLines(d) {
+  const lines = [`  \u2192 ${authorityMarker(d)}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`];
+  const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
+  if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
+  return lines;
+}
 function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed, matchLabel = "for this path" } = {}) {
   const shown = decisions.slice(0, cap);
   const fullTotal = total ?? decisions.length;
@@ -8438,11 +8444,7 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
   const lines = [
     `\u25B8 DECISIONS ${matchLabel} (${fullTotal}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
-  for (const d of shown) {
-    lines.push(`  \u2192 ${authorityMarker(d)}${clip(d.statement, DECISION_STATEMENT_CLIP)}${d.slug ? ` [${d.slug}]` : ""} (knowledge_get ${d.id})${statusAnnotation(d)}`);
-    const rejected = (Array.isArray(d.alternatives_rejected) ? d.alternatives_rejected : []).map((a) => typeof a?.option === "string" ? a.option.trim() : "").filter(Boolean).join("; ");
-    if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
-  }
+  for (const d of shown) lines.push(...decisionPointerLines(d));
   if (dropped > 0) {
     const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${fullTotal}`;
     lines.push(`  \u2026 ${dropped} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
@@ -8537,13 +8539,27 @@ function assembleOnce(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}, re
     }
     return out;
   };
-  const creditsFor = (survivors2) => {
+  const creditedEntries = (part, { full, keptLines }) => {
+    if (full) return idsOf(part);
+    if (part.contentClass !== "discovery" || !Number.isInteger(keptLines)) return [];
+    if (!Number.isInteger(part.headingLines) || part.headingLines < 0) return [];
+    const credited = [];
+    let used = part.headingLines;
+    for (const entry of idsOf(part)) {
+      if (!Number.isInteger(entry?.lines) || entry.lines < 1) break;
+      used += entry.lines;
+      if (used > keptLines) break;
+      credited.push(entry);
+    }
+    return credited;
+  };
+  const creditsFor = (rendered2) => {
     const emittedSubstance2 = [];
     const emittedDiscovery2 = [];
-    for (const part of survivors2) {
+    for (const [part, selection] of rendered2) {
       if (part.contentClass !== "substance" && part.contentClass !== "discovery") continue;
       const bucket = part.contentClass === "substance" ? emittedSubstance2 : emittedDiscovery2;
-      for (const entry of idsOf(part)) {
+      for (const entry of creditedEntries(part, selection)) {
         if (entry?.identity) bucket.push({ identity: entry.identity, revision: entry.revision });
       }
     }
@@ -8594,7 +8610,7 @@ ${line}` : line;
         return;
       }
       if (best) {
-        selected.set(part, { text: best, full: false });
+        selected.set(part, { text: best, full: false, keptLines: bestLines });
         return;
       }
       selected.delete(part);
@@ -8662,15 +8678,15 @@ ${line}` : line;
     omitted.length = 0;
     omitted.push(...baseOmitted);
     reserved.clear();
-    let rendered = selected.size;
+    let rendered2 = selected.size;
     let room = Math.min(ordinaryCeiling - ordinaryBytesUsed(), DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes());
     for (const part of ordinaryParts) {
       const ptr = pointerFor(part);
       if (!ptr) continue;
-      const cost = bytes(ptr) + sepCost(rendered);
+      const cost = bytes(ptr) + sepCost(rendered2);
       if (cost > room) continue;
       reserved.set(part, cost);
-      rendered += 1;
+      rendered2 += 1;
       room -= cost;
     }
     const roomFor = (size) => size > 0 ? Math.max(0, Math.min(room, size + bytes(sep))) : 0;
@@ -8753,8 +8769,8 @@ ${line}` : line;
       break;
     }
   }
-  const survivors = items.filter((part) => selected.has(part) && selected.get(part).full);
-  const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
+  const rendered = items.filter((part) => selected.has(part)).map((part) => [part, selected.get(part)]);
+  const { emittedSubstance, emittedDiscovery } = creditsFor(rendered);
   const omittedEntries = dedupeEntries(omitted.flatMap(disclosureIdsOf));
   const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
   const result = {
@@ -8786,7 +8802,8 @@ function decisionPointerPart(rel, decisions, { widen, cap = DECISION_POINTER_CAP
   return {
     kind: "ordinary",
     contentClass: "discovery",
-    identities: shown.map(entry),
+    headingLines: 1,
+    identities: shown.map((d) => ({ ...entry(d), lines: decisionPointerLines(d).join("\n").split("\n").length })),
     // Every decision the block represents: if the whole block is omitted, its
     // '+N more' disclosure counts and names all of them, not only the slice.
     disclosureIdentities: decisions.map(entry),

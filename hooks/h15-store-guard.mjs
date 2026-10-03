@@ -5287,18 +5287,8 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   exit: (code) => process.exit(code)
 });
 
-// scripts/hooks/h15-store-guard.mjs
+// scripts/hooks/lib/store-shell-verdict.mjs
 var DB_FILE_RE = /^sterling\.db(?:-wal|-shm|-journal|\..+)?$/i;
-var input;
-try {
-  input = readStdin();
-} catch (e) {
-  deny(`H15: hook input could not be read (${e && e.message || e}) \u2014 a gate that cannot read its input fails closed (P5).`);
-}
-function namesStoreComponent(absPath) {
-  const win32 = sep === "\\";
-  return absPath.split(win32 ? /[\\/]+/ : /\/+/).some((c) => (win32 ? c.replace(/[. ]+$/, "") : c).toLowerCase() === ".sterling");
-}
 function skipQuoted(s, i) {
   if (s[i] === "'") {
     const j2 = s.indexOf("'", i + 1);
@@ -5309,7 +5299,7 @@ function skipQuoted(s, i) {
   return Math.min(j + 1, s.length);
 }
 var escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-function stripHeredocBodies(cmd, bodies) {
+function stripHeredocBodies(cmd, bodies, o) {
   let out = "", i = 0;
   const n = cmd.length;
   while (i < n) {
@@ -5320,7 +5310,7 @@ function stripHeredocBodies(cmd, bodies) {
       i = end;
       continue;
     }
-    if (c === "\\" && !PS) {
+    if (c === "\\" && !o.ps) {
       out += cmd.slice(i, Math.min(i + 2, n));
       i += 2;
       continue;
@@ -5380,25 +5370,25 @@ function extractBalanced(str, start, openCh, closeCh) {
   }
   return { inner: str.slice(start, i - 1), end: i };
 }
-function scanDoubleQuoted(str, i) {
+function scanDoubleQuoted(str, i, o) {
   let j = i + 1;
   const n = str.length;
   const subs = [];
   while (j < n && str[j] !== '"') {
-    if (str[j] === "\\" && j + 1 < n && !PS) {
+    if (str[j] === "\\" && j + 1 < n && !o.ps) {
       j += 2;
       continue;
     }
     if (str[j] === "$" && str[j + 1] === "(") {
       const { inner, end } = extractBalanced(str, j + 2, "(", ")");
-      subs.push(...splitTopLevel(inner));
+      subs.push(...splitTopLevel(inner, o));
       j = end;
       continue;
     }
     if (str[j] === "`") {
       let k = j + 1;
       while (k < n && str[k] !== "`") k += str[k] === "\\" ? 2 : 1;
-      subs.push(...splitTopLevel(str.slice(j + 1, k)));
+      subs.push(...splitTopLevel(str.slice(j + 1, k), o));
       j = k + 1;
       continue;
     }
@@ -5406,7 +5396,7 @@ function scanDoubleQuoted(str, i) {
   }
   return { end: Math.min(j + 1, n), subs };
 }
-function splitTopLevel(str) {
+function splitTopLevel(str, o) {
   const fragments = [];
   let buf = "", i = 0;
   const n = str.length;
@@ -5424,20 +5414,20 @@ function splitTopLevel(str) {
       continue;
     }
     if (c === '"') {
-      const { end, subs } = scanDoubleQuoted(str, i);
+      const { end, subs } = scanDoubleQuoted(str, i, o);
       buf += str.slice(i, end);
       fragments.push(...subs);
       i = end;
       continue;
     }
-    if (c === "\\" && !PS) {
+    if (c === "\\" && !o.ps) {
       buf += str.slice(i, Math.min(i + 2, n));
       i += 2;
       continue;
     }
     if (c === "$" && str[i + 1] === "(") {
       const { inner, end } = extractBalanced(str, i + 2, "(", ")");
-      fragments.push(...splitTopLevel(inner));
+      fragments.push(...splitTopLevel(inner, o));
       buf += " ";
       i = end;
       continue;
@@ -5445,14 +5435,14 @@ function splitTopLevel(str) {
     if (c === "`") {
       let j = i + 1;
       while (j < n && str[j] !== "`") j += str[j] === "\\" ? 2 : 1;
-      fragments.push(...splitTopLevel(str.slice(i + 1, j)));
+      fragments.push(...splitTopLevel(str.slice(i + 1, j), o));
       buf += " ";
       i = j + 1;
       continue;
     }
     if (c === "(") {
       const { inner, end } = extractBalanced(str, i + 1, "(", ")");
-      fragments.push(...splitTopLevel(inner));
+      fragments.push(...splitTopLevel(inner, o));
       buf += " ";
       i = end;
       continue;
@@ -5498,7 +5488,7 @@ function splitTopLevel(str) {
   flush();
   return fragments;
 }
-function tokenizeFragment(fragment) {
+function tokenizeFragment(fragment, o) {
   const tokens = [];
   let word = "", i = 0;
   const n = fragment.length;
@@ -5534,7 +5524,7 @@ function tokenizeFragment(fragment) {
     if (c === '"') {
       let j = i + 1;
       while (j < n && fragment[j] !== '"') {
-        if (fragment[j] === "\\" && j + 1 < n && !PS) {
+        if (fragment[j] === "\\" && j + 1 < n && !o.ps) {
           word += fragment[j + 1];
           j += 2;
         } else {
@@ -5545,7 +5535,7 @@ function tokenizeFragment(fragment) {
       i = j + 1;
       continue;
     }
-    if (c === "\\" && i + 1 < n && !PS) {
+    if (c === "\\" && i + 1 < n && !o.ps) {
       word += fragment[i + 1];
       i += 2;
       continue;
@@ -5582,18 +5572,62 @@ function tokenizeFragment(fragment) {
   flushWord();
   return tokens;
 }
-function isDbPath(token) {
-  const value = token.includes("=") ? token.slice(token.lastIndexOf("=") + 1) : token;
-  const parts = value.split(/[\\/]+/).filter(Boolean);
-  if (parts.length < 2) return false;
-  const base3 = parts[parts.length - 1];
-  return parts.slice(0, -1).some((p) => p.toLowerCase() === ".sterling") && DB_FILE_RE.test(base3);
+var DB_NAME_SAMPLES = ["sterling.db", "sterling.db-wal", "sterling.db-shm", "sterling.db-journal", "sterling.db.bak"];
+function globMatchesDbName(pattern) {
+  if (!/[*?[{]/.test(pattern)) return false;
+  const base3 = pattern.replace(/\*+/g, "*");
+  if (base3.match(/[*?[]/g)?.length > 6) return true;
+  let src = "", depth = 0;
+  for (let i = 0; i < base3.length; i++) {
+    const c = base3[i];
+    if (c === "*") src += ".*";
+    else if (c === "?") src += ".";
+    else if (c === "[") {
+      const j = base3.indexOf("]", i + 1);
+      if (j === -1) src += "\\[";
+      else {
+        src += ".";
+        i = j;
+      }
+    } else if (c === "{") {
+      src += "(?:";
+      depth++;
+    } else if (c === "}" && depth > 0) {
+      src += ")";
+      depth--;
+    } else if (c === "," && depth > 0) src += "|";
+    else src += escapeRe(c);
+  }
+  let re;
+  try {
+    re = new RegExp("^" + src + "$", "i");
+  } catch {
+    return true;
+  }
+  return DB_NAME_SAMPLES.some((name) => re.test(name));
 }
+function isDbPath(token, bare) {
+  let value = token.includes("=") ? token.slice(token.lastIndexOf("=") + 1) : token;
+  const param = /^-\w+:(.+)$/.exec(value);
+  if (param) value = param[1];
+  const parts = value.split(/[\\/]+/).filter(Boolean);
+  if (parts.length === 0) return false;
+  const base3 = parts[parts.length - 1];
+  const dirs = parts.slice(0, -1).map((p) => p.toLowerCase());
+  const named = bare || dirs.includes(".sterling");
+  if (DB_FILE_RE.test(base3)) return named;
+  const direct = dirs.at(-1) === ".sterling" || dirs.at(-3) === ".sterling" && dirs.at(-2) === "domains";
+  if (!(base3.toLowerCase().startsWith("sterling") ? named : direct)) return false;
+  return globMatchesDbName(base3);
+}
+var storeTextSource = (bare) => bare ? "(?:\\.sterling[\\\\/]|sterling\\.db)" : "\\.sterling[\\\\/]";
 function isDotSterlingDir(token) {
   const parts = token.replace(/[\\/]+$/, "").split(/[\\/]+/).filter(Boolean);
   return parts.length > 0 && parts[parts.length - 1].toLowerCase() === ".sterling";
 }
-var WRAPPERS_PLAIN = /* @__PURE__ */ new Set(["command", "time", "exec", "xargs", "builtin"]);
+var WRAPPERS_PLAIN = /* @__PURE__ */ new Set(["command", "time", "exec", "xargs", "builtin", "nohup"]);
+var GRAMMAR_WORDS = /* @__PURE__ */ new Set(["if", "then", "else", "elif", "do", "while", "until", "{", "!"]);
+var TIMEOUT_ARG_OPTS = /* @__PURE__ */ new Set(["-k", "-s"]);
 var SUDO_ARG_OPTS = /* @__PURE__ */ new Set(["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T"]);
 var NICE_ARG_OPTS = /* @__PURE__ */ new Set(["-n"]);
 var ENV_ARG_OPTS = /* @__PURE__ */ new Set(["-u", "-C", "-S"]);
@@ -5631,6 +5665,15 @@ function skipWrappers(tokens) {
   if (tokens[i] && tokens[i].type === "op" && tokens[i].value === "&") i++;
   while (i < tokens.length && tokens[i].type === "word") {
     const lv = tokens[i].value.toLowerCase();
+    if (/^[A-Za-z_]\w*=/.test(tokens[i].value) || GRAMMAR_WORDS.has(lv)) {
+      i++;
+      continue;
+    }
+    if (lv === "timeout") {
+      i = skipOptsWithArgs(tokens, i + 1, TIMEOUT_ARG_OPTS);
+      if (i < tokens.length && tokens[i].type === "word") i++;
+      continue;
+    }
     if (lv === "sudo") {
       i = skipOptsWithArgs(tokens, i + 1, SUDO_ARG_OPTS);
       continue;
@@ -5676,8 +5719,18 @@ var DESTRUCTIVE_VERBS = /* @__PURE__ */ new Set([
   "add-content",
   "out-file",
   "clear-content",
-  "new-item"
+  "new-item",
+  "sc",
+  "ac",
+  "clc",
+  "ni",
+  "mi",
+  "cpi",
+  "rni",
+  "ren"
+  // PowerShell aliases of the cmdlets above
 ]);
+var INNER_SHELLS = /* @__PURE__ */ new Set(["bash", "sh", "zsh", "dash", "ksh", "pwsh", "powershell"]);
 var SQLITE3_VALUE_OPTS = /* @__PURE__ */ new Map([
   ["-cmd", 1],
   ["-init", 1],
@@ -5703,7 +5756,8 @@ function sqlite3ReadonlyBefore(tokens, end) {
   }
   return false;
 }
-function sqlite3DotCommandTargetsStore(words, heredocBodies) {
+function sqlite3DotCommandTargetsStore(words, heredocBodies, bare) {
+  const store = new RegExp(storeTextSource(bare), "i");
   const text = words.join("\n") + "\n" + heredocBodies.join("\n");
   const re = /\.(?:output|once|backup|save)\b([^\n;]*)/gi;
   let m;
@@ -5711,38 +5765,48 @@ function sqlite3DotCommandTargetsStore(words, heredocBodies) {
     const args = m[1].trim().match(/'[^']*'|"[^"]*"|\S+/g);
     if (!args || args.length === 0) continue;
     const target = args[args.length - 1].replace(/^['"]|['"]$/g, "");
-    if (/\.sterling[\\/]/i.test(target)) return true;
+    if (store.test(target)) return true;
   }
   return false;
 }
-function sqlite3VacuumOrAttachTargetsStore(words, heredocBodies) {
+function sqlite3VacuumOrAttachTargetsStore(words, heredocBodies, bare) {
   const text = words.join(" ") + " " + heredocBodies.join(" ");
-  return /vacuum\s+(?:\w+\s+)?into\b[^;]*\.sterling[\\/]/i.test(text) || /\battach\b[^;]*\.sterling[\\/]/i.test(text);
+  const store = storeTextSource(bare);
+  return new RegExp("vacuum\\s+(?:\\w+\\s+)?into\\b[^;]*" + store, "i").test(text) || new RegExp("\\battach\\b[^;]*" + store, "i").test(text);
 }
-function isDestructiveFragment(tokens, heredocBodies = []) {
+function isDestructiveFragment(tokens, heredocBodies, o) {
+  const dbPath = (token) => isDbPath(token, o.bare);
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     if (t.type === "op" && /^\d*(>>|>\||&>|>)$/.test(t.value)) {
       const next = tokens[i + 1];
-      if (next && next.type === "word" && isDbPath(next.value)) return true;
+      if (next && next.type === "word" && dbPath(next.value)) return true;
     }
   }
   const idx0 = skipWrappers(tokens);
   const verb = tokens[idx0];
   if (!verb || verb.type !== "word") return false;
-  const lv = verb.value.toLowerCase();
+  if (o.bare && !verb.value.includes("=") && dbPath(verb.value)) return true;
+  const lv = verb.value.toLowerCase().replace(/^.*[\\/]/, "").replace(/\.exe$/, "");
   const rest = tokens.slice(idx0 + 1);
   const restWords = rest.filter((t) => t.type === "word").map((t) => t.value);
+  if (INNER_SHELLS.has(lv)) {
+    const at = rest.findIndex((t) => t.type === "word" && (/^-[a-z]*c$/.test(t.value) || /^-command$/i.test(t.value)));
+    const inner = at === -1 ? void 0 : rest[at + 1];
+    if (inner && inner.type === "word" && writeShape(inner.value, o)) return true;
+  }
+  if (lv === "eval" && writeShape(restWords.join(" "), o)) return true;
   if (lv === "sqlite3") {
-    if (sqlite3DotCommandTargetsStore(restWords, heredocBodies)) return true;
-    if (sqlite3VacuumOrAttachTargetsStore(restWords, heredocBodies)) return true;
-    const dbIdx = rest.findIndex((t) => t.type === "word" && isDbPath(t.value));
+    if (sqlite3DotCommandTargetsStore(restWords, heredocBodies, o.bare)) return true;
+    if (sqlite3VacuumOrAttachTargetsStore(restWords, heredocBodies, o.bare)) return true;
+    const dbIdx = rest.findIndex((t) => t.type === "word" && dbPath(t.value));
     if (dbIdx !== -1) {
       const readonly = sqlite3ReadonlyBefore(rest, dbIdx);
       if (!readonly) return true;
+      if (o.bare && heredocBodies.length === 0 && rest.some((t) => t.type === "op" && /^\d*<<$/.test(t.value))) return true;
     }
-  } else if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(isDbPath)) return true;
-  if ((lv === "sed" || lv === "perl") && restWords.some((w) => /^-\S*i\S*$/.test(w)) && restWords.some(isDbPath)) return true;
+  } else if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(dbPath)) return true;
+  if ((lv === "sed" || lv === "perl") && restWords.some((w) => /^-\S*i\S*$/.test(w)) && restWords.some(dbPath)) return true;
   if (lv === "rm") {
     const recursive = restWords.some((w) => w === "--recursive" || /^-[A-Za-z]*[rR][A-Za-z]*$/.test(w));
     if (recursive && restWords.some(isDotSterlingDir)) return true;
@@ -5763,6 +5827,26 @@ function isDestructiveFragment(tokens, heredocBodies = []) {
   }
   return false;
 }
+function storeShellWriteShape(command, { powershell = false, bareDbName = false } = {}) {
+  return writeShape(command, { ps: powershell, bare: bareDbName });
+}
+function writeShape(command, o) {
+  const heredocBodies = [];
+  const fragments = splitTopLevel(stripHeredocBodies(command, heredocBodies, o), o);
+  return fragments.some((fragment) => isDestructiveFragment(tokenizeFragment(fragment, o), heredocBodies, o));
+}
+
+// scripts/hooks/h15-store-guard.mjs
+var input;
+try {
+  input = readStdin();
+} catch (e) {
+  deny(`H15: hook input could not be read (${e && e.message || e}) \u2014 a gate that cannot read its input fails closed (P5).`);
+}
+function namesStoreComponent(absPath) {
+  const win32 = sep === "\\";
+  return absPath.split(win32 ? /[\\/]+/ : /\/+/).some((c) => (win32 ? c.replace(/[. ]+$/, "") : c).toLowerCase() === ".sterling");
+}
 var tool = input.tool_name;
 var PS = tool === "PowerShell";
 if (tool === "Bash" || tool === "PowerShell") {
@@ -5771,14 +5855,16 @@ if (tool === "Bash" || tool === "PowerShell") {
   if (rawCommand === void 0 || rawCommand === null) command = "";
   else if (typeof rawCommand === "string") command = rawCommand;
   else deny(`H15: this ${tool} call carries a non-string command (${typeof rawCommand}), which cannot be safely inspected for a destructive shape \u2014 re-issue with a string command.`);
-  const heredocBodies = [];
-  const fragments = splitTopLevel(stripHeredocBodies(command, heredocBodies));
-  for (const fragment of fragments) {
-    if (isDestructiveFragment(tokenizeFragment(fragment), heredocBodies)) {
-      deny(
-        "H15: this command would overwrite, delete, move or rewrite the Sterling store database (sterling.db) or the .sterling directory that holds it, which only the Sterling MCP server writes \u2014 write it with knowledge_create / knowledge_update / board_add and the other MCP tools. Reading or merely naming the path is fine, and every other file under .sterling/ (config.json, transient/*) may be read and written freely."
-      );
-    }
+  let writes;
+  try {
+    writes = storeShellWriteShape(command, { powershell: PS });
+  } catch (e) {
+    deny(`H15: this ${tool} command could not be parsed (${e && e.message || e}), so the store database cannot be shown untouched \u2014 a gate that cannot read its input fails closed (P5). Re-issue it in a simpler form.`);
+  }
+  if (writes) {
+    deny(
+      "H15: this command would overwrite, delete, move or rewrite the Sterling store database (sterling.db) or the .sterling directory that holds it, which only the Sterling MCP server writes \u2014 write it with knowledge_create / knowledge_update / board_add and the other MCP tools. Reading or merely naming the path is fine, and every other file under .sterling/ (config.json, transient/*) may be read and written freely."
+    );
   }
   allow();
 }
