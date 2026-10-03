@@ -6,7 +6,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, chmodSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,6 +50,12 @@ function init(dir, extraEnv = {}) {
     env,
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+// What the TUI System tab's Handoff files row writes.
+function turnHandoffOn(dir) {
+  const p = join(dir, '.sterling', 'config.json');
+  writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf8')), handoff: { enabled: true } }, null, 2));
 }
 
 // ---------- probeClaude (mirrors probeOpenCode) ----------
@@ -103,20 +109,36 @@ test('(a) claude absent: no Claude-only file is written, ONE loud line names the
   assert.match(r.stdout, /^hooks \(§6 set\)\s+skipped\b.*not applicable/m);
   assert.ok(!/^\.mcp\.json\s+matches\b/m.test(r.stdout), '.mcp.json is not reported as matching without Claude Code');
   assert.ok(!/^hooks \(§6 set\)\s+matches\b/m.test(r.stdout), 'the hooks are not reported as matching without Claude Code');
-  // the host-independent and OpenCode side is intact
-  for (const f of ['.sterling/config.json', 'AGENTS.md', 'sterling-update.bat', '.opencode/agents/scout.md']) {
+  // the host-independent side is intact
+  for (const f of ['.sterling/config.json', 'AGENTS.md', 'sterling-update.bat']) {
     assert.ok(existsSync(join(dir, f)), `${f} is still written`);
   }
-  assert.match(r.stdout, /^\.opencode\/agents\/scout\.md\s+created\b/m);
+  // CHANGED: the portable OpenCode agent used to arrive on this first run because
+  // FRESH_FLAGS says --mode work. It follows config.handoff.enabled now (decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting), so
+  // work mode alone writes none, and a re-run with the setting on writes it —
+  // still without Claude Code.
+  assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')), 'work mode alone writes no portable agent');
+  turnHandoffOn(dir);
+  const again = init(dir, { STERLING_CLAUDE_PROBE: 'absent' });
+  assert.equal(again.code, 0, again.stderr);
+  assert.match(again.stdout, /^\.opencode\/agents\/scout\.md\s+created\b/m);
+  assert.ok(existsSync(join(dir, '.opencode', 'agents', 'scout.md')), 'the OpenCode side is written without Claude Code');
+  for (const f of CLAUDE_FILES) assert.ok(!existsSync(join(dir, f)), `${f} is still not written`);
 });
 
 test('(b) claude present: every Claude file is written and no skip line is printed', () => {
   const dir = tmp('sterling-cp-b-');
   const r = init(dir, { STERLING_CLAUDE_PROBE: 'ok' });
   assert.equal(r.code, 0, r.stderr);
-  for (const f of [...CLAUDE_FILES, '.claude/agents/librarian.md', '.claude/settings.json', '.sterling/synced-version', '.opencode/agents/scout.md']) {
+  for (const f of [...CLAUDE_FILES, '.claude/agents/librarian.md', '.claude/settings.json', '.sterling/synced-version']) {
     assert.ok(existsSync(join(dir, f)), `${f} is written with Claude Code present`);
   }
+  // CHANGED: as in (a), the portable agent follows config.handoff.enabled, not --mode work.
+  assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')), 'work mode alone writes no portable agent');
+  turnHandoffOn(dir);
+  assert.equal(init(dir, { STERLING_CLAUDE_PROBE: 'ok' }).code, 0);
+  assert.ok(existsSync(join(dir, '.opencode', 'agents', 'scout.md')), '.opencode/agents/scout.md is written with Claude Code present');
   assert.equal((r.stdout.match(SKIP_LINE) ?? []).length, 0, 'no skip line');
   assert.match(r.stdout, /^sterling-launch\.sh\s+created\b/m);
   assert.match(r.stdout, /^\.claude\/agents\/librarian\.md\s+created\b/m);

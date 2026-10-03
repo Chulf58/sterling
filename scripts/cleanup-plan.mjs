@@ -13,7 +13,14 @@
 //            check could not run. Fails closed: unmeasured means kept.
 //   delete   on disk, no live owner, no reference from any other file.
 // A reference is a mention of the filename, the stem, the stem's PascalCase or
-// camelCase form, or (for a .gd file) the class_name the file declares.
+// camelCase form, or (for a .gd file) the class_name the file declares. A
+// document basename (README, CHANGELOG, LICENSE, CONTRIBUTING) names every
+// such file in the repo, so only a path-qualified mention counts for it, plus
+// the bare name inside its own directory.
+// The paths of one deletable article die together: a reference from another
+// path of the same article that is itself being deleted does not keep a path.
+// A reference from any other file does, and a path that stays (keep, release)
+// is such a file, so what a kept path names stays with it.
 // Only `delete` paths reach the top-level delete_paths list. An article whose
 // every path is absent is not a candidate at all (decision
 // cleanup-plan-skips-deprecated-articles-whose-files-are-all-gone): its files
@@ -21,7 +28,7 @@
 // plan. A path that cannot be statted for any reason but ENOENT counts as
 // present. The planner opens a read-only copy of the store and never writes to it.
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, join, posix } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { arg, openProjectReadOnly } from './lib/project.mjs';
 
@@ -30,6 +37,19 @@ import { arg, openProjectReadOnly } from './lib/project.mjs';
 const ARTICLE_CAP = 10000;
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 const LIST_LIMIT = 5;
+// Stems (compared case-insensitively) of files that are documents and never
+// imported: a mention of the bare name says nothing about one particular file.
+// Below the repo root they are searched path-qualified everywhere and by bare
+// name or stem only inside their own directory; at the root they keep the
+// bare-name search everywhere. Code names (index, main, mod, __init__) are NOT
+// here: an importer in another directory reaches them by a dotted module path,
+// an alias or a bare module name with no slash (`from app import main`,
+// `@core/main`), so only the old repo-wide bare-name search keeps them safe.
+const GENERIC_STEMS = new Set(['readme', 'changelog', 'license', 'contributing']);
+// Stems whose file is reached through its directory's name (`mod oldfeat;`,
+// `import oldpkg`, `from './legacy'`) rather than through a path: the directory
+// name is a needle too. It only widens the search, so it can only keep more.
+const DIRECTORY_NAMED_STEMS = new Set(['index', 'mod', '__init__']);
 
 const target = arg('--target') ?? process.cwd();
 
@@ -56,16 +76,39 @@ function gitUnavailable() {
 // What a reference to the path looks like: its basename, the basename without
 // the extension, that stem in PascalCase and camelCase (foo_bar -> FooBar,
 // fooBar), and for a .gd file every `class_name` it declares, which is the name
-// other scripts use and `extends`. Returns { needles } or { error } when the
-// file cannot be read for its class_name.
+// other scripts use and `extends`. A generic basename below the repo root
+// (GENERIC_STEMS) gets the path-qualified forms searched everywhere (the full
+// repo-relative path, and its last directory segment plus the basename and plus
+// the stem) and the bare basename and stem searched only in `local`, the files
+// under its own directory. index, mod and __init__ also get their directory
+// name. `what` words the evidence for the printed reason. Returns
+// { needles, local, localDir, what } or { error } when the file cannot be read
+// for its class_name.
 function needlesFor(path) {
   const base = basename(path);
   const dot = base.lastIndexOf('.');
   const stem = dot > 0 ? base.slice(0, dot) : base;
-  const words = stem.split(/[^A-Za-z0-9]+/).filter(Boolean);
-  const pascal = words.map((w) => w[0].toUpperCase() + w.slice(1)).join('');
-  const camel = pascal ? pascal[0].toLowerCase() + pascal.slice(1) : '';
-  const needles = [base, stem, pascal, camel];
+  const dirPath = posix.dirname(path);
+  const inRoot = dirPath === '.';
+  const dirSegment = inRoot ? '' : basename(dirPath);
+  const lower = stem.toLowerCase();
+  let needles;
+  let local = [];
+  let what = 'its filename, stem or declared class';
+  if (GENERIC_STEMS.has(lower) && !inRoot) {
+    needles = [path, `${dirSegment}/${base}`, `${dirSegment}/${stem}`];
+    local = [base, stem];
+    what = `its path (a generic document name, so searched path-qualified everywhere and by bare name or stem only in its own directory ${dirPath}/)`;
+  } else {
+    const words = stem.split(/[^A-Za-z0-9]+/).filter(Boolean);
+    const pascal = words.map((w) => w[0].toUpperCase() + w.slice(1)).join('');
+    const camel = pascal ? pascal[0].toLowerCase() + pascal.slice(1) : '';
+    needles = [base, stem, pascal, camel];
+  }
+  if (DIRECTORY_NAMED_STEMS.has(lower) && dirSegment) {
+    needles.push(dirSegment);
+    what = local.length ? `${what}, and by its directory name` : 'its filename, stem, declared class or directory name';
+  }
   if (base.endsWith('.gd')) {
     let text;
     try {
@@ -75,29 +118,38 @@ function needlesFor(path) {
     }
     for (const m of text.matchAll(/^\s*class_name\s+([A-Za-z_][A-Za-z0-9_]*)/gm)) needles.push(m[1]);
   }
-  return { needles: [...new Set(needles.filter(Boolean))] };
+  return { needles: [...new Set(needles.filter(Boolean))], local: [...new Set(local)], localDir: dirPath, what };
 }
 
 // Other files (tracked, plus untracked files git does not ignore) that mention
-// any needle. Fixed-string match, no regex over file text, one git grep per
-// needle so the reason can say which needle matched. Returns { refs, matched }
-// or { error }.
+// any needle. Fixed-string match, no regex over file text, one search per
+// needle so the reason can say which needle matched. Returns
+// { refs: Map<file, Set<needle matched there>>, what } or { error }.
 function referencesTo(path) {
   const n = needlesFor(path);
   if (n.error) return { error: n.error };
-  const refs = new Set();
-  const matched = [];
+  const refs = new Map();
+  const search = (needle, pathspec) => {
+    const r = runGit(['grep', '-l', '-z', '--untracked', '--fixed-strings', '-e', needle, '--', ...pathspec]);
+    if (r.error) return `git grep could not be run (${r.error.message})`;
+    if (r.status === 1) return null;
+    if (r.status !== 0) return `git grep failed (exit ${r.status}): ${firstLine(r.stderr)}`;
+    for (const f of r.stdout.split('\0')) {
+      if (!f || f === path) continue;
+      if (!refs.has(f)) refs.set(f, new Set());
+      refs.get(f).add(needle);
+    }
+    return null;
+  };
   for (const needle of n.needles) {
-    const r = runGit(['grep', '-l', '-z', '--untracked', '--fixed-strings', '-e', needle, '--']);
-    if (r.error) return { error: `git grep could not be run (${r.error.message})` };
-    if (r.status === 1) continue;
-    if (r.status !== 0) return { error: `git grep failed (exit ${r.status}): ${firstLine(r.stderr)}` };
-    const hits = r.stdout.split('\0').filter((f) => f && f !== path);
-    if (!hits.length) continue;
-    matched.push(needle);
-    for (const f of hits) refs.add(f);
+    const error = search(needle, []);
+    if (error) return { error };
   }
-  return { refs: [...refs], matched };
+  for (const needle of n.local) {
+    const error = search(needle, [`:(literal)${n.localDir}/`]);
+    if (error) return { error };
+  }
+  return { refs, what: n.what };
 }
 
 function buildPlan(store) {
@@ -129,7 +181,9 @@ function buildPlan(store) {
   };
 
   let gitWhy;
-  const classify = (a, path) => {
+  // The verdict that needs no reference comparison, or { refs, matched } when
+  // the path is on disk, unowned and has to be weighed against its referrers.
+  const preliminary = (a, path) => {
     const owners = (liveOwners.get(path) ?? []).filter((o) => o.id !== a.id).map((o) => o.slug);
     if (owners.length) return ['release', `also owned by live article(s) ${listed(owners)}; only this article's ownership goes`];
     let st;
@@ -142,10 +196,39 @@ function buildPlan(store) {
     if (!st.isFile()) return ['keep', 'not a regular file (a directory or a link); fs-remove deletes files only'];
     if (gitWhy === undefined) gitWhy = gitUnavailable();
     if (gitWhy) return ['keep', `reference check could not run: ${gitWhy}`];
-    const { refs, matched, error } = referencesTo(path);
+    const { refs, what, error } = referencesTo(path);
     if (error) return ['keep', `reference check could not run: ${error}`];
-    if (refs.length) return ['keep', `referenced by ${refs.length} other file(s): ${listed(refs)} (matched ${listed(matched)})`];
-    return ['delete', 'on disk, no live owner, and no other tracked file references its filename, stem or declared class'];
+    return { refs, what };
+  };
+
+  // Every path of one deletable article, to its [bucket, reason]. The paths that
+  // are only waiting on their referrers form the dying group; a path with a
+  // referrer outside the group is kept and leaves the group, which can put a
+  // referrer of another path outside it, so this runs until nothing changes.
+  const classifyArticle = (a) => {
+    const verdicts = new Map();
+    const group = new Map();
+    for (const path of new Set(a.files.map((f) => f.path))) {
+      const r = preliminary(a, path);
+      if (Array.isArray(r)) verdicts.set(path, r);
+      else group.set(path, r);
+    }
+    for (let changed = true; changed; ) {
+      changed = false;
+      for (const [path, { refs }] of group) {
+        const outside = [...refs.keys()].filter((f) => !group.has(f));
+        if (!outside.length) continue;
+        const matched = [...new Set(outside.flatMap((f) => [...refs.get(f)]))];
+        verdicts.set(path, ['keep', `referenced by ${outside.length} other file(s): ${listed(outside)} (matched ${listed(matched)})`]);
+        group.delete(path);
+        changed = true;
+      }
+    }
+    for (const [path, { refs, what }] of group) {
+      const ownDeleted = refs.size ? '; references from this article\'s own deleted files do not count' : '';
+      verdicts.set(path, ['delete', `on disk, no live owner, and no other tracked file references ${what}${ownDeleted}`]);
+    }
+    return verdicts;
   };
 
   const candidates = articles
@@ -164,8 +247,9 @@ function buildPlan(store) {
       let buckets = null;
       if (deletable) {
         buckets = { delete: [], release: [], absent: [], keep: [] };
+        const verdicts = classifyArticle(a);
         for (const path of new Set(a.files.map((f) => f.path))) {
-          const [bucket, reason] = classify(a, path);
+          const [bucket, reason] = verdicts.get(path);
           buckets[bucket].push({ path, reason });
         }
       }

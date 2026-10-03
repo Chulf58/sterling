@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { openDashboard, type DashboardController } from '../controller.js';
 import { SYSTEM_TAB } from '../state.js';
 
@@ -37,15 +38,65 @@ test('controller: the TDD toggle on the System tab writes config.tdd.enabled thr
   try {
     await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
     assert.equal(ctl.roster()?.tdd?.enabled, true, 'the roster loads on System-tab activation');
-    // config.models defaults fill the top rows; the mode row is last (DOWN
-    // clamps on it) and the tdd row sits directly above it.
+    // config.models defaults fill the top rows; the handoff files row is last
+    // (DOWN clamps on it), the mode row sits above it and the tdd row above that.
     for (let i = 0; i < 30; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
+    await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
     const written = JSON.parse(readFileSync(f.configPath, 'utf8'));
     assert.equal(written.tdd.enabled, false, 'config.tdd.enabled flipped on disk');
     assert.equal(ctl.roster()?.tdd?.enabled, false, 'the roster reloads after the write');
     assert.match(ctl.ui().notice ?? '', /config\.json updated/);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+// The handoff files row and the project mode row are separate switches (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+// each writes only its own key, and each notice says only what that key decides.
+for (const mode of ['hobby', 'work']) {
+  test(`controller (${mode}): the handoff toggle writes config.handoff.enabled and leaves the mode alone; the mode toggle leaves handoff alone`, async () => {
+    const f = fixture({ mode, tdd: { enabled: true } });
+    const ctl = openDashboard(f.storePath);
+    try {
+      await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+      assert.equal(ctl.roster()?.handoff, false, 'no handoff key and nothing tracked reads off, in work mode too');
+      for (let i = 0; i < 30; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
+      await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
+      let written = JSON.parse(readFileSync(f.configPath, 'utf8'));
+      assert.deepEqual(written.handoff, { enabled: true }, 'config.handoff.enabled written');
+      assert.equal(written.mode, mode, 'the mode is untouched');
+      assert.equal(ctl.roster()?.handoff, true, 'the roster reloads after the write');
+      assert.match(ctl.ui().notice ?? '', /^handoff files turned on — run \/sterling:update \(or init\)/);
+
+      await ctl.handle({ kind: 'key', name: 'UP' }, VP);
+      await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
+      written = JSON.parse(readFileSync(f.configPath, 'utf8'));
+      assert.equal(written.mode, mode === 'hobby' ? 'work' : 'hobby', 'the mode row flips the mode');
+      assert.deepEqual(written.handoff, { enabled: true }, 'the handoff setting is untouched by a mode switch');
+      assert.match(ctl.ui().notice ?? '', /^project mode set to /);
+      assert.doesNotMatch(ctl.ui().notice ?? '', /OpenCode|handoff/i, 'the mode notice makes no claim about the handoff files');
+
+      await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
+      await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
+      assert.deepEqual(JSON.parse(readFileSync(f.configPath, 'utf8')).handoff, { enabled: false });
+      assert.match(ctl.ui().notice ?? '', /^handoff files turned off — .*NOT deleted/);
+    } finally {
+      ctl.close();
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('controller: a non-boolean handoff value reaches the roster as its JSON text (the row shows INVALID)', async () => {
+  const f = fixture({ handoff: { enabled: 'yes' } });
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    assert.equal(ctl.roster()?.handoff, '"yes"');
   } finally {
     ctl.close();
     rmSync(f.dir, { recursive: true, force: true });
@@ -167,6 +218,37 @@ test('controller: state() builds the dashboard with the project folder name', ()
     assert.ok(st.projectName.length > 0);
   } finally {
     ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('controller: the handoff row says why — not set for an absent key, the tracked-files note, and UNKNOWN with the git error when git cannot answer', async () => {
+  const f = fixture({ mode: 'work' });
+  const git = (args: string[]) => assert.equal(spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...args], { cwd: f.dir, encoding: 'utf8' }).status, 0, `git ${args.join(' ')}`);
+  const load = async () => {
+    const ctl = openDashboard(f.storePath);
+    try {
+      await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+      return { handoff: ctl.roster()?.handoff, detail: ctl.roster()?.handoffDetail };
+    } finally {
+      ctl.close();
+    }
+  };
+  try {
+    assert.deepEqual(await load(), { handoff: false, detail: 'not set' });
+    git(['init', '-q']);
+    mkdirSync(join(f.dir, '.opencode', 'agents'), { recursive: true });
+    writeFileSync(join(f.dir, '.opencode', 'agents', 'scout.md'), 'portable\n');
+    git(['add', '.opencode/agents/scout.md']);
+    git(['commit', '-qm', 'portable']);
+    assert.deepEqual(await load(), { handoff: true, detail: 'not set; handoff files are tracked in git' });
+    writeFileSync(join(f.dir, '.git', 'index'), 'not an index');
+    const unknown = await load();
+    assert.equal(unknown.handoff, null, 'never the off default');
+    assert.match(unknown.detail ?? '', /^git ls-files exited 128: /);
+    writeFileSync(f.configPath, JSON.stringify({ mode: 'work', handoff: { enabled: false } }));
+    assert.deepEqual(await load(), { handoff: false, detail: undefined }, 'an explicit key never asks git and carries no note');
+  } finally {
     rmSync(f.dir, { recursive: true, force: true });
   }
 });

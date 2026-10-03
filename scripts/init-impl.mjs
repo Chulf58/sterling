@@ -39,7 +39,7 @@ import { DEFAULT_DOMAIN_DESCRIPTIONS } from './lib/domain-defaults.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
-import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL, PROJECT_MODES } from './lib/handoff-projection.mjs';
+import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL, trackedHandoffFiles, PROJECT_MODES } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -221,6 +221,7 @@ const eff = recorded
 const UNIVERSAL_DOMAIN = 'sterling';
 eff.stackTags = [...eff.stackTags.filter((t) => t !== UNIVERSAL_DOMAIN), UNIVERSAL_DOMAIN];
 
+const freshTracked = recorded ? null : trackedHandoffFiles(target);
 const expectedConfig = parseConfig({
   ...JSON.parse(readFileSync(join(pluginRoot, 'templates', 'default-config.json'), 'utf8')),
   toolchains: baked,
@@ -236,6 +237,15 @@ const expectedConfig = parseConfig({
   // work project's config is not "hand-edited" for carrying it. A fresh config
   // takes --mode, else the explicit 'hobby' default.
   mode: recorded ? recorded.mode : (modeFlag ?? 'hobby'),
+  // the handoff setting (decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) is
+  // a recorded declaration too, switched in the TUI System tab. A fresh config
+  // starts with it off, unless the project already has handoff files tracked
+  // in git (a clone of a project that commits them): then it starts on, so the
+  // first init on a new machine does not stop maintaining committed files. When
+  // git cannot say what is tracked the key is left out of the written config
+  // (below), never recorded as off from a failed read.
+  handoff: recorded ? recorded.handoff : { enabled: freshTracked.files.length > 0 },
 });
 if (eff.splitRatio === undefined) eff.splitRatio = expectedConfig.tui_split_ratio;
 
@@ -350,7 +360,14 @@ for (const m of domainsExisting) {
 // config: created from declarations | matches defaults+declarations | tuned/hand-edited → left
 const backupDetail = eff.backupPath ? eff.backupPath : 'OPTED OUT (recorded; snapshots will skip loudly)';
 if (!recorded) {
-  writeFileSync(configPath, JSON.stringify(expectedConfig, null, 2));
+  if (freshTracked.unknown === null) {
+    writeFileSync(configPath, JSON.stringify(expectedConfig, null, 2));
+  } else {
+    const withoutHandoff = { ...expectedConfig };
+    delete withoutHandoff.handoff;
+    writeFileSync(configPath, JSON.stringify(withoutHandoff, null, 2));
+    notes.push(`note: config.handoff.enabled was left out of the new .sterling/config.json — git could not say whether handoff files are committed (${freshTracked.unknown}); once git answers, the setting follows what is tracked, or set it in the TUI System tab`);
+  }
   items.push({ item: '.sterling/config.json', status: 'created', detail: `${baked.map((t) => t.adapter).join(', ')} toolchain(s); stack tags [${eff.stackTags.join(', ')}]; backup ${backupDetail}` });
   for (const tc of baked) {
     for (const [cap, present] of Object.entries(tc.capabilities ?? {})) {
@@ -979,24 +996,26 @@ try {
   handoffCloneTarget = null;
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'refused', detail: `${err.message} — nothing written` });
 }
-// Project mode (decision project-mode-hobby-work-toggle-decides-flow): both are
-// WORK-ONLY, read from this target's own config. Hobby is a loud skip row that
-// deletes nothing; every init run provisions a work target, so re-running init
-// after a hobby→work switch writes the files.
-let handoffMode = null;
+// The handoff setting (decision
+// project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+// both follow config.handoff.enabled, read from this target's own config, in
+// hobby and work mode alike. Off is a loud skip row that deletes nothing; every
+// init run provisions a target that has it on, so re-running init after turning
+// it on writes the files.
+let handoffEnabled = null;
 if (handoffCloneTarget === false) {
   try {
-    handoffMode = readProjectMode(target);
+    handoffEnabled = readHandoffEnabled(target);
   } catch (err) {
-    if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
+    if (!(err instanceof HandoffSettingError) && !(err instanceof ContainmentError)) throw err;
     items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'refused', detail: `${err.message} — nothing written` });
   }
 }
 if (handoffCloneTarget === true) {
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'skipped', detail: 'the target is a Sterling clone — it has its own projections and is not a handoff target' });
-} else if (handoffMode === 'hobby') {
-  items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'skipped', detail: HOBBY_SKIP_DETAIL });
-} else if (handoffMode === 'work') {
+} else if (handoffEnabled === false) {
+  items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'skipped', detail: HANDOFF_OFF_DETAIL });
+} else if (handoffEnabled === true) {
   const { report: opencodeReport } = syncOpenCodeAgents({
     templatesDir: join(pluginRoot, 'agent-templates'),
     registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
@@ -1206,6 +1225,7 @@ const pluginPkg = (() => {
   }
 })();
 const registry = new ProjectRegistry(registryPath());
+let liveProjectPaths = null; // a registry failure stops init before the hint; null (every clone treated as live) is for a caller that could not read it
 try {
   const already = registry.list().some((p) => p.repo_path === fwd(target));
   registry.register({
@@ -1216,6 +1236,7 @@ try {
     sterling_version: typeof pluginPkg.version === 'string' ? pluginPkg.version : null,
     at: new Date().toISOString(),
   });
+  liveProjectPaths = [target, ...registry.list().map((p) => p.repo_path)];
   const siblings = registry.list().filter((p) => p.repo_path !== fwd(target)).length;
   items.push({
     item: 'project registry',
@@ -1274,5 +1295,5 @@ if (restartNeeded || conductorActivation.activation === 'written' || conductorAc
 }
 
 // S6 ruling point 4: deleting the old clone stays a manual step, printed last.
-const cleanupLines = cloneCleanupLines(oldClonePaths);
+const cleanupLines = cloneCleanupLines(oldClonePaths, liveProjectPaths);
 if (cleanupLines.length) console.log('\n' + cleanupLines.join('\n'));

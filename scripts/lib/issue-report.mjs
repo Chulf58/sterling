@@ -167,6 +167,58 @@ export function fingerprint(component, title) {
 /** The visible body line the dedup search matches. */
 export const fingerprintLine = (fp) => `Fingerprint: sterling-fp-${fp}`;
 
+/** The visible body line that carries the labels, so the classification
+ * survives when GitHub refuses or drops them for an account that may not set labels. */
+export const labelsLine = (labels) => `Labels: ${labels.join(', ')}`;
+
+/** The index of the last line for which `isFp(trimmed line)` holds (the renderer writes the fingerprint line last), or -1. */
+const lastFingerprintAt = (lines, isFp) => {
+  for (let i = lines.length - 1; i >= 0; i--) if (isFp(lines[i].trim())) return i;
+  return -1;
+};
+
+const FINGERPRINT_ANY = /^Fingerprint: sterling-fp-[0-9a-f]{12}$/;
+
+/** The tokens of the `Labels:` line that sits directly above the body's
+ * fingerprint line, as written, or null when there is none. A `Labels:` line
+ * anywhere else is user text and is not read. */
+export function parseLabelsLine(body) {
+  const lines = String(body).split('\n');
+  const at = lastFingerprintAt(lines, (l) => FINGERPRINT_ANY.test(l));
+  if (at < 1) return null;
+  const m = lines[at - 1].replace(/\r$/, '').match(/^Labels: (.*)$/);
+  return m ? m[1].split(',').map((l) => l.trim()) : null;
+}
+
+/** The labels a report carries when its Labels line is exactly `sterling-report`,
+ * one `severity:` label and one `project:` label (any order), returned in that
+ * order; null for any other line. --apply-labels acts on nothing else, because
+ * the body it reads is text anyone could have written. */
+export function reportLabels(body) {
+  const tokens = parseLabelsLine(body);
+  if (!tokens || tokens.length !== 3) return null;
+  const report = tokens.filter((l) => l === 'sterling-report');
+  const severity = tokens.filter((l) => /^severity:(?:blocked|workaround|friction)$/.test(l));
+  const project = tokens.filter((l) => /^project:[a-z0-9._-]{1,40}$/.test(l));
+  return report.length === 1 && severity.length === 1 && project.length === 1 ? [report[0], severity[0], project[0]] : null;
+}
+
+/** `body` with a `Labels:` line directly above its fingerprint line (or at the
+ * end when it has no fingerprint line), unless that line is already there. For
+ * queued reports written before the line existed; the fingerprint is untouched. */
+export function withLabelsLine(body, labels, fp) {
+  const lines = body.split('\n');
+  const fpLine = fingerprintLine(fp);
+  const at = lastFingerprintAt(lines, (l) => l === fpLine);
+  if (at < 0) {
+    const last = [...lines].reverse().find((l) => l.trim() !== '');
+    return last?.startsWith('Labels: ') ? body : `${body}\n\n${labelsLine(labels)}`;
+  }
+  if (at > 0 && lines[at - 1].startsWith('Labels: ')) return body;
+  lines.splice(at, 0, labelsLine(labels));
+  return lines.join('\n');
+}
+
 /** A body for a new issue whose fingerprint matched closed issue #n. */
 export const withRecurrence = (body, n) => `Recurs after #${n}.\n\n${body}`;
 
@@ -207,6 +259,7 @@ export function renderBody(report, stamps, { recursAfter } = {}) {
     '### Evidence',
     fence(report.evidence.join('\n')),
     '',
+    labelsLine(labelsFor(report.severity, stamps.project)),
     fingerprintLine(fingerprint(report.component, report.title)),
   ].join('\n');
   return recursAfter ? withRecurrence(body, recursAfter) : body;

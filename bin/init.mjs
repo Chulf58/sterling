@@ -4171,6 +4171,37 @@ function matchesGlob(path, glob) {
   }
   return new RegExp("^" + re + "$").test(path.replace(/\\/g, "/"));
 }
+function isAbsolutePathAnyHost(p) {
+  const s2 = String(p ?? "");
+  return /^[A-Za-z]:[\\/]/.test(s2) || s2.startsWith("/") || s2.startsWith("\\");
+}
+function sameLocationAnyHost(a, b) {
+  const x = drvfsForm(a);
+  const y = drvfsForm(b);
+  if (x === void 0 || y === void 0)
+    return false;
+  const [fx, fy] = foldDrvfs(x, y);
+  return fx === fy;
+}
+function isUnderLocationAnyHost(child, parent) {
+  const x = drvfsForm(child);
+  const y = drvfsForm(parent);
+  if (x === void 0 || y === void 0)
+    return false;
+  const [c, p] = foldDrvfs(x, y);
+  return c.startsWith(p + "/");
+}
+function drvfsForm(p) {
+  const s2 = String(p ?? "").replace(/\\/g, "/");
+  if (!isAbsolutePathAnyHost(s2))
+    return void 0;
+  const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
+  return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
+}
+function foldDrvfs(x, y) {
+  const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
+  return onDrvfs(x) && onDrvfs(y) ? [x.toLowerCase(), y.toLowerCase()] : [x, y];
+}
 var repoPath;
 var init_paths = __esm({
   "packages/schemas/dist/paths.js"() {
@@ -5395,22 +5426,40 @@ var init_config = __esm({
       tdd: external_exports.object({
         enabled: external_exports.boolean().default(true)
       }).default({}),
-      // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-      // per-project switch that decides the flow. 'hobby' (the default, today's
-      // behaviour) skips the OpenCode agents and the handoff projection; 'work'
-      // writes and maintains them. Toggled in the TUI System tab. A missing key
-      // means hobby.
+      // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed
+      // by project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+      // the per-project switch that decides how work ships. 'hobby' (the default)
+      // merges directly through /sterling:merge; 'work' opens a pull request and
+      // runs the review loop. It decides nothing else: whether the handoff files
+      // are written is `handoff` below. Toggled in the TUI System tab. A missing
+      // key means hobby.
       // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
       // S1): any other value is PRESERVED raw, never coerced to hobby and never
       // thrown on — a typo here must not turn every parseConfig reader (the MCP
       // server's boot included) into a startup failure. The strict judge is
       // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
-      // surface that ACTS on the mode (init, sync-agents, /sterling:update, the
-      // handoff-projection CLI) uses, and which refuses an invalid value loudly.
+      // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
+      // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
       // Consumers of the PARSED config must narrow this field themselves.
       // The default lives twice (anti_pattern 85d15143): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       mode: external_exports.unknown().default("hobby"),
+      // Handoff files (decision
+      // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+      // `enabled` says whether Sterling writes the files for colleagues who do not
+      // have Sterling, the portable OpenCode agents (.opencode/agents/) and the
+      // handoff projection (architecture.md, rulings.md, docs/sterling/). Off by
+      // default, independent of `mode`. Toggled in the TUI System tab.
+      // PERMISSIVE for the same reason as `mode`: the value is preserved raw. The
+      // strict judge is readHandoffEnabled() in scripts/lib/handoff-projection.mjs,
+      // which init, sync-agents, /sterling:update, the handoff-projection CLI and
+      // the git exclude block use. It refuses a value that is not a boolean, and it
+      // reads a config with NO key as on when portable agents are already tracked
+      // in git, which this default cannot express: read the setting through it,
+      // never from the parsed config.
+      // The default lives twice (anti_pattern 85d15143): here and in
+      // templates/default-config.json; config.test.ts pins that they agree.
+      handoff: external_exports.unknown().default({ enabled: false }),
       // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
       // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
       // first use; empty means unpinned (any Bot login matching /copilot/i, with
@@ -5543,6 +5592,9 @@ function open(dbPath2) {
   mkdirSync(dirname(dbPath2), { recursive: true });
   return new SterlingStore(dbPath2);
 }
+function isStoreFailure(e) {
+  return e instanceof SchemaMigrationRequiredError || e instanceof UnsupportedSchemaVersionError || e instanceof StoreRowDecodeError || e?.code === "ERR_SQLITE_ERROR";
+}
 function missingDomainWarning(m) {
   return `sterling: domain '${m.name}' is configured but has no store at '${m.dbPath}'; it is NOT mounted, so its knowledge is not read and writes to scope domain:${m.name} are refused. Create it with createDomain (a description is required), or run init to set it up.`;
 }
@@ -5573,13 +5625,17 @@ function createDomain(name4, description, dbPath2) {
   }
   store.close();
 }
-var DOMAIN_DESCRIPTION_KEY, DomainNotCreatedError, MountedStores;
+var PROBE_ID, DROPPED_AFTER_MOUNT_NOTE, DROPPED_AT_MOUNT_NOTE, errorText, DOMAIN_DESCRIPTION_KEY, DomainNotCreatedError, MountedStores;
 var init_mounted = __esm({
   "packages/store/dist/mounted.js"() {
     "use strict";
     init_dist2();
     init_dist();
     init_shares();
+    PROBE_ID = "00000000-0000-0000-0000-000000000000";
+    DROPPED_AFTER_MOUNT_NOTE = "dropped after mount; reads skip it until the session restarts";
+    DROPPED_AT_MOUNT_NOTE = "dropped at mount; restart the session after the store is repaired";
+    errorText = (e) => String(e?.message ?? e);
     DOMAIN_DESCRIPTION_KEY = "description";
     DomainNotCreatedError = class extends Error {
       domain;
@@ -5630,8 +5686,26 @@ var init_mounted = __esm({
        *  exist, in manifest order. Kept so a caller (boot, a tool response, H1) can
        *  disclose the skip instead of the domain silently vanishing. */
       missingDomains = [];
-      /** The project store is opened, and created when absent. A domain store is
-       *  only ever OPENED here, never created: a mount whose db file does not exist
+      /** Mounted domains whose store failed a read, in the order they were dropped.
+       *  One broken domain must not fail a read over the whole mounted set, so a
+       *  domain read that throws drops that domain from every later read and lists
+       *  it here with the error; a caller (a tool response, boot) discloses it
+       *  instead of the domain silently vanishing. Checked at mount (probeDomain)
+       *  and on every fanned read. The drop lasts for this instance's lifetime:
+       *  a later read does not retry the store. It covers READS only: the domain
+       *  stays in domainNames(), but every write into it is refused
+       *  (assertWritable), and the slug uniqueness checks still ask it
+       *  (slugHolders). The PROJECT store is never listed here: its failure
+       *  throws. */
+      unreadableDomains = [];
+      domainPaths = /* @__PURE__ */ new Map();
+      /** Every configured domain whose store file exists, in manifest order,
+       *  whether or not it could be opened. */
+      mountedNames = [];
+      /** The project store is opened, and created when absent; a failure to open
+       *  it throws. A domain store is only ever OPENED here, never created, and one
+       *  that exists but cannot be opened is listed on unreadableDomains instead of
+       *  failing the mount: a mount whose db file does not exist
        *  throws DomainNotCreatedError naming createDomain (board 675daf9d (c)), with
        *  every handle opened so far closed and no file written for the missing
        *  domain. When options.skipMissing is true such a mount is skipped instead,
@@ -5648,17 +5722,123 @@ var init_mounted = __esm({
               }
               throw new DomainNotCreatedError(m.name, m.dbPath);
             }
-            this.domains.set(m.name, new SterlingStore(m.dbPath));
+            this.mountedNames.push(m.name);
+            this.domainPaths.set(m.name, m.dbPath);
+            let store;
+            try {
+              store = new SterlingStore(m.dbPath);
+            } catch (e) {
+              if (!isStoreFailure(e))
+                throw e;
+              this.dropDomain(m.name, e, true);
+              continue;
+            }
+            this.domains.set(m.name, store);
+            this.probeDomain(m.name, store);
           }
         } catch (e) {
           this.close();
           throw e;
         }
       }
+      /** Mount-time read check. A pre-v2 store opens and answers some reads (get,
+       *  query over pre-v2 bodies) but not others (inboundSupersedes: it has no
+       *  record_relations table), so without this a first tool call could serve
+       *  that domain's records and then drop it halfway through. The probe runs the
+       *  two per-record reads the fan makes, against an id no record has, and drops
+       *  the domain when either throws. */
+      probeDomain(name4, store) {
+        try {
+          store.get(PROBE_ID);
+          store.inboundSupersedes(PROBE_ID);
+        } catch (e) {
+          if (!isStoreFailure(e))
+            throw e;
+          this.dropDomain(name4, e, true);
+        }
+      }
+      /** Drop a domain from reads. The drop lasts for this instance's lifetime:
+       *  no later read retries the store, even when the failure was transient. That
+       *  is safe to leave because a dropped domain cannot be written either
+       *  (assertWritable): a session never writes into a store it cannot read back,
+       *  and the slug checks still ask it (fanEveryDomain). */
+      dropDomain(name4, e, atMount = false) {
+        if (this.isUnreadable(name4))
+          return;
+        this.unreadableDomains.push({
+          name: name4,
+          dbPath: this.domainPaths.get(name4) ?? "",
+          error: errorText(e),
+          note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE
+        });
+      }
+      isUnreadable(name4) {
+        return this.unreadableDomains.some((d) => d.name === name4);
+      }
+      /** `(<error>; <note>)` for a dropped domain, for refusal text. */
+      droppedReason(name4) {
+        const d = this.unreadableDomains.find((x) => x.name === name4);
+        return d ? `(${d.error}; ${d.note})` : "";
+      }
+      /** Refuse a write into a domain this session has dropped from reads: the
+       *  write could not be read back, and a promotion would retire the project
+       *  original in favour of a copy nobody can see. */
+      assertWritable(name4) {
+        if (!this.isUnreadable(name4))
+          return;
+        throw new Error(`domain '${name4}' cannot be written: this session cannot read it ${this.droppedReason(name4)}. Nothing was written. Repair the store, then restart the session.`);
+      }
+      /** `fn` on the project store and then on EVERY mounted domain, dropped ones
+       *  included, for a check where "not read" must never count as "absent" (slug
+       *  uniqueness). A dropped domain that still answers is believed. A domain
+       *  whose read fails makes the whole check refuse, naming it and the error. */
+      fanEveryDomain(what, fn) {
+        const out = [fn(this.project)];
+        for (const [name4, store] of this.domains) {
+          try {
+            out.push(fn(store));
+          } catch (e) {
+            if (!isStoreFailure(e))
+              throw e;
+            this.dropDomain(name4, e);
+            throw new Error(`${what} cannot be checked: domain '${name4}' could not be read (${errorText(e)}), so whether it is taken there is unknown. Nothing was written. Repair the store, then restart the session.`);
+          }
+        }
+        return out;
+      }
+      /** The one read fan: `fn` on the project store, then on each readable domain
+       *  in manifest order, yielding each answer with its source ('project' or the
+       *  domain's manifest name). The project read is NOT guarded, so its failure
+       *  throws. A domain read that fails with a store failure (isStoreFailure)
+       *  drops that domain (dropDomain) and the fan moves on; any other error is
+       *  rethrown. Lazy, so a first-hit caller stops reading at its hit. */
+      *fanRead(fn) {
+        yield { source: "project", store: this.project, value: fn(this.project) };
+        for (const [name4, store] of [...this.domains]) {
+          if (this.isUnreadable(name4))
+            continue;
+          let value;
+          try {
+            value = fn(store);
+          } catch (e) {
+            if (!isStoreFailure(e))
+              throw e;
+            this.dropDomain(name4, e);
+            continue;
+          }
+          yield { source: name4, store, value };
+        }
+      }
+      /** fanRead's answers alone, project first. */
+      fanValues(fn) {
+        return [...this.fanRead(fn)].map((r) => r.value);
+      }
       /** A mounted domain's description (store_meta 'description'), or undefined
        *  when that existing store has none. An unmounted name is refused. */
       domainDescription(name4) {
         const store = this.domains.get(name4);
+        if (!store && this.isUnreadable(name4))
+          throw new Error(`domainDescription: domain '${name4}' cannot be read ${this.droppedReason(name4)}`);
         if (!store)
           throw new Error(`domainDescription: domain '${name4}' is not mounted`);
         return store.getMeta(DOMAIN_DESCRIPTION_KEY);
@@ -5670,6 +5850,7 @@ var init_mounted = __esm({
        *  transaction open on another mount (the same affinity rule as every write
        *  through this class). */
       setDomainDescription(name4, description) {
+        this.assertWritable(name4);
         const store = this.domains.get(name4);
         if (!store)
           throw new Error(`setDomainDescription: domain '${name4}' is not mounted`);
@@ -5723,6 +5904,7 @@ var init_mounted = __esm({
           return this.project;
         const m = /^domain:(.+)$/.exec(scope);
         if (m) {
+          this.assertWritable(m[1]);
           const store = this.domains.get(m[1]);
           if (!store)
             throw new Error(`scope '${scope}' targets an unmounted domain \u2014 not in the project's domains manifest`);
@@ -5739,7 +5921,7 @@ var init_mounted = __esm({
        *  databases. When only the project matches it fills the cap, as before. */
       query(opts = {}) {
         const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-        const perStore = this.all().map((s2) => s2.query({ ...opts, cap }));
+        const perStore = this.fanValues((s2) => s2.query({ ...opts, cap }));
         const shares = allocateShares(perStore.map((r) => r.length), cap);
         return perStore.flatMap((records, i) => records.slice(0, shares[i]));
       }
@@ -5754,7 +5936,7 @@ var init_mounted = __esm({
       /** Cross-mount twin of countAboveScore (board a577a69d) — summed
        *  project-first across every mounted store, same fan as count(). */
       countAboveScore(opts, minScore) {
-        return this.all().reduce((n, s2) => n + s2.countAboveScore(opts, minScore), 0);
+        return this.fanValues((s2) => s2.countAboveScore(opts, minScore)).reduce((n, c) => n + c, 0);
       }
       /** Per-source projection (AC2): project store FIRST, then each mounted domain
        *  in manifest order. Each store runs the full query independently — type
@@ -5763,37 +5945,39 @@ var init_mounted = __esm({
        *  The source name is 'project' for the project store and the domain manifest
        *  name (DomainMount.name) for each domain store. */
       bySource(opts) {
-        const result = [];
-        result.push({ source: "project", records: this.project.query(opts) });
-        for (const [name4, store] of this.domains) {
-          result.push({ source: name4, records: store.query(opts) });
-        }
-        return result;
+        return [...this.fanRead((s2) => s2.query(opts))].map((r) => ({ source: r.source, records: r.value }));
       }
       /** Count-only per-source projection — the COUNT(*) twin of bySource (same
        *  project-first, per-store ordering) with NO body fetch. The TUI Knowledge
        *  tree's collapsed category/source badges use this so the default all-collapsed
        *  view does not fetch + parse every source's record bodies each frame. */
       countBySource(opts) {
-        const result = [{ source: "project", count: this.project.count(opts) }];
-        for (const [name4, store] of this.domains) {
-          result.push({ source: name4, count: store.count(opts) });
-        }
-        return result;
+        return [...this.fanRead((s2) => s2.count(opts))].map((r) => ({ source: r.source, count: r.value }));
       }
       /** Records from ONE named source ('project' or a mounted domain name) — the
        *  full §3.4 query against that single store. The TUI fetches bodies only for
-       *  the source the user actually expanded; an unknown source yields []. */
+       *  the source the user actually expanded; an unknown source yields [], and so
+       *  does a domain that is, or on this read becomes, unreadable. */
       querySource(source, opts = {}) {
-        const store = source === "project" ? this.project : this.domains.get(source);
-        return store ? store.query(opts) : [];
+        if (source === "project")
+          return this.project.query(opts);
+        const store = this.domains.get(source);
+        if (!store || this.isUnreadable(source))
+          return [];
+        try {
+          return store.query(opts);
+        } catch (e) {
+          if (!isStoreFailure(e))
+            throw e;
+          this.dropDomain(source, e);
+          return [];
+        }
       }
       /** Cross-store fetch by id: project first, then domains. */
       get(id) {
-        for (const s2 of this.all()) {
-          const r = s2.get(id);
-          if (r)
-            return r;
+        for (const { value } of this.fanRead((s2) => s2.get(id))) {
+          if (value)
+            return value;
         }
         return void 0;
       }
@@ -5813,7 +5997,7 @@ var init_mounted = __esm({
        *  so a project-only lookup calls them dangling. No dedup needed — a record
        *  lives in exactly one store. */
       recordIdIndex() {
-        return this.all().flatMap((s2) => s2.recordIdIndex());
+        return this.fanValues((s2) => s2.recordIdIndex()).flat();
       }
       /** Project-first concatenation of every mounted store's dead-id alias index
        *  ([stable-identity-design-v2] contract 3) — same reasoning as
@@ -5822,7 +6006,7 @@ var init_mounted = __esm({
        *  A historical id is unique across the fan (it was one record's id), so no
        *  dedup is needed. */
       recordAliases() {
-        return this.all().flatMap((s2) => s2.recordAliases());
+        return this.fanValues((s2) => s2.recordAliases()).flat();
       }
       /** Exact-slug article resolution across the fan, PROJECT-FIRST (decision
        *  3db7095f's deterministic lookup, mounted). Feature articles are always
@@ -5834,14 +6018,26 @@ var init_mounted = __esm({
        *  serve two records under one slug, which is the failure the refusal exists to
        *  prevent. No dedup needed — a record lives in exactly one store. */
       articlesBySlug(slug) {
-        return this.all().flatMap((s2) => s2.articlesBySlug(slug));
+        return this.fanValues((s2) => s2.articlesBySlug(slug)).flat();
       }
       /** Type-agnostic exact-slug lookup across the fan, PROJECT-FIRST (board
        *  1e639f32) — same over-detect-is-safe reasoning as articlesBySlug: its
        *  callers are a uniqueness refusal and an identity resolution, and both
        *  would rather see a domain-store record than miss one. */
       recordsBySlug(slug) {
-        return this.all().flatMap((s2) => s2.recordsBySlug(slug));
+        return this.fanValues((s2) => s2.recordsBySlug(slug)).flat();
+      }
+      /** recordsBySlug for a UNIQUENESS check: every mounted domain is asked,
+       *  dropped ones included (fanEveryDomain), so a slug held by a record in a
+       *  dropped domain still counts as taken, and a domain that cannot answer
+       *  makes the check refuse instead of passing. Identity resolution keeps using
+       *  recordsBySlug, which skips a dropped domain and says so. */
+      slugHolders(slug) {
+        return this.fanEveryDomain(`slug '${slug}'`, (s2) => s2.recordsBySlug(slug)).flat();
+      }
+      /** articlesBySlug for a uniqueness check; same rule as slugHolders. */
+      articleSlugHolders(slug) {
+        return this.fanEveryDomain(`slug '${slug}'`, (s2) => s2.articlesBySlug(slug)).flat();
       }
       /** Superseded-only counterpart of recordsBySlug — knowledge_get's dead-slug
        *  fallthrough is the sole caller (decision foreign_df361a0f) and takes result[0] as
@@ -5857,16 +6053,15 @@ var init_mounted = __esm({
        *  the one field comparable across stores, and is therefore the cross-store
        *  sort key here (review finding, 2026-08-20). */
       supersededRecordsBySlug(slug) {
-        return this.all().flatMap((s2) => s2.supersededRecordsBySlug(slug)).sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
+        return this.fanValues((s2) => s2.supersededRecordsBySlug(slug)).flat().sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
       }
       /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
        *  exactly one store (same reasoning as get()), so this tries each mounted
        *  store project-first and returns the first hit. */
       resolveTerminus(id) {
-        for (const s2 of this.all()) {
-          const r = s2.resolveTerminus(id);
-          if (r)
-            return r;
+        for (const { value } of this.fanRead((s2) => s2.resolveTerminus(id))) {
+          if (value)
+            return value;
         }
         return null;
       }
@@ -5877,12 +6072,12 @@ var init_mounted = __esm({
        *  reasoning as recordsBySlug's fan. DEDUPED BY ID (roster review F3,
        *  anti_pattern foreign_1896c79b): a record promoted into a domain store leaves a
        *  project-store tombstone behind, so the SAME source id can resolve out of
-       *  two different mounts — first-seen (project-first, this.all()'s own
+       *  two different mounts — first-seen (project-first, the read fan's own
        *  ordering) wins, never a duplicate entry for one concept. */
       inboundSupersedes(id) {
         const seen = /* @__PURE__ */ new Set();
         const out = [];
-        for (const record of this.all().flatMap((s2) => s2.inboundSupersedes(id))) {
+        for (const record of this.fanValues((s2) => s2.inboundSupersedes(id)).flat()) {
           if (seen.has(record.id))
             continue;
           seen.add(record.id);
@@ -5973,21 +6168,45 @@ var init_mounted = __esm({
        *  target is already validated. */
       addLink(sourceId, rel, targetId) {
         if (!this.get(targetId))
-          throw new Error(`addLink: no target record '${targetId}' in the project store or any mounted domain`);
+          throw new Error(`addLink: no target record '${targetId}' in the project store or any mounted domain${this.unreadableNote()}`);
         return this.mutatingStoreHolding("addLink", sourceId).addLink(sourceId, rel, targetId, true);
       }
       /** EVERY mounted store physically holding `id`, project-first. Ordinarily
        *  exactly one — a record lives in one store — which is precisely why the
        *  cardinality is returned rather than assumed away by a first-hit scan. */
       holdersOf(id) {
-        return this.all().filter((s2) => s2.get(id) !== void 0);
+        const holders = [...this.fanRead((s2) => s2.get(id) !== void 0)].filter((r) => r.value).map((r) => r.store);
+        for (const [name4, store] of this.domains) {
+          if (!this.isUnreadable(name4))
+            continue;
+          try {
+            if (store.get(id) !== void 0)
+              holders.push(store);
+          } catch (e) {
+            if (!isStoreFailure(e))
+              throw e;
+          }
+        }
+        return holders;
+      }
+      /** ' Not read: domain <name> (<error>)...' for a refusal that says a record
+       *  was not found, so a miss caused by a dropped domain is not read as absence. */
+      unreadableNote() {
+        if (!this.unreadableDomains.length)
+          return "";
+        return `. Not read: ${this.unreadableDomains.map((d) => `domain '${d.name}' (${d.error}; ${d.note})`).join("; ")}`;
       }
       storeHolding(id) {
         const holders = this.holdersOf(id);
         if (holders.length === 0)
-          throw new Error(`no record '${id}' in the project store or any mounted domain`);
+          throw new Error(`no record '${id}' in the project store or any mounted domain${this.unreadableNote()}`);
         if (holders.length > 1) {
           throw new Error(`ambiguous holder: record '${id}' is held by ${holders.length} mounts \u2014 ${holders.map((s2) => `'${this.mountNameOf(s2)}'`).join(", ")}. One id must name one row: every routing decision here (which store a write lands in, which mount a transaction opens on, what scope a derived record inherits) assumes a single holder, so the ambiguity is refused rather than resolved project-first. Resolve the duplicate (scripts/domain-doctor.mjs show --id '${id}' on each store) before retrying.`);
+        }
+        for (const [name4, store] of this.domains) {
+          if (store === holders[0] && this.isUnreadable(name4)) {
+            throw new Error(`record '${id}' is held by domain '${name4}', which this session cannot read ${this.droppedReason(name4)}. Nothing was read or written. Repair the store, then restart the session.`);
+          }
         }
         return holders[0];
       }
@@ -6134,9 +6353,10 @@ var init_mounted = __esm({
         for (const [name4, store] of this.domains)
           store.snapshot(pathFor(`domain-${name4}`));
       }
-      /** Mounted domain names, in manifest order. */
+      /** Mounted domain names, in manifest order. Includes a domain listed on
+       *  unreadableDomains: it is still configured, though neither read nor written. */
       domainNames() {
-        return [...this.domains.keys()];
+        return [...this.mountedNames];
       }
       close() {
         for (const s2 of this.all())
@@ -6631,6 +6851,7 @@ __export(dist_exports, {
   SUPPORTED_SCHEMA_VERSION: () => SUPPORTED_SCHEMA_VERSION,
   SchemaMigrationRequiredError: () => SchemaMigrationRequiredError,
   SterlingStore: () => SterlingStore,
+  StoreRowDecodeError: () => StoreRowDecodeError,
   UnsupportedSchemaVersionError: () => UnsupportedSchemaVersionError,
   allocateShares: () => allocateShares,
   assertNoFieldLoss: () => assertNoFieldLoss,
@@ -6677,7 +6898,12 @@ function classifyClaimPath(repoRoot, path) {
   }
 }
 function decodeLiveRecordRow(op, row) {
-  const record = JSON.parse(row.body);
+  let record;
+  try {
+    record = JSON.parse(row.body);
+  } catch (e) {
+    throw new StoreRowDecodeError(op, e);
+  }
   if (typeof row.scope !== "string" || row.scope.length === 0) {
     throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
   }
@@ -6908,7 +7134,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var DDL, SUPPORTED_SCHEMA_VERSION, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, JournalDemotionRefusedError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var StoreRowDecodeError, DDL, SUPPORTED_SCHEMA_VERSION, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, JournalDemotionRefusedError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -6920,6 +7146,14 @@ var init_dist2 = __esm({
     init_registry2();
     init_axis();
     init_axis();
+    StoreRowDecodeError = class extends Error {
+      op;
+      constructor(op, cause) {
+        super(`${op}: a record row's body is not valid JSON (${cause?.message ?? String(cause)})`);
+        this.name = "StoreRowDecodeError";
+        this.op = op;
+      }
+    };
     DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -9445,8 +9679,8 @@ var init_resolve = __esm({
 // scripts/init-impl.mjs
 init_dist();
 init_dist2();
-import { existsSync as existsSync11, mkdirSync as mkdirSync8, readFileSync as readFileSync14, writeFileSync as writeFileSync6, appendFileSync as appendFileSync3, statSync as statSync5, unlinkSync as unlinkSync5, renameSync as renameSync2 } from "node:fs";
-import { spawnSync as spawnSync9 } from "node:child_process";
+import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync14, writeFileSync as writeFileSync6, appendFileSync as appendFileSync3, statSync as statSync5, unlinkSync as unlinkSync5, renameSync as renameSync2 } from "node:fs";
+import { spawnSync as spawnSync10 } from "node:child_process";
 import { join as join21, resolve as resolve6, dirname as dirname9, basename as basename2 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 
@@ -10453,6 +10687,8 @@ function syncOpenCodeAgents({ registryPath: registryPath2, templatesDir, targetD
 }
 
 // scripts/lib/handoff-projection.mjs
+import { spawnSync as spawnSync4 } from "node:child_process";
+import { existsSync as existsSync5 } from "node:fs";
 import { join as join11, resolve as resolve3 } from "node:path";
 var fwd = (p) => p.replace(/\\/g, "/");
 function isSterlingClone(root, pluginRoot2) {
@@ -10462,27 +10698,99 @@ function isSterlingClone(root, pluginRoot2) {
   return JSON.parse(readContained(root, manifest)).name === "sterling";
 }
 var PROJECT_MODES = ["hobby", "work"];
-var HOBBY_SKIP_DETAIL = "project mode is hobby (OpenCode and handoff files are work-only; existing files are no longer maintained, and nothing is deleted)";
-var ProjectModeError = class extends Error {
-};
-function readProjectMode(root) {
-  const rel = ".sterling/config.json";
-  const where = `${fwd(resolve3(root))}/${rel}`;
-  if (!existsContained(root, rel, "file")) return "hobby";
+var CONFIG_REL = ".sterling/config.json";
+function readRawConfig(root, ErrorClass, subject) {
+  const where = `${fwd(resolve3(root))}/${CONFIG_REL}`;
+  if (!existsContained(root, CONFIG_REL, "file")) return { where, parsed: void 0 };
   let parsed;
   try {
-    parsed = JSON.parse(readContained(root, rel));
+    parsed = JSON.parse(readContained(root, CONFIG_REL));
   } catch (err) {
-    throw new ProjectModeError(`${where} is not valid JSON (${err.message}) \u2014 the project mode cannot be read`);
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ProjectModeError(`${where} is not a JSON object \u2014 the project mode cannot be read`);
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
   }
-  if (parsed.mode === void 0) return "hobby";
-  if (!PROJECT_MODES.includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  return { where, parsed };
+}
+var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
+var HANDOFF_OFF_DETAIL = "handoff files are off (config.handoff.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted)";
+var HandoffSettingError = class extends Error {
+};
+var HandoffGitError = class extends HandoffSettingError {
+  constructor(message, reason) {
+    super(message);
+    this.reason = reason;
   }
-  return parsed.mode;
+};
+var GIT_TIMEOUT_MS = 3e4;
+function trackedHandoffFiles(root, { spawn = spawnSync4 } = {}) {
+  const run = (args) => {
+    const r = spawn("git", args, { cwd: root, encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
+    const name4 = `git ${args[0]}`;
+    if (r.error) return { failed: r.error.code === "ETIMEDOUT" ? `${name4} timed out after ${GIT_TIMEOUT_MS / 1e3}s` : `${name4} did not run (${r.error.message})` };
+    if (r.status !== 0) {
+      const stderr = (r.stderr || "").trim().split("\n")[0];
+      return { failed: `${name4} exited ${r.status ?? `on signal ${r.signal}`}: ${stderr || "no error output"}`, notARepo: r.status === 128 && /not a git repository/i.test(stderr) };
+    }
+    return { stdout: r.stdout || "" };
+  };
+  if (!existsSync5(root)) return { files: [], unknown: null };
+  const inside = run(["rev-parse", "--is-inside-work-tree"]);
+  if (inside.failed) {
+    if (inside.notARepo && !existsSync5(join11(root, ".git"))) return { files: [], unknown: null };
+    return { files: [], unknown: inside.failed };
+  }
+  if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
+  const ls = run(["ls-files", "-z", "--", ...PORTABLE_AGENT_PATHS, HANDOFF_DOCS_DIR, ...HANDOFF_ROOT_FILES]);
+  if (ls.failed) return { files: [], unknown: ls.failed };
+  const files = [];
+  for (const rel of ls.stdout.split("\0").filter(Boolean)) {
+    if (!HANDOFF_ROOT_FILES.includes(rel)) {
+      files.push(rel);
+      continue;
+    }
+    try {
+      if (existsContained(root, rel, "file") && readContained(root, rel).startsWith(HANDOFF_MARKER)) files.push(rel);
+    } catch (err) {
+      return { files: [], unknown: `${rel} is tracked but could not be read (${err.message})` };
+    }
+  }
+  return { files, unknown: null };
+}
+function handoffFilesOnDisk(root) {
+  const found = PORTABLE_AGENT_PATHS.filter((rel) => existsContained(root, rel, "file"));
+  if (existsContained(root, HANDOFF_DOCS_DIR, "dir")) found.push(`${HANDOFF_DOCS_DIR}/`);
+  for (const rel of HANDOFF_ROOT_FILES) {
+    if (existsContained(root, rel, "file") && readContained(root, rel).startsWith(HANDOFF_MARKER)) found.push(rel);
+  }
+  return found;
+}
+function handoffSettingOf(parsed, root, where = CONFIG_REL) {
+  const block = parsed?.handoff;
+  if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
+    throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
+  }
+  const value = block?.enabled;
+  if (value === void 0) {
+    const tracked = trackedHandoffFiles(root);
+    if (tracked.unknown !== null) {
+      throw new HandoffGitError(`config.handoff.enabled is not set in ${where} and git could not say whether handoff files are committed (${tracked.unknown}) \u2014 the setting is not guessed; repair the repository, or set config.handoff.enabled to true or false (TUI System tab)`, tracked.unknown);
+    }
+    return tracked.files.length ? { enabled: true, source: "tracked" } : { enabled: false, source: "default" };
+  }
+  if (typeof value !== "boolean") {
+    throw new HandoffSettingError(`config.handoff.enabled is ${JSON.stringify(value)} in ${where} \u2014 it must be true or false; switch it in the TUI System tab or fix the file`);
+  }
+  return { enabled: value, source: "config" };
+}
+function readHandoffSetting(root) {
+  const { where, parsed } = readRawConfig(root, HandoffSettingError, "the handoff setting");
+  const setting = handoffSettingOf(parsed, root, where);
+  return { ...setting, unmaintained: setting.source === "default" ? handoffFilesOnDisk(root) : [] };
+}
+function readHandoffEnabled(root) {
+  return readHandoffSetting(root).enabled;
 }
 var HANDOFF_DOCS_DIR = "docs/sterling";
 var HANDOFF_ROOT_FILES = ["architecture.md", "rulings.md"];
@@ -10505,7 +10813,7 @@ function isOwnedExport(root, rel) {
 }
 
 // scripts/lib/update-launcher.mjs
-import { existsSync as existsSync7, readFileSync as readFileSync7, writeFileSync as writeFileSync2, appendFileSync, unlinkSync as unlinkSync3 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync7, writeFileSync as writeFileSync2, appendFileSync, unlinkSync as unlinkSync3 } from "node:fs";
 import { join as join14 } from "node:path";
 
 // scripts/lib/generated-marker.mjs
@@ -10530,12 +10838,12 @@ function verifyStamp(content, prefix) {
 }
 
 // scripts/lib/installed-copy.mjs
-import { existsSync as existsSync6 } from "node:fs";
+import { existsSync as existsSync7 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join13 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync5, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync3 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join12, resolve as resolve4, sep as sep2 } from "node:path";
 
@@ -10706,7 +11014,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync5, readFileSync6, readdirSync4, join12, homedir3);
+)(existsSync6, readFileSync6, readdirSync4, join12, homedir3);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -10737,9 +11045,9 @@ function canonical(p) {
   }
 }
 function installHostOf(root, { env = process.env, home = homedir3() } = {}) {
-  const real = canonical(root);
+  const real2 = canonical(root);
   for (const { host, dir } of installRoots(env, home)) {
-    if (real.startsWith(canonical(dir) + sep2)) return host;
+    if (real2.startsWith(canonical(dir) + sep2)) return host;
   }
   return null;
 }
@@ -10749,7 +11057,7 @@ function isInstalledCopy(root, { env = process.env, home = homedir4() } = {}) {
   if (typeof root !== "string" || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  if (!existsSync6(join13(root, ".git"))) return true;
+  if (!existsSync7(join13(root, ".git"))) return true;
   return installHostOf(root, { env, home }) !== null;
 }
 
@@ -10787,12 +11095,12 @@ function cloneUpdateLauncherTarget(text) {
   return cdTarget === null ? null : toWslPath2(cdTarget);
 }
 function ensureUpdateLauncher(target2, pluginRoot2) {
-  if (!existsSync7(target2)) {
+  if (!existsSync8(target2)) {
     return { status: "skipped", detail: `target missing: ${target2}` };
   }
   if (isInstalledCopy(pluginRoot2)) {
     const launcherPath2 = join14(target2, UPDATE_LAUNCHER_NAME);
-    if (!existsSync7(launcherPath2)) {
+    if (!existsSync8(launcherPath2)) {
       return { status: "skipped", detail: "installed plugin copy \u2014 updates come from the plugin manager, there is no clone to update" };
     }
     const clonePath = cloneUpdateLauncherTarget(readFileSync7(launcherPath2, "utf8"));
@@ -10802,13 +11110,13 @@ function ensureUpdateLauncher(target2, pluginRoot2) {
     unlinkSync3(launcherPath2);
     return { status: "removed", detail: `deleted \u2014 it ran /sterling:update in the clone ${clonePath}; on an installed plugin copy updates come from the plugin manager`, clonePath };
   }
-  if (!existsSync7(join14(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL))) {
+  if (!existsSync8(join14(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL))) {
     return { status: "skipped", detail: `templates/${UPDATE_TEMPLATE_WSL} missing in the clone` };
   }
   const expected = renderUpdateLauncher(pluginRoot2);
   const launcherPath = join14(target2, UPDATE_LAUNCHER_NAME);
   let result;
-  if (!existsSync7(launcherPath)) {
+  if (!existsSync8(launcherPath)) {
     writeFileSync2(launcherPath, expected);
     result = { status: "created", detail: "double-click -> update the Sterling clone (no session in the loop)" };
   } else {
@@ -10826,7 +11134,7 @@ function ensureUpdateLauncher(target2, pluginRoot2) {
     }
   }
   const gitignorePath2 = join14(target2, ".gitignore");
-  const existing = existsSync7(gitignorePath2) ? readFileSync7(gitignorePath2, "utf8") : "";
+  const existing = existsSync8(gitignorePath2) ? readFileSync7(gitignorePath2, "utf8") : "";
   if (!existing.split(/\r?\n/).includes(UPDATE_LAUNCHER_NAME)) {
     appendFileSync(gitignorePath2, `${existing && !existing.endsWith("\n") ? "\n" : ""}${UPDATE_LAUNCHER_NAME}
 `);
@@ -10835,7 +11143,7 @@ function ensureUpdateLauncher(target2, pluginRoot2) {
 }
 
 // scripts/lib/consumer-checks.mjs
-import { existsSync as existsSync8, readFileSync as readFileSync8, writeFileSync as writeFileSync3, appendFileSync as appendFileSync2 } from "node:fs";
+import { existsSync as existsSync9, readFileSync as readFileSync8, writeFileSync as writeFileSync3, appendFileSync as appendFileSync2 } from "node:fs";
 import { join as join15 } from "node:path";
 var CONSUMER_CHECK_LAUNCHER_NAME = "sterling-check.mjs";
 var normalize4 = (s2) => s2.replace(/\r\n/g, "\n");
@@ -10857,16 +11165,16 @@ function newestInstalledPluginDir() {
   return stampBody(body, "//");
 }
 function ensureConsumerCheckLauncher(target2, pluginRoot2) {
-  if (!existsSync8(target2)) {
+  if (!existsSync9(target2)) {
     return { status: "skipped", detail: `target missing: ${target2}` };
   }
-  if (!existsSync8(join15(pluginRoot2, "templates", "check-consumer.mjs"))) {
+  if (!existsSync9(join15(pluginRoot2, "templates", "check-consumer.mjs"))) {
     return { status: "skipped", detail: "templates/check-consumer.mjs missing in the clone" };
   }
   const expected = renderConsumerCheckLauncher(pluginRoot2);
   const launcherPath = join15(target2, CONSUMER_CHECK_LAUNCHER_NAME);
   let result;
-  if (!existsSync8(launcherPath)) {
+  if (!existsSync9(launcherPath)) {
     writeFileSync3(launcherPath, expected);
     result = { status: "created", detail: "node sterling-check.mjs \u2014 runs record-citations + stale-claim checks against this project" };
   } else {
@@ -10884,7 +11192,7 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
     }
   }
   const gitignorePath2 = join15(target2, ".gitignore");
-  const existing = existsSync8(gitignorePath2) ? readFileSync8(gitignorePath2, "utf8") : "";
+  const existing = existsSync9(gitignorePath2) ? readFileSync8(gitignorePath2, "utf8") : "";
   if (!existing.split(/\r?\n/).includes(CONSUMER_CHECK_LAUNCHER_NAME)) {
     appendFileSync2(gitignorePath2, `${existing && !existing.endsWith("\n") ? "\n" : ""}${CONSUMER_CHECK_LAUNCHER_NAME}
 `);
@@ -10893,12 +11201,12 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
 }
 
 // scripts/lib/codex-mcp.mjs
-import { spawnSync as spawnSync4 } from "node:child_process";
+import { spawnSync as spawnSync5 } from "node:child_process";
 import { readFileSync as readFileSync9 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { join as join16 } from "node:path";
 var PROBE_TIMEOUT_MS = 5e3;
-function probeCodex({ spawnFn = spawnSync4, timeoutMs = PROBE_TIMEOUT_MS, env = process.env } = {}) {
+function probeCodex({ spawnFn = spawnSync5, timeoutMs = PROBE_TIMEOUT_MS, env = process.env } = {}) {
   const run = (args) => {
     try {
       return spawnFn("codex", args, { encoding: "utf8", timeout: timeoutMs, env });
@@ -11000,7 +11308,7 @@ function renderTmuxLauncher(pluginRoot2, { session, splitPercent, installed = is
 }
 
 // scripts/lib/launcher-history.mjs
-import { spawnSync as spawnSync5 } from "node:child_process";
+import { spawnSync as spawnSync6 } from "node:child_process";
 import { mkdirSync as mkdirSync6, mkdtempSync, readFileSync as readFileSync11, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname as dirname7, join as join18 } from "node:path";
@@ -11059,7 +11367,7 @@ var replayFailureLine = (failures, consequence) => {
   return `launcher history: ${failures.length} earlier renderer version(s) could not be replayed (${detail}); ${consequence}`;
 };
 var currentText = (repoRoot, name4) => lf(readFileSync11(join18(repoRoot, "templates", name4), "utf8"));
-var defaultGit = (repoRoot) => (args, { input, encoding = "utf8" } = {}) => spawnSync5("git", args, { cwd: repoRoot, encoding, input, maxBuffer: 256 * 1024 * 1024 });
+var defaultGit = (repoRoot) => (args, { input, encoding = "utf8" } = {}) => spawnSync6("git", args, { cwd: repoRoot, encoding, input, maxBuffer: 256 * 1024 * 1024 });
 function gitLog(git2, repoRoot, rels) {
   const log = git2(["log", "--full-history", "--format=%H", "--", ...rels]);
   if (log.status !== 0) throw new Error(`launcher history: git log failed for ${rels.join(", ")} in ${repoRoot}: ${log.stderr}`);
@@ -11230,7 +11538,7 @@ function loadSnapshot(path) {
   if (!valid) return { ok: false, reason: `${path} is unparseable (expected an object of name \u2192 string[])` };
   return { ok: true, data: parsed };
 }
-function historicalLauncherTemplates({ repoRoot, git: git2 = defaultGit(repoRoot), spawn = spawnSync5 }) {
+function historicalLauncherTemplates({ repoRoot, git: git2 = defaultGit(repoRoot), spawn = spawnSync6 }) {
   const fromGit = gitHistory(repoRoot, git2, spawn);
   const templates = /* @__PURE__ */ new Map();
   if (fromGit) {
@@ -11256,7 +11564,8 @@ function olderGeneratedLauncher(text, templateName, history) {
 }
 
 // scripts/lib/consumer-cutover.mjs
-import { existsSync as existsSync9, readFileSync as readFileSync12 } from "node:fs";
+init_dist();
+import { existsSync as existsSync10, readFileSync as readFileSync12, realpathSync as realpathSync4 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { join as join19 } from "node:path";
 var fwd4 = (p) => p.replace(/\\/g, "/");
@@ -11320,7 +11629,7 @@ function readJsonField(path, field) {
   }
 }
 function inspectClone(dir) {
-  if (!existsSync9(join19(dir, ".git"))) return { kind: "not-clone" };
+  if (!existsSync10(join19(dir, ".git"))) return { kind: "not-clone" };
   const name4 = readJsonField(join19(dir, ".claude-plugin", "plugin.json"), "name");
   if (name4.error) return { kind: "error", code: name4.error };
   if (name4.value !== "sterling") return { kind: "not-clone" };
@@ -11329,11 +11638,32 @@ function inspectClone(dir) {
   return { kind: "clone", authoring: role.value === "authoring" };
 }
 var trimSlash = (p) => p.length > 1 ? p.replace(/\/+$/, "") : p;
-function cloneCleanupLines(paths) {
+var real = (p) => {
+  try {
+    return existsSync10(p) ? realpathSync4(p) : p;
+  } catch {
+    return p;
+  }
+};
+function cloneCleanupLines(paths, liveProjectPaths2) {
   const unique = [...new Set(paths.filter(Boolean).map((p) => trimSlash(fwd4(p))))];
   if (unique.length === 0) return [];
   const lines = ["old Sterling clone \u2014 this project used to run Sterling from a clone. Init never deletes a clone:"];
   for (const p of unique) {
+    if (liveProjectPaths2 === null || liveProjectPaths2 === void 0) {
+      lines.push(`  ${p} \u2014 the project registry could not be read, so this is treated as a live project and not offered for deletion; keep it unless you have checked by hand that no project on this machine uses it`);
+      continue;
+    }
+    const here2 = real(p);
+    const live = liveProjectPaths2.map(real);
+    if (live.some((l) => sameLocationAnyHost(here2, l))) {
+      lines.push(`  ${p} \u2014 a live Sterling project on this machine with its own store; keep it. Only the --plugin-dir launch was replaced; this directory is not an old clone to delete`);
+      continue;
+    }
+    if (live.some((l) => isUnderLocationAnyHost(l, here2))) {
+      lines.push(`  ${p} \u2014 contains a live Sterling project on this machine; keep it. Deleting this directory would delete that project with it`);
+      continue;
+    }
     const found = inspectClone(p);
     if (found.kind === "error") {
       lines.push(`  ${p} \u2014 could not inspect ${p}: ${found.code}; check it by hand before deleting anything`);
@@ -11341,6 +11671,8 @@ function cloneCleanupLines(paths) {
       lines.push(`  ${p} \u2014 not a Sterling clone on this machine (already removed or moved); nothing to delete`);
     } else if (found.authoring) {
       lines.push(`  ${p} \u2014 this machine's authoring clone (machine_role authoring in its .sterling/config.json); keep it`);
+    } else if (existsSync10(join19(p, ".sterling", "sterling.db"))) {
+      lines.push(`  ${p} \u2014 holds its own project store (.sterling/sterling.db), so it is a live Sterling project even if no registry lists it; keep it`);
     } else {
       lines.push(`  ${p} \u2014 delete it by hand once no project on this machine launches from it (rm -rf "${p}")`);
     }
@@ -11497,9 +11829,9 @@ function renderUnavailable(reason) {
 }
 
 // scripts/lib/opencode-install.mjs
-import { spawnSync as spawnSync6 } from "node:child_process";
+import { spawnSync as spawnSync7 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync10, mkdirSync as mkdirSync7, readFileSync as readFileSync13, readdirSync as readdirSync5, realpathSync as realpathSync4, rmSync as rmSync3, statSync as statSync4, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync11, mkdirSync as mkdirSync7, readFileSync as readFileSync13, readdirSync as readdirSync5, realpathSync as realpathSync5, rmSync as rmSync3, statSync as statSync4, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
 import { dirname as dirname8, isAbsolute, join as join20, resolve as resolve5 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -11522,7 +11854,7 @@ function mcpLauncherPath({ home = homedir7() } = {}) {
   return join20(home, ".sterling", "opencode", "sterling-mcp.mjs");
 }
 function probeOpenCode({ env = process.env } = {}) {
-  const r = spawnSync6("opencode", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  const r = spawnSync7("opencode", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
   if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `opencode` on PATH" : `opencode --version could not run (${r.error.message})` };
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
   if (r.status !== 0 || !m) return { installed: false, reason: `opencode --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
@@ -11692,7 +12024,7 @@ await import(pathToFileURL(entry).href);
 `, "//");
 }
 function ensureStampedFile(path, content, label) {
-  if (!existsSync10(path)) {
+  if (!existsSync11(path)) {
     mkdirSync7(dirname8(path), { recursive: true });
     writeFileSync5(path, content);
     return { item: label, status: "created" };
@@ -11712,7 +12044,7 @@ function refusal(item, what, remedy) {
 var TWICE = "the npm package is registered too, so Sterling would load twice; remove it unless you mean it to";
 function retireServerShim(path) {
   const item = fwd5(path);
-  if (!existsSync10(path)) return { item, status: "skipped", detail: `not installed: opencode plugin add registers the ${STERLING_NPM_PACKAGE} server itself, so a shim would load it twice` };
+  if (!existsSync11(path)) return { item, status: "skipped", detail: `not installed: opencode plugin add registers the ${STERLING_NPM_PACKAGE} server itself, so a shim would load it twice` };
   if (!statSync4(path).isFile()) return { item, status: "skipped", detail: `KEPT: ${item} is not a file, so it stays; ${TWICE}` };
   const stamp = verifyStamp(normalize5(readFileSync13(path, "utf8")), "//");
   if (stamp === null) return { item, status: "skipped", detail: `KEPT: ${item} exists and Sterling did not write it, so it stays; if it loads Sterling, ${TWICE}` };
@@ -11741,7 +12073,7 @@ function materializedState(dir) {
   const extra = readdirSync5(dir).filter((n) => n !== MATERIALIZED_MARKER && !(n in files));
   if (extra.length) return "edited";
   for (const [name4, hash] of Object.entries(files)) {
-    if (!existsSync10(join20(dir, name4)) || bytesHash(readFileSync13(join20(dir, name4))) !== hash) return "edited";
+    if (!existsSync11(join20(dir, name4)) || bytesHash(readFileSync13(join20(dir, name4))) !== hash) return "edited";
   }
   return "ours";
 }
@@ -11751,7 +12083,7 @@ function materializeTui({ pluginRoot: pluginRoot2, env = process.env, home = hom
   const src = join20(pluginRoot2, "opencode", "sterling-tui");
   const v = readCopyVersion(pluginRoot2, "opencode");
   if (!v.version) return [refusal(`${fwd5(base2)}/`, `the version of ${fwd5(pluginRoot2)} cannot be read: ${v.reason}`, `reinstall Sterling (${sterlingInstallRemedy("opencode")}), then rerun /sterling:update`)];
-  const missing2 = TUI_MATERIALIZED_FILES.filter((f) => !existsSync10(join20(src, f)));
+  const missing2 = TUI_MATERIALIZED_FILES.filter((f) => !existsSync11(join20(src, f)));
   if (missing2.length) return [refusal(`${fwd5(base2)}/`, `${fwd5(src)} lacks ${missing2.join(", ")}, so there is no dashboard to copy`, "update Sterling, then rerun /sterling:update")];
   const rows = [];
   const dest = join20(base2, v.version);
@@ -11764,7 +12096,7 @@ function materializeTui({ pluginRoot: pluginRoot2, env = process.env, home = hom
     writeFileSync5(join20(dest, MATERIALIZED_MARKER), `${JSON.stringify({ version: v.version, files: hashes }, null, 2)}
 `);
   };
-  if (!existsSync10(dest)) {
+  if (!existsSync11(dest)) {
     write();
     rows.push({ item, status: "created", detail: `the dashboard copied out of the npm cache (OpenCode gives its own solid-js only outside node_modules)` });
   } else {
@@ -11797,8 +12129,8 @@ function ensureTuiShim(tuiDir, shim) {
   const pkgPath = join20(tuiDir, "package.json");
   const pkgLabel = `${fwd5(tuiDir)}/package.json`;
   const pkg = renderTuiPackageJson();
-  const pkgState = existsSync10(pkgPath) && statSync4(pkgPath).isFile() ? tuiPackageState(normalize5(readFileSync13(pkgPath, "utf8"))) : null;
-  if (existsSync10(tuiDir) && !statSync4(tuiDir).isDirectory()) {
+  const pkgState = existsSync11(pkgPath) && statSync4(pkgPath).isFile() ? tuiPackageState(normalize5(readFileSync13(pkgPath, "utf8"))) : null;
+  if (existsSync11(tuiDir) && !statSync4(tuiDir).isDirectory()) {
     return [refusal(`${fwd5(tuiDir)}/`, `${fwd5(tuiDir)} exists and is not a directory`, "move it aside, then rerun /sterling:update")];
   }
   if (pkgState === "foreign") {
@@ -11807,10 +12139,10 @@ function ensureTuiShim(tuiDir, shim) {
   if (pkgState === "edited") {
     return [refusal(pkgLabel, `${fwd5(pkgPath)} was edited after Sterling wrote it`, `delete it so Sterling can regenerate it, then rerun /sterling:update`)];
   }
-  if (existsSync10(tuiDir) && !existsSync10(pkgPath) && readdirSync5(tuiDir).length > 0) {
+  if (existsSync11(tuiDir) && !existsSync11(pkgPath) && readdirSync5(tuiDir).length > 0) {
     return [refusal(`${fwd5(tuiDir)}/`, `${fwd5(tuiDir)}/ exists with files Sterling did not write and no package.json`, `rename or remove ${fwd5(tuiDir)}/, then rerun /sterling:update`)];
   }
-  const before = existsSync10(pkgPath) ? normalize5(readFileSync13(pkgPath, "utf8")) : null;
+  const before = existsSync11(pkgPath) ? normalize5(readFileSync13(pkgPath, "utf8")) : null;
   mkdirSync7(tuiDir, { recursive: true });
   if (before !== pkg) writeFileSync5(pkgPath, pkg);
   return [
@@ -11823,7 +12155,7 @@ function npmCopyOnMachine({ env = process.env, home = homedir7() } = {}) {
   copies.sort((a, b) => compareSterlingVersions(a.version, b.version) || (a.root > b.root ? 1 : a.root < b.root ? -1 : 0));
   const root = copies.length ? copies[copies.length - 1].root : null;
   const path = join20(opencodeConfigDir({ env, home }), "opencode.json");
-  if (!existsSync10(path)) return { root, configured: false };
+  if (!existsSync11(path)) return { root, configured: false };
   const item = `${fwd5(path)} plugins`;
   let config;
   try {
@@ -11858,7 +12190,7 @@ function installGlobal({ pluginRoot: pluginRoot2, installed, npmCopy = false, en
 var PINNED_CODEX_REL = ".local/codex-mcp-0.153.4/bin/codex";
 var PINNED_CODEX_INSTALL = "npm i -g --prefix ~/.local/codex-mcp-0.153.4 @openai/codex@0.153.4";
 var CODEX_PROBE_TIMEOUT_MS = 1e4;
-var isFile = (p) => existsSync10(p) && statSync4(p).isFile();
+var isFile = (p) => existsSync11(p) && statSync4(p).isFile();
 function codexCandidates({ env, home }) {
   const out = [];
   const notes2 = [];
@@ -11876,7 +12208,7 @@ function codexCandidates({ env, home }) {
   for (const dir of (env.PATH ?? "").split(":").filter(Boolean)) out.push(join20(dir, "codex"));
   return { candidates: [...new Set(out)].filter(isFile), notes: notes2 };
 }
-function resolveCodexMcp({ env = process.env, home = homedir7(), nodeBinDir, spawnFn = spawnSync6 }) {
+function resolveCodexMcp({ env = process.env, home = homedir7(), nodeBinDir, spawnFn = spawnSync7 }) {
   const { candidates, notes: notes2 } = codexCandidates({ env, home });
   const tried = [...notes2];
   for (const command of candidates) {
@@ -11897,7 +12229,7 @@ function codexServerEntry(command, nodeBinDir) {
     timeout: { startup: 3e4, execution: 9e5 }
   };
 }
-function ensureCodexServer({ env = process.env, home = homedir7(), nodeBinDir = dirname8(process.execPath), spawnFn = spawnSync6 }) {
+function ensureCodexServer({ env = process.env, home = homedir7(), nodeBinDir = dirname8(process.execPath), spawnFn = spawnSync7 }) {
   const path = join20(opencodeConfigDir({ env, home }), "opencode.json");
   const label = `${fwd5(path)} mcp.servers.codex`;
   const found = resolveCodexMcp({ env, home, nodeBinDir, spawnFn });
@@ -11907,7 +12239,7 @@ function ensureCodexServer({ env = process.env, home = homedir7(), nodeBinDir = 
   }
   let config = {};
   let before = null;
-  if (existsSync10(path)) {
+  if (existsSync11(path)) {
     before = normalize5(readFileSync13(path, "utf8"));
     try {
       config = JSON.parse(before);
@@ -11933,7 +12265,7 @@ function ensureCodexServer({ env = process.env, home = homedir7(), nodeBinDir = 
   return { item: label, status: before === null ? "created" : "refreshed", detail: `${fwd5(found.command)}${legacy}` };
 }
 function git(projectDir, args) {
-  const r = spawnSync6("git", args, { cwd: projectDir, encoding: "utf8" });
+  const r = spawnSync7("git", args, { cwd: projectDir, encoding: "utf8" });
   if (r.error) throw new Error(`git ${args.join(" ")} could not run in ${fwd5(projectDir)}: ${r.error.message}`);
   return r;
 }
@@ -11985,10 +12317,10 @@ function guardPermission(permission) {
   return { value: out, removedShellDeny };
 }
 function agentFiles(dir, { flat = false, prefix = "", seen = /* @__PURE__ */ new Set() } = {}) {
-  if (!existsSync10(dir)) return [];
-  const real = realpathSync4(dir);
-  if (seen.has(real)) return [];
-  seen.add(real);
+  if (!existsSync11(dir)) return [];
+  const real2 = realpathSync5(dir);
+  if (seen.has(real2)) return [];
+  seen.add(real2);
   const files = [];
   for (const name4 of readdirSync5(dir)) {
     const path = join20(dir, name4);
@@ -12080,7 +12412,7 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
     join20(dotDir, "opencode.jsonc"),
     ...ancestors.flatMap((a) => ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"].map((f) => join20(a, f))),
     ...env.OPENCODE_CONFIG ? [env.OPENCODE_CONFIG] : []
-  ].map((path) => ({ label: fwd5(path), read: () => existsSync10(path) ? readFileSync13(path, "utf8") : null }));
+  ].map((path) => ({ label: fwd5(path), read: () => existsSync11(path) ? readFileSync13(path, "utf8") : null }));
   if (env.OPENCODE_CONFIG_CONTENT) docs.push({ label: "OPENCODE_CONFIG_CONTENT", read: () => env.OPENCODE_CONFIG_CONTENT });
   const fromEnv = /* @__PURE__ */ new Set([...env.OPENCODE_CONFIG_DIR ? ["opencode.json", "opencode.jsonc"].map((f) => fwd5(join20(globalDir, f))) : [], ...env.OPENCODE_CONFIG ? [fwd5(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
   const late2 = /* @__PURE__ */ new Set([fwd5(join20(dotDir, "opencode.jsonc")), ...env.OPENCODE_CONFIG ? [fwd5(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
@@ -12120,7 +12452,7 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir7(),
   }
   let config = {};
   let before = null;
-  if (existsSync10(path)) {
+  if (existsSync11(path)) {
     before = normalize5(readFileSync13(path, "utf8"));
     try {
       config = JSON.parse(before);
@@ -12196,14 +12528,14 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir7(),
 function excludeLines(wholeDir) {
   return wholeDir ? ["/.opencode/"] : [`/${PROJECT_CONFIG_REL}`, `/${STERLING_AGENTS_SUBDIR}/`];
 }
-function ensureExcluded({ projectDir, mode, tracked }) {
+function ensureExcluded({ projectDir, handoff, tracked, unmaintained = [] }) {
   const label = ".git/info/exclude";
-  const wholeDir = mode === "hobby" && tracked.length === 0;
+  const wholeDir = handoff === false && tracked.length === 0 && unmaintained.length === 0;
   const want = [EXCLUDE_BEGIN, ...excludeLines(wholeDir), EXCLUDE_END].join("\n");
   const gp = git(projectDir, ["rev-parse", "--git-path", "info/exclude"]);
   if (gp.status !== 0) return { item: label, status: "skipped", detail: `not a git work tree (${(gp.stderr || "").trim().split("\n")[0]}) \u2014 nothing to keep untracked` };
   const excludePath = resolve5(projectDir, gp.stdout.trim());
-  const current = existsSync10(excludePath) ? normalize5(readFileSync13(excludePath, "utf8")) : "";
+  const current = existsSync11(excludePath) ? normalize5(readFileSync13(excludePath, "utf8")) : "";
   const begin = current.indexOf(EXCLUDE_BEGIN);
   const end = current.indexOf(EXCLUDE_END);
   if (begin !== -1 && end > begin) {
@@ -12238,7 +12570,7 @@ function storeWriteTools(pluginRoot2 = sterlingRootFrom()) {
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname8(fileURLToPath3(moduleUrl));
   for (let dir = start; ; dir = dirname8(dir)) {
-    if (existsSync10(join20(dir, "agent-templates", "registry.json"))) return dir;
+    if (existsSync11(join20(dir, "agent-templates", "registry.json"))) return dir;
     if (dirname8(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
@@ -12281,7 +12613,7 @@ function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const disk = existsSync10(path) ? normalize5(readFileSync13(path, "utf8")) : null;
+    const disk = existsSync11(path) ? normalize5(readFileSync13(path, "utf8")) : null;
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
       if (!m || m[1] !== name4) {
@@ -12319,14 +12651,17 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
   rows.push(ensureCodexServer({ env, home }));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
-  let mode;
+  let handoff;
+  let unmaintained = [];
   try {
-    mode = readProjectMode(projectDir);
+    const setting = readHandoffSetting(projectDir);
+    handoff = setting.enabled;
+    unmaintained = setting.unmaintained.filter((rel) => PORTABLE_AGENT_PATHS.includes(rel));
   } catch (err) {
-    mode = null;
-    rows.push({ item: ".sterling/config.json mode", status: "skipped", detail: `${err.message} \u2014 excluding only Sterling's own .opencode paths` });
+    handoff = null;
+    rows.push({ item: ".sterling/config.json handoff", status: "skipped", detail: `${err.message} \u2014 excluding only Sterling's own .opencode paths` });
   }
-  rows.push(ensureExcluded({ projectDir, mode, tracked }));
+  rows.push(ensureExcluded({ projectDir, handoff, tracked, unmaintained }));
   const agentRows = ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked });
   const conductorRow = agentRows.find((r) => r.item === `${STERLING_AGENTS_SUBDIR}/conductor.md`);
   const conductorOk = ["created", "matches", "refreshed"].includes(conductorRow?.status);
@@ -12336,9 +12671,9 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
 }
 
 // scripts/lib/claude-probe.mjs
-import { spawnSync as spawnSync7 } from "node:child_process";
+import { spawnSync as spawnSync8 } from "node:child_process";
 function probeClaude({ env = process.env } = {}) {
-  const r = spawnSync7("claude", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  const r = spawnSync8("claude", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
   if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `claude` on PATH" : `claude --version could not run (${r.error.message})` };
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
   if (r.status !== 0 || !m) return { installed: false, reason: `claude --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
@@ -12347,7 +12682,7 @@ function probeClaude({ env = process.env } = {}) {
 
 // scripts/hooks/lib/undeclared-source-scan.mjs
 init_dist();
-import { spawnSync as spawnSync8 } from "node:child_process";
+import { spawnSync as spawnSync9 } from "node:child_process";
 var UNDECLARED_SOURCE_TIMEOUT_MS = 3e3;
 var UNDECLARED_SOURCE_OUTPUT_CAP = 5e6;
 function isPlainObject2(v) {
@@ -12405,14 +12740,14 @@ function gitSpawnFailureReason(result, label) {
   return null;
 }
 function scanFilePaths(cwd) {
-  const gitAll = spawnSync8("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+  const gitAll = spawnSync9("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
     cwd,
     timeout: UNDECLARED_SOURCE_TIMEOUT_MS,
     maxBuffer: UNDECLARED_SOURCE_OUTPUT_CAP
   });
   let reason = gitSpawnFailureReason(gitAll, "ls-files");
   if (reason) return { ok: false, reason };
-  const gitDeleted = spawnSync8("git", ["ls-files", "-z", "-d"], {
+  const gitDeleted = spawnSync9("git", ["ls-files", "-z", "-d"], {
     cwd,
     timeout: UNDECLARED_SOURCE_TIMEOUT_MS,
     maxBuffer: UNDECLARED_SOURCE_OUTPUT_CAP
@@ -12486,16 +12821,16 @@ var canonical2 = (v) => JSON.stringify(
   v,
   (_, val) => val && typeof val === "object" && !Array.isArray(val) ? Object.fromEntries(Object.keys(val).sort().map((k) => [k, val[k]])) : val
 );
-if (!existsSync11(target)) fail(`init REFUSED: target '${target}' does not exist`, 2);
+if (!existsSync12(target)) fail(`init REFUSED: target '${target}' does not exist`, 2);
 if (modeFlagGiven && !PROJECT_MODES.includes(modeFlag)) {
   fail(`init REFUSED: --mode must be 'hobby' or 'work' \u2014 got ${JSON.stringify(modeFlag ?? "")}`, 2);
 }
-if (!existsSync11(join21(pluginRoot, "mcp", "sterling-mcp.mjs"))) fail("init REFUSED: MCP server bundle missing (mcp/sterling-mcp.mjs) \u2014 the plugin checkout is incomplete; on the authoring clone run `npm run build:bundles`", 2);
-if (!existsSync11(join21(pluginRoot, "tui", "sterling-tui.mjs"))) fail("init REFUSED: TUI bundle missing (tui/sterling-tui.mjs) \u2014 the plugin checkout is incomplete; on the authoring clone run `npm run build:bundles`", 2);
+if (!existsSync12(join21(pluginRoot, "mcp", "sterling-mcp.mjs"))) fail("init REFUSED: MCP server bundle missing (mcp/sterling-mcp.mjs) \u2014 the plugin checkout is incomplete; on the authoring clone run `npm run build:bundles`", 2);
+if (!existsSync12(join21(pluginRoot, "tui", "sterling-tui.mjs"))) fail("init REFUSED: TUI bundle missing (tui/sterling-tui.mjs) \u2014 the plugin checkout is incomplete; on the authoring clone run `npm run build:bundles`", 2);
 var mcpServerEntry = join21(pluginRoot, "packages", "mcp-server", "dist", "main.js");
 for (const rel of [".sterling", ".sterling/runs", "docs", "docs/briefs", ".claude", ".claude/agents", ".opencode", OPENCODE_AGENTS_DIR, ...HANDOFF_DIRS]) {
   const p = join21(target, rel);
-  if (existsSync11(p) && !statSync5(p).isDirectory()) {
+  if (existsSync12(p) && !statSync5(p).isDirectory()) {
     fail(`init REFUSED (destructive): '${rel}' exists as a file but the manifest requires a directory \u2014 refusing to replace it`, 2);
   }
 }
@@ -12505,7 +12840,7 @@ var claudeHost = claudeProbe.installed;
 var configPath = join21(target, ".sterling", "config.json");
 var recorded;
 var rawRecorded;
-if (existsSync11(configPath)) {
+if (existsSync12(configPath)) {
   try {
     rawRecorded = JSON.parse(readFileSync14(configPath, "utf8"));
     recorded = parseConfig(rawRecorded);
@@ -12547,6 +12882,7 @@ var eff = recorded ? {
 };
 var UNIVERSAL_DOMAIN = "sterling";
 eff.stackTags = [...eff.stackTags.filter((t) => t !== UNIVERSAL_DOMAIN), UNIVERSAL_DOMAIN];
+var freshTracked = recorded ? null : trackedHandoffFiles(target);
 var expectedConfig = parseConfig({
   ...JSON.parse(readFileSync14(join21(pluginRoot, "templates", "default-config.json"), "utf8")),
   toolchains: baked,
@@ -12559,14 +12895,23 @@ var expectedConfig = parseConfig({
   // recorded declaration like the ones above, switched in the TUI System tab: a
   // work project's config is not "hand-edited" for carrying it. A fresh config
   // takes --mode, else the explicit 'hobby' default.
-  mode: recorded ? recorded.mode : modeFlag ?? "hobby"
+  mode: recorded ? recorded.mode : modeFlag ?? "hobby",
+  // the handoff setting (decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) is
+  // a recorded declaration too, switched in the TUI System tab. A fresh config
+  // starts with it off, unless the project already has handoff files tracked
+  // in git (a clone of a project that commits them): then it starts on, so the
+  // first init on a new machine does not stop maintaining committed files. When
+  // git cannot say what is tracked the key is left out of the written config
+  // (below), never recorded as off from a failed read.
+  handoff: recorded ? recorded.handoff : { enabled: freshTracked.files.length > 0 }
 });
 if (eff.splitRatio === void 0) eff.splitRatio = expectedConfig.tui_split_ratio;
 var domainMounts = resolveDomainMounts({ stack_tags: eff.stackTags, domain_paths: eff.domainPaths });
 var domainsToCreate = [];
 var domainsExisting = [];
 for (const m of domainMounts) {
-  if (existsSync11(m.dbPath)) domainsExisting.push(m);
+  if (existsSync12(m.dbPath)) domainsExisting.push(m);
   else domainsToCreate.push({ ...m, description: domainDescriptions.get(m.name) ?? DEFAULT_DOMAIN_DESCRIPTIONS[m.name] });
 }
 for (const name4 of domainDescriptions.keys()) {
@@ -12626,7 +12971,7 @@ if (!claudeHost) {
 \u26A0 Claude Code not found (${claudeProbe.reason}) \u2014 skipped the Claude-only files: sterling-launch.sh, sterling.bat, tui.bat, .claude/agents/, .claude/settings.json and the codex user-scope check. Wrote the OpenCode side only; install Claude Code and re-run /sterling:init to add them.`);
 }
 for (const [label, leaf] of [[".sterling/ (+runs/)", ".sterling/runs"], ["docs/briefs/", "docs/briefs"]]) {
-  const existed = existsSync11(join21(target, leaf));
+  const existed = existsSync12(join21(target, leaf));
   mkdirSync8(join21(target, leaf), { recursive: true });
   items.push({ item: label, status: existed ? "exists" : "created", detail: "" });
 }
@@ -12642,7 +12987,14 @@ for (const m of domainsExisting) {
 }
 var backupDetail = eff.backupPath ? eff.backupPath : "OPTED OUT (recorded; snapshots will skip loudly)";
 if (!recorded) {
-  writeFileSync6(configPath, JSON.stringify(expectedConfig, null, 2));
+  if (freshTracked.unknown === null) {
+    writeFileSync6(configPath, JSON.stringify(expectedConfig, null, 2));
+  } else {
+    const withoutHandoff = { ...expectedConfig };
+    delete withoutHandoff.handoff;
+    writeFileSync6(configPath, JSON.stringify(withoutHandoff, null, 2));
+    notes.push(`note: config.handoff.enabled was left out of the new .sterling/config.json \u2014 git could not say whether handoff files are committed (${freshTracked.unknown}); once git answers, the setting follows what is tracked, or set it in the TUI System tab`);
+  }
   items.push({ item: ".sterling/config.json", status: "created", detail: `${baked.map((t) => t.adapter).join(", ")} toolchain(s); stack tags [${eff.stackTags.join(", ")}]; backup ${backupDetail}` });
   for (const tc of baked) {
     for (const [cap, present] of Object.entries(tc.capabilities ?? {})) {
@@ -12667,7 +13019,7 @@ if (!recorded) {
   }
 }
 var dbPath = join21(target, ".sterling", "sterling.db");
-if (existsSync11(dbPath)) {
+if (existsSync12(dbPath)) {
   items.push({ item: ".sterling/sterling.db", status: "exists", detail: "data store \u2014 left as-is, never recreated" });
 } else {
   const { SterlingStore: SterlingStore2 } = await Promise.resolve().then(() => (init_dist2(), dist_exports));
@@ -12770,7 +13122,7 @@ function mapNormToRaw(lineBoundaries, normOffset) {
   return null;
 }
 function historicalHeadSegmentSets() {
-  const log = spawnSync9("git", ["log", "--format=%H", "--", "templates/target-claude-md.md"], { cwd: pluginRoot, encoding: "utf8" });
+  const log = spawnSync10("git", ["log", "--format=%H", "--", "templates/target-claude-md.md"], { cwd: pluginRoot, encoding: "utf8" });
   if (log.error || log.status !== 0) {
     const stderrTrimmed = (log.stderr || "").trim();
     const cause = log.error?.message ?? (stderrTrimmed || `exit ${log.status}`);
@@ -12780,7 +13132,7 @@ function historicalHeadSegmentSets() {
   if (!shas.length) return { segmentSets: [], unavailableReason: "templates/target-claude-md.md has no git history in this clone" };
   const segmentSets = [];
   for (const sha of shas) {
-    const show = spawnSync9("git", ["show", `${sha}:templates/target-claude-md.md`], { cwd: pluginRoot, encoding: "utf8" });
+    const show = spawnSync10("git", ["show", `${sha}:templates/target-claude-md.md`], { cwd: pluginRoot, encoding: "utf8" });
     if (show.status !== 0) continue;
     const idx = show.stdout.indexOf("{{CONVENTIONS_SECTION}}");
     if (idx === -1) continue;
@@ -12802,7 +13154,7 @@ function writeMigrationPreview(rawClaudeText, tailForPreview) {
 <!-- AGENTS.md would carry: -->
 
 ${previewAgents}`);
-  const diff = spawnSync9("diff", ["-u", oldTmp, newTmp], { encoding: "utf8" });
+  const diff = spawnSync10("diff", ["-u", oldTmp, newTmp], { encoding: "utf8" });
   writeFileSync6(previewPath, diff.stdout || "(no textual diff produced)");
   unlinkSync5(oldTmp);
   unlinkSync5(newTmp);
@@ -12844,8 +13196,8 @@ function computeMigration(rawText) {
     claudeMd: withEol(expectedClaudeMd, eol)
   };
 }
-var agentsMdExists = existsSync11(agentsMdPath);
-var claudeMdExists = existsSync11(claudeMdPath);
+var agentsMdExists = existsSync12(agentsMdPath);
+var claudeMdExists = existsSync12(claudeMdPath);
 var claudeMdRaw = claudeMdExists ? readFileSync14(claudeMdPath, "utf8") : "";
 var claudeMdIsStub = claudeMdExists && claudeMdRaw.split(/\r?\n/, 1)[0] === "@AGENTS.md";
 if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
@@ -12925,7 +13277,7 @@ if (claudeHost) {
     return { item: file, status: "differs", detail: "left untouched (matches no generated version: hand-edited or another path) \u2014 delete it and re-run /sterling:init to regenerate" };
   };
   const ensureBat = (file, path, expected, templateName, createdDetail) => {
-    const existing = existsSync11(path) ? readFileSync14(path, "utf8") : null;
+    const existing = existsSync12(path) ? readFileSync14(path, "utf8") : null;
     if (existing === null) {
       writeFileSync6(path, expected);
       items.push({ item: file, status: "created", detail: createdDetail });
@@ -12947,7 +13299,7 @@ if (claudeHost) {
     renderTmuxLauncher(pluginRoot, { session: sessionName, splitPercent })
   ));
   const tmuxLauncherPath = join21(target, "sterling-launch.sh");
-  const existingTmuxLauncher = existsSync11(tmuxLauncherPath) ? readFileSync14(tmuxLauncherPath, "utf8") : null;
+  const existingTmuxLauncher = existsSync12(tmuxLauncherPath) ? readFileSync14(tmuxLauncherPath, "utf8") : null;
   const cloneLauncher = installedCopy && existingTmuxLauncher !== null ? cloneLauncherTarget(existingTmuxLauncher) : null;
   if (existingTmuxLauncher === null) {
     writeFileSync6(tmuxLauncherPath, expectedTmuxLauncher);
@@ -12980,7 +13332,7 @@ if (claudeHost) {
   ensureBat("tui.bat", join21(target, "tui.bat"), expectedTuiLauncher, "tui-win.bat", "double-click -> ./sterling-launch.sh tui");
 }
 var nativeLauncherPath = join21(target, "sterling-windows.bat");
-if (existsSync11(nativeLauncherPath)) {
+if (existsSync12(nativeLauncherPath)) {
   items.push({
     item: "sterling-windows.bat",
     status: "stale",
@@ -13068,20 +13420,20 @@ try {
   handoffCloneTarget = null;
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: "refused", detail: `${err.message} \u2014 nothing written` });
 }
-var handoffMode = null;
+var handoffEnabled = null;
 if (handoffCloneTarget === false) {
   try {
-    handoffMode = readProjectMode(target);
+    handoffEnabled = readHandoffEnabled(target);
   } catch (err) {
-    if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
+    if (!(err instanceof HandoffSettingError) && !(err instanceof ContainmentError)) throw err;
     items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: "refused", detail: `${err.message} \u2014 nothing written` });
   }
 }
 if (handoffCloneTarget === true) {
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: "skipped", detail: "the target is a Sterling clone \u2014 it has its own projections and is not a handoff target" });
-} else if (handoffMode === "hobby") {
-  items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: "skipped", detail: HOBBY_SKIP_DETAIL });
-} else if (handoffMode === "work") {
+} else if (handoffEnabled === false) {
+  items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: "skipped", detail: HANDOFF_OFF_DETAIL });
+} else if (handoffEnabled === true) {
   const { report: opencodeReport } = syncOpenCodeAgents({
     templatesDir: join21(pluginRoot, "agent-templates"),
     registryPath: join21(pluginRoot, "agent-templates", "registry.json"),
@@ -13104,8 +13456,8 @@ if (handoffCloneTarget === true) {
     if (r.instruction) agentInstructions.push(r.instruction);
   }
   const handoffBundle = join21(pluginRoot, "bin", "handoff-projection.mjs");
-  const handoffScript = existsSync11(handoffBundle) ? handoffBundle : join21(pluginRoot, "scripts", "handoff-projection.mjs");
-  const handoff = spawnSync9(process.execPath, [handoffScript, target], { cwd: target, encoding: "utf8" });
+  const handoffScript = existsSync12(handoffBundle) ? handoffBundle : join21(pluginRoot, "scripts", "handoff-projection.mjs");
+  const handoff = spawnSync10(process.execPath, [handoffScript, target], { cwd: target, encoding: "utf8" });
   const handoffOut = `${handoff.stdout ?? ""}${handoff.stderr ?? ""}${handoff.error ? handoff.error.message : ""}`.trim();
   const handoffLine = handoffOut.split("\n")[0].replace(/^handoff projection: /, "");
   const handoffStatus = handoff.status === 0 ? handoffLine.startsWith("unchanged") ? "matches" : handoffLine.startsWith("SKIPPED") ? "skipped" : "refreshed" : handoff.status === 2 || handoff.status === 3 ? "refused" : "failed";
@@ -13148,14 +13500,14 @@ if (claudeHost && installedCopy) {
 }
 if (initIsPluginRepo) {
   const winMcpConfigPath = join21(pluginArtifactRoot, ".claude-plugin", "sterling-mcp-win.json");
-  if (existsSync11(winMcpConfigPath)) {
+  if (existsSync12(winMcpConfigPath)) {
     items.push({
       item: ".claude-plugin/sterling-mcp-win.json",
       status: "stale",
       detail: "retired (decision native-windows-launcher-retired-wsl2-only) \u2014 its only reader was the retired sterling-windows.bat; init no longer generates or maintains it. Left on disk untouched: delete it yourself when you no longer want it"
     });
   }
-  if (existsSync11(mcpPath)) {
+  if (existsSync12(mcpPath)) {
     const mcp = readMcp();
     if (mcp && mcp.mcpServers && isOurMcpEntry(mcp.mcpServers.sterling) && Object.keys(mcp.mcpServers).length === 1) {
       unlinkSync5(mcpPath);
@@ -13165,8 +13517,8 @@ if (initIsPluginRepo) {
     }
   }
 } else {
-  const mcp = existsSync11(mcpPath) ? readMcp() : void 0;
-  if (!existsSync11(mcpPath)) {
+  const mcp = existsSync12(mcpPath) ? readMcp() : void 0;
+  if (!existsSync12(mcpPath)) {
     items.push(claudeHost ? { item: ".mcp.json", status: "matches", detail: "not written \u2014 the plugin declares sterling, bound to this project via ${CLAUDE_PROJECT_DIR}" } : { item: ".mcp.json", status: "skipped", detail: "not applicable \u2014 Claude Code is not installed on this machine, and the Claude Code plugin is what declares sterling there" });
   } else if (!mcp) {
     items.push({ item: ".mcp.json", status: "differs", detail: "exists but is not a parseable object \u2014 left untouched" });
@@ -13182,7 +13534,7 @@ if (initIsPluginRepo) {
 }
 items.push(claudeHost ? { item: "hooks (\xA76 set)", status: "matches", detail: "active via the plugin (hooks/hooks.json) \u2014 not duplicated into the project" } : { item: "hooks (\xA76 set)", status: "skipped", detail: "not applicable \u2014 Claude Code is not installed on this machine, and the Claude Code plugin is what activates these hooks (OpenCode runs its own plugin hooks)" });
 var gitignorePath = join21(target, ".gitignore");
-var existingIgnore = existsSync11(gitignorePath) ? readFileSync14(gitignorePath, "utf8") : "";
+var existingIgnore = existsSync12(gitignorePath) ? readFileSync14(gitignorePath, "utf8") : "";
 var entries = [".sterling/", "sterling.bat", "sterling-windows.bat", "tui.bat", "sterling-launch.sh", UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, ".claude/agents/"];
 if (initIsPluginRepo) entries.push(".claude-plugin/sterling-mcp-win.json");
 if (eff.backupPath) {
@@ -13206,6 +13558,7 @@ var pluginPkg = (() => {
   }
 })();
 var registry = new ProjectRegistry(registryPath());
+var liveProjectPaths = null;
 try {
   const already = registry.list().some((p) => p.repo_path === fwd6(target));
   registry.register({
@@ -13216,6 +13569,7 @@ try {
     sterling_version: typeof pluginPkg.version === "string" ? pluginPkg.version : null,
     at: (/* @__PURE__ */ new Date()).toISOString()
   });
+  liveProjectPaths = [target, ...registry.list().map((p) => p.repo_path)];
   const siblings = registry.list().filter((p) => p.repo_path !== fwd6(target)).length;
   items.push({
     item: "project registry",
@@ -13255,5 +13609,5 @@ if (restartNeeded || conductorActivation.activation === "written" || conductorAc
 } else {
   console.log("\nno agent changes \u2014 no restart required");
 }
-var cleanupLines = cloneCleanupLines(oldClonePaths);
+var cleanupLines = cloneCleanupLines(oldClonePaths, liveProjectPaths);
 if (cleanupLines.length) console.log("\n" + cleanupLines.join("\n"));

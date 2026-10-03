@@ -5239,22 +5239,40 @@ var configSchema = external_exports.object({
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
   }).default({}),
-  // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-  // per-project switch that decides the flow. 'hobby' (the default, today's
-  // behaviour) skips the OpenCode agents and the handoff projection; 'work'
-  // writes and maintains them. Toggled in the TUI System tab. A missing key
-  // means hobby.
+  // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed
+  // by project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+  // the per-project switch that decides how work ships. 'hobby' (the default)
+  // merges directly through /sterling:merge; 'work' opens a pull request and
+  // runs the review loop. It decides nothing else: whether the handoff files
+  // are written is `handoff` below. Toggled in the TUI System tab. A missing
+  // key means hobby.
   // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
   // S1): any other value is PRESERVED raw, never coerced to hobby and never
   // thrown on — a typo here must not turn every parseConfig reader (the MCP
   // server's boot included) into a startup failure. The strict judge is
   // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
-  // surface that ACTS on the mode (init, sync-agents, /sterling:update, the
-  // handoff-projection CLI) uses, and which refuses an invalid value loudly.
+  // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
+  // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.
   // The default lives twice (anti_pattern 85d15143): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // Handoff files (decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+  // `enabled` says whether Sterling writes the files for colleagues who do not
+  // have Sterling, the portable OpenCode agents (.opencode/agents/) and the
+  // handoff projection (architecture.md, rulings.md, docs/sterling/). Off by
+  // default, independent of `mode`. Toggled in the TUI System tab.
+  // PERMISSIVE for the same reason as `mode`: the value is preserved raw. The
+  // strict judge is readHandoffEnabled() in scripts/lib/handoff-projection.mjs,
+  // which init, sync-agents, /sterling:update, the handoff-projection CLI and
+  // the git exclude block use. It refuses a value that is not a boolean, and it
+  // reads a config with NO key as on when portable agents are already tracked
+  // in git, which this default cannot express: read the setting through it,
+  // never from the parsed config.
+  // The default lives twice (anti_pattern 85d15143): here and in
+  // templates/default-config.json; config.test.ts pins that they agree.
+  handoff: external_exports.unknown().default({ enabled: false }),
   // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
   // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
   // first use; empty means unpinned (any Bot login matching /copilot/i, with
@@ -5663,8 +5681,21 @@ function hasRecordCentralityHit(record, outgoingText, opts = {}) {
 import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
+var StoreRowDecodeError = class extends Error {
+  op;
+  constructor(op, cause) {
+    super(`${op}: a record row's body is not valid JSON (${cause?.message ?? String(cause)})`);
+    this.name = "StoreRowDecodeError";
+    this.op = op;
+  }
+};
 function decodeLiveRecordRow(op, row) {
-  const record = JSON.parse(row.body);
+  let record;
+  try {
+    record = JSON.parse(row.body);
+  } catch (e) {
+    throw new StoreRowDecodeError(op, e);
+  }
   if (typeof row.scope !== "string" || row.scope.length === 0) {
     throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
   }
@@ -9415,6 +9446,19 @@ function markBoardReadyNoticed(root, sessionId, hash) {
   writeFileSync3(p, JSON.stringify({ hash }));
 }
 
+// scripts/lib/contained-fs.mjs
+import { lstatSync as lstatSync2, readFileSync as readFileSync5, readdirSync as readdirSync2, mkdirSync as mkdirSync5, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync, constants } from "node:fs";
+var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+// scripts/lib/handoff-projection.mjs
+var HANDOFF_DOCS_DIR = "docs/sterling";
+var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
+var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
+     Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
+     your commit message rather than editing it. -->`;
+var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
+var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
+
 // scripts/hooks/lib/subject-fan.mjs
 import { existsSync as existsSync6 } from "node:fs";
 import { join as join7 } from "node:path";
@@ -9549,18 +9593,18 @@ function readProjectConfig(cwd) {
 }
 
 // scripts/hooks/lib/advisory-counter.mjs
-import { appendFileSync, existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync5 } from "node:fs";
+import { appendFileSync, existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync6 } from "node:fs";
 import { join as join8 } from "node:path";
 function recordAdvisoryFire(root, hook, sessionId) {
   try {
     if (!root || !hook) return;
     if (!existsSync7(join8(root, ".sterling"))) return;
     const dir = join8(root, ".sterling", "transient");
-    mkdirSync5(dir, { recursive: true });
+    mkdirSync6(dir, { recursive: true });
     let session = typeof sessionId === "string" && sessionId ? sessionId : null;
     if (!session) {
       try {
-        const parsed = JSON.parse(readFileSync5(join8(dir, "session.json"), "utf8"));
+        const parsed = JSON.parse(readFileSync6(join8(dir, "session.json"), "utf8"));
         session = typeof parsed?.session_id === "string" ? parsed.session_id : null;
       } catch {
       }

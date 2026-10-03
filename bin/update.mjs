@@ -4179,19 +4179,31 @@ function isAbsolutePathAnyHost(p) {
   return /^[A-Za-z]:[\\/]/.test(s2) || s2.startsWith("/") || s2.startsWith("\\");
 }
 function sameLocationAnyHost(a, b) {
-  const drvfs = (p) => {
-    const s2 = String(p ?? "").replace(/\\/g, "/");
-    if (!isAbsolutePathAnyHost(s2))
-      return void 0;
-    const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
-    return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
-  };
-  const x = drvfs(a);
-  const y = drvfs(b);
+  const x = drvfsForm(a);
+  const y = drvfsForm(b);
   if (x === void 0 || y === void 0)
     return false;
+  const [fx, fy] = foldDrvfs(x, y);
+  return fx === fy;
+}
+function isUnderLocationAnyHost(child, parent) {
+  const x = drvfsForm(child);
+  const y = drvfsForm(parent);
+  if (x === void 0 || y === void 0)
+    return false;
+  const [c, p] = foldDrvfs(x, y);
+  return c.startsWith(p + "/");
+}
+function drvfsForm(p) {
+  const s2 = String(p ?? "").replace(/\\/g, "/");
+  if (!isAbsolutePathAnyHost(s2))
+    return void 0;
+  const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
+  return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
+}
+function foldDrvfs(x, y) {
   const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
-  return onDrvfs(x) && onDrvfs(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
+  return onDrvfs(x) && onDrvfs(y) ? [x.toLowerCase(), y.toLowerCase()] : [x, y];
 }
 function toRepoRelative(absolutePath, repoRoot) {
   const abs = normSep(absolutePath);
@@ -5891,22 +5903,40 @@ var init_config = __esm({
       tdd: external_exports.object({
         enabled: external_exports.boolean().default(true)
       }).default({}),
-      // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
-      // per-project switch that decides the flow. 'hobby' (the default, today's
-      // behaviour) skips the OpenCode agents and the handoff projection; 'work'
-      // writes and maintains them. Toggled in the TUI System tab. A missing key
-      // means hobby.
+      // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed
+      // by project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+      // the per-project switch that decides how work ships. 'hobby' (the default)
+      // merges directly through /sterling:merge; 'work' opens a pull request and
+      // runs the review loop. It decides nothing else: whether the handoff files
+      // are written is `handoff` below. Toggled in the TUI System tab. A missing
+      // key means hobby.
       // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
       // S1): any other value is PRESERVED raw, never coerced to hobby and never
       // thrown on — a typo here must not turn every parseConfig reader (the MCP
       // server's boot included) into a startup failure. The strict judge is
       // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
-      // surface that ACTS on the mode (init, sync-agents, /sterling:update, the
-      // handoff-projection CLI) uses, and which refuses an invalid value loudly.
+      // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
+      // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
       // Consumers of the PARSED config must narrow this field themselves.
       // The default lives twice (anti_pattern 85d15143): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       mode: external_exports.unknown().default("hobby"),
+      // Handoff files (decision
+      // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+      // `enabled` says whether Sterling writes the files for colleagues who do not
+      // have Sterling, the portable OpenCode agents (.opencode/agents/) and the
+      // handoff projection (architecture.md, rulings.md, docs/sterling/). Off by
+      // default, independent of `mode`. Toggled in the TUI System tab.
+      // PERMISSIVE for the same reason as `mode`: the value is preserved raw. The
+      // strict judge is readHandoffEnabled() in scripts/lib/handoff-projection.mjs,
+      // which init, sync-agents, /sterling:update, the handoff-projection CLI and
+      // the git exclude block use. It refuses a value that is not a boolean, and it
+      // reads a config with NO key as on when portable agents are already tracked
+      // in git, which this default cannot express: read the setting through it,
+      // never from the parsed config.
+      // The default lives twice (anti_pattern 85d15143): here and in
+      // templates/default-config.json; config.test.ts pins that they agree.
+      handoff: external_exports.unknown().default({ enabled: false }),
       // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
       // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
       // first use; empty means unpinned (any Bot login matching /copilot/i, with
@@ -6020,6 +6050,7 @@ __export(dist_exports, {
   featureArticleSchema: () => featureArticleSchema,
   headlineRecord: () => headlineRecord,
   isAbsolutePathAnyHost: () => isAbsolutePathAnyHost,
+  isUnderLocationAnyHost: () => isUnderLocationAnyHost,
   knownFieldsFor: () => knownFieldsFor,
   linkSchema: () => linkSchema,
   matchesGlob: () => matchesGlob,
@@ -6108,7 +6139,7 @@ var init_shares = __esm({
 });
 
 // packages/store/dist/mounted.js
-import { mkdirSync as mkdirSync2, existsSync as existsSync5, rmSync, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
+import { mkdirSync as mkdirSync2, existsSync as existsSync6, rmSync, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
 import { dirname as dirname2, join as join9 } from "node:path";
 import { homedir as homedir3 } from "node:os";
 function resolveDomainMounts(config) {
@@ -6120,6 +6151,9 @@ function resolveDomainMounts(config) {
 function open(dbPath) {
   mkdirSync2(dirname2(dbPath), { recursive: true });
   return new SterlingStore(dbPath);
+}
+function isStoreFailure(e) {
+  return e instanceof SchemaMigrationRequiredError || e instanceof UnsupportedSchemaVersionError || e instanceof StoreRowDecodeError || e?.code === "ERR_SQLITE_ERROR";
 }
 function missingDomainWarning(m) {
   return `sterling: domain '${m.name}' is configured but has no store at '${m.dbPath}'; it is NOT mounted, so its knowledge is not read and writes to scope domain:${m.name} are refused. Create it with createDomain (a description is required), or run init to set it up.`;
@@ -6151,13 +6185,17 @@ function createDomain(name, description, dbPath) {
   }
   store.close();
 }
-var DOMAIN_DESCRIPTION_KEY, DomainNotCreatedError, MountedStores;
+var PROBE_ID, DROPPED_AFTER_MOUNT_NOTE, DROPPED_AT_MOUNT_NOTE, errorText, DOMAIN_DESCRIPTION_KEY, DomainNotCreatedError, MountedStores;
 var init_mounted = __esm({
   "packages/store/dist/mounted.js"() {
     "use strict";
     init_dist2();
     init_dist();
     init_shares();
+    PROBE_ID = "00000000-0000-0000-0000-000000000000";
+    DROPPED_AFTER_MOUNT_NOTE = "dropped after mount; reads skip it until the session restarts";
+    DROPPED_AT_MOUNT_NOTE = "dropped at mount; restart the session after the store is repaired";
+    errorText = (e) => String(e?.message ?? e);
     DOMAIN_DESCRIPTION_KEY = "description";
     DomainNotCreatedError = class extends Error {
       domain;
@@ -6208,8 +6246,26 @@ var init_mounted = __esm({
        *  exist, in manifest order. Kept so a caller (boot, a tool response, H1) can
        *  disclose the skip instead of the domain silently vanishing. */
       missingDomains = [];
-      /** The project store is opened, and created when absent. A domain store is
-       *  only ever OPENED here, never created: a mount whose db file does not exist
+      /** Mounted domains whose store failed a read, in the order they were dropped.
+       *  One broken domain must not fail a read over the whole mounted set, so a
+       *  domain read that throws drops that domain from every later read and lists
+       *  it here with the error; a caller (a tool response, boot) discloses it
+       *  instead of the domain silently vanishing. Checked at mount (probeDomain)
+       *  and on every fanned read. The drop lasts for this instance's lifetime:
+       *  a later read does not retry the store. It covers READS only: the domain
+       *  stays in domainNames(), but every write into it is refused
+       *  (assertWritable), and the slug uniqueness checks still ask it
+       *  (slugHolders). The PROJECT store is never listed here: its failure
+       *  throws. */
+      unreadableDomains = [];
+      domainPaths = /* @__PURE__ */ new Map();
+      /** Every configured domain whose store file exists, in manifest order,
+       *  whether or not it could be opened. */
+      mountedNames = [];
+      /** The project store is opened, and created when absent; a failure to open
+       *  it throws. A domain store is only ever OPENED here, never created, and one
+       *  that exists but cannot be opened is listed on unreadableDomains instead of
+       *  failing the mount: a mount whose db file does not exist
        *  throws DomainNotCreatedError naming createDomain (board 675daf9d (c)), with
        *  every handle opened so far closed and no file written for the missing
        *  domain. When options.skipMissing is true such a mount is skipped instead,
@@ -6219,24 +6275,130 @@ var init_mounted = __esm({
         this.project = open(projectDbPath);
         try {
           for (const m of mounts) {
-            if (!existsSync5(m.dbPath)) {
+            if (!existsSync6(m.dbPath)) {
               if (options?.skipMissing) {
                 this.missingDomains.push({ name: m.name, dbPath: m.dbPath });
                 continue;
               }
               throw new DomainNotCreatedError(m.name, m.dbPath);
             }
-            this.domains.set(m.name, new SterlingStore(m.dbPath));
+            this.mountedNames.push(m.name);
+            this.domainPaths.set(m.name, m.dbPath);
+            let store;
+            try {
+              store = new SterlingStore(m.dbPath);
+            } catch (e) {
+              if (!isStoreFailure(e))
+                throw e;
+              this.dropDomain(m.name, e, true);
+              continue;
+            }
+            this.domains.set(m.name, store);
+            this.probeDomain(m.name, store);
           }
         } catch (e) {
           this.close();
           throw e;
         }
       }
+      /** Mount-time read check. A pre-v2 store opens and answers some reads (get,
+       *  query over pre-v2 bodies) but not others (inboundSupersedes: it has no
+       *  record_relations table), so without this a first tool call could serve
+       *  that domain's records and then drop it halfway through. The probe runs the
+       *  two per-record reads the fan makes, against an id no record has, and drops
+       *  the domain when either throws. */
+      probeDomain(name, store) {
+        try {
+          store.get(PROBE_ID);
+          store.inboundSupersedes(PROBE_ID);
+        } catch (e) {
+          if (!isStoreFailure(e))
+            throw e;
+          this.dropDomain(name, e, true);
+        }
+      }
+      /** Drop a domain from reads. The drop lasts for this instance's lifetime:
+       *  no later read retries the store, even when the failure was transient. That
+       *  is safe to leave because a dropped domain cannot be written either
+       *  (assertWritable): a session never writes into a store it cannot read back,
+       *  and the slug checks still ask it (fanEveryDomain). */
+      dropDomain(name, e, atMount = false) {
+        if (this.isUnreadable(name))
+          return;
+        this.unreadableDomains.push({
+          name,
+          dbPath: this.domainPaths.get(name) ?? "",
+          error: errorText(e),
+          note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE
+        });
+      }
+      isUnreadable(name) {
+        return this.unreadableDomains.some((d) => d.name === name);
+      }
+      /** `(<error>; <note>)` for a dropped domain, for refusal text. */
+      droppedReason(name) {
+        const d = this.unreadableDomains.find((x) => x.name === name);
+        return d ? `(${d.error}; ${d.note})` : "";
+      }
+      /** Refuse a write into a domain this session has dropped from reads: the
+       *  write could not be read back, and a promotion would retire the project
+       *  original in favour of a copy nobody can see. */
+      assertWritable(name) {
+        if (!this.isUnreadable(name))
+          return;
+        throw new Error(`domain '${name}' cannot be written: this session cannot read it ${this.droppedReason(name)}. Nothing was written. Repair the store, then restart the session.`);
+      }
+      /** `fn` on the project store and then on EVERY mounted domain, dropped ones
+       *  included, for a check where "not read" must never count as "absent" (slug
+       *  uniqueness). A dropped domain that still answers is believed. A domain
+       *  whose read fails makes the whole check refuse, naming it and the error. */
+      fanEveryDomain(what, fn) {
+        const out = [fn(this.project)];
+        for (const [name, store] of this.domains) {
+          try {
+            out.push(fn(store));
+          } catch (e) {
+            if (!isStoreFailure(e))
+              throw e;
+            this.dropDomain(name, e);
+            throw new Error(`${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. Nothing was written. Repair the store, then restart the session.`);
+          }
+        }
+        return out;
+      }
+      /** The one read fan: `fn` on the project store, then on each readable domain
+       *  in manifest order, yielding each answer with its source ('project' or the
+       *  domain's manifest name). The project read is NOT guarded, so its failure
+       *  throws. A domain read that fails with a store failure (isStoreFailure)
+       *  drops that domain (dropDomain) and the fan moves on; any other error is
+       *  rethrown. Lazy, so a first-hit caller stops reading at its hit. */
+      *fanRead(fn) {
+        yield { source: "project", store: this.project, value: fn(this.project) };
+        for (const [name, store] of [...this.domains]) {
+          if (this.isUnreadable(name))
+            continue;
+          let value;
+          try {
+            value = fn(store);
+          } catch (e) {
+            if (!isStoreFailure(e))
+              throw e;
+            this.dropDomain(name, e);
+            continue;
+          }
+          yield { source: name, store, value };
+        }
+      }
+      /** fanRead's answers alone, project first. */
+      fanValues(fn) {
+        return [...this.fanRead(fn)].map((r) => r.value);
+      }
       /** A mounted domain's description (store_meta 'description'), or undefined
        *  when that existing store has none. An unmounted name is refused. */
       domainDescription(name) {
         const store = this.domains.get(name);
+        if (!store && this.isUnreadable(name))
+          throw new Error(`domainDescription: domain '${name}' cannot be read ${this.droppedReason(name)}`);
         if (!store)
           throw new Error(`domainDescription: domain '${name}' is not mounted`);
         return store.getMeta(DOMAIN_DESCRIPTION_KEY);
@@ -6248,6 +6410,7 @@ var init_mounted = __esm({
        *  transaction open on another mount (the same affinity rule as every write
        *  through this class). */
       setDomainDescription(name, description) {
+        this.assertWritable(name);
         const store = this.domains.get(name);
         if (!store)
           throw new Error(`setDomainDescription: domain '${name}' is not mounted`);
@@ -6301,6 +6464,7 @@ var init_mounted = __esm({
           return this.project;
         const m = /^domain:(.+)$/.exec(scope);
         if (m) {
+          this.assertWritable(m[1]);
           const store = this.domains.get(m[1]);
           if (!store)
             throw new Error(`scope '${scope}' targets an unmounted domain \u2014 not in the project's domains manifest`);
@@ -6317,7 +6481,7 @@ var init_mounted = __esm({
        *  databases. When only the project matches it fills the cap, as before. */
       query(opts2 = {}) {
         const cap = opts2.cap ?? DEFAULT_QUERY_CAP;
-        const perStore = this.all().map((s2) => s2.query({ ...opts2, cap }));
+        const perStore = this.fanValues((s2) => s2.query({ ...opts2, cap }));
         const shares = allocateShares(perStore.map((r) => r.length), cap);
         return perStore.flatMap((records, i) => records.slice(0, shares[i]));
       }
@@ -6332,7 +6496,7 @@ var init_mounted = __esm({
       /** Cross-mount twin of countAboveScore (board a577a69d) — summed
        *  project-first across every mounted store, same fan as count(). */
       countAboveScore(opts2, minScore) {
-        return this.all().reduce((n, s2) => n + s2.countAboveScore(opts2, minScore), 0);
+        return this.fanValues((s2) => s2.countAboveScore(opts2, minScore)).reduce((n, c) => n + c, 0);
       }
       /** Per-source projection (AC2): project store FIRST, then each mounted domain
        *  in manifest order. Each store runs the full query independently — type
@@ -6341,37 +6505,39 @@ var init_mounted = __esm({
        *  The source name is 'project' for the project store and the domain manifest
        *  name (DomainMount.name) for each domain store. */
       bySource(opts2) {
-        const result = [];
-        result.push({ source: "project", records: this.project.query(opts2) });
-        for (const [name, store] of this.domains) {
-          result.push({ source: name, records: store.query(opts2) });
-        }
-        return result;
+        return [...this.fanRead((s2) => s2.query(opts2))].map((r) => ({ source: r.source, records: r.value }));
       }
       /** Count-only per-source projection — the COUNT(*) twin of bySource (same
        *  project-first, per-store ordering) with NO body fetch. The TUI Knowledge
        *  tree's collapsed category/source badges use this so the default all-collapsed
        *  view does not fetch + parse every source's record bodies each frame. */
       countBySource(opts2) {
-        const result = [{ source: "project", count: this.project.count(opts2) }];
-        for (const [name, store] of this.domains) {
-          result.push({ source: name, count: store.count(opts2) });
-        }
-        return result;
+        return [...this.fanRead((s2) => s2.count(opts2))].map((r) => ({ source: r.source, count: r.value }));
       }
       /** Records from ONE named source ('project' or a mounted domain name) — the
        *  full §3.4 query against that single store. The TUI fetches bodies only for
-       *  the source the user actually expanded; an unknown source yields []. */
+       *  the source the user actually expanded; an unknown source yields [], and so
+       *  does a domain that is, or on this read becomes, unreadable. */
       querySource(source, opts2 = {}) {
-        const store = source === "project" ? this.project : this.domains.get(source);
-        return store ? store.query(opts2) : [];
+        if (source === "project")
+          return this.project.query(opts2);
+        const store = this.domains.get(source);
+        if (!store || this.isUnreadable(source))
+          return [];
+        try {
+          return store.query(opts2);
+        } catch (e) {
+          if (!isStoreFailure(e))
+            throw e;
+          this.dropDomain(source, e);
+          return [];
+        }
       }
       /** Cross-store fetch by id: project first, then domains. */
       get(id) {
-        for (const s2 of this.all()) {
-          const r = s2.get(id);
-          if (r)
-            return r;
+        for (const { value } of this.fanRead((s2) => s2.get(id))) {
+          if (value)
+            return value;
         }
         return void 0;
       }
@@ -6391,7 +6557,7 @@ var init_mounted = __esm({
        *  so a project-only lookup calls them dangling. No dedup needed — a record
        *  lives in exactly one store. */
       recordIdIndex() {
-        return this.all().flatMap((s2) => s2.recordIdIndex());
+        return this.fanValues((s2) => s2.recordIdIndex()).flat();
       }
       /** Project-first concatenation of every mounted store's dead-id alias index
        *  ([stable-identity-design-v2] contract 3) — same reasoning as
@@ -6400,7 +6566,7 @@ var init_mounted = __esm({
        *  A historical id is unique across the fan (it was one record's id), so no
        *  dedup is needed. */
       recordAliases() {
-        return this.all().flatMap((s2) => s2.recordAliases());
+        return this.fanValues((s2) => s2.recordAliases()).flat();
       }
       /** Exact-slug article resolution across the fan, PROJECT-FIRST (decision
        *  3db7095f's deterministic lookup, mounted). Feature articles are always
@@ -6412,14 +6578,26 @@ var init_mounted = __esm({
        *  serve two records under one slug, which is the failure the refusal exists to
        *  prevent. No dedup needed — a record lives in exactly one store. */
       articlesBySlug(slug) {
-        return this.all().flatMap((s2) => s2.articlesBySlug(slug));
+        return this.fanValues((s2) => s2.articlesBySlug(slug)).flat();
       }
       /** Type-agnostic exact-slug lookup across the fan, PROJECT-FIRST (board
        *  1e639f32) — same over-detect-is-safe reasoning as articlesBySlug: its
        *  callers are a uniqueness refusal and an identity resolution, and both
        *  would rather see a domain-store record than miss one. */
       recordsBySlug(slug) {
-        return this.all().flatMap((s2) => s2.recordsBySlug(slug));
+        return this.fanValues((s2) => s2.recordsBySlug(slug)).flat();
+      }
+      /** recordsBySlug for a UNIQUENESS check: every mounted domain is asked,
+       *  dropped ones included (fanEveryDomain), so a slug held by a record in a
+       *  dropped domain still counts as taken, and a domain that cannot answer
+       *  makes the check refuse instead of passing. Identity resolution keeps using
+       *  recordsBySlug, which skips a dropped domain and says so. */
+      slugHolders(slug) {
+        return this.fanEveryDomain(`slug '${slug}'`, (s2) => s2.recordsBySlug(slug)).flat();
+      }
+      /** articlesBySlug for a uniqueness check; same rule as slugHolders. */
+      articleSlugHolders(slug) {
+        return this.fanEveryDomain(`slug '${slug}'`, (s2) => s2.articlesBySlug(slug)).flat();
       }
       /** Superseded-only counterpart of recordsBySlug — knowledge_get's dead-slug
        *  fallthrough is the sole caller (decision foreign_df361a0f) and takes result[0] as
@@ -6435,16 +6613,15 @@ var init_mounted = __esm({
        *  the one field comparable across stores, and is therefore the cross-store
        *  sort key here (review finding, 2026-08-20). */
       supersededRecordsBySlug(slug) {
-        return this.all().flatMap((s2) => s2.supersededRecordsBySlug(slug)).sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
+        return this.fanValues((s2) => s2.supersededRecordsBySlug(slug)).flat().sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
       }
       /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
        *  exactly one store (same reasoning as get()), so this tries each mounted
        *  store project-first and returns the first hit. */
       resolveTerminus(id) {
-        for (const s2 of this.all()) {
-          const r = s2.resolveTerminus(id);
-          if (r)
-            return r;
+        for (const { value } of this.fanRead((s2) => s2.resolveTerminus(id))) {
+          if (value)
+            return value;
         }
         return null;
       }
@@ -6455,12 +6632,12 @@ var init_mounted = __esm({
        *  reasoning as recordsBySlug's fan. DEDUPED BY ID (roster review F3,
        *  anti_pattern foreign_1896c79b): a record promoted into a domain store leaves a
        *  project-store tombstone behind, so the SAME source id can resolve out of
-       *  two different mounts — first-seen (project-first, this.all()'s own
+       *  two different mounts — first-seen (project-first, the read fan's own
        *  ordering) wins, never a duplicate entry for one concept. */
       inboundSupersedes(id) {
         const seen = /* @__PURE__ */ new Set();
         const out = [];
-        for (const record of this.all().flatMap((s2) => s2.inboundSupersedes(id))) {
+        for (const record of this.fanValues((s2) => s2.inboundSupersedes(id)).flat()) {
           if (seen.has(record.id))
             continue;
           seen.add(record.id);
@@ -6551,21 +6728,45 @@ var init_mounted = __esm({
        *  target is already validated. */
       addLink(sourceId, rel, targetId) {
         if (!this.get(targetId))
-          throw new Error(`addLink: no target record '${targetId}' in the project store or any mounted domain`);
+          throw new Error(`addLink: no target record '${targetId}' in the project store or any mounted domain${this.unreadableNote()}`);
         return this.mutatingStoreHolding("addLink", sourceId).addLink(sourceId, rel, targetId, true);
       }
       /** EVERY mounted store physically holding `id`, project-first. Ordinarily
        *  exactly one — a record lives in one store — which is precisely why the
        *  cardinality is returned rather than assumed away by a first-hit scan. */
       holdersOf(id) {
-        return this.all().filter((s2) => s2.get(id) !== void 0);
+        const holders = [...this.fanRead((s2) => s2.get(id) !== void 0)].filter((r) => r.value).map((r) => r.store);
+        for (const [name, store] of this.domains) {
+          if (!this.isUnreadable(name))
+            continue;
+          try {
+            if (store.get(id) !== void 0)
+              holders.push(store);
+          } catch (e) {
+            if (!isStoreFailure(e))
+              throw e;
+          }
+        }
+        return holders;
+      }
+      /** ' Not read: domain <name> (<error>)...' for a refusal that says a record
+       *  was not found, so a miss caused by a dropped domain is not read as absence. */
+      unreadableNote() {
+        if (!this.unreadableDomains.length)
+          return "";
+        return `. Not read: ${this.unreadableDomains.map((d) => `domain '${d.name}' (${d.error}; ${d.note})`).join("; ")}`;
       }
       storeHolding(id) {
         const holders = this.holdersOf(id);
         if (holders.length === 0)
-          throw new Error(`no record '${id}' in the project store or any mounted domain`);
+          throw new Error(`no record '${id}' in the project store or any mounted domain${this.unreadableNote()}`);
         if (holders.length > 1) {
           throw new Error(`ambiguous holder: record '${id}' is held by ${holders.length} mounts \u2014 ${holders.map((s2) => `'${this.mountNameOf(s2)}'`).join(", ")}. One id must name one row: every routing decision here (which store a write lands in, which mount a transaction opens on, what scope a derived record inherits) assumes a single holder, so the ambiguity is refused rather than resolved project-first. Resolve the duplicate (scripts/domain-doctor.mjs show --id '${id}' on each store) before retrying.`);
+        }
+        for (const [name, store] of this.domains) {
+          if (store === holders[0] && this.isUnreadable(name)) {
+            throw new Error(`record '${id}' is held by domain '${name}', which this session cannot read ${this.droppedReason(name)}. Nothing was read or written. Repair the store, then restart the session.`);
+          }
         }
         return holders[0];
       }
@@ -6712,9 +6913,10 @@ var init_mounted = __esm({
         for (const [name, store] of this.domains)
           store.snapshot(pathFor(`domain-${name}`));
       }
-      /** Mounted domain names, in manifest order. */
+      /** Mounted domain names, in manifest order. Includes a domain listed on
+       *  unreadableDomains: it is still configured, though neither read nor written. */
       domainNames() {
-        return [...this.domains.keys()];
+        return [...this.mountedNames];
       }
       close() {
         for (const s2 of this.all())
@@ -7209,6 +7411,7 @@ __export(dist_exports2, {
   SUPPORTED_SCHEMA_VERSION: () => SUPPORTED_SCHEMA_VERSION,
   SchemaMigrationRequiredError: () => SchemaMigrationRequiredError,
   SterlingStore: () => SterlingStore,
+  StoreRowDecodeError: () => StoreRowDecodeError,
   UnsupportedSchemaVersionError: () => UnsupportedSchemaVersionError,
   allocateShares: () => allocateShares,
   assertNoFieldLoss: () => assertNoFieldLoss,
@@ -7241,7 +7444,7 @@ __export(dist_exports2, {
   unrecognizedKeyPaths: () => unrecognizedKeyPaths
 });
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync as mkdirSync4, existsSync as existsSync6, realpathSync as realpathSync3, statSync } from "node:fs";
+import { mkdirSync as mkdirSync4, existsSync as existsSync7, realpathSync as realpathSync3, statSync } from "node:fs";
 import { dirname as dirname4, basename, join as join11, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 function classifyClaimPath(repoRoot, path) {
@@ -7255,7 +7458,12 @@ function classifyClaimPath(repoRoot, path) {
   }
 }
 function decodeLiveRecordRow(op, row) {
-  const record = JSON.parse(row.body);
+  let record;
+  try {
+    record = JSON.parse(row.body);
+  } catch (e) {
+    throw new StoreRowDecodeError(op, e);
+  }
   if (typeof row.scope !== "string" || row.scope.length === 0) {
     throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
   }
@@ -7486,7 +7694,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var DDL, SUPPORTED_SCHEMA_VERSION, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, JournalDemotionRefusedError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var StoreRowDecodeError, DDL, SUPPORTED_SCHEMA_VERSION, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, JournalDemotionRefusedError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -7498,6 +7706,14 @@ var init_dist2 = __esm({
     init_registry2();
     init_axis();
     init_axis();
+    StoreRowDecodeError = class extends Error {
+      op;
+      constructor(op, cause) {
+        super(`${op}: a record row's body is not valid JSON (${cause?.message ?? String(cause)})`);
+        this.name = "StoreRowDecodeError";
+        this.op = op;
+      }
+    };
     DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -9336,7 +9552,7 @@ CREATE TABLE IF NOT EXISTS store_meta (
       /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */
       snapshot(targetPath) {
         const target2 = targetPath.replace(/\\/g, "/");
-        if (existsSync6(target2)) {
+        if (existsSync7(target2)) {
           throw new Error(`snapshot: target already exists, refusing to overwrite: '${target2}'`);
         }
         mkdirSync4(dirname4(target2), { recursive: true });
@@ -9828,14 +10044,14 @@ var init_agent_coverage = __esm({
 });
 
 // scripts/update.mjs
-import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync8 } from "node:fs";
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { existsSync as existsSync9 } from "node:fs";
 import { dirname as dirname6, join as join14, resolve as resolve6 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/lib/update.mjs
-import { spawnSync } from "node:child_process";
-import { closeSync as closeSync3, existsSync as existsSync7, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, readSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { closeSync as closeSync3, existsSync as existsSync8, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, readSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname5, join as join13 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10277,6 +10493,8 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
 }
 
 // scripts/lib/handoff-projection.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync5 } from "node:fs";
 import { join as join7, resolve as resolve4 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
@@ -10458,29 +10676,112 @@ var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 // scripts/lib/handoff-projection.mjs
 var fwd2 = (p) => p.replace(/\\/g, "/");
 var PROJECT_MODES = ["hobby", "work"];
-var HOBBY_SKIP_DETAIL = "project mode is hobby (OpenCode and handoff files are work-only; existing files are no longer maintained, and nothing is deleted)";
 var ProjectModeError = class extends Error {
 };
-function readProjectMode(root) {
-  const rel = ".sterling/config.json";
-  const where = `${fwd2(resolve4(root))}/${rel}`;
-  if (!existsContained(root, rel, "file")) return "hobby";
+var CONFIG_REL = ".sterling/config.json";
+function readRawConfig(root, ErrorClass, subject) {
+  const where = `${fwd2(resolve4(root))}/${CONFIG_REL}`;
+  if (!existsContained(root, CONFIG_REL, "file")) return { where, parsed: void 0 };
   let parsed;
   try {
-    parsed = JSON.parse(readContained(root, rel));
+    parsed = JSON.parse(readContained(root, CONFIG_REL));
   } catch (err) {
-    throw new ProjectModeError(`${where} is not valid JSON (${err.message}) \u2014 the project mode cannot be read`);
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ProjectModeError(`${where} is not a JSON object \u2014 the project mode cannot be read`);
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
   }
-  if (parsed.mode === void 0) return "hobby";
+  return { where, parsed };
+}
+function readProjectMode(root) {
+  const { where, parsed } = readRawConfig(root, ProjectModeError, "the project mode");
+  if (parsed === void 0 || parsed.mode === void 0) return "hobby";
   if (!PROJECT_MODES.includes(parsed.mode)) {
     throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
   }
   return parsed.mode;
 }
+var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
+var HANDOFF_OFF_DETAIL = "handoff files are off (config.handoff.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted)";
+var HandoffSettingError = class extends Error {
+};
+var HandoffGitError = class extends HandoffSettingError {
+  constructor(message, reason) {
+    super(message);
+    this.reason = reason;
+  }
+};
+var GIT_TIMEOUT_MS = 3e4;
+function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
+  const run = (args) => {
+    const r = spawn("git", args, { cwd: root, encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
+    const name = `git ${args[0]}`;
+    if (r.error) return { failed: r.error.code === "ETIMEDOUT" ? `${name} timed out after ${GIT_TIMEOUT_MS / 1e3}s` : `${name} did not run (${r.error.message})` };
+    if (r.status !== 0) {
+      const stderr = (r.stderr || "").trim().split("\n")[0];
+      return { failed: `${name} exited ${r.status ?? `on signal ${r.signal}`}: ${stderr || "no error output"}`, notARepo: r.status === 128 && /not a git repository/i.test(stderr) };
+    }
+    return { stdout: r.stdout || "" };
+  };
+  if (!existsSync5(root)) return { files: [], unknown: null };
+  const inside = run(["rev-parse", "--is-inside-work-tree"]);
+  if (inside.failed) {
+    if (inside.notARepo && !existsSync5(join7(root, ".git"))) return { files: [], unknown: null };
+    return { files: [], unknown: inside.failed };
+  }
+  if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
+  const ls = run(["ls-files", "-z", "--", ...PORTABLE_AGENT_PATHS, HANDOFF_DOCS_DIR, ...HANDOFF_ROOT_FILES]);
+  if (ls.failed) return { files: [], unknown: ls.failed };
+  const files = [];
+  for (const rel of ls.stdout.split("\0").filter(Boolean)) {
+    if (!HANDOFF_ROOT_FILES.includes(rel)) {
+      files.push(rel);
+      continue;
+    }
+    try {
+      if (existsContained(root, rel, "file") && readContained(root, rel).startsWith(HANDOFF_MARKER)) files.push(rel);
+    } catch (err) {
+      return { files: [], unknown: `${rel} is tracked but could not be read (${err.message})` };
+    }
+  }
+  return { files, unknown: null };
+}
+function handoffFilesOnDisk(root) {
+  const found = PORTABLE_AGENT_PATHS.filter((rel) => existsContained(root, rel, "file"));
+  if (existsContained(root, HANDOFF_DOCS_DIR, "dir")) found.push(`${HANDOFF_DOCS_DIR}/`);
+  for (const rel of HANDOFF_ROOT_FILES) {
+    if (existsContained(root, rel, "file") && readContained(root, rel).startsWith(HANDOFF_MARKER)) found.push(rel);
+  }
+  return found;
+}
+function handoffSettingOf(parsed, root, where = CONFIG_REL) {
+  const block = parsed?.handoff;
+  if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
+    throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
+  }
+  const value = block?.enabled;
+  if (value === void 0) {
+    const tracked = trackedHandoffFiles(root);
+    if (tracked.unknown !== null) {
+      throw new HandoffGitError(`config.handoff.enabled is not set in ${where} and git could not say whether handoff files are committed (${tracked.unknown}) \u2014 the setting is not guessed; repair the repository, or set config.handoff.enabled to true or false (TUI System tab)`, tracked.unknown);
+    }
+    return tracked.files.length ? { enabled: true, source: "tracked" } : { enabled: false, source: "default" };
+  }
+  if (typeof value !== "boolean") {
+    throw new HandoffSettingError(`config.handoff.enabled is ${JSON.stringify(value)} in ${where} \u2014 it must be true or false; switch it in the TUI System tab or fix the file`);
+  }
+  return { enabled: value, source: "config" };
+}
+function readHandoffSetting(root) {
+  const { where, parsed } = readRawConfig(root, HandoffSettingError, "the handoff setting");
+  const setting = handoffSettingOf(parsed, root, where);
+  return { ...setting, unmaintained: setting.source === "default" ? handoffFilesOnDisk(root) : [] };
+}
+function handoffUnmaintainedNotice(files) {
+  return `handoff files NOT MAINTAINED \u2014 ${files.join(", ")} ${files.length === 1 ? "exists" : "exist"} on disk, not tracked in git, and config.handoff.enabled is not set: Sterling no longer maintains them and deletes nothing. Turn on the Handoff files row in the TUI System tab to keep them maintained.`;
+}
 var HANDOFF_DOCS_DIR = "docs/sterling";
+var HANDOFF_ROOT_FILES = ["architecture.md", "rulings.md"];
 var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
 var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
      Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
@@ -10493,7 +10794,7 @@ var STEP_TIMEOUT_MS = 9e5;
 function defaultExec(cmd, args, { cwd, timeout = STEP_TIMEOUT_MS } = {}) {
   const shell = process.platform === "win32";
   const q = (s2) => shell && /[\s"]/.test(s2) ? `"${s2}"` : s2;
-  const r = spawnSync(q(cmd), args.map(q), { cwd, encoding: "utf8", timeout, shell });
+  const r = spawnSync2(q(cmd), args.map(q), { cwd, encoding: "utf8", timeout, shell });
   return {
     status: r.error ? 1 : r.status ?? 1,
     stdout: r.stdout ?? "",
@@ -10626,7 +10927,7 @@ function refusalFor(c) {
 }
 function stampConsumerRoleIfAbsent(cwd, log) {
   const configPath = join13(cwd, ".sterling", "config.json");
-  if (!existsSync7(configPath)) {
+  if (!existsSync8(configPath)) {
     log(
       "\n\u25B8 machine-role stamp \u2014 SKIPPED: no .sterling/config.json in the clone. Normal for a consumer machine (the clone is not init'd as a project). H1 reports MACHINE ROLE: UNDECLARED, which is treated as CONSUMER \u2014 declare machine_role explicitly only on the authoring machine."
     );
@@ -10688,7 +10989,7 @@ function preScaleDownMarkers(text) {
 var UPDATE_MARKER_RELATIVE_PATH = join13(".sterling", "update-complete.json");
 function readUpdateMarker(cwd, log) {
   const p = join13(cwd, UPDATE_MARKER_RELATIVE_PATH);
-  if (!existsSync7(p)) return null;
+  if (!existsSync8(p)) return null;
   try {
     const parsed = JSON.parse(readFileSync6(p, "utf8"));
     if (typeof parsed?.sha !== "string" || !parsed.sha) throw new Error('missing or invalid "sha" field');
@@ -10705,14 +11006,14 @@ function writeUpdateMarker(cwd, sha) {
   writeFileSync3(p, JSON.stringify({ sha, completed_at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2) + "\n");
 }
 var isFsError = (err) => typeof err?.code === "string" && typeof err?.syscall === "string";
-var isProjectReadRefusal = (err) => err instanceof ProjectModeError || err instanceof ContainmentError || isFsError(err);
+var isProjectReadRefusal = (err) => err instanceof ProjectModeError || err instanceof HandoffSettingError || err instanceof ContainmentError || isFsError(err);
 function handoffRefusalRemedy(repoPath2) {
   return `fix it in ${repoPath2} and rerun /sterling:update (every registered project is refreshed on every run). If it cannot be repaired: retire it (move or delete the project, then \`node scripts/list-projects.mjs --prune-missing\` unregisters it), or set "store_authority": "secondary" in its .sterling/config.json so the refusal becomes a standing one.`;
 }
 function ownPluginRoot() {
   let dir = dirname5(fileURLToPath(new URL("../scripts/lib/update.mjs", import.meta.url).href));
   for (let i = 0; i < 4; i++) {
-    if (existsSync7(join13(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync8(join13(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname5(dir);
   }
   return null;
@@ -10724,16 +11025,16 @@ function installedCopyRefusal(host, { env = process.env, home = homedir5(), root
 function machineStores(cwd) {
   const stores = [join13(cwd, ".sterling", "sterling.db")];
   const domains = join13(homedir5(), ".sterling", "domains");
-  if (existsSync7(domains)) {
+  if (existsSync8(domains)) {
     for (const name of readdirSync4(domains).sort()) {
       stores.push(join13(domains, name, "sterling.db"));
     }
   }
-  return stores.filter((store) => existsSync7(store));
+  return stores.filter((store) => existsSync8(store));
 }
 function walUserVersion(dbPath) {
   const walPath = `${dbPath}-wal`;
-  if (!existsSync7(walPath)) return null;
+  if (!existsSync8(walPath)) return null;
   const wal = readFileSync6(walPath);
   if (wal.length < 32) return null;
   const magic = wal.readUInt32BE(0);
@@ -10800,13 +11101,24 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
     for (const p of list) {
       const entry = { name: p.name, repo_path: p.repo_path, status: null };
       report2.projects.push(entry);
-      let mode;
       try {
-        mode = readProjectMode(p.repo_path);
+        readProjectMode(p.repo_path);
       } catch (err) {
         if (!isProjectReadRefusal(err)) throw err;
         log(`  \u2717 ${p.name}: REFUSED \u2014 project mode: ${err.message}. Nothing was synced or projected for this project; fix config.mode ('hobby' or 'work', TUI System tab) and rerun /sterling:update.`);
         entry.handoff = "refused_project_mode";
+        fail(2);
+        failures++;
+        continue;
+      }
+      let handoffEnabled;
+      let handoffUnmaintained;
+      try {
+        ({ enabled: handoffEnabled, unmaintained: handoffUnmaintained } = readHandoffSetting(p.repo_path));
+      } catch (err) {
+        if (!isProjectReadRefusal(err)) throw err;
+        log(`  \u2717 ${p.name}: REFUSED \u2014 handoff setting: ${err.message}. Nothing was synced or projected for this project; set config.handoff.enabled to true or false (TUI System tab) and rerun /sterling:update.`);
+        entry.handoff = "refused_handoff_setting";
         fail(2);
         failures++;
         continue;
@@ -10834,10 +11146,11 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         for (const line of driftedAgents) log(`      \u26A0 ${line}`);
         for (const line of autoMemoryNotices) log(`      \u26A0 ${line}`);
       }
+      if (handoffUnmaintained.length) log(`      \u26A0 ${handoffUnmaintainedNotice(handoffUnmaintained)}`);
       if (!withHandoff) {
         entry.handoff = "not_run";
-      } else if (mode !== "work") {
-        log(`      skipped \u2014 ${HOBBY_SKIP_DETAIL}`);
+      } else if (!handoffEnabled) {
+        log(`      skipped \u2014 ${HANDOFF_OFF_DETAIL}`);
         entry.handoff = "skipped";
       } else {
         const handoff = exec(nodeBin, [join13(cwd, "scripts", "handoff-projection.mjs"), p.repo_path], { cwd });
@@ -10936,7 +11249,7 @@ AUTHORING clone \u2014 nothing to pull; syncing ${project.repo_path} only`);
     refreshProjects([project], { launchers: false, handoff: false });
     if (normPath(project.repo_path) === normPath(cwd)) {
       log("\u25B8 the clone's contract files are hand-maintained \u2014 not checked");
-    } else if (existsSync7(join13(cwd, "scripts", "stamp-contract.mjs"))) {
+    } else if (existsSync8(join13(cwd, "scripts", "stamp-contract.mjs"))) {
       const contract = step("contract drift in the invoking project (stamp-contract, dry run)", nodeBin, [join13(cwd, "scripts", "stamp-contract.mjs"), "--project", project.repo_path], {
         show: true,
         tolerate: true
@@ -11041,7 +11354,7 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
       if (!p.clone) {
         const claudePath = join13(p.repo_path, "CLAUDE.md");
         try {
-          if (existsSync7(claudePath)) {
+          if (existsSync8(claudePath)) {
             const markers = preScaleDownMarkers(readFileSync6(claudePath, "utf8"));
             if (markers.length) lines.push(`  \u26A0 ${p.name}: CLAUDE.md predates the scale-down (mentions ${markers.join(", ")}) \u2014 run /sterling:init there (${p.repo_path}) to migrate it`);
           }
@@ -11051,7 +11364,7 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
       }
       if (!describe) continue;
       const configPath = join13(p.repo_path, ".sterling", "config.json");
-      if (!existsSync7(configPath)) continue;
+      if (!existsSync8(configPath)) continue;
       let raw;
       try {
         raw = JSON.parse(readFileSync6(configPath, "utf8"));
@@ -11112,7 +11425,7 @@ Already current \u2014 nothing to do for the core update at ${before.head_short}
         report2.exit = 1;
         return report2;
       };
-      if (!existsSync7(script)) return failed(`${script} not found after the fast-forward`);
+      if (!existsSync8(script)) return failed(`${script} not found after the fast-forward`);
       log(`
 \u25B8 re-running the UPDATED updater (${script}) so the rest of this update runs the code just pulled`);
       const r = await reexec2(script, { from: before.head });
@@ -11192,7 +11505,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   } else {
     log("\n\u25B8 store migration (this clone) \u2014 SKIPPED (red test battery)");
   }
-  if (existsSync7(join13(cwd, ".sterling", "config.json"))) {
+  if (existsSync8(join13(cwd, ".sterling", "config.json"))) {
     step("re-bake machine artifacts (init ensure pass)", nodeBin, [join13(cwd, "scripts", "init.mjs"), "--target", cwd, "--update-ensure"], { show: true, tolerate: true });
   } else {
     log(
@@ -11212,7 +11525,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   } else if (opts2.projects !== false && projectList.length) {
     for (const p of projectList) {
       const projStore = join13(p.repo_path, ".sterling", "sterling.db");
-      if (!existsSync7(projStore)) continue;
+      if (!existsSync8(projStore)) continue;
       let projVersion;
       try {
         projVersion = probeSchemaVersion(projStore);
@@ -11248,7 +11561,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   }
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
-  if (opts2.projects !== false && existsSync7(join13(cwd, "scripts", "stamp-contract.mjs"))) {
+  if (opts2.projects !== false && existsSync8(join13(cwd, "scripts", "stamp-contract.mjs"))) {
     const contract = step("contract drift in sibling projects (stamp-contract, dry run)", nodeBin, [join13(cwd, "scripts", "stamp-contract.mjs")], {
       show: true,
       tolerate: true
@@ -11309,14 +11622,14 @@ async function loadProjects({ includeClone = false } = {}) {
   const store = await loadStoreModule();
   const registry = new store.ProjectRegistry(store.registryPath());
   try {
-    return registry.list().filter((p) => existsSync8(p.repo_path) && (includeClone || norm(p.repo_path) !== norm(target))).map((p) => ({ name: p.name, repo_path: p.repo_path }));
+    return registry.list().filter((p) => existsSync9(p.repo_path) && (includeClone || norm(p.repo_path) !== norm(target))).map((p) => ({ name: p.name, repo_path: p.repo_path }));
   } finally {
     registry.close();
   }
 }
 var isReexecChild = process.env[UPDATE_REEXEC_ENV] === "1";
 if (isReexecChild && process.env[UPDATE_REEXEC_FROM_ENV]) opts.from = process.env[UPDATE_REEXEC_FROM_ENV];
-var reexec = isReexecChild ? null : (script, { from }) => spawnSync2(process.execPath, [script, ...reexecArgs(process.argv.slice(2), { target })], {
+var reexec = isReexecChild ? null : (script, { from }) => spawnSync3(process.execPath, [script, ...reexecArgs(process.argv.slice(2), { target })], {
   cwd: target,
   stdio: "inherit",
   env: { ...process.env, [UPDATE_REEXEC_ENV]: "1", [UPDATE_REEXEC_FROM_ENV]: from }

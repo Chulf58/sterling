@@ -27,7 +27,7 @@ import { withRegisterLock, readRegister, registerPath, sessionBoundarySweep } fr
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { consumeRotationNote, renderRotationRestore } from './lib/rotation-restore.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
-import { machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, tddPostureLine } from './lib/operating-state.mjs';
+import { handoffFilesLine, machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, tddPostureLine } from './lib/operating-state.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
 import { ProjectRegistry, registryPath, SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
@@ -443,6 +443,13 @@ try {
 let modeContext = '';
 try {
   modeContext = `\n\n${projectModeLine({ config, configUnreadable })}`;
+} catch {
+  // fail-open — a malformed config costs only this line
+}
+
+let handoffContext = '';
+try {
+  handoffContext = `\n\n${handoffFilesLine({ config, configUnreadable, root: input.cwd })}`;
 } catch {
   // fail-open — a malformed config costs only this line
 }
@@ -1438,7 +1445,7 @@ const output = {
   systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + handoffContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the

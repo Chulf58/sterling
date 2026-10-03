@@ -364,9 +364,10 @@ const cliEnv = { ...process.env, STERLING_OPENCODE_SETUP_DISABLE: '1' };
 test('the sync-agents CLI (the /sterling:update fan-out) writes the portable set and exits 2 on a portable refusal', () => {
   const dir = tempTarget();
   try {
-    // the portable set is work-only (decision project-mode-hobby-work-toggle-decides-flow)
+    // the portable set follows config.handoff.enabled (decision
+    // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting)
     mkdirSync(join(dir, '.sterling'), { recursive: true });
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'work' }));
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ handoff: { enabled: true } }));
     const cli = () => spawnSync(process.execPath, [join(root, 'scripts', 'sync-agents.mjs'), '--target', dir], { encoding: 'utf8', cwd: dir, env: cliEnv });
     const first = cli();
     assert.equal(first.status, 0, first.stdout + first.stderr);
