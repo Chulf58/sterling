@@ -169,7 +169,7 @@ test('4: classifyClaimPath is the SAME function object whether imported from the
 // 'function') before the identity check is ever reached.
 // SABOTAGE (once one exists): implement a SECOND, textually-duplicated
 // classifyClaimPath directly inside packages/mcp-server/src/tools.ts (or
-// scripts/delivery-oracle.mjs) instead of importing the store's export, while
+// any script under scripts/) instead of importing the store's export, while
 // leaving @sterling/store's own export in place unused -> this specific pin
 // cannot see that duplication directly (it only imports @sterling/store), but
 // the two `typeof` assertions stay green while the identity assertion is the
