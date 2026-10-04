@@ -25,7 +25,7 @@
 import { rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { domainMapDue, domainNotice, runDomainMapAsync } from '../../../scripts/hooks/lib/domain-notice.mjs';
+import { domainMapDue, domainNotice, pendingFileNote, runDomainMapAsync } from '../../../scripts/hooks/lib/domain-notice.mjs';
 import { DOMAIN_MAP_PENDING_REL } from '../../../scripts/lib/update.mjs';
 import { formatOpenCodeRows, materializeTui } from '../../../scripts/lib/opencode-install.mjs';
 import { postUpdateApplies, postUpdateSync, runStepAsync } from '../../../scripts/lib/post-update-sync.mjs';
@@ -54,6 +54,8 @@ export function createSessionSync(deps = {}) {
   const home = deps.home ?? homedir();
   const verdicts = new Map();
   const started = deps.started ?? new Set();
+  // Roots with a run in flight, so two requests of one session never start two.
+  const inFlight = new Set();
   const runs = [];
 
   function report(root, text) {
@@ -70,12 +72,19 @@ export function createSessionSync(deps = {}) {
     // sync's contract check needs that row.
     let due = null;
     let map = null;
+    let unremoved = '';
     try {
       due = domainMapDue(pluginRoot, root, env);
       if (due) map = await runDomainMapAsync(pluginRoot, root, { nodeBin });
-      if (due === 'marker') rmSync(join(root, DOMAIN_MAP_PENDING_REL), { force: true });
     } catch (e) {
       map = { error: errText(e) };
+    }
+    if (map && due === 'marker') {
+      try {
+        rmSync(join(root, DOMAIN_MAP_PENDING_REL), { force: true });
+      } catch (e) {
+        unremoved = pendingFileNote(join(root, DOMAIN_MAP_PENDING_REL), e);
+      }
     }
     const lines = [];
     let outcome = null;
@@ -94,7 +103,7 @@ export function createSessionSync(deps = {}) {
         lines.push(`Sterling: post-update sync FAILED (${errText(e)}); no marker was written, so it retries the next time OpenCode starts. See ${LOG_REL}.`);
       }
     }
-    const notice = map && (due === 'marker' || outcome === 'synced') ? domainNotice(map, { label: 'OpenCode plugin' }) : null;
+    const notice = map && (due === 'marker' || outcome === 'synced') ? domainNotice(map, { label: 'OpenCode plugin', note: unremoved }) : null;
     if (notice) lines.push(notice.context.replace(/^\n+/, ''));
     if (lines.length) report(root, lines.join('\n'));
   }
@@ -138,14 +147,14 @@ export function createSessionSync(deps = {}) {
       started.add(root);
       throw e;
     }
-    if (!applies && !pending) {
-      started.add(root);
-      return;
-    }
+    // Where no sync applies (a clone) the root is never latched: /sterling:update can leave
+    // its pending file while OpenCode runs, and the next root session has to read it.
+    if (!applies && !pending) return;
     if (!verdicts.has(sessionID)) verdicts.set(sessionID, isRootSession(root, sessionID));
-    if (!(await verdicts.get(sessionID)) || started.has(root)) return;
-    started.add(root);
-    runs.push(run(root, pluginRoot, applies));
+    if (!(await verdicts.get(sessionID)) || started.has(root) || inFlight.has(root)) return;
+    if (applies) started.add(root);
+    inFlight.add(root);
+    runs.push(run(root, pluginRoot, applies).finally(() => inFlight.delete(root)));
   }
 
   syncOnce.idle = () => Promise.all(runs).then(() => undefined);

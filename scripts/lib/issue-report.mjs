@@ -48,6 +48,7 @@ export const STERLING_STATE_NAMES = [
   'sterling.db-shm',
   'plan-lock.json',
   'synced-version',
+  'domain-map-pending',
   'pending-issue-reports.jsonl',
   'pending-issue-reports.jsonl.lock',
   'maintenance-worker.log',

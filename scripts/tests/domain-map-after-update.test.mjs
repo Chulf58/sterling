@@ -19,9 +19,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { SterlingStore, ProjectRegistry, createDomain } from '@sterling/store';
 import { runUpdate, UPDATE_MARKER_RELATIVE_PATH, DOMAIN_MAP_PENDING_REL } from '../lib/update.mjs';
 import { buildSeamHook } from './lib/seam-hook.mjs';
+import { renderClaudeText } from '../lib/agent-fences.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const REPO_ROOT = root;
 const realDomains = join(root, 'scripts', 'domains.mjs');
+const realStampContract = join(root, 'scripts', 'stamp-contract.mjs');
 const sourceH1 = join(root, 'scripts', 'hooks', 'h1-session-start.mjs');
 const HEAD = 'a'.repeat(40);
 const VERSION = '9.9.9-fixture';
@@ -71,10 +74,17 @@ function machine() {
 
   // The already-current path of runUpdate: git answers "nothing to pull", the agent sync is
   // a stub, and the domain map is the real scripts/domains.mjs under this machine's env.
-  const update = async (projects) => {
+  // `authoringFrom`: the clone is an authoring clone and the update was invoked from that
+  // project, which is the path that runs stamp-contract for one project with no fetch step.
+  const update = async (projects, { authoringFrom = null } = {}) => {
     const cwd = tmp('sterling-dmu-clone-');
     mkdirSync(dirname(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), { recursive: true });
     writeFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), JSON.stringify({ sha: HEAD, completed_at: new Date().toISOString() }));
+    if (authoringFrom) {
+      writeFileSync(join(cwd, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring' }));
+      mkdirSync(join(cwd, 'scripts'), { recursive: true });
+      writeFileSync(join(cwd, 'scripts', 'stamp-contract.mjs'), '// fixture: the exec below runs the real one\n');
+    }
     const calls = [];
     const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
     const exec = (cmd, args) => {
@@ -92,14 +102,15 @@ function machine() {
         return ok('');
       }
       if (args[0]?.endsWith('sync-agents.mjs')) return ok('up_to_date: implementor\n');
-      if (args[0]?.endsWith('domains.mjs')) {
-        const r = spawnSync(process.execPath, [realDomains, ...args.slice(1)], { encoding: 'utf8', cwd, timeout: 60_000, env });
+      const real = args[0]?.endsWith('domains.mjs') ? realDomains : args[0]?.endsWith('stamp-contract.mjs') ? realStampContract : null;
+      if (real) {
+        const r = spawnSync(process.execPath, [real, ...args.slice(1)], { encoding: 'utf8', cwd, timeout: 120_000, env });
         return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
       }
       return ok('');
     };
     const lines = [];
-    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: projects.map((dir) => ({ name: configOf(dir).project_name, repo_path: fwd(dir) })), opts: {}, pluginRoot: null });
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: projects.map((dir) => ({ name: configOf(dir).project_name, repo_path: fwd(dir) })), opts: {}, pluginRoot: null, projectDir: authoringFrom });
     return { report, calls, out: lines.join('\n') };
   };
 
@@ -209,6 +220,7 @@ test('a failing domain map is reported by the update and does not fail it', asyn
   // stack_tags of the wrong type: the project mode still reads, and the map CLI refuses.
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'plain', stack_tags: 'sterling' }));
   const u = await m.update([dir]);
+  assert.equal(u.report.exit, 0, u.out);
   assert.match(u.out, /domain map FAILED \(nonfatal\)/);
   assert.ok(!pendingOf(dir));
 });
@@ -249,6 +261,61 @@ test('a registry row spelled as a Windows path is the same project: session star
   assert.deepEqual(rows[0].stack_tags, ['genesys', 'sterling']);
   assert.ok(rows[0].last_seen_at, 'last-seen is touched on the same row');
   assert.doesNotMatch(s.ctx, /- adder:/, 'the project is not its own sibling');
+});
+
+
+// An existing project's instruction files: the current templates rendered, minus the Domains
+// section, with one tracked bullet (Anti-speculation) in an older template wording.
+const STALE_ANTI_SPEC = '- **Anti-speculation:** never invent an API, field, flag, or behavior. Verify in docs or code first. If you cannot verify, say so and ask.';
+function writeOldContractFiles(dir) {
+  const render = (rel) =>
+    renderClaudeText(readFileSync(join(REPO_ROOT, rel), 'utf8'), rel)
+      .replaceAll('{{PROJECT_NAME}}', 'fixture')
+      .replaceAll('{{STACK_TAGS}}', 'sterling')
+      .replaceAll('{{TOOLCHAINS}}', 'node (**/*.mjs)')
+      .replaceAll('{{DOMAINS}}', '~/.sterling/domains/sterling/')
+      .replaceAll('{{BACKUP_PATH}}', '(opted out — recorded)')
+      .replaceAll('{{CONVENTIONS_SECTION}}', '(nothing yet)');
+  const agents = render('templates/target-agents-md.md')
+    .replace(/## Domains\n[\s\S]*?(?=## Conventions)/, '')
+    .replace(/^- \*\*Anti-speculation:\*\*.*$/m, STALE_ANTI_SPEC);
+  writeFileSync(join(dir, 'AGENTS.md'), agents);
+  writeFileSync(join(dir, 'CLAUDE.md'), render('templates/target-claude-md.md'));
+  return agents;
+}
+
+test('/sterling:update writes the Domains section into an existing project with no --apply, leaves old wording alone, and writes nothing on a second run', async () => {
+  const m = machine();
+  m.addStore('sterling');
+  const dir = m.addProject('plain', ['sterling']);
+  const before = writeOldContractFiles(dir);
+  assert.ok(!before.includes('## Domains'));
+
+  const u = await m.update([dir], { authoringFrom: dir });
+  assert.equal(u.report.exit, 0, u.out);
+  const contractCalls = u.calls.filter((c) => c.includes('stamp-contract.mjs'));
+  assert.equal(contractCalls.length, 1);
+  assert.ok(contractCalls[0].includes('--apply-inserts') && !/--apply( |$)/.test(contractCalls[0]), contractCalls[0]);
+  assert.match(u.out, /section_inserted {2}## Domains/, 'the update prints what it inserted');
+  const after = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+  assert.match(after, /## Domains\n\n- \*\*A domain is a shared knowledge store for one subject\.\*\*/);
+  assert.ok(after.includes(STALE_ANTI_SPEC), 'the old-wording bullet is not rewritten');
+  assert.match(u.out, /would_update {2}- \*\*Anti-speculation:\*\*/);
+
+  const again = await m.update([dir], { authoringFrom: dir });
+  assert.doesNotMatch(again.out, /inserted {2}/);
+  assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), after, 'a second run writes nothing');
+});
+
+test('a pending file that cannot be removed is said in the notice, and the session still starts', async () => {
+  const m = machine();
+  const dir = withProposal(m);
+  // A non-empty directory where the file would be: rmSync without recursive refuses it.
+  mkdirSync(join(dir, DOMAIN_MAP_PENDING_REL));
+  writeFileSync(join(dir, DOMAIN_MAP_PENDING_REL, 'x'), '');
+  const s = m.sessionStart(dir);
+  assert.match(s.ctx, /DOMAIN MAP \(H1[^\n]*'salesforce'/);
+  assert.match(s.ctx, /DOMAIN MAP \(H1[^\n]*domain-map-pending could not be removed/);
 });
 
 // ---- installed copy: the trigger is the post-update sync, with no marker of its own ----

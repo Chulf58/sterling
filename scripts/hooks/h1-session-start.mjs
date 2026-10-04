@@ -29,14 +29,15 @@ import { consumeRotationNote, renderRotationRestore } from './lib/rotation-resto
 import { renderUnavailable } from './lib/undeclared-source.mjs';
 import { handoffFilesLine, machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, sterlingRootLine, tddPostureLine } from './lib/operating-state.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
-import { ProjectRegistry, registryPath, SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
-import { buildIdPath, parseConfig, runtimeMarkerPath, runtimeMarkerSchema, sameLocationAnyHost, stalenessVerdict } from '@sterling/schemas';
+import { SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
+import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths, isLocallyModified, loadRegistry, sha256 } from '../lib/agent-distribution.mjs';
 import { gitTouches, writeInitialGitSettled } from './lib/settlement.mjs';
 import { isInstalledCopy } from '../lib/installed-copy.mjs';
 import { pluginScript, postUpdateSync, samePath } from '../lib/post-update-sync.mjs';
 import { DOMAIN_MAP_PENDING_REL, machineStores, probeSchemaVersion } from '../lib/update.mjs';
-import { domainMapDue, domainNotice, runDomainMap } from './lib/domain-notice.mjs';
+import { domainMapDue, domainNotice, pendingFileNote, runDomainMap } from './lib/domain-notice.mjs';
+import { refreshRegistryRow } from './lib/registry-refresh.mjs';
 import { queueDepthLine, readMaintenanceState, reconcileBacklog } from './lib/maintenance-state.mjs';
 import { laneCeiling, liveLanes, renderBoardReadiness } from './lib/board-ready.mjs';
 
@@ -403,8 +404,15 @@ try {
 // pending file dies in the session start that read it (P4); with no such file the line
 // waits for the session whose sync succeeded, which is the one that writes the sync marker.
 if (domainMapResult) {
-  if (domainMapDueBy === 'marker') rmSync(join(input.cwd, DOMAIN_MAP_PENDING_REL), { force: true });
-  const notice = domainMapDueBy === 'marker' || postUpdateOutcome === 'synced' ? domainNotice(domainMapResult) : null;
+  let unremoved = '';
+  if (domainMapDueBy === 'marker') {
+    try {
+      rmSync(join(input.cwd, DOMAIN_MAP_PENDING_REL), { force: true });
+    } catch (err) {
+      unremoved = pendingFileNote(join(input.cwd, DOMAIN_MAP_PENDING_REL), err);
+    }
+  }
+  const notice = domainMapDueBy === 'marker' || postUpdateOutcome === 'synced' ? domainNotice(domainMapResult, { note: unremoved }) : null;
   if (notice) {
     postUpdateWarning += notice.warning;
     postUpdateContext += notice.context;
@@ -1050,40 +1058,17 @@ const reconcileContext = backlog.line ? `\n\n${backlog.line}` : '';
 // /sterling:projects peek surfaces them for human pruning.
 // The row's stack tags are refreshed from the project's config too, so a mount added by
 // a config edit reaches other projects' sibling lists by this project's next session
-// start (init and /sterling:domains --apply write the row themselves). Tags only, and
-// only for an existing row: the init dates and version stay init's. This project's row is
-// matched with sameLocationAnyHost, as scripts/domains.mjs matches it, so a row a Windows
-// host spelled with backslashes or a drive letter is the same row.
+// start. The touch and the refresh live in scripts/hooks/lib/registry-refresh.mjs, which
+// the OpenCode server plugin calls for its root sessions too.
 let registryContext = '';
-if (existsSync(registryPath())) {
-  const cwdPosix = input.cwd.replace(/\\/g, '/');
-  let registry;
-  try {
-    registry = new ProjectRegistry(registryPath());
-    const isThisProject = (p) => sameLocationAnyHost(p.repo_path, cwdPosix);
-    const seenAt = new Date().toISOString();
-    for (const row of registry.list().filter(isThisProject)) registry.touchLastSeen(row.repo_path, seenAt);
-    let mounts = null;
-    try {
-      if (config && !configUnreadable) mounts = parseConfig(config).stack_tags;
-    } catch {
-      // a config that does not parse is reported by the mounted-domain lines; the row keeps its tags
-    }
-    const rows = registry.list();
-    if (mounts) {
-      for (const row of rows.filter(isThisProject)) {
-        if (JSON.stringify(row.stack_tags) !== JSON.stringify(mounts)) registry.updateStackTags(row.repo_path, mounts);
-      }
-    }
-    const siblings = rows.filter((p) => !isThisProject(p) && existsSync(p.repo_path));
-    if (siblings.length) {
-      registryContext =
-        '\n\nSibling Sterling projects on this machine (shared project registry) — other initialized projects; ' +
-        'knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n' +
-        siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(', ') || '(no domains)'}`).join('\n');
-    }
-  } finally {
-    registry?.close();
+{
+  const refreshed = refreshRegistryRow(input.cwd, { config, configUnreadable });
+  const siblings = (refreshed?.siblings ?? []).filter((p) => existsSync(p.repo_path));
+  if (siblings.length) {
+    registryContext =
+      '\n\nSibling Sterling projects on this machine (shared project registry) — other initialized projects; ' +
+      'knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n' +
+      siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(', ') || '(no domains)'}`).join('\n');
   }
 }
 

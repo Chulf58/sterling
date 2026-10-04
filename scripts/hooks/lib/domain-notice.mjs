@@ -13,6 +13,9 @@
 //     sync is about to run. The map runs BEFORE it, because the sync's contract check fails
 //     for a project the registry lacks. The line is printed only in the session whose sync
 //     succeeds; that sync writes .sterling/synced-version, after which nothing is due.
+// ACCEPTED COST: while a due sync keeps failing, the map is spawned again at every session
+// start (it has to run before the sync, and nothing is recorded until a sync succeeds). The
+// line is still printed once, in the session whose sync succeeds.
 // It does NOT run on an ordinary session start. The OpenCode server plugin applies the same
 // rule from its own post-update sync (packages/opencode-plugin/src/sync.mjs), through
 // runDomainMapAsync, so its event loop is never blocked.
@@ -107,20 +110,26 @@ export function runDomainMapAsync(root, project, { nodeBin = process.execPath } 
   });
 }
 
+/** What to say when the update's pending file could not be removed after it was read. */
+export function pendingFileNote(path, err) {
+  return ` The pending file ${path} could not be removed (${err?.code ?? err?.message ?? err}), so this check runs again at the next session start; delete it by hand.`;
+}
+
 /**
  * The banner segment and the conductor line for a map result, or null when there is
- * nothing to say (no proposal and no new registration). Both carry H1's spacing.
- * `label` names the host that prints it ('H1' or 'OpenCode plugin').
+ * nothing to say (no proposal, no new registration and no note). Both carry H1's spacing.
+ * `label` names the host that prints it ('H1' or 'OpenCode plugin'); `note` is appended to
+ * the line (pendingFileNote) and is printed even when the map proposes nothing.
  */
-export function domainNotice(result, { label = 'H1' } = {}) {
+export function domainNotice(result, { label = 'H1', note = '' } = {}) {
   const HEAD = `DOMAIN MAP (${label}, once after the Sterling update):`;
   if (result.error) {
     return {
       warning: '⚠ Domain map check after the update could not run — run /sterling:domains. ',
-      context: `\n\n${HEAD} the map could not be computed (${result.error}), so whether this project is missing a domain is unknown. Run /sterling:domains to see it.`,
+      context: `\n\n${HEAD} the map could not be computed (${result.error}), so whether this project is missing a domain is unknown. Run /sterling:domains to see it.${note}`,
     };
   }
-  const registered = result.registered ? " This project was not in the project registry and is now registered, so other projects' maps list it." : '';
+  const registered = (result.registered ? " This project was not in the project registry and is now registered, so other projects' maps list it." : '') + note;
   if (!result.add.length) return registered ? { warning: '', context: `\n\n${HEAD}${registered}` } : null;
   const names = result.add.map((a) => `'${a.domain}'`).join(', ');
   return {
