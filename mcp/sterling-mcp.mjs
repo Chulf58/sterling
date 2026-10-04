@@ -21160,6 +21160,33 @@ function foldDrvfs(x, y) {
   const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
   return onDrvfs(x) && onDrvfs(y) ? [x.toLowerCase(), y.toLowerCase()] : [x, y];
 }
+var SCHEME_LOCATION = /^[a-z][a-z0-9+.-]+:(\S|$)/i;
+var COLLAPSED_URL_LOCATION = /^(https?|ftp):\/[^/]/i;
+var HAS_SEPARATOR = /[\\/]/;
+var ENDS_IN_EXTENSION = /\.[A-Za-z0-9]{1,8}$/;
+function isCollapsedUrlLocation(location) {
+  return COLLAPSED_URL_LOCATION.test(location.trim());
+}
+function classifyLocation(location) {
+  const text = location.trim();
+  if (SCHEME_LOCATION.test(text))
+    return "url";
+  if (!/\s/.test(text))
+    return "path";
+  return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
+}
+function repoPathOfLocation(location) {
+  if (classifyLocation(location) !== "path")
+    return void 0;
+  try {
+    return normalizeRepoPath(location.trim());
+  } catch {
+    return void 0;
+  }
+}
+function normalizeLocation(location) {
+  return repoPathOfLocation(location) ?? location;
+}
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
@@ -21248,6 +21275,8 @@ var notApplicableExemptionSchema = external_exports.object({
     ruling_record_id: external_exports.string().optional()
   }).strict()
 }).strict();
+var ARTICLE_KINDS = ["feature", "probe", "tool", "concept"];
+var NOT_APPLICABLE_EXEMPT_KINDS = ["probe", "tool"];
 var currentAcItemSchema = external_exports.object({
   ac_id: external_exports.string().min(1),
   text: external_exports.string().min(1),
@@ -21307,7 +21336,7 @@ var featureArticleSchema = base.extend({
   // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
-  article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
+  article_kind: external_exports.enum(ARTICLE_KINDS).default("feature"),
   // Union with the structured not_applicable exemption (see
   // notApplicableExemptionSchema above) — acceptance of the exemption
   // branch, and rejection of an empty array, are both gated BY KIND in the
@@ -21357,7 +21386,7 @@ var featureArticleSchema = base.extend({
   if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (\xA73.2.3)" });
   }
-  const exemptKind = rec.article_kind === "probe" || rec.article_kind === "tool";
+  const exemptKind = NOT_APPLICABLE_EXEMPT_KINDS.includes(rec.article_kind);
   const isExempt = (v) => typeof v === "object" && v !== null && !Array.isArray(v) && "not_applicable" in v;
   const gated = [
     ["live_test_refs", rec.live_test_refs, "real content (ac_id/test_paths)"],
@@ -21369,7 +21398,7 @@ var featureArticleSchema = base.extend({
       ctx.addIssue({
         code: external_exports.ZodIssueCode.custom,
         path: [field],
-        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind probe/tool may; other kinds must supply real content`
+        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind ${NOT_APPLICABLE_EXEMPT_KINDS.join("/")} may; other kinds must supply real content`
       });
     }
     if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
@@ -21461,15 +21490,7 @@ var referenceMaterialSchema = base.extend({
   // Detached-working-tree resolution for a repo-located kind:doc — same
   // semantics as featureArticleSchema.working_tree (comsoft-juiced 2026-07-17).
   working_tree: external_exports.string().min(1).optional()
-}).superRefine(refineSupersession).transform((rec) => {
-  if (rec.kind !== "doc")
-    return rec;
-  try {
-    return { ...rec, location: normalizeRepoPath(rec.location) };
-  } catch {
-    return rec;
-  }
-});
+}).superRefine(refineSupersession).transform((rec) => rec.kind === "doc" ? { ...rec, location: normalizeLocation(rec.location) } : rec);
 var disconfirmedHypothesisSchema = base.extend({
   type: external_exports.literal("disconfirmed_hypothesis"),
   question: external_exports.string().min(1),
@@ -21776,15 +21797,13 @@ var RECORD_TYPES = {
     fts: (r) => [s(r.title), s(r.summary)].join("\n"),
     // §3.2.5: repo-located docs join the reconcile economy — for kind:doc a
     // repo-relative location doubles as a file_key (H7 pressure applies);
-    // pdf/url locations are external and carry none.
+    // pdf/url locations are external and carry none, and neither does a
+    // kind:doc location that is a URL, prose or an absolute/escaping path.
     fileKeys: (r) => {
       if (r.kind !== "doc")
         return [];
-      try {
-        return [normalizeRepoPath(r.location)];
-      } catch {
-        return [];
-      }
+      const rel = repoPathOfLocation(r.location);
+      return rel === void 0 ? [] : [rel];
     },
     // location is this type's path-bearing field (§3.2.5), so it is what a
     // reader needs to go open the thing.
@@ -22278,10 +22297,17 @@ function describeElementFields(node, depth = 0) {
       return void 0;
   }
 }
+function featureArticleFieldConditions() {
+  const exempt = NOT_APPLICABLE_EXEMPT_KINDS.join(" or ");
+  const others = ARTICLE_KINDS.filter((k) => !NOT_APPLICABLE_EXEMPT_KINDS.includes(k)).join(", ");
+  const condition = `The {not_applicable: {reason, ruling_record_id?}} form is accepted only when article_kind is ${exempt} (on those kinds an empty array is refused). Other kinds (${others}) pass an array, which may be [].`;
+  return { current_ac: condition, live_test_refs: condition };
+}
 function schemaFor(type) {
   const shape = objectShapeFor(type);
   if (!shape)
     return void 0;
+  const conditions = type === "feature_article" ? featureArticleFieldConditions() : {};
   const fields = Object.entries(shape).map(([name, node]) => {
     const described = describeZodDetailed(node);
     const required2 = !node.isOptional?.();
@@ -22292,6 +22318,7 @@ function schemaFor(type) {
       type: described.type,
       ...described.enum_values ? { enum_values: described.enum_values } : {},
       ...described.element_fields ? { element_fields: described.element_fields } : {},
+      ...conditions[name] ? { condition: conditions[name] } : {},
       ...example ? { example } : {}
     };
   });
@@ -25824,6 +25851,21 @@ var SterlingStore = class _SterlingStore {
     return row.n;
   }
   /**
+   * READ-ONLY damage count for issue #14: how many live reference_material
+   * records hold a web URL location (http, https, ftp) whose '//' an earlier
+   * write collapsed to '/' ('https:/host/…'). The shape is isCollapsedUrlLocation's, the one
+   * definition in packages/schemas. Nothing is repaired here: each such record
+   * is fixed by a knowledge_edit on `location` restoring the second slash.
+   */
+  countCollapsedUrlLocations() {
+    const { where, params } = this.baseFilter({ types: ["reference_material"] });
+    const rows = this.db.prepare(`SELECT r.body FROM records r WHERE ${where.join(" AND ")}`).all(...params);
+    return rows.filter((row) => {
+      const location = JSON.parse(row.body).location;
+      return typeof location === "string" && isCollapsedUrlLocation(location);
+    }).length;
+  }
+  /**
    * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
    * usable "nothing", and a capped/ranked window can never establish one —
    * this counts over the FULL rank_terms match set (uncapped, never the
@@ -29021,16 +29063,11 @@ var SterlingTools = class _SterlingTools {
       }
       if (record2.type === "reference_material" && record2.kind === "doc" && this.repoRoot) {
         const r = record2;
-        const tree = this.treeRootFor(record2);
-        if (tree.unresolved)
+        const rel = repoPathOfLocation(r.location);
+        const tree = rel === void 0 ? void 0 : this.treeRootFor(record2);
+        if (tree?.unresolved)
           return { ...record2, verify_before_use: true };
-        let rel;
-        try {
-          rel = normalizeRepoPath(r.location);
-        } catch {
-          rel = void 0;
-        }
-        if (rel && tree.root) {
+        if (rel && tree?.root) {
           const stat = statSync2(join5(tree.root, rel), { throwIfNoEntry: false });
           if (!stat && this.parkedOnRef(rel, tree.root).status !== "parked") {
             const mintFailed = this.mintAtRead({
@@ -29372,6 +29409,20 @@ var SterlingTools = class _SterlingTools {
     const at = current.indexOf(find);
     return current.slice(0, at) + replace + current.slice(at + find.length);
   }
+  /**
+   * A receipt reports what was STORED, not what was submitted (issue #14: an
+   * edit receipt gave the submitted length while the schema boundary had
+   * normalized the value, so chars_after disagreed with the next knowledge_get).
+   * Returns the warning for one submitted string whose stored value differs —
+   * empty when they match or when `stored` is not a string.
+   */
+  static normalizedOnWrite(field, submitted, stored) {
+    if (typeof stored !== "string" || stored === submitted)
+      return [];
+    return [
+      `'${field}' was normalized on write: ${submitted.length} chars submitted, ${stored.length} chars stored \u2014 the stored value is what knowledge_get returns; read it back before relying on the text you sent.`
+    ];
+  }
   knowledgeEdit(id, field, find, replace, resolves) {
     const old = this.resolveRecordId(id, "knowledge_edit");
     this.refuseStaleAddress(old, id, "knowledge_edit");
@@ -29428,10 +29479,14 @@ var SterlingTools = class _SterlingTools {
       const nextEl = { ...el, [sub]: _SterlingTools.spliceOnce(cur, find, replace) };
       const nextArr = arr.map((e) => e === el ? nextEl : e);
       const { record: record3, claims_check: claims_check2 } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base2]: nextArr }, resolves, void 0, "knowledge_edit"));
+      const submittedSub = nextEl[sub];
+      const storedArr = record3[base2];
+      const storedEl = Array.isArray(storedArr) && storedArr.length === arr.length ? storedArr[arr.indexOf(el)] : void 0;
+      const storedSub = typeof storedEl?.[sub] === "string" ? storedEl[sub] : submittedSub;
       return {
         record: record3,
         ...claims_check2 ? { claims_check: claims_check2 } : {},
-        replaced: { field, chars_before: cur.length, chars_after: nextEl[sub].length },
+        replaced: { field, chars_before: cur.length, chars_after: storedSub.length },
         // Cited-id scan (board fc053051 extension): the REPLACE text only —
         // never `find`, never the rest of the record, which was already
         // scanned (or not) on whatever write introduced it.
@@ -29439,7 +29494,8 @@ var SterlingTools = class _SterlingTools {
           ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base2]: nextArr }), record3),
           ...this.articleOversizeWarnings(record3),
           ...this.citedIdWarnings(replace),
-          ...this.openReconcileLaneWarnings(this.supersedeChain(old))
+          ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+          ..._SterlingTools.normalizedOnWrite(field, submittedSub, storedSub)
         ]
       };
     }
@@ -29458,10 +29514,12 @@ var SterlingTools = class _SterlingTools {
     }
     const next = _SterlingTools.spliceOnce(current, find, replace);
     const { record: record2, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, void 0, "knowledge_edit"));
+    const storedValue = record2[field];
+    const stored = typeof storedValue === "string" ? storedValue : next;
     return {
       record: record2,
       ...claims_check ? { claims_check } : {},
-      replaced: { field, chars_before: current.length, chars_after: next.length },
+      replaced: { field, chars_before: current.length, chars_after: stored.length },
       // Cited-id scan (board fc053051 extension): the REPLACE text only —
       // never `find`, never the rest of the record (scope guarantee: an edit
       // must not warn about a pre-existing citation elsewhere in the record
@@ -29470,7 +29528,9 @@ var SterlingTools = class _SterlingTools {
         ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record2),
         ...this.articleOversizeWarnings(record2),
         ...this.citedIdWarnings(replace),
-        ...this.openReconcileLaneWarnings(this.supersedeChain(old))
+        ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+        ...this.staleLocationItemWarnings(record2, this.supersedeChain(old)),
+        ..._SterlingTools.normalizedOnWrite(field, next, stored)
       ]
     };
   }
@@ -29938,10 +29998,17 @@ var SterlingTools = class _SterlingTools {
         warnings.push(`what_it_does changed but ${untouched.join(" and ")} ${untouched.length === 1 ? "was" : "were"} not passed, so the prior text persists \u2014 re-read the new version and confirm it does not now contradict itself. This is a WARNING, not a refusal: the pairing is often genuinely unaffected, and only you can tell. (knowledge_append extends history/files/current_ac without retransmitting them.)`);
       }
     }
+    for (const [field, submitted] of Object.entries(body)) {
+      if (typeof submitted === "string") {
+        warnings.push(..._SterlingTools.normalizedOnWrite(field, submitted, record2[field]));
+      }
+    }
     warnings.push(...this.articleOversizeWarnings(record2));
     warnings.push(...this.citedIdWarnings(JSON.stringify(body)));
     if (before)
       warnings.push(...this.openReconcileLaneWarnings(this.supersedeChain(before)));
+    if (before)
+      warnings.push(...this.staleLocationItemWarnings(record2, this.supersedeChain(before)));
     const findability = this.findabilityDisclosure(record2);
     warnings.push(...findability.warnings);
     return { record: record2, warnings, ...findability.central, ...same_subject ? { same_subject } : {}, ...claims_check ? { claims_check } : {} };
@@ -31382,6 +31449,23 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       warnings.push(`the open-reconcile-lane sweep hit its ${sweepCap}-item cap \u2014 more open ${[..._SterlingTools.UPDATE_RESOLVABLE_LANES].join("/")} debt may exist past this window; narrow with maintenance_query to confirm.`);
     }
     return warnings;
+  }
+  /**
+   * A refresh_reference item still open on a reference_material whose location
+   * is NOT a repo path (a URL, prose, an external path) is false debt: nothing
+   * on disk can be missing or changed (issue #13). No read closes it — decision
+   * 68988832 rejects auto-closure, an item closes only through a write that
+   * names it in `resolves` or maintenance_remove — so the write receipt names
+   * each such item's FULL id and both ways to close it. Called AFTER the write:
+   * an item this write's `resolves` claimed is already gone.
+   */
+  staleLocationItemWarnings(record2, chain) {
+    if (record2.type !== "reference_material")
+      return [];
+    const location = record2.location;
+    if (typeof location !== "string" || repoPathOfLocation(location) !== void 0)
+      return [];
+    return this.maintenanceQuery({ system_reason: "refresh_reference", cap: 1e3 }).map((item) => item).filter((it) => it.feature_link !== void 0 && chain.has(it.feature_link)).map((it) => `refresh_reference item '${it.id}' is open on this record, but its location is not a file (a URL, prose or an external path), so nothing on disk can be missing \u2014 close it by passing resolves: ['${it.id}'] on a knowledge_update or knowledge_edit of this record, or with maintenance_remove('${it.id}').`);
   }
   /**
    * The sentinel separating the REGENERATED canonical statement of an
@@ -34340,7 +34424,7 @@ function createSterlingServer(storePath2) {
     })
   }, ({ id, field, find, replace, new_record, reason, resolves }) => json(tools.knowledgeExtractResult({ id, field, find, replace, new_record, reason, resolves })));
   server2.registerTool("knowledge_schema", {
-    description: "Describe what a record type accepts before writing it. Returns {type, fields:[{name, required, type, enum_values?, element_fields?, example?, server_owned?}], required[], optional[]}, derived from the registered schema. `example` is a schema-validated worked value (absent when none is derivable). server_owned fields are listed but refused on write and excluded from required/optional. An unregistered type lists the registered ones.",
+    description: "Describe what a record type accepts before writing it. Returns {type, fields:[{name, required, type, enum_values?, element_fields?, condition?, example?, server_owned?}], required[], optional[]}, derived from the registered schema. `condition` is present on a field whose accepted shape depends on another field of the same record (feature_article current_ac and live_test_refs: the {not_applicable} form is accepted only for some article_kind values). `example` is a schema-validated worked value (absent when none is derivable). server_owned fields are listed but refused on write and excluded from required/optional. An unregistered type lists the registered ones.",
     inputSchema: strict({ type: external_exports.string() })
   }, ({ type }) => json(tools.knowledgeSchema(type)));
   server2.registerTool("knowledge_stats", {

@@ -4,7 +4,7 @@
 // stays byte-identical; the h10-*.test.mjs suite pins the hook's behaviour.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -131,4 +131,28 @@ test('ownership join and demand exemption', () =>
     assert.equal(duties.hasOpenSystemTodo(store, 'research_owed'), false);
     store.enqueueSystemTodo(duties.systemTodo('2026-10-02T00:00:00.000Z', { text: duties.researchOwedText('q'), system_reason: 'research_owed' }));
     assert.equal(duties.hasOpenSystemTodo(store, 'research_owed'), true);
+  }));
+
+test('openDutyRecords.close closes every domain store and returns the close errors instead of throwing', () =>
+  withStore((store, dir) => {
+    const paths = { a: join(dir, 'a.db'), b: join(dir, 'b.db'), gone: join(dir, 'gone.db') };
+    writeFileSync(paths.a, '');
+    writeFileSync(paths.b, '');
+    const closed = [];
+    const opener = (dbPath) => ({
+      query: () => [{ id: dbPath }],
+      close: () => {
+        closed.push(dbPath);
+        throw new Error(`close boom ${dbPath === paths.a ? 'a' : 'b'}`);
+      },
+    });
+    const unreadable = [];
+    const records = duties.openDutyRecords(store, { stack_tags: ['a', 'gone', 'b'], domain_paths: paths }, { opener, onUnreadable: (name) => unreadable.push(name) });
+    assert.deepEqual(records.query({ types: ['decision'], cap: 10 }).map((r) => r.id), [paths.a, paths.b], 'project first (empty), then each domain store that exists');
+    let errors;
+    assert.doesNotThrow(() => (errors = records.close()));
+    assert.deepEqual(closed, [paths.a, paths.b], 'the second store is closed although the first close threw');
+    assert.deepEqual(errors, [{ name: 'a', error: 'close boom a' }, { name: 'b', error: 'close boom b' }]);
+    assert.deepEqual(unreadable, [], 'a close error is not an unreadable store');
+    assert.deepEqual(records.close(), [], 'a second close has nothing left to close');
   }));
