@@ -37,7 +37,7 @@ function context(dir, source, hookPath = join(root, 'scripts', 'hooks', 'h1-sess
   const input = { session_id: 's1', transcript_path: join(dir, 't', 's1.jsonl'), cwd: dir, permission_mode: 'default', hook_event_name: 'SessionStart', source };
   const r = spawnSync(process.execPath, [hookPath], {
     input: JSON.stringify(input), encoding: 'utf8', cwd: dir, timeout: 60_000,
-    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1', NO_COLOR: '1', STERLING_NO_BANNER: '1', ...env },
+    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1', NO_COLOR: '1', STERLING_NO_BANNER: '1', ...env, HOME: mkdtempSync(join(tmpdir(), 'sterling-h1-root-home-')) },
   });
   assert.equal(r.status, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
   return JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
@@ -99,7 +99,7 @@ function stdoutOf(dir, source = 'startup') {
   const input = { session_id: 's1', transcript_path: join(dir, 't', 's1.jsonl'), cwd: dir, permission_mode: 'default', hook_event_name: 'SessionStart', source };
   const r = spawnSync(process.execPath, [join(root, 'scripts', 'hooks', 'h1-session-start.mjs')], {
     input: JSON.stringify(input), encoding: 'utf8', cwd: dir, timeout: 60_000,
-    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1', NO_COLOR: '1', STERLING_NO_BANNER: '1' },
+    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1', NO_COLOR: '1', STERLING_NO_BANNER: '1', HOME: mkdtempSync(join(tmpdir(), 'sterling-h1-root-home-')) },
   });
   assert.equal(r.status, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
   return r.stdout;

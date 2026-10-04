@@ -24,6 +24,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildSeamHook } from './lib/seam-hook.mjs';
 import { compareVersions, parseVersion, postUpdateSync, runStepAsync } from '../lib/post-update-sync.mjs';
+import { sterlingRootLine } from '../hooks/lib/operating-state.mjs';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const VERSION = '9.9.9-fixture';
@@ -89,6 +90,19 @@ function markerOf(project) {
   }
 }
 
+// The goldens pin the post-update part of H1's output from before the extraction, so the one line
+// H1 later gained, STERLING ROOT, is taken out of ctx before comparing: exactly one occurrence of
+// its exact text, or the case fails. The harness runs a seam-built bundle in a marker-free temp
+// dir, so the walk-up finds no plugin root and the line is the constant UNRESOLVED text (the seam
+// value is never printed). Every other byte still has to match. Its presence and content are
+// asserted by the exactly-one check below in every case, and its content by scripts/tests/h1-sterling-root-line.test.mjs.
+const ROOT_LINE_BLOCK = `\n\n${sterlingRootLine(null)}`;
+function withoutRootLine(ctx) {
+  const parts = ctx.split(ROOT_LINE_BLOCK);
+  assert.equal(parts.length, 2, 'H1 prints exactly one STERLING ROOT line');
+  return parts.join('');
+}
+
 function runH1(project, plugin, env = {}) {
   const log = join(tmp('sterling-pus-log-'), 'calls.log');
   const r = spawnSync(process.execPath, [seam.hookPath], {
@@ -104,7 +118,7 @@ function runH1(project, plugin, env = {}) {
   return {
     code: r.status,
     sys: norm(out.systemMessage ?? ''),
-    ctx: norm(out.hookSpecificOutput?.additionalContext ?? ''),
+    ctx: withoutRootLine(norm(out.hookSpecificOutput?.additionalContext ?? '')),
     calls: existsSync(log) ? norm(readFileSync(log, 'utf8')).trim().split('\n') : [],
     marker: markerOf(project),
   };
