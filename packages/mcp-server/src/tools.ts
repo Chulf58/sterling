@@ -4,11 +4,11 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -4084,6 +4084,8 @@ export class SterlingTools {
       };
     }
     const record = this.store.create(candidate);
+    const ledgerWarning = this.logDomainWrite(record.scope, record);
+    if (ledgerWarning) citationWarnings.push(ledgerWarning);
     const promotionWarning = this.surfacePromotionCandidate(record, type);
     if (promotionWarning) citationWarnings.push(promotionWarning);
     const mountedDomains = this.mountedDomainList();
@@ -4714,12 +4716,13 @@ export class SterlingTools {
         );
       }
       const nextArr = arr.map((e) => (e === el ? { ...el, [sub]: [...cur, ...entries] } : e));
-      const { record, claims_check } = this.splitSameSubject(
+      const { record, claims_check, ledger_warnings } = this.splitSameSubject(
         this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_append')
       );
       return {
         record,
         warnings: [
+          ...ledger_warnings,
           ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record),
           ...this.articleOversizeWarnings(record),
           ...this.citedIdWarnings(JSON.stringify(entries)),
@@ -4773,7 +4776,7 @@ export class SterlingTools {
             retained: [] as { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[],
           }
         : undefined;
-    const { record, claims_check } = this.splitSameSubject(
+    const { record, claims_check, ledger_warnings } = this.splitSameSubject(
       this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_append', appendJoin)
     );
     // Cited-id scan (board fc053051 extension): only the newly APPENDED
@@ -4782,6 +4785,7 @@ export class SterlingTools {
     return {
       record,
       warnings: [
+        ...ledger_warnings,
         ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record),
         ...this.articleOversizeWarnings(record),
         ...this.citedIdWarnings(JSON.stringify(entries)),
@@ -4958,12 +4962,13 @@ export class SterlingTools {
         }
         const nextEl = { ...el, [sub]: replace === 'true' };
         const nextArr = arr.map((e) => (e === el ? nextEl : e));
-        const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_edit'));
+        const { record, claims_check, ledger_warnings } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_edit'));
         return {
           record,
           ...(claims_check ? { claims_check } : {}),
           replaced: { field, chars_before: find.length, chars_after: replace.length },
           warnings: [
+            ...ledger_warnings,
             ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record),
             ...this.articleOversizeWarnings(record),
             ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
@@ -4990,7 +4995,7 @@ export class SterlingTools {
       const nextArr = arr.map((e) => (e === el ? nextEl : e));
       // same_subject (ruling types only) is split off rather than left
       // inside `record` — see splitSameSubject.
-      const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_edit'));
+      const { record, claims_check, ledger_warnings } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_edit'));
       // The element AS STORED, by position — only when the write kept the
       // array's length, so a rotated array is never read at a shifted index.
       const submittedSub = nextEl[sub] as string;
@@ -5006,6 +5011,7 @@ export class SterlingTools {
         // never `find`, never the rest of the record, which was already
         // scanned (or not) on whatever write introduced it.
         warnings: [
+          ...ledger_warnings,
           ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record),
           ...this.articleOversizeWarnings(record),
           ...this.citedIdWarnings(replace),
@@ -5042,7 +5048,7 @@ export class SterlingTools {
     const next = SterlingTools.spliceOnce(current, find, replace);
     // same_subject (ruling types only) is split off rather than left inside
     // `record` — see splitSameSubject.
-    const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_edit'));
+    const { record, claims_check, ledger_warnings } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_edit'));
     const storedValue = (record as unknown as Record<string, unknown>)[field];
     const stored = typeof storedValue === 'string' ? storedValue : next;
     return {
@@ -5054,6 +5060,7 @@ export class SterlingTools {
       // must not warn about a pre-existing citation elsewhere in the record
       // just because that record happens to get written again).
       warnings: [
+        ...ledger_warnings,
         ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [field]: next }), record),
         ...this.articleOversizeWarnings(record),
         ...this.citedIdWarnings(replace),
@@ -5290,13 +5297,14 @@ export class SterlingTools {
     }
     const next = current.slice(0, at) + r + current.slice(at + f.length);
     const body = bodyFor(next);
-    const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, body, undefined, old.version, op));
+    const { record, claims_check, ledger_warnings } = this.splitSameSubject(this.knowledgeUpdate(old.id, body, undefined, old.version, op));
     return {
       record,
       ...(claims_check ? { claims_check } : {}),
       replaced: { field, find: f, replace: r },
       verification: { path, lines: label, anchor, head_commit: head.head_commit, blob: head.blob },
       warnings: [
+        ...ledger_warnings,
         ...this.historyRotationWarnings(this.attemptedHistoryLen(old, body), record),
         ...this.articleOversizeWarnings(record),
         ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
@@ -5525,7 +5533,7 @@ export class SterlingTools {
       base === 'links'
         ? { rel: (el as { rel: string }).rel, target_id: (el as { target_id: string }).target_id }
         : undefined;
-    const { record, claims_check } = this.splitSameSubject(
+    const { record, claims_check, ledger_warnings } = this.splitSameSubject(
       this.knowledgeUpdate(
         old.id,
         relationRemoval ? {} : { [base]: nextArr },
@@ -5544,7 +5552,7 @@ export class SterlingTools {
         element: el,
         ...(identicalDuplicates ? { note: `removed 1 of ${hits.length} identical elements; ${hits.length - 1} identical remain` } : {}),
       },
-      warnings: [...this.articleOversizeWarnings(record), ...this.openReconcileLaneWarnings(this.supersedeChain(old))],
+      warnings: [...ledger_warnings, ...this.articleOversizeWarnings(record), ...this.openReconcileLaneWarnings(this.supersedeChain(old))],
     };
   }
 
@@ -5757,8 +5765,9 @@ export class SterlingTools {
     // wraps it as `record`. Left inside, the digest write-projection
     // (writeProjected -> digestRecord's field whitelist) silently drops it,
     // and projection:'full' would echo it back as a fake record field.
-    const { record, same_subject, claims_check } = this.splitSameSubject(this.knowledgeUpdate(id, body, resolves, expectedVersion));
+    const { record, same_subject, claims_check, ledger_warnings } = this.splitSameSubject(this.knowledgeUpdate(id, body, resolves, expectedVersion));
     const warnings: string[] = before ? this.historyRotationWarnings(this.attemptedHistoryLen(before, body), record) : [];
+    warnings.push(...ledger_warnings);
     // A SMUGGLED `version` IS STRIPPED, AND SAID SO ([stable-identity-design-v2]
     // contract 1): the counter is server-owned, so the caller's value never
     // lands — but a silent strip is how a caller comes to believe it controls
@@ -7318,13 +7327,15 @@ export class SterlingTools {
    * splits it off here first and puts it on its own envelope instead.
    */
   private splitSameSubject(
-    rec: DurableRecord & { same_subject?: SameSubjectEntry[]; claims_check?: string }
-  ): { record: DurableRecord; same_subject?: SameSubjectEntry[]; claims_check?: string } {
+    rec: DurableRecord & { same_subject?: SameSubjectEntry[]; claims_check?: string; ledger_warning?: string }
+  ): { record: DurableRecord; same_subject?: SameSubjectEntry[]; claims_check?: string; ledger_warnings: string[] } {
     // `claims_check` rides out on the same envelope-sibling principle as
     // same_subject: it is a receipt disclosure, not a record field, so a
     // re-wrapper must lift it out rather than echo it back as one.
-    const { same_subject, claims_check, ...record } = rec;
-    return { record: record as DurableRecord, same_subject, claims_check };
+    // `ledger_warning` likewise: it leaves the record and joins the receipt's
+    // warnings (an array, so a re-wrapper spreads it without a presence check).
+    const { same_subject, claims_check, ledger_warning, ...record } = rec;
+    return { record: record as DurableRecord, same_subject, claims_check, ledger_warnings: ledger_warning ? [ledger_warning] : [] };
   }
 
   /**
@@ -8259,6 +8270,8 @@ export class SterlingTools {
     identity_moved?: { previous_id: string; note: string };
     /** see CreateResult.claims_check — the same disclosure on this write's receipt */
     claims_check?: string;
+    /** Set only when a domain record's write could not be logged (see logDomainWrite); a receipt disclosure, lifted out by splitSameSubject. */
+    ledger_warning?: string;
     /**
      * WHAT resolves ACTUALLY CLOSED, named with its file_keys AS THEY STOOD
      * AT THE MOMENT OF REMOVAL (board b0bb9d96 / I-29, fix-round HIGH):
@@ -8638,6 +8651,10 @@ export class SterlingTools {
     // read-modify-write). It now happens inside dischargeAppendJoin's own
     // transaction; re-introducing anything here would re-open exactly that gap.
     this.repointPromotionReview(chain, updated.id, ts);
+    // The PHYSICAL holder decides, as for the repo-path rule above: a record's
+    // body scope is not where it lives. `updated.id` is the replacement's id on
+    // the attestation path.
+    const ledgerWarning = this.logDomainWrite(holderScope, { id: updated.id, type: updated.type });
     // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): only for the three ruling
     // types — other types' update responses stay byte-identical. Excludes
     // the update's own lineage: `chain` (the prior version plus every
@@ -8686,6 +8703,7 @@ export class SterlingTools {
       ? {
           ...claimsCheck,
           ...updated,
+          ...(ledgerWarning ? { ledger_warning: ledgerWarning } : {}),
           ...(resolvedItems ? { resolved_items: resolvedItems } : {}),
           ...(prunedItems ? { pruned_reconcile_items: prunedItems } : {}),
           identity_moved: {
@@ -8696,6 +8714,7 @@ export class SterlingTools {
       : {
           ...claimsCheck,
           ...updated,
+          ...(ledgerWarning ? { ledger_warning: ledgerWarning } : {}),
           ...(resolvedItems ? { resolved_items: resolvedItems } : {}),
           ...(prunedItems ? { pruned_reconcile_items: prunedItems } : {}),
           previous_version: previousVersion ?? (typeof bumpedTo === 'number' ? bumpedTo - 1 : undefined),
@@ -9082,7 +9101,14 @@ export class SterlingTools {
     new_record: { type: string; fields: Record<string, unknown> };
     reason?: string;
     resolves?: string[];
-  }): { extracted: string; source: { id: string; version: number }; edges: { informed_by: string; cites: string }; claims_check?: string } {
+  }): {
+    extracted: string;
+    source: { id: string; version: number };
+    edges: { informed_by: string; cites: string };
+    claims_check?: string;
+    /** Present only when a domain write of this extract could not be logged (see logDomainWrite); knowledgeExtractResult moves it into `warnings`. */
+    ledger_warnings?: string[];
+  } {
     const { id, field, find, new_record, reason, resolves } = input;
     const replace = input.replace ?? '';
 
@@ -9300,6 +9326,11 @@ export class SterlingTools {
     // — opened the transaction on the mount the LABEL named while every write
     // inside it independently resolved to the mount that actually holds the id,
     // so a drifted label put the BEGIN on the wrong database.
+    // Domain-write ledger lines (the new record and the trimmed source) are
+    // queued while the transaction is open and written only after it commits:
+    // a rolled-back extract must not leave a line for a write that never
+    // landed. A line that could not be written is a warning on the receipt.
+    const ledgerWarnings = this.logDomainWritesAfter(() =>
     this.store.withTransactionForRecord(original.id, () => {
       // scope inherited from the source (Q5) — from its physical mount, not its
       // body label. An explicit new_record.fields.scope that DIFFERS was already
@@ -9335,7 +9366,8 @@ export class SterlingTools {
       // Explicit-claim closure (decision foreign_68988832), drained inside this same
       // transaction so a claim only lands alongside an extract that landed.
       for (const claim of resolveClaims) this.store.remove(claim.id, ts);
-    });
+    })
+    );
 
     // Post-commit: persist the deferred check_skipped audit rows now that the
     // mount transaction has committed (see the deferCheckSkipped rationale above).
@@ -9349,6 +9381,7 @@ export class SterlingTools {
       source: { id: original.id, version: sourceVersion },
       edges: { informed_by: original.id, cites: newId },
       ...claimsCheck,
+      ...(ledgerWarnings.length ? { ledger_warnings: ledgerWarnings } : {}),
     };
   }
 
@@ -9375,8 +9408,8 @@ export class SterlingTools {
     warnings: string[];
     claims_check?: string;
   } {
-    const result = this.knowledgeExtract(input);
-    const warnings: string[] = [];
+    const { ledger_warnings, ...result } = this.knowledgeExtract(input);
+    const warnings: string[] = [...(ledger_warnings ?? [])];
     const newRecord = this.store.get(result.edges.cites);
     if (newRecord) warnings.push(...this.articleOversizeWarnings(newRecord));
     const sourceRecord = this.store.get(result.source.id);
@@ -9596,6 +9629,7 @@ export class SterlingTools {
     // tombstone the project original, pointing forward to the promoted copy —
     // 'promoted' (not the default 'retired') so the activity feed names this
     // for what it is (board 39d6462d)
+    const ledgerWarning = this.logDomainWrite(`domain:${domain}`, promoted);
     this.store.retireInFavorOf(originalId, promoted.id, ts, 'promoted');
     const review = this.maintenanceQuery({ system_reason: 'promotion_review', cap: 1000 }).find(
       (t) => (t as { feature_link?: string }).feature_link === originalId
@@ -9606,6 +9640,7 @@ export class SterlingTools {
     // what did not, surfaced on the write result — warn-only, never a
     // refusal (P1).
     const warnings: string[] = [];
+    if (ledgerWarning) warnings.push(ledgerWarning);
     if (originalFileKeys.length) {
       warnings.push(`dropped ${originalFileKeys.length} file_keys (repo-relative paths are project-scoped and meaningless in a shared domain store)`);
     }
@@ -9670,6 +9705,150 @@ export class SterlingTools {
     return [
       `WARNING: possible project-local label(s) in the promoted prose — review before relying on this in a shared domain: ${list.slice(0, 10).join(', ')}${list.length > 10 ? ', …' : ''}`,
     ];
+  }
+
+  // -- domain-write ledger -----------------------------------------------------
+
+  /**
+   * Set while a caller holds a store transaction open around nested
+   * knowledgeCreate/knowledgeUpdate calls (knowledgeExtract): logDomainWrite
+   * queues here instead of writing, and the caller flushes the queue only
+   * after the transaction commits, so a rolled-back write is never logged.
+   */
+  private deferredDomainWrites: { scope: string; record: { id: string; type: string } }[] | undefined;
+
+  /**
+   * Runs `write` (a store transaction around nested knowledge writes) with
+   * ledger logging queued, then logs the queued writes once it has returned,
+   * which is after the commit. Returns the warnings for the lines that could
+   * not be written. When `write` throws, nothing is logged and the throw
+   * passes through.
+   */
+  private logDomainWritesAfter(write: () => void): string[] {
+    const queued: NonNullable<SterlingTools['deferredDomainWrites']> = [];
+    const outer = this.deferredDomainWrites;
+    this.deferredDomainWrites = queued;
+    try {
+      write();
+    } finally {
+      this.deferredDomainWrites = outer;
+    }
+    return queued.map((w) => this.logDomainWrite(w.scope, w.record)).filter((w): w is string => w !== undefined);
+  }
+
+  /**
+   * Logs one write of a record a mounted DOMAIN store holds to this project's
+   * transient ledger (KNOWLEDGE_WRITES_REL under repoRoot), so the session-end
+   * duty reads can tell this project's domain writes from another project's
+   * (decision domain-record-duty-credit-comes-from-a-per-project-write-ledger).
+   * A domain store is shared by every project on the machine and its records
+   * carry no origin; H10 and the OpenCode settlement count a domain record
+   * toward the capture or research duty only when this ledger holds an entry
+   * for its id inside the duty window. A project-scoped write logs nothing.
+   *
+   * Called AFTER the store write returned, with the stored record's own id and
+   * type and this server's clock. No caller field reaches an entry.
+   *
+   * APPEND-ONLY: the entry is one JSON line, written with a single O_APPEND
+   * call and no read before it. Appends from several processes under one root
+   * (the session's server and a maintenance worker's) are safe on a Linux
+   * filesystem. On /mnt/c under WSL2 they are NOT: concurrent appends within a
+   * few milliseconds can overwrite each other. The lost entry's record then
+   * does not pay, and nothing reports it (finding
+   * o-append-is-not-atomic-across-processes-on-wsl2-mnt-c; the follow-up is
+   * boarded).
+   * The line opens with a newline as well as ending with one, so it stands on
+   * its own even after a predecessor a crash cut short. Nothing clears the
+   * file; compactDomainWrites bounds it. No lock file, by conductor decision:
+   * decision dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own
+   * (48f5209d) records why lock directories are avoided here.
+   *
+   * NEVER fails the knowledge write. Returns undefined when the entry was
+   * logged (or queued for a caller's post-commit flush), otherwise the warning
+   * for the write's receipt: with no repoRoot, a repoRoot that holds no
+   * .sterling directory (never created here), or when the file cannot be
+   * written, the record is stored but will not count toward this project's
+   * duties, and the receipt says so (P5). A logged entry whose compaction
+   * failed returns a warning that says only that.
+   */
+  private logDomainWrite(scope: string, record: { id: string; type: string }): string | undefined {
+    if (!scope.startsWith('domain:')) return undefined;
+    if (this.deferredDomainWrites) {
+      this.deferredDomainWrites.push({ scope, record: { id: record.id, type: record.type } });
+      return undefined;
+    }
+    let ledgerPath: string;
+    try {
+      if (!this.repoRoot) throw new Error('no project root is known to this server');
+      // Only inside an existing .sterling/: a server whose store does not sit at
+      // <root>/.sterling/sterling.db derives a root that is not the project,
+      // and the ledger must not plant a .sterling/ directory there.
+      if (!existsSync(join(this.repoRoot, '.sterling'))) throw new Error(`${this.repoRoot} has no .sterling directory`);
+      ledgerPath = join(this.repoRoot, KNOWLEDGE_WRITES_REL);
+      mkdirSync(dirname(ledgerPath), { recursive: true });
+      const entry = knowledgeWriteSchema.parse({ id: record.id, type: record.type, at: this.now() });
+      appendFileSync(ledgerPath, `\n${JSON.stringify(entry)}\n`);
+    } catch (err) {
+      return (
+        `domain-write ledger: this write was NOT logged to ${KNOWLEDGE_WRITES_REL} (${err instanceof Error ? err.message : String(err)}). ` +
+        `The record ${record.id} is stored in ${scope}, but it will not count toward this project's capture or research duty at session end.`
+      );
+    }
+    try {
+      this.compactDomainWrites(ledgerPath);
+    } catch (err) {
+      return `domain-write ledger: this write was logged, but ${KNOWLEDGE_WRITES_REL} could not be compacted (${err instanceof Error ? err.message : String(err)}); the file keeps growing until a compaction succeeds.`;
+    }
+    return undefined;
+  }
+
+  /**
+   * Bounds the ledger: once it holds more than KNOWLEDGE_WRITES_COMPACT_LINES
+   * lines it is rewritten to the latest entry of each of the newest
+   * KNOWLEDGE_WRITES_KEEP_IDS record ids (newest by where an id last appears),
+   * through a temp file and a rename. Keeping only the latest `at` per id loses
+   * nothing for an "at or after X" read; an id past the newest
+   * KNOWLEDGE_WRITES_KEEP_IDS is dropped, and so is a line that does not parse.
+   *
+   * This is the ledger's only read-modify-write. An entry another process
+   * appends between the read and the rename is lost, once per several hundred
+   * writes at most; that entry's record then does not pay (the duty stays
+   * armed, the fail-closed side).
+   *
+   * The size check keeps the read off most writes: a line cannot be shorter
+   * than MIN_LINE_BYTES, so a smaller file cannot be past the line threshold.
+   */
+  private compactDomainWrites(ledgerPath: string): void {
+    const MIN_LINE_BYTES = 30; // {"id":"a","type":"b","at":"c"} and its newline
+    if (statSync(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES) return;
+    const lines = readFileSync(ledgerPath, 'utf8').split('\n').filter((line) => line !== '');
+    if (lines.length <= KNOWLEDGE_WRITES_COMPACT_LINES) return;
+    const latest = new Map<string, KnowledgeWrite>();
+    for (const line of lines) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue; // a torn or garbage line carries no entry to keep
+      }
+      const ok = knowledgeWriteSchema.safeParse(parsed);
+      if (!ok.success) continue;
+      latest.delete(ok.data.id); // re-insert, so map order is order of last appearance
+      latest.set(ok.data.id, ok.data);
+    }
+    const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
+    const tmp = `${ledgerPath}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      writeFileSync(tmp, kept.map((e) => `${JSON.stringify(e)}\n`).join(''));
+      renameSync(tmp, ledgerPath);
+    } catch (err) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // the temp file may never have been created; the write error is the one to report
+      }
+      throw err;
+    }
   }
 
   // -- session-event register writers (boards 75b1a05f + 1af5d630) ------------
@@ -12257,6 +12436,9 @@ export class SterlingTools {
       return head;
     });
     this.repointPromotionReview(chain, updated.id, ts);
+    // The new head lives in the old record's own mount (the transaction above).
+    const ledgerWarning = this.logDomainWrite(supersedeHolder, { id: updated.id, type: updated.type });
+    if (ledgerWarning) citationWarnings.push(ledgerWarning);
 
     // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): the new record is
     // always one of the three ruling types (SUPERSEDE_ALLOWED_TYPES, of which

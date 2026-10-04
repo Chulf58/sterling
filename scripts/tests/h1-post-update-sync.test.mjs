@@ -61,6 +61,9 @@ function makePluginRoot({ clone = false, bin = false } = {}) {
   writeFileSync(join(scriptDir, 'sync-agents.mjs'), LOGGING_SCRIPT(bin ? 'bin/sync-agents' : 'sync-agents', 'refreshed: implementor\n\nRESTART REQUIRED — project subagents load at session start.\n', 'FIXTURE_SYNC_EXIT'));
   writeFileSync(join(scriptDir, 'stamp-contract.mjs'), LOGGING_SCRIPT(bin ? 'bin/stamp-contract' : 'stamp-contract', 'stamp-contract: 1 already in sync — 1 project(s) processed\n', 'FIXTURE_CONTRACT_EXIT'));
   writeFileSync(join(scriptDir, 'migrate-stores.mjs'), LOGGING_SCRIPT('migrate-stores', '', 'FIXTURE_MIGRATE_EXIT'));
+  // Every Sterling copy ships domains.mjs, and H1 runs it before a due sync
+  // (scripts/hooks/lib/domain-notice.mjs). This one reports no proposal and logs nothing.
+  writeFileSync(join(scriptDir, 'domains.mjs'), `process.stdout.write(${JSON.stringify(JSON.stringify({ proposal: { add: [], sibling_steps: [] } }))});\n`);
   return dir;
 }
 
@@ -114,7 +117,7 @@ test('version change on an installed copy: syncs THIS project only, writes the m
   const project = makeProject({ syncedVersion: '0.0.1' });
   const r = runH1(project, plugin);
   assert.equal(r.code, 0, r.stderr);
-  assert.deepEqual(r.calls, [`sync-agents --target ${project}`, `stamp-contract --project ${project}`], 'sync-agents for this project, then a stamp-contract DRY run (no --apply) for this project');
+  assert.deepEqual(r.calls, [`sync-agents --target ${project}`, `stamp-contract --apply-inserts --project ${project}`], 'sync-agents for this project, then stamp-contract for this project in inserts-only mode (never a full --apply)');
   assert.equal(markerOf(project), VERSION);
   assert.match(r.sys, new RegExp(`Sterling 0\\.0\\.1→${VERSION.replace(/\./g, '\\.')}: agents synced — RESTART`));
   assert.match(r.ctx, /EXIT AND RELAUNCH/);
@@ -125,7 +128,7 @@ test('first run (no marker) syncs; the bundled bin/ scripts win over scripts/ wh
   const project = makeProject();
   const r = runH1(project, plugin);
   assert.equal(r.code, 0, r.stderr);
-  assert.deepEqual(r.calls, [`bin/sync-agents --target ${project}`, `bin/stamp-contract --project ${project}`]);
+  assert.deepEqual(r.calls, [`bin/sync-agents --target ${project}`, `bin/stamp-contract --apply-inserts --project ${project}`]);
   assert.equal(markerOf(project), VERSION);
   assert.ok(r.ctx.includes(`node '${plugin}'/bin/sync-agents.mjs --target '${project}'`), `the CONDUCTOR NOT ACTIVE remedy names the bundled script: ${r.ctx}`);
 });

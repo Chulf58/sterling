@@ -83,3 +83,47 @@ export const sessionEventSchema = z.object({
   target: z.string().trim().min(1).optional(),
 });
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
+
+// Domain-write ledger (decision domain-record-duty-credit-comes-from-a-per-project-write-ledger).
+// A mounted domain store is shared by every project on the machine and its
+// records carry no origin project, so the record alone cannot say whose session
+// wrote it. The MCP server therefore appends one entry to KNOWLEDGE_WRITES_REL
+// under its own project root after each write of a record held by a domain
+// store (create, update and the tools that go through it, promote, supersede).
+// H10 and the OpenCode settlement count a domain record toward the capture or
+// research duty only when this ledger holds an entry with the same id and an
+// `at` inside the duty window. Project-store records never appear here and pay
+// as before.
+//
+// FORMAT: JSON Lines, one entry per line, append-only. Each write is a single
+// O_APPEND call with no read before it. Appends from several processes under
+// one root (the session's server, a maintenance worker's) are safe on a Linux
+// filesystem. On /mnt/c under WSL2 they are not: concurrent appends within a
+// few milliseconds can overwrite each other, the lost entry's record then does
+// not pay, and nothing reports it (finding
+// o-append-is-not-atomic-across-processes-on-wsl2-mnt-c; the follow-up is
+// boarded). A reader takes the latest `at` per id and skips a line that does
+// not parse or is not the shape below.
+//
+// A SEPARATE file from the session-event register on purpose: H10's
+// clearRegisters rewrites and deletes that register at Stop, which would lose
+// the write evidence while later work re-arms the duty. Nothing clears this
+// file, by choice; it is bounded instead. When it passes
+// KNOWLEDGE_WRITES_COMPACT_LINES lines the server rewrites it to the latest
+// entry of the newest KNOWLEDGE_WRITES_KEEP_IDS record ids (tmp file, then
+// rename). That compaction is the only read-modify-write left: an entry another
+// process appends between its read and its rename is lost.
+//
+// Strict: an entry is exactly {id, type, at}. Nothing about the writing project
+// or session enters it, and nothing from this file enters any store.
+export const KNOWLEDGE_WRITES_REL = '.sterling/transient/knowledge-writes.jsonl';
+export const KNOWLEDGE_WRITES_COMPACT_LINES = 1000;
+export const KNOWLEDGE_WRITES_KEEP_IDS = 500;
+export const knowledgeWriteSchema = z
+  .object({
+    id: z.string().min(1),
+    type: z.string().min(1),
+    at: z.string().min(1),
+  })
+  .strict();
+export type KnowledgeWrite = z.infer<typeof knowledgeWriteSchema>;

@@ -544,3 +544,59 @@ test('the root session context states the pending Sterling issue reports, with t
     rmSync(pluginDir, { recursive: true, force: true });
   }
 });
+
+// ---- the project registry row (scripts/hooks/lib/registry-refresh.mjs, shared with H1) ----
+
+test("a root session refreshes this project's registry row (last-seen and stack tags); a child session and the maintenance worker child do not", async () => {
+  const { ProjectRegistry } = await import(pathToFileURL(join(repo, 'packages', 'store', 'dist', 'index.js')).href);
+  const dir = makeProject({ project_name: 'fixture-proj', stack_tags: ['genesys', 'sterling'] });
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-oc-registry-'));
+  const saved = process.env.STERLING_REGISTRY_DB;
+  process.env.STERLING_REGISTRY_DB = join(scratch, 'registry.db');
+  const row = () => {
+    const registry = new ProjectRegistry(process.env.STERLING_REGISTRY_DB);
+    try {
+      return registry.list()[0];
+    } finally {
+      registry.close();
+    }
+  };
+  const make = (env) =>
+    contextMod.createContextHandler({
+      openStore: (p) => new SterlingStore(p),
+      now: () => NOW,
+      rootOf: () => dir,
+      fenced: async (_name, _root, fn) => fn(),
+      rotationRestore: async () => '',
+      sessionSync: async () => {},
+      pluginRoot: join(dir, 'no-such-plugin-root'),
+      getSession: () => ({ get: async ({ sessionID }) => (sessionID === 'ses_child' ? { id: sessionID, parentID: 'ses_root' } : { id: sessionID }) }),
+      env,
+    });
+  try {
+    const registry = new ProjectRegistry(process.env.STERLING_REGISTRY_DB);
+    try {
+      registry.register({ repo_path: dir.replace(/\\/g, '/'), name: 'fixture-proj', stack_tags: ['sterling'], toolchains: [], sterling_version: '0.0.0', at: '2026-10-01T00:00:00.000Z' });
+    } finally {
+      registry.close();
+    }
+    await make({ ...process.env, STERLING_MAINTENANCE_WORKER: '1' }).onContext(input('ses_worker'));
+    assert.deepEqual(row().stack_tags, ['sterling'], 'the worker child changes nothing');
+    assert.equal(row().last_seen_at, null);
+
+    const h = make({ ...process.env, STERLING_MAINTENANCE_WORKER: '' });
+    await h.onContext(input('ses_child', [userMsg('do the thing')]));
+    assert.deepEqual(row().stack_tags, ['sterling'], 'a child session changes nothing');
+    assert.equal(row().last_seen_at, null);
+
+    await h.onContext(input('ses_root'));
+    assert.deepEqual(row().stack_tags, ['genesys', 'sterling'], 'the root session refreshes the tags from config.json');
+    assert.equal(row().last_seen_at, NOW);
+    assert.equal(row().sterling_version, '0.0.0', 'init fields are untouched');
+  } finally {
+    if (saved === undefined) delete process.env.STERLING_REGISTRY_DB;
+    else process.env.STERLING_REGISTRY_DB = saved;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});

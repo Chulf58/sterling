@@ -5592,7 +5592,7 @@ var init_records = __esm({
 });
 
 // packages/schemas/dist/transient.js
-var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema;
+var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema;
 var init_transient = __esm({
   "packages/schemas/dist/transient.js"() {
     "use strict";
@@ -5621,6 +5621,14 @@ var init_transient = __esm({
       // Trimmed before the length check, so a whitespace-only target is refused.
       target: external_exports.string().trim().min(1).optional()
     });
+    KNOWLEDGE_WRITES_REL = ".sterling/transient/knowledge-writes.jsonl";
+    KNOWLEDGE_WRITES_COMPACT_LINES = 1e3;
+    KNOWLEDGE_WRITES_KEEP_IDS = 500;
+    knowledgeWriteSchema = external_exports.object({
+      id: external_exports.string().min(1),
+      type: external_exports.string().min(1),
+      at: external_exports.string().min(1)
+    }).strict();
   }
 });
 
@@ -6189,6 +6197,9 @@ __export(dist_exports, {
   DRAIN_VERBS: () => DRAIN_VERBS,
   FRESHNESS_VALUES: () => FRESHNESS_VALUES,
   HEADLINE_CLIP: () => HEADLINE_CLIP,
+  KNOWLEDGE_WRITES_COMPACT_LINES: () => KNOWLEDGE_WRITES_COMPACT_LINES,
+  KNOWLEDGE_WRITES_KEEP_IDS: () => KNOWLEDGE_WRITES_KEEP_IDS,
+  KNOWLEDGE_WRITES_REL: () => KNOWLEDGE_WRITES_REL,
   LIFECYCLE_VALUES: () => LIFECYCLE_VALUES,
   LINK_RELS: () => LINK_RELS,
   NAME_CLIP: () => NAME_CLIP,
@@ -6230,6 +6241,7 @@ __export(dist_exports, {
   isAbsolutePathAnyHost: () => isAbsolutePathAnyHost,
   isCollapsedUrlLocation: () => isCollapsedUrlLocation,
   isUnderLocationAnyHost: () => isUnderLocationAnyHost,
+  knowledgeWriteSchema: () => knowledgeWriteSchema,
   knownFieldsFor: () => knownFieldsFor,
   linkSchema: () => linkSchema,
   matchesGlob: () => matchesGlob,
@@ -6269,6 +6281,7 @@ var init_dist = __esm({
     init_paths();
     init_envelope();
     init_records();
+    init_transient();
     init_transient();
     init_config();
     init_registry();
@@ -11203,6 +11216,12 @@ function writeUpdateMarker(cwd, sha) {
   mkdirSync5(dirname5(p), { recursive: true });
   writeFileSync3(p, JSON.stringify({ sha, completed_at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2) + "\n");
 }
+var DOMAIN_MAP_PENDING_REL = join13(".sterling", "domain-map-pending");
+function parseDomainProposal(stdout) {
+  const map = JSON.parse(stdout);
+  if (!Array.isArray(map?.proposal?.add)) throw new Error("the output carries no proposal list");
+  return { add: map.proposal.add.map((a) => ({ domain: a.domain, reason: a.reason })), registered: map.registered_by_this_run === true };
+}
 var isFsError = (err) => typeof err?.code === "string" && typeof err?.syscall === "string";
 var isProjectReadRefusal = (err) => err instanceof ProjectModeError || err instanceof HandoffSettingError || err instanceof ContainmentError || isFsError(err);
 function handoffRefusalRemedy(repoPath2) {
@@ -11372,6 +11391,22 @@ ${handoffOut.split("\n").map((l) => `          ${l}`).join("\n")}`);
         }
       }
       if (failed) failures++;
+      if (existsSync8(join13(p.repo_path, ".sterling", "config.json"))) {
+        try {
+          const dm = exec(nodeBin, [join13(cwd, "scripts", "domains.mjs"), "--target", p.repo_path, "--json"], { cwd });
+          if (dm.status !== 0) throw new Error(`exit ${dm.status}: ${`${dm.stdout}${dm.stderr}`.trim().split("\n").slice(-3).join(" | ")}`);
+          const { add } = parseDomainProposal(dm.stdout);
+          entry.domain_proposal = add.map((a) => a.domain);
+          if (add.length) {
+            for (const a of add) log(`      domains: proposes adding '${a.domain}' \u2014 ${a.reason}`);
+            log(`      Nothing was applied. Run /sterling:domains in ${p.repo_path} to see the map; it adds a domain only after you agree.`);
+            writeFileSync3(join13(p.repo_path, DOMAIN_MAP_PENDING_REL), `${(/* @__PURE__ */ new Date()).toISOString()}
+`);
+          }
+        } catch (err) {
+          log(`      \u26A0 domain map FAILED (nonfatal): ${err?.message ?? err}. Run /sterling:domains in ${p.repo_path} to see it.`);
+        }
+      }
       if (!launchers) continue;
       try {
         const launcher = ensureUpdateLauncher(p.repo_path, cwd);
@@ -11448,7 +11483,7 @@ AUTHORING clone \u2014 nothing to pull; syncing ${project.repo_path} only`);
     if (normPath(project.repo_path) === normPath(cwd)) {
       log("\u25B8 the clone's contract files are hand-maintained \u2014 not checked");
     } else if (existsSync8(join13(cwd, "scripts", "stamp-contract.mjs"))) {
-      const contract = step("contract drift in the invoking project (stamp-contract, dry run)", nodeBin, [join13(cwd, "scripts", "stamp-contract.mjs"), "--project", project.repo_path], {
+      const contract = step("contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join13(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", "--project", project.repo_path], {
         show: true,
         tolerate: true
       });
@@ -11760,7 +11795,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
   if (opts2.projects !== false && existsSync8(join13(cwd, "scripts", "stamp-contract.mjs"))) {
-    const contract = step("contract drift in sibling projects (stamp-contract, dry run)", nodeBin, [join13(cwd, "scripts", "stamp-contract.mjs")], {
+    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join13(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts"], {
       show: true,
       tolerate: true
     });
