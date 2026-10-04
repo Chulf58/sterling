@@ -367,7 +367,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_schema',
     {
       description:
-        "Describe what a record type accepts before writing it. Returns {type, fields:[{name, required, type, enum_values?, element_fields?, example?, server_owned?}], required[], optional[]}, derived from the registered schema. `example` is a schema-validated worked value (absent when none is derivable). server_owned fields are listed but refused on write and excluded from required/optional. An unregistered type lists the registered ones.",
+        "Describe what a record type accepts before writing it. Returns {type, fields:[{name, required, type, enum_values?, element_fields?, condition?, example?, server_owned?}], required[], optional[]}, derived from the registered schema. `condition` is present on a field whose accepted shape depends on another field of the same record (feature_article current_ac and live_test_refs: the {not_applicable} form is accepted only for some article_kind values). `example` is a schema-validated worked value (absent when none is derivable). server_owned fields are listed but refused on write and excluded from required/optional. An unregistered type lists the registered ones.",
       inputSchema: strict({ type: z.string() }),
     },
     ({ type }) => json(tools.knowledgeSchema(type))

@@ -46,6 +46,8 @@ export {
   BOARD_NEEDS,
   AGENT_MODEL_KEY,
   REVIEWER_ROLES,
+  ARTICLE_KINDS,
+  NOT_APPLICABLE_EXEMPT_KINDS,
 } from './records.js';
 export type { RecordType, RecordTypeEntry, DurableRecord, FieldShape, BoardNeeds } from './records.js';
 export { sessionEventSchema, NO_CAPTURE_LANES, noCaptureLaneSchema } from './transient.js';
