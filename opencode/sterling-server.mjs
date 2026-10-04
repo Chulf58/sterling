@@ -5917,17 +5917,88 @@ var init_domain_fit = __esm({
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
+import { mkdirSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { dirname as dirname2, join as join2 } from "node:path";
+function registryPath() {
+  return process.env.STERLING_REGISTRY_DB ?? join2(homedir2(), ".sterling", "registry.db");
+}
+var REGISTRY_DDL, ProjectRegistry;
 var init_registry2 = __esm({
   "packages/store/dist/registry.js"() {
     "use strict";
     init_dist();
+    REGISTRY_DDL = `
+CREATE TABLE IF NOT EXISTS projects (
+  repo_path TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  stack_tags TEXT NOT NULL,
+  toolchains TEXT NOT NULL,
+  sterling_version TEXT,
+  first_init_at TEXT NOT NULL,
+  last_init_at TEXT NOT NULL,
+  last_seen_at TEXT
+);`;
+    ProjectRegistry = class {
+      db;
+      constructor(path = registryPath()) {
+        mkdirSync(dirname2(path), { recursive: true });
+        this.db = new DatabaseSync(path);
+        this.db.exec("PRAGMA busy_timeout=5000");
+        this.db.exec("PRAGMA journal_mode=WAL");
+        this.db.exec(REGISTRY_DDL);
+      }
+      /** Upsert by repo_path (init event, P4): create on first init
+       *  (first_init_at = last_init_at = at), refresh the mutable fields + last_init_at
+       *  on re-init while preserving first_init_at. */
+      register(input) {
+        this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+         ON CONFLICT(repo_path) DO UPDATE SET
+           name = excluded.name,
+           stack_tags = excluded.stack_tags,
+           toolchains = excluded.toolchains,
+           sterling_version = excluded.sterling_version,
+           last_init_at = excluded.last_init_at`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at);
+      }
+      /** Session-activity touch (H1 SessionStart): update last_seen_at for an
+       *  EXISTING row only — never create (registration is init's job). Returns
+       *  whether a row was updated. */
+      touchLastSeen(repoPath2, at) {
+        return this.db.prepare("UPDATE projects SET last_seen_at = ? WHERE repo_path = ?").run(at, repoPath2).changes > 0;
+      }
+      /** Mount-change refresh (/sterling:domains --apply): replace stack_tags of an
+       *  EXISTING row and nothing else, so the row's init dates and version still
+       *  say when and by which Sterling the project was last initialized. Never
+       *  creates a row. Returns whether a row was updated. */
+      updateStackTags(repoPath2, stackTags) {
+        return this.db.prepare("UPDATE projects SET stack_tags = ? WHERE repo_path = ?").run(JSON.stringify(stackTags), repoPath2).changes > 0;
+      }
+      /** All registered projects, name-ordered. Stale-at-read (existence of
+       *  repo_path) is the caller's lazy check — the registry stores no liveness. */
+      list() {
+        return this.db.prepare("SELECT * FROM projects ORDER BY name").all().map((r) => projectRegistrationSchema.parse({
+          ...r,
+          stack_tags: JSON.parse(r.stack_tags),
+          toolchains: JSON.parse(r.toolchains)
+        }));
+      }
+      /** Human-gated removal (the /sterling:projects prune of a missing project) —
+       *  never automatic. Returns whether a row was removed. */
+      remove(repoPath2) {
+        return this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2).changes > 0;
+      }
+      close() {
+        this.db.close();
+      }
+    };
   }
 });
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync, existsSync, realpathSync, statSync } from "node:fs";
-import { dirname as dirname2, basename, join as join2, resolve as resolvePath } from "node:path";
+import { mkdirSync as mkdirSync2, existsSync, realpathSync, statSync } from "node:fs";
+import { dirname as dirname3, basename, join as join3, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 function decodeLiveRecordRow(op, row) {
   let record;
@@ -6393,7 +6464,7 @@ CREATE TABLE IF NOT EXISTS store_meta (
         this.db = new DatabaseSync2(path);
         let classifiedPath = this.dbPath;
         try {
-          classifiedPath = join2(realpathSync(dirname2(this.dbPath)), basename(this.dbPath));
+          classifiedPath = join3(realpathSync(dirname3(this.dbPath)), basename(this.dbPath));
         } catch {
         }
         this.db.exec("PRAGMA busy_timeout=5000");
@@ -8033,7 +8104,7 @@ CREATE TABLE IF NOT EXISTS store_meta (
         if (existsSync(target)) {
           throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
         }
-        mkdirSync(dirname2(target), { recursive: true });
+        mkdirSync2(dirname3(target), { recursive: true });
         this.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
       }
       close() {
@@ -8505,14 +8576,14 @@ import { isAbsolute as isAbsolute3, resolve as resolve4 } from "node:path";
 init_dist();
 init_dist2();
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { dirname as dirname3, join as join3, resolve } from "node:path";
+import { dirname as dirname4, join as join4, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 function projectRoot(from) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (; ; ) {
-    if (existsSync2(join3(dir, ".sterling", "sterling.db"))) return dir;
-    const parent = dirname3(dir);
+    if (existsSync2(join4(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname4(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -8624,7 +8695,7 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   exit: (code) => process.exit(code)
 });
 function loadConfig(cwd) {
-  const p = join3(cwd, ".sterling", "config.json");
+  const p = join4(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
 function gitIgnored(paths, cwd) {
@@ -8651,24 +8722,24 @@ function repoRel(toolPath, cwd) {
 }
 
 // scripts/hooks/lib/advisory-counter.mjs
-import { appendFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "node:fs";
-import { join as join4 } from "node:path";
+import { appendFileSync, existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync2 } from "node:fs";
+import { join as join5 } from "node:path";
 function recordAdvisoryFire(root, hook, sessionId) {
   try {
     if (!root || !hook) return;
-    if (!existsSync3(join4(root, ".sterling"))) return;
-    const dir = join4(root, ".sterling", "transient");
-    mkdirSync2(dir, { recursive: true });
+    if (!existsSync3(join5(root, ".sterling"))) return;
+    const dir = join5(root, ".sterling", "transient");
+    mkdirSync3(dir, { recursive: true });
     let session = typeof sessionId === "string" && sessionId ? sessionId : null;
     if (!session) {
       try {
-        const parsed = JSON.parse(readFileSync2(join4(dir, "session.json"), "utf8"));
+        const parsed = JSON.parse(readFileSync2(join5(dir, "session.json"), "utf8"));
         session = typeof parsed?.session_id === "string" ? parsed.session_id : null;
       } catch {
       }
     }
     appendFileSync(
-      join4(dir, "advisory-fires.ndjson"),
+      join5(dir, "advisory-fires.ndjson"),
       JSON.stringify({ hook, session, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n"
     );
   } catch {
@@ -8687,11 +8758,11 @@ function isForeignTree(record, root) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, renameSync, openSync, closeSync } from "node:fs";
-import { join as join5, dirname as dirname4 } from "node:path";
+import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync4, existsSync as existsSync4, renameSync, openSync, closeSync } from "node:fs";
+import { join as join6, dirname as dirname5 } from "node:path";
 init_dist2();
 function deliveryDir(cwd) {
-  return join5(cwd, ".sterling", "transient", "delivery");
+  return join6(cwd, ".sterling", "transient", "delivery");
 }
 var HEADER_TERM_CAP = 6;
 function boundedTermClause(terms, cap = HEADER_TERM_CAP) {
@@ -8735,11 +8806,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join5(deliveryDir(cwd), component);
+  return join6(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join5(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join6(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -8802,7 +8873,7 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync3(dirname4(path), { recursive: true });
+  mkdirSync4(dirname5(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
@@ -10085,8 +10156,8 @@ function isReviewerClass(type) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync2, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync5, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { join as join6, resolve as resolve2, dirname as dirname5, isAbsolute } from "node:path";
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync2, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync5, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join7, resolve as resolve2, dirname as dirname6, isAbsolute } from "node:path";
 import { hostname } from "node:os";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash } from "node:crypto";
@@ -10208,13 +10279,13 @@ function render(x) {
 
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
-  return join6(root, ".sterling", "transient", "dispatch-register.json");
+  return join7(root, ".sterling", "transient", "dispatch-register.json");
 }
 function legacyRegisterLockDir(root) {
-  return join6(root, ".sterling", "transient", "dispatch-register.lock");
+  return join7(root, ".sterling", "transient", "dispatch-register.lock");
 }
 function configPath(root) {
-  return join6(root, ".sterling", "config.json");
+  return join7(root, ".sterling", "config.json");
 }
 function readStaleMinutesDefault(root) {
   try {
@@ -10262,8 +10333,8 @@ function readRawArray(root) {
   return { availability: "ok", arr: parsed };
 }
 function writeRawArrayAtomic(root, arr) {
-  const dir = join6(root, ".sterling", "transient");
-  mkdirSync4(dir, { recursive: true });
+  const dir = join7(root, ".sterling", "transient");
+  mkdirSync5(dir, { recursive: true });
   const p = registerPath(root);
   const tmp = `${p}.tmp-${randomBytes(4).toString("hex")}`;
   writeFileSync2(tmp, JSON.stringify(arr));
@@ -10294,7 +10365,7 @@ function registerLockRoot() {
   if (typeof xdg === "string" && isAbsolute(xdg)) {
     try {
       const st = lstatSync(xdg);
-      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid) return join6(xdg, "sterling-locks");
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid) return join7(xdg, "sterling-locks");
     } catch (e) {
       if (!["ENOENT", "ENOTDIR", "EACCES"].includes(e?.code)) throw e;
     }
@@ -10303,10 +10374,10 @@ function registerLockRoot() {
 }
 function registerLockPath(root) {
   const hash = createHash("sha256").update(realpathSync2(resolve2(root))).digest("hex");
-  return join6(registerLockRoot(), `${hash}.db`);
+  return join7(registerLockRoot(), `${hash}.db`);
 }
 function ensureLockRoot(dir) {
-  mkdirSync4(dir, { recursive: true, mode: 448 });
+  mkdirSync5(dir, { recursive: true, mode: 448 });
   const st = lstatSync(dir);
   if (!st.isDirectory() || st.isSymbolicLink()) {
     throw new Error(`dispatch-register: ${dir} is not a real directory \u2014 refusing to take the register lock through it`);
@@ -10340,7 +10411,7 @@ function isPidAlive(pid) {
 }
 function readLegacyOwner(legacy) {
   try {
-    return JSON.parse(readFileSync4(join6(legacy, "owner.json"), "utf8"));
+    return JSON.parse(readFileSync4(join7(legacy, "owner.json"), "utf8"));
   } catch (e) {
     if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
     throw e;
@@ -10381,7 +10452,7 @@ async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs = opts.timeoutMs ?? 1e3;
   const lockPath = registerLockPath(root);
-  ensureLockRoot(dirname5(lockPath));
+  ensureLockRoot(dirname6(lockPath));
   const db = new DatabaseSync3(lockPath);
   try {
     db.exec("PRAGMA busy_timeout=0");
@@ -10511,7 +10582,7 @@ function retryBudgetFor(verdict) {
   return verdict === "siblings-retry" ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
 }
 function dispatchStateDir(root) {
-  return join6(root, ".sterling", "transient", "dispatch-state");
+  return join7(root, ".sterling", "transient", "dispatch-state");
 }
 var LIVE_PREFIX = "live-";
 var DONE_PREFIX = "done-";
@@ -10657,7 +10728,7 @@ function checkDispatchStateContainment(root, { create }) {
   } catch (e) {
     if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
     if (!create) return { ok: true, availability: "absent" };
-    mkdirSync4(dir, { recursive: true });
+    mkdirSync5(dir, { recursive: true });
     return { ok: true, availability: "ok" };
   }
   if (st.isSymbolicLink() || !st.isDirectory()) {
@@ -10675,8 +10746,8 @@ function writeRecordAtomic(root, fileName, record) {
       `dispatch-state write refused \u2014 ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"}, never mkdir'd or written through`
     );
   }
-  const file = join6(dir, fileName);
-  const tmp = join6(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
+  const file = join7(dir, fileName);
+  const tmp = join7(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
   writeFileSync2(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
   renameSync2(tmp, file);
 }
@@ -10690,7 +10761,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync(join6(dir, to));
+    lstatSync(join7(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -10700,7 +10771,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync2(join6(dir, from), join6(dir, to));
+    renameSync2(join7(dir, from), join7(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -10727,7 +10798,7 @@ function listStateDir(root) {
   }
 }
 function validateNamedRecord(dir, name, parsed) {
-  const classified = classifyRecordFile(join6(dir, name));
+  const classified = classifyRecordFile(join7(dir, name));
   if (!classified.exists || classified.poisoned) return classified;
   const record = classified.record;
   if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
@@ -10797,7 +10868,7 @@ function scanLiveState(root, { repair }) {
       done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
       continue;
     }
-    const classified = classifyRecordFile(join6(dir, name));
+    const classified = classifyRecordFile(join7(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
@@ -11404,12 +11475,12 @@ function sessionBoundarySweep(root, opts = {}) {
       continue;
     }
     const target = v.record.terminal ? terminalFileName(parsed.key, v.record) : liveFileName(parsed.key);
-    if (existsSync5(join6(dir, target))) {
+    if (existsSync5(join7(dir, target))) {
       warnStateFile(name, `sessionBoundarySweep: legacy record '${name}' not migrated \u2014 '${target}' already exists; never overwritten`);
       continue;
     }
     try {
-      renameSync2(join6(dir, name), join6(dir, target));
+      renameSync2(join7(dir, name), join7(dir, target));
       migrated++;
     } catch (e) {
       warnStateFile(name, `sessionBoundarySweep: legacy record '${name}' could not be renamed to '${target}' (${e?.code ?? e?.message}) \u2014 left in place`);
@@ -11428,7 +11499,7 @@ function sessionBoundarySweep(root, opts = {}) {
   const pruneIfExpired = (fileName, record) => {
     const terminalAt = Date.parse(record.terminal.at);
     if (Number.isNaN(terminalAt) || now - terminalAt <= SEVEN_DAYS_MS) return;
-    const file = join6(dir, fileName);
+    const file = join7(dir, fileName);
     try {
       const s2 = lstatSync(file);
       if (s2.isFile() && !s2.isSymbolicLink()) {
@@ -11441,7 +11512,7 @@ function sessionBoundarySweep(root, opts = {}) {
   for (const name of names) {
     const parsed = parseStateFileName(name);
     if (parsed.kind === "tmp") {
-      const tmpFile = join6(dir, name);
+      const tmpFile = join7(dir, name);
       try {
         const ts = lstatSync(tmpFile);
         if (ts.isFile() && !ts.isSymbolicLink()) {
@@ -11732,7 +11803,7 @@ function isListingCommand(command) {
 
 // packages/opencode-plugin/src/delivery.mjs
 import { statSync as statSync2 } from "node:fs";
-import { isAbsolute as isAbsolute2, join as join7, resolve as resolve3 } from "node:path";
+import { isAbsolute as isAbsolute2, join as join8, resolve as resolve3 } from "node:path";
 var PATH_TOOLS = /* @__PURE__ */ new Set(["read", "edit", "write"]);
 var PENDING_CAP = 200;
 var PATCH_HEADER = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm;
@@ -11801,7 +11872,7 @@ function buildShellDelivery(store, root, command, directory, sessionID) {
     if (!rel || guard.pointer_files.includes(rel) || entries.some((e) => e.rel === rel)) continue;
     let isFile;
     try {
-      isFile = statSync2(join7(root, rel)).isFile();
+      isFile = statSync2(join8(root, rel)).isFile();
     } catch (e) {
       if (e?.code === "ENOENT" || e?.code === "ENOTDIR" || e?.code === "ENAMETOOLONG") continue;
       throw e;
@@ -11901,7 +11972,7 @@ function createDeliveryHandlers({ openStore, rootOf, directory, fenced }) {
     await fenced("delivery", root, () => {
       const build = builderFor(input, root);
       if (!build) return;
-      const store = openStore(join7(root, ".sterling", "sterling.db"));
+      const store = openStore(join8(root, ".sterling", "sterling.db"));
       try {
         const delivery = build(store);
         if (!delivery) return;
@@ -11930,7 +12001,7 @@ function createDeliveryHandlers({ openStore, rootOf, directory, fenced }) {
 init_dist();
 init_dist2();
 import { existsSync as existsSync6 } from "node:fs";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 var defaultOpener = (dbPath) => new SterlingStore(dbPath);
 function domainMountsFromConfig(config) {
   if (config === null || config === void 0) return [];
@@ -11939,7 +12010,7 @@ function domainMountsFromConfig(config) {
 var tag = (records, source) => records.map((r) => ({ ...r, source_store: source }));
 var errorText = (e) => String(e && e.message || e);
 function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
-  const projectPath = join8(cwd, ".sterling", "sterling.db");
+  const projectPath = join9(cwd, ".sterling", "sterling.db");
   if (!existsSync6(projectPath)) return null;
   let mounts = [];
   let configError = null;
@@ -12214,28 +12285,28 @@ function createCompactionHandler({ rootOf, fenced }) {
 // packages/opencode-plugin/src/config.mjs
 init_agent_fences();
 import { existsSync as existsSync13, readdirSync as readdirSync5, readFileSync as readFileSync10 } from "node:fs";
-import { join as join18 } from "node:path";
+import { join as join19 } from "node:path";
 
 // packages/opencode-plugin/src/layer.mjs
 import { existsSync as existsSync11, readFileSync as readFileSync8 } from "node:fs";
-import { basename as basename2, join as join15 } from "node:path";
+import { basename as basename2, join as join16 } from "node:path";
 
 // scripts/lib/opencode-install.mjs
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync10, mkdirSync as mkdirSync6, readFileSync as readFileSync7, readdirSync as readdirSync4, realpathSync as realpathSync5, rmSync as rmSync3, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { dirname as dirname6, isAbsolute as isAbsolute4, join as join14, resolve as resolve9 } from "node:path";
+import { existsSync as existsSync10, mkdirSync as mkdirSync7, readFileSync as readFileSync7, readdirSync as readdirSync4, realpathSync as realpathSync5, rmSync as rmSync3, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { dirname as dirname7, isAbsolute as isAbsolute4, join as join15, resolve as resolve9 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/installed-copy.mjs
 import { existsSync as existsSync8 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join10 } from "node:path";
+import { homedir as homedir4 } from "node:os";
+import { join as join11 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
 import { existsSync as existsSync7, readFileSync as readFileSync5, readdirSync as readdirSync2, realpathSync as realpathSync3 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join9, resolve as resolve5, sep } from "node:path";
+import { homedir as homedir3 } from "node:os";
+import { join as join10, resolve as resolve5, sep } from "node:path";
 
 // scripts/lib/jsonc.mjs
 function parseJsonc(text) {
@@ -12405,7 +12476,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync7, readFileSync5, readdirSync2, join9, homedir2);
+)(existsSync7, readFileSync5, readdirSync2, join10, homedir3);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -12436,7 +12507,7 @@ function copyKindOf(root, env, home) {
   return real.slice(base2.length).split(sep)[0].startsWith("git-") ? "git" : "npm";
 }
 function configuredSterlingSpec(env, home, root) {
-  const path = join9(env.XDG_CONFIG_HOME || join9(home, ".config"), "opencode", "opencode.json");
+  const path = join10(env.XDG_CONFIG_HOME || join10(home, ".config"), "opencode", "opencode.json");
   let config;
   try {
     config = parseJsonc(readFileSync5(path, "utf8"));
@@ -12456,7 +12527,7 @@ function pinOf(spec) {
   return TAG_REF.test(ref) || COMMIT_REF.test(ref) ? ref : null;
 }
 var SHELL_SPECIAL = /["$`]/;
-function sterlingUpdateRemedy(host, { env = process.env, home = homedir2(), root = null } = {}) {
+function sterlingUpdateRemedy(host, { env = process.env, home = homedir3(), root = null } = {}) {
   if (host === "claude-code") return "/plugin (Installed tab \u2192 Update) or `claude plugin update sterling@<marketplace>`";
   if (host === "opencode" || host === null) {
     const found = configuredSterlingSpec(env, home, root);
@@ -12482,7 +12553,7 @@ function canonical(p) {
     throw err;
   }
 }
-function installHostOf(root, { env = process.env, home = homedir2() } = {}) {
+function installHostOf(root, { env = process.env, home = homedir3() } = {}) {
   const real = canonical(root);
   for (const { host, dir } of installRoots(env, home)) {
     if (real.startsWith(canonical(dir) + sep)) return host;
@@ -12491,11 +12562,11 @@ function installHostOf(root, { env = process.env, home = homedir2() } = {}) {
 }
 
 // scripts/lib/installed-copy.mjs
-function isInstalledCopy(root, { env = process.env, home = homedir3() } = {}) {
+function isInstalledCopy(root, { env = process.env, home = homedir4() } = {}) {
   if (typeof root !== "string" || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  if (!existsSync8(join10(root, ".git"))) return true;
+  if (!existsSync8(join11(root, ".git"))) return true;
   return installHostOf(root, { env, home }) !== null;
 }
 
@@ -12504,12 +12575,12 @@ init_agent_distribution();
 init_agent_fences();
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync3, readFileSync as readFileSync6, readdirSync as readdirSync3, mkdirSync as mkdirSync5, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync, constants } from "node:fs";
-import { join as join12, resolve as resolve7 } from "node:path";
+import { lstatSync as lstatSync3, readFileSync as readFileSync6, readdirSync as readdirSync3, mkdirSync as mkdirSync6, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync, constants } from "node:fs";
+import { join as join13, resolve as resolve7 } from "node:path";
 
 // scripts/lib/store-path.mjs
 import { lstatSync as lstatSync2, realpathSync as realpathSync4 } from "node:fs";
-import { join as join11, resolve as resolve6, sep as sep2 } from "node:path";
+import { join as join12, resolve as resolve6, sep as sep2 } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
     super(message);
@@ -12552,7 +12623,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   if (target !== rootResolved && !target.startsWith(rootResolved + sep2)) {
     throw new StorePathContainmentError(
-      `resolveStoreWritePath: '${join11(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
+      `resolveStoreWritePath: '${join12(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
       { root: rootResolved, target }
     );
   }
@@ -12560,7 +12631,7 @@ function resolveStoreWritePath(root, ...segments) {
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
-    const next = join11(cursor, part);
+    const next = join12(cursor, part);
     let st;
     try {
       st = lstatSync2(next);
@@ -12625,7 +12696,7 @@ function resolveStoreWritePath(root, ...segments) {
     );
   }
   const suffix = target.slice(deepestExisting.length);
-  const reconstructed = suffix ? join11(realDeepest, suffix) : realDeepest;
+  const reconstructed = suffix ? join12(realDeepest, suffix) : realDeepest;
   if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep2)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target}') resolves outside the project \u2014 refusing, nothing was written`,
@@ -12655,7 +12726,7 @@ function containedPath(root, rel, leaf) {
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
   let cursor = resolve7(root);
   for (const [index, part] of segments.entries()) {
-    cursor = join12(cursor, part);
+    cursor = join13(cursor, part);
     const st = lstatOrNull(cursor);
     if (!st) break;
     const isLeaf = index === segments.length - 1;
@@ -12686,7 +12757,7 @@ init_agent_fences();
 // scripts/lib/handoff-projection.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync9 } from "node:fs";
-import { join as join13, resolve as resolve8 } from "node:path";
+import { join as join14, resolve as resolve8 } from "node:path";
 var fwd = (p) => p.replace(/\\/g, "/");
 var PROJECT_MODES = ["hobby", "work"];
 var ProjectModeError = class extends Error {
@@ -12724,9 +12795,9 @@ var HandoffGitError = class extends HandoffSettingError {
   }
 };
 var GIT_TIMEOUT_MS = 3e4;
-function trackedHandoffFiles(root, { spawn: spawn3 = spawnSync2 } = {}) {
+function trackedHandoffFiles(root, { spawn: spawn4 = spawnSync2 } = {}) {
   const run = (args) => {
-    const r = spawn3("git", args, { cwd: root, encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
+    const r = spawn4("git", args, { cwd: root, encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
     const name = `git ${args[0]}`;
     if (r.error) return { failed: r.error.code === "ETIMEDOUT" ? `${name} timed out after ${GIT_TIMEOUT_MS / 1e3}s` : `${name} did not run (${r.error.message})` };
     if (r.status !== 0) {
@@ -12738,7 +12809,7 @@ function trackedHandoffFiles(root, { spawn: spawn3 = spawnSync2 } = {}) {
   if (!existsSync9(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync9(join13(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync9(join14(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -12808,13 +12879,13 @@ var TUI_MATERIALIZED_KEEP = 2;
 var MATERIALIZED_MARKER = ".sterling-materialized.json";
 var SEMVER_DIR = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 var bytesHash = (b) => createHash2("sha256").update(b).digest("hex");
-function materializedTuiRoot({ home = homedir4() } = {}) {
-  return join14(home, ".sterling", "opencode", "tui");
+function materializedTuiRoot({ home = homedir5() } = {}) {
+  return join15(home, ".sterling", "opencode", "tui");
 }
 function materializedState(dir) {
   let marker;
   try {
-    marker = JSON.parse(readFileSync7(join14(dir, MATERIALIZED_MARKER), "utf8"));
+    marker = JSON.parse(readFileSync7(join15(dir, MATERIALIZED_MARKER), "utf8"));
   } catch (err) {
     if (err.code === "ENOENT" || err instanceof SyntaxError) return "foreign";
     throw err;
@@ -12824,27 +12895,27 @@ function materializedState(dir) {
   const extra = readdirSync4(dir).filter((n) => n !== MATERIALIZED_MARKER && !(n in files));
   if (extra.length) return "edited";
   for (const [name, hash] of Object.entries(files)) {
-    if (!existsSync10(join14(dir, name)) || bytesHash(readFileSync7(join14(dir, name))) !== hash) return "edited";
+    if (!existsSync10(join15(dir, name)) || bytesHash(readFileSync7(join15(dir, name))) !== hash) return "edited";
   }
   return "ours";
 }
-function materializeTui({ pluginRoot, env = process.env, home = homedir4() }) {
+function materializeTui({ pluginRoot, env = process.env, home = homedir5() }) {
   void env;
   const base2 = materializedTuiRoot({ home });
-  const src = join14(pluginRoot, "opencode", "sterling-tui");
+  const src = join15(pluginRoot, "opencode", "sterling-tui");
   const v = readCopyVersion(pluginRoot, "opencode");
   if (!v.version) return [refusal2(`${fwd2(base2)}/`, `the version of ${fwd2(pluginRoot)} cannot be read: ${v.reason}`, `reinstall Sterling (${sterlingInstallRemedy("opencode")}), then rerun /sterling:update`)];
-  const missing = TUI_MATERIALIZED_FILES.filter((f) => !existsSync10(join14(src, f)));
+  const missing = TUI_MATERIALIZED_FILES.filter((f) => !existsSync10(join15(src, f)));
   if (missing.length) return [refusal2(`${fwd2(base2)}/`, `${fwd2(src)} lacks ${missing.join(", ")}, so there is no dashboard to copy`, "update Sterling, then rerun /sterling:update")];
   const rows = [];
-  const dest = join14(base2, v.version);
+  const dest = join15(base2, v.version);
   const item = `${fwd2(dest)}/`;
-  const content = Object.fromEntries(TUI_MATERIALIZED_FILES.map((f) => [f, readFileSync7(join14(src, f))]));
+  const content = Object.fromEntries(TUI_MATERIALIZED_FILES.map((f) => [f, readFileSync7(join15(src, f))]));
   const hashes = Object.fromEntries(Object.entries(content).map(([f, b]) => [f, bytesHash(b)]));
   const write = () => {
-    mkdirSync6(dest, { recursive: true });
-    for (const [f, b] of Object.entries(content)) writeFileSync3(join14(dest, f), b);
-    writeFileSync3(join14(dest, MATERIALIZED_MARKER), `${JSON.stringify({ version: v.version, files: hashes }, null, 2)}
+    mkdirSync7(dest, { recursive: true });
+    for (const [f, b] of Object.entries(content)) writeFileSync3(join15(dest, f), b);
+    writeFileSync3(join15(dest, MATERIALIZED_MARKER), `${JSON.stringify({ version: v.version, files: hashes }, null, 2)}
 `);
   };
   if (!existsSync10(dest)) {
@@ -12854,17 +12925,17 @@ function materializeTui({ pluginRoot, env = process.env, home = homedir4() }) {
     const state = statSync3(dest).isDirectory() ? materializedState(dest) : "foreign";
     if (state === "foreign") rows.push(refusal2(item, `${item} exists and Sterling did not write it`, `move it aside, then rerun /sterling:update`));
     else if (state === "edited") rows.push(refusal2(item, `${item} was edited after Sterling wrote it`, `delete it so Sterling can copy the dashboard again, then rerun /sterling:update`));
-    else if (TUI_MATERIALIZED_FILES.every((f) => bytesHash(readFileSync7(join14(dest, f))) === hashes[f])) rows.push({ item, status: "matches" });
+    else if (TUI_MATERIALIZED_FILES.every((f) => bytesHash(readFileSync7(join15(dest, f))) === hashes[f])) rows.push({ item, status: "matches" });
     else {
       write();
       rows.push({ item, status: "refreshed" });
     }
   }
-  const versions = readdirSync4(base2).filter((n) => SEMVER_DIR.test(n) && statSync3(join14(base2, n)).isDirectory());
+  const versions = readdirSync4(base2).filter((n) => SEMVER_DIR.test(n) && statSync3(join15(base2, n)).isDirectory());
   versions.sort((a, b) => compareSterlingVersions(b, a));
   const keep = /* @__PURE__ */ new Set([...versions.slice(0, TUI_MATERIALIZED_KEEP), v.version]);
   for (const old of versions.filter((n) => !keep.has(n))) {
-    const dir = join14(base2, old);
+    const dir = join15(base2, old);
     const oldItem = `${fwd2(dir)}/`;
     const state = materializedState(dir);
     if (state === "ours") {
@@ -12879,10 +12950,10 @@ function materializeTui({ pluginRoot, env = process.env, home = homedir4() }) {
 var EDIT_FAMILY = ["edit", "write", "patch"];
 var GUARDED_KEYS = /* @__PURE__ */ new Set(["*", ...EDIT_FAMILY]);
 function sterlingRootFrom(moduleUrl = import.meta.url) {
-  const start = dirname6(fileURLToPath(moduleUrl));
-  for (let dir = start; ; dir = dirname6(dir)) {
-    if (existsSync10(join14(dir, "agent-templates", "registry.json"))) return dir;
-    if (dirname6(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
+  const start = dirname7(fileURLToPath(moduleUrl));
+  for (let dir = start; ; dir = dirname7(dir)) {
+    if (existsSync10(join15(dir, "agent-templates", "registry.json"))) return dir;
+    if (dirname7(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
 function formatOpenCodeRows(result) {
@@ -12909,7 +12980,7 @@ function sterlingRoot(moduleUrl = import.meta.url) {
   return sterlingRootFrom(moduleUrl);
 }
 function defaultTemplatePath(moduleUrl = import.meta.url) {
-  return join15(sterlingRoot(moduleUrl), "templates", "target-claude-md.md");
+  return join16(sterlingRoot(moduleUrl), "templates", "target-claude-md.md");
 }
 var ROOT_TOKEN = "{{STERLING_ROOT}}";
 var CLAUDE_ONLY_RESIDUE = ["${CLAUDE_PLUGIN_ROOT}", "READY TO CLEAR", "/clear", "AskUserQuestion"];
@@ -12977,19 +13048,19 @@ function unmarkedOpenCodeBlocks(source) {
   });
   return out;
 }
-function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), templatePath = join15(pluginRoot, "templates", "target-claude-md.md")) {
+function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), templatePath = join16(pluginRoot, "templates", "target-claude-md.md")) {
   const projectName = loadConfig(projectDir)?.project_name ?? basename2(projectDir);
   const named = (s2) => s2.replaceAll("{{PROJECT_NAME}}", () => projectName);
   const templateText = readFileSync8(templatePath, "utf8");
   const pairs = hostBlockPairs(templateText).map((p) => ({ claude: p.claude.map(named), opencode: p.opencode.map(named) }));
-  const claudeMdPath = join15(projectDir, "CLAUDE.md");
+  const claudeMdPath = join16(projectDir, "CLAUDE.md");
   const source = existsSync11(claudeMdPath) ? readFileSync8(claudeMdPath, "utf8") : named(renderClaudeText(templateText, templatePath));
   const lines = renderOpenCodeFullText(source, "CLAUDE.md").split("\n");
   const plain = unfencedText(source);
   const unmatched = swapBlocks(lines, pairs).filter((first) => plain.includes(leadOf(first)));
   const missingCommands = [];
   const text = lines.join("\n").replaceAll(ROOT_TOKEN, () => pluginRoot).replaceAll("${CLAUDE_PLUGIN_ROOT}", () => pluginRoot).replace(/`?\/sterling:([a-z][a-z-]*)`?/g, (whole, name) => {
-    const file = join15(pluginRoot, "commands", `${name}.md`);
+    const file = join16(pluginRoot, "commands", `${name}.md`);
     if (existsSync11(file)) return `${whole} (on OpenCode: follow \`${file}\`)`;
     missingCommands.push(`\`/sterling:${name}\` names a command with no file at ${file}.`);
     return whole;
@@ -13012,24 +13083,24 @@ ${body}`;
 }
 
 // packages/opencode-plugin/src/log.mjs
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync7 } from "node:fs";
-import { dirname as dirname7, join as join16 } from "node:path";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync8 } from "node:fs";
+import { dirname as dirname8, join as join17 } from "node:path";
 var LOG_REL = ".sterling/transient/opencode-plugin.log";
 var errText = (e) => String(e && e.message || e);
 function logLine(root, line) {
-  const p = join16(root, LOG_REL);
-  mkdirSync7(dirname7(p), { recursive: true });
+  const p = join17(root, LOG_REL);
+  mkdirSync8(dirname8(p), { recursive: true });
   appendFileSync2(p, `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
 }
 
 // packages/opencode-plugin/src/notices.mjs
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync9, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname8, join as join17 } from "node:path";
+import { existsSync as existsSync12, mkdirSync as mkdirSync9, readFileSync as readFileSync9, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname9, join as join18 } from "node:path";
 var NOTICES_REL = ".sterling/transient/opencode-notices.json";
 function writeJsonAtomic(path, value) {
-  mkdirSync8(dirname8(path), { recursive: true });
+  mkdirSync9(dirname9(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomUUID2()}.tmp`;
   try {
     writeFileSync4(tmp, JSON.stringify(value));
@@ -13040,7 +13111,7 @@ function writeJsonAtomic(path, value) {
   }
 }
 function readNotices(root) {
-  const p = join17(root, NOTICES_REL);
+  const p = join18(root, NOTICES_REL);
   if (!existsSync12(p)) return [];
   const parsed = JSON.parse(readFileSync9(p, "utf8"));
   if (!Array.isArray(parsed)) throw new Error(`${NOTICES_REL} is not a JSON array`);
@@ -13050,7 +13121,7 @@ function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString())
   const notices = readNotices(root);
   if (notices.some((n) => n.text === text && !n.shown_at)) return;
   notices.push({ id: randomUUID2(), at: now, text });
-  writeJsonAtomic(join17(root, NOTICES_REL), notices);
+  writeJsonAtomic(join18(root, NOTICES_REL), notices);
 }
 function takeNotices(root, now) {
   const notices = readNotices(root);
@@ -13062,15 +13133,15 @@ function takeNotices(root, now) {
       changed = true;
     }
   }
-  if (changed) writeJsonAtomic(join17(root, NOTICES_REL), notices);
+  if (changed) writeJsonAtomic(join18(root, NOTICES_REL), notices);
   return notices;
 }
 function pruneShownNotices(root) {
   const notices = readNotices(root);
   const left = notices.filter((n) => !n.shown_at);
   if (left.length === notices.length) return;
-  if (left.length) writeJsonAtomic(join17(root, NOTICES_REL), left);
-  else rmSync4(join17(root, NOTICES_REL), { force: true });
+  if (left.length) writeJsonAtomic(join18(root, NOTICES_REL), left);
+  else rmSync4(join18(root, NOTICES_REL), { force: true });
 }
 
 // packages/opencode-plugin/src/config.mjs
@@ -13119,21 +13190,21 @@ function renderRegistrations(root) {
   const commands = [];
   const skills = [];
   const failures = [];
-  const commandsDir = join18(root, "commands");
-  const skillsDir = join18(root, "skills");
+  const commandsDir = join19(root, "commands");
+  const skillsDir = join19(root, "skills");
   if (!existsSync13(commandsDir)) throw new Error(`no commands directory at ${commandsDir}`);
   if (!existsSync13(skillsDir)) throw new Error(`no skills directory at ${skillsDir}`);
   for (const file of readdirSync5(commandsDir).filter((f) => f.endsWith(".md")).sort()) {
     const name = `${COMMAND_PREFIX}${file.slice(0, -3)}`;
     try {
-      const { description, body } = renderSource(join18(commandsDir, file), root, `commands/${file}`);
+      const { description, body } = renderSource(join19(commandsDir, file), root, `commands/${file}`);
       commands.push({ name, description, body });
     } catch (e) {
       failures.push({ kind: "command", name, error: errText(e) });
     }
   }
   for (const dir of readdirSync5(skillsDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort()) {
-    const path = join18(skillsDir, dir, "SKILL.md");
+    const path = join19(skillsDir, dir, "SKILL.md");
     if (!existsSync13(path)) continue;
     const id = `${SKILL_PREFIX}${dir}`;
     try {
@@ -13148,7 +13219,7 @@ function renderRegistrations(root) {
 function mcpEntry(root, project) {
   return {
     type: "local",
-    command: ["node", "--disable-warning=ExperimentalWarning", join18(root, "mcp", "sterling-mcp.mjs"), "--store", join18(project, ".sterling", "sterling.db")]
+    command: ["node", "--disable-warning=ExperimentalWarning", join19(root, "mcp", "sterling-mcp.mjs"), "--store", join19(project, ".sterling", "sterling.db")]
   };
 }
 function commandText(body, args) {
@@ -13178,7 +13249,7 @@ function createBootstrapHandler(deps = {}) {
     for (const name of BOOTSTRAP_COMMANDS) {
       const file = `${name.slice(COMMAND_PREFIX.length)}.md`;
       try {
-        const { description, body } = renderSource(join18(root, "commands", file), root, `commands/${file}`);
+        const { description, body } = renderSource(join19(root, "commands", file), root, `commands/${file}`);
         commands.push({ name, description, body });
       } catch (e) {
         stderr(`[sterling] /${name} not registered on OpenCode: ${errText(e)}
@@ -13221,13 +13292,19 @@ function createConfigHandler(deps = {}) {
 
 // packages/opencode-plugin/src/context.mjs
 init_dist2();
-import { join as join27 } from "node:path";
+import { join as join28 } from "node:path";
 
 // scripts/lib/update.mjs
-import { closeSync as closeSync3, existsSync as existsSync14, mkdirSync as mkdirSync9, openSync as openSync3, readFileSync as readFileSync11, readdirSync as readdirSync6, readSync, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname9, join as join19 } from "node:path";
+import { closeSync as closeSync3, existsSync as existsSync14, mkdirSync as mkdirSync10, openSync as openSync3, readFileSync as readFileSync11, readdirSync as readdirSync6, readSync, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname10, join as join20 } from "node:path";
 var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed-By-Agent", "review-ledger", "frozen-test"]);
-var UPDATE_MARKER_RELATIVE_PATH = join19(".sterling", "update-complete.json");
+var UPDATE_MARKER_RELATIVE_PATH = join20(".sterling", "update-complete.json");
+var DOMAIN_MAP_PENDING_REL = join20(".sterling", "domain-map-pending");
+function parseDomainProposal(stdout) {
+  const map = JSON.parse(stdout);
+  if (!Array.isArray(map?.proposal?.add)) throw new Error("the output carries no proposal list");
+  return { add: map.proposal.add.map((a) => ({ domain: a.domain, reason: a.reason })), registered: map.registered_by_this_run === true };
+}
 function walUserVersion(dbPath) {
   const walPath = `${dbPath}-wal`;
   if (!existsSync14(walPath)) return null;
@@ -13264,13 +13341,13 @@ function probeSchemaVersion(dbPath) {
 
 // scripts/hooks/lib/maintenance-state.mjs
 import { readFileSync as readFileSync13 } from "node:fs";
-import { join as join21 } from "node:path";
+import { join as join22 } from "node:path";
 
 // scripts/hooks/lib/maintenance-worker.mjs
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync4, existsSync as existsSync15, mkdirSync as mkdirSync10, openSync as openSync4, readFileSync as readFileSync12, renameSync as renameSync4, rmSync as rmSync5, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync6, appendFileSync as appendFileSync3 } from "node:fs";
-import { dirname as dirname10, isAbsolute as isAbsolute5, join as join20, resolve as resolve10, sep as sep3 } from "node:path";
+import { closeSync as closeSync4, existsSync as existsSync15, mkdirSync as mkdirSync11, openSync as openSync4, readFileSync as readFileSync12, renameSync as renameSync4, rmSync as rmSync5, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync6, appendFileSync as appendFileSync3 } from "node:fs";
+import { dirname as dirname11, isAbsolute as isAbsolute5, join as join21, resolve as resolve10, sep as sep3 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
@@ -13307,22 +13384,22 @@ var OPENCODE_MODEL_KEY = "opencode_model";
 var opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
 var OPENCODE_MODEL_UNSET = `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
 function workerPaths(root) {
-  const sterling = join20(root, ".sterling");
+  const sterling = join21(root, ".sterling");
   return {
-    lock: join20(sterling, "transient", "maintenance-worker.lock"),
-    takeover: join20(sterling, "transient", "maintenance-worker.lock.takeover"),
-    lastLaunch: join20(sterling, "transient", "maintenance-worker.last-launch"),
-    eligible: join20(sterling, "transient", "maintenance-worker.eligible.json"),
-    state: join20(sterling, "transient", "maintenance-worker.state.json"),
-    log: join20(sterling, "maintenance-worker.log"),
-    journal: join20(sterling, "maintenance-worker.jsonl")
+    lock: join21(sterling, "transient", "maintenance-worker.lock"),
+    takeover: join21(sterling, "transient", "maintenance-worker.lock.takeover"),
+    lastLaunch: join21(sterling, "transient", "maintenance-worker.last-launch"),
+    eligible: join21(sterling, "transient", "maintenance-worker.eligible.json"),
+    state: join21(sterling, "transient", "maintenance-worker.state.json"),
+    log: join21(sterling, "maintenance-worker.log"),
+    journal: join21(sterling, "maintenance-worker.jsonl")
   };
 }
 function pluginRootFrom(moduleUrl = import.meta.url) {
-  let dir = dirname10(fileURLToPath2(moduleUrl));
+  let dir = dirname11(fileURLToPath2(moduleUrl));
   for (let i = 0; i < 5; i++) {
-    if (existsSync15(join20(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname10(dir);
+    if (existsSync15(join21(dir, ".claude-plugin", "plugin.json"))) return dir;
+    dir = dirname11(dir);
   }
   return null;
 }
@@ -13390,15 +13467,15 @@ function openReconcileItems(store) {
   if (!total) return [];
   return store.query({ types: ["todo"], source: "system", cap: total }).filter((t) => t.system_reason === "reconcile_needed");
 }
-function gitState(root, spawnSync8 = nodeSpawnSync) {
-  const r = spawnSync8("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
+function gitState(root, spawnSync9 = nodeSpawnSync) {
+  const r = spawnSync9("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const [head, prefix = ""] = String(r.stdout ?? "").split("\n");
   return /^[0-9a-f]{40,64}$/.test(head) ? { head, prefix: prefix.trim() } : null;
 }
-function dirtyPaths(root, paths, spawnSync8 = nodeSpawnSync, prefix = "") {
+function dirtyPaths(root, paths, spawnSync9 = nodeSpawnSync, prefix = "") {
   if (!paths.length) return /* @__PURE__ */ new Set();
-  const r = spawnSync8("git", ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync9("git", ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const dirty = /* @__PURE__ */ new Set();
   const add = (p) => {
@@ -13444,7 +13521,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   if (!tryCreate()) {
     if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
     try {
-      mkdirSync10(paths.takeover);
+      mkdirSync11(paths.takeover);
     } catch (e) {
       if (e?.code !== "EEXIST") throw e;
       let age = 0;
@@ -13466,7 +13543,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   return readJson(paths.lock)?.token === token ? token : null;
 }
 function resolveMcpConfig(pluginRoot, projectRoot2) {
-  const path = join20(pluginRoot, ".claude-plugin", "sterling-mcp.json");
+  const path = join21(pluginRoot, ".claude-plugin", "sterling-mcp.json");
   let parsed;
   try {
     parsed = JSON.parse(readFileSync12(path, "utf8"));
@@ -13481,7 +13558,7 @@ function resolveMcpConfig(pluginRoot, projectRoot2) {
   return JSON.stringify({ mcpServers: { [SERVER2]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
 }
 function readWorkerPrompt(pluginRoot) {
-  const path = join20(pluginRoot, "templates", "maintenance-worker-prompt.md");
+  const path = join21(pluginRoot, "templates", "maintenance-worker-prompt.md");
   try {
     return readFileSync12(path, "utf8");
   } catch (e) {
@@ -13494,12 +13571,12 @@ function readState(root) {
 }
 function writeLastRun(root, lastRun) {
   const { state } = workerPaths(root);
-  mkdirSync10(dirname10(state), { recursive: true });
+  mkdirSync11(dirname11(state), { recursive: true });
   writeFileSync6(state, JSON.stringify({ last_run: lastRun }));
 }
 function logLauncherNote(root, reason, detail) {
   const { log } = workerPaths(root);
-  mkdirSync10(dirname10(log), { recursive: true });
+  mkdirSync11(dirname11(log), { recursive: true });
   rotateIfLarge(log);
   appendFileSync3(log, `maintenance-worker: ${(/* @__PURE__ */ new Date()).toISOString()} ${reason}: ${detail}
 `);
@@ -13586,9 +13663,9 @@ function launchWorker(opts) {
     if (!pluginRoot) return { launched: false, reason: "error", detail: failDetail("plugin root not found above the hook") };
     resolveMcpConfig(pluginRoot, opts.root);
     readWorkerPrompt(pluginRoot);
-    const runner = join20(pluginRoot, "scripts", "maintenance-worker-run.mjs");
+    const runner = join21(pluginRoot, "scripts", "maintenance-worker-run.mjs");
     if (!existsSync15(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
-    mkdirSync10(dirname10(paths.lock), { recursive: true });
+    mkdirSync11(dirname11(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: "already_running" };
@@ -13712,7 +13789,7 @@ function stateUnknownReason(e) {
 function readProjectConfig(cwd) {
   let raw;
   try {
-    raw = readFileSync13(join21(cwd, ".sterling", "config.json"), "utf8");
+    raw = readFileSync13(join22(cwd, ".sterling", "config.json"), "utf8");
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     throw Object.assign(new Error("config.json unreadable"), { stableReason: `config.json unreadable: ${typeof e?.code === "string" ? e.code : "read error"}` });
@@ -14116,7 +14193,7 @@ function computeUndeclaredSourceDisclosure({ cwd, config }) {
 // scripts/hooks/lib/operating-state.mjs
 init_dist2();
 import { existsSync as existsSync16, readFileSync as readFileSync14 } from "node:fs";
-import { join as join22 } from "node:path";
+import { join as join23 } from "node:path";
 function readProjectConfig2(cwd) {
   let config = null;
   let configUnreadable = false;
@@ -14191,7 +14268,7 @@ function handoffFilesLine({ config, configUnreadable, root }) {
 }
 var PENDING_ISSUE_REPORTS = "pending-issue-reports.jsonl";
 function pendingIssueReportsLine({ cwd, pluginRoot }) {
-  const path = join22(cwd, ".sterling", PENDING_ISSUE_REPORTS);
+  const path = join23(cwd, ".sterling", PENDING_ISSUE_REPORTS);
   if (!existsSync16(path)) return "";
   let count;
   try {
@@ -14200,7 +14277,7 @@ function pendingIssueReportsLine({ cwd, pluginRoot }) {
     return `Sterling issue reports: UNKNOWN \u2014 .sterling/${PENDING_ISSUE_REPORTS} could not be read (${e && e.message || e}), so the number of queued reports is not known.`;
   }
   if (count === 0) return "";
-  const flush = pluginRoot ? `\`node "${join22(pluginRoot, "bin", "report-issue.mjs")}" --flush\`` : "Sterling's bin/report-issue.mjs --flush";
+  const flush = pluginRoot ? `\`node "${join23(pluginRoot, "bin", "report-issue.mjs")}" --flush\`` : "Sterling's bin/report-issue.mjs --flush";
   return `Sterling issue reports: ${count} queued in .sterling/${PENDING_ISSUE_REPORTS}, not yet filed on GitHub. Send them with ${flush} once gh is installed and logged in; the next report sends them too.`;
 }
 function mountedDomainLines({ config, configUnreadable, opener }) {
@@ -14226,10 +14303,10 @@ function mountedDomainLines({ config, configUnreadable, opener }) {
 // scripts/lib/post-update-sync.mjs
 import { spawn, spawnSync as spawnSync4 } from "node:child_process";
 import { existsSync as existsSync17, readFileSync as readFileSync15, writeFileSync as writeFileSync7 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { join as join23 } from "node:path";
+import { homedir as homedir6 } from "node:os";
+import { join as join24 } from "node:path";
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
-var SYNC_MARKER_REL = join23(".sterling", "synced-version");
+var SYNC_MARKER_REL = join24(".sterling", "synced-version");
 var HOST_TEXT2 = {
   claude: {
     label: "H1",
@@ -14261,12 +14338,12 @@ function samePath2(a, b) {
   return norm(a) === norm(b);
 }
 function pluginScript(root, name) {
-  const bundled = join23(root, "bin", name);
-  return existsSync17(bundled) ? bundled : join23(root, "scripts", name);
+  const bundled = join24(root, "bin", name);
+  return existsSync17(bundled) ? bundled : join24(root, "scripts", name);
 }
 function readPluginVersion(root) {
   try {
-    const v = JSON.parse(readFileSync15(join23(root, ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync15(join24(root, ".claude-plugin", "plugin.json"), "utf8")).version;
     return typeof v === "string" && v.length ? v : null;
   } catch {
   }
@@ -14318,7 +14395,7 @@ async function runPostUpdateSteps(root, project, runStep) {
   if (sync.status === 2) return { ok: false, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
   if (sync.status !== 0) return { ok: false, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
-  const contract = await runStep(root, "stamp-contract.mjs", ["--project", project]);
+  const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
   if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
   if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
   if (/—\s*0 project\(s\) processed/.test(contract.out)) {
@@ -14326,22 +14403,23 @@ async function runPostUpdateSteps(root, project, runStep) {
     if (refusals.length) return { ok: false, restart, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join("; ")})` };
     return { ok: false, restart, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) \u2014 the project is not reachable through the project registry; run /sterling:init here to register it` };
   }
-  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail };
+  const inserted = contract.out.split("\n").map((l) => /^\s*(section_inserted|inserted) {2}(.+)$/.exec(l)).filter(Boolean).map((m) => `${m[1]} ${m[2].trim()}`);
+  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted };
 }
 function postUpdateApplies(root, project) {
-  return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync17(join23(project, ".sterling", "config.json"));
+  return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync17(join24(project, ".sterling", "config.json"));
 }
-async function postUpdateSync({ root, project, host = "claude", runStep = runStepSync, env = process.env, home = homedir5() }) {
+async function postUpdateSync({ root, project, host = "claude", runStep = runStepSync, env = process.env, home = homedir6() }) {
   const t = hostText(host);
   if (!postUpdateApplies(root, project)) return null;
   const current = readPluginVersion(root);
-  const markerPath = join23(project, SYNC_MARKER_REL);
+  const markerPath = join24(project, SYNC_MARKER_REL);
   let previous = null;
   try {
     previous = readFileSync15(markerPath, "utf8").trim() || null;
   } catch {
   }
-  const manifest = join23(root, ".claude-plugin", "plugin.json");
+  const manifest = join24(root, ".claude-plugin", "plugin.json");
   if (!current) {
     return {
       outcome: "skipped",
@@ -14393,12 +14471,14 @@ POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker 
   }
   const restartLine = result.restart ? t.restartShort : "agents synced, none changed";
   warning ||= `\u26A0 ${hop}: ${restartLine}. `;
+  const inserted = result.inserted ?? [];
+  if (inserted.length) warning += `AGENTS.md/CLAUDE.md gained new Sterling text (${inserted.length} insert${inserted.length === 1 ? "" : "s"}). `;
   return {
     outcome: "synced",
     warning,
     context: `
 
-POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart ? ` ${t.restartLong}` : "") + (result.drift ? ` Contract drift in this project (stamp-contract dry run, tolerated): ${result.driftOut}` : "")
+POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart ? ` ${t.restartLong}` : "") + (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md/CLAUDE.md (text that was entirely absent; no existing wording was replaced): ${inserted.join("; ")}.` : "") + (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : "")
   };
 }
 
@@ -14426,8 +14506,8 @@ function maintenanceLines(state, config, root) {
 init_dist2();
 
 // scripts/hooks/lib/plan-lock.mjs
-import { closeSync as closeSync5, constants as FS, existsSync as existsSync18, fstatSync, mkdirSync as mkdirSync11, openSync as openSync5, readSync as readSync2, renameSync as renameSync5, unlinkSync as unlinkSync3, writeFileSync as writeFileSync8 } from "node:fs";
-import { join as join24 } from "node:path";
+import { closeSync as closeSync5, constants as FS, existsSync as existsSync18, fstatSync, mkdirSync as mkdirSync12, openSync as openSync5, readSync as readSync2, renameSync as renameSync5, unlinkSync as unlinkSync3, writeFileSync as writeFileSync8 } from "node:fs";
+import { join as join25 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
 var MARKER_MAX_BYTES = 64 * 1024;
@@ -14438,7 +14518,7 @@ function isAbsolutePlanPath(p) {
   return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
 }
 function sterlingDirOf(cwd) {
-  return join24(cwd, ".sterling");
+  return join25(cwd, ".sterling");
 }
 function sanitizeForContext(value, max) {
   if (typeof value !== "string") return "";
@@ -14518,7 +14598,7 @@ function invalidReason(l) {
   return null;
 }
 function readLock(sterlingDir) {
-  const read = readStoreFileBounded(join24(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  const read = readStoreFileBounded(join25(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
   if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
   const raw = read.text;
   let parsed;
@@ -14711,8 +14791,8 @@ function remember(map, key, value, cap = SESSION_CACHE_CAP) {
 }
 
 // packages/opencode-plugin/src/dispatch.mjs
-import { mkdirSync as mkdirSync12, readdirSync as readdirSync7, rmSync as rmSync6, statSync as statSync5 } from "node:fs";
-import { basename as basename3, dirname as dirname11, join as join25 } from "node:path";
+import { mkdirSync as mkdirSync13, readdirSync as readdirSync7, rmSync as rmSync6, statSync as statSync5 } from "node:fs";
+import { basename as basename3, dirname as dirname12, join as join26 } from "node:path";
 function claudeShape(input) {
   const args = input.input && typeof input.input === "object" ? input.input : {};
   return { tool_use_id: input.id, session_id: input.sessionID, tool_input: { prompt: args.prompt, subagent_type: args.agent, description: args.description } };
@@ -14776,9 +14856,9 @@ async function rootSessionGate(root, { session, sessionID, parents }) {
   return { settle: true };
 }
 async function sweepStaleDispatches(root) {
-  const transientDir = dirname11(registerPath(root));
+  const transientDir = dirname12(registerPath(root));
   try {
-    mkdirSync12(transientDir, { recursive: true });
+    mkdirSync13(transientDir, { recursive: true });
     let refused = "";
     let terminated = 0;
     await withRegisterLock(
@@ -14790,7 +14870,7 @@ async function sweepStaleDispatches(root) {
         rmSync6(registerPath(root), { force: true });
         const registerBasename = basename3(registerPath(root));
         for (const f of readdirSync7(transientDir)) {
-          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync6(join25(transientDir, f), { force: true });
+          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync6(join26(transientDir, f), { force: true });
         }
       },
       { retryMs: 100, timeoutMs: 2e3 }
@@ -14813,7 +14893,7 @@ function regularFiles(root, files) {
   for (const f of files) {
     let st;
     try {
-      st = statSync5(join25(root, f), { throwIfNoEntry: false });
+      st = statSync5(join26(root, f), { throwIfNoEntry: false });
     } catch (e) {
       if (e?.code !== "ENOTDIR") logLine(root, `dispatch register: could not stat territory entry '${f}' (${e?.code ?? errText(e)}); it keeps the directory prefix match`);
       continue;
@@ -14893,11 +14973,11 @@ function createDispatchHandlers({ rootOf, fenced, now = () => Date.now() }) {
 // packages/opencode-plugin/src/worker.mjs
 import { spawn as spawn2 } from "node:child_process";
 import { existsSync as existsSync19 } from "node:fs";
-import { delimiter, join as join26 } from "node:path";
+import { delimiter, join as join27 } from "node:path";
 function inWorkerChild(env = process.env) {
   return env?.[WORKER_ENV_FLAG] === "1";
 }
-var onPath = (name) => (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync19(join26(d, name)));
+var onPath = (name) => (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync19(join27(d, name)));
 function claudeOnPathDefault() {
   return onPath("claude");
 }
@@ -14952,7 +15032,7 @@ function createWorkerLaunch({
     const spawnNode = (cmd, args, opts) => spawnImpl(cmd === process.execPath ? nodeCmd : cmd, args, opts);
     let workerStore;
     try {
-      workerStore = openStore(join26(root, ".sterling", "sterling.db"));
+      workerStore = openStore(join27(root, ".sterling", "sterling.db"));
       const result = launchWorker2({ root, config, store: workerStore, trigger: "stop", spawn: spawnNode, ...runnerHost });
       if (result?.reason === "error") {
         logLine(root, `maintenance worker launch failed: ${result.detail ?? "no detail"}`);
@@ -14967,6 +15047,33 @@ function createWorkerLaunch({
   };
 }
 
+// scripts/hooks/lib/registry-refresh.mjs
+init_dist();
+init_dist2();
+import { existsSync as existsSync20 } from "node:fs";
+function refreshRegistryRow(cwd, { config, configUnreadable = false, at = (/* @__PURE__ */ new Date()).toISOString() } = {}) {
+  if (!existsSync20(registryPath())) return null;
+  const cwdPosix = cwd.replace(/\\/g, "/");
+  const isThisProject = (p) => sameLocationAnyHost(p.repo_path, cwdPosix);
+  let mounts = null;
+  try {
+    if (config && !configUnreadable) mounts = parseConfig(config).stack_tags;
+  } catch {
+  }
+  let registry;
+  try {
+    registry = new ProjectRegistry(registryPath());
+    const rows = registry.list();
+    for (const row of rows.filter(isThisProject)) {
+      registry.touchLastSeen(row.repo_path, at);
+      if (mounts && JSON.stringify(row.stack_tags) !== JSON.stringify(mounts)) registry.updateStackTags(row.repo_path, mounts);
+    }
+    return { siblings: rows.filter((p) => !isThisProject(p)) };
+  } finally {
+    registry?.close();
+  }
+}
+
 // packages/opencode-plugin/src/context.mjs
 var STATUS_TTL_MS = 1e4;
 var UNDECLARED_TTL_MS = 5 * 6e4;
@@ -14976,10 +15083,11 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   const maintenanceCache = /* @__PURE__ */ new Map();
   const stagedCache = /* @__PURE__ */ new Map();
   const boardCache = /* @__PURE__ */ new Map();
+  const registrySeen = /* @__PURE__ */ new Map();
   function statusLine(root) {
     const hit = statusCache.get(root);
     if (hit && Date.now() - hit.at < STATUS_TTL_MS) return hit.text;
-    const dbPath = join27(root, ".sterling", "sterling.db");
+    const dbPath = join28(root, ".sterling", "sterling.db");
     let schema;
     try {
       const found = probeSchemaVersion(dbPath);
@@ -15007,7 +15115,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     if (cached) return cached;
     const brief = briefOf(input.messages);
     try {
-      const store = openStore(join27(root, ".sterling", "sterling.db"));
+      const store = openStore(join28(root, ".sterling", "sterling.db"));
       try {
         const out = stageChild({ store, root, sessionID: input.sessionID, agent: input.agent, brief, disclosure: brief ? "" : notStagedLine("brief-unavailable") });
         if (out.staged) remember(stagedCache, input.sessionID, out.text);
@@ -15034,7 +15142,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       let state = null;
       let error = null;
       try {
-        const store = openStore(join27(root, ".sterling", "sterling.db"));
+        const store = openStore(join28(root, ".sterling", "sterling.db"));
         try {
           state = readMaintenanceState(store, root);
         } finally {
@@ -15054,7 +15162,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     let hit = boardCache.get(root);
     if (!hit || Date.now() - hit.at >= STATUS_TTL_MS) {
       try {
-        const store = openStore(join27(root, ".sterling", "sterling.db"));
+        const store = openStore(join28(root, ".sterling", "sterling.db"));
         let readiness;
         try {
           readiness = store.boardReadiness();
@@ -15118,6 +15226,15 @@ ${opencodeHostTail(pluginRoot)}`;
             blocks.push(line);
           }
         }
+        if (!inWorkerChild(env) && registrySeen.get(root) !== input.sessionID) {
+          registrySeen.set(root, input.sessionID);
+          try {
+            refreshRegistryRow(root, { config: state.config, at: now() });
+          } catch (e) {
+            logLine(root, `context: project registry refresh failed: ${errText(e)}`);
+            blocks.push(`STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
+          }
+        }
         const undeclared = undeclaredBlock(root, state.config);
         if (undeclared) blocks.push(undeclared);
         if (!inWorkerChild(env)) {
@@ -15139,17 +15256,17 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
 }
 
 // packages/opencode-plugin/src/pr-loop.mjs
-import { join as join30 } from "node:path";
+import { join as join31 } from "node:path";
 
 // scripts/lib/work-pr.mjs
-import { existsSync as existsSync20, mkdirSync as mkdirSync13, readFileSync as readFileSync16, renameSync as renameSync6, writeFileSync as writeFileSync9 } from "node:fs";
-import { delimiter as delimiter2, dirname as dirname12, join as join28 } from "node:path";
+import { existsSync as existsSync21, mkdirSync as mkdirSync14, readFileSync as readFileSync16, renameSync as renameSync6, writeFileSync as writeFileSync9 } from "node:fs";
+import { delimiter as delimiter2, dirname as dirname13, join as join29 } from "node:path";
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
-var prLoopPath = (root) => join28(root, PR_LOOP_REL);
+var prLoopPath = (root) => join29(root, PR_LOOP_REL);
 function readPrLoop(root) {
   const file = prLoopPath(root);
-  if (!existsSync20(file)) return null;
+  if (!existsSync21(file)) return null;
   let s2;
   try {
     s2 = JSON.parse(readFileSync16(file, "utf8"));
@@ -15168,15 +15285,15 @@ function readPrLoop(root) {
 }
 
 // scripts/hooks/lib/pr-loop-duty.mjs
-import { existsSync as existsSync21 } from "node:fs";
-import { join as join29 } from "node:path";
+import { existsSync as existsSync22 } from "node:fs";
+import { join as join30 } from "node:path";
 var errMessage = (e) => String(e && e.message || e);
 function evaluatePrLoop(root) {
   let mode;
   try {
     mode = readProjectMode(root);
   } catch (e) {
-    if (existsSync21(join29(root, PR_LOOP_REL))) {
+    if (existsSync22(join30(root, PR_LOOP_REL))) {
       return {
         state: null,
         degraded: `\u2022 PR review loop: the project mode is unreadable (${errMessage(e)}) \u2014 ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
@@ -15214,18 +15331,18 @@ function createPrLoopNotice({ now, pluginRoot } = {}) {
       return;
     }
     announced.add(state.armed_at);
-    addNotice(root, prLoopOwedText(state, prLoopNext(state, join30(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"))), at);
+    addNotice(root, prLoopOwedText(state, prLoopNext(state, join31(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"))), at);
   };
 }
 
 // packages/opencode-plugin/src/restore.mjs
 import { statSync as statSync6 } from "node:fs";
-import { join as join32 } from "node:path";
+import { join as join33 } from "node:path";
 
 // scripts/hooks/lib/rotation-restore.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { existsSync as existsSync22, readFileSync as readFileSync17, rmSync as rmSync7 } from "node:fs";
-import { join as join31 } from "node:path";
+import { existsSync as existsSync23, readFileSync as readFileSync17, rmSync as rmSync7 } from "node:fs";
+import { join as join32 } from "node:path";
 var NOTE_PROSE_MAX = 2e3;
 var LIVE_DISPATCH_MAX = 20;
 var LIVE_TERRITORY_MAX = 40;
@@ -15242,11 +15359,11 @@ var NOTE_FIELD_MAX = {
 };
 var LANE_HANDOFF_MAX = 1e3;
 function rotationNotePath(cwd) {
-  return join31(cwd, ".sterling", "transient", "rotation-note.json");
+  return join32(cwd, ".sterling", "transient", "rotation-note.json");
 }
 function readRotationNote(cwd) {
   const notePath = rotationNotePath(cwd);
-  if (!existsSync22(notePath)) return null;
+  if (!existsSync23(notePath)) return null;
   return JSON.parse(readFileSync17(notePath, "utf8"));
 }
 function consumeRotationNote(cwd) {
@@ -15433,7 +15550,7 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
     let planLock = null;
     let planLockMalformed = false;
     try {
-      const read = readLock(join32(root, ".sterling"));
+      const read = readLock(join33(root, ".sterling"));
       planLock = read.lock ?? null;
       planLockMalformed = Boolean(read.malformed);
     } catch (e) {
@@ -15452,18 +15569,18 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { existsSync as existsSync23, mkdirSync as mkdirSync14, readFileSync as readFileSync18, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname13, join as join33 } from "node:path";
-var SESSION_EVENTS_REL = join33(".sterling", "transient", "session-events.json");
+import { existsSync as existsSync24, mkdirSync as mkdirSync15, readFileSync as readFileSync18, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname14, join as join34 } from "node:path";
+var SESSION_EVENTS_REL = join34(".sterling", "transient", "session-events.json");
 function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
   const event = { kind: "research_tool", detail: String(detail ?? ""), at };
   if (typeof agentId === "string" && agentId !== "") event.agent_id = agentId;
   return event;
 }
 function appendSessionEvent(projectDir, event) {
-  const eventsPath = join33(projectDir, SESSION_EVENTS_REL);
-  mkdirSync14(dirname13(eventsPath), { recursive: true });
-  const events = existsSync23(eventsPath) ? JSON.parse(readFileSync18(eventsPath, "utf8")) : [];
+  const eventsPath = join34(projectDir, SESSION_EVENTS_REL);
+  mkdirSync15(dirname14(eventsPath), { recursive: true });
+  const events = existsSync24(eventsPath) ? JSON.parse(readFileSync18(eventsPath, "utf8")) : [];
   events.push(event);
   writeFileSync10(eventsPath, JSON.stringify(events));
 }
@@ -15494,7 +15611,7 @@ function createResearchRecorder({ rootOf, fenced, now }) {
 }
 
 // packages/opencode-plugin/src/selection.mjs
-import { join as join34 } from "node:path";
+import { join as join35 } from "node:path";
 function createPromptHandler({ openStore, rootOf, fenced, env = process.env }) {
   return async function onPrompt(input) {
     if (inWorkerChild(env)) return;
@@ -15502,7 +15619,7 @@ function createPromptHandler({ openStore, rootOf, fenced, env = process.env }) {
     if (!root) return;
     await fenced("prompt", root, () => {
       if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
-      const store = openStore(join34(root, ".sterling", "sterling.db"));
+      const store = openStore(join35(root, ".sterling", "sterling.db"));
       let selection;
       try {
         selection = store.takeSelection();
@@ -15521,15 +15638,15 @@ TUI selection (one-shot): the user has selected ${selection.type} '${selection.r
 init_dist();
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync25, mkdirSync as mkdirSync16, readFileSync as readFileSync21, renameSync as renameSync8, rmSync as rmSync9, writeFileSync as writeFileSync12 } from "node:fs";
-import { dirname as dirname15, join as join37 } from "node:path";
+import { existsSync as existsSync26, mkdirSync as mkdirSync17, readFileSync as readFileSync21, renameSync as renameSync8, rmSync as rmSync9, writeFileSync as writeFileSync12 } from "node:fs";
+import { dirname as dirname16, join as join38 } from "node:path";
 
 // scripts/hooks/lib/session-duties.mjs
 init_dist();
 init_dist2();
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { existsSync as existsSync24, readFileSync as readFileSync19 } from "node:fs";
-import { join as join35 } from "node:path";
+import { existsSync as existsSync25, readFileSync as readFileSync19 } from "node:fs";
+import { join as join36 } from "node:path";
 var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 var isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
 var IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
@@ -15577,7 +15694,7 @@ function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore
     if (domains === null) {
       domains = [];
       for (const m of resolveDomainMounts(config)) {
-        if (!existsSync24(m.dbPath)) continue;
+        if (!existsSync25(m.dbPath)) continue;
         try {
           domains.push({ name: m.name, store: opener(m.dbPath) });
         } catch (e) {
@@ -15629,9 +15746,9 @@ function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore
 }
 var writtenSince = (r, since) => r.created_at >= since || r.updated_at >= since;
 function readKnowledgeWrites(root) {
-  const p = join35(root, KNOWLEDGE_WRITES_REL);
+  const p = join36(root, KNOWLEDGE_WRITES_REL);
   const latestAt = /* @__PURE__ */ new Map();
-  if (!existsSync24(p)) return { latestAt };
+  if (!existsSync25(p)) return { latestAt };
   let text;
   try {
     text = readFileSync19(p, "utf8");
@@ -15721,12 +15838,12 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 // scripts/hooks/lib/settlement.mjs
 init_dist2();
 import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
-import { readFileSync as readFileSync20, writeFileSync as writeFileSync11, mkdirSync as mkdirSync15, rmSync as rmSync8, statSync as statSync7, renameSync as renameSync7 } from "node:fs";
+import { readFileSync as readFileSync20, writeFileSync as writeFileSync11, mkdirSync as mkdirSync16, rmSync as rmSync8, statSync as statSync7, renameSync as renameSync7 } from "node:fs";
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { join as join36, dirname as dirname14 } from "node:path";
+import { join as join37, dirname as dirname15 } from "node:path";
 function hashFile(root, rel) {
   try {
-    return createHash3("sha256").update(readFileSync20(join36(root, rel))).digest("hex");
+    return createHash3("sha256").update(readFileSync20(join37(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -15740,7 +15857,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync20(join36(root, ".sterling", "config.json"), "utf8");
+    const raw = readFileSync20(join37(root, ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -15807,7 +15924,7 @@ function changedSince(root, base2) {
 var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
 function readGitSettled(root) {
   try {
-    const s2 = JSON.parse(readFileSync20(join36(root, GIT_SETTLED_REL), "utf8"));
+    const s2 = JSON.parse(readFileSync20(join37(root, GIT_SETTLED_REL), "utf8"));
     return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
   } catch {
     return null;
@@ -15846,7 +15963,7 @@ function gitTouches(root, now) {
     const candidates = [...changed].map((path) => {
       let at = settled.at;
       try {
-        at = statSync7(join36(root, path)).mtime.toISOString();
+        at = statSync7(join37(root, path)).mtime.toISOString();
       } catch {
       }
       return { path, at: typeof at === "string" ? at : now };
@@ -15857,8 +15974,8 @@ function gitTouches(root, now) {
   }
 }
 function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
-  const p = join36(root, GIT_SETTLED_REL);
-  mkdirSync15(dirname14(p), { recursive: true });
+  const p = join37(root, GIT_SETTLED_REL);
+  mkdirSync16(dirname15(p), { recursive: true });
   if (ifAbsent) {
     try {
       writeFileSync11(p, JSON.stringify(snapshot), { flag: "wx" });
@@ -15888,15 +16005,15 @@ var EVENTS_REL = ".sterling/transient/session-events.json";
 var WEIGHED_KINDS = /* @__PURE__ */ new Set(["concept_designed", "research_tool", "agent_dispatch"]);
 var eventKey = (e) => `${e.kind}|${e.detail ?? ""}|${e.at ?? ""}`;
 function readDutyState(root) {
-  const p = join37(root, DUTIES_REL);
-  if (!existsSync25(p)) return { owed: [], weighed: [] };
+  const p = join38(root, DUTIES_REL);
+  if (!existsSync26(p)) return { owed: [], weighed: [] };
   const parsed = JSON.parse(readFileSync21(p, "utf8"));
   if (!parsed || !Array.isArray(parsed.owed) || !Array.isArray(parsed.weighed)) throw new Error(`${DUTIES_REL} is not a {owed, weighed} object`);
   return parsed;
 }
 function readSessionEvents(root) {
-  const p = join37(root, EVENTS_REL);
-  if (!existsSync25(p)) return { events: [] };
+  const p = join38(root, EVENTS_REL);
+  if (!existsSync26(p)) return { events: [] };
   try {
     const parsed = JSON.parse(readFileSync21(p, "utf8"));
     if (!Array.isArray(parsed)) return { events: [], error: "it is not a JSON array" };
@@ -15915,7 +16032,7 @@ function newSince(root, base2, paths) {
 function articleDemand(store, root, config, paths, base2, degraded) {
   const exempt = demandExemption(config, loadGeneratedProjections(root));
   const { isUnowned } = ownershipJoin(store, root);
-  let unowned = paths.filter((p) => existsSync25(join37(root, p)) && !exempt(p) && isUnowned(p));
+  let unowned = paths.filter((p) => existsSync26(join38(root, p)) && !exempt(p) && isUnowned(p));
   if (unowned.length) {
     const ignored = gitIgnored(unowned, root);
     if (ignored === null) degraded.push("git check-ignore failed, so ignored files may be named");
@@ -15993,7 +16110,7 @@ function weighDuties(store, records, config, root, at, git) {
   if (queued.length) notices.push(`Sterling settlement: duties the previous turn left unpaid are now queued as maintenance items: ${queued.join(", ")}. Pay them, or drain them with /sterling:drain.`);
   const owed = [];
   const windowStart = isValidAt(git.settled.at) ? git.settled.at : at;
-  const changed = git.candidates.filter((c) => existsSync25(join37(root, c.path)));
+  const changed = git.candidates.filter((c) => existsSync26(join38(root, c.path)));
   const generated = loadGeneratedProjections(root);
   const touched = changed.filter((c) => !IMAGE_BINARY_EXT.test(c.path) && !generated.has(c.path) && !dischargedByCutoff(c.at, cutoffs.capture));
   if (touched.length && !capturedSince(records, windowStart)) {
@@ -16021,11 +16138,11 @@ ${owed.map((d) => `- ${describe(d)}`).join("\n")}`);
   if (degraded.length) notices.push(`Sterling settlement: the article demand was checked with a degraded probe: ${degraded.join("; ")}.`);
   const present = new Set(events.map(eventKey));
   const nextWeighed = [.../* @__PURE__ */ new Set([...state.weighed.filter((k) => present.has(k)), ...fresh.map(eventKey)])];
-  writeJsonAtomic2(join37(root, DUTIES_REL), { owed, weighed: nextWeighed });
+  writeJsonAtomic2(join38(root, DUTIES_REL), { owed, weighed: nextWeighed });
   return { notices };
 }
 function writeJsonAtomic2(path, value) {
-  mkdirSync16(dirname15(path), { recursive: true });
+  mkdirSync17(dirname16(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomUUID6()}.tmp`;
   try {
     writeFileSync12(tmp, JSON.stringify(value));
@@ -16066,7 +16183,7 @@ function createSettle({ openStore, now, launchWorkerFor }) {
     const dispatch = liveDispatch(root);
     let store;
     try {
-      store = openStore(join37(root, ".sterling", "sterling.db"));
+      store = openStore(join38(root, ".sterling", "sterling.db"));
       const minted = mintSettlementReconcile(store, root, git.candidates.map((c) => c.path), at);
       const duties = settleDuties(store, root, git, at, { opener: openStore });
       if (!dispatch.live) writeGitSettled(root, git.next);
@@ -16693,15 +16810,109 @@ function openProjectStore(dbPath) {
 }
 
 // packages/opencode-plugin/src/sync.mjs
-import { homedir as homedir6 } from "node:os";
+import { rmSync as rmSync10 } from "node:fs";
+import { homedir as homedir7 } from "node:os";
+import { join as join40 } from "node:path";
+
+// scripts/hooks/lib/domain-notice.mjs
+import { spawn as spawn3, spawnSync as spawnSync8 } from "node:child_process";
+import { existsSync as existsSync27, readFileSync as readFileSync22 } from "node:fs";
+import { join as join39 } from "node:path";
+var DOMAIN_MAP_TIMEOUT_MS = 3e4;
+function domainMapDue(root, project, env = process.env) {
+  if (env[WORKER_ENV_FLAG] === "1") return null;
+  if (existsSync27(join39(project, DOMAIN_MAP_PENDING_REL))) return "marker";
+  if (!postUpdateApplies(root, project)) return null;
+  const current = readPluginVersion(root);
+  if (!current || !parseVersion(current)) return null;
+  let previous = null;
+  try {
+    previous = readFileSync22(join39(project, SYNC_MARKER_REL), "utf8").trim() || null;
+  } catch {
+  }
+  return previous === null || (compareVersions(current, previous) ?? 1) > 0 ? "sync" : null;
+}
+function mapScript(root) {
+  if (!root) return { error: "the Sterling plugin root is unresolved" };
+  const script = pluginScript(root, "domains.mjs");
+  return existsSync27(script) ? { script } : { error: `${script} is missing` };
+}
+var mapArgs = (script, project) => [script, "--target", project, "--json"];
+function mapResult({ error, signal, status, stdout, stderr }) {
+  if (error) return { error };
+  if (signal) return { error: `killed by ${signal}` };
+  if (status !== 0) return { error: `exit ${status}: ${`${stdout ?? ""}${stderr ?? ""}`.trim().split("\n").slice(-3).join(" | ")}` };
+  try {
+    return parseDomainProposal(stdout);
+  } catch (err) {
+    return { error: `its output could not be read (${err?.message ?? err})` };
+  }
+}
+function runDomainMapAsync(root, project, { nodeBin = process.execPath } = {}) {
+  const { script, error } = mapScript(root);
+  if (error) return Promise.resolve({ error });
+  return new Promise((resolve12) => {
+    let stdout = "";
+    let stderr = "";
+    let spawnError = null;
+    let settled = false;
+    const finish = (r) => {
+      if (settled) return;
+      settled = true;
+      resolve12(mapResult(r));
+    };
+    let child;
+    try {
+      child = spawn3(nodeBin, mapArgs(script, project), { cwd: project, timeout: DOMAIN_MAP_TIMEOUT_MS, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      finish({ error: e.message });
+      return;
+    }
+    child.stdout.setEncoding("utf8").on("data", (d) => stdout += d);
+    child.stderr.setEncoding("utf8").on("data", (d) => stderr += d);
+    child.on("error", (e) => {
+      spawnError = e;
+      if (child.pid === void 0) finish({ error: e.message });
+    });
+    child.on("close", (status, signal) => finish({ error: spawnError?.message, signal, status, stdout, stderr }));
+  });
+}
+function pendingFileNote(path, err) {
+  return ` The pending file ${path} could not be removed (${err?.code ?? err?.message ?? err}), so this check runs again at the next session start; delete it by hand.`;
+}
+function domainNotice(result, { label = "H1", note = "" } = {}) {
+  const HEAD = `DOMAIN MAP (${label}, once after the Sterling update):`;
+  if (result.error) {
+    return {
+      warning: "\u26A0 Domain map check after the update could not run \u2014 run /sterling:domains. ",
+      context: `
+
+${HEAD} the map could not be computed (${result.error}), so whether this project is missing a domain is unknown. Run /sterling:domains to see it.${note}`
+    };
+  }
+  const registered = (result.registered ? " This project was not in the project registry and is now registered, so other projects' maps list it." : "") + note;
+  if (!result.add.length) return registered ? { warning: "", context: `
+
+${HEAD}${registered}` } : null;
+  const names = result.add.map((a) => `'${a.domain}'`).join(", ");
+  return {
+    warning: `\u26A0 Domain map: this project does not mount ${names} \u2014 run /sterling:domains to see why and add ${result.add.length === 1 ? "it" : "them"} (nothing was changed). `,
+    context: `
+
+${HEAD} the map proposes adding ${names} to this project's mounts. Nothing was applied. Run /sterling:domains to show the map; it adds a domain only after the user agrees.${registered}`
+  };
+}
+
+// packages/opencode-plugin/src/sync.mjs
 function createSessionSync(deps = {}) {
   const getSession = deps.getSession ?? (() => null);
   const now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
   const nodeBin = deps.nodeBin ?? "node";
   const env = deps.env ?? process.env;
-  const home = deps.home ?? homedir6();
+  const home = deps.home ?? homedir7();
   const verdicts = /* @__PURE__ */ new Map();
   const started = deps.started ?? /* @__PURE__ */ new Set();
+  const inFlight = /* @__PURE__ */ new Set();
   const runs = [];
   function report(root, text) {
     try {
@@ -16711,20 +16922,44 @@ function createSessionSync(deps = {}) {
 `);
     }
   }
-  async function run(root, pluginRoot) {
+  async function run(root, pluginRoot, applies) {
+    let due = null;
+    let map = null;
+    let unremoved = "";
     try {
-      const result = await postUpdateSync({ root: pluginRoot, project: root, host: "opencode", env, home, runStep: (r, name, args) => runStepAsync(r, name, args, { nodeBin }) });
-      if (!result) return;
-      logLine(root, `post-update sync: ${result.outcome}`);
-      const tui = result.outcome === "synced" || result.outcome === "failed" ? dashboardLines(root, pluginRoot) : [];
-      report(root, [result.context.replace(/^\n+/, ""), ...tui].join("\n"));
+      due = domainMapDue(pluginRoot, root, env);
+      if (due) map = await runDomainMapAsync(pluginRoot, root, { nodeBin });
+    } catch (e) {
+      map = { error: errText(e) };
+    }
+    if (map && due === "marker") {
+      try {
+        rmSync10(join40(root, DOMAIN_MAP_PENDING_REL), { force: true });
+      } catch (e) {
+        unremoved = pendingFileNote(join40(root, DOMAIN_MAP_PENDING_REL), e);
+        started.add(root);
+      }
+    }
+    const lines = [];
+    let outcome = null;
+    try {
+      const result = applies ? await postUpdateSync({ root: pluginRoot, project: root, host: "opencode", env, home, runStep: (r, name, args) => runStepAsync(r, name, args, { nodeBin }) }) : null;
+      if (result) {
+        outcome = result.outcome;
+        logLine(root, `post-update sync: ${result.outcome}`);
+        const tui = result.outcome === "synced" || result.outcome === "failed" ? dashboardLines(root, pluginRoot) : [];
+        lines.push(result.context.replace(/^\n+/, ""), ...tui);
+      }
     } catch (e) {
       try {
         logLine(root, `post-update sync failed: ${errText(e)}`);
       } finally {
-        report(root, `Sterling: post-update sync FAILED (${errText(e)}); no marker was written, so it retries the next time OpenCode starts. See ${LOG_REL}.`);
+        lines.push(`Sterling: post-update sync FAILED (${errText(e)}); no marker was written, so it retries the next time OpenCode starts. See ${LOG_REL}.`);
       }
     }
+    const notice = map && (due === "marker" || outcome === "synced") ? domainNotice(map, { label: "OpenCode plugin", note: unremoved }) : null;
+    if (notice) lines.push(notice.context.replace(/^\n+/, ""));
+    if (lines.length) report(root, lines.join("\n"));
   }
   function dashboardLines(root, pluginRoot) {
     try {
@@ -16752,20 +16987,20 @@ function createSessionSync(deps = {}) {
     if (started.has(root) || inWorkerChild(env)) return;
     const pluginRoot = deps.sterlingRoot ?? sterlingRoot();
     let applies;
+    let pending;
     try {
       applies = postUpdateApplies(pluginRoot, root);
+      pending = domainMapDue(pluginRoot, root, env) === "marker";
     } catch (e) {
       started.add(root);
       throw e;
     }
-    if (!applies) {
-      started.add(root);
-      return;
-    }
+    if (!applies && !pending) return;
     if (!verdicts.has(sessionID)) verdicts.set(sessionID, isRootSession(root, sessionID));
-    if (!await verdicts.get(sessionID) || started.has(root)) return;
-    started.add(root);
-    runs.push(run(root, pluginRoot));
+    if (!await verdicts.get(sessionID) || started.has(root) || inFlight.has(root)) return;
+    if (applies) started.add(root);
+    inFlight.add(root);
+    runs.push(run(root, pluginRoot, applies).finally(() => inFlight.delete(root)));
   }
   syncOnce.idle = () => Promise.all(runs).then(() => void 0);
   return syncOnce;

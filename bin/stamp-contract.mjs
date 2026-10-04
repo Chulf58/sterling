@@ -5644,6 +5644,13 @@ function renderClaudeText(text, label) {
 var AGENTS_TEMPLATE_REL = "templates/target-agents-md.md";
 var CLAUDE_TEMPLATE_REL = "templates/target-claude-md.md";
 var TEMPLATE_RELS = [AGENTS_TEMPLATE_REL, CLAUDE_TEMPLATE_REL];
+var DOMAINS_LEADS = [
+  "- **A domain is a shared knowledge store for one subject.**",
+  "- **Mount every subject the project works with, its own subject included.**",
+  "- **What not to do:** a Salesforce project",
+  "- **A domain needs a description**",
+  "- **Run `/sterling:domains` to see and change mounts.**"
+];
 var TARGET_LEADS = [
   "- **Reconcile _every affected_ article, not just the primary one**",
   "- **Concept articles \u2014 capture design the moment it settles",
@@ -5704,8 +5711,15 @@ var TARGET_LEADS = [
   // 2026-10-02: Sterling defects are filed as scrubbed GitHub issues through report-issue.mjs
   // (decision projects-file-sterling-issues-as-scrubbed-github-issues-automatically). The bullet
   // already exists in every sibling under this lead, so the REPLACE path carries the new wording.
-  "- **Stamp Sterling's version when reporting on Sterling.**"
+  "- **Stamp Sterling's version when reporting on Sterling.**",
+  // 2026-10-04: the Domains section of AGENTS.md (decision
+  // consumers-learn-domain-mounting-from-agents-md-and-a-domain-check-command). A project
+  // initialized before the section existed has none of these and no heading for them, so the
+  // whole section arrives through TARGET_SECTIONS below; from then on each bullet is an
+  // ordinary tracked lead (replace, hand-tuned refusal, re-insert after the bullet before it).
+  ...DOMAINS_LEADS
 ];
+var TARGET_SECTIONS = [{ heading: "## Domains", before: "## Conventions", leads: DOMAINS_LEADS }];
 var RENAMED_LEADS = /* @__PURE__ */ new Map([
   ["- **Knowledge is born structured.**", ["- **Notes are the user's surface.**"]],
   // 2026-10-01: Sterling's own CLAUDE.md carried these two bullets under shorter leads
@@ -5736,6 +5750,11 @@ function unfencedLineIndexes(lines) {
   for (const [open, close] of fenceSpans(lines)) for (let k = open; k <= close; k++) fenced.add(k);
   return lines.map((_, i) => i).filter((i) => !fenced.has(i));
 }
+function headingIndex(text, heading, { loose = false } = {}) {
+  const lines = text.split("\n");
+  const tail = loose ? " " : " (";
+  return unfencedLineIndexes(lines).find((i) => lines[i].trimEnd() === heading || lines[i].startsWith(`${heading}${tail}`)) ?? -1;
+}
 function extractBlock(text, lead) {
   const lines = text.split("\n");
   const start = unfencedLineIndexes(lines).find((i) => lines[i].startsWith(lead)) ?? -1;
@@ -5762,6 +5781,8 @@ function readTemplateBullets(repoRoot2) {
 
 // scripts/stamp-contract.mjs
 var APPLY = process.argv.includes("--apply");
+var APPLY_INSERTS = !APPLY && process.argv.includes("--apply-inserts");
+var WRITE_INSERTS = APPLY || APPLY_INSERTS;
 var VERBOSE = process.argv.includes("--verbose");
 var onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
@@ -5778,9 +5799,39 @@ var INSERT_AFTER = /* @__PURE__ */ new Map([
   ["- **Solve, don't board.**", ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", "- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Solve, don't board.**"]]
 ]);
+for (const section of TARGET_SECTIONS) {
+  section.leads.forEach((lead, i) => {
+    if (i > 0) INSERT_AFTER.set(lead, section.leads.slice(0, i).reverse());
+  });
+}
 var normalizeEol = (text) => text.replace(/\r\n/g, "\n");
-var detectEol = (text) => text.includes("\r\n") ? "\r\n" : "\n";
-var withEol = (lfText, eol) => eol === "\r\n" ? lfText.replace(/\n/g, "\r\n") : lfText;
+function withOriginalEols(raw, finalLf) {
+  const pieces = raw.split("\n");
+  const oldLines = pieces.map((l, i) => i < pieces.length - 1 && l.endsWith("\r") ? l.slice(0, -1) : l);
+  const oldEols = pieces.map((l, i) => i === pieces.length - 1 ? null : l.endsWith("\r") ? "\r\n" : "\n");
+  const newLines = finalLf.split("\n");
+  const n = oldLines.length;
+  const m = newLines.length;
+  const lcs = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i][j] = oldLines[i] === newLines[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+  const eols = new Array(m).fill(null);
+  for (let i = 0, j = 0; i < n && j < m; ) {
+    if (oldLines[i] === newLines[j] && lcs[i][j] === lcs[i + 1][j + 1] + 1) eols[j++] = oldEols[i++];
+    else if (lcs[i + 1][j] >= lcs[i][j + 1]) i++;
+    else j++;
+  }
+  const fallback = oldEols.find(Boolean) ?? "\n";
+  let out = "";
+  for (let j = 0; j < m - 1; j++) {
+    if (!eols[j]) eols[j] = (j > 0 ? eols[j - 1] : eols.slice(1).find(Boolean)) ?? fallback;
+    out += newLines[j] + eols[j];
+  }
+  return out + newLines[m - 1];
+}
 function itemEnd(text, start) {
   const lines = text.split("\n");
   const spans = fenceSpans(lines);
@@ -5824,35 +5875,95 @@ try {
 var selfPath = realpathSync2(repoRoot);
 var results = [];
 var drift = 0;
+var inSync = 0;
+function record(r) {
+  results.push(r);
+  if (r.status !== "processed") {
+    console.log(`\u2717 ${r.project}: ${r.status} (${r.detail})`);
+    return;
+  }
+  const notable = r.actions.filter((a) => a.action !== "matches");
+  if (!notable.length) {
+    inSync++;
+    if (!VERBOSE) return;
+  }
+  console.log(`${r.actions.some((a) => a.action.includes("REFUSED")) ? "\u2717" : "\u2022"} ${r.project} (${r.file})`);
+  for (const a of VERBOSE ? r.actions : notable) {
+    console.log(`    ${a.action}  ${a.lead.slice(0, 60)}\u2026`);
+    if (a.detail) console.log(`      ${a.detail}`);
+    if (a.have) console.log(`      sibling text (hand-tuned, NOT touched):
+      ${a.have.split("\n").join("\n      ")}`);
+  }
+}
+var UNWRITTEN = { updated: "would_update", inserted: "would_insert", renamed: "would_rename", section_inserted: "would_insert_section" };
 for (const p of projects) {
   const repo = p.repo_path;
   if (onlyProjects.length && !onlyProjects.includes(resolve2(repo))) continue;
   if (!existsSync3(repo)) {
-    results.push({ project: p.name, status: "missing_path", detail: repo });
+    record({ project: p.name, status: "missing_path", detail: repo });
     continue;
   }
   if (realpathSync2(repo) === selfPath) continue;
   const agentsMd = join6(repo, "AGENTS.md");
   const claudeMd = join6(repo, "CLAUDE.md");
   if (!existsSync3(agentsMd)) {
-    results.push({ project: p.name, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node scripts/init.mjs --target ${repo}` });
+    record({ project: p.name, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node scripts/init.mjs --target ${repo}` });
     drift++;
     continue;
   }
   if (!existsSync3(claudeMd)) {
-    results.push({ project: p.name, status: "no_claude_md", detail: claudeMd });
+    record({ project: p.name, status: "no_claude_md", detail: claudeMd });
     drift++;
     continue;
   }
   const loadSibling = (path) => {
     const raw = readFileSync4(path, "utf8");
-    return { path, eol: detectEol(raw), text: normalizeEol(raw) };
+    const text = normalizeEol(raw);
+    return { path, raw, original: text, text };
   };
   const siblingFiles = /* @__PURE__ */ new Map([[AGENTS_TEMPLATE_REL, loadSibling(agentsMd)], [CLAUDE_TEMPLATE_REL, loadSibling(claudeMd)]]);
   const actions = [];
   const VALID_ANCHOR = /* @__PURE__ */ new Set(["matches", "updated", "would_update", "inserted", "would_insert", "renamed", "would_rename"]);
   const outcome = (lead) => [...actions].reverse().find((a) => a.lead === lead)?.action;
+  const sectionRefused = /* @__PURE__ */ new Set();
+  for (const section of TARGET_SECTIONS) {
+    const home = leadLayer.get(section.leads[0]);
+    const target = siblingFiles.get(home);
+    if (section.leads.some((lead) => [...siblingFiles.values()].some((f) => extractBlock(f.text, lead)))) continue;
+    const label = `${section.heading} (section)`;
+    const own = headingIndex(target.text, section.heading, { loose: true });
+    if (own !== -1) {
+      actions.push({
+        lead: label,
+        action: "SECTION_HEADING_WITHOUT_BULLETS_REFUSED",
+        file: layerFileName(home),
+        detail: `${layerFileName(home)} already has a '${target.text.split("\n")[own].trim()}' heading and none of the '${section.heading}' bullets. To get Sterling's section, rename that heading and re-run; or copy the bullets from ${home} under it.`
+      });
+      drift++;
+      for (const lead of section.leads) sectionRefused.add(lead);
+      continue;
+    }
+    const at = headingIndex(target.text, section.before);
+    if (at === -1) {
+      actions.push({
+        lead: label,
+        action: "SECTION_ANCHOR_MISSING_REFUSED",
+        file: layerFileName(home),
+        detail: `${layerFileName(home)} has no '${section.before}' heading to put the section before. Copy the '${section.heading}' section from ${home} to where it belongs and re-run.`
+      });
+      drift++;
+      for (const lead of section.leads) sectionRefused.add(lead);
+      continue;
+    }
+    const lines = target.text.split("\n");
+    const block = [section.heading, "", ...section.leads.flatMap((lead) => current.get(lead).split("\n")), ""];
+    if (at > 0 && lines[at - 1].trim() !== "") block.unshift("");
+    lines.splice(at, 0, ...block);
+    target.text = lines.join("\n");
+    actions.push({ lead: label, action: WRITE_INSERTS ? "section_inserted" : "would_insert_section", file: layerFileName(home) });
+  }
   for (const lead of TARGET_LEADS) {
+    if (sectionRefused.has(lead)) continue;
     const home = leadLayer.get(lead);
     const other = TEMPLATE_RELS.find((rel) => rel !== home);
     const want = current.get(lead);
@@ -5875,9 +5986,11 @@ for (const p of projects) {
         continue;
       }
       if (variants.get(lead).has(found.block)) {
-        const lines = target.text.split("\n");
-        lines.splice(found.start, found.end - found.start, ...want.split("\n"));
-        target.text = lines.join("\n");
+        if (!APPLY_INSERTS) {
+          const lines = target.text.split("\n");
+          lines.splice(found.start, found.end - found.start, ...want.split("\n"));
+          target.text = lines.join("\n");
+        }
         actions.push({ lead, action: APPLY ? "updated" : "would_update", file: layerFileName(home) });
       } else {
         actions.push({ lead, action: "HAND_TUNED_REFUSED", file: layerFileName(home), have: found.block });
@@ -5891,9 +6004,11 @@ for (const p of projects) {
       if (!oldFound) continue;
       renamed = true;
       if (variants.get(oldLead).has(oldFound.block)) {
-        const lines = target.text.split("\n");
-        lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split("\n"));
-        target.text = lines.join("\n");
+        if (!APPLY_INSERTS) {
+          const lines = target.text.split("\n");
+          lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split("\n"));
+          target.text = lines.join("\n");
+        }
         actions.push({ lead, action: APPLY ? "renamed" : "would_rename", file: layerFileName(home) });
       } else {
         actions.push({ lead, action: "HAND_TUNED_REFUSED", file: layerFileName(home), have: oldFound.block });
@@ -5902,47 +6017,43 @@ for (const p of projects) {
       break;
     }
     if (renamed) continue;
-    const anchor = (INSERT_AFTER.get(lead) ?? []).filter((a) => VALID_ANCHOR.has(outcome(a))).map((a) => extractBlock(target.text, a)).find(Boolean);
+    const anchor = (INSERT_AFTER.get(lead) ?? []).filter((a) => VALID_ANCHOR.has(outcome(a))).map((a) => extractBlock(target.text, a) ?? (RENAMED_LEADS.get(a) ?? []).map((old) => extractBlock(target.text, old)).find(Boolean)).find(Boolean);
     if (anchor) {
       const lines = target.text.split("\n");
       lines.splice(itemEnd(target.text, anchor.start), 0, ...want.split("\n"));
       target.text = lines.join("\n");
-      actions.push({ lead, action: APPLY ? "inserted" : "would_insert", file: layerFileName(home) });
+      actions.push({ lead, action: WRITE_INSERTS ? "inserted" : "would_insert", file: layerFileName(home) });
       continue;
     }
     actions.push({ lead, action: "ANCHOR_MISSING_REFUSED", file: layerFileName(home) });
     drift++;
   }
-  const dirty = actions.some((a) => ["updated", "inserted", "renamed"].includes(a.action));
-  if (APPLY && dirty) {
-    for (const { path, text, eol } of siblingFiles.values()) writeFileSync(path, withEol(text, eol));
+  if (WRITE_INSERTS) {
+    for (const [rel, f] of siblingFiles) {
+      if (f.text === f.original) continue;
+      try {
+        writeFileSync(f.path, withOriginalEols(f.raw, f.text));
+      } catch (err) {
+        const file = layerFileName(rel);
+        for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
+        actions.push({
+          lead: `${file} (write)`,
+          action: "WRITE_FAILED_REFUSED",
+          file,
+          detail: `${f.path} could not be written (${err?.code ?? "error"}: ${err?.message ?? err}). Nothing in it was changed; make the file writable and re-run.`
+        });
+        drift++;
+      }
+    }
   }
-  results.push({ project: p.name, status: "processed", file: `${agentsMd} + ${claudeMd}`, actions });
-}
-var inSync = 0;
-for (const r of results) {
-  if (r.status !== "processed") {
-    console.log(`\u2717 ${r.project}: ${r.status} (${r.detail})`);
-    continue;
-  }
-  const notable = r.actions.filter((a) => a.action !== "matches");
-  if (!notable.length) {
-    inSync++;
-    if (!VERBOSE) continue;
-  }
-  console.log(`${r.actions.some((a) => a.action.includes("REFUSED")) ? "\u2717" : "\u2022"} ${r.project} (${r.file})`);
-  for (const a of VERBOSE ? r.actions : notable) {
-    console.log(`    ${a.action}  ${a.lead.slice(0, 60)}\u2026`);
-    if (a.have) console.log(`      sibling text (hand-tuned, NOT touched):
-      ${a.have.split("\n").join("\n      ")}`);
-  }
+  record({ project: p.name, status: "processed", file: `${agentsMd} + ${claudeMd}`, actions });
 }
 var processed = results.filter((r) => r.status === "processed").length;
 console.log(
   `
-${APPLY ? "APPLIED" : "DRY-RUN (no writes; pass --apply)"} \u2014 ${processed} project(s) processed, ${inSync} already in sync, ${drift} refusal(s).` + (!VERBOSE && inSync ? " Pass --verbose to list the in-sync bullets." : "")
+${APPLY ? "APPLIED" : APPLY_INSERTS ? "INSERTS APPLIED (new text only; existing wording is never replaced without --apply)" : "DRY-RUN (no writes; pass --apply)"} \u2014 ${processed} project(s) processed, ${inSync} already in sync, ${drift} refusal(s).` + (!VERBOSE && inSync ? " Pass --verbose to list the in-sync bullets." : "")
 );
 if (drift) {
-  console.error("stamp-contract: drift refused above \u2014 resolve by hand (the sibling text differs from every template version) and re-run.");
+  console.error("stamp-contract: refused above \u2014 resolve each by hand (sibling text that differs from every template version, a missing anchor, or a file that could not be written) and re-run.");
   process.exit(2);
 }

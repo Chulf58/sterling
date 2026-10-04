@@ -8303,6 +8303,7 @@ if (!project) {
   if (parent) notes.push(`this folder is inside the Sterling project at ${fwd(parent)}. Run the command from there, or pass --target "${fwd(parent)}" for a report on it.`);
 }
 var rows = [];
+var registeredByThisRun = false;
 var hasStore = project ? existsSync4(join6(projectDir, ".sterling", "sterling.db")) : false;
 if (existsSync4(registryPath()) || hasStore) {
   const registry = new ProjectRegistry(registryPath());
@@ -8319,6 +8320,7 @@ if (existsSync4(registryPath()) || hasStore) {
           at: (/* @__PURE__ */ new Date()).toISOString()
         });
         rows = registry.list();
+        registeredByThisRun = true;
         notes.push(`${projectName} was not in the project registry (it was initialized by a Sterling version from before the registry, or on another machine or user). It is now registered by this command, so other projects' maps list it; its init dates in /sterling:projects are the time of this registration.`);
       } else {
         notes.push(`${projectName} is not registered: it has no .sterling/sterling.db, so it is not an initialized project. Run /sterling:init here to register it.`);
@@ -8350,7 +8352,7 @@ var projects = rows.map((p) => {
 var current = project ? { name: projectName, path: currentPath, stack_tags: project.config.stack_tags } : null;
 if (!opts.apply) {
   const map = buildDomainMap({ stores: listStores(), projects, current, notes });
-  if (opts.json) console.log(JSON.stringify(map, null, 2));
+  if (opts.json) console.log(JSON.stringify({ ...map, registered_by_this_run: registeredByThisRun }, null, 2));
   else {
     console.log("Knowledge domains on this machine, for this user");
     console.log("");

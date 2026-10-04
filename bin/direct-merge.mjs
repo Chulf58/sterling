@@ -8199,8 +8199,15 @@ function openProject(cwd = process.cwd()) {
 
 // scripts/lib/branch-manager.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-function git(cwd, args, { allowFail = false } = {}) {
-  const r = spawnSync2("git", args, { cwd, encoding: "utf8", timeout: 6e4 });
+function git(cwd, args, { allowFail = false, treeWrite = false } = {}) {
+  if (treeWrite) {
+    console.error(`branch-manager: running \`git ${args[0]}\` with no time limit; this can take minutes on a slow drive; do not interrupt it.`);
+  }
+  const r = spawnSync2("git", args, {
+    cwd,
+    encoding: "utf8",
+    ...treeWrite ? { maxBuffer: Infinity, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } } : { timeout: 6e4 }
+  });
   if (r.status !== 0 && !allowFail) {
     const spawnState = r.error ? `spawn-error ${r.error.code ?? r.error.message}` : r.signal ? `killed by ${r.signal}` : `exit ${r.status}`;
     throw new Error(`git ${args.join(" ")} failed (${spawnState}): ${(r.stderr || r.stdout || "").trim()}`);
@@ -8221,6 +8228,59 @@ function defaultBranch(cwd) {
   }
   throw new Error("branch-manager: cannot determine the default branch (no origin/HEAD, no main, no master) \u2014 pass --into");
 }
+function repoStateReport({ cwd, branch: branch2, step }) {
+  const read = (args) => {
+    const r = spawnSync2("git", args, { cwd, encoding: "utf8", timeout: 6e4, maxBuffer: Infinity });
+    return r.error || r.signal ? null : r;
+  };
+  const sym = read(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const onBranch = sym === null ? null : sym.status === 0 ? sym.stdout.trim() : "(detached HEAD)";
+  const headR = read(["rev-parse", "HEAD"]);
+  const head = headR?.status === 0 ? headR.stdout.trim() : null;
+  const mergeR = read(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]);
+  const mergeHead = mergeR?.status === 0 ? true : mergeR?.status === 1 ? false : null;
+  const statusR = read(["status", "--porcelain"]);
+  const changed2 = statusR?.status === 0 ? statusR.stdout.split("\n").filter(Boolean).length : null;
+  const unknown = "unknown (git could not answer)";
+  const lines = [
+    `REPO STATE after the failed \`git ${step}\` (nothing was reset or discarded for you):`,
+    `  branch:     ${onBranch ?? unknown}`,
+    `  HEAD:       ${head ?? unknown}`,
+    `  MERGE_HEAD: ${mergeHead === null ? unknown : mergeHead ? "present (a merge is in progress)" : "absent"}`,
+    `  changed paths: ${changed2 === null ? unknown : `${changed2} (git status --porcelain)`}`
+  ];
+  if (changed2 === 0 && mergeHead === false) {
+    lines.push(
+      onBranch === branch2 ? `The working tree is clean and still on ${branch2}. Nothing to recover.` : `The working tree is clean. Return to the branch with: git checkout ${branch2}`
+    );
+    return lines.join("\n");
+  }
+  const here = onBranch ?? "the checked-out branch";
+  if (mergeHead === true) {
+    lines.push(
+      `\`git ${step}\` stopped on conflicts: a merge of ${branch2} is in progress on ${here}.`,
+      `Do NOT \`git add\` or commit here: that would finish the conflicted merge on ${here}.`,
+      `Abort it and go back to ${branch2} (this discards the conflict markers; every commit on ${branch2} is intact):`,
+      "  git merge --abort"
+    );
+  } else {
+    lines.push(
+      `Do NOT \`git add\` or commit here until \`git status --short\` prints nothing: the changed paths were`,
+      `partly written by the failed \`git ${step}\`, they are not your edits, and committing them puts a half-merge on ${here}.`,
+      `Recover (this discards the partly written files; every commit on ${branch2} is intact):`
+    );
+    if (mergeHead === null) lines.push("  git merge --abort        (only if a merge is in progress; git says so if not)");
+  }
+  lines.push(
+    `  git checkout -f ${branch2}`,
+    "If `git status --short` then still lists `??` paths, git wrote them (the merge only starts on a tree",
+    "with no untracked paths). List them, then remove them:",
+    "  git clean -nd",
+    "  git clean -fd",
+    mergeHead === true ? `Once \`git status --short\` prints nothing, resolve the conflicts on ${branch2} (merge ${here} into it, fix them, commit), then rerun the merge.` : "Once `git status --short` prints nothing, rerun the merge."
+  );
+  return lines.join("\n");
+}
 function mergeBranchInto({ cwd, branch: branch2, into: into2, message }) {
   const status = git(cwd, ["status", "--porcelain"]);
   if (status) {
@@ -8237,8 +8297,17 @@ function mergeBranchInto({ cwd, branch: branch2, into: into2, message }) {
     }
     throw new Error(parts.join("\n"));
   }
-  git(cwd, ["checkout", into2]);
-  git(cwd, ["merge", "--no-ff", branch2, "-m", message ?? `Merge ${branch2} into ${into2}`]);
+  for (const args of [
+    ["checkout", into2],
+    ["merge", "--no-ff", branch2, "-m", message ?? `Merge ${branch2} into ${into2}`]
+  ]) {
+    try {
+      git(cwd, args, { treeWrite: true });
+    } catch (e) {
+      throw new Error(`${e.message}
+${repoStateReport({ cwd, branch: branch2, step: args[0] })}`);
+    }
+  }
   git(cwd, ["branch", "-d", branch2]);
   return { merged_into: into2, branch_merged: branch2 };
 }
@@ -8513,6 +8582,7 @@ function defaultExec(cmd, args, { cwd, timeout = STEP_TIMEOUT_MS } = {}) {
 }
 var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed-By-Agent", "review-ledger", "frozen-test"]);
 var UPDATE_MARKER_RELATIVE_PATH = join7(".sterling", "update-complete.json");
+var DOMAIN_MAP_PENDING_REL = join7(".sterling", "domain-map-pending");
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
