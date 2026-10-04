@@ -834,7 +834,8 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     if (normPath(project.repo_path) === normPath(cwd)) {
       log("▸ the clone's contract files are hand-maintained — not checked");
     } else if (existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
-      const contract = step('contract drift in the invoking project (stamp-contract, dry run)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--project', project.repo_path], {
+      // --apply-inserts: see the sibling-projects step below.
+      const contract = step('contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', project.repo_path], {
         show: true,
         tolerate: true,
       });
@@ -1301,14 +1302,18 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
 
-  // Read-only: reports AGENTS.md/CLAUDE.md contract drift in sibling projects without
-  // touching them (--apply stays a deliberate act — it rewrites seven repos).
+  // INSERTS ONLY (user-ruled 2026-10-04 through the question form, "Auto-insert, new text
+  // only"): --apply-inserts writes a tracked section or bullet that is entirely absent from
+  // a sibling's AGENTS.md/CLAUDE.md and lists what it inserted; without that, text a newer
+  // template added never reaches a project initialized before it. Existing wording is
+  // reported and never replaced here: the full --apply stays a deliberate act (it rewrites
+  // seven repos), and hand-tuned text is still refused.
   // TOLERATED because a sibling's AGENTS.md/CLAUDE.md must never abort THIS clone's update —
   // but tolerated is not the same as unseen: the step's own block sits between
   // build/test/check output, so its verdict is repeated in the closing summary
   // where it cannot scroll past (P1/P5). stamp-contract exits 2 on refusal.
   if (opts.projects !== false && existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
-    const contract = step('contract drift in sibling projects (stamp-contract, dry run)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs')], {
+    const contract = step('contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts'], {
       show: true,
       tolerate: true,
     });
