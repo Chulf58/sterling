@@ -185,3 +185,79 @@ export function toRepoRelative(absolutePath: string, repoRoot: string): string {
   }
   return normalizeRepoPath(abs.slice(root.length + 1));
 }
+
+// reference_material.location — ONE classifier (invariant 1), imported by the
+// schema's write transform, the file_key extractor and the server's read-time
+// refresh_reference check. A location is free text that is only SOMETIMES a
+// repo path: treating every one as a path collapsed 'https://' to 'https:/' on
+// write (issue #14) and called URLs and prose "no longer exists on disk"
+// (issue #13).
+
+/**
+ * A scheme of two or more characters and ':' with the rest attached: 'https://…',
+ * 'mailto:a@b.com', 'urn:isbn:1', 'jira:ABC-12', 's3:/bucket/key'. One character
+ * is a Windows drive ('c:/docs'), never a scheme; 'Note: ask the team' has a
+ * space after the colon and is prose.
+ */
+const SCHEME_LOCATION = /^[a-z][a-z0-9+.-]+:(\S|$)/i;
+/**
+ * A web URL whose '//' an earlier write collapsed to '/' (issue #14 damage).
+ * Only http, https and ftp: 'file:/tmp/x' and 's3:/bucket/key' are legitimate
+ * single-slash forms, not damage.
+ */
+const COLLAPSED_URL_LOCATION = /^(https?|ftp):\/[^/]/i;
+/** With whitespace, a path has a separator and ends in a file extension. */
+const HAS_SEPARATOR = /[\\/]/;
+const ENDS_IN_EXTENSION = /\.[A-Za-z0-9]{1,8}$/;
+
+export type LocationKind = 'url' | 'prose' | 'path';
+
+/** Is this location a web URL whose scheme separator was collapsed to a single slash? */
+export function isCollapsedUrlLocation(location: string): boolean {
+  return COLLAPSED_URL_LOCATION.test(location.trim());
+}
+
+/**
+ * THE rule for what a reference_material location is, decided on the trimmed
+ * text alone (no filesystem, no network), first match wins:
+ *   1. 'url'   — it starts with a scheme of two or more characters and ':'
+ *                (SCHEME_LOCATION); a collapsed 'https:/host' is one too.
+ *   2. 'path'  — it has no whitespace; or it has whitespace, contains '/' or
+ *                '\', ends in a file extension and mentions no '://'
+ *                ('docs/Design Notes/spec.md').
+ *   3. 'prose' — everything else with whitespace ("See the vendor portal,
+ *                section 4").
+ * Two limits, both accepted: a sentence that ends in a file path ("see
+ * docs/foo.md") reads as a path, and one prose word with no whitespace
+ * ("Confluence") reads as a path. A file whose own name starts 'word:'
+ * reads as a url. 'path' does NOT mean repo-relative — an absolute or
+ * parent-escaping one is still a path; repoPathOfLocation answers that.
+ */
+export function classifyLocation(location: string): LocationKind {
+  const text = location.trim();
+  if (SCHEME_LOCATION.test(text)) return 'url';
+  if (!/\s/.test(text)) return 'path';
+  return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes('://') ? 'path' : 'prose';
+}
+
+/**
+ * The normalized repo-relative path a location names, or undefined when it
+ * names none: a URL, prose, or a path that is absolute, drive-prefixed or
+ * parent-escaping (an external document, never repo-located).
+ */
+export function repoPathOfLocation(location: string): string | undefined {
+  if (classifyLocation(location) !== 'path') return undefined;
+  try {
+    return normalizeRepoPath(location.trim());
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The stored form of a location: a repo-relative path is normalized (invariant
+ * 2); a URL, prose and an external path are kept exactly as given.
+ */
+export function normalizeLocation(location: string): string {
+  return repoPathOfLocation(location) ?? location;
+}
