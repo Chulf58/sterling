@@ -8,7 +8,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -739,6 +739,11 @@ const UNPROMOTABLE_TYPES = ['feature_article', 'todo', 'attestation'];
  *  project-scoped (decision projects-mount-domains-and-sibling-projects). A
  *  reference_material's doc `location` is deliberately not counted: the ruling
  *  names file_keys, and domain-scoped doc references already exist. */
+/** The field declaredRepoPaths reads for a type: what the domain-scope refusal and knowledge_schema both name. */
+function declaredRepoPathsField(type: string): string {
+  return type === 'feature_article' ? 'files' : 'file_keys';
+}
+
 function declaredRepoPaths(type: string, record: Record<string, unknown>): string[] {
   if (type === 'feature_article') {
     return ((record.files as { path?: unknown }[] | undefined) ?? []).map((f) => f?.path).filter((p): p is string => typeof p === 'string');
@@ -1362,6 +1367,30 @@ export const CREATE_DEFAULTED_FIELDS: readonly string[] = ['author', 'links', 's
  * refusal is operation-aware: creation-only input, immutable afterwards.
  */
 const MUTATION_REFUSED_FIELDS: readonly string[] = ['scope'];
+
+/**
+ * The create-time directive that lets a near-duplicate through, and the one
+ * type whose create runs the near-duplicate refusal. Read by knowledgeCreate,
+ * by server.ts's typed create variants and by knowledge_schema's `rules`, so
+ * the three cannot name different things.
+ */
+export const DEDUP_OVERRIDE_FIELD = 'dedup_override';
+const DEDUP_GUARDED_TYPE = 'anti_pattern';
+
+/**
+ * The types whose EXPLICIT slug is refused at create when another record holds
+ * it, with the sentence knowledge_schema prints on `slug`. The first six share
+ * one cross-type namespace (knowledgeCreate's handle branch reads
+ * HANDLE_NAMESPACE_TYPES); feature_article is checked against other articles
+ * in its own branch.
+ */
+const HANDLE_NAMESPACE_TYPES: readonly string[] = ['decision', 'anti_pattern', 'research_finding', 'open_question', 'attestation', 'todo'];
+const SLUG_COLLISION_CONDITIONS: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(
+    HANDLE_NAMESPACE_TYPES.map((t) => [t, 'An explicit slug that any record already holds is refused: slugs are one namespace across record types. Omit it to have one derived.'])
+  ),
+  feature_article: 'A slug that another feature_article already holds is refused.',
+};
 
 /**
  * elementOwnsScalar — the ONE ownership predicate shared by every
@@ -3625,7 +3654,7 @@ export class SterlingTools {
    */
   knowledgeSchema(
     type: string
-  ): { type: string; fields: (FieldShape & { server_owned?: boolean; consumed_by?: string })[]; required: string[]; optional: string[] } {
+  ): { type: string; fields: (FieldShape & { server_owned?: boolean; consumed_by?: string })[]; required: string[]; optional: string[]; rules: string[] } {
     const described = schemaFor(type);
     if (!described) {
       throw new Error(`knowledge_schema: '${type}' is not a registered record type. Registered: ${Object.keys(RECORD_TYPES).sort().join(', ')}.`);
@@ -3660,11 +3689,52 @@ export class SterlingTools {
           ? { ...f, ...withConsumer, required: false }
           : { ...f, ...withConsumer };
     });
+    // RULES THE WRITE PATH ENFORCES ABOVE THE ZOD SCHEMA (finding
+    // knowledge-schema-describes-field-shapes-only-enforced-rules-undescribed-october-2026).
+    // Each sentence is keyed off the constant or function the refusal itself
+    // reads, so a rule that moves takes its description with it.
+    //
+    // `type` is the one server_owned field a create must still carry: the MCP
+    // tool takes it as the discriminator of `fields` and strips it before
+    // knowledgeCreate, which refuses it like the rest of the envelope.
+    addFieldCondition(
+      fields,
+      'type',
+      `knowledge_create requires fields.type set to '${described.type}', equal to its outer type argument: it selects this schema. Fixed afterwards: every other write refuses it.`
+    );
+    for (const name of MUTATION_REFUSED_FIELDS) {
+      addFieldCondition(fields, name, 'Creation-only: knowledge_create routes the record by it, and every later write refuses it.');
+    }
+    const slugRule = SLUG_COLLISION_CONDITIONS[described.type];
+    if (slugRule) addFieldCondition(fields, 'slug', slugRule);
+    addFieldCondition(
+      fields,
+      'links[].rel',
+      `${WRITE_REFUSED_LINK_RELS.map((rel) => `'${rel}'`).join(', ')} is refused on knowledge_create and as a new entry on knowledge_update: use knowledge_supersede, which also retires the old record.`
+    );
+    // The path refusals the tool layer adds to the schema's own. The fields are
+    // found by running the type's example record through the same two
+    // functions the create path runs, so there is no list of path fields here.
+    const exampleRecord = { ...(exampleRecordFor(described.type) ?? {}), type: described.type };
+    const pathExtras = new Map<string, string[]>();
+    const addPathExtra = (path: string, text: string): void => void pathExtras.set(path, [...(pathExtras.get(path) ?? []), text]);
+    for (const claim of SterlingTools.claimedPaths(exampleRecord)) addPathExtra(claim.field, 'an existing directory');
+    if (declaredRepoPaths(described.type, exampleRecord).length) {
+      addPathExtra(declaredRepoPathsField(described.type), 'any path when scope is domain:<name>');
+    }
+    for (const [path, extras] of pathExtras) addFieldCondition(fields, path, `Also refused: ${extras.join('; ')}.`);
+    const rules = [
+      `${DEDUP_OVERRIDE_FIELD}: true is accepted in the fields of every knowledge_create; it is a directive and is never stored.`,
+      ...(described.type === DEDUP_GUARDED_TYPE
+        ? [`A new ${DEDUP_GUARDED_TYPE} that overlaps an existing one is refused unless ${DEDUP_OVERRIDE_FIELD}: true is set.`]
+        : []),
+    ];
     // The split lists are redundant with `fields` on purpose — "what must I
     // supply" is the actual question, and making the reader filter the array to
     // answer it is how the guessing starts.
     return {
       type: described.type,
+      rules,
       fields,
       required: fields.filter((f) => f.required && !serverOwned.has(f.name)).map((f) => f.name),
       optional: fields.filter((f) => !f.required && !serverOwned.has(f.name)).map((f) => f.name),
@@ -3793,8 +3863,8 @@ export class SterlingTools {
     // target_id past this resolution.
     candidate.links = this.resolveLinksTargets(candidate.links, 'knowledge_create') ?? [];
     // dedup_override is a create-time directive, never a stored field
-    const dedupOverride = candidate.dedup_override === true;
-    delete candidate.dedup_override;
+    const dedupOverride = candidate[DEDUP_OVERRIDE_FIELD] === true;
+    delete candidate[DEDUP_OVERRIDE_FIELD];
     // validate BEFORE any dedup logic: a schema-invalid candidate gets the
     // schema error, never a dedup refusal (board 3f9591e9 defect 3); unknown
     // types fall through to store.create for its canonical rejection.
@@ -3825,7 +3895,7 @@ export class SterlingTools {
     if (scopeValue.startsWith('domain:')) {
       const paths = declaredRepoPaths(type, parsed);
       if (paths.length) {
-        const field = type === 'feature_article' ? 'files' : 'file_keys';
+        const field = declaredRepoPathsField(type);
         throw new Error(
           `knowledge_create: scope '${scopeValue}' is a shared domain store, and this ${type} declares repo paths in ${field} ` +
             `(${paths.slice(0, 5).join(', ')}${paths.length > 5 ? ', …' : ''}). A record about this repo's files stays scope 'project'; ` +
@@ -3859,7 +3929,7 @@ export class SterlingTools {
     }
     const skipped: SkippedCheck[] = [];
 
-    if (type === 'anti_pattern') {
+    if (type === DEDUP_GUARDED_TYPE) {
       // dedup guard (§3.2.2): an overlapping anti_pattern is REFUSED LOUD, never
       // silently merged — a wrong merge costs the whole lesson (2026-07-04: a
       // distinct lesson was swallowed on one shared file_key, board 3f9591e9);
@@ -3947,14 +4017,7 @@ export class SterlingTools {
     // `todo` a namespace of its own, which is exactly the read-time ambiguity
     // de1a7329 rejected. Its headline comes from mintHeadlineOf (a board item
     // has no title field; see todoHeadline).
-    if (
-      type === 'decision' ||
-      type === 'anti_pattern' ||
-      type === 'research_finding' ||
-      type === 'open_question' ||
-      type === 'attestation' ||
-      type === 'todo'
-    ) {
+    if (HANDLE_NAMESPACE_TYPES.includes(type)) {
       const explicit = (parsed as { slug?: string }).slug;
       if (explicit) {
         if (this.slugHolders(explicit).length) {
@@ -9979,7 +10042,7 @@ export class SterlingTools {
     // nothing true.
     if (source === 'user' && !(res.record as unknown as { slug?: string }).slug) {
       notices.push(
-        `no handle could be derived from this item's headline — it slugifies to nothing (non-Latin script, digits or symbols only), so this item has no readable name and can be cited only by its id; give it one via board_add {slug: "<handle>"} on a re-add, or lead the text with a Latin-script headline line`
+        `no handle could be derived from this item's headline — it slugifies to nothing (non-Latin script, digits or symbols only), so this item has no readable name and can be cited only by its id; board_add takes no slug and a later edit never mints one, so to give it a name remove it and add it again with a Latin-script headline as its first line`
       );
     }
     if (notices.length) return { ...res, notice: notices.join(' | ') };
