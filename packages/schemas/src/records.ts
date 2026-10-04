@@ -65,6 +65,12 @@ const notApplicableExemptionSchema = z
   })
   .strict();
 
+// The article_kind values, and the subset that may use the not_applicable
+// exemption. Exported once: the superRefine refusal below, knowledge_schema's
+// field condition (schemaFor) and the tests all read these, so they cannot drift.
+export const ARTICLE_KINDS = ['feature', 'probe', 'tool', 'concept'] as const;
+export const NOT_APPLICABLE_EXEMPT_KINDS: readonly (typeof ARTICLE_KINDS)[number][] = ['probe', 'tool'];
+
 const currentAcItemSchema = z.object({
   ac_id: z.string().min(1),
   text: z.string().min(1),
@@ -222,7 +228,7 @@ export const featureArticleSchema = base
     // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
     // axis, subsuming concept_family's role there — concept_family itself is
     // untouched, kept for compatibility (see below).
-    article_kind: z.enum(['feature', 'probe', 'tool', 'concept']).default('feature'),
+    article_kind: z.enum(ARTICLE_KINDS).default('feature'),
     // Union with the structured not_applicable exemption (see
     // notApplicableExemptionSchema above) — acceptance of the exemption
     // branch, and rejection of an empty array, are both gated BY KIND in the
@@ -281,7 +287,7 @@ export const featureArticleSchema = base
     // live_test_refs/current_ac is gated by article_kind — accepted ONLY on
     // probe|tool, and on probe|tool an empty array is rejected outright (both
     // are honest-ceremony rules a single field's shape cannot express alone).
-    const exemptKind = rec.article_kind === 'probe' || rec.article_kind === 'tool';
+    const exemptKind = NOT_APPLICABLE_EXEMPT_KINDS.includes(rec.article_kind);
     const isExempt = (v: unknown): boolean => typeof v === 'object' && v !== null && !Array.isArray(v) && 'not_applicable' in (v as Record<string, unknown>);
     const gated: Array<[('live_test_refs' | 'current_ac'), unknown, string]> = [
       ['live_test_refs', rec.live_test_refs, 'real content (ac_id/test_paths)'],
@@ -293,7 +299,7 @@ export const featureArticleSchema = base
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: [field],
-          message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} — only kind probe/tool may; other kinds must supply real content`,
+          message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} — only kind ${NOT_APPLICABLE_EXEMPT_KINDS.join('/')} may; other kinds must supply real content`,
         });
       }
       if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
@@ -1192,6 +1198,14 @@ export interface FieldShape {
    */
   element_fields?: FieldShape[];
   /**
+   * Present only when the field's accepted shape depends on another field of
+   * the same record, which the type string alone cannot say (GitHub issue #15:
+   * current_ac and live_test_refs read `{...}[] | {not_applicable}` while the
+   * `{not_applicable}` branch is accepted on only some article_kind values).
+   * Plain words, derived from the same constants the validator uses.
+   */
+  condition?: string;
+  /**
    * A concrete, correctly-SHAPED value for this field, DERIVED from the field's
    * own zod node and then PROVEN by it (board 89672420, extending be5e1d04's
    * scalar examples to every field kind). Scalars render bare ('fast',
@@ -1634,6 +1648,21 @@ function describeElementFields(node: unknown, depth = 0): FieldShape[] | undefin
 }
 
 /**
+ * The article_kind condition on feature_article's current_ac and live_test_refs
+ * (GitHub issue #15), built from ARTICLE_KINDS and NOT_APPLICABLE_EXEMPT_KINDS —
+ * the constants the superRefine gate reads — so the words cannot drift from the
+ * refusal. Decision article-kind-marker-gates-structured-na-exemption.
+ */
+function featureArticleFieldConditions(): Record<string, string> {
+  const exempt = NOT_APPLICABLE_EXEMPT_KINDS.join(' or ');
+  const others = ARTICLE_KINDS.filter((k) => !NOT_APPLICABLE_EXEMPT_KINDS.includes(k)).join(', ');
+  const condition =
+    `The {not_applicable: {reason, ruling_record_id?}} form is accepted only when article_kind is ${exempt} ` +
+    `(on those kinds an empty array is refused). Other kinds (${others}) pass an array, which may be [].`;
+  return { current_ac: condition, live_test_refs: condition };
+}
+
+/**
  * The shape of a registered record type, DERIVED from its own zod schema
  * (board 7acfbe48 / feedback §2.7).
  *
@@ -1656,6 +1685,7 @@ function describeElementFields(node: unknown, depth = 0): FieldShape[] | undefin
 export function schemaFor(type: string): { type: string; fields: FieldShape[] } | undefined {
   const shape = objectShapeFor(type);
   if (!shape) return undefined;
+  const conditions = type === 'feature_article' ? featureArticleFieldConditions() : {};
   const fields: FieldShape[] = Object.entries(shape).map(([name, node]) => {
     const described = describeZodDetailed(node);
     const required = !(node as { isOptional?: () => boolean }).isOptional?.();
@@ -1670,6 +1700,7 @@ export function schemaFor(type: string): { type: string; fields: FieldShape[] } 
       type: described.type,
       ...(described.enum_values ? { enum_values: described.enum_values } : {}),
       ...(described.element_fields ? { element_fields: described.element_fields } : {}),
+      ...(conditions[name] ? { condition: conditions[name] } : {}),
       ...(example ? { example } : {}),
     };
   });
