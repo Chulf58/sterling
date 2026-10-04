@@ -25,6 +25,12 @@
 //          domain-scoped finding: the declaration is held, nothing is nagged.
 //   DF-e — capture_pending + a live dispatch + an UNPAID research duty: the
 //          research demand still fires (the declaration covers capture only).
+//   DF-h — a domain record with no ledger line (another project wrote it, or
+//          it predates the ledger) pays neither duty.
+//   DF-i — the ledger line must be inside the window as well as name the id:
+//          this project's OLD line does not let another project's later
+//          update of the same record pay.
+//   DF-j — a ledger that cannot be read is announced and pays nothing.
 //   DF-g — the capture duty reads the domain stores too: a domain-scoped
 //          decision written after the edit discharges it; one written before
 //          the edit does not.
@@ -39,7 +45,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -182,19 +188,33 @@ function domainDecision(domain, at) {
   });
 }
 
+// The domain-write ledger (decision
+// domain-record-duty-credit-comes-from-a-per-project-write-ledger): the line
+// this project's MCP server writes after a domain-scoped write. A domain record
+// pays a duty only when the ledger under this project root has a line for it
+// inside the window; a fixture that only creates the record models a write by
+// ANOTHER project into the shared store.
+const ledgerPath = (dir) => join(dir, '.sterling', 'transient', 'knowledge-writes.jsonl');
+function logWrite(dir, record, at) {
+  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+  appendFileSync(ledgerPath(dir), `${JSON.stringify({ id: record.id, type: record.type, at })}\n`);
+}
+
 const owed = (store, reason) => store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === reason);
 
 test('DF-a (RED before the fix): a research_finding with scope domain:<name>, created after the research event, discharges the research duty', () => {
   const { dir, store, domain, cleanup } = makeProject();
   try {
     writeSessionEvents(dir, [rEvent('genesys webhook signature validation')]);
-    domainFinding(domain, AFTER_EVENT);
+    logWrite(dir, domainFinding(domain, AFTER_EVENT), AFTER_EVENT);
+    const ledgerBefore = readFileSync(ledgerPath(dir), 'utf8');
 
     const r = stopOnce(dir);
     assert.equal(r.code, 0, 'DOMAIN-FINDING-UNSEEN SHAPE if this is 2: the finding lives in the mounted domain store and must pay the research duty');
     assert.doesNotMatch(r.stderr, /research/i, 'no research demand once a domain-scoped finding has landed');
     assert.equal(existsSync(eventsPath(dir)), false, 'the paid duty clears the session-events register');
     assert.equal(owed(store, 'research_owed').length, 0, 'nothing owed');
+    assert.equal(readFileSync(ledgerPath(dir), 'utf8'), ledgerBefore, 'the Stop that clears the registers leaves the write ledger byte-identical');
   } finally {
     cleanup();
   }
@@ -249,7 +269,7 @@ test('DF-d (RED before the fix): with the research duty paid by a domain-scoped 
   try {
     touchRegister(dir, [WORKFILE], TOUCH_AT);
     writeSessionEvents(dir, [rEvent('genesys webhook signature validation'), cpEvent('commit-7f3a9c — rides the pending commit')]);
-    domainFinding(domain, AFTER_EVENT); // after the research event, BEFORE the touch: pays research, not capture
+    logWrite(dir, domainFinding(domain, AFTER_EVENT), AFTER_EVENT); // after the research event, BEFORE the touch: pays research, not capture
     // The live entry owns a file that was not touched, so only the declaration
     // can be what defers WORKFILE.
     writeRegisterRaw(dir, [liveEntry('sub-anon-42', ['src/elsewhere/lane.mjs'])]);
@@ -286,7 +306,7 @@ test('DF-g (RED before the fix): a domain-scoped decision written after the edit
   const early = makeProject();
   try {
     touchRegister(early.dir, [WORKFILE], TOUCH_AT);
-    domainDecision(early.domain, AFTER_EVENT); // before the touch
+    logWrite(early.dir, domainDecision(early.domain, AFTER_EVENT), AFTER_EVENT); // before the touch
     const r = stopOnce(early.dir);
     assert.equal(r.code, 2, 'a domain record older than the edit pays nothing');
     assert.match(r.stderr, /nothing was captured/);
@@ -297,12 +317,78 @@ test('DF-g (RED before the fix): a domain-scoped decision written after the edit
   const late = makeProject();
   try {
     touchRegister(late.dir, [WORKFILE], TOUCH_AT);
-    domainDecision(late.domain, AFTER_TOUCH);
+    logWrite(late.dir, domainDecision(late.domain, AFTER_TOUCH), AFTER_TOUCH);
     const r = stopOnce(late.dir);
     assert.doesNotMatch(r.stderr, /nothing was captured/, 'DOMAIN-CAPTURE-UNSEEN SHAPE if this matches: the decision lives in the mounted domain store and must pay the capture duty');
     assert.equal(r.code, 0);
     assert.equal(owed(late.store, 'capture_owed').length, 0, 'nothing owed');
   } finally {
     late.cleanup();
+  }
+});
+
+test('DF-h: a domain record with no ledger line under this root pays neither the research nor the capture duty', () => {
+  const research = makeProject();
+  try {
+    writeSessionEvents(research.dir, [rEvent('genesys webhook signature validation')]);
+    domainFinding(research.domain, AFTER_EVENT); // in the window, written by another project
+    const r = stopOnce(research.dir);
+    assert.equal(r.code, 2, 'FOREIGN-WRITE-PAYS SHAPE if this is 0: a record this project did not log must not pay its research duty');
+    assert.match(r.stderr, /genesys webhook signature validation/);
+  } finally {
+    research.cleanup();
+  }
+
+  const capture = makeProject();
+  try {
+    touchRegister(capture.dir, [WORKFILE], TOUCH_AT);
+    domainDecision(capture.domain, AFTER_TOUCH);
+    const r = stopOnce(capture.dir);
+    assert.equal(r.code, 2, 'FOREIGN-WRITE-PAYS SHAPE if this is 0: a record this project did not log must not pay its capture duty');
+    assert.match(r.stderr, /nothing was captured/);
+  } finally {
+    capture.cleanup();
+  }
+});
+
+test('DF-i: a ledger line older than the window does not let a later write by another project pay; a line inside the window does', () => {
+  const { dir, store, domain, cleanup } = makeProject();
+  try {
+    const finding = domainFinding(domain, BEFORE_EVENT);
+    logWrite(dir, finding, BEFORE_EVENT); // this project wrote it, before the research ran
+    domain.updateRecord(finding.id, { ...finding, answer: 'changed by another project', updated_at: AFTER_EVENT });
+    assert.equal(domain.get(finding.id).updated_at, AFTER_EVENT, 'fixture: the record itself is inside the window');
+    writeSessionEvents(dir, [rEvent('genesys webhook signature validation')]);
+
+    const stale = stopOnce(dir);
+    assert.equal(stale.code, 2, 'ID-ALONE-PAYS SHAPE if this is 0: the id is logged, but not inside the window');
+    assert.match(stale.stderr, /genesys webhook signature validation/);
+
+    // The same record, now updated by THIS project inside the window (a record another project created).
+    writeSessionEvents(dir, [rEvent('genesys webhook signature validation')]);
+    logWrite(dir, finding, AFTER_EVENT);
+    const paid = stopOnce(dir);
+    assert.equal(paid.code, 0, 'an in-window line for the id pays, whoever created the record');
+    assert.doesNotMatch(paid.stderr, /research/i);
+    assert.equal(owed(store, 'research_owed').length, 0, 'paid, not queued as debt');
+  } finally {
+    cleanup();
+  }
+});
+
+test('DF-j: a domain-write ledger that cannot be read is announced in the nag and no domain record pays', () => {
+  const { dir, domain, cleanup } = makeProject();
+  try {
+    writeSessionEvents(dir, [rEvent('genesys webhook signature validation')]);
+    logWrite(dir, domainFinding(domain, AFTER_EVENT), AFTER_EVENT);
+    rmSync(ledgerPath(dir));
+    mkdirSync(ledgerPath(dir)); // a directory where the file belongs: the read fails
+
+    const r = stopOnce(dir);
+    assert.equal(r.code, 2, 'an unreadable ledger never discharges the duty');
+    assert.match(r.stderr, /genesys webhook signature validation/);
+    assert.match(r.stderr, /the domain-write ledger \(\.sterling\/transient\/knowledge-writes\.jsonl\) could not be read/, 'the degraded read is stated, not silent');
+  } finally {
+    cleanup();
   }
 });

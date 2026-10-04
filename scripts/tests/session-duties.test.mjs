@@ -156,3 +156,177 @@ test('openDutyRecords.close closes every domain store and returns the close erro
     assert.deepEqual(unreadable, [], 'a close error is not an unreadable store');
     assert.deepEqual(records.close(), [], 'a second close has nothing left to close');
   }));
+
+// The domain-write ledger (decision
+// domain-record-duty-credit-comes-from-a-per-project-write-ledger). Two
+// projects, A and B, mount the same domain store; each has its own ledger under
+// its own root, written by its own MCP server (pinned in
+// packages/mcp-server/src/tests/domain-write-ledger.test.ts).
+const W0 = '2026-10-04T12:00:00.000Z'; // window start
+const BEFORE_W0 = '2026-10-04T11:00:00.000Z';
+const IN_WINDOW = '2026-10-04T12:30:00.000Z';
+const domainDecision = (at) => ({ ...env('decision', at), scope: 'domain:shared', title: 't', statement: 's', alternatives_rejected: [], rationale: 'r' });
+
+// The ledger is JSON Lines: one entry per line, appended by the server.
+const ledgerFile = (root) => join(root, '.sterling', 'transient', 'knowledge-writes.jsonl');
+function writeLedger(root, entries) {
+  mkdirSync(join(root, '.sterling', 'transient'), { recursive: true });
+  writeFileSync(ledgerFile(root), typeof entries === 'string' ? entries : entries.map((e) => `${JSON.stringify(e)}\n`).join(''));
+}
+
+/** Projects A and B (each a root with its own project store) over one shared domain store. */
+function withSharedDomain(fn) {
+  const base = mkdtempSync(join(tmpdir(), 'sterling-duties-ledger-'));
+  const domainDb = join(base, 'domains', 'shared', 'sterling.db');
+  mkdirSync(dirname(domainDb), { recursive: true });
+  const domain = new SterlingStore(domainDb);
+  const config = { stack_tags: ['shared'], domain_paths: { shared: domainDb } };
+  const opened = [];
+  const project = (name) => {
+    const root = join(base, name);
+    mkdirSync(join(root, '.sterling'), { recursive: true });
+    const store = new SterlingStore(join(root, '.sterling', 'sterling.db'));
+    opened.push(store);
+    /** Both duty answers for this project at window start W0, plus what was announced. */
+    const paid = (over = {}) => {
+      const said = { domains: [], ledger: [] };
+      const records = duties.openDutyRecords(store, config, { onUnreadable: (n, e) => said.domains.push(`${n}: ${e}`), root, onLedgerUnreadable: (e) => said.ledger.push(e), ...over });
+      try {
+        return { capture: duties.capturedSince(records, W0), research: duties.researchCapturedSince(records, W0), said };
+      } finally {
+        records.close();
+      }
+    };
+    return { root, store, paid };
+  };
+  try {
+    return fn({ domain, domainDb, a: project('a'), b: project('b') });
+  } finally {
+    for (const s of opened) s.close();
+    domain.close();
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
+test('ledger: a domain record B wrote pays B and not A; one A wrote pays A', () =>
+  withSharedDomain(({ domain, a, b }) => {
+    const byB = domain.create(domainDecision(IN_WINDOW));
+    writeLedger(b.root, [{ id: byB.id, type: 'decision', at: IN_WINDOW }]);
+    assert.deepEqual({ capture: a.paid().capture, research: a.paid().research }, { capture: false, research: false }, "FOREIGN-WRITE-PAYS SHAPE if true: B's in-window domain record must not pay A");
+    assert.deepEqual({ capture: b.paid().capture, research: b.paid().research }, { capture: true, research: true }, 'it pays the project that logged it');
+
+    const byA = domain.create(domainDecision(IN_WINDOW));
+    writeLedger(a.root, [{ id: byA.id, type: 'decision', at: IN_WINDOW }]);
+    assert.equal(a.paid().capture, true);
+    assert.equal(a.paid().research, true);
+    assert.deepEqual(a.paid().said, { domains: [], ledger: [] }, 'nothing is degraded');
+  }));
+
+test('ledger: a domain record with no entry never pays, with or without a ledger file', () =>
+  withSharedDomain(({ domain, a }) => {
+    domain.create(domainDecision(IN_WINDOW));
+    assert.equal(a.paid().capture, false, 'no ledger file: every existing domain record is unlogged');
+    assert.deepEqual(a.paid().said.ledger, [], 'an absent ledger is empty, not an error');
+    writeLedger(a.root, [{ id: randomUUID(), type: 'decision', at: IN_WINDOW }]);
+    assert.equal(a.paid().capture, false, 'an entry for another id does not pay');
+    assert.equal(a.paid().research, false);
+  }));
+
+test('ledger: the entry must be inside the window as well as name the id', () =>
+  withSharedDomain(({ domain, a }) => {
+    // B created it before the window; A updates it inside A's window.
+    const rec = domain.create(domainDecision(BEFORE_W0));
+    domain.updateRecord(rec.id, { ...rec, rationale: 'r2', updated_at: IN_WINDOW });
+    assert.equal(domain.get(rec.id).updated_at, IN_WINDOW);
+
+    writeLedger(a.root, [{ id: rec.id, type: 'decision', at: BEFORE_W0 }]);
+    assert.equal(a.paid().capture, false, "ID-ALONE-PAYS SHAPE if true: A's old entry must not let a later write by another project pay");
+    assert.equal(a.paid().research, false);
+
+    writeLedger(a.root, [{ id: rec.id, type: 'decision', at: IN_WINDOW }]);
+    assert.equal(a.paid().capture, true, 'a record B created, updated by A inside the window, pays A');
+    assert.equal(a.paid().research, true);
+  }));
+
+test('ledger: an in-window entry does not pay for a record that itself was not written in the window', () =>
+  withSharedDomain(({ domain, a }) => {
+    const rec = domain.create(domainDecision(BEFORE_W0));
+    writeLedger(a.root, [{ id: rec.id, type: 'decision', at: IN_WINDOW }]);
+    assert.equal(a.paid().capture, false, 'the record and the entry must both be inside the window');
+  }));
+
+test('ledger: a project-store record pays on its own timestamps, with no entry', () =>
+  withSharedDomain(({ a }) => {
+    a.store.create({ ...domainDecision(IN_WINDOW), scope: 'project' });
+    assert.equal(a.paid().capture, true);
+    assert.equal(a.paid().research, true);
+  }));
+
+test('ledger: a root spelled with a trailing slash reads the same ledger', () =>
+  withSharedDomain(({ domain, a }) => {
+    const rec = domain.create(domainDecision(IN_WINDOW));
+    writeLedger(a.root, [{ id: rec.id, type: 'decision', at: IN_WINDOW }]);
+    assert.equal(a.paid({ root: `${a.root}/` }).capture, true);
+  }));
+
+test('ledger: with no root there is no ledger, so no domain record pays', () =>
+  withSharedDomain(({ domain, a }) => {
+    const rec = domain.create(domainDecision(IN_WINDOW));
+    writeLedger(a.root, [{ id: rec.id, type: 'decision', at: IN_WINDOW }]);
+    assert.equal(a.paid({ root: undefined }).capture, false);
+  }));
+
+test('ledger: a file that cannot be read is announced once and pays nothing', () =>
+  withSharedDomain(({ domain, a }) => {
+    domain.create(domainDecision(IN_WINDOW));
+    mkdirSync(ledgerFile(a.root), { recursive: true }); // a directory where the file belongs
+    const broken = a.paid();
+    assert.deepEqual({ capture: broken.capture, research: broken.research }, { capture: false, research: false });
+    assert.equal(broken.said.ledger.length, 1, 'announced once, not once per record or per duty');
+    assert.match(broken.said.ledger[0], /EISDIR/);
+  }));
+
+test('ledger: a line that does not parse or is not the entry shape is skipped, and the entries around it still count', () =>
+  withSharedDomain(({ domain, a }) => {
+    const rec = domain.create(domainDecision(IN_WINDOW));
+    for (const bad of [{ id: rec.id, type: 'decision', at: '0' }, { id: rec.id, type: 'decision' }, { id: rec.id, type: 'decision', at: IN_WINDOW, project: a.root }, null, [{ id: rec.id, type: 'decision', at: IN_WINDOW }]]) {
+      writeLedger(a.root, [bad]);
+      assert.equal(a.paid().capture, false, `ignored: ${JSON.stringify(bad)}`);
+      assert.deepEqual(a.paid().said.ledger, [], 'a skipped line is not an unreadable ledger');
+    }
+    assert.deepEqual([...duties.readKnowledgeWrites(a.root).latestAt], []);
+
+    const good = JSON.stringify({ id: rec.id, type: 'decision', at: IN_WINDOW });
+    const other = JSON.stringify({ id: 'another-record', type: 'decision', at: IN_WINDOW });
+    writeLedger(a.root, `not json at all\n\n${good}\n{"id":"torn","type":"decis\n${other}\n{"id":"cut-short","ty`);
+    assert.equal(a.paid().capture, true, 'GARBAGE-LINE-HIDES-ENTRIES SHAPE if false: the entry between a garbage line and a torn one still pays');
+    assert.equal(a.paid().research, true);
+    assert.deepEqual(a.paid().said.ledger, []);
+    assert.deepEqual([...duties.readKnowledgeWrites(a.root).latestAt], [[rec.id, IN_WINDOW], ['another-record', IN_WINDOW]], 'the entry after the torn line is read too');
+  }));
+
+test('ledger: several lines for one id count as its latest at, in whatever order they sit', () =>
+  withSharedDomain(({ domain, a }) => {
+    const rec = domain.create(domainDecision(BEFORE_W0));
+    domain.updateRecord(rec.id, { ...rec, rationale: 'r2', updated_at: IN_WINDOW });
+    const line = (at) => ({ id: rec.id, type: 'decision', at });
+    writeLedger(a.root, [line(BEFORE_W0), line('2026-10-04T10:00:00.000Z')]);
+    assert.equal(a.paid().capture, false, 'every line for the id is before the window');
+    writeLedger(a.root, [line(IN_WINDOW), line(BEFORE_W0)]);
+    assert.equal(a.paid().capture, true, 'one in-window line pays, even when an older line follows it');
+    assert.deepEqual([...duties.readKnowledgeWrites(a.root).latestAt], [[rec.id, IN_WINDOW]]);
+  }));
+
+test('ledger: an unreadable domain store is still announced and pays nothing, even with an in-window entry for a record in it', () =>
+  withSharedDomain(({ domain, domainDb, a }) => {
+    const rec = domain.create(domainDecision(IN_WINDOW));
+    writeLedger(a.root, [{ id: rec.id, type: 'decision', at: IN_WINDOW }]);
+    const opener = (dbPath) => {
+      if (dbPath === domainDb) throw new Error('open boom');
+      return new SterlingStore(dbPath);
+    };
+    const r = a.paid({ opener });
+    assert.equal(r.capture, false, 'the ledger names an id; only a record actually read can pay');
+    assert.equal(r.research, false);
+    assert.deepEqual(r.said.domains, ['shared: open boom'], 'the unreadable-domain announcement is kept');
+  }));

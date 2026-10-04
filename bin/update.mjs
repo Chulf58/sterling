@@ -5592,7 +5592,7 @@ var init_records = __esm({
 });
 
 // packages/schemas/dist/transient.js
-var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema;
+var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema;
 var init_transient = __esm({
   "packages/schemas/dist/transient.js"() {
     "use strict";
@@ -5621,6 +5621,14 @@ var init_transient = __esm({
       // Trimmed before the length check, so a whitespace-only target is refused.
       target: external_exports.string().trim().min(1).optional()
     });
+    KNOWLEDGE_WRITES_REL = ".sterling/transient/knowledge-writes.jsonl";
+    KNOWLEDGE_WRITES_COMPACT_LINES = 1e3;
+    KNOWLEDGE_WRITES_KEEP_IDS = 500;
+    knowledgeWriteSchema = external_exports.object({
+      id: external_exports.string().min(1),
+      type: external_exports.string().min(1),
+      at: external_exports.string().min(1)
+    }).strict();
   }
 });
 
@@ -6189,6 +6197,9 @@ __export(dist_exports, {
   DRAIN_VERBS: () => DRAIN_VERBS,
   FRESHNESS_VALUES: () => FRESHNESS_VALUES,
   HEADLINE_CLIP: () => HEADLINE_CLIP,
+  KNOWLEDGE_WRITES_COMPACT_LINES: () => KNOWLEDGE_WRITES_COMPACT_LINES,
+  KNOWLEDGE_WRITES_KEEP_IDS: () => KNOWLEDGE_WRITES_KEEP_IDS,
+  KNOWLEDGE_WRITES_REL: () => KNOWLEDGE_WRITES_REL,
   LIFECYCLE_VALUES: () => LIFECYCLE_VALUES,
   LINK_RELS: () => LINK_RELS,
   NAME_CLIP: () => NAME_CLIP,
@@ -6230,6 +6241,7 @@ __export(dist_exports, {
   isAbsolutePathAnyHost: () => isAbsolutePathAnyHost,
   isCollapsedUrlLocation: () => isCollapsedUrlLocation,
   isUnderLocationAnyHost: () => isUnderLocationAnyHost,
+  knowledgeWriteSchema: () => knowledgeWriteSchema,
   knownFieldsFor: () => knownFieldsFor,
   linkSchema: () => linkSchema,
   matchesGlob: () => matchesGlob,
@@ -6269,6 +6281,7 @@ var init_dist = __esm({
     init_paths();
     init_envelope();
     init_records();
+    init_transient();
     init_transient();
     init_config();
     init_registry();

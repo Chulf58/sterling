@@ -4891,6 +4891,11 @@ var sessionEventSchema = external_exports.object({
   // Trimmed before the length check, so a whitespace-only target is refused.
   target: external_exports.string().trim().min(1).optional()
 });
+var knowledgeWriteSchema = external_exports.object({
+  id: external_exports.string().min(1),
+  type: external_exports.string().min(1),
+  at: external_exports.string().min(1)
+}).strict();
 
 // packages/schemas/dist/config.js
 var modelEffort = external_exports.object({
