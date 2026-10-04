@@ -24,6 +24,7 @@ import {
   RESTART_INSTRUCTION,
   ensureConductorActivation,
   describeConfigDrift,
+  CONFIG_DRIFT_FIX,
 } from '../lib/agent-distribution.mjs';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 
@@ -774,6 +775,27 @@ test('syncAgents: config-only MODEL divergence on an unmodified install -> confi
   }
 });
 
+// Decision session-start-prints-the-sterling-root-plain-text-instructions-use-it:
+// the config_drift remedy is plain text the model reads. scripts/install-agents.mjs
+// imports @sterling/* packages and fails on an installed plugin copy, so the remedy
+// names the bundled bin entry in the Sterling root form. Both printers (sync-agents,
+// init) print the report's `fix`, which is this constant.
+test('config_drift fix names node "<Sterling root>/bin/install-agents.mjs", never scripts/install-agents.mjs, and the report carries it', () => {
+  assert.equal(CONFIG_DRIFT_FIX, 'node "<Sterling root>/bin/install-agents.mjs" (--target <dir> for a sibling)');
+  assert.doesNotMatch(CONFIG_DRIFT_FIX, /scripts\/install-agents/);
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'coder.md': CODER_TOKEN_TEMPLATE });
+    const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, ...cfgBoth({ librarian: { model: 'claude-sonnet-4-6', effort: 'high' } }) });
+    const { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, ...cfgBoth({ librarian: { model: 'claude-opus-4-8', effort: 'high' } }) });
+    assert.equal(report[0].status, 'config_drift');
+    assert.equal(report[0].fix, CONFIG_DRIFT_FIX, 'the report entry carries the remedy both printers print');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('syncAgents: config-only EFFORT divergence -> config_drift; matching config -> up_to_date', () => {
   const dir = scratch();
   try {
@@ -1447,7 +1469,7 @@ test('sync-agents CLI reports config_drift loudly, exits 0, and writes nothing',
     assert.ok(line, `a config_drift status line for implementor:\n${r.stdout}`);
     assert.ok(line.includes(`model=${installedModel}`) && line.includes(`effort=${installedEffort}`), `names the installed model/effort: ${line}`);
     assert.ok(line.includes('model=claude-drift-probe-9') && line.includes('effort=xhigh'), `names the configured model/effort: ${line}`);
-    assert.ok(line.includes('node scripts/install-agents.mjs') && line.includes('--target <dir>'), `names the fix command: ${line}`);
+    assert.ok(line.includes('node "<Sterling root>/bin/install-agents.mjs"') &&line.includes('--target <dir>'), `names the fix command: ${line}`);
     assert.doesNotMatch(r.stdout, /^up_to_date: implementor$/m, 'never up_to_date over a dead config bump');
     assert.doesNotMatch(r.stdout, /^config_drift: (?!implementor)/m, 'agents whose config was not bumped do not drift');
     assert.equal(readFileSync(agentPath, 'utf8'), before, 'sync writes nothing for config_drift');

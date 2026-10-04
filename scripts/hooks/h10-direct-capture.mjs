@@ -1234,7 +1234,9 @@ try {
         return false;
       }
     })();
-    const next = prLoopNext(state, '${CLAUDE_PLUGIN_ROOT}/scripts/pr-review-wait.mjs');
+    // Plain text the model reads (decision session-start-prints-the-sterling-root-plain-text-instructions-use-it):
+    // the bundled bin entry in the Sterling root form, the root being the one H1 printed at session start.
+    const next = prLoopNext(state, '<Sterling root>/bin/pr-review-wait.mjs');
     // SESSIONLESS (Sol review): without a session identity the once-per-session
     // marker cannot be kept, so blocking would repeat on every Stop. Degrade to
     // a loud NON-blocking reminder instead.
