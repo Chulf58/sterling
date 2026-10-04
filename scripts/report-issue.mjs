@@ -52,9 +52,11 @@ import {
   detectHost,
   fingerprint,
   fingerprintLine,
+  lastFingerprint,
   labelsFor,
   projectSlug,
   renderBody,
+  parseLabelsLine,
   reportLabels,
   scrub,
   validateReport,
@@ -347,8 +349,7 @@ function send(gh, queued, { printBefore = true } = {}) {
   const q = `repo:${STERLING_ISSUE_REPO} is:issue "sterling-fp-${entry.fingerprint}" in:body`;
   const found = gh.api('GET', 'search/issues', [['q', q], ['per_page', '100']]);
   if (!Array.isArray(found?.items)) throw new TransportError(`gh at ${gh.path}: search/issues returned no items array`);
-  const line = fingerprintLine(entry.fingerprint);
-  const matches = found.items.filter((i) => !i?.pull_request && typeof i?.body === 'string' && i.body.split('\n').some((l) => l.trim() === line));
+  const matches = found.items.filter((i) => !i?.pull_request && typeof i?.body === 'string' && lastFingerprint(i.body) === entry.fingerprint);
   for (const m of matches) {
     if (!Number.isInteger(m.number) || !['open', 'closed'].includes(m.state)) throw new TransportError(`gh at ${gh.path}: search/issues returned a malformed item ${JSON.stringify({ number: m.number, state: m.state })}`);
   }
@@ -404,8 +405,6 @@ function flush(gh) {
 
 const { mode, values, yes } = parseArgs(process.argv.slice(2));
 
-const FINGERPRINT_LINE_RE = /^Fingerprint: sterling-fp-[0-9a-f]{12}$/m;
-
 const SEARCH_PAGE_SIZE = 100;
 const SEARCH_MAX_PAGES = 5;
 
@@ -426,7 +425,7 @@ function openReports(gh) {
     incomplete = incomplete || found.incomplete_results === true;
     if (found.items.length < SEARCH_PAGE_SIZE) break;
   }
-  const reports = items.filter((i) => !i?.pull_request && Number.isInteger(i?.number) && typeof i?.body === 'string' && FINGERPRINT_LINE_RE.test(i.body.replace(/\r/g, '')));
+  const reports = items.filter((i) => !i?.pull_request && Number.isInteger(i?.number) && typeof i?.body === 'string' && lastFingerprint(i.body) !== null);
   return { reports: reports.sort((a, b) => a.number - b.number), matched, read: items.length, incomplete };
 }
 
@@ -517,6 +516,10 @@ if (mode === 'apply-labels') {
   for (const issue of found.reports) {
     const wanted = reportLabels(issue.body);
     if (!wanted) {
+      if (parseLabelsLine(issue.body) === null) {
+        console.error(`report-issue: #${issue.number} skipped: it has no Labels line directly above its Fingerprint line; label it by hand on GitHub if it needs labels.`);
+        continue;
+      }
       console.error(`report-issue: #${issue.number} skipped: its Labels line is not exactly sterling-report, one severity and one project label; nothing was created or set for it.`);
       continue;
     }
@@ -527,13 +530,12 @@ if (mode === 'apply-labels') {
   let created = 0;
   let labelled = 0;
   let notLabelled = 0;
-  let capped = null;
-  for (let w = 0; w < work.length; w++) {
-    const { number, missing } = work[w];
+  const capped = [];
+  for (const { number, missing } of work) {
     const fresh = missing.filter((name) => !labelExists(name));
     if (created + fresh.length > MAX_NEW_LABELS) {
-      capped = work.slice(w).map((x) => `#${x.number}`).join(', ');
-      break;
+      capped.push(`#${number}`);
+      continue;
     }
     for (const name of fresh) {
       if (yes) {
@@ -573,12 +575,13 @@ if (mode === 'apply-labels') {
     labelled++;
   }
   printSearchNotes(found);
-  if (capped) {
-    if (yes) console.error(`report-issue: stopped at the cap of ${MAX_NEW_LABELS} new labels per run; ${capped} were not handled. Review them, then run report-issue --apply-labels --yes again.`);
-    else console.log(`report-issue: the cap of ${MAX_NEW_LABELS} new labels per run is reached; ${capped} would not be handled in one run.`);
+  if (capped.length > 0) {
+    const names = capped.join(', ');
+    if (yes) console.error(`report-issue: stopped at the cap of ${MAX_NEW_LABELS} new labels per run; ${names} were not handled. Review them, then run report-issue --apply-labels --yes again.`);
+    else console.log(`report-issue: the cap of ${MAX_NEW_LABELS} new labels per run is reached; ${names} would not be handled in one run.`);
   }
   console.log(yes ? `report-issue: labels applied to ${labelled} of ${found.reports.length} open report(s).` : `report-issue: DRY RUN: would create ${created} label(s) and set labels on ${labelled} of ${found.reports.length} open report(s).`);
-  process.exit((capped && yes) || notLabelled > 0 ? 1 : 0);
+  process.exit((capped.length > 0 && yes) || notLabelled > 0 ? 1 : 0);
 }
 
 if (mode === 'flush') {

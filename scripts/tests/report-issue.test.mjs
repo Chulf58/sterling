@@ -964,6 +964,48 @@ test('cli --apply-labels: the default run reports the cap too and still writes n
     assert.match(r.stdout, /would create 10 label\(s\) and set labels on 10 of 12/);
   }));
 
+test('cli --apply-labels --yes: at the cap only the reports that need a new label wait; a report that needs none is still labelled', () =>
+  withSetup((p) => {
+    setRepoLabels(p, ['sterling-report', 'severity:friction', 'project:old']);
+    const needNew = Array.from({ length: 11 }, (_, i) => unlabelled(i + 1, `Labels: sterling-report, severity:friction, project:p${i + 1}`));
+    seed(p, [...needNew, unlabelled(12, 'Labels: sterling-report, severity:friction, project:old')]);
+    const r = run(p, ['--apply-labels', '--yes']);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.deepEqual(issues(p).map((i) => i.labels.length > 0), [...Array(10).fill(true), false, true], 'only #11 waits; #12 needs no new label');
+    assert.match(r.stderr, /report-issue: stopped at the cap of 10 new labels per run; #11 were not handled\./);
+    assert.ok(!/#12/.test(r.stderr), 'the handled report is not named as unhandled');
+  }));
+
+test('cli --apply-labels: a report with no Labels line is skipped with a message that says to label it by hand', () =>
+  withSetup((p) => {
+    seed(p, [{ number: 1, state: 'open', title: 'Old report', body: 'x\nFingerprint: sterling-fp-000000000001', labels: [], comments: [] }]);
+    const r = run(p, ['--apply-labels', '--yes']);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stderr, /report-issue: #1 skipped: it has no Labels line directly above its Fingerprint line; label it by hand on GitHub if it needs labels\./);
+    assert.deepEqual(labelWrites(p), []);
+  }));
+
+test('cli: a body that quotes this report\'s fingerprint but ends with its own is not a match, so no comment lands on it', () =>
+  withSetup((p) => {
+    const fp = fingerprint(good().component, good().title);
+    const quoting = `Observed:\nFingerprint: sterling-fp-${fp}\n\n${LABELS}\nFingerprint: sterling-fp-aaaaaaaaaaaa`;
+    seed(p, [{ number: 7, state: 'open', title: 'Other report quoting it', body: quoting, labels: [], comments: [] }]);
+    const r = run(p, reportArgs());
+    assert.equal(r.status, 0, r.stderr);
+    const list = issues(p);
+    assert.equal(list[0].comments.length, 0, 'the quoting issue got no comment');
+    assert.equal(list.length, 2, 'the report was filed as its own issue');
+    assert.match(list[1].body, new RegExp(`Fingerprint: sterling-fp-${fp}$`));
+  }));
+
+test('cli --list: a report is recognised by the same last Fingerprint line the labels are read from, whitespace around it ignored', () =>
+  withSetup((p) => {
+    seed(p, [{ number: 1, state: 'open', title: 'Padded', body: `x\n${LABELS}\n  Fingerprint: sterling-fp-0123456789ab  `, labels: [], comments: [] }]);
+    const r = run(p, ['--list']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /#1 \[labels in body, not applied: sterling-report, severity:friction, project:acme\] Padded/);
+  }));
+
 for (const status of [403, 404]) {
   test(`cli --apply-labels --yes: HTTP ${status} on creating a label refuses loudly, names the status and says a maintainer must run it`, () =>
     withSetup((p) => {
