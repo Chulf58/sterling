@@ -11,6 +11,7 @@ import { basename, dirname, join } from 'node:path';
 import { pluginRoot as sharedPluginRoot, walkUpPluginRoot as sharedWalkUpPluginRoot } from './lib/plugin-root-walk.mjs';
 import { readStdin, allow, exitAfterWrite, openStore } from './lib/common.mjs';
 import { codexRegistrationLine, userScopeCodexServer } from '../lib/codex-mcp.mjs';
+import { SPARE_SKIP_LINE, isSpareSession } from './lib/claude-session-kind.mjs';
 // Plan-lock primitives — ONE implementation, shared with h31-plan-lock.mjs,
 // h19-dispatch-staging.mjs and scripts/plan-lock.mjs. Aliased on import so the
 // PLAN LOCK section's names read locally while the definitions stay shared.
@@ -211,6 +212,21 @@ function computeH1DeadDispatchResidue(cwd, source) {
 }
 
 const input = readStdin();
+
+// DAEMON SPARE GUARD (decision `h1-skips-a-claude-code-daemon-spare-session`).
+// Claude Code's background supervisor keeps an idle spare session beside the
+// real one, and a named spare runs this hook under its own session id. Every
+// write, delete, claim and consume below assumes one live session per
+// worktree, so a spare's SessionStart would overwrite session.json and wipe
+// the real session's register and transient state. This sits BEFORE all of
+// them and must stay first. A claimed spare fires SessionStart again without
+// the marker, so the session that does real work still gets everything below.
+// Any doubt in the lookup answers "not a spare" and H1 runs as it always has.
+if (isSpareSession(input.session_id)) {
+  exitAfterWrite(`${SPARE_SKIP_LINE}\n`, 0);
+  // exitAfterWrite exits from the write callback; nothing below may run meanwhile.
+  await new Promise(() => {});
+}
 
 // H10's missing-snapshot policy intentionally yields no git candidates. Seed
 // before startup/clear work begins, so only post-start edits reach first Stop.
