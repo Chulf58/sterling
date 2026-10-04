@@ -162,6 +162,7 @@ if (!project) {
 }
 
 let rows = [];
+let registeredByThisRun = false;
 // The registry file is read when it exists. It is created only to register an
 // initialized project: a report run from any other folder writes nothing.
 const hasStore = project ? existsSync(join(projectDir, '.sterling', 'sterling.db')) : false;
@@ -183,6 +184,7 @@ if (existsSync(registryPath()) || hasStore) {
           at: new Date().toISOString(),
         });
         rows = registry.list();
+        registeredByThisRun = true;
         notes.push(`${projectName} was not in the project registry (it was initialized by a Sterling version from before the registry, or on another machine or user). It is now registered by this command, so other projects' maps list it; its init dates in /sterling:projects are the time of this registration.`);
       } else {
         notes.push(`${projectName} is not registered: it has no .sterling/sterling.db, so it is not an initialized project. Run /sterling:init here to register it.`);
@@ -221,7 +223,9 @@ const current = project ? { name: projectName, path: currentPath, stack_tags: pr
 
 if (!opts.apply) {
   const map = buildDomainMap({ stores: listStores(), projects, current, notes });
-  if (opts.json) console.log(JSON.stringify(map, null, 2));
+  // registered_by_this_run lets a caller that reads the JSON (the update pass, session
+  // start) say that the report run wrote a registry row.
+  if (opts.json) console.log(JSON.stringify({ ...map, registered_by_this_run: registeredByThisRun }, null, 2));
   else {
     console.log('Knowledge domains on this machine, for this user');
     console.log('');
