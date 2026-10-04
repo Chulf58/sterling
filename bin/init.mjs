@@ -4202,7 +4202,30 @@ function foldDrvfs(x, y) {
   const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
   return onDrvfs(x) && onDrvfs(y) ? [x.toLowerCase(), y.toLowerCase()] : [x, y];
 }
-var repoPath;
+function isCollapsedUrlLocation(location) {
+  return COLLAPSED_URL_LOCATION.test(location.trim());
+}
+function classifyLocation(location) {
+  const text = location.trim();
+  if (SCHEME_LOCATION.test(text))
+    return "url";
+  if (!/\s/.test(text))
+    return "path";
+  return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
+}
+function repoPathOfLocation(location) {
+  if (classifyLocation(location) !== "path")
+    return void 0;
+  try {
+    return normalizeRepoPath(location.trim());
+  } catch {
+    return void 0;
+  }
+}
+function normalizeLocation(location) {
+  return repoPathOfLocation(location) ?? location;
+}
+var repoPath, SCHEME_LOCATION, COLLAPSED_URL_LOCATION, HAS_SEPARATOR, ENDS_IN_EXTENSION;
 var init_paths = __esm({
   "packages/schemas/dist/paths.js"() {
     "use strict";
@@ -4215,6 +4238,10 @@ var init_paths = __esm({
         return external_exports.NEVER;
       }
     });
+    SCHEME_LOCATION = /^[a-z][a-z0-9+.-]+:(\S|$)/i;
+    COLLAPSED_URL_LOCATION = /^(https?|ftp):\/[^/]/i;
+    HAS_SEPARATOR = /[\\/]/;
+    ENDS_IN_EXTENSION = /\.[A-Za-z0-9]{1,8}$/;
   }
 });
 
@@ -4289,7 +4316,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4335,6 +4362,8 @@ var init_records = __esm({
         ruling_record_id: external_exports.string().optional()
       }).strict()
     }).strict();
+    ARTICLE_KINDS = ["feature", "probe", "tool", "concept"];
+    NOT_APPLICABLE_EXEMPT_KINDS = ["probe", "tool"];
     currentAcItemSchema = external_exports.object({
       ac_id: external_exports.string().min(1),
       text: external_exports.string().min(1),
@@ -4394,7 +4423,7 @@ var init_records = __esm({
       // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
       // axis, subsuming concept_family's role there — concept_family itself is
       // untouched, kept for compatibility (see below).
-      article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
+      article_kind: external_exports.enum(ARTICLE_KINDS).default("feature"),
       // Union with the structured not_applicable exemption (see
       // notApplicableExemptionSchema above) — acceptance of the exemption
       // branch, and rejection of an empty array, are both gated BY KIND in the
@@ -4444,7 +4473,7 @@ var init_records = __esm({
       if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (\xA73.2.3)" });
       }
-      const exemptKind = rec.article_kind === "probe" || rec.article_kind === "tool";
+      const exemptKind = NOT_APPLICABLE_EXEMPT_KINDS.includes(rec.article_kind);
       const isExempt = (v) => typeof v === "object" && v !== null && !Array.isArray(v) && "not_applicable" in v;
       const gated = [
         ["live_test_refs", rec.live_test_refs, "real content (ac_id/test_paths)"],
@@ -4456,7 +4485,7 @@ var init_records = __esm({
           ctx.addIssue({
             code: external_exports.ZodIssueCode.custom,
             path: [field],
-            message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind probe/tool may; other kinds must supply real content`
+            message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind ${NOT_APPLICABLE_EXEMPT_KINDS.join("/")} may; other kinds must supply real content`
           });
         }
         if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
@@ -4548,15 +4577,7 @@ var init_records = __esm({
       // Detached-working-tree resolution for a repo-located kind:doc — same
       // semantics as featureArticleSchema.working_tree (comsoft-juiced 2026-07-17).
       working_tree: external_exports.string().min(1).optional()
-    }).superRefine(refineSupersession).transform((rec) => {
-      if (rec.kind !== "doc")
-        return rec;
-      try {
-        return { ...rec, location: normalizeRepoPath(rec.location) };
-      } catch {
-        return rec;
-      }
-    });
+    }).superRefine(refineSupersession).transform((rec) => rec.kind === "doc" ? { ...rec, location: normalizeLocation(rec.location) } : rec);
     disconfirmedHypothesisSchema = base.extend({
       type: external_exports.literal("disconfirmed_hypothesis"),
       question: external_exports.string().min(1),
@@ -4856,15 +4877,13 @@ var init_records = __esm({
         fts: (r) => [s(r.title), s(r.summary)].join("\n"),
         // §3.2.5: repo-located docs join the reconcile economy — for kind:doc a
         // repo-relative location doubles as a file_key (H7 pressure applies);
-        // pdf/url locations are external and carry none.
+        // pdf/url locations are external and carry none, and neither does a
+        // kind:doc location that is a URL, prose or an absolute/escaping path.
         fileKeys: (r) => {
           if (r.kind !== "doc")
             return [];
-          try {
-            return [normalizeRepoPath(r.location)];
-          } catch {
-            return [];
-          }
+          const rel = repoPathOfLocation(r.location);
+          return rel === void 0 ? [] : [rel];
         },
         // location is this type's path-bearing field (§3.2.5), so it is what a
         // reader needs to go open the thing.
@@ -8715,6 +8734,21 @@ CREATE TABLE IF NOT EXISTS store_meta (
         const { where, params } = this.baseFilter(opts);
         const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(" AND ")}`).get(...params);
         return row.n;
+      }
+      /**
+       * READ-ONLY damage count for issue #14: how many live reference_material
+       * records hold a web URL location (http, https, ftp) whose '//' an earlier
+       * write collapsed to '/' ('https:/host/…'). The shape is isCollapsedUrlLocation's, the one
+       * definition in packages/schemas. Nothing is repaired here: each such record
+       * is fixed by a knowledge_edit on `location` restoring the second slash.
+       */
+      countCollapsedUrlLocations() {
+        const { where, params } = this.baseFilter({ types: ["reference_material"] });
+        const rows = this.db.prepare(`SELECT r.body FROM records r WHERE ${where.join(" AND ")}`).all(...params);
+        return rows.filter((row) => {
+          const location = JSON.parse(row.body).location;
+          return typeof location === "string" && isCollapsedUrlLocation(location);
+        }).length;
       }
       /**
        * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
