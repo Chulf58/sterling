@@ -8,7 +8,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -601,7 +601,7 @@ function makeDomainProject({ domain = 'store' } = {}) {
   // ledger after a domain-scoped write; a record written with logged:false is
   // one another project put in the shared store (decision
   // domain-record-duty-credit-comes-from-a-per-project-write-ledger).
-  const ledgerPath = join(p.dir, '.sterling', 'transient', 'knowledge-writes.json');
+  const ledgerPath = join(p.dir, '.sterling', 'transient', 'knowledge-writes.jsonl');
   const writeDomain = (record, { logged = true } = {}) => {
     const at = new Date().toISOString();
     const d = new SterlingStore(domainDb);
@@ -609,8 +609,7 @@ function makeDomainProject({ domain = 'store' } = {}) {
     d.close();
     if (!logged) return;
     mkdirSync(dirname(ledgerPath), { recursive: true });
-    const lines = existsSync(ledgerPath) ? JSON.parse(readFileSync(ledgerPath, 'utf8')) : [];
-    writeFileSync(ledgerPath, JSON.stringify([...lines, { id: made.id, type: made.type, at }]));
+    appendFileSync(ledgerPath, `${JSON.stringify({ id: made.id, type: made.type, at })}\n`);
   };
   return { ...p, domainDb, ledgerPath, writeDomain, cleanup: () => (p.cleanup(), rmSync(dirname(domainDb), { recursive: true, force: true })) };
 }
@@ -747,10 +746,11 @@ test('settlement: a domain-write ledger that cannot be read raises its own notic
   try {
     const text = await settleAnEdit(p, {}, () => {
       p.writeDomain({ type: 'decision', title: 'a is two', statement: 's', alternatives_rejected: [], rationale: 'r' });
-      writeFileSync(p.ledgerPath, '{ not json');
+      rmSync(p.ledgerPath);
+      mkdirSync(p.ledgerPath); // a directory where the file belongs: the read fails
     });
     assert.match(text, /capture owed: 1 changed file/, 'nothing pays through an unreadable ledger');
-    assert.match(text, /Sterling settlement: the domain-write ledger \.sterling\/transient\/knowledge-writes\.json could not be read \(.+\); no domain-scoped record was counted toward the capture and research duties\./);
+    assert.match(text, /Sterling settlement: the domain-write ledger \.sterling\/transient\/knowledge-writes\.jsonl could not be read \(.+\); no domain-scoped record was counted toward the capture and research duties\./);
     assert.doesNotMatch(text, /settlement failed/, 'the settlement itself completes');
   } finally {
     p.cleanup();

@@ -4,11 +4,11 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_CAP, knowledgeWriteSchema, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -9101,7 +9101,14 @@ export class SterlingTools {
     new_record: { type: string; fields: Record<string, unknown> };
     reason?: string;
     resolves?: string[];
-  }): { extracted: string; source: { id: string; version: number }; edges: { informed_by: string; cites: string }; claims_check?: string } {
+  }): {
+    extracted: string;
+    source: { id: string; version: number };
+    edges: { informed_by: string; cites: string };
+    claims_check?: string;
+    /** Present only when a domain write of this extract could not be logged (see logDomainWrite); knowledgeExtractResult moves it into `warnings`. */
+    ledger_warnings?: string[];
+  } {
     const { id, field, find, new_record, reason, resolves } = input;
     const replace = input.replace ?? '';
 
@@ -9319,6 +9326,11 @@ export class SterlingTools {
     // — opened the transaction on the mount the LABEL named while every write
     // inside it independently resolved to the mount that actually holds the id,
     // so a drifted label put the BEGIN on the wrong database.
+    // Domain-write ledger lines (the new record and the trimmed source) are
+    // queued while the transaction is open and written only after it commits:
+    // a rolled-back extract must not leave a line for a write that never
+    // landed. A line that could not be written is a warning on the receipt.
+    const ledgerWarnings = this.logDomainWritesAfter(() =>
     this.store.withTransactionForRecord(original.id, () => {
       // scope inherited from the source (Q5) — from its physical mount, not its
       // body label. An explicit new_record.fields.scope that DIFFERS was already
@@ -9354,7 +9366,8 @@ export class SterlingTools {
       // Explicit-claim closure (decision foreign_68988832), drained inside this same
       // transaction so a claim only lands alongside an extract that landed.
       for (const claim of resolveClaims) this.store.remove(claim.id, ts);
-    });
+    })
+    );
 
     // Post-commit: persist the deferred check_skipped audit rows now that the
     // mount transaction has committed (see the deferCheckSkipped rationale above).
@@ -9368,6 +9381,7 @@ export class SterlingTools {
       source: { id: original.id, version: sourceVersion },
       edges: { informed_by: original.id, cites: newId },
       ...claimsCheck,
+      ...(ledgerWarnings.length ? { ledger_warnings: ledgerWarnings } : {}),
     };
   }
 
@@ -9394,8 +9408,8 @@ export class SterlingTools {
     warnings: string[];
     claims_check?: string;
   } {
-    const result = this.knowledgeExtract(input);
-    const warnings: string[] = [];
+    const { ledger_warnings, ...result } = this.knowledgeExtract(input);
+    const warnings: string[] = [...(ledger_warnings ?? [])];
     const newRecord = this.store.get(result.edges.cites);
     if (newRecord) warnings.push(...this.articleOversizeWarnings(newRecord));
     const sourceRecord = this.store.get(result.source.id);
@@ -9696,6 +9710,33 @@ export class SterlingTools {
   // -- domain-write ledger -----------------------------------------------------
 
   /**
+   * Set while a caller holds a store transaction open around nested
+   * knowledgeCreate/knowledgeUpdate calls (knowledgeExtract): logDomainWrite
+   * queues here instead of writing, and the caller flushes the queue only
+   * after the transaction commits, so a rolled-back write is never logged.
+   */
+  private deferredDomainWrites: { scope: string; record: { id: string; type: string } }[] | undefined;
+
+  /**
+   * Runs `write` (a store transaction around nested knowledge writes) with
+   * ledger logging queued, then logs the queued writes once it has returned,
+   * which is after the commit. Returns the warnings for the lines that could
+   * not be written. When `write` throws, nothing is logged and the throw
+   * passes through.
+   */
+  private logDomainWritesAfter(write: () => void): string[] {
+    const queued: NonNullable<SterlingTools['deferredDomainWrites']> = [];
+    const outer = this.deferredDomainWrites;
+    this.deferredDomainWrites = queued;
+    try {
+      write();
+    } finally {
+      this.deferredDomainWrites = outer;
+    }
+    return queued.map((w) => this.logDomainWrite(w.scope, w.record)).filter((w): w is string => w !== undefined);
+  }
+
+  /**
    * Logs one write of a record a mounted DOMAIN store holds to this project's
    * transient ledger (KNOWLEDGE_WRITES_REL under repoRoot), so the session-end
    * duty reads can tell this project's domain writes from another project's
@@ -9708,65 +9749,99 @@ export class SterlingTools {
    * Called AFTER the store write returned, with the stored record's own id and
    * type and this server's clock. No caller field reaches an entry.
    *
-   * One entry per record id (a later write replaces the id's earlier entry,
-   * which loses nothing for an "at or after X" read), newest
-   * KNOWLEDGE_WRITES_CAP ids kept. Nothing clears the file: it is a separate
-   * file from session-events.json because H10 consumes that register at Stop.
+   * APPEND-ONLY: the entry is one JSON line, written with a single O_APPEND
+   * call and no read before it, so several servers under one root (the
+   * session's and a maintenance worker's) cannot lose each other's entries.
+   * The line opens with a newline as well as ending with one, so it stands on
+   * its own even after a predecessor a crash cut short. Nothing clears the
+   * file; compactDomainWrites bounds it. No lock file, by ruling (the repo's
+   * history with lock directories).
    *
    * NEVER fails the knowledge write. Returns undefined when the entry was
-   * logged, otherwise the warning for the write's receipt: with no repoRoot,
-   * a repoRoot that holds no .sterling directory (never created here), or
-   * when the file cannot be written, the record is stored but will not
-   * count toward this project's duties, and the receipt says so (P5). An
-   * existing ledger that cannot be parsed is restarted with this entry, and
-   * the receipt says the earlier entries were lost.
+   * logged (or queued for a caller's post-commit flush), otherwise the warning
+   * for the write's receipt: with no repoRoot, a repoRoot that holds no
+   * .sterling directory (never created here), or when the file cannot be
+   * written, the record is stored but will not count toward this project's
+   * duties, and the receipt says so (P5). A logged entry whose compaction
+   * failed returns a warning that says only that.
    */
   private logDomainWrite(scope: string, record: { id: string; type: string }): string | undefined {
     if (!scope.startsWith('domain:')) return undefined;
+    if (this.deferredDomainWrites) {
+      this.deferredDomainWrites.push({ scope, record: { id: record.id, type: record.type } });
+      return undefined;
+    }
+    let ledgerPath: string;
     try {
       if (!this.repoRoot) throw new Error('no project root is known to this server');
       // Only inside an existing .sterling/: a server whose store does not sit at
       // <root>/.sterling/sterling.db derives a root that is not the project,
       // and the ledger must not plant a .sterling/ directory there.
       if (!existsSync(join(this.repoRoot, '.sterling'))) throw new Error(`${this.repoRoot} has no .sterling directory`);
-      const ledgerPath = join(this.repoRoot, KNOWLEDGE_WRITES_REL);
+      ledgerPath = join(this.repoRoot, KNOWLEDGE_WRITES_REL);
       mkdirSync(dirname(ledgerPath), { recursive: true });
-      let entries: KnowledgeWrite[] = [];
-      let restarted: string | undefined;
-      if (existsSync(ledgerPath)) {
-        try {
-          const parsed: unknown = JSON.parse(readFileSync(ledgerPath, 'utf8'));
-          if (!Array.isArray(parsed)) throw new Error('it is not a JSON array');
-          entries = parsed.flatMap((e) => {
-            const ok = knowledgeWriteSchema.safeParse(e);
-            return ok.success ? [ok.data] : [];
-          });
-        } catch (err) {
-          restarted = err instanceof Error ? err.message : String(err);
-        }
-      }
       const entry = knowledgeWriteSchema.parse({ id: record.id, type: record.type, at: this.now() });
-      const next = [...entries.filter((e) => e.id !== entry.id), entry].slice(-KNOWLEDGE_WRITES_CAP);
-      const tmp = `${ledgerPath}.tmp-${process.pid}-${randomUUID()}`;
-      try {
-        writeFileSync(tmp, JSON.stringify(next));
-        renameSync(tmp, ledgerPath);
-      } catch (err) {
-        try {
-          unlinkSync(tmp);
-        } catch {
-          // the temp file may never have been created; the write error below is the one to report
-        }
-        throw err;
-      }
-      return restarted === undefined
-        ? undefined
-        : `domain-write ledger: ${KNOWLEDGE_WRITES_REL} could not be read (${restarted}) and was restarted with this write. Domain records this project wrote earlier are no longer logged, so they no longer count toward its capture or research duty.`;
+      appendFileSync(ledgerPath, `\n${JSON.stringify(entry)}\n`);
     } catch (err) {
       return (
         `domain-write ledger: this write was NOT logged to ${KNOWLEDGE_WRITES_REL} (${err instanceof Error ? err.message : String(err)}). ` +
         `The record ${record.id} is stored in ${scope}, but it will not count toward this project's capture or research duty at session end.`
       );
+    }
+    try {
+      this.compactDomainWrites(ledgerPath);
+    } catch (err) {
+      return `domain-write ledger: this write was logged, but ${KNOWLEDGE_WRITES_REL} could not be compacted (${err instanceof Error ? err.message : String(err)}); the file keeps growing until a compaction succeeds.`;
+    }
+    return undefined;
+  }
+
+  /**
+   * Bounds the ledger: once it holds more than KNOWLEDGE_WRITES_COMPACT_LINES
+   * lines it is rewritten to the latest entry of each of the newest
+   * KNOWLEDGE_WRITES_KEEP_IDS record ids (newest by where an id last appears),
+   * through a temp file and a rename. Keeping only the latest `at` per id loses
+   * nothing for an "at or after X" read; an id past the newest
+   * KNOWLEDGE_WRITES_KEEP_IDS is dropped, and so is a line that does not parse.
+   *
+   * This is the ledger's only read-modify-write. An entry another process
+   * appends between the read and the rename is lost, once per several hundred
+   * writes at most; that entry's record then does not pay (the duty stays
+   * armed, the fail-closed side).
+   *
+   * The size check keeps the read off most writes: a line cannot be shorter
+   * than MIN_LINE_BYTES, so a smaller file cannot be past the line threshold.
+   */
+  private compactDomainWrites(ledgerPath: string): void {
+    const MIN_LINE_BYTES = 30; // {"id":"a","type":"b","at":"c"} and its newline
+    if (statSync(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES) return;
+    const lines = readFileSync(ledgerPath, 'utf8').split('\n').filter((line) => line !== '');
+    if (lines.length <= KNOWLEDGE_WRITES_COMPACT_LINES) return;
+    const latest = new Map<string, KnowledgeWrite>();
+    for (const line of lines) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue; // a torn or garbage line carries no entry to keep
+      }
+      const ok = knowledgeWriteSchema.safeParse(parsed);
+      if (!ok.success) continue;
+      latest.delete(ok.data.id); // re-insert, so map order is order of last appearance
+      latest.set(ok.data.id, ok.data);
+    }
+    const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
+    const tmp = `${ledgerPath}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      writeFileSync(tmp, kept.map((e) => `${JSON.stringify(e)}\n`).join(''));
+      renameSync(tmp, ledgerPath);
+    } catch (err) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // the temp file may never have been created; the write error is the one to report
+      }
+      throw err;
     }
   }
 

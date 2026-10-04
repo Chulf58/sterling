@@ -1716,7 +1716,7 @@ try {
   // domain-record-duty-credit-comes-from-a-per-project-write-ledger): a domain
   // store is shared by every project on the machine, so openDutyRecords counts
   // one of its records only when the domain-write ledger under this root
-  // (.sterling/transient/knowledge-writes.json, written by the MCP server)
+  // (.sterling/transient/knowledge-writes.jsonl, appended by the MCP server)
   // holds an entry for it inside the window. The ledger is a separate file
   // from the registers clearRegisters() consumes and is never cleared here.
   // Left on the project store on purpose: the concept duty and the ownership

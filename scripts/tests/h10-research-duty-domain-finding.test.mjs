@@ -45,7 +45,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -194,11 +194,10 @@ function domainDecision(domain, at) {
 // pays a duty only when the ledger under this project root has a line for it
 // inside the window; a fixture that only creates the record models a write by
 // ANOTHER project into the shared store.
-const ledgerPath = (dir) => join(dir, '.sterling', 'transient', 'knowledge-writes.json');
+const ledgerPath = (dir) => join(dir, '.sterling', 'transient', 'knowledge-writes.jsonl');
 function logWrite(dir, record, at) {
   mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
-  const lines = existsSync(ledgerPath(dir)) ? JSON.parse(readFileSync(ledgerPath(dir), 'utf8')) : [];
-  writeFileSync(ledgerPath(dir), JSON.stringify([...lines, { id: record.id, type: record.type, at }]));
+  appendFileSync(ledgerPath(dir), `${JSON.stringify({ id: record.id, type: record.type, at })}\n`);
 }
 
 const owed = (store, reason) => store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === reason);
@@ -381,13 +380,14 @@ test('DF-j: a domain-write ledger that cannot be read is announced in the nag an
   const { dir, domain, cleanup } = makeProject();
   try {
     writeSessionEvents(dir, [rEvent('genesys webhook signature validation')]);
-    domainFinding(domain, AFTER_EVENT);
-    writeFileSync(ledgerPath(dir), '{ not json');
+    logWrite(dir, domainFinding(domain, AFTER_EVENT), AFTER_EVENT);
+    rmSync(ledgerPath(dir));
+    mkdirSync(ledgerPath(dir)); // a directory where the file belongs: the read fails
 
     const r = stopOnce(dir);
     assert.equal(r.code, 2, 'an unreadable ledger never discharges the duty');
     assert.match(r.stderr, /genesys webhook signature validation/);
-    assert.match(r.stderr, /the domain-write ledger \(\.sterling\/transient\/knowledge-writes\.json\) could not be read/, 'the degraded read is stated, not silent');
+    assert.match(r.stderr, /the domain-write ledger \(\.sterling\/transient\/knowledge-writes\.jsonl\) could not be read/, 'the degraded read is stated, not silent');
   } finally {
     cleanup();
   }

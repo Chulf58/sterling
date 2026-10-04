@@ -167,9 +167,11 @@ const BEFORE_W0 = '2026-10-04T11:00:00.000Z';
 const IN_WINDOW = '2026-10-04T12:30:00.000Z';
 const domainDecision = (at) => ({ ...env('decision', at), scope: 'domain:shared', title: 't', statement: 's', alternatives_rejected: [], rationale: 'r' });
 
+// The ledger is JSON Lines: one entry per line, appended by the server.
+const ledgerFile = (root) => join(root, '.sterling', 'transient', 'knowledge-writes.jsonl');
 function writeLedger(root, entries) {
   mkdirSync(join(root, '.sterling', 'transient'), { recursive: true });
-  writeFileSync(join(root, '.sterling', 'transient', 'knowledge-writes.json'), typeof entries === 'string' ? entries : JSON.stringify(entries));
+  writeFileSync(ledgerFile(root), typeof entries === 'string' ? entries : entries.map((e) => `${JSON.stringify(e)}\n`).join(''));
 }
 
 /** Projects A and B (each a root with its own project store) over one shared domain store. */
@@ -274,22 +276,45 @@ test('ledger: with no root there is no ledger, so no domain record pays', () =>
     assert.equal(a.paid({ root: undefined }).capture, false);
   }));
 
-test('ledger: one that cannot be read is announced once and pays nothing; an entry of the wrong shape is ignored', () =>
+test('ledger: a file that cannot be read is announced once and pays nothing', () =>
   withSharedDomain(({ domain, a }) => {
-    const rec = domain.create(domainDecision(IN_WINDOW));
-    writeLedger(a.root, '{ not json');
+    domain.create(domainDecision(IN_WINDOW));
+    mkdirSync(ledgerFile(a.root), { recursive: true }); // a directory where the file belongs
     const broken = a.paid();
     assert.deepEqual({ capture: broken.capture, research: broken.research }, { capture: false, research: false });
     assert.equal(broken.said.ledger.length, 1, 'announced once, not once per record or per duty');
+    assert.match(broken.said.ledger[0], /EISDIR/);
+  }));
 
-    writeLedger(a.root, '{"id":"x"}');
-    assert.deepEqual(a.paid().said.ledger, ['it is not a JSON array']);
-
-    for (const bad of [{ id: rec.id, type: 'decision', at: '0' }, { id: rec.id, type: 'decision' }, { id: rec.id, type: 'decision', at: IN_WINDOW, project: a.root }, null]) {
+test('ledger: a line that does not parse or is not the entry shape is skipped, and the entries around it still count', () =>
+  withSharedDomain(({ domain, a }) => {
+    const rec = domain.create(domainDecision(IN_WINDOW));
+    for (const bad of [{ id: rec.id, type: 'decision', at: '0' }, { id: rec.id, type: 'decision' }, { id: rec.id, type: 'decision', at: IN_WINDOW, project: a.root }, null, [{ id: rec.id, type: 'decision', at: IN_WINDOW }]]) {
       writeLedger(a.root, [bad]);
       assert.equal(a.paid().capture, false, `ignored: ${JSON.stringify(bad)}`);
+      assert.deepEqual(a.paid().said.ledger, [], 'a skipped line is not an unreadable ledger');
     }
-    assert.deepEqual(duties.readKnowledgeWrites(a.root), { entries: [] });
+    assert.deepEqual([...duties.readKnowledgeWrites(a.root).latestAt], []);
+
+    const good = JSON.stringify({ id: rec.id, type: 'decision', at: IN_WINDOW });
+    const other = JSON.stringify({ id: 'another-record', type: 'decision', at: IN_WINDOW });
+    writeLedger(a.root, `not json at all\n\n${good}\n{"id":"torn","type":"decis\n${other}\n{"id":"cut-short","ty`);
+    assert.equal(a.paid().capture, true, 'GARBAGE-LINE-HIDES-ENTRIES SHAPE if false: the entry between a garbage line and a torn one still pays');
+    assert.equal(a.paid().research, true);
+    assert.deepEqual(a.paid().said.ledger, []);
+    assert.deepEqual([...duties.readKnowledgeWrites(a.root).latestAt], [[rec.id, IN_WINDOW], ['another-record', IN_WINDOW]], 'the entry after the torn line is read too');
+  }));
+
+test('ledger: several lines for one id count as its latest at, in whatever order they sit', () =>
+  withSharedDomain(({ domain, a }) => {
+    const rec = domain.create(domainDecision(BEFORE_W0));
+    domain.updateRecord(rec.id, { ...rec, rationale: 'r2', updated_at: IN_WINDOW });
+    const line = (at) => ({ id: rec.id, type: 'decision', at });
+    writeLedger(a.root, [line(BEFORE_W0), line('2026-10-04T10:00:00.000Z')]);
+    assert.equal(a.paid().capture, false, 'every line for the id is before the window');
+    writeLedger(a.root, [line(IN_WINDOW), line(BEFORE_W0)]);
+    assert.equal(a.paid().capture, true, 'one in-window line pays, even when an older line follows it');
+    assert.deepEqual([...duties.readKnowledgeWrites(a.root).latestAt], [[rec.id, IN_WINDOW]]);
   }));
 
 test('ledger: an unreadable domain store is still announced and pays nothing, even with an in-window entry for a record in it', () =>

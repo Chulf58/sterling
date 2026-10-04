@@ -4910,7 +4910,7 @@ var sessionEventSchema = external_exports.object({
   // Trimmed before the length check, so a whitespace-only target is refused.
   target: external_exports.string().trim().min(1).optional()
 });
-var KNOWLEDGE_WRITES_REL = ".sterling/transient/knowledge-writes.json";
+var KNOWLEDGE_WRITES_REL = ".sterling/transient/knowledge-writes.jsonl";
 var knowledgeWriteSchema = external_exports.object({
   id: external_exports.string().min(1),
   type: external_exports.string().min(1),
@@ -9567,9 +9567,9 @@ function openDutyRecords(store2, config, { opener = (dbPath) => new SterlingStor
   let ledger = null;
   const loggedWrites = () => {
     if (ledger === null) {
-      const read = root ? readKnowledgeWrites(root) : { entries: [] };
+      const read = root ? readKnowledgeWrites(root) : { latestAt: /* @__PURE__ */ new Map() };
       if (read.error) onLedgerUnreadable(read.error);
-      ledger = read.entries;
+      ledger = read.latestAt;
     }
     return ledger;
   };
@@ -9610,7 +9610,8 @@ function openDutyRecords(store2, config, { opener = (dbPath) => new SterlingStor
     pays(r, since) {
       if (!writtenSince(r, since)) return false;
       if (!domainRows.has(r)) return true;
-      return loggedWrites().some((e) => e.id === r.id && e.at >= since);
+      const loggedAt = loggedWrites().get(r.id);
+      return loggedAt !== void 0 && loggedAt >= since;
     },
     close() {
       const open = domains ?? [];
@@ -9630,15 +9631,27 @@ function openDutyRecords(store2, config, { opener = (dbPath) => new SterlingStor
 var writtenSince = (r, since) => r.created_at >= since || r.updated_at >= since;
 function readKnowledgeWrites(root) {
   const p = join15(root, KNOWLEDGE_WRITES_REL);
-  if (!existsSync10(p)) return { entries: [] };
-  let parsed;
+  const latestAt = /* @__PURE__ */ new Map();
+  if (!existsSync10(p)) return { latestAt };
+  let text;
   try {
-    parsed = JSON.parse(readFileSync9(p, "utf8"));
+    text = readFileSync9(p, "utf8");
   } catch (e) {
-    return { entries: [], error: String(e && e.message || e) };
+    return { latestAt, error: String(e && e.message || e) };
   }
-  if (!Array.isArray(parsed)) return { entries: [], error: "it is not a JSON array" };
-  return { entries: parsed.filter((e) => knowledgeWriteSchema.safeParse(e).success && isValidAt(e.at)) };
+  for (const line of text.split("\n")) {
+    if (line === "") continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!knowledgeWriteSchema.safeParse(entry).success || !isValidAt(entry.at)) continue;
+    const prior = latestAt.get(entry.id);
+    if (prior === void 0 || entry.at > prior) latestAt.set(entry.id, entry.at);
+  }
+  return { latestAt };
 }
 var paysSince = (store2, r, since) => typeof store2.pays === "function" ? store2.pays(r, since) : writtenSince(r, since);
 var CAPTURE_TYPES = ["decision", "anti_pattern", "feature_article", "research_finding", "disconfirmed_hypothesis", "open_question"];

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { knowledgeWriteSchema, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_CAP } from '../index.js';
+import { knowledgeWriteSchema, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS } from '../index.js';
 
 // The domain-write ledger entry (decision
 // domain-record-duty-credit-comes-from-a-per-project-write-ledger): the shape
@@ -22,7 +22,9 @@ test('knowledgeWriteSchema: nothing about the writing project or session rides o
   assert.equal(knowledgeWriteSchema.safeParse({ ...entry, session_id: 's1' }).success, false);
 });
 
-test('the ledger location and bound are stated once, beside the shape', () => {
-  assert.equal(KNOWLEDGE_WRITES_REL, '.sterling/transient/knowledge-writes.json');
-  assert.equal(KNOWLEDGE_WRITES_CAP, 500);
+test('the ledger location and bounds are stated once, beside the shape', () => {
+  assert.equal(KNOWLEDGE_WRITES_REL, '.sterling/transient/knowledge-writes.jsonl');
+  assert.equal(KNOWLEDGE_WRITES_COMPACT_LINES, 1000);
+  assert.equal(KNOWLEDGE_WRITES_KEEP_IDS, 500);
+  assert.ok(KNOWLEDGE_WRITES_KEEP_IDS < KNOWLEDGE_WRITES_COMPACT_LINES, 'a compaction must shrink the file');
 });

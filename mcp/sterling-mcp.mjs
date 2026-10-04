@@ -22503,8 +22503,9 @@ var sessionEventSchema = external_exports.object({
   // Trimmed before the length check, so a whitespace-only target is refused.
   target: external_exports.string().trim().min(1).optional()
 });
-var KNOWLEDGE_WRITES_REL = ".sterling/transient/knowledge-writes.json";
-var KNOWLEDGE_WRITES_CAP = 500;
+var KNOWLEDGE_WRITES_REL = ".sterling/transient/knowledge-writes.jsonl";
+var KNOWLEDGE_WRITES_COMPACT_LINES = 1e3;
+var KNOWLEDGE_WRITES_KEEP_IDS = 500;
 var knowledgeWriteSchema = external_exports.object({
   id: external_exports.string().min(1),
   type: external_exports.string().min(1),
@@ -26623,7 +26624,7 @@ var SterlingStore = class _SterlingStore {
 // packages/mcp-server/dist/tools.js
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
-import { chmodSync, existsSync as existsSync4, lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, realpathSync as realpathSync2, renameSync, statSync as statSync2, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync as existsSync4, lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, realpathSync as realpathSync2, renameSync, statSync as statSync2, unlinkSync, writeFileSync } from "node:fs";
 import { dirname as dirname4, isAbsolute, join as join5, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
@@ -32358,7 +32359,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     let deferredSkips = [];
     let claimsCheck = {};
     const isDomainScope = !sourceProjectHeld;
-    this.store.withTransactionForRecord(original.id, () => {
+    const ledgerWarnings = this.logDomainWritesAfter(() => this.store.withTransactionForRecord(original.id, () => {
       const created = this.knowledgeCreate(newType, { scope: sourceScope, ...new_record.fields }, { deferCheckSkipped: isDomainScope });
       deferredSkips = isDomainScope ? created.check_skipped ?? [] : [];
       claimsCheck = created.claims_check ? { claims_check: created.claims_check } : {};
@@ -32377,7 +32378,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       this.store.addLink(original.id, "cites", newId);
       for (const claim of resolveClaims)
         this.store.remove(claim.id, ts);
-    });
+    }));
     for (const s2 of deferredSkips) {
       this.store.recordCheckSkipped(s2.check, s2.reason, this.activeRunId(), this.now());
     }
@@ -32385,7 +32386,8 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       extracted: find,
       source: { id: original.id, version: sourceVersion },
       edges: { informed_by: original.id, cites: newId },
-      ...claimsCheck
+      ...claimsCheck,
+      ...ledgerWarnings.length ? { ledger_warnings: ledgerWarnings } : {}
     };
   }
   /**
@@ -32397,8 +32399,8 @@ ${JSON.stringify(value, null, 2)}` : void 0;
    * carry. Warnings never gate the write (P1).
    */
   knowledgeExtractResult(input) {
-    const result = this.knowledgeExtract(input);
-    const warnings = [];
+    const { ledger_warnings, ...result } = this.knowledgeExtract(input);
+    const warnings = [...ledger_warnings ?? []];
     const newRecord = this.store.get(result.edges.cites);
     if (newRecord)
       warnings.push(...this.articleOversizeWarnings(newRecord));
@@ -32615,6 +32617,31 @@ ${JSON.stringify(value, null, 2)}` : void 0;
   }
   // -- domain-write ledger -----------------------------------------------------
   /**
+   * Set while a caller holds a store transaction open around nested
+   * knowledgeCreate/knowledgeUpdate calls (knowledgeExtract): logDomainWrite
+   * queues here instead of writing, and the caller flushes the queue only
+   * after the transaction commits, so a rolled-back write is never logged.
+   */
+  deferredDomainWrites;
+  /**
+   * Runs `write` (a store transaction around nested knowledge writes) with
+   * ledger logging queued, then logs the queued writes once it has returned,
+   * which is after the commit. Returns the warnings for the lines that could
+   * not be written. When `write` throws, nothing is logged and the throw
+   * passes through.
+   */
+  logDomainWritesAfter(write) {
+    const queued = [];
+    const outer = this.deferredDomainWrites;
+    this.deferredDomainWrites = queued;
+    try {
+      write();
+    } finally {
+      this.deferredDomainWrites = outer;
+    }
+    return queued.map((w) => this.logDomainWrite(w.scope, w.record)).filter((w) => w !== void 0);
+  }
+  /**
    * Logs one write of a record a mounted DOMAIN store holds to this project's
    * transient ledger (KNOWLEDGE_WRITES_REL under repoRoot), so the session-end
    * duty reads can tell this project's domain writes from another project's
@@ -32627,60 +32654,100 @@ ${JSON.stringify(value, null, 2)}` : void 0;
    * Called AFTER the store write returned, with the stored record's own id and
    * type and this server's clock. No caller field reaches an entry.
    *
-   * One entry per record id (a later write replaces the id's earlier entry,
-   * which loses nothing for an "at or after X" read), newest
-   * KNOWLEDGE_WRITES_CAP ids kept. Nothing clears the file: it is a separate
-   * file from session-events.json because H10 consumes that register at Stop.
+   * APPEND-ONLY: the entry is one JSON line, written with a single O_APPEND
+   * call and no read before it, so several servers under one root (the
+   * session's and a maintenance worker's) cannot lose each other's entries.
+   * The line opens with a newline as well as ending with one, so it stands on
+   * its own even after a predecessor a crash cut short. Nothing clears the
+   * file; compactDomainWrites bounds it. No lock file, by ruling (the repo's
+   * history with lock directories).
    *
    * NEVER fails the knowledge write. Returns undefined when the entry was
-   * logged, otherwise the warning for the write's receipt: with no repoRoot,
-   * a repoRoot that holds no .sterling directory (never created here), or
-   * when the file cannot be written, the record is stored but will not
-   * count toward this project's duties, and the receipt says so (P5). An
-   * existing ledger that cannot be parsed is restarted with this entry, and
-   * the receipt says the earlier entries were lost.
+   * logged (or queued for a caller's post-commit flush), otherwise the warning
+   * for the write's receipt: with no repoRoot, a repoRoot that holds no
+   * .sterling directory (never created here), or when the file cannot be
+   * written, the record is stored but will not count toward this project's
+   * duties, and the receipt says so (P5). A logged entry whose compaction
+   * failed returns a warning that says only that.
    */
   logDomainWrite(scope, record2) {
     if (!scope.startsWith("domain:"))
       return void 0;
+    if (this.deferredDomainWrites) {
+      this.deferredDomainWrites.push({ scope, record: { id: record2.id, type: record2.type } });
+      return void 0;
+    }
+    let ledgerPath;
     try {
       if (!this.repoRoot)
         throw new Error("no project root is known to this server");
       if (!existsSync4(join5(this.repoRoot, ".sterling")))
         throw new Error(`${this.repoRoot} has no .sterling directory`);
-      const ledgerPath = join5(this.repoRoot, KNOWLEDGE_WRITES_REL);
+      ledgerPath = join5(this.repoRoot, KNOWLEDGE_WRITES_REL);
       mkdirSync3(dirname4(ledgerPath), { recursive: true });
-      let entries = [];
-      let restarted;
-      if (existsSync4(ledgerPath)) {
-        try {
-          const parsed = JSON.parse(readFileSync2(ledgerPath, "utf8"));
-          if (!Array.isArray(parsed))
-            throw new Error("it is not a JSON array");
-          entries = parsed.flatMap((e) => {
-            const ok = knowledgeWriteSchema.safeParse(e);
-            return ok.success ? [ok.data] : [];
-          });
-        } catch (err) {
-          restarted = err instanceof Error ? err.message : String(err);
-        }
-      }
       const entry = knowledgeWriteSchema.parse({ id: record2.id, type: record2.type, at: this.now() });
-      const next = [...entries.filter((e) => e.id !== entry.id), entry].slice(-KNOWLEDGE_WRITES_CAP);
-      const tmp = `${ledgerPath}.tmp-${process.pid}-${randomUUID2()}`;
-      try {
-        writeFileSync(tmp, JSON.stringify(next));
-        renameSync(tmp, ledgerPath);
-      } catch (err) {
-        try {
-          unlinkSync(tmp);
-        } catch {
-        }
-        throw err;
-      }
-      return restarted === void 0 ? void 0 : `domain-write ledger: ${KNOWLEDGE_WRITES_REL} could not be read (${restarted}) and was restarted with this write. Domain records this project wrote earlier are no longer logged, so they no longer count toward its capture or research duty.`;
+      appendFileSync(ledgerPath, `
+${JSON.stringify(entry)}
+`);
     } catch (err) {
       return `domain-write ledger: this write was NOT logged to ${KNOWLEDGE_WRITES_REL} (${err instanceof Error ? err.message : String(err)}). The record ${record2.id} is stored in ${scope}, but it will not count toward this project's capture or research duty at session end.`;
+    }
+    try {
+      this.compactDomainWrites(ledgerPath);
+    } catch (err) {
+      return `domain-write ledger: this write was logged, but ${KNOWLEDGE_WRITES_REL} could not be compacted (${err instanceof Error ? err.message : String(err)}); the file keeps growing until a compaction succeeds.`;
+    }
+    return void 0;
+  }
+  /**
+   * Bounds the ledger: once it holds more than KNOWLEDGE_WRITES_COMPACT_LINES
+   * lines it is rewritten to the latest entry of each of the newest
+   * KNOWLEDGE_WRITES_KEEP_IDS record ids (newest by where an id last appears),
+   * through a temp file and a rename. Keeping only the latest `at` per id loses
+   * nothing for an "at or after X" read; an id past the newest
+   * KNOWLEDGE_WRITES_KEEP_IDS is dropped, and so is a line that does not parse.
+   *
+   * This is the ledger's only read-modify-write. An entry another process
+   * appends between the read and the rename is lost, once per several hundred
+   * writes at most; that entry's record then does not pay (the duty stays
+   * armed, the fail-closed side).
+   *
+   * The size check keeps the read off most writes: a line cannot be shorter
+   * than MIN_LINE_BYTES, so a smaller file cannot be past the line threshold.
+   */
+  compactDomainWrites(ledgerPath) {
+    const MIN_LINE_BYTES = 30;
+    if (statSync2(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES)
+      return;
+    const lines = readFileSync2(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
+    if (lines.length <= KNOWLEDGE_WRITES_COMPACT_LINES)
+      return;
+    const latest = /* @__PURE__ */ new Map();
+    for (const line of lines) {
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const ok = knowledgeWriteSchema.safeParse(parsed);
+      if (!ok.success)
+        continue;
+      latest.delete(ok.data.id);
+      latest.set(ok.data.id, ok.data);
+    }
+    const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
+    const tmp = `${ledgerPath}.tmp-${process.pid}-${randomUUID2()}`;
+    try {
+      writeFileSync(tmp, kept.map((e) => `${JSON.stringify(e)}
+`).join(""));
+      renameSync(tmp, ledgerPath);
+    } catch (err) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+      }
+      throw err;
     }
   }
   // -- session-event register writers (boards 75b1a05f + 1af5d630) ------------

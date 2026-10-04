@@ -95,12 +95,12 @@ export function conceptFamiliesFrom(sessionEvents) {
  *   written before the ledger existed, never pays (decision
  *   domain-record-duty-credit-comes-from-a-per-project-write-ledger).
  * - The ledger is read once, on the first domain record weighed, and never
- *   written or cleared here. An absent ledger is empty. One that cannot be
- *   read or is not a JSON array is reported once through
- *   `onLedgerUnreadable(errorText)` and counts as empty, so no domain record
- *   pays and the duty stays armed. An entry that is not the shared shape or
- *   whose `at` is not a canonical stamp is ignored. With no `root` there is no
- *   ledger to read and no domain record pays.
+ *   written or cleared here. An absent ledger is empty. A file that cannot be
+ *   read is reported once through `onLedgerUnreadable(errorText)` and counts
+ *   as empty, so no domain record pays and the duty stays armed. A line that
+ *   does not parse, is not the shared shape or whose `at` is not a canonical
+ *   stamp is skipped without a report; the lines around it still count. With
+ *   no `root` there is no ledger to read and no domain record pays.
  *
  * Not for ownership reads: a feature_article is always project-scoped, and a
  * domain record's file_keys name files in other repos.
@@ -114,9 +114,9 @@ export function openDutyRecords(store, config, { opener = (dbPath) => new Sterli
   let ledger = null;
   const loggedWrites = () => {
     if (ledger === null) {
-      const read = root ? readKnowledgeWrites(root) : { entries: [] };
+      const read = root ? readKnowledgeWrites(root) : { latestAt: new Map() };
       if (read.error) onLedgerUnreadable(read.error);
-      ledger = read.entries;
+      ledger = read.latestAt;
     }
     return ledger;
   };
@@ -158,7 +158,8 @@ export function openDutyRecords(store, config, { opener = (dbPath) => new Sterli
     pays(r, since) {
       if (!writtenSince(r, since)) return false;
       if (!domainRows.has(r)) return true;
-      return loggedWrites().some((e) => e.id === r.id && e.at >= since);
+      const loggedAt = loggedWrites().get(r.id);
+      return loggedAt !== undefined && loggedAt >= since;
     },
     close() {
       const open = domains ?? [];
@@ -180,21 +181,37 @@ export function openDutyRecords(store, config, { opener = (dbPath) => new Sterli
 const writtenSince = (r, since) => r.created_at >= since || r.updated_at >= since;
 
 /**
- * The domain-write ledger under `root`: `{ entries }`, plus `error` when the
- * file exists and cannot be used. Entries keep only the shared shape with a
- * canonical `at`, since `at` is compared lexically against the window start.
+ * The domain-write ledger under `root` (JSON Lines, appended by the MCP
+ * server): `{ latestAt }`, a Map of record id to the latest `at` logged for
+ * it, plus `error` when the file exists and cannot be read. The server appends
+ * a line per write, so one id can have many lines; the latest `at` is all an
+ * "at or after X" read needs. A line that does not parse (a torn or garbage
+ * line), is not the shared shape, or whose `at` is not a canonical stamp is
+ * skipped: `at` is compared lexically against the window start.
  */
 export function readKnowledgeWrites(root) {
   const p = join(root, KNOWLEDGE_WRITES_REL);
-  if (!existsSync(p)) return { entries: [] };
-  let parsed;
+  const latestAt = new Map();
+  if (!existsSync(p)) return { latestAt };
+  let text;
   try {
-    parsed = JSON.parse(readFileSync(p, 'utf8'));
+    text = readFileSync(p, 'utf8');
   } catch (e) {
-    return { entries: [], error: String((e && e.message) || e) };
+    return { latestAt, error: String((e && e.message) || e) };
   }
-  if (!Array.isArray(parsed)) return { entries: [], error: 'it is not a JSON array' };
-  return { entries: parsed.filter((e) => knowledgeWriteSchema.safeParse(e).success && isValidAt(e.at)) };
+  for (const line of text.split('\n')) {
+    if (line === '') continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue; // a torn or garbage line carries no entry
+    }
+    if (!knowledgeWriteSchema.safeParse(entry).success || !isValidAt(entry.at)) continue;
+    const prior = latestAt.get(entry.id);
+    if (prior === undefined || entry.at > prior) latestAt.set(entry.id, entry.at);
+  }
+  return { latestAt };
 }
 
 /**
