@@ -43,7 +43,12 @@ function git(cwd, args) {
 }
 
 // SLOW_GIT_STEPS: git subcommands that "take 65 s" — killed only if the caller
-// set a shorter timeout. KILLED_GIT_STEP: a git subcommand that dies part-way
+// set a shorter timeout. LOUD_GIT_STEPS: git subcommands that "print more than
+// any finite buffer" — killed with ENOBUFS, as spawnSync does, unless the caller
+// lifted maxBuffer to Infinity. PROMPTLESS_GIT_STEPS: git subcommands that
+// would wait on a terminal prompt unless GIT_TERMINAL_PROMPT=0 is in the child
+// environment. KILLED_GIT_STRAY: the killed step also leaves a path that is in
+// neither HEAD nor the feature branch. KILLED_GIT_STEP: a git subcommand that dies part-way
 // regardless (the state a killed merge leaves: some files of the incoming
 // branch written, the index and HEAD untouched).
 const PRELOAD = `
@@ -54,6 +59,8 @@ const { syncBuiltinESMExports } = require('node:module');
 const real = cp.spawnSync;
 const SIMULATED_RUNTIME_MS = 65_000;
 const slow = (process.env.SLOW_GIT_STEPS ?? '').split(',').filter(Boolean);
+const loud = (process.env.LOUD_GIT_STEPS ?? '').split(',').filter(Boolean);
+const promptless = (process.env.PROMPTLESS_GIT_STEPS ?? '').split(',').filter(Boolean);
 const killed = process.env.KILLED_GIT_STEP ?? '';
 const dead = (code) => ({
   pid: 0, status: null, signal: 'SIGTERM', stdout: '', stderr: '', output: [null, '', ''],
@@ -62,7 +69,13 @@ const dead = (code) => ({
 cp.spawnSync = function (cmd, args, opts) {
   const step = cmd === 'git' && Array.isArray(args) ? args[0] : null;
   if (step && slow.includes(step) && opts?.timeout && opts.timeout < SIMULATED_RUNTIME_MS) return dead('ETIMEDOUT');
+  if (step && loud.includes(step) && opts?.maxBuffer !== Infinity) return dead('ENOBUFS');
+  if (step && promptless.includes(step) && opts?.env?.GIT_TERMINAL_PROMPT !== '0') return dead('WOULD_PROMPT');
   if (step && step === killed) {
+    if (process.env.KILLED_GIT_STRAY) {
+      fs.mkdirSync(path.join(opts.cwd, 'stray'), { recursive: true });
+      fs.writeFileSync(path.join(opts.cwd, 'stray', 'z.mjs'), 'export const z = 1;\\n');
+    }
     fs.writeFileSync(path.join(opts.cwd, 'src', 'x.mjs'), 'export const x = 1;\\n');
     fs.writeFileSync(path.join(opts.cwd, 'src', 'base.mjs'), 'export const base = 2;\\n');
     return dead(null);
@@ -127,6 +140,62 @@ test('direct-merge.mjs: a checkout and a merge that each run longer than the 60 
   }
 });
 
+test('direct-merge.mjs: a checkout and a merge whose output passes any finite spawn buffer are not killed, and the merge lands', async () => {
+  const { dir, preload, cleanup } = await makeGitProject();
+  try {
+    commitFeature(dir);
+    const r = runDirectMerge(dir, preload, { LOUD_GIT_STEPS: 'checkout,merge' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /ENOBUFS/);
+    assert.equal(JSON.parse(r.stdout).branch_merged, 'feat/x');
+    assert.equal(git(dir, ['log', '-1', '--format=%s']), 'Merge feat/x into main');
+    assert.equal(git(dir, ['status', '--porcelain']), '');
+  } finally {
+    cleanup();
+  }
+});
+
+test('direct-merge.mjs: the untimed checkout and merge run with GIT_TERMINAL_PROMPT=0 and each is announced on stderr first', async () => {
+  const { dir, preload, cleanup } = await makeGitProject();
+  try {
+    commitFeature(dir);
+    const r = runDirectMerge(dir, preload, { PROMPTLESS_GIT_STEPS: 'checkout,merge' });
+    assert.equal(r.status, 0, r.stderr);
+    const checkoutAt = r.stderr.search(/^branch-manager: running `git checkout` with no time limit.*minutes on a slow drive.*do not interrupt/m);
+    const mergeAt = r.stderr.search(/^branch-manager: running `git merge` with no time limit.*minutes on a slow drive.*do not interrupt/m);
+    assert.ok(checkoutAt !== -1 && mergeAt > checkoutAt, r.stderr);
+    assert.equal(JSON.parse(r.stdout).branch_merged, 'feat/x', 'stdout is still one JSON report');
+  } finally {
+    cleanup();
+  }
+});
+
+test('direct-merge.mjs: a killed merge that left a path in neither HEAD nor the branch prints the git clean step, and the printed commands end with a clean tree', async () => {
+  const { dir, preload, cleanup } = await makeGitProject();
+  try {
+    commitFeature(dir);
+    const r = runDirectMerge(dir, preload, { KILLED_GIT_STEP: 'merge', KILLED_GIT_STRAY: '1' });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /changed paths:\s+3\b/);
+    assert.match(r.stderr, /partly written by the failed `git merge`/);
+    const checkoutAt = r.stderr.search(/^ {2}git checkout -f feat\/x$/m);
+    const listAt = r.stderr.search(/^ {2}git clean -nd$/m);
+    const cleanAt = r.stderr.search(/^ {2}git clean -fd$/m);
+    assert.ok(checkoutAt !== -1 && listAt > checkoutAt && cleanAt > listAt, r.stderr);
+    assert.doesNotMatch(r.stderr, /git clean -\w*x/, 'ignored files are never offered for deletion');
+
+    // Following the printed commands in order.
+    git(dir, ['checkout', '-f', 'feat/x']);
+    assert.equal(git(dir, ['status', '--porcelain']), '?? stray/', 'the forced checkout alone leaves the stray path');
+    assert.match(git(dir, ['clean', '-nd']), /stray\//);
+    git(dir, ['clean', '-fd']);
+    assert.equal(git(dir, ['status', '--porcelain']), '');
+    assert.ok(existsSync(join(dir, '.sterling', 'sterling.db')), 'the ignored store survives git clean -fd');
+  } finally {
+    cleanup();
+  }
+});
+
 test('direct-merge.mjs: a merge step killed part-way reports branch, HEAD, MERGE_HEAD, the changed-path count and a recovery command that restores a clean tree', async () => {
   const { dir, preload, cleanup } = await makeGitProject();
   try {
@@ -177,6 +246,9 @@ test('direct-merge.mjs: a merge that stops on a conflict reports MERGE_HEAD pres
     assert.match(r.stderr, /MERGE_HEAD:\s+present/);
     assert.match(r.stderr, /changed paths:\s+2\b/);
     assert.match(r.stderr, /Do NOT `git add` or commit/);
+    assert.match(r.stderr, /stopped on conflicts/);
+    assert.match(r.stderr, /resolve the conflicts on feat\/x/);
+    assert.doesNotMatch(r.stderr, /partly written/, 'a conflict stop is not a partly written tree');
     const abortAt = r.stderr.search(/^ {2}git merge --abort$/m);
     const checkoutAt = r.stderr.search(/^ {2}git checkout -f feat\/x$/m);
     assert.ok(abortAt !== -1 && checkoutAt > abortAt, r.stderr);
