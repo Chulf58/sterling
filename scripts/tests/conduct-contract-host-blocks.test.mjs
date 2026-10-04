@@ -45,7 +45,11 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // node "<Sterling root>/bin/<name>.mjs" and say the root is the path the STERLING ROOT line printed
 // at session start, because ${CLAUDE_PLUGIN_ROOT} is not in the Bash tool's environment (decision
 // session-start-prints-the-sterling-root-plain-text-instructions-use-it; GitHub issue #16).
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'd148b6e3c9e4a88319f1affc823ed08f991a9cccb63fdd44a2b49d911db90564';
+// Moved 2026-10-04 (from d148b6e3…): the Claude Code "Codex runs through the MCP tool" bullet says the
+// pinned Codex 0.153.4 MCP server is the one supported route and that an absent `codex` tool is
+// reported and its lane skipped (decision codex-route-stays-the-pinned-0-153-4-mcp-server; GitHub
+// issue #18). The OpenCode bullet already said so.
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = '000cd9b3e1d09d5d3a92e64eb74f5abec85090e4d1229f84a02a25e6e91a697d';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);
