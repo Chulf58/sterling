@@ -588,6 +588,113 @@ test('a torn notices file cannot reject the event handler, so the subscription l
   }
 });
 
+// A record with scope domain:<name> lives in that domain's own store, so the
+// settlement duty reads cover the project store and every mounted domain store
+// (GitHub issue #12; the H10 side is h10-research-duty-domain-finding.test.mjs).
+function makeDomainProject({ domain = 'store' } = {}) {
+  const domainDb = join(tmpdir(), `sterling-oc-duty-domain-${randomUUID()}`, 'sterling.db');
+  const p = makeProject({ records: [], config: { stack_tags: ['alpha'], domain_paths: { alpha: domainDb } } });
+  if (domain !== 'missing') mkdirSync(dirname(domainDb), { recursive: true });
+  if (domain === 'store') createDomain('alpha', 'Alpha reactor facts', domainDb);
+  if (domain === 'junk') writeFileSync(domainDb, 'this is not a sqlite database, just text '.repeat(50));
+  const writeDomain = (record) => {
+    const at = new Date().toISOString();
+    const d = new SterlingStore(domainDb);
+    d.create({ ...envelope(record.type), ...record, created_at: at, updated_at: at, scope: 'domain:alpha' });
+    d.close();
+  };
+  return { ...p, domainDb, writeDomain, cleanup: () => (p.cleanup(), rmSync(dirname(domainDb), { recursive: true, force: true })) };
+}
+
+/** Settle, edit src/a.mjs, settle again: the notices the edit's settlement raised. */
+async function settleAnEdit(p, deps = {}, beforeSecondSettle = () => {}) {
+  const { plugin, cleanup } = await setup(p.dir, { ses_root: {} }, deps);
+  await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+  writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 2;\n');
+  beforeSecondSettle();
+  await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+  await cleanup?.();
+  return noticeTexts(p.dir).join('\n');
+}
+
+test('settlement: a mounted domain with no store on disk is skipped and never created', async () => {
+  const p = makeDomainProject({ domain: 'missing' });
+  try {
+    const text = await settleAnEdit(p);
+    assert.match(text, /capture owed: 1 changed file/, 'nothing paid the duty');
+    assert.doesNotMatch(text, /could not be read|settlement failed/, 'a missing domain store is not a failure');
+    assert.equal(existsSync(p.domainDb), false, 'the domain store was not created');
+    assert.equal(existsSync(dirname(p.domainDb)), false, 'nor its directory');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('settlement: an unreadable domain store raises its own notice and pays nothing', async () => {
+  const p = makeDomainProject({ domain: 'junk' });
+  try {
+    const text = await settleAnEdit(p);
+    assert.match(text, /capture owed: 1 changed file/, 'the unreadable domain pays nothing');
+    assert.match(text, /Sterling settlement: domain store\(s\) 'alpha' \(.+\) could not be read; a record written there was not counted toward the capture and research duties\./);
+    assert.doesNotMatch(text, /settlement failed/, 'the settlement itself completes');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('settlement: a domain store whose close throws does not fail the settlement or lose the capture it holds', async () => {
+  const p = makeDomainProject();
+  try {
+    let domainCloses = 0;
+    const openStore = (dbPath) => {
+      const real = new SterlingStore(dbPath);
+      if (dbPath !== p.domainDb) return real;
+      return { query: (q) => real.query(q), close: () => (real.close(), (domainCloses += 1), assert.fail('domain close boom')) };
+    };
+    const text = await settleAnEdit(p, { openStore }, () => p.writeDomain({ type: 'decision', title: 'a is two', statement: 's', alternatives_rejected: [], rationale: 'r' }));
+    assert.ok(domainCloses >= 1, 'the domain store was closed');
+    assert.doesNotMatch(text, /settlement failed/, 'CLOSE-ERROR-FAILS-SETTLEMENT SHAPE if this matches');
+    assert.doesNotMatch(text, /capture owed/, 'the decision read before the close still pays the duty');
+    assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /settle: domain store 'alpha' did not close cleanly \(domain close boom\)/, 'the close error is logged, not dropped');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('settlement: a domain-scoped research_finding written after the research dispatch pays the research duty', async () => {
+  const p = makeDomainProject();
+  try {
+    const { ctx, plugin, cleanup } = await setup(p.dir);
+    await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+    await call(ctx, { tool: 'subagent', id: 'call_r1', input: { agent: 'sterling/researcher', description: 'r', prompt: 'how does settlement work' }, metadata: { sessionID: 'ses_rchild', status: 'completed' } });
+    p.writeDomain({ type: 'research_finding', question: 'how does settlement work?', answer: 'per execution', source_urls: ['https://example.com/x'], source_date: '2026-10-02', capture_date: '2026-10-02' });
+    await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+    assert.doesNotMatch(noticeTexts(p.dir).join('\n'), /research owed/, 'the finding in the mounted domain store pays the duty');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('settlement: a domain-scoped decision written after the edit pays the capture duty; without one the duty is raised', async () => {
+  for (const captured of [false, true]) {
+    const p = makeDomainProject();
+    try {
+      const { plugin, cleanup } = await setup(p.dir);
+      await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+      writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 2;\n');
+      if (captured) p.writeDomain({ type: 'decision', title: 'a is two', statement: 's', alternatives_rejected: [], rationale: 'r' });
+      await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+      const text = noticeTexts(p.dir).join('\n');
+      if (captured) assert.doesNotMatch(text, /capture owed/, 'the decision in the mounted domain store pays the duty');
+      else assert.match(text, /capture owed: 1 changed file/, 'control: the edit raises the duty');
+      await cleanup?.();
+    } finally {
+      p.cleanup();
+    }
+  }
+});
+
 test('the maintenance worker child never sweeps: a parent\'s live background implementor stays live', async () => {
   const p = makeProject({ records: [] });
   try {

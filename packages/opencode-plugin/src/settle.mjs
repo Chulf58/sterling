@@ -35,6 +35,7 @@ import {
   hasOpenSystemTodo,
   isValidAt,
   noCaptureCutoffs,
+  openDutyRecords,
   ownershipJoin,
   researchCapturedSince,
   researchOwedText,
@@ -115,9 +116,26 @@ const describe = (d) => {
  * Weigh this settlement's duties: queue last settlement's still-unpaid ones,
  * then find this turn's. Returns { notices } for the caller to raise, and
  * writes the duty state. `git` is settlement's gitTouches result.
+ *
+ * The capture and research reads cover the project store plus every mounted
+ * domain store that exists on disk (openDutyRecords, shared with H10), opened
+ * with `opener` and closed before this returns. A domain store that cannot be
+ * read pays nothing and gets its own notice.
  */
-export function settleDuties(store, root, git, at) {
+export function settleDuties(store, root, git, at, { opener } = {}) {
   const config = parseConfig(loadConfig(root) ?? {});
+  const unreadable = [];
+  const records = openDutyRecords(store, config, { ...(opener ? { opener } : {}), onUnreadable: (name, error) => unreadable.push(`'${name}' (${error})`) });
+  try {
+    const { notices } = weighDuties(store, records, config, root, at, git);
+    if (unreadable.length) notices.push(`Sterling settlement: domain store(s) ${unreadable.join(', ')} could not be read; a record written there was not counted toward the capture and research duties.`);
+    return { notices };
+  } finally {
+    for (const c of records.close()) logLine(root, `settle: domain store '${c.name}' did not close cleanly (${c.error})`);
+  }
+}
+
+function weighDuties(store, records, config, root, at, git) {
   const state = readDutyState(root);
   const register = readSessionEvents(root);
   const events = register.events;
@@ -131,7 +149,7 @@ export function settleDuties(store, root, git, at) {
   const queued = [];
   for (const d of state.owed) {
     if (d.duty === 'capture') {
-      if (capturedSince(store, d.since) || dischargedByCutoff(d.last, cutoffs.capture)) continue;
+      if (capturedSince(records, d.since) || dischargedByCutoff(d.last, cutoffs.capture)) continue;
       if (!hasOpenSystemTodo(store, 'capture_owed')) {
         const keys = d.paths.slice(0, 20);
         const clipped = d.paths.length > keys.length ? ` (file list truncated: naming ${keys.length} of ${d.paths.length} touched path(s))` : '';
@@ -149,7 +167,7 @@ export function settleDuties(store, root, git, at) {
       store.enqueueSystemTodo(systemTodo(at, { text: conceptArticleMissingText(d.family), system_reason: 'concept_article_missing' }));
       queued.push(`concept_article_missing (${d.family})`);
     } else if (d.duty === 'research') {
-      if (researchCapturedSince(store, d.since) || dischargedByCutoff(d.last, cutoffs.research)) continue;
+      if (researchCapturedSince(records, d.since) || dischargedByCutoff(d.last, cutoffs.research)) continue;
       if (!hasOpenSystemTodo(store, 'research_owed')) store.enqueueSystemTodo(systemTodo(at, { text: researchOwedText(d.details.join('; ')), system_reason: 'research_owed' }));
       queued.push('research_owed');
     } else {
@@ -164,7 +182,7 @@ export function settleDuties(store, root, git, at) {
   const changed = git.candidates.filter((c) => existsSync(join(root, c.path)));
   const generated = loadGeneratedProjections(root);
   const touched = changed.filter((c) => !IMAGE_BINARY_EXT.test(c.path) && !generated.has(c.path) && !dischargedByCutoff(c.at, cutoffs.capture));
-  if (touched.length && !capturedSince(store, windowStart)) {
+  if (touched.length && !capturedSince(records, windowStart)) {
     const ats = touched.map((c) => c.at).filter(isValidAt).sort();
     owed.push({ duty: 'capture', since: windowStart, last: ats.at(-1) ?? at, paths: touched.map((c) => c.path) });
   }
@@ -184,7 +202,7 @@ export function settleDuties(store, root, git, at) {
   if (research.length) {
     const ats = research.map((e) => e.at).filter(isValidAt).sort();
     const since = ats[0] ?? at;
-    if (!researchCapturedSince(store, since)) owed.push({ duty: 'research', since, last: ats.at(-1) ?? at, details: research.map((e) => e.detail).filter(Boolean) });
+    if (!researchCapturedSince(records, since)) owed.push({ duty: 'research', since, last: ats.at(-1) ?? at, details: research.map((e) => e.detail).filter(Boolean) });
   }
   if (owed.length) notices.push(`Sterling settlement: the last turn left ${owed.length} duty(ies) unpaid (OpenCode has no stop block, so this is the reminder; still unpaid at the next settlement, each is queued as a maintenance item):\n${owed.map((d) => `- ${describe(d)}`).join('\n')}`);
   if (degraded.length) notices.push(`Sterling settlement: the article demand was checked with a degraded probe: ${degraded.join('; ')}.`);
@@ -254,7 +272,7 @@ export function createSettle({ openStore, now, launchWorkerFor }) {
     try {
       store = openStore(join(root, '.sterling', 'sterling.db'));
       const minted = mintSettlementReconcile(store, root, git.candidates.map((c) => c.path), at);
-      const duties = settleDuties(store, root, git, at);
+      const duties = settleDuties(store, root, git, at, { opener: openStore });
       if (!dispatch.live) writeGitSettled(root, git.next);
       if (minted.length) {
         const lines = minted.map((m) => {
