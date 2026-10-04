@@ -11,6 +11,10 @@
 //     entirely is inserted whole before the heading it sits ahead of in the template; a
 //     sibling with no such heading is refused, and its bullets are then not reported one by one.
 //   - dry-run by default; --apply writes.
+//   - a write touches only a file whose text changed. A file that cannot be written is that
+//     project's refusal (WRITE_FAILED_REFUSED, exit 2), naming the path and the error; its
+//     actions are then reported as would_*, never as written. Each project's result is
+//     printed when that project is done, so a later failure cannot hide an earlier write.
 //   - --apply-inserts writes NEW TEXT ONLY (user-ruled 2026-10-04, "Auto-insert, new text
 //     only"): a section or tracked bullet that is entirely absent from the file is inserted
 //     and listed; a block whose wording is old is reported as would_update / would_rename
@@ -85,12 +89,43 @@ for (const section of TARGET_SECTIONS) {
   });
 }
 
-// CRLF handling (Sol review fix round, finding 6): comparisons run on a CR-stripped copy so a
-// CRLF sibling is never spuriously treated as hand-tuned (the recorded stamp-contract CRLF
-// hazard); a write converts back to the sibling's OWN original EOL, never forcing LF onto it.
+// LINE ENDINGS. Comparisons run on a CR-stripped copy, so a CRLF sibling is never spuriously
+// treated as hand-tuned (the recorded stamp-contract CRLF hazard). A write puts every line
+// that was already in the file back with the line ending it had, and gives each new line the
+// ending of the line before it (of the line after it, at the top of the file). So a CRLF
+// file stays CRLF, an LF file stays LF, and a file with mixed endings keeps every existing
+// byte. The old and new line lists are aligned by their longest common subsequence, taking
+// the earliest match, so pure inserts leave the original lines in place and in order.
 const normalizeEol = (text) => text.replace(/\r\n/g, '\n');
-const detectEol = (text) => (text.includes('\r\n') ? '\r\n' : '\n');
-const withEol = (lfText, eol) => (eol === '\r\n' ? lfText.replace(/\n/g, '\r\n') : lfText);
+function withOriginalEols(raw, finalLf) {
+  const pieces = raw.split('\n');
+  const oldLines = pieces.map((l, i) => (i < pieces.length - 1 && l.endsWith('\r') ? l.slice(0, -1) : l));
+  const oldEols = pieces.map((l, i) => (i === pieces.length - 1 ? null : l.endsWith('\r') ? '\r\n' : '\n'));
+  const newLines = finalLf.split('\n');
+  const n = oldLines.length;
+  const m = newLines.length;
+  // lcs[i][j]: the longest common subsequence of oldLines[i:] and newLines[j:].
+  const lcs = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i][j] = oldLines[i] === newLines[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+  const eols = new Array(m).fill(null);
+  for (let i = 0, j = 0; i < n && j < m; ) {
+    if (oldLines[i] === newLines[j] && lcs[i][j] === lcs[i + 1][j + 1] + 1) eols[j++] = oldEols[i++];
+    else if (lcs[i + 1][j] >= lcs[i][j + 1]) i++;
+    else j++;
+  }
+  const fallback = oldEols.find(Boolean) ?? '\n';
+  let out = '';
+  for (let j = 0; j < m - 1; j++) {
+    // A new line, or the old last line (which had no ending) now followed by more text.
+    if (!eols[j]) eols[j] = (j > 0 ? eols[j - 1] : eols.slice(1).find(Boolean)) ?? fallback;
+    out += newLines[j] + eols[j];
+  }
+  return out + newLines[m - 1];
+}
 
 // Where to INSERT after a list item: past its whole extent, including blank-separated INDENTED
 // continuation paragraphs, so an insert never lands inside an item. extractBlock's stop at the
@@ -148,30 +183,61 @@ const selfPath = realpathSync(repoRoot);
 const results = [];
 let drift = 0;
 
+// QUIET ON CLEAN, LOUD ON DRIFT (P1). A fully in-sync project prints nothing —
+// it is counted in the summary instead. This runs inside /sterling:update between
+// the build/test/check blocks, where one 'matches' line per bullet per project
+// (28 lines for seven clean siblings, observed 2026-07-27) buries the rare ✗ in a
+// wall of green. Attention is spent only where something needs doing; --verbose
+// restores the full per-bullet listing when you actually want the inventory.
+// A project is printed as soon as it is done, so what was written is on record
+// whatever happens to a later project.
+let inSync = 0;
+function record(r) {
+  results.push(r);
+  if (r.status !== 'processed') {
+    console.log(`✗ ${r.project}: ${r.status} (${r.detail})`);
+    return;
+  }
+  const notable = r.actions.filter((a) => a.action !== 'matches');
+  if (!notable.length) {
+    inSync++;
+    if (!VERBOSE) return;
+  }
+  console.log(`${r.actions.some((a) => a.action.includes('REFUSED')) ? '✗' : '•'} ${r.project} (${r.file})`);
+  for (const a of VERBOSE ? r.actions : notable) {
+    console.log(`    ${a.action}  ${a.lead.slice(0, 60)}…`);
+    if (a.detail) console.log(`      ${a.detail}`);
+    if (a.have) console.log(`      sibling text (hand-tuned, NOT touched):\n      ${a.have.split('\n').join('\n      ')}`);
+  }
+}
+// What a written action is called when its file could not be written.
+const UNWRITTEN = { updated: 'would_update', inserted: 'would_insert', renamed: 'would_rename', section_inserted: 'would_insert_section' };
+
 for (const p of projects) {
   const repo = p.repo_path;
   if (onlyProjects.length && !onlyProjects.includes(resolve(repo))) continue;
   if (!existsSync(repo)) {
-    results.push({ project: p.name, status: 'missing_path', detail: repo });
+    record({ project: p.name, status: 'missing_path', detail: repo });
     continue;
   }
   if (realpathSync(repo) === selfPath) continue; // the Sterling repo's own contract files are hand-maintained in sync with the templates
   const agentsMd = join(repo, 'AGENTS.md');
   const claudeMd = join(repo, 'CLAUDE.md');
   if (!existsSync(agentsMd)) {
-    results.push({ project: p.name, status: 'not_migrated', detail: `no AGENTS.md — run: node scripts/init.mjs --target ${repo}` });
+    record({ project: p.name, status: 'not_migrated', detail: `no AGENTS.md — run: node scripts/init.mjs --target ${repo}` });
     drift++;
     continue;
   }
   if (!existsSync(claudeMd)) {
-    results.push({ project: p.name, status: 'no_claude_md', detail: claudeMd });
+    record({ project: p.name, status: 'no_claude_md', detail: claudeMd });
     drift++;
     continue;
   }
 
   const loadSibling = (path) => {
     const raw = readFileSync(path, 'utf8');
-    return { path, eol: detectEol(raw), text: normalizeEol(raw) };
+    const text = normalizeEol(raw);
+    return { path, raw, original: text, text };
   };
   const siblingFiles = new Map([[AGENTS_TEMPLATE_REL, loadSibling(agentsMd)], [CLAUDE_TEMPLATE_REL, loadSibling(claudeMd)]]);
   const actions = [];
@@ -301,37 +367,29 @@ for (const p of projects) {
     drift++;
   }
 
-  const dirty = actions.some((a) => ['updated', 'inserted', 'renamed', 'section_inserted'].includes(a.action));
-  if (WRITE_INSERTS && dirty) {
-    for (const { path, text, eol } of siblingFiles.values()) writeFileSync(path, withEol(text, eol));
+  // Only a file whose text changed is written. In a dry run nothing is; in --apply-inserts
+  // the text holds inserts only.
+  if (WRITE_INSERTS) {
+    for (const [rel, f] of siblingFiles) {
+      if (f.text === f.original) continue;
+      try {
+        writeFileSync(f.path, withOriginalEols(f.raw, f.text));
+      } catch (err) {
+        const file = layerFileName(rel);
+        for (const a of actions) if (a.file === file && UNWRITTEN[a.action]) a.action = UNWRITTEN[a.action];
+        actions.push({
+          lead: `${file} (write)`,
+          action: 'WRITE_FAILED_REFUSED',
+          file,
+          detail: `${f.path} could not be written (${err?.code ?? 'error'}: ${err?.message ?? err}). Nothing in it was changed; make the file writable and re-run.`,
+        });
+        drift++;
+      }
+    }
   }
-  results.push({ project: p.name, status: 'processed', file: `${agentsMd} + ${claudeMd}`, actions });
+  record({ project: p.name, status: 'processed', file: `${agentsMd} + ${claudeMd}`, actions });
 }
 
-// QUIET ON CLEAN, LOUD ON DRIFT (P1). A fully in-sync project prints nothing —
-// it is counted in the summary instead. This runs inside /sterling:update between
-// the build/test/check blocks, where one 'matches' line per bullet per project
-// (28 lines for seven clean siblings, observed 2026-07-27) buries the rare ✗ in a
-// wall of green. Attention is spent only where something needs doing; --verbose
-// restores the full per-bullet listing when you actually want the inventory.
-let inSync = 0;
-for (const r of results) {
-  if (r.status !== 'processed') {
-    console.log(`✗ ${r.project}: ${r.status} (${r.detail})`);
-    continue;
-  }
-  const notable = r.actions.filter((a) => a.action !== 'matches');
-  if (!notable.length) {
-    inSync++;
-    if (!VERBOSE) continue;
-  }
-  console.log(`${r.actions.some((a) => a.action.includes('REFUSED')) ? '✗' : '•'} ${r.project} (${r.file})`);
-  for (const a of VERBOSE ? r.actions : notable) {
-    console.log(`    ${a.action}  ${a.lead.slice(0, 60)}…`);
-    if (a.detail) console.log(`      ${a.detail}`);
-    if (a.have) console.log(`      sibling text (hand-tuned, NOT touched):\n      ${a.have.split('\n').join('\n      ')}`);
-  }
-}
 const processed = results.filter((r) => r.status === 'processed').length;
 console.log(
   `\n${APPLY ? 'APPLIED' : APPLY_INSERTS ? 'INSERTS APPLIED (new text only; existing wording is never replaced without --apply)' : 'DRY-RUN (no writes; pass --apply)'} — ${processed} project(s) processed, ` +
@@ -339,6 +397,6 @@ console.log(
     (!VERBOSE && inSync ? ' Pass --verbose to list the in-sync bullets.' : '')
 );
 if (drift) {
-  console.error('stamp-contract: drift refused above — resolve by hand (the sibling text differs from every template version) and re-run.');
+  console.error('stamp-contract: refused above — resolve each by hand (sibling text that differs from every template version, a missing anchor, or a file that could not be written) and re-run.');
   process.exit(2);
 }
