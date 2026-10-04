@@ -84,6 +84,9 @@ export function createSessionSync(deps = {}) {
         rmSync(join(root, DOMAIN_MAP_PENDING_REL), { force: true });
       } catch (e) {
         unremoved = pendingFileNote(join(root, DOMAIN_MAP_PENDING_REL), e);
+        // The file is still there, so every later request would find the map due again:
+        // this process says it once and leaves the retry to the next OpenCode start.
+        started.add(root);
       }
     }
     const lines = [];

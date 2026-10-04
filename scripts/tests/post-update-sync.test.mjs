@@ -829,3 +829,26 @@ test('OpenCode sync: on a clone, a pending file written while OpenCode runs is r
   assert.match(noticeTexts(project)[0], DOMAIN_NOTICE);
   assert.ok(!existsSync(join(project, PENDING_REL)));
 });
+
+test('OpenCode sync: a pending file that cannot be removed is said once; the root is latched so the map and the notice do not repeat', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  // A map script that counts its runs (the notice store drops a repeated text, so the notice count alone proves nothing).
+  const runsLog = join(tmp('sterling-pus-log-'), 'map-runs.log');
+  const map = { proposal: { add: [{ domain: 'salesforce', reason: 'its own subject' }], sibling_steps: [] } };
+  writeFileSync(join(plugin, 'scripts', 'domains.mjs'), `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(runsLog)}, 'run\\n');\nprocess.stdout.write(${JSON.stringify(JSON.stringify(map))});\n`);
+  const mapRuns = () => readFileSync(runsLog, 'utf8').trim().split('\n').length;
+  const project = makeProject({ marker: '0.0.1', store: false });
+  // A non-empty directory where the file would be: rmSync without recursive refuses it.
+  mkdirSync(join(project, PENDING_REL));
+  writeFileSync(join(project, PENDING_REL, 'x'), '');
+  const syncOnce = ocSync(plugin, sessionStub({ ses_1: {}, ses_2: {} }));
+  await syncOnce(project, 'ses_1');
+  await syncOnce.idle();
+  assert.equal(noticeTexts(project).length, 1);
+  assert.match(noticeTexts(project)[0], /domain-map-pending could not be removed/);
+  assert.equal(mapRuns(), 1);
+  await syncOnce(project, 'ses_2');
+  await syncOnce.idle();
+  assert.equal(mapRuns(), 1, 'the map is not run again for the next session in this process');
+  assert.equal(noticeTexts(project).length, 1);
+});
