@@ -667,3 +667,89 @@ test('OpenCode sync, a copy outside the npm cache: no dashboard is materialized'
     delete process.env.FIXTURE_LOG;
   }
 });
+
+// ---- OpenCode: the domain map notice (scripts/hooks/lib/domain-notice.mjs), same rule as H1 ----
+
+const PENDING_REL = join('.sterling', 'domain-map-pending');
+// Replaces the fixture root's no-proposal domains.mjs with one that proposes 'salesforce'.
+function proposeSalesforce(plugin) {
+  const map = { proposal: { add: [{ domain: 'salesforce', reason: 'its own subject' }], sibling_steps: [] } };
+  writeFileSync(join(plugin, 'scripts', 'domains.mjs'), `process.stdout.write(${JSON.stringify(JSON.stringify(map))});\n`);
+}
+const DOMAIN_NOTICE = /^DOMAIN MAP \(OpenCode plugin, once after the Sterling update\): the map proposes adding 'salesforce'[^\n]*\/sterling:domains/m;
+
+test('OpenCode sync: the session whose sync succeeds carries the domain map line, once; a failed sync holds it back', async () => {
+  const plugin = makePluginRoot();
+  proposeSalesforce(plugin);
+  const project = makeProject({ marker: '0.0.1', store: false });
+  process.env.FIXTURE_LOG = join(tmp('sterling-pus-log-'), 'calls.log');
+  try {
+    process.env.FIXTURE_SYNC_EXIT = '1';
+    const failing = ocSync(plugin, sessionStub({ ses_root: {} }));
+    await failing(project, 'ses_root');
+    await failing.idle();
+    assert.equal(noticeTexts(project).length, 1);
+    assert.match(noticeTexts(project)[0], /^POST-UPDATE SYNC FAILED/);
+    assert.doesNotMatch(noticeTexts(project)[0], /DOMAIN MAP/, 'no domain line until the sync succeeds');
+    delete process.env.FIXTURE_SYNC_EXIT;
+
+    // A new plugin process: the sync is still due, and now succeeds.
+    const synced = ocSync(plugin, sessionStub({ ses_root: {} }));
+    await synced(project, 'ses_root');
+    await synced.idle();
+    const texts = noticeTexts(project);
+    assert.equal(texts.length, 2, 'the sync notice and the domain line are one notice');
+    assert.match(texts[1], /^POST-UPDATE SYNC \(OpenCode plugin\)/);
+    assert.match(texts[1], DOMAIN_NOTICE);
+    assert.match(texts[1], /Nothing was applied/);
+
+    // The next process: versions are equal, so nothing is due and nothing is said.
+    const later = ocSync(plugin, sessionStub({ ses_root: {} }));
+    await later(project, 'ses_root');
+    await later.idle();
+    assert.equal(noticeTexts(project).length, 2);
+  } finally {
+    delete process.env.FIXTURE_SYNC_EXIT;
+    delete process.env.FIXTURE_LOG;
+  }
+});
+
+test('OpenCode sync: on a clone, the pending file /sterling:update left is read by the first ROOT session, which prints the line and removes the file', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  proposeSalesforce(plugin);
+  const project = makeProject({ marker: '0.0.1', store: false });
+  writeFileSync(join(project, PENDING_REL), '2026-10-04T00:00:00.000Z\n');
+  const session = sessionStub({ ses_child: { parentID: 'ses_root' }, ses_root: {} });
+  const syncOnce = ocSync(plugin, session);
+  await syncOnce(project, 'ses_child');
+  await syncOnce.idle();
+  assert.ok(existsSync(join(project, PENDING_REL)), 'a child session leaves the file');
+  assert.deepEqual(noticeTexts(project), []);
+
+  await syncOnce(project, 'ses_root');
+  await syncOnce.idle();
+  assert.ok(!existsSync(join(project, PENDING_REL)), 'the root session that prints the line removes the file');
+  const texts = noticeTexts(project);
+  assert.equal(texts.length, 1);
+  assert.match(texts[0], DOMAIN_NOTICE);
+  assert.equal(markerOf(project), '0.0.1\n', 'a clone still runs no post-update sync');
+
+  const next = ocSync(plugin, sessionStub({ ses_root: {} }));
+  await next(project, 'ses_root');
+  await next.idle();
+  assert.equal(noticeTexts(project).length, 1, 'once');
+});
+
+test('OpenCode sync: the maintenance worker child never reads the pending file or runs the map', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  proposeSalesforce(plugin);
+  const project = makeProject({ marker: '0.0.1', store: false });
+  writeFileSync(join(project, PENDING_REL), '2026-10-04T00:00:00.000Z\n');
+  const session = sessionStub({ ses_worker: {} });
+  const syncOnce = ocSync(plugin, session, { env: { ...process.env, STERLING_MAINTENANCE_WORKER: '1' } });
+  await syncOnce(project, 'ses_worker');
+  await syncOnce.idle();
+  assert.ok(existsSync(join(project, PENDING_REL)), 'the file is left for the user\'s own session');
+  assert.deepEqual(session.calls, []);
+  assert.deepEqual(noticeTexts(project), []);
+});
