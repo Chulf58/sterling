@@ -131,7 +131,7 @@ export function settleDuties(store, root, git, at, { opener } = {}) {
     if (unreadable.length) notices.push(`Sterling settlement: domain store(s) ${unreadable.join(', ')} could not be read; a record written there was not counted toward the capture and research duties.`);
     return { notices };
   } finally {
-    records.close();
+    for (const c of records.close()) logLine(root, `settle: domain store '${c.name}' did not close cleanly (${c.error})`);
   }
 }
 

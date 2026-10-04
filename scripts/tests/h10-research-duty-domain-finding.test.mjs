@@ -238,7 +238,7 @@ test('DF-f: a mounted domain store that cannot be opened is announced in the nag
     const r = stopOnce(dir);
     assert.equal(r.code, 2, 'an unreadable domain store never discharges the duty');
     assert.match(r.stderr, /genesys webhook signature validation/);
-    assert.match(r.stderr, new RegExp(`domain store '${DOMAIN}' could not be read`), 'the degraded read is stated, not silent');
+    assert.match(r.stderr, new RegExp(`domain store '${DOMAIN}' could not be read for the session-end duties`), 'the degraded read is stated, not silent');
   } finally {
     cleanup();
   }

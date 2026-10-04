@@ -78,9 +78,20 @@ export function conceptFamiliesFrom(sessionEvents) {
  *   nothing, so the duty stays armed.
  * - `query` returns each store's own result for the same options, project
  *   first, concatenated: `cap` applies per store.
+ * - `close()` closes every domain store it opened and never throws: it returns
+ *   the stores that failed to close as [{name, error}], for the caller to
+ *   report. The reads are already done, so a close error changes no duty.
+ *
+ * Known limit: a mounted domain store is shared by every project on the
+ * machine and its records carry no origin project. A record that another
+ * project's session wrote into the same domain inside the duty window also
+ * pays this project's capture or research duty.
  *
  * Not for ownership reads: a feature_article is always project-scoped, and a
  * domain record's file_keys name files in other repos.
+ *
+ * Deliberately separate from subject-fan.mjs's openSubjectFan, which splits one
+ * cap across the stores by shares; a "since X" read needs each store's full cap.
  */
 export function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore(dbPath), onUnreadable }) {
   let domains = null;
@@ -120,7 +131,15 @@ export function openDutyRecords(store, config, { opener = (dbPath) => new Sterli
     close() {
       const open = domains ?? [];
       domains = [];
-      for (const d of open) d.store.close();
+      const errors = [];
+      for (const d of open) {
+        try {
+          d.store.close();
+        } catch (e) {
+          errors.push({ name: d.name, error: String((e && e.message) || e) });
+        }
+      }
+      return errors;
     },
   };
 }
