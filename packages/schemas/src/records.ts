@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { envelopeFields, refineSupersession } from './envelope.js';
-import { normalizeRepoPath, repoPath } from './paths.js';
+import { normalizeLocation, normalizeRepoPath, repoPath, repoPathOfLocation } from './paths.js';
 
 // Durable record schemas — MVP-spine set (spec §16.1 item 2): decision,
 // feature_article, todo, brief. Remaining §3.2 types arrive at full-build
@@ -411,15 +411,10 @@ export const referenceMaterialSchema = base
   // 'docs\spec.md' / './docs/spec.md' body diverges from the normalized index key
   // and renameFileKey's exact-match rewrite misses it. Mirrors the fileKeys
   // extractor: only kind:doc, and an absolute/escaping location keeps its raw
-  // value (pdf/url/external docs are never repo-relative).
-  .transform((rec) => {
-    if (rec.kind !== 'doc') return rec;
-    try {
-      return { ...rec, location: normalizeRepoPath(rec.location) };
-    } catch {
-      return rec;
-    }
-  });
+  // value (pdf/url/external docs are never repo-relative). A URL or prose
+  // location under kind:doc is not a path and is kept verbatim (issue #14:
+  // 'https://' was collapsed to 'https:/' here) — normalizeLocation decides.
+  .transform((rec) => (rec.kind === 'doc' ? { ...rec, location: normalizeLocation(rec.location) } : rec));
 
 // §3.2.8 — refuted trails live here instead of dying; debug runs must not
 // re-litigate false trails already disproved.
@@ -882,14 +877,12 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     fts: (r) => [s(r.title), s(r.summary)].join('\n'),
     // §3.2.5: repo-located docs join the reconcile economy — for kind:doc a
     // repo-relative location doubles as a file_key (H7 pressure applies);
-    // pdf/url locations are external and carry none.
+    // pdf/url locations are external and carry none, and neither does a
+    // kind:doc location that is a URL, prose or an absolute/escaping path.
     fileKeys: (r) => {
       if (r.kind !== 'doc') return [];
-      try {
-        return [normalizeRepoPath(r.location as string)];
-      } catch {
-        return []; // absolute/escaping location: not repo-located
-      }
+      const rel = repoPathOfLocation(r.location as string);
+      return rel === undefined ? [] : [rel];
     },
     // location is this type's path-bearing field (§3.2.5), so it is what a
     // reader needs to go open the thing.

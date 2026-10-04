@@ -185,3 +185,66 @@ export function toRepoRelative(absolutePath: string, repoRoot: string): string {
   }
   return normalizeRepoPath(abs.slice(root.length + 1));
 }
+
+// reference_material.location — ONE classifier (invariant 1), imported by the
+// schema's write transform, the file_key extractor and the server's read-time
+// refresh_reference check. A location is free text that is only SOMETIMES a
+// repo path: treating every one as a path collapsed 'https://' to 'https:/' on
+// write (issue #14) and called URLs and prose "no longer exists on disk"
+// (issue #13).
+
+/** A URL: an RFC 3986 scheme followed by '://'. Stored verbatim, never a file. */
+const URL_LOCATION = /^[a-z][a-z0-9+.-]*:\/\//i;
+/**
+ * A URL whose '//' an earlier write collapsed to '/' (issue #14 damage). Two or
+ * more scheme characters, so a drive-prefixed path ('c:/docs/x.md') is not one.
+ */
+const COLLAPSED_URL_LOCATION = /^[a-z][a-z0-9+.-]+:\/[^/]/i;
+
+export type LocationKind = 'url' | 'prose' | 'path';
+
+/** Is this location a URL whose scheme separator was collapsed to a single slash? */
+export function isCollapsedUrlLocation(location: string): boolean {
+  return COLLAPSED_URL_LOCATION.test(location.trim());
+}
+
+/**
+ * THE rule for what a reference_material location is, decided on the text alone
+ * (no filesystem, no network):
+ *   - 'url'   — it starts with a scheme and '://', or is a collapsed URL
+ *               (scheme and ':/'), which is damage and still never a file;
+ *   - 'prose' — it is not a URL and contains whitespace ("the vendor portal,
+ *               section 3");
+ *   - 'path'  — everything else: one whitespace-free token with no scheme.
+ * It does NOT guarantee a 'path' is repo-relative (an absolute or parent-
+ * escaping one is still a path; repoPathOfLocation answers that), and a file
+ * whose name contains whitespace reads as prose, so it is not drift-tracked.
+ */
+export function classifyLocation(location: string): LocationKind {
+  const text = location.trim();
+  if (URL_LOCATION.test(text) || COLLAPSED_URL_LOCATION.test(text)) return 'url';
+  if (/\s/.test(text)) return 'prose';
+  return 'path';
+}
+
+/**
+ * The normalized repo-relative path a location names, or undefined when it
+ * names none: a URL, prose, or a path that is absolute, drive-prefixed or
+ * parent-escaping (an external document, never repo-located).
+ */
+export function repoPathOfLocation(location: string): string | undefined {
+  if (classifyLocation(location) !== 'path') return undefined;
+  try {
+    return normalizeRepoPath(location.trim());
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The stored form of a location: a repo-relative path is normalized (invariant
+ * 2); a URL, prose and an external path are kept exactly as given.
+ */
+export function normalizeLocation(location: string): string {
+  return repoPathOfLocation(location) ?? location;
+}

@@ -16,6 +16,7 @@ import {
   RECORD_TYPES,
   validateRecord,
   normalizeRepoPath,
+  isCollapsedUrlLocation,
   linkSchema,
   LIFECYCLE_VALUES,
   FRESHNESS_VALUES,
@@ -3298,6 +3299,22 @@ export class SterlingStore {
     const { where, params } = this.baseFilter(opts);
     const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(' AND ')}`).get(...params) as { n: number };
     return row.n;
+  }
+
+  /**
+   * READ-ONLY damage count for issue #14: how many live reference_material
+   * records hold a URL location whose '//' an earlier write collapsed to '/'
+   * ('https:/host/…'). The shape is isCollapsedUrlLocation's, the one
+   * definition in packages/schemas. Nothing is repaired here: each such record
+   * is fixed by a knowledge_edit on `location` restoring the second slash.
+   */
+  countCollapsedUrlLocations(): number {
+    const { where, params } = this.baseFilter({ types: ['reference_material'] });
+    const rows = this.db.prepare(`SELECT r.body FROM records r WHERE ${where.join(' AND ')}`).all(...params) as { body: string }[];
+    return rows.filter((row) => {
+      const location = (JSON.parse(row.body) as { location?: unknown }).location;
+      return typeof location === 'string' && isCollapsedUrlLocation(location);
+    }).length;
   }
 
   /**

@@ -8,7 +8,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, boardDisplayLabel, normalizeRepoPath, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -4202,18 +4202,18 @@ export class SterlingTools {
       // refresh_reference maintenance item (a hundred stale reads, one queue entry).
       if (record.type === 'reference_material' && (record as unknown as { kind: string }).kind === 'doc' && this.repoRoot) {
         const r = record as unknown as { id: string; title: string; location: string; source_date: string; file_baselines?: Record<string, string> };
+        // ONLY A REPO PATH IS A FILE (issue #13): a URL or prose location, and
+        // an absolute/escaping path, is not repo-located — nothing to stat, no
+        // network call, no item. The shared classifier in packages/schemas
+        // decides, the same one the write path normalizes by.
+        const rel = repoPathOfLocation(r.location);
         // Detached-working-tree resolution (comsoft-juiced 2026-07-17): resolve
-        // against the record's declared tree; an unmapped name abstains LOUD —
-        // never checked against the wrong tree, never a fabricated queue item.
-        const tree = this.treeRootFor(record as unknown as Record<string, unknown>);
-        if (tree.unresolved) return { ...record, verify_before_use: true };
-        let rel: string | undefined;
-        try {
-          rel = normalizeRepoPath(r.location);
-        } catch {
-          rel = undefined; // absolute/escaping location: not repo-located
-        }
-        if (rel && tree.root) {
+        // against the record's declared tree, else the project root; an unmapped
+        // name abstains LOUD — never checked against the wrong tree, never a
+        // fabricated queue item.
+        const tree = rel === undefined ? undefined : this.treeRootFor(record as unknown as Record<string, unknown>);
+        if (tree?.unresolved) return { ...record, verify_before_use: true };
+        if (rel && tree?.root) {
           const stat = statSync(join(tree.root, rel), { throwIfNoEntry: false });
           // DELETION IS DRIFT (decision record-audit-dead-records-superseded-
           // stale-findings-by-age-report-arm-plus-sampled-audit): a repo-located
@@ -4805,6 +4805,20 @@ export class SterlingTools {
     return current.slice(0, at) + replace + current.slice(at + find.length);
   }
 
+  /**
+   * A receipt reports what was STORED, not what was submitted (issue #14: an
+   * edit receipt gave the submitted length while the schema boundary had
+   * normalized the value, so chars_after disagreed with the next knowledge_get).
+   * Returns the warning for one submitted string whose stored value differs —
+   * empty when they match or when `stored` is not a string.
+   */
+  private static normalizedOnWrite(field: string, submitted: string, stored: unknown): string[] {
+    if (typeof stored !== 'string' || stored === submitted) return [];
+    return [
+      `'${field}' was normalized on write: ${submitted.length} chars submitted, ${stored.length} chars stored — the stored value is what knowledge_get returns; read it back before relying on the text you sent.`,
+    ];
+  }
+
   knowledgeEdit(
     id: string,
     field: string,
@@ -4913,10 +4927,17 @@ export class SterlingTools {
       // same_subject (ruling types only) is split off rather than left
       // inside `record` — see splitSameSubject.
       const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_edit'));
+      // The element AS STORED, by position — only when the write kept the
+      // array's length, so a rotated array is never read at a shifted index.
+      const submittedSub = nextEl[sub] as string;
+      const storedArr = (record as unknown as Record<string, unknown>)[base];
+      const storedEl =
+        Array.isArray(storedArr) && storedArr.length === arr.length ? (storedArr[arr.indexOf(el)] as Record<string, unknown> | undefined) : undefined;
+      const storedSub = typeof storedEl?.[sub] === 'string' ? (storedEl[sub] as string) : submittedSub;
       return {
         record,
         ...(claims_check ? { claims_check } : {}),
-        replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
+        replaced: { field, chars_before: cur.length, chars_after: storedSub.length },
         // Cited-id scan (board fc053051 extension): the REPLACE text only —
         // never `find`, never the rest of the record, which was already
         // scanned (or not) on whatever write introduced it.
@@ -4925,6 +4946,7 @@ export class SterlingTools {
           ...this.articleOversizeWarnings(record),
           ...this.citedIdWarnings(replace),
           ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+          ...SterlingTools.normalizedOnWrite(field, submittedSub, storedSub),
         ],
       };
     }
@@ -4957,10 +4979,12 @@ export class SterlingTools {
     // same_subject (ruling types only) is split off rather than left inside
     // `record` — see splitSameSubject.
     const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_edit'));
+    const storedValue = (record as unknown as Record<string, unknown>)[field];
+    const stored = typeof storedValue === 'string' ? storedValue : next;
     return {
       record,
       ...(claims_check ? { claims_check } : {}),
-      replaced: { field, chars_before: current.length, chars_after: next.length },
+      replaced: { field, chars_before: current.length, chars_after: stored.length },
       // Cited-id scan (board fc053051 extension): the REPLACE text only —
       // never `find`, never the rest of the record (scope guarantee: an edit
       // must not warn about a pre-existing citation elsewhere in the record
@@ -4970,6 +4994,7 @@ export class SterlingTools {
         ...this.articleOversizeWarnings(record),
         ...this.citedIdWarnings(replace),
         ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+        ...SterlingTools.normalizedOnWrite(field, next, stored),
       ],
     };
   }
@@ -5689,6 +5714,12 @@ export class SterlingTools {
             `re-read the new version and confirm it does not now contradict itself. This is a WARNING, not a refusal: the pairing is often genuinely unaffected, ` +
             `and only you can tell. (knowledge_append extends history/files/current_ac without retransmitting them.)`
         );
+      }
+    }
+    // A submitted string the schema boundary changed is named on the receipt.
+    for (const [field, submitted] of Object.entries(body)) {
+      if (typeof submitted === 'string') {
+        warnings.push(...SterlingTools.normalizedOnWrite(field, submitted, (record as unknown as Record<string, unknown>)[field]));
       }
     }
     warnings.push(...this.articleOversizeWarnings(record));
