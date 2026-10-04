@@ -43,6 +43,7 @@ import { pluginRoot } from './lib/plugin-root-walk.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy, fileEntriesOf } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
+import { SterlingStore, resolveDomainMounts } from '@sterling/store';
 import { publishNotice } from './lib/delivery.mjs';
 import { evaluatePrLoop, prLoopNext, prLoopOwedText, prLoopReminderText } from './lib/pr-loop-duty.mjs';
 import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
@@ -1700,6 +1701,46 @@ try {
     return !dischargedOnResearchLaneForDispatch(e);
   });
 
+  // RESEARCH RECORDS LIVE IN THE DOMAIN STORES TOO (GitHub issue #12). A record
+  // with scope `domain:<name>` is written to that mounted domain's own store,
+  // never to the project store, so a research_finding filed under a domain was
+  // invisible to both research-duty reads below and the duty stayed open. They
+  // read the project store first and then each mounted domain store that exists
+  // on disk (the same resolveDomainMounts manifest the MCP server mounts).
+  // Opened lazily, at most once per Stop, and only when a research read
+  // actually runs. A missing domain store is skipped and never created; one
+  // that cannot be opened or read is announced in the nag and counts as holding
+  // nothing, so the duty stays armed (P5).
+  let domainResearchStores = null;
+  const researchStores = () => {
+    if (domainResearchStores === null) {
+      domainResearchStores = [];
+      for (const mount of resolveDomainMounts(config)) {
+        if (!existsSync(mount.dbPath)) continue;
+        const unreadable = (e) =>
+          degradationParts.push(
+            `H10: domain store '${mount.name}' could not be read for the research duty — ${String((e && e.message) || e)}; a research record written there this session is not counted`
+          );
+        try {
+          const domainStore = new SterlingStore(mount.dbPath);
+          domainResearchStores.push({
+            query: (q) => {
+              try {
+                return domainStore.query(q);
+              } catch (e) {
+                unreadable(e);
+                return [];
+              }
+            },
+          });
+        } catch (e) {
+          unreadable(e);
+        }
+      }
+    }
+    return [store, ...domainResearchStores];
+  };
+
   // OUTSTANDING DEFERRED RESEARCH EVENTS — what clearRegisters() must PRESERVE
   // on a deferring release (review fix, HIGH found on commit 5306735). Among
   // the `agent_dispatch` events the gate above just excluded from
@@ -1724,7 +1765,7 @@ try {
   // query here would be wasted work on every ordinary Stop.
   const hasLiveAgentDispatchEvents = researchEvents.some((e) => isLaneResearchEvent(e) && isDispatchEventLive(e));
   const researchSatisfyingRecords = hasLiveAgentDispatchEvents
-    ? store.query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
+    ? researchStores().flatMap((s) => s.query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 }))
     : [];
   const individuallyResearchSatisfied = (at) =>
     isValidAt(at) && researchSatisfyingRecords.some((r) => r.created_at >= at || r.updated_at >= at);
@@ -2365,7 +2406,7 @@ try {
     // store, satisfying the duty with knowledge written months ago.
     const rts = activeResearchEvents.map((e) => e.at).filter(isValidAt).sort();
     earliestResearch = rts.length ? rts[0] : now;
-    researchSatisfied = researchCapturedSince(store, earliestResearch);
+    researchSatisfied = researchStores().some((s) => researchCapturedSince(s, earliestResearch));
   }
 
   // Concept duty satisfaction (decision foreign_7208729b): per FAMILY, a feature_article
