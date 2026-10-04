@@ -4084,6 +4084,29 @@ var repoPath = external_exports.string().transform((value, ctx) => {
     return external_exports.NEVER;
   }
 });
+var SCHEME_LOCATION = /^[a-z][a-z0-9+.-]+:(\S|$)/i;
+var HAS_SEPARATOR = /[\\/]/;
+var ENDS_IN_EXTENSION = /\.[A-Za-z0-9]{1,8}$/;
+function classifyLocation(location) {
+  const text = location.trim();
+  if (SCHEME_LOCATION.test(text))
+    return "url";
+  if (!/\s/.test(text))
+    return "path";
+  return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
+}
+function repoPathOfLocation(location) {
+  if (classifyLocation(location) !== "path")
+    return void 0;
+  try {
+    return normalizeRepoPath(location.trim());
+  } catch {
+    return void 0;
+  }
+}
+function normalizeLocation(location) {
+  return repoPathOfLocation(location) ?? location;
+}
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
@@ -4172,6 +4195,8 @@ var notApplicableExemptionSchema = external_exports.object({
     ruling_record_id: external_exports.string().optional()
   }).strict()
 }).strict();
+var ARTICLE_KINDS = ["feature", "probe", "tool", "concept"];
+var NOT_APPLICABLE_EXEMPT_KINDS = ["probe", "tool"];
 var currentAcItemSchema = external_exports.object({
   ac_id: external_exports.string().min(1),
   text: external_exports.string().min(1),
@@ -4231,7 +4256,7 @@ var featureArticleSchema = base.extend({
   // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
-  article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
+  article_kind: external_exports.enum(ARTICLE_KINDS).default("feature"),
   // Union with the structured not_applicable exemption (see
   // notApplicableExemptionSchema above) — acceptance of the exemption
   // branch, and rejection of an empty array, are both gated BY KIND in the
@@ -4281,7 +4306,7 @@ var featureArticleSchema = base.extend({
   if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (\xA73.2.3)" });
   }
-  const exemptKind = rec.article_kind === "probe" || rec.article_kind === "tool";
+  const exemptKind = NOT_APPLICABLE_EXEMPT_KINDS.includes(rec.article_kind);
   const isExempt = (v) => typeof v === "object" && v !== null && !Array.isArray(v) && "not_applicable" in v;
   const gated = [
     ["live_test_refs", rec.live_test_refs, "real content (ac_id/test_paths)"],
@@ -4293,7 +4318,7 @@ var featureArticleSchema = base.extend({
       ctx.addIssue({
         code: external_exports.ZodIssueCode.custom,
         path: [field],
-        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind probe/tool may; other kinds must supply real content`
+        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind ${NOT_APPLICABLE_EXEMPT_KINDS.join("/")} may; other kinds must supply real content`
       });
     }
     if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
@@ -4385,15 +4410,7 @@ var referenceMaterialSchema = base.extend({
   // Detached-working-tree resolution for a repo-located kind:doc — same
   // semantics as featureArticleSchema.working_tree (comsoft-juiced 2026-07-17).
   working_tree: external_exports.string().min(1).optional()
-}).superRefine(refineSupersession).transform((rec) => {
-  if (rec.kind !== "doc")
-    return rec;
-  try {
-    return { ...rec, location: normalizeRepoPath(rec.location) };
-  } catch {
-    return rec;
-  }
-});
+}).superRefine(refineSupersession).transform((rec) => rec.kind === "doc" ? { ...rec, location: normalizeLocation(rec.location) } : rec);
 var disconfirmedHypothesisSchema = base.extend({
   type: external_exports.literal("disconfirmed_hypothesis"),
   question: external_exports.string().min(1),
