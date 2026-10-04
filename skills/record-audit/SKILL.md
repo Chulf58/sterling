@@ -1,6 +1,6 @@
 ---
 name: record-audit
-description: Run the periodic sampled audit of knowledge records — the part of record upkeep that code cannot check, such as one decision quietly contradicting another or a hazard record whose hazard was fixed. Use when the user asks to audit the knowledge store or a record type, or when the conductor judges the store is due one. Not for the dead paths and findability lint that scripts/check-record-hygiene.mjs already lists.
+description: Run the periodic sampled audit of knowledge records — the part of record upkeep that code cannot check, such as one decision quietly contradicting another or a hazard record whose hazard was fixed. Use when the user asks to audit the knowledge store or a record type, or when the conductor judges the store is due one. Not for the dead paths and findability lint that bin/check-record-hygiene.mjs already lists.
 ---
 
 # Record audit SOP

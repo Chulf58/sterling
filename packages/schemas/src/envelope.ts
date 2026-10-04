@@ -27,6 +27,14 @@ import { z } from 'zod';
 // deliberately does not extend to it.
 export const LINK_RELS = ['cites', 'informed_by', 'fulfills', 'supersedes', 'falsified_by'] as const;
 
+// The rels a caller may not write as a raw link on knowledge_create,
+// knowledge_update or knowledge_link: supersession is a lifecycle transition
+// with its own write path (decision
+// a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede).
+// knowledge_schema's condition on links[].rel reads this list; the store's
+// refusal still compares against the literal, and a test holds the two together.
+export const WRITE_REFUSED_LINK_RELS: readonly (typeof LINK_RELS)[number][] = ['supersedes'];
+
 export const linkSchema = z.object({
   rel: z.enum(LINK_RELS),
   target_id: z.string().uuid(),

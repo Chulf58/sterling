@@ -46,6 +46,19 @@ export function readProjectConfig(cwd) {
 }
 
 /**
+ * STERLING ROOT (decision session-start-prints-the-sterling-root-plain-text-instructions-use-it,
+ * GitHub issue #16): the absolute plugin root, printed at every session start so a plain-text
+ * instruction can run `node "<Sterling root>/bin/<name>.mjs"`. ${CLAUDE_PLUGIN_ROOT} is not in the
+ * Bash tool's environment, so the model has no other way to learn it. `root` must come from the
+ * running hook's own location (walkUpPluginRoot), never from an env value; an unresolved root
+ * (null) is stated loudly instead of printing a wrong path or nothing.
+ */
+export function sterlingRootLine(root) {
+  if (root) return `STERLING ROOT: ${root}`;
+  return 'STERLING ROOT: UNRESOLVED — this hook could not find the Sterling plugin root above its own location, so no script path can be given; scripts named as node "<Sterling root>/bin/<name>.mjs" cannot be run until the root is known (report it with /sterling:report-issue).';
+}
+
+/**
  * MACHINE ROLE (todo cabbc10f, decision foreign_a9b98b7d): stated ONLY when this
  * session's project IS a Sterling clone itself (`atClone`), or, for an installed
  * copy, in every project (`installedCopy`, the only place a session learns that

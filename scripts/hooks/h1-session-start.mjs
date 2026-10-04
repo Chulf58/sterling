@@ -27,7 +27,7 @@ import { withRegisterLock, readRegister, registerPath, sessionBoundarySweep } fr
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { consumeRotationNote, renderRotationRestore } from './lib/rotation-restore.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
-import { handoffFilesLine, machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, tddPostureLine } from './lib/operating-state.mjs';
+import { handoffFilesLine, machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, sterlingRootLine, tddPostureLine } from './lib/operating-state.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
 import { ProjectRegistry, registryPath, SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
@@ -301,6 +301,19 @@ try {
   // fail-open — a broken plan lock costs its own section, never the rest of H1
 }
 
+// STERLING ROOT (decision session-start-prints-the-sterling-root-plain-text-instructions-use-it):
+// printed on every source, from the hook's own location only (the walk-up, never the
+// STERLING_PLUGIN_ROOT env seam, because the model runs scripts from this path). Unresolved is
+// stated loudly by sterlingRootLine, never silenced. Computed above the `if (!store)` exit so a
+// Sterling project with a blocked or missing store gets it too.
+let rootLocation = null;
+try {
+  rootLocation = walkUpPluginRoot();
+} catch {
+  // an unresolvable root is stated by sterlingRootLine as UNRESOLVED
+}
+const rootContext = `\n\n${sterlingRootLine(rootLocation)}`;
+
 // STORE-VERSION PROBE (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
 // ruling point 1 'Explicit command'): read the SQLite header user_version of the project
 // store and every ~/.sterling/domains/*/sterling.db — no connection opened — and on a
@@ -383,13 +396,17 @@ if (!store) {
   // main path: a project can hold an approved plan before its store exists, and
   // a section computed but never emitted would consume its one-shot markers
   // silently — disclosing nothing while spending the disclosure.
-  if (planLockContext || dispatchResidueLines.length || earlyWarning) {
+  // A project with a Sterling config or a blocked store is a Sterling project: its instructions
+  // name <Sterling root>, so this exit prints the STERLING ROOT line too. A directory with no
+  // Sterling state prints nothing.
+  const sterlingProject = projectStoreBlocked || existsSync(join(input.cwd, '.sterling', 'config.json'));
+  if (planLockContext || dispatchResidueLines.length || earlyWarning || sterlingProject) {
     process.stdout.write(
       JSON.stringify({
         ...(earlyWarning ? { systemMessage: earlyWarning.trim() } : {}),
         hookSpecificOutput: {
           hookEventName: 'SessionStart',
-          additionalContext: planLockContext + dispatchResidueLines.join('\n\n') + storeVersionContext + postUpdateContext,
+          additionalContext: planLockContext + dispatchResidueLines.join('\n\n') + (sterlingProject ? rootContext : '') + storeVersionContext + postUpdateContext,
         },
       })
     );
@@ -1445,7 +1462,7 @@ const output = {
   systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + handoffContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + handoffContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the

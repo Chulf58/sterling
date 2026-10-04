@@ -8,7 +8,7 @@ import { join, dirname } from 'node:path';
 import { z } from 'zod';
 import { parseConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS } from '@sterling/schemas';
 import { MountedStores, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
-import { SterlingTools, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS, mountedDomainSurface } from './tools.js';
+import { SterlingTools, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS, DEDUP_OVERRIDE_FIELD, mountedDomainSurface } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
 
@@ -108,7 +108,7 @@ const KNOWLEDGE_CREATE_FIELD_VARIANTS = Object.keys(RECORD_TYPES).map((type) => 
   fieldsShape.type = z.literal(type);
   // create-time directive, never a stored field (the tool handler strips it
   // before the candidate is built) — admitted on every variant, not type-specific.
-  fieldsShape.dedup_override = z.boolean().optional();
+  fieldsShape[DEDUP_OVERRIDE_FIELD] = z.boolean().optional();
   return z.object(fieldsShape).strict();
 });
 
@@ -367,7 +367,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_schema',
     {
       description:
-        "Describe what a record type accepts before writing it. Returns {type, fields:[{name, required, type, enum_values?, element_fields?, condition?, example?, server_owned?}], required[], optional[]}, derived from the registered schema. `condition` is present on a field whose accepted shape depends on another field of the same record (feature_article current_ac and live_test_refs: the {not_applicable} form is accepted only for some article_kind values). `example` is a schema-validated worked value (absent when none is derivable). server_owned fields are listed but refused on write and excluded from required/optional. An unregistered type lists the registered ones.",
+        "Describe what a record type accepts before writing it. Returns {type, rules[], fields:[{name, required, type, enum_values?, element_fields?, member_fields?, min_length?, format?, default?, condition?, example?, server_owned?}], required[], optional[]}, derived from the registered schema. `condition` states a refusal the type string cannot: a rule tying the field to another field of the record, or a limit on the value itself (a repo path, a slug already held, a link rel with its own tool). `rules` holds what applies to the whole create and fits no field (dedup_override). element_fields describes an array's element and member_fields an object's members, each entry in the same form as a field. min_length marks a string that must not be empty and format a repo-relative path; on an array both apply to each element. `default` is the value used when the field is absent. `example` is a schema-validated worked value (absent when none is derivable); the examples of one type validate together as one record. server_owned fields are assigned by the server, refused on write and excluded from required/optional, except `type`, which knowledge_create requires as fields.type (see its condition). An unregistered type lists the registered ones.",
       inputSchema: strict({ type: z.string() }),
     },
     ({ type }) => json(tools.knowledgeSchema(type))
@@ -542,7 +542,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         objective: z.string().optional(),
         file_keys: z.array(z.string()).optional(),
         priority: z.enum(['low', 'normal', 'high']).optional(),
-        feature_link: z.string().optional(),
+        feature_link: z.string().describe('full record uuid; a slug or an 8-char prefix is refused').optional(),
         system_reason: z.string().optional(),
         stack_tags: z.array(z.string()).optional(),
         measured_at_head: z.string().optional(),

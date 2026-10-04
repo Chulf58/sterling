@@ -4265,7 +4265,14 @@ var init_envelope = __esm({
 });
 
 // packages/schemas/dist/records.js
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES;
+function todoBlocksItself(rec) {
+  return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
+}
+function undeclaredPhaseInterfaces(rec) {
+  const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
+  return rec.phases.flatMap((phase) => (phase.interfaces ?? []).filter((name4) => !declared.has(name4)).map((name4) => ({ phase_id: phase.phase_id, name: name4 })));
+}
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4313,6 +4320,9 @@ var init_records = __esm({
     }).strict();
     ARTICLE_KINDS = ["feature", "probe", "tool", "concept"];
     NOT_APPLICABLE_EXEMPT_KINDS = ["probe", "tool"];
+    ARTICLE_STATE_REQUIRES = {
+      dormant: ["state_reason", "wiring_todo_id"]
+    };
     currentAcItemSchema = external_exports.object({
       ac_id: external_exports.string().min(1),
       text: external_exports.string().min(1),
@@ -4419,8 +4429,9 @@ var init_records = __esm({
       last_executed: external_exports.string().datetime().optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
-      if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {
-        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (\xA73.2.3)" });
+      const stateNeeds = ARTICLE_STATE_REQUIRES[rec.state];
+      if (stateNeeds?.some((field) => !rec[field])) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `state '${rec.state}' requires ${stateNeeds.join(" and ")} (\xA73.2.3)` });
       }
       const exemptKind = NOT_APPLICABLE_EXEMPT_KINDS.includes(rec.article_kind);
       const isExempt = (v) => typeof v === "object" && v !== null && !Array.isArray(v) && "not_applicable" in v;
@@ -4534,6 +4545,8 @@ var init_records = __esm({
       evidence: external_exports.string().min(1),
       file_keys: external_exports.array(repoPath).optional()
     }).superRefine(refineSupersession);
+    OPEN_QUESTION_CLOSED = "closed";
+    OPEN_QUESTION_TERMINUS_FIELD = "closed_into";
     openQuestionSchema = base.extend({
       type: external_exports.literal("open_question"),
       // Stable handle, minted from the question — see decisionSchema.slug.
@@ -4559,16 +4572,16 @@ var init_records = __esm({
       file_keys: external_exports.array(repoPath).optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
-      if (rec.resolution_status === "closed" && !rec.closed_into) {
+      if (rec.resolution_status === OPEN_QUESTION_CLOSED && !rec[OPEN_QUESTION_TERMINUS_FIELD]) {
         ctx.addIssue({
           code: external_exports.ZodIssueCode.custom,
-          message: "resolution_status 'closed' requires closed_into (the research_finding the answer landed in)"
+          message: `resolution_status '${OPEN_QUESTION_CLOSED}' requires ${OPEN_QUESTION_TERMINUS_FIELD} (the research_finding the answer landed in)`
         });
       }
-      if (rec.resolution_status !== "closed" && rec.closed_into) {
+      if (rec.resolution_status !== OPEN_QUESTION_CLOSED && rec[OPEN_QUESTION_TERMINUS_FIELD]) {
         ctx.addIssue({
           code: external_exports.ZodIssueCode.custom,
-          message: "closed_into is set but resolution_status is 'open' \u2014 close the question or drop the terminus"
+          message: `${OPEN_QUESTION_TERMINUS_FIELD} is set but resolution_status is 'open' \u2014 close the question or drop the terminus`
         });
       }
     });
@@ -4651,6 +4664,9 @@ var init_records = __esm({
       // getting reverted", not "an event happened".
       "restore_performed"
     ];
+    TODO_SYSTEM_SOURCE = "system";
+    TODO_SYSTEM_REQUIRES = ["system_reason"];
+    TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
     todoSchema = base.extend({
       type: external_exports.literal("todo"),
       // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -4701,24 +4717,23 @@ var init_records = __esm({
       needs: external_exports.enum(BOARD_NEEDS).optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
-      if (rec.source === "system" && !rec.system_reason) {
-        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "source 'system' requires system_reason (\xA73.2.7)" });
+      if (rec.source === TODO_SYSTEM_SOURCE) {
+        for (const field of TODO_SYSTEM_REQUIRES) {
+          if (!rec[field]) {
+            ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `source '${TODO_SYSTEM_SOURCE}' requires ${field} (\xA73.2.7)` });
+          }
+        }
+        for (const [field, verb] of Object.entries(TODO_USER_ONLY_FIELDS)) {
+          if (rec[field] !== void 0) {
+            ctx.addIssue({
+              code: external_exports.ZodIssueCode.custom,
+              path: [field],
+              message: `${field} ${verb} source:'user' board tasks only \u2014 maintenance-queue items never carry it`
+            });
+          }
+        }
       }
-      if (rec.blocked_by !== void 0 && rec.source === "system") {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: ["blocked_by"],
-          message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
-        });
-      }
-      if (rec.needs !== void 0 && rec.source === "system") {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: ["needs"],
-          message: "needs marks source:'user' board tasks only \u2014 maintenance-queue items never carry it"
-        });
-      }
-      if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
+      if (todoBlocksItself(rec)) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["blocked_by"], message: `blocked_by lists '${rec.slug}', the item itself \u2014 an item cannot block itself` });
       }
     });
@@ -4768,16 +4783,11 @@ var init_records = __esm({
       decisions_made: external_exports.array(external_exports.string().uuid())
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
-      const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
-      for (const phase of rec.phases) {
-        for (const name4 of phase.interfaces ?? []) {
-          if (!declared.has(name4)) {
-            ctx.addIssue({
-              code: external_exports.ZodIssueCode.custom,
-              message: `phase '${phase.phase_id}' references undeclared interface '${name4}' (\xA78.1 interface slice must come from technical_design.interfaces)`
-            });
-          }
-        }
+      for (const { phase_id, name: name4 } of undeclaredPhaseInterfaces(rec)) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          message: `phase '${phase_id}' references undeclared interface '${name4}' (\xA78.1 interface slice must come from technical_design.interfaces)`
+        });
       }
     });
     AGENT_MODEL_KEY = {

@@ -91,17 +91,20 @@ test('knowledge_schema feature_article: the live_test_refs condition says [] is 
   assert.match(condition!, /\[\]/);
 });
 
-test('knowledge_schema feature_article: only current_ac and live_test_refs carry a condition', () => {
+// These two pinned "no other field has any condition". Other rules now print
+// conditions too (schema-enforced-rules.test.ts), so the pins are narrowed to
+// what they were guarding: the article_kind rule sits on these two fields only.
+test('knowledge_schema feature_article: only current_ac and live_test_refs carry the article_kind condition', () => {
   const withCondition = describeType('feature_article')
-    .fields.filter((f) => f.condition !== undefined)
+    .fields.filter((f) => /not_applicable/.test(f.condition ?? ''))
     .map((f) => f.name)
     .sort();
   assert.deepEqual(withCondition, ['current_ac', 'live_test_refs']);
 });
 
-test('knowledge_schema: record types other than feature_article report no condition', () => {
+test('knowledge_schema: record types other than feature_article report no article_kind condition', () => {
   for (const type of ['decision', 'anti_pattern', 'research_finding']) {
-    assert.ok(describeType(type).fields.every((f) => f.condition === undefined), `${type} has no condition`);
+    assert.ok(describeType(type).fields.every((f) => !/not_applicable|article_kind/.test(f.condition ?? '')), `${type} has no article_kind condition`);
   }
 });
 
