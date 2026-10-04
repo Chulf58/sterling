@@ -1828,26 +1828,41 @@ function recordFieldConditions(type: string): [path: string, text: string][] {
  * (the finding behind this: open_question's own examples were
  * resolution_status 'open' beside a closed_into, which the type refuses as a
  * pair). Each field starts on its first valid candidate, as before. While the
- * full schema still refuses the record, the single swap to another valid
- * candidate that removes the most issues is applied, later fields first, since
- * a dependent field is declared after the field it depends on. When no swap
+ * full schema still refuses the record, the single change that removes the
+ * most issues is applied: a swap to another valid candidate or, for an
+ * optional field, leaving it out (tried after its swaps). Later fields go
+ * first, since a dependent field is declared after the field it depends on;
+ * that is why open_question keeps resolution_status 'open' and prints no
+ * closed_into example, so a writer copying the examples opens a question
+ * rather than a closed one. A required field is never left out. When no change
  * helps, the per-field values are returned as they stand: no worse than the
  * old answer, and the all-examples test names the type.
  */
+const OMIT_EXAMPLE = Symbol('omit example');
+
 function exampleValuesFor(type: string, shape: Record<string, unknown>): Map<string, unknown> {
   const candidates = new Map<string, unknown[]>();
   for (const [name, node] of Object.entries(shape)) {
     const valid = exampleCandidates(node, name, 0).filter((c) => satisfies(node, c));
-    if (valid.length) candidates.set(name, valid);
+    if (!valid.length) continue;
+    const optional = (node as { isOptional?: () => boolean }).isOptional?.() === true;
+    candidates.set(name, optional ? [...valid, OMIT_EXAMPLE] : valid);
   }
-  const chosen = new Map<string, unknown>([...candidates].map(([name, valid]) => [name, valid[0]]));
+  const withChange = (values: Map<string, unknown>, name: string, value: unknown): Map<string, unknown> => {
+    const next = new Map(values);
+    if (value === OMIT_EXAMPLE) next.delete(name);
+    else next.set(name, value);
+    return next;
+  };
+  let chosen = new Map<string, unknown>([...candidates].map(([name, valid]) => [name, valid[0]]));
   const schema = RECORD_TYPES[type]?.schema;
   const issueCount = (values: Map<string, unknown>): number => {
     try {
       const result = schema?.safeParse(Object.fromEntries(values));
       return !result || result.success ? 0 : result.error.issues.length;
     } catch {
-      return 0;
+      // A schema that throws on this record has not accepted it.
+      return Infinity;
     }
   };
   const order = [...candidates].reverse();
@@ -1856,13 +1871,13 @@ function exampleValuesFor(type: string, shape: Record<string, unknown>): Map<str
     let best: { name: string; value: unknown; issues: number } | undefined;
     for (const [name, valid] of order) {
       for (const value of valid) {
-        if (value === chosen.get(name)) continue;
-        const issues = issueCount(new Map(chosen).set(name, value));
+        if (value === OMIT_EXAMPLE ? !chosen.has(name) : chosen.has(name) && value === chosen.get(name)) continue;
+        const issues = issueCount(withChange(chosen, name, value));
         if (issues < (best?.issues ?? remaining)) best = { name, value, issues };
       }
     }
     if (!best) break;
-    chosen.set(best.name, best.value);
+    chosen = withChange(chosen, best.name, best.value);
     remaining = best.issues;
   }
   return chosen;
@@ -1907,6 +1922,7 @@ export function schemaFor(type: string): { type: string; fields: FieldShape[] } 
   // errors: {option, reason}[] written as string[] is the canonical one.
   const examples = exampleValuesFor(type, shape);
   const fields: FieldShape[] = Object.entries(shape).map(([name, node]) =>
+    // A field the whole-record choice left out is still listed, without an example.
     fieldShape(name, node, 0, examples.has(name) ? { value: examples.get(name) } : { value: undefined })
   );
   for (const [path, text] of recordFieldConditions(type)) addFieldCondition(fields, path, text);

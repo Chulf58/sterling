@@ -108,6 +108,10 @@ test('type: marked with the condition that knowledge_create requires it as field
       assert.equal(field?.server_owned, true);
       assert.match(field?.condition ?? '', new RegExp(`knowledge_create requires fields\\.type set to '${type}'`));
       assert.match(field?.condition ?? '', /every other write refuses it/);
+      assert.ok(
+        tools.knowledgeSchema(type).rules.includes('knowledge_create requires fields.type equal to its outer type argument.'),
+        `${type}: rules state the fields.type requirement`
+      );
     }
     const schemaTool = listed.find((t) => t.name === 'knowledge_schema');
     for (const key of ['rules', 'member_fields', 'min_length', 'format', 'default', 'condition']) {
@@ -158,7 +162,7 @@ test('scope: the creation-only condition sits on exactly the fields a later writ
   }
 });
 
-test('links[].rel: the condition names exactly the rels knowledge_create refuses', () => {
+test('links[].rel: the condition names exactly the rels knowledge_create and knowledge_link refuse', () => {
   const { tools, cleanup } = harness();
   try {
     const { record: target } = tools.knowledgeCreate('decision', createBody(tools, 'decision', { title: 'the link target' }));
@@ -168,6 +172,13 @@ test('links[].rel: the condition names exactly the rels knowledge_create refuses
       return message !== undefined;
     });
     assert.deepEqual([...refused], [...WRITE_REFUSED_LINK_RELS]);
+    const { record: source } = tools.knowledgeCreate('decision', createBody(tools, 'decision', { title: 'the link source' }));
+    const refusedByLink = LINK_RELS.filter((rel) => {
+      const message = thrown(() => tools.knowledgeLink(source.id, rel, target.id));
+      if (message !== undefined) assert.match(message, /lifecycle transition/, `knowledge_link ${rel} is refused for being a lifecycle rel`);
+      return message !== undefined;
+    });
+    assert.deepEqual([...refusedByLink], [...refused], 'knowledge_link refuses the same rels');
     for (const type of TYPES) {
       const rel = fieldShapeAt(tools.knowledgeSchema(type).fields, 'links[].rel');
       assert.deepEqual(rel?.enum_values, [...LINK_RELS], `${type}: the enum still lists every registered rel`);
@@ -177,6 +188,9 @@ test('links[].rel: the condition names exactly the rels knowledge_create refuses
         `${type}: the condition names the refused rels`
       );
       assert.match(rel?.condition ?? '', /knowledge_supersede/);
+      for (const tool of ['knowledge_create', 'knowledge_link', 'knowledge_update']) {
+        assert.match(rel?.condition ?? '', new RegExp(`\\b${tool}\\b`), `${type}: the condition names ${tool}`);
+      }
     }
   } finally {
     cleanup();
@@ -206,7 +220,7 @@ test('dedup_override: rules state it for every type, and the near-duplicate refu
   try {
     for (const type of TYPES) {
       const { rules } = tools.knowledgeSchema(type);
-      assert.match(rules[0], /^dedup_override: true is accepted in the fields of every knowledge_create/, type);
+      assert.ok(rules.some((r) => /^dedup_override: true is accepted in the fields of every knowledge_create/.test(r)), type);
 
       // The same content three times, each under its own slug.
       assert.equal(thrown(() => tools.knowledgeCreate(type, createBody(tools, type))), undefined, `${type}: a first create is accepted`);

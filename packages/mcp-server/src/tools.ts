@@ -3710,7 +3710,7 @@ export class SterlingTools {
     addFieldCondition(
       fields,
       'links[].rel',
-      `${WRITE_REFUSED_LINK_RELS.map((rel) => `'${rel}'`).join(', ')} is refused on knowledge_create and as a new entry on knowledge_update: use knowledge_supersede, which also retires the old record.`
+      `${WRITE_REFUSED_LINK_RELS.map((rel) => `'${rel}'`).join(', ')} is refused on knowledge_create, on knowledge_link and as a new entry on knowledge_update: use knowledge_supersede, which also retires the old record.`
     );
     // The path refusals the tool layer adds to the schema's own. The fields are
     // found by running the type's example record through the same two
@@ -3724,6 +3724,7 @@ export class SterlingTools {
     }
     for (const [path, extras] of pathExtras) addFieldCondition(fields, path, `Also refused: ${extras.join('; ')}.`);
     const rules = [
+      'knowledge_create requires fields.type equal to its outer type argument.',
       `${DEDUP_OVERRIDE_FIELD}: true is accepted in the fields of every knowledge_create; it is a directive and is never stored.`,
       ...(described.type === DEDUP_GUARDED_TYPE
         ? [`A new ${DEDUP_GUARDED_TYPE} that overlaps an existing one is refused unless ${DEDUP_OVERRIDE_FIELD}: true is set.`]

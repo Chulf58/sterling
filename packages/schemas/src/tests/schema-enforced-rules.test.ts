@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { z } from 'zod';
 import {
+  exampleFor,
   RECORD_TYPES,
   schemaFor,
   exampleRecordFor,
@@ -89,9 +91,45 @@ test('every type: the examples knowledge_schema prints validate together as one 
   }
 });
 
-test('open_question: the printed examples no longer pair an open status with a terminus', () => {
-  const record = base('open_question');
-  assert.equal(record[OPEN_QUESTION_TERMINUS_FIELD] !== undefined, record.resolution_status === OPEN_QUESTION_CLOSED);
+test('open_question: the printed examples open a question, so the terminus is listed without an example', () => {
+  const fields = fieldsOf('open_question');
+  assert.equal(fieldShapeAt(fields, 'resolution_status')?.example, 'open', 'a writer copying the examples opens a question');
+  const terminus = fieldShapeAt(fields, OPEN_QUESTION_TERMINUS_FIELD);
+  assert.ok(terminus, 'the terminus field is still listed');
+  assert.equal(terminus.example, undefined, 'and carries no example, since an open question refuses it');
+  assert.ok(!(OPEN_QUESTION_TERMINUS_FIELD in base('open_question')));
+});
+
+test('every type: only an optional field ever loses its example to the whole-record check, and only where the record needs it', () => {
+  const omitted: string[] = [];
+  for (const type of Object.keys(RECORD_TYPES)) {
+    const shape = objectShapeFor(type)!;
+    for (const field of fieldsOf(type)) {
+      if (field.example !== undefined || exampleFor(shape[field.name], field.name) === undefined) continue;
+      assert.equal(field.required, false, `${type}.${field.name}: a required field keeps its example`);
+      omitted.push(`${type}.${field.name}`);
+    }
+  }
+  assert.deepEqual(omitted, [`open_question.${OPEN_QUESTION_TERMINUS_FIELD}`]);
+});
+
+test('example choice: a candidate the record schema throws on is never chosen', () => {
+  // mode 'b' makes the refinement throw; mode 'a' refuses `extra`. The only
+  // valid record is mode 'a' without extra. `mode` is declared last so its
+  // swap to 'b' is tried before the omission of `extra`.
+  const schema = z
+    .object({ extra: z.string().optional(), mode: z.enum(['a', 'b']) })
+    .superRefine((rec, ctx) => {
+      if (rec.mode === 'b') throw new Error('refinement blew up');
+      if (rec.extra !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'mode a refuses extra' });
+    });
+  const probeType = 'example_choice_probe';
+  RECORD_TYPES[probeType] = { schema, immutable: false, fts: () => '', fileKeys: () => [], digest: {} };
+  try {
+    assert.deepEqual(exampleRecordFor(probeType), { mode: 'a' });
+  } finally {
+    delete RECORD_TYPES[probeType];
+  }
 });
 
 test('feature_article state: the condition names exactly the states the validator makes conditional, and each companion field says so', () => {
