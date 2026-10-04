@@ -139,6 +139,17 @@ const PINNED_INSTALL = 'npm i -g --prefix ~/.local/codex-mcp-0.153.4 @openai/cod
 const pinnedAddCommand = (nodeBinDir) =>
   `claude mcp add --scope user -e PATH=${nodeBinDir}:/usr/local/bin:/usr/bin:/bin codex -- ~/.local/codex-mcp-0.153.4/bin/codex mcp-server`;
 
+// The ONE line session start (H1) prints when no `codex` server is registered at user scope
+// (decision codex-route-stays-the-pinned-0-153-4-mcp-server). `registration` is
+// userScopeCodexServer's result; this reads nothing and spawns nothing, so no probe is
+// involved (anti_pattern codex-mcp-probe-by-exit-status). A registered server returns '' and
+// an unreadable config still returns the line, with the reason appended, as init's line does.
+export function codexRegistrationLine(registration, { nodeBinDir } = {}) {
+  if (registration.found) return '';
+  const unread = registration.unreadable ? ` (the user-level Claude config could not be read: ${registration.unreadable})` : '';
+  return `Codex MCP: no \`codex\` MCP server is registered at user scope${unread}, so Codex lanes are unavailable. The supported route is the pinned Codex 0.153.4 MCP server. Install and register it: ${PINNED_INSTALL} && ${pinnedAddCommand(nodeBinDir ?? '<node bin dir>')}`;
+}
+
 // The ONE loud line init prints (P5) when no codex server is in the user-level config.
 // `probe` is probeCodex's result (or the STERLING_CODEX_PROBE forced equivalent) and only
 // selects the remedy: a working `codex mcp-server` gets the plain add command, every
