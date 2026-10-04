@@ -126,16 +126,16 @@ export const CONDUCTOR_WORDING_EDITS = [
   {
     commit: 'fix/instructions-name-bin-entries',
     date: '2026-10-04',
-    reason: 'the rotation note is written by the bundled bin/ entry through the plugin root, not <clone>/scripts/rotation-note.mjs (GitHub issue #16)',
+    reason: 'the rotation note is written by the bundled bin/ entry through the Sterling root the session start printed, not <clone>/scripts/rotation-note.mjs (GitHub issue #16)',
     before: '`node <clone>/scripts/rotation-note.mjs --next-slice "<exact next slice>" --lane "<agent type; files; what it found or changed; what is left>"`; H1 injects',
-    after: '`node "${CLAUDE_PLUGIN_ROOT}/bin/rotation-note.mjs" --next-slice "<exact next slice>" --lane "<agent type; files; what it found or changed; what is left>"`; H1 injects',
+    after: '`node "<Sterling root>/bin/rotation-note.mjs" --next-slice "<exact next slice>" --lane "<agent type; files; what it found or changed; what is left>"` (the Sterling root is the path the STERLING ROOT line printed at session start; every `<Sterling root>` below means it); H1 injects',
   },
   {
     commit: 'fix/instructions-name-bin-entries',
     date: '2026-10-04',
     reason: 'the plan lock release is run through the bundled bin/ entry (GitHub issue #16)',
     before: 'release it with `plan-lock.mjs --release --reason "<why>"` only when',
-    after: 'release it with `node "${CLAUDE_PLUGIN_ROOT}/bin/plan-lock.mjs" --release --reason "<why>"` only when',
+    after: 'release it with `node "<Sterling root>/bin/plan-lock.mjs" --release --reason "<why>"` only when',
   },
 ];
 

@@ -63,3 +63,31 @@ test('the reference pattern ignores skill-local scripts, hooks and file:line cit
 test('no shipped instruction names scripts/<name>.mjs when bin/<name>.mjs exists', () => {
   assert.deepEqual(offenders(), []);
 });
+
+// Plain-text instructions are not plugin content: Claude Code substitutes ${CLAUDE_PLUGIN_ROOT}
+// only in plugin skill, command and agent content and hook/MCP config, and it is absent from the
+// Bash tool's environment. An agent file copied from agent-templates/ into a project, and a
+// generated CLAUDE.md or AGENTS.md, reach the model as literal text, so the command would resolve
+// to /bin/<name>.mjs. They name `node "<Sterling root>/bin/<name>.mjs"` instead; session start
+// prints the root (decision session-start-prints-the-sterling-root-plain-text-instructions-use-it).
+// Skills and commands may use the variable.
+const PLAIN_TEXT = [
+  ...markdownUnder('agent-templates'),
+  'templates/target-claude-md.md',
+  'templates/target-agents-md.md',
+  'CLAUDE.md',
+  'AGENTS.md',
+].filter((f) => existsSync(join(root, f)));
+
+test('plain-text instruction files never use ${CLAUDE_PLUGIN_ROOT} or <clone>/scripts/', () => {
+  assert.ok(PLAIN_TEXT.includes('agent-templates/conductor.md'));
+  assert.ok(PLAIN_TEXT.includes('templates/target-claude-md.md'));
+  const found = [];
+  for (const file of PLAIN_TEXT) {
+    readFileSync(join(root, file), 'utf8').split('\n').forEach((line, i) => {
+      if (line.includes('${CLAUDE_PLUGIN_ROOT}')) found.push(`${file}:${i + 1} uses \${CLAUDE_PLUGIN_ROOT}; name "<Sterling root>/bin/<name>.mjs"`);
+      if (line.includes('<clone>/scripts/')) found.push(`${file}:${i + 1} names <clone>/scripts/...; name "<Sterling root>/bin/<name>.mjs"`);
+    });
+  }
+  assert.deepEqual(found, []);
+});
