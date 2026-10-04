@@ -11,11 +11,17 @@
 //     entirely is inserted whole before the heading it sits ahead of in the template; a
 //     sibling with no such heading is refused, and its bullets are then not reported one by one.
 //   - dry-run by default; --apply writes.
+//   - --apply-inserts writes NEW TEXT ONLY (user-ruled 2026-10-04, "Auto-insert, new text
+//     only"): a section or tracked bullet that is entirely absent from the file is inserted
+//     and listed; a block whose wording is old is reported as would_update / would_rename
+//     exactly as the dry run reports it, and is not touched; hand-tuned text is still
+//     refused. /sterling:update and the post-update sync run this mode. Replacing existing
+//     wording stays the by-hand --apply.
 //   - QUIET ON CLEAN: an in-sync project prints nothing and is counted in the
 //     summary; --verbose restores the per-bullet listing. The caller that matters
 //     is /sterling:update, where this block sits between build/test/check output
 //     and a per-bullet inventory would bury the rare refusal (P1).
-//   node scripts/stamp-contract.mjs [--apply] [--verbose] [--project <repo_path>...]
+//   node scripts/stamp-contract.mjs [--apply | --apply-inserts] [--verbose] [--project <repo_path>...]
 import { readFileSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,6 +44,9 @@ import {
 } from './lib/contract-bullets.mjs';
 
 const APPLY = process.argv.includes('--apply');
+// --apply wins when both are given: it is the wider mode.
+const APPLY_INSERTS = !APPLY && process.argv.includes('--apply-inserts');
+const WRITE_INSERTS = APPLY || APPLY_INSERTS;
 const VERBOSE = process.argv.includes('--verbose');
 const onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
@@ -176,9 +185,22 @@ for (const p of projects) {
   for (const section of TARGET_SECTIONS) {
     const home = leadLayer.get(section.leads[0]);
     const target = siblingFiles.get(home);
-    if (headingIndex(target.text, section.heading) !== -1) continue;
     if (section.leads.some((lead) => [...siblingFiles.values()].some((f) => extractBlock(f.text, lead)))) continue;
     const label = `${section.heading} (section)`;
+    // A heading by that name with none of the section's bullets is the project's own
+    // section, or Sterling's with every bullet deleted. One refusal, not one per bullet.
+    const own = headingIndex(target.text, section.heading, { loose: true });
+    if (own !== -1) {
+      actions.push({
+        lead: label,
+        action: 'SECTION_HEADING_WITHOUT_BULLETS_REFUSED',
+        file: layerFileName(home),
+        detail: `${layerFileName(home)} already has a '${target.text.split('\n')[own].trim()}' heading and none of the '${section.heading}' bullets. To get Sterling's section, rename that heading and re-run; or copy the bullets from ${home} under it.`,
+      });
+      drift++;
+      for (const lead of section.leads) sectionRefused.add(lead);
+      continue;
+    }
     const at = headingIndex(target.text, section.before);
     if (at === -1) {
       actions.push({
@@ -196,7 +218,7 @@ for (const p of projects) {
     if (at > 0 && lines[at - 1].trim() !== '') block.unshift('');
     lines.splice(at, 0, ...block);
     target.text = lines.join('\n');
-    actions.push({ lead: label, action: APPLY ? 'section_inserted' : 'would_insert_section', file: layerFileName(home) });
+    actions.push({ lead: label, action: WRITE_INSERTS ? 'section_inserted' : 'would_insert_section', file: layerFileName(home) });
   }
   for (const lead of TARGET_LEADS) {
     if (sectionRefused.has(lead)) continue;
@@ -225,10 +247,13 @@ for (const p of projects) {
         continue;
       }
       if (variants.get(lead).has(found.block)) {
-        // clean template-descended block → replace
-        const lines = target.text.split('\n');
-        lines.splice(found.start, found.end - found.start, ...want.split('\n'));
-        target.text = lines.join('\n');
+        // clean template-descended block → replace. Not in --apply-inserts: that mode
+        // writes the text it holds, so the old wording has to stay in it.
+        if (!APPLY_INSERTS) {
+          const lines = target.text.split('\n');
+          lines.splice(found.start, found.end - found.start, ...want.split('\n'));
+          target.text = lines.join('\n');
+        }
         actions.push({ lead, action: APPLY ? 'updated' : 'would_update', file: layerFileName(home) });
       } else {
         actions.push({ lead, action: 'HAND_TUNED_REFUSED', file: layerFileName(home), have: found.block });
@@ -245,9 +270,11 @@ for (const p of projects) {
       if (!oldFound) continue;
       renamed = true;
       if (variants.get(oldLead).has(oldFound.block)) {
-        const lines = target.text.split('\n');
-        lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split('\n'));
-        target.text = lines.join('\n');
+        if (!APPLY_INSERTS) {
+          const lines = target.text.split('\n');
+          lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split('\n'));
+          target.text = lines.join('\n');
+        }
         actions.push({ lead, action: APPLY ? 'renamed' : 'would_rename', file: layerFileName(home) });
       } else {
         actions.push({ lead, action: 'HAND_TUNED_REFUSED', file: layerFileName(home), have: oldFound.block });
@@ -260,13 +287,14 @@ for (const p of projects) {
     // past that anchor's whole list item; everything else missing = drift.
     const anchor = (INSERT_AFTER.get(lead) ?? [])
       .filter((a) => VALID_ANCHOR.has(outcome(a)))
-      .map((a) => extractBlock(target.text, a))
+      // In --apply-inserts a would_rename anchor still sits under its old lead.
+      .map((a) => extractBlock(target.text, a) ?? (RENAMED_LEADS.get(a) ?? []).map((old) => extractBlock(target.text, old)).find(Boolean))
       .find(Boolean);
     if (anchor) {
       const lines = target.text.split('\n');
       lines.splice(itemEnd(target.text, anchor.start), 0, ...want.split('\n'));
       target.text = lines.join('\n');
-      actions.push({ lead, action: APPLY ? 'inserted' : 'would_insert', file: layerFileName(home) });
+      actions.push({ lead, action: WRITE_INSERTS ? 'inserted' : 'would_insert', file: layerFileName(home) });
       continue;
     }
     actions.push({ lead, action: 'ANCHOR_MISSING_REFUSED', file: layerFileName(home) });
@@ -274,7 +302,7 @@ for (const p of projects) {
   }
 
   const dirty = actions.some((a) => ['updated', 'inserted', 'renamed', 'section_inserted'].includes(a.action));
-  if (APPLY && dirty) {
+  if (WRITE_INSERTS && dirty) {
     for (const { path, text, eol } of siblingFiles.values()) writeFileSync(path, withEol(text, eol));
   }
   results.push({ project: p.name, status: 'processed', file: `${agentsMd} + ${claudeMd}`, actions });
@@ -306,7 +334,7 @@ for (const r of results) {
 }
 const processed = results.filter((r) => r.status === 'processed').length;
 console.log(
-  `\n${APPLY ? 'APPLIED' : 'DRY-RUN (no writes; pass --apply)'} — ${processed} project(s) processed, ` +
+  `\n${APPLY ? 'APPLIED' : APPLY_INSERTS ? 'INSERTS APPLIED (new text only; existing wording is never replaced without --apply)' : 'DRY-RUN (no writes; pass --apply)'} — ${processed} project(s) processed, ` +
     `${inSync} already in sync, ${drift} refusal(s).` +
     (!VERBOSE && inSync ? ' Pass --verbose to list the in-sync bullets.' : '')
 );

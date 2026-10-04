@@ -608,3 +608,86 @@ test('stamp-contract: no Domains section and no Conventions heading to put it be
     f.cleanup();
   }
 });
+
+// ---- --apply-inserts: what /sterling:update and the post-update sync run (user-ruled
+// 2026-10-04, "Auto-insert, new text only") ----
+
+const STALE_ANTI_SPEC = '- **Anti-speculation:** never invent an API, field, flag, or behavior. Verify in docs or code first. If you cannot verify, say so and ask.';
+const withStaleAntiSpec = (agents) => agents.replace(/^- \*\*Anti-speculation:\*\*.*$/m, STALE_ANTI_SPEC);
+
+test('stamp-contract --apply-inserts: text that is entirely absent is written, old wording is only reported, and a second run writes nothing', () => {
+  const f = sectionFixture('inserts-only', (agents) => withStaleAntiSpec(agents).replace(DOMAINS_SECTION, ''));
+  try {
+    const expected = { agents: withStaleAntiSpec(f.complete.agents), claude: f.complete.claude };
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /section_inserted {2}## Domains/);
+    assert.match(r.stdout, /would_update {2}- \*\*Anti-speculation:\*\*/, 'a replace is reported exactly as the dry run reports it');
+    assert.match(r.stdout, /INSERTS APPLIED/);
+    assert.deepEqual(f.read(), expected, 'the section is in; the old-wording bullet is byte-for-byte what it was');
+
+    const again = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+    assert.ok(!/inserted/.test(again.stdout), `nothing left to insert:\n${again.stdout}`);
+    assert.deepEqual(f.read(), expected, 'a second run writes nothing');
+
+    const full = runStampContract(f.regDb, ['--apply']);
+    assert.equal(full.status, 0, `${full.stdout}\n${full.stderr}`);
+    assert.deepEqual(f.read(), f.complete, 'the by-hand --apply is what replaces old wording');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: a missing tracked bullet is inserted too', () => {
+  const f = sectionFixture('inserts-bullet', (agents) => dropBlock(agents, DOMAIN_DESCRIPTION_LEAD));
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /inserted {2}- \*\*A domain needs a description\*\*/);
+    assert.deepEqual(f.read(), f.complete);
+  } finally {
+    f.cleanup();
+  }
+});
+
+for (const heading of ['## Domains', '## Domains and hosting']) {
+  test(`stamp-contract: a project's own '${heading}' heading with none of the section's bullets is ONE section refusal with what to do`, () => {
+    const f = sectionFixture('own-heading', (agents) => agents.replace(DOMAINS_SECTION, `${heading}\n\nWe host at example.org.\n\n`));
+    try {
+      const before = f.read();
+      const r = runStampContract(f.regDb);
+      assert.equal(r.status, 2, r.stdout);
+      assert.match(r.stdout, /SECTION_HEADING_WITHOUT_BULLETS_REFUSED {2}## Domains/);
+      assert.match(r.stdout, /already has a '## Domains[^']*' heading/);
+      assert.equal((r.stdout.match(/REFUSED {2}/g) ?? []).length, 1, `one refusal, not one per bullet:\n${r.stdout}`);
+      assert.deepEqual(f.read(), before, 'nothing written');
+    } finally {
+      f.cleanup();
+    }
+  });
+}
+
+test("stamp-contract: the section goes before the template's Conventions heading, never before a project heading that only starts the same", () => {
+  const decoy = '## Conventions of naming\n\nWe name things plainly.\n\n';
+  const f = sectionFixture('decoy-conventions', (agents) => agents.replace(DOMAINS_SECTION, '').replace('## Project facts', `${decoy}## Project facts`));
+  try {
+    assert.ok(f.read().agents.indexOf('## Conventions of naming') < f.read().agents.indexOf('## Conventions ('), 'fixture sanity: the decoy sits above the real heading');
+    const r = runStampContract(f.regDb);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.equal(f.read().agents, f.complete.agents.replace('## Project facts', `${decoy}## Project facts`), 'the section sits where the template has it');
+  } finally {
+    f.cleanup();
+  }
+
+  const only = sectionFixture('only-decoy', (agents) => agents.replace(DOMAINS_SECTION, '').replace(/^## Conventions.*$/m, '## Conventions of naming'));
+  try {
+    const before = only.read();
+    const r = runStampContract(only.regDb);
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stdout, /SECTION_ANCHOR_MISSING_REFUSED {2}## Domains/);
+    assert.deepEqual(only.read(), before);
+  } finally {
+    only.cleanup();
+  }
+});

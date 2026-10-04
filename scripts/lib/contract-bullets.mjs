@@ -102,8 +102,10 @@ export const TARGET_LEADS = [
 // Tracked sections: a heading plus its bullets, inserted as one block before the `before`
 // heading when the home file has neither the heading nor any of the bullets. A file with
 // no `before` heading is refused (SECTION_ANCHOR_MISSING_REFUSED in scripts/stamp-contract.mjs),
-// because a place for the section is never invented. Headings match a whole line, or the
-// line's start followed by a space ('## Conventions (lean …)').
+// because a place for the section is never invented. A file that has a heading starting with
+// the section's own heading but none of its bullets is refused too
+// (SECTION_HEADING_WITHOUT_BULLETS_REFUSED): that heading is the project's, or the bullets
+// were deleted on purpose. See headingIndex for how the two headings are matched.
 export const TARGET_SECTIONS = [{ heading: '## Domains', before: '## Conventions', leads: DOMAINS_LEADS }];
 
 // Renamed bullets: new lead → the old lead(s) it replaced. When the new lead is
@@ -153,11 +155,15 @@ function unfencedLineIndexes(lines) {
   for (const [open, close] of fenceSpans(lines)) for (let k = open; k <= close; k++) fenced.add(k);
   return lines.map((_, i) => i).filter((i) => !fenced.has(i));
 }
-// The index of the first line outside every fence that is `heading`, or starts with it and a
-// space; -1 when there is none.
-export function headingIndex(text, heading) {
+// The index of the first line outside every fence that is `heading`; -1 when there is none.
+// Strict (the default, used to find where a section goes): the whole line, or the heading
+// followed by ' (' as the templates write '## Conventions (lean …)'. A project's
+// '## Conventions of naming' is not that heading. Loose (used to ask whether a project
+// already has a heading of its own by that name): the heading followed by any text.
+export function headingIndex(text, heading, { loose = false } = {}) {
   const lines = text.split('\n');
-  return unfencedLineIndexes(lines).find((i) => lines[i].trimEnd() === heading || lines[i].startsWith(`${heading} `)) ?? -1;
+  const tail = loose ? ' ' : ' (';
+  return unfencedLineIndexes(lines).find((i) => lines[i].trimEnd() === heading || lines[i].startsWith(`${heading}${tail}`)) ?? -1;
 }
 export function extractBlock(text, lead) {
   const lines = text.split('\n');
