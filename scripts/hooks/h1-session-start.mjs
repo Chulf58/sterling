@@ -30,12 +30,13 @@ import { renderUnavailable } from './lib/undeclared-source.mjs';
 import { handoffFilesLine, machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, sterlingRootLine, tddPostureLine } from './lib/operating-state.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
 import { ProjectRegistry, registryPath, SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
-import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
+import { buildIdPath, parseConfig, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths, isLocallyModified, loadRegistry, sha256 } from '../lib/agent-distribution.mjs';
 import { gitTouches, writeInitialGitSettled } from './lib/settlement.mjs';
 import { isInstalledCopy } from '../lib/installed-copy.mjs';
 import { pluginScript, postUpdateSync, samePath } from '../lib/post-update-sync.mjs';
-import { machineStores, probeSchemaVersion } from '../lib/update.mjs';
+import { DOMAIN_MAP_PENDING_REL, machineStores, probeSchemaVersion } from '../lib/update.mjs';
+import { domainMapDue, domainNotice, runDomainMap } from './lib/domain-notice.mjs';
 import { queueDepthLine, readMaintenanceState, reconcileBacklog } from './lib/maintenance-state.mjs';
 import { laneCeiling, liveLanes, renderBoardReadiness } from './lib/board-ready.mjs';
 
@@ -372,16 +373,42 @@ try {
 // scripts/lib/post-update-sync.mjs, shared with the OpenCode server plugin. INSTALLED COPIES
 // ONLY: on a clone /sterling:update owns these steps. Runs before the agent-currency block,
 // which then sees the synced agents.
+//
+// DOMAIN MAP NOTICE (scripts/hooks/lib/domain-notice.mjs): the first session start after an
+// update runs the domain map and prints one line when it proposes a mount. The map runs
+// BEFORE the sync, because its report run registers a project the registry lacks and the
+// sync's contract check needs that row. It never applies a mount.
+let domainMapDueBy = null;
+let domainMapResult = null;
+try {
+  domainMapDueBy = domainMapDue(pluginRoot(), input.cwd);
+  if (domainMapDueBy) domainMapResult = runDomainMap(pluginRoot(), input.cwd);
+} catch (err) {
+  domainMapResult = { error: String(err?.message ?? err) };
+}
 let postUpdateWarning = '';
 let postUpdateContext = '';
+let postUpdateOutcome = null;
 try {
   const result = await postUpdateSync({ root: pluginRoot(), project: input.cwd, host: 'claude' });
   if (result) {
     postUpdateWarning = result.warning;
     postUpdateContext = result.context;
+    postUpdateOutcome = result.outcome;
   }
 } catch (err) {
   postUpdateWarning = `✗ Sterling post-update sync FAILED (${err?.message ?? err}) — no marker written; it retries at the next session start. `;
+}
+// The notice rides the post-update strings, so both exits below print it. The update's
+// pending file dies in the session start that read it (P4); with no such file the line
+// waits for the session whose sync succeeded, which is the one that writes the sync marker.
+if (domainMapResult) {
+  if (domainMapDueBy === 'marker') rmSync(join(input.cwd, DOMAIN_MAP_PENDING_REL), { force: true });
+  const notice = domainMapDueBy === 'marker' || postUpdateOutcome === 'synced' ? domainNotice(domainMapResult) : null;
+  if (notice) {
+    postUpdateWarning += notice.warning;
+    postUpdateContext += notice.context;
+  }
 }
 
 const store = projectStoreBlocked ? null : openStore(input.cwd);
@@ -1021,6 +1048,10 @@ const reconcileContext = backlog.line ? `\n\n${backlog.line}` : '';
 // creates it, and touchLastSeen no-ops for a project that was never registered.
 // Missing (stale) siblings are excluded — irrelevant to the conductor; the
 // /sterling:projects peek surfaces them for human pruning.
+// The row's stack tags are refreshed from the project's config too, so a mount added by
+// a config edit reaches other projects' sibling lists by this project's next session
+// start (init and /sterling:domains --apply write the row themselves). Tags only, and
+// only for an existing row: the init dates and version stay init's.
 let registryContext = '';
 if (existsSync(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, '/');
@@ -1028,7 +1059,16 @@ if (existsSync(registryPath())) {
   try {
     registry = new ProjectRegistry(registryPath());
     registry.touchLastSeen(cwdPosix, new Date().toISOString());
-    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync(p.repo_path));
+    let mounts = null;
+    try {
+      if (config && !configUnreadable) mounts = parseConfig(config).stack_tags;
+    } catch {
+      // a config that does not parse is reported by the mounted-domain lines; the row keeps its tags
+    }
+    const rows = registry.list();
+    const mine = rows.find((p) => p.repo_path === cwdPosix);
+    if (mounts && mine && JSON.stringify(mine.stack_tags) !== JSON.stringify(mounts)) registry.updateStackTags(cwdPosix, mounts);
+    const siblings = rows.filter((p) => p.repo_path !== cwdPosix && existsSync(p.repo_path));
     if (siblings.length) {
       registryContext =
         '\n\nSibling Sterling projects on this machine (shared project registry) — other initialized projects; ' +

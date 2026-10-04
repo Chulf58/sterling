@@ -69,6 +69,11 @@ function makePluginRoot({ clone = false, bin = false, noVersion = false, version
   mkdirSync(scriptDir, { recursive: true });
   writeFileSync(join(scriptDir, 'sync-agents.mjs'), LOGGING_SCRIPT('sync-agents', syncOut, 'FIXTURE_SYNC_EXIT'));
   writeFileSync(join(scriptDir, 'stamp-contract.mjs'), LOGGING_SCRIPT('stamp-contract', contractOut, 'FIXTURE_CONTRACT_EXIT'));
+  // Every Sterling copy ships domains.mjs, and H1 runs it before the sync when one is due
+  // (scripts/hooks/lib/domain-notice.mjs). This one reports a map with no proposal and logs
+  // nothing, so the goldens keep pinning the post-update sync's own bytes and calls; the
+  // domain notice is pinned in scripts/tests/domain-map-after-update.test.mjs.
+  writeFileSync(join(scriptDir, 'domains.mjs'), `process.stdout.write(${JSON.stringify(JSON.stringify({ proposal: { add: [], sibling_steps: [] } }))});\n`);
   return dir;
 }
 
