@@ -61,6 +61,9 @@ function makePluginRoot({ clone = false, bin = false } = {}) {
   writeFileSync(join(scriptDir, 'sync-agents.mjs'), LOGGING_SCRIPT(bin ? 'bin/sync-agents' : 'sync-agents', 'refreshed: implementor\n\nRESTART REQUIRED — project subagents load at session start.\n', 'FIXTURE_SYNC_EXIT'));
   writeFileSync(join(scriptDir, 'stamp-contract.mjs'), LOGGING_SCRIPT(bin ? 'bin/stamp-contract' : 'stamp-contract', 'stamp-contract: 1 already in sync — 1 project(s) processed\n', 'FIXTURE_CONTRACT_EXIT'));
   writeFileSync(join(scriptDir, 'migrate-stores.mjs'), LOGGING_SCRIPT('migrate-stores', '', 'FIXTURE_MIGRATE_EXIT'));
+  // Every Sterling copy ships domains.mjs, and H1 runs it before a due sync
+  // (scripts/hooks/lib/domain-notice.mjs). This one reports no proposal and logs nothing.
+  writeFileSync(join(scriptDir, 'domains.mjs'), `process.stdout.write(${JSON.stringify(JSON.stringify({ proposal: { add: [], sibling_steps: [] } }))});\n`);
   return dir;
 }
 

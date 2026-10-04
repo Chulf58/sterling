@@ -58,12 +58,12 @@ function machine() {
       registry.close();
     }
   };
-  const addProject = (name, tags, { register = true } = {}) => {
+  const addProject = (name, tags, { register = true, repoPath = fwd } = {}) => {
     const dir = join(tmp('sterling-dmu-proj-'), name);
     mkdirSync(join(dir, '.sterling'), { recursive: true });
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: name, stack_tags: tags, toolchains: [], backup_opt_out: true }, null, 2));
     new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
-    if (register) withRegistry((r) => r.register({ repo_path: fwd(dir), name, stack_tags: tags, toolchains: [], sterling_version: '0.0.0', at: '2026-10-01T00:00:00.000Z' }));
+    if (register) withRegistry((r) => r.register({ repo_path: repoPath(dir), name, stack_tags: tags, toolchains: [], sterling_version: '0.0.0', at: '2026-10-01T00:00:00.000Z' }));
     return dir;
   };
   const addStore = (name) => createDomain(name, `${name} facts`, join(home, '.sterling', 'domains', name, 'sterling.db'));
@@ -120,7 +120,8 @@ function machine() {
     assert.equal(r.status, 0, r.stderr);
     return JSON.parse(r.stdout);
   };
-  return { env, addProject, addStore, rowOf, update, sessionStart, map };
+  const rows = () => withRegistry((r) => r.list());
+  return { env, addProject, addStore, rowOf, rows, update, sessionStart, map };
 }
 
 // A project named like a domain it does not mount: the map proposes its own subject.
@@ -233,6 +234,21 @@ test('a mount added by a config edit is in the registry, and in another project\
   assert.match(m.sessionStart(other).ctx, /- adder: genesys, sterling$/m);
   const genesys = m.map(other).domains.find((d) => d.name === 'genesys');
   assert.deepEqual(genesys.mounted_by, ['adder', 'other']);
+});
+
+test('a registry row spelled as a Windows path is the same project: session start refreshes its tags and last-seen', () => {
+  const m = machine();
+  m.addStore('sterling');
+  m.addStore('genesys');
+  const dir = m.addProject('adder', ['sterling'], { repoPath: (d) => d.replace(/\//g, '\\') });
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ ...configOf(dir), stack_tags: ['genesys', 'sterling'] }, null, 2));
+
+  const s = m.sessionStart(dir);
+  const rows = m.rows();
+  assert.equal(rows.length, 1, 'no second row');
+  assert.deepEqual(rows[0].stack_tags, ['genesys', 'sterling']);
+  assert.ok(rows[0].last_seen_at, 'last-seen is touched on the same row');
+  assert.doesNotMatch(s.ctx, /- adder:/, 'the project is not its own sibling');
 });
 
 // ---- installed copy: the trigger is the post-update sync, with no marker of its own ----
