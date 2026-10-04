@@ -10,12 +10,17 @@
 // empty list.
 //
 // The current session: H1 writes .sterling/transient/session.json at every
-// SessionStart. A row from another session is not listed. In the current
-// session an ended agent stays listed as `resumable` for as long as the
-// session lasts (the host resumes a subagent only inside the session that
-// started it), with its idle time and the context a resume would re-send.
-// Without a readable session.json nothing can be told apart by session, so
-// the old rule holds: ended rows linger DONE_LINGER_MS as `done`.
+// SessionStart. A second session started in the same worktree overwrites that
+// file, and the session that wrote it last is not necessarily the one doing
+// the work, so session.json cannot be trusted to hide a live agent: a live row
+// is listed whatever its session (a row from a session other than session.json's
+// is counted in `foreignLive`, which the Agents tab announces). The session
+// filter stays for ended rows: in the current session an ended agent stays
+// listed as `resumable` for as long as the session lasts (the host resumes a
+// subagent only inside the session that started it), with its idle time and
+// the context a resume would re-send; an ended row from another session is not
+// listed. Without a readable session.json nothing can be told apart by
+// session, so the old rule holds: ended rows linger DONE_LINGER_MS as `done`.
 //
 // Live means a register row with no `ended`. A resumed agent keeps its
 // agent_id across rounds, so rows are grouped by agent_id and the latest round
@@ -61,6 +66,8 @@ export interface SubagentRow {
 export interface SubagentSource {
   availability: RegisterAvailability;
   rows: SubagentRow[];
+  /** listed live rows whose session is not the one session.json names; always 0 when session.json is unreadable */
+  foreignLive: number;
 }
 
 function roundOf(e: RegisterEntry): number {
@@ -82,15 +89,17 @@ export function readCurrentSessionId(projectRoot: string): string | null {
 }
 
 /** Read the register and reduce it to one row per agent_id, the latest round
- *  deciding. With the current session known: only that session's rows; a round
- *  with a real `ended` is resumable with no time limit. With it unknown: every
+ *  deciding. With the current session known: every live row, whatever its
+ *  session (counted in foreignLive when it is not the current one), and an
+ *  ended row only from that session; a round with a real `ended` is resumable
+ *  with no time limit. With it unknown: every
  *  row, an ended one done for lingerMs. H10 stamps residue_reported_at on a row
  *  whose subagent is gone without a stop event: the stamp counts as the end
  *  (done, lingering lingerMs) but never as resumable, since nothing shows such
  *  a subagent can be resumed. */
 export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_LINGER_MS): SubagentSource {
   const reg = readRegister(projectRoot);
-  if (reg.availability !== 'ok') return { availability: reg.availability, rows: [] };
+  if (reg.availability !== 'ok') return { availability: reg.availability, rows: [], foreignLive: 0 };
   const currentSession = readCurrentSessionId(projectRoot);
   const byAgent = new Map<string, RegisterEntry[]>();
   for (const e of reg.entries) {
@@ -99,10 +108,13 @@ export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_
     byAgent.set(e.agent_id, list);
   }
   const rows: SubagentRow[] = [];
+  let foreignLive = 0;
   for (const [agentId, rounds] of byAgent) {
     rounds.sort((a, b) => roundOf(b) - roundOf(a) || Date.parse(b.at) - Date.parse(a.at));
     const latest = rounds[0]!;
-    if (currentSession !== null && latest.session_id !== currentSession) continue;
+    const live = !latest.ended && !latest.residue_reported_at;
+    const foreign = currentSession !== null && latest.session_id !== currentSession;
+    if (foreign && !live) continue;
     const startedAt = Date.parse(latest.at);
     if (Number.isNaN(startedAt)) continue;
     const endStamp = latest.ended ? latest.ended.at : latest.residue_reported_at ? String(latest.residue_reported_at) : null;
@@ -111,6 +123,7 @@ export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_
     const resumable = currentSession !== null && Boolean(latest.ended);
     if (endedAt !== null && (Number.isNaN(endedAt) || (!resumable && now - endedAt > lingerMs))) continue;
     const withId = rounds.find((r) => typeof r.tool_use_id === 'string' && r.tool_use_id !== '');
+    if (foreign && endedAt === null) foreignLive++;
     rows.push({
       agentId,
       sessionId: latest.session_id,
@@ -127,7 +140,7 @@ export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_
     if (aRun !== bRun) return aRun ? -1 : 1;
     return aRun ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0);
   });
-  return { availability: 'ok', rows };
+  return { availability: 'ok', rows, foreignLive };
 }
 
 /** The dispatch description from the dispatch-state record of a tool_use_id
@@ -266,6 +279,8 @@ export interface SubagentView {
   /** running agents */
   active: number;
   agents: SubagentAgentView[];
+  /** listed live agents from a session other than the one session.json names; unset reads as 0 */
+  foreignLive?: number;
 }
 
 export interface SubagentTracker {
@@ -288,7 +303,7 @@ export function createSubagentTracker(
   let avatars: AssignState = { current: new Map(), freed: [] };
   const descriptions = new Map<string, string | null>();
   let lastRead = -Infinity;
-  let source: SubagentSource = { availability: 'absent', rows: [] };
+  let source: SubagentSource = { availability: 'absent', rows: [], foreignLive: 0 };
   let models = new Map<string, string | null>();
   // the shipped window table, read once; the project override on every refresh
   const sharedWindows = readSharedWindows();
@@ -376,7 +391,7 @@ export function createSubagentTracker(
         contextTokens: context.get(r.agentId)?.tokens ?? null,
         idleMs: r.endedAt === null ? null : Math.max(0, now - r.endedAt),
       }));
-      return { availability: source.availability, active: agents.filter((a) => a.status === 'running').length, agents };
+      return { availability: source.availability, active: agents.filter((a) => a.status === 'running').length, agents, foreignLive: source.foreignLive };
     },
   };
 }
@@ -480,9 +495,21 @@ function fadeToTile(hex: string, amount: number): string {
   return `#${mix.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
 }
 
+/** The cards, then, when live agents come from a session other than the one
+ *  session.json names, one dim line under them saying so (dropped when there
+ *  is no room: the cards win). */
+export function composeSubagentBlock(view: SubagentView, width: number, maxHeight: number, tick: number): SubagentBlock {
+  const cards = composeCards(view, width, maxHeight, tick);
+  if (!view.foreignLive || cards.height + 1 > maxHeight) return cards;
+  const put: BlockPut = { x: 0, y: cards.height, attr: { dim: true }, text: clip(FOREIGN_SESSION_NOTE, width) };
+  return { ...cards, height: cards.height + 1, puts: [...cards.puts, put] };
+}
+
+const FOREIGN_SESSION_NOTE = 'session.json names another session; live agents from the other one are listed';
+
 /** Lay the cards out in at most maxHeight rows of a width-column area. A readable
  *  register with no agents draws one dim line, so the tab is never blank. */
-export function composeSubagentBlock(view: SubagentView, width: number, maxHeight: number, tick: number): SubagentBlock {
+function composeCards(view: SubagentView, width: number, maxHeight: number, tick: number): SubagentBlock {
   const empty: SubagentBlock = { height: 0, puts: [], pixels: [] };
   if (maxHeight < 1 || width < 1) return empty;
   const note = (text: string): SubagentBlock => ({ height: 1, puts: [{ x: 0, y: 0, attr: { dim: true }, text: clip(text, width) }], pixels: [] });
