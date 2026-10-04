@@ -305,6 +305,20 @@ test('userScopeCodexServer: a missing file is "not registered"; an unreadable or
   assert.match(garbage.unreadable, /not valid JSON/);
 });
 
+// V8's JSON.parse message carries a source excerpt, and on Node 24 real newlines. Neither may reach
+// the session-start line: a parse failure says only that the file is not valid JSON, a read failure
+// keeps only the error code.
+test('userScopeCodexServer: a parse failure never carries the parser message or file content, a read failure carries only the code', () => {
+  const pretty = '{\n  "mcpServers": {\n    "secret-server-name": { "command": "x" },\n  }\n}\n';
+  const garbage = userScopeCodexServer({ env: {}, home: '/h', readFile: () => pretty });
+  assert.equal(garbage.found, false);
+  assert.equal(garbage.unreadable, 'not valid JSON');
+  const denied = userScopeCodexServer({ env: {}, home: '/h', readFile: () => { throw Object.assign(new Error('EACCES: permission denied, open \'/h/.claude.json\'\nsecond line'), { code: 'EACCES' }); } });
+  assert.equal(denied.unreadable, 'EACCES');
+  const noCode = userScopeCodexServer({ env: {}, home: '/h', readFile: () => { throw new Error('boom\nsecret'); } });
+  assert.equal(noCode.unreadable, 'unknown error');
+});
+
 test('codexUserScopeLine: a proven `codex mcp-server` gets the plain user-scope add command', () => {
   const line = codexUserScopeLine({ ok: true });
   assert.ok(line.includes(CODEX_USER_ADD_COMMAND));
@@ -339,6 +353,8 @@ test('codexRegistrationLine: registered means no line; not registered names the 
   assert.match(line, /npm i -g --prefix ~\/\.local\/codex-mcp-0\.153\.4 @openai\/codex@0\.153\.4/);
   assert.match(line, /claude mcp add --scope user -e PATH=\/n\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin codex -- ~\/\.local\/codex-mcp-0\.153\.4\/bin\/codex mcp-server/);
   assert.doesNotMatch(line, /could not be read/);
+  assert.doesNotMatch(line, /unavailable/, 'user-scope evidence alone cannot say Codex lanes are unavailable: a server may be registered at project scope');
+  assert.match(line, /registered at user scope\. The supported route is the pinned Codex 0\.153\.4 MCP server\./);
   const unread = codexRegistrationLine({ found: false, path: '/h/.claude.json', unreadable: 'EACCES' }, { nodeBinDir: '/n/bin' });
   assert.match(unread, /could not be read: EACCES/);
 });

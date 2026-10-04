@@ -96,6 +96,33 @@ test('H1: an unparseable user-level config is one line that says it could not be
   }
 });
 
+test('H1: a multi-line, pretty-printed malformed config is still exactly one line and none of its content reaches the context', () => {
+  const dir = project();
+  try {
+    const malformed = '{\n  "mcpServers": {\n    "zz-marker-server": { "command": "zz-marker-cmd" },\n  }\n}\n';
+    const ctx = context(dir, malformed);
+    const lines = codexLines(ctx);
+    assert.equal(lines.length, 1, lines.join('\n'));
+    assert.match(lines[0], /could not be read: not valid JSON\)/);
+    assert.ok(!ctx.includes('zz-marker'), 'no fixture content in the context');
+    assert.ok(!/JSON\.parse|position \d+|Unexpected|Expected/.test(lines[0]), 'no parser message in the line');
+    const at = ctx.split('\n').findIndex((l) => l.startsWith('Codex MCP:'));
+    assert.ok(ctx.split('\n')[at + 1] === '' || ctx.split('\n')[at + 1] === undefined, 'the next physical line is blank, so the Codex line did not spill over');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('H1: the Codex line does not claim Codex lanes are unavailable', () => {
+  const dir = project();
+  try {
+    const lines = codexLines(context(dir, undefined));
+    assert.doesNotMatch(lines[0], /unavailable/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('H1: the check reads registration only and never runs a codex binary', () => {
   const dir = project();
   const bin = mkdtempSync(join(tmpdir(), 'sterling-h1-codex-bin-'));

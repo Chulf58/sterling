@@ -501,6 +501,7 @@ function fadeToTile(hex: string, amount: number): string {
 export function composeSubagentBlock(view: SubagentView, width: number, maxHeight: number, tick: number): SubagentBlock {
   const cards = composeCards(view, width, maxHeight, tick);
   if (!view.foreignLive || cards.height + 1 > maxHeight) return cards;
+  if (cards.height === 0 && width < 1) return cards;
   const put: BlockPut = { x: 0, y: cards.height, attr: { dim: true }, text: clip(FOREIGN_SESSION_NOTE, width) };
   return { ...cards, height: cards.height + 1, puts: [...cards.puts, put] };
 }

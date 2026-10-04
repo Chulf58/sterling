@@ -717,6 +717,8 @@ test('block: live agents from another session add one dim line saying the sessio
   assert.equal(line.text, 'session.json names another session; live agents from the other one are listed');
   assert.deepEqual([line.x, line.y, line.attr.dim], [0, plain.height, true]);
   assert.equal(composeSubagentBlock({ ...view(agents), foreignLive: 1 }, 160, plain.height, 0).height, plain.height, 'no room: the cards win');
+  const none = composeSubagentBlock({ ...view(agents), foreignLive: 1 }, 0, 30, 0);
+  assert.deepEqual([none.height, none.puts.length, none.pixels.length], [0, 0, 0], 'width < 1: the cards block is empty, so the note is not appended on its own');
 });
 
 test('formatElapsed', () => {

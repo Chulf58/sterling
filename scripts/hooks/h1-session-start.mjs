@@ -531,9 +531,15 @@ if (issueReportsLine) issueReportsContext = `\n\n${issueReportsLine}`;
 // when the user-level Claude config registers no `codex` MCP server. It reads
 // <CLAUDE_CONFIG_DIR or home>/.claude.json and never spawns codex (anti_pattern
 // codex-mcp-probe-by-exit-status). userScopeCodexServer reports an unreadable config as
-// `unreadable`, which the line states, so this has no failure to swallow.
-const codexLine = codexRegistrationLine(userScopeCodexServer(), { nodeBinDir: dirname(process.execPath) });
-const codexContext = codexLine ? `\n\n${codexLine}` : '';
+// `unreadable`, which the line states. A throw from the check itself still prints one line
+// naming the error code, so the section never costs the rest of H1 and never goes silent.
+let codexContext = '';
+try {
+  const codexLine = codexRegistrationLine(userScopeCodexServer(), { nodeBinDir: dirname(process.execPath) });
+  if (codexLine) codexContext = `\n\n${codexLine}`;
+} catch (err) {
+  codexContext = `\n\nCodex MCP: the Codex registration could not be checked (${err?.code ?? 'unknown error'})`;
+}
 
 // CLONE-CURRENCY SIGNAL (closes the gap decision foreign_be9168e8 surfaced and parked:
 // "a machine that never runs /sterling:update has no passive signal that it is
