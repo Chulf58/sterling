@@ -4802,7 +4802,7 @@ var init_records = __esm({
 });
 
 // packages/schemas/dist/transient.js
-var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema;
+var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, knowledgeWriteSchema;
 var init_transient = __esm({
   "packages/schemas/dist/transient.js"() {
     "use strict";
@@ -4831,6 +4831,11 @@ var init_transient = __esm({
       // Trimmed before the length check, so a whitespace-only target is refused.
       target: external_exports.string().trim().min(1).optional()
     });
+    knowledgeWriteSchema = external_exports.object({
+      id: external_exports.string().min(1),
+      type: external_exports.string().min(1),
+      at: external_exports.string().min(1)
+    }).strict();
   }
 });
 
@@ -5330,6 +5335,7 @@ var init_dist = __esm({
     init_paths();
     init_envelope();
     init_records();
+    init_transient();
     init_transient();
     init_config();
     init_registry();

@@ -1,8 +1,11 @@
 // POST-UPDATE SYNC, shared by H1 (Claude Code) and the Sterling OpenCode server
 // plugin (packages/opencode-plugin/src/sync.mjs). An installed Sterling copy
 // that is NEWER than a project's sync marker (<project>/.sterling/synced-version)
-// runs that project's post-update steps: sync-agents --target <project>, then a
-// stamp-contract dry run scoped to it. An OLDER copy refuses with one loud line
+// runs that project's post-update steps: sync-agents --target <project>, then
+// stamp-contract --apply-inserts scoped to it, which writes tracked text that is entirely
+// absent from the project's AGENTS.md/CLAUDE.md and only reports wording that is old
+// (user-ruled 2026-10-04, "Auto-insert, new text only"). What it inserted is said in the
+// banner and the context. An OLDER copy refuses with one loud line
 // telling the user to update that host's Sterling; an equal one does nothing
 // (decision dual-host-post-update-sync-newest-copy-wins). The marker is per
 // project and both hosts write it, so an inequality trigger would downgrade and
@@ -144,7 +147,8 @@ export function runStepAsync(root, name, args, { nodeBin = process.execPath } = 
  * The two steps and their verdicts: sync-agents exit 2 is a refusal and any other
  * non-zero a failure; stamp-contract exit 2 is tolerated drift, but any
  * "0 project(s) processed" (exit 0 or a refusal-only exit 2) checked nothing, which is a failure (P5).
- * Returns { ok, detail } or { ok, restart, drift, driftOut }.
+ * Returns { ok, detail } or { ok, restart, drift, driftOut, inserted }; `inserted` is one
+ * 'action lead' string per section or bullet stamp-contract wrote.
  */
 export async function runPostUpdateSteps(root, project, runStep) {
   const sync = await runStep(root, 'sync-agents.mjs', ['--target', project]);
@@ -154,7 +158,7 @@ export async function runPostUpdateSteps(root, project, runStep) {
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
   // From here sync-agents has already run: a later failure still carries `restart`,
   // so the user is told agents changed even though the step as a whole failed.
-  const contract = await runStep(root, 'stamp-contract.mjs', ['--project', project]);
+  const contract = await runStep(root, 'stamp-contract.mjs', ['--apply-inserts', '--project', project]);
   if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
   if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
   if (/—\s*0 project\(s\) processed/.test(contract.out)) {
@@ -164,7 +168,12 @@ export async function runPostUpdateSteps(root, project, runStep) {
     if (refusals.length) return { ok: false, restart, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed, refused: ${refusals.join('; ')})` };
     return { ok: false, restart, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) — the project is not reachable through the project registry; run /sterling:init here to register it` };
   }
-  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail };
+  const inserted = contract.out
+    .split('\n')
+    .map((l) => /^\s*(section_inserted|inserted) {2}(.+)$/.exec(l))
+    .filter(Boolean)
+    .map((m) => `${m[1]} ${m[2].trim()}`);
+  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted };
 }
 
 /**
@@ -243,12 +252,15 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
   }
   const restartLine = result.restart ? t.restartShort : 'agents synced, none changed';
   warning ||= `⚠ ${hop}: ${restartLine}. `;
+  const inserted = result.inserted ?? [];
+  if (inserted.length) warning += `AGENTS.md/CLAUDE.md gained new Sterling text (${inserted.length} insert${inserted.length === 1 ? '' : 's'}). `;
   return {
     outcome: 'synced',
     warning,
     context:
       `\n\nPOST-UPDATE SYNC (${t.label}): ${hop} — ${restartLine}.` +
       (result.restart ? ` ${t.restartLong}` : '') +
-      (result.drift ? ` Contract drift in this project (stamp-contract dry run, tolerated): ${result.driftOut}` : ''),
+      (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md/CLAUDE.md (text that was entirely absent; no existing wording was replaced): ${inserted.join('; ')}.` : '') +
+      (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : ''),
   };
 }

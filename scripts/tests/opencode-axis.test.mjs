@@ -8,7 +8,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -597,13 +597,21 @@ function makeDomainProject({ domain = 'store' } = {}) {
   if (domain !== 'missing') mkdirSync(dirname(domainDb), { recursive: true });
   if (domain === 'store') createDomain('alpha', 'Alpha reactor facts', domainDb);
   if (domain === 'junk') writeFileSync(domainDb, 'this is not a sqlite database, just text '.repeat(50));
-  const writeDomain = (record) => {
+  // `logged` is the line this project's MCP server adds to the domain-write
+  // ledger after a domain-scoped write; a record written with logged:false is
+  // one another project put in the shared store (decision
+  // domain-record-duty-credit-comes-from-a-per-project-write-ledger).
+  const ledgerPath = join(p.dir, '.sterling', 'transient', 'knowledge-writes.jsonl');
+  const writeDomain = (record, { logged = true } = {}) => {
     const at = new Date().toISOString();
     const d = new SterlingStore(domainDb);
-    d.create({ ...envelope(record.type), ...record, created_at: at, updated_at: at, scope: 'domain:alpha' });
+    const made = d.create({ ...envelope(record.type), ...record, created_at: at, updated_at: at, scope: 'domain:alpha' });
     d.close();
+    if (!logged) return;
+    mkdirSync(dirname(ledgerPath), { recursive: true });
+    appendFileSync(ledgerPath, `${JSON.stringify({ id: made.id, type: made.type, at })}\n`);
   };
-  return { ...p, domainDb, writeDomain, cleanup: () => (p.cleanup(), rmSync(dirname(domainDb), { recursive: true, force: true })) };
+  return { ...p, domainDb, ledgerPath, writeDomain, cleanup: () => (p.cleanup(), rmSync(dirname(domainDb), { recursive: true, force: true })) };
 }
 
 /** Settle, edit src/a.mjs, settle again: the notices the edit's settlement raised. */
@@ -692,6 +700,60 @@ test('settlement: a domain-scoped decision written after the edit pays the captu
     } finally {
       p.cleanup();
     }
+  }
+});
+
+test('settlement: a domain record this project did not log pays neither duty, and settlement never clears the ledger', async () => {
+  const decision = { type: 'decision', title: 'a is two', statement: 's', alternatives_rejected: [], rationale: 'r' };
+  const foreign = makeDomainProject();
+  try {
+    const text = await settleAnEdit(foreign, {}, () => foreign.writeDomain(decision, { logged: false }));
+    assert.match(text, /capture owed: 1 changed file/, 'FOREIGN-WRITE-PAYS SHAPE if this is missing: another project\'s domain write must not pay this project');
+    assert.equal(existsSync(foreign.ledgerPath), false, 'settlement does not create a ledger');
+  } finally {
+    foreign.cleanup();
+  }
+
+  const research = makeDomainProject();
+  try {
+    const { ctx, plugin, cleanup } = await setup(research.dir);
+    await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+    await call(ctx, { tool: 'subagent', id: 'call_r1', input: { agent: 'sterling/researcher', description: 'r', prompt: 'how does settlement work' }, metadata: { sessionID: 'ses_rchild', status: 'completed' } });
+    research.writeDomain({ type: 'research_finding', question: 'how does settlement work?', answer: 'per execution', source_urls: ['https://example.com/x'], source_date: '2026-10-02', capture_date: '2026-10-02' }, { logged: false });
+    await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+    assert.match(noticeTexts(research.dir).join('\n'), /research owed/, 'an unlogged domain finding does not pay the research duty');
+    await cleanup?.();
+  } finally {
+    research.cleanup();
+  }
+
+  const own = makeDomainProject();
+  try {
+    let ledgerBefore;
+    const text = await settleAnEdit(own, {}, () => {
+      own.writeDomain(decision);
+      ledgerBefore = readFileSync(own.ledgerPath, 'utf8');
+    });
+    assert.doesNotMatch(text, /capture owed/, 'control: the logged write pays');
+    assert.equal(readFileSync(own.ledgerPath, 'utf8'), ledgerBefore, 'the settlement that consumed the write leaves the ledger byte-identical');
+  } finally {
+    own.cleanup();
+  }
+});
+
+test('settlement: a domain-write ledger that cannot be read raises its own notice and pays nothing', async () => {
+  const p = makeDomainProject();
+  try {
+    const text = await settleAnEdit(p, {}, () => {
+      p.writeDomain({ type: 'decision', title: 'a is two', statement: 's', alternatives_rejected: [], rationale: 'r' });
+      rmSync(p.ledgerPath);
+      mkdirSync(p.ledgerPath); // a directory where the file belongs: the read fails
+    });
+    assert.match(text, /capture owed: 1 changed file/, 'nothing pays through an unreadable ledger');
+    assert.match(text, /Sterling settlement: the domain-write ledger \.sterling\/transient\/knowledge-writes\.jsonl could not be read \(.+\); no domain-scoped record was counted toward the capture and research duties\./);
+    assert.doesNotMatch(text, /settlement failed/, 'the settlement itself completes');
+  } finally {
+    p.cleanup();
   }
 });
 

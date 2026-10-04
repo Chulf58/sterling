@@ -48,6 +48,7 @@ export const STERLING_STATE_NAMES = [
   'sterling.db-shm',
   'plan-lock.json',
   'synced-version',
+  'domain-map-pending',
   'pending-issue-reports.jsonl',
   'pending-issue-reports.jsonl.lock',
   'maintenance-worker.log',
@@ -206,6 +207,15 @@ const lastFingerprintAt = (lines, isFp) => {
 };
 
 const FINGERPRINT_ANY = /^Fingerprint: sterling-fp-[0-9a-f]{12}$/;
+
+/** The fingerprint (12 hex) a body identifies itself by: its LAST `Fingerprint:`
+ * line, the one the renderer writes last, or null when it has none. A line
+ * quoted earlier in the body is user text and never names the report. */
+export function lastFingerprint(body) {
+  const lines = String(body).split('\n');
+  const at = lastFingerprintAt(lines, (l) => FINGERPRINT_ANY.test(l));
+  return at < 0 ? null : lines[at].trim().slice('Fingerprint: sterling-fp-'.length);
+}
 
 /** The tokens of the `Labels:` line that sits directly above the body's
  * fingerprint line, as written, or null when there is none. A `Labels:` line

@@ -438,6 +438,28 @@ function writeUpdateMarker(cwd, sha) {
   writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString() }, null, 2) + '\n');
 }
 
+// THE DOMAIN MAP AFTER AN UPDATE (board item
+// the-domain-map-runs-by-itself-the-first-time-after-an-update; decision
+// consumers-learn-domain-mounting-from-agents-md-and-a-domain-check-command). The
+// per-project pass runs `domains.mjs --target <project> --json` and prints a proposal
+// when the map has one. It never passes --apply: a mount is added only by
+// /sterling:domains after the user agrees. A project with a proposal also gets this
+// file, which the project's next session start (H1, scripts/hooks/lib/domain-notice.mjs)
+// reads to print one line and then deletes, so the line shows once. Its content is the
+// time it was written and is never parsed: H1 computes the map again. An installed copy
+// writes no such file; there the post-update sync is the trigger.
+export const DOMAIN_MAP_PENDING_REL = join('.sterling', 'domain-map-pending');
+
+/**
+ * The proposal in `domains.mjs --json` output: the domains the project should add, and
+ * whether that run put the project into the registry. Throws on output that is not a map.
+ */
+export function parseDomainProposal(stdout) {
+  const map = JSON.parse(stdout);
+  if (!Array.isArray(map?.proposal?.add)) throw new Error('the output carries no proposal list');
+  return { add: map.proposal.add.map((a) => ({ domain: a.domain, reason: a.reason })), registered: map.registered_by_this_run === true };
+}
+
 // A Node filesystem error (EACCES, EPERM, EIO, ...) raised while reading ONE
 // project's files: a per-project refusal, never an abort of the machine-wide
 // update (Sol re-check). contained-fs rethrows every non-ENOENT lstat error.
@@ -702,6 +724,24 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         }
       }
       if (failed) failures++;
+      // The domain map for this project (DOMAIN_MAP_PENDING_REL above): quiet when it
+      // proposes nothing, never applied, and never a reason to fail the update. A
+      // target with no config is not an initialized project, so it has no mounts to check.
+      if (existsSync(join(p.repo_path, '.sterling', 'config.json'))) {
+        try {
+          const dm = exec(nodeBin, [join(cwd, 'scripts', 'domains.mjs'), '--target', p.repo_path, '--json'], { cwd });
+          if (dm.status !== 0) throw new Error(`exit ${dm.status}: ${`${dm.stdout}${dm.stderr}`.trim().split('\n').slice(-3).join(' | ')}`);
+          const { add } = parseDomainProposal(dm.stdout);
+          entry.domain_proposal = add.map((a) => a.domain);
+          if (add.length) {
+            for (const a of add) log(`      domains: proposes adding '${a.domain}' — ${a.reason}`);
+            log(`      Nothing was applied. Run /sterling:domains in ${p.repo_path} to see the map; it adds a domain only after you agree.`);
+            writeFileSync(join(p.repo_path, DOMAIN_MAP_PENDING_REL), `${new Date().toISOString()}\n`);
+          }
+        } catch (err) {
+          log(`      ⚠ domain map FAILED (nonfatal): ${err?.message ?? err}. Run /sterling:domains in ${p.repo_path} to see it.`);
+        }
+      }
       if (!launchers) continue;
       // Deliver the double-click updater to every registered project — the
       // update event is how a machine receives new artifacts, so a project
@@ -794,7 +834,8 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     if (normPath(project.repo_path) === normPath(cwd)) {
       log("▸ the clone's contract files are hand-maintained — not checked");
     } else if (existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
-      const contract = step('contract drift in the invoking project (stamp-contract, dry run)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--project', project.repo_path], {
+      // --apply-inserts: see the sibling-projects step below.
+      const contract = step('contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts', '--project', project.repo_path], {
         show: true,
         tolerate: true,
       });
@@ -1261,14 +1302,18 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
 
-  // Read-only: reports AGENTS.md/CLAUDE.md contract drift in sibling projects without
-  // touching them (--apply stays a deliberate act — it rewrites seven repos).
+  // INSERTS ONLY (user-ruled 2026-10-04 through the question form, "Auto-insert, new text
+  // only"): --apply-inserts writes a tracked section or bullet that is entirely absent from
+  // a sibling's AGENTS.md/CLAUDE.md and lists what it inserted; without that, text a newer
+  // template added never reaches a project initialized before it. Existing wording is
+  // reported and never replaced here: the full --apply stays a deliberate act (it rewrites
+  // seven repos), and hand-tuned text is still refused.
   // TOLERATED because a sibling's AGENTS.md/CLAUDE.md must never abort THIS clone's update —
   // but tolerated is not the same as unseen: the step's own block sits between
   // build/test/check output, so its verdict is repeated in the closing summary
   // where it cannot scroll past (P1/P5). stamp-contract exits 2 on refusal.
   if (opts.projects !== false && existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
-    const contract = step('contract drift in sibling projects (stamp-contract, dry run)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs')], {
+    const contract = step('contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)', nodeBin, [join(cwd, 'scripts', 'stamp-contract.mjs'), '--apply-inserts'], {
       show: true,
       tolerate: true,
     });

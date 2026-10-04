@@ -685,6 +685,7 @@ test('sibling contract drift is tolerated but repeated in the closing summary, n
       const out = lines.join('\n');
 
       assert.ok(calls.some((c) => c.includes('stamp-contract.mjs')), 'the dry run runs either way');
+      assert.ok(calls.some((c) => /stamp-contract\.mjs --apply-inserts$/.test(c)), 'new text is inserted, wording is never replaced: --apply-inserts, not --apply');
       assert.equal(report.contract_drift, expectDrift, 'the report carries the verdict for callers');
       assert.equal(report.exit, 0, "a sibling's CLAUDE.md never blocks this clone's update");
       assert.equal(/CONTRACT DRIFT/.test(out), expectDrift, 'the summary names drift only when there is drift');
@@ -728,7 +729,8 @@ test('authoring role: no fetch/merge/build/check/test/migrate, syncs ONLY the in
     const contract = calls.filter((c) => c.includes('stamp-contract.mjs'));
     assert.equal(contract.length, 1);
     assert.match(contract[0], /--project \/tmp\/dome-farmer$/, 'stamp-contract is scoped to the invoking project');
-    assert.doesNotMatch(contract[0], /--apply/, 'the existing dry-run posture is kept');
+    assert.match(contract[0], /stamp-contract\.mjs --apply-inserts --project /, 'inserts only, never a full --apply');
+    assert.doesNotMatch(contract[0], /--apply( |$)/, 'existing wording is never replaced by an update: no full --apply');
     assert.ok(lines.some((l) => l.includes('AUTHORING clone — nothing to pull; syncing /tmp/dome-farmer only')), 'the loud line names the project');
     assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'the marker attests the full sequence, which did not run — never written');
   } finally {

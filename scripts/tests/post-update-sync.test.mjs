@@ -25,6 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildSeamHook } from './lib/seam-hook.mjs';
 import { compareVersions, parseVersion, postUpdateSync, runStepAsync } from '../lib/post-update-sync.mjs';
 import { sterlingRootLine } from '../hooks/lib/operating-state.mjs';
+import { renderClaudeText } from '../lib/agent-fences.mjs';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const VERSION = '9.9.9-fixture';
@@ -69,6 +70,11 @@ function makePluginRoot({ clone = false, bin = false, noVersion = false, version
   mkdirSync(scriptDir, { recursive: true });
   writeFileSync(join(scriptDir, 'sync-agents.mjs'), LOGGING_SCRIPT('sync-agents', syncOut, 'FIXTURE_SYNC_EXIT'));
   writeFileSync(join(scriptDir, 'stamp-contract.mjs'), LOGGING_SCRIPT('stamp-contract', contractOut, 'FIXTURE_CONTRACT_EXIT'));
+  // Every Sterling copy ships domains.mjs, and H1 runs it before the sync when one is due
+  // (scripts/hooks/lib/domain-notice.mjs). This one reports a map with no proposal and logs
+  // nothing, so the goldens keep pinning the post-update sync's own bytes and calls; the
+  // domain notice is pinned in scripts/tests/domain-map-after-update.test.mjs.
+  writeFileSync(join(scriptDir, 'domains.mjs'), `process.stdout.write(${JSON.stringify(JSON.stringify({ proposal: { add: [], sibling_steps: [] } }))});\n`);
   return dir;
 }
 
@@ -146,7 +152,7 @@ const GOLDEN = {
     "ctx": "\n\nCONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/scripts/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH\n\nPOST-UPDATE SYNC (H1): Sterling 0.0.1→9.9.9-fixture — agents synced — RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough). RESTART REQUIRED — project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent.\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.\n\nTDD posture: tests-first ON (config.tdd.enabled — TUI System tab; explicit asks still work)\n\nProject mode: HOBBY (config.mode — TUI System tab) — work ships by direct merge through /sterling:merge.\n\nHandoff files: OFF (not set: config.handoff.enabled is absent and no handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.\n\nUNDECLARED SOURCE CHECK UNAVAILABLE: git ls-files exited 128",
     "calls": [
       "sync-agents --target <PROJECT>",
-      "stamp-contract --project <PROJECT>"
+      "stamp-contract --apply-inserts --project <PROJECT>"
     ],
     "marker": "9.9.9-fixture\n"
   },
@@ -156,7 +162,7 @@ const GOLDEN = {
     "ctx": "\n\nCONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/scripts/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH\n\nPOST-UPDATE SYNC (H1): Sterling 0.0.1→9.9.9-fixture — agents synced, none changed.\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.\n\nTDD posture: tests-first ON (config.tdd.enabled — TUI System tab; explicit asks still work)\n\nProject mode: HOBBY (config.mode — TUI System tab) — work ships by direct merge through /sterling:merge.\n\nHandoff files: OFF (not set: config.handoff.enabled is absent and no handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.\n\nUNDECLARED SOURCE CHECK UNAVAILABLE: git ls-files exited 128",
     "calls": [
       "sync-agents --target <PROJECT>",
-      "stamp-contract --project <PROJECT>"
+      "stamp-contract --apply-inserts --project <PROJECT>"
     ],
     "marker": "9.9.9-fixture\n"
   },
@@ -166,17 +172,17 @@ const GOLDEN = {
     "ctx": "\n\nCONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/bin/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH\n\nPOST-UPDATE SYNC (H1): Sterling (never synced)→9.9.9-fixture — agents synced — RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough). RESTART REQUIRED — project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent.\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.\n\nTDD posture: tests-first ON (config.tdd.enabled — TUI System tab; explicit asks still work)\n\nProject mode: HOBBY (config.mode — TUI System tab) — work ships by direct merge through /sterling:merge.\n\nHandoff files: OFF (not set: config.handoff.enabled is absent and no handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.\n\nUNDECLARED SOURCE CHECK UNAVAILABLE: git ls-files exited 128",
     "calls": [
       "sync-agents --target <PROJECT>",
-      "stamp-contract --project <PROJECT>"
+      "stamp-contract --apply-inserts --project <PROJECT>"
     ],
     "marker": "9.9.9-fixture\n"
   },
   "drift-tolerated": {
     "code": 0,
     "sys": "⚠ CONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/scripts/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH. ⚠ Sterling 0.0.1→9.9.9-fixture: agents synced — RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough). 0 tasks · 0 maintenance items pending",
-    "ctx": "\n\nCONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/scripts/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH\n\nPOST-UPDATE SYNC (H1): Sterling 0.0.1→9.9.9-fixture — agents synced — RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough). RESTART REQUIRED — project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent. Contract drift in this project (stamp-contract dry run, tolerated): DRIFT: CLAUDE.md differs\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.\n\nTDD posture: tests-first ON (config.tdd.enabled — TUI System tab; explicit asks still work)\n\nProject mode: HOBBY (config.mode — TUI System tab) — work ships by direct merge through /sterling:merge.\n\nHandoff files: OFF (not set: config.handoff.enabled is absent and no handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.\n\nUNDECLARED SOURCE CHECK UNAVAILABLE: git ls-files exited 128",
+    "ctx": "\n\nCONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/scripts/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH\n\nPOST-UPDATE SYNC (H1): Sterling 0.0.1→9.9.9-fixture — agents synced — RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough). RESTART REQUIRED — project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent. Contract drift in this project (stamp-contract, tolerated): DRIFT: CLAUDE.md differs\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.\n\nTDD posture: tests-first ON (config.tdd.enabled — TUI System tab; explicit asks still work)\n\nProject mode: HOBBY (config.mode — TUI System tab) — work ships by direct merge through /sterling:merge.\n\nHandoff files: OFF (not set: config.handoff.enabled is absent and no handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.\n\nUNDECLARED SOURCE CHECK UNAVAILABLE: git ls-files exited 128",
     "calls": [
       "sync-agents --target <PROJECT>",
-      "stamp-contract --project <PROJECT>"
+      "stamp-contract --apply-inserts --project <PROJECT>"
     ],
     "marker": "9.9.9-fixture\n"
   },
@@ -204,7 +210,7 @@ const GOLDEN = {
     "ctx": "\n\nCONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/scripts/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH\n\nPOST-UPDATE SYNC FAILED (H1): Sterling 0.0.1→9.9.9-fixture — stamp-contract exited 1: boom. No marker was written, so it retries at the next session start; tell the user and fix the cause. sync-agents DID refresh agents before the failure: RESTART REQUIRED — project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent.\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.\n\nTDD posture: tests-first ON (config.tdd.enabled — TUI System tab; explicit asks still work)\n\nProject mode: HOBBY (config.mode — TUI System tab) — work ships by direct merge through /sterling:merge.\n\nHandoff files: OFF (not set: config.handoff.enabled is absent and no handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.\n\nUNDECLARED SOURCE CHECK UNAVAILABLE: git ls-files exited 128",
     "calls": [
       "sync-agents --target <PROJECT>",
-      "stamp-contract --project <PROJECT>"
+      "stamp-contract --apply-inserts --project <PROJECT>"
     ],
     "marker": "0.0.1\n"
   },
@@ -214,7 +220,7 @@ const GOLDEN = {
     "ctx": "\n\nCONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/scripts/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH\n\nPOST-UPDATE SYNC FAILED (H1): Sterling 0.0.1→9.9.9-fixture — stamp-contract checked NOTHING for <PROJECT> (0 project(s) processed) — the project is not reachable through the project registry; run /sterling:init here to register it. No marker was written, so it retries at the next session start; tell the user and fix the cause. sync-agents DID refresh agents before the failure: RESTART REQUIRED — project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent.\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.\n\nTDD posture: tests-first ON (config.tdd.enabled — TUI System tab; explicit asks still work)\n\nProject mode: HOBBY (config.mode — TUI System tab) — work ships by direct merge through /sterling:merge.\n\nHandoff files: OFF (not set: config.handoff.enabled is absent and no handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.\n\nUNDECLARED SOURCE CHECK UNAVAILABLE: git ls-files exited 128",
     "calls": [
       "sync-agents --target <PROJECT>",
-      "stamp-contract --project <PROJECT>"
+      "stamp-contract --apply-inserts --project <PROJECT>"
     ],
     "marker": "0.0.1\n"
   },
@@ -224,7 +230,7 @@ const GOLDEN = {
     "ctx": "\n\nCONDUCTOR NOT ACTIVE: settings key missing — run `node '<PLUGIN>'/scripts/sync-agents.mjs --target '<PROJECT>'` then EXIT AND RELAUNCH\n\nPOST-UPDATE SYNC (H1): Sterling (never synced)→9.9.9-fixture — agents synced — RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough). RESTART REQUIRED — project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent.\n\nMACHINE ROLE: INSTALLED PLUGIN (consumer) — updates via /plugin (Installed tab → Update); /sterling:update refuses on an installed copy. Never edit the installed plugin files; Sterling work lands on the authoring machine.\n\nTDD posture: tests-first ON (config.tdd.enabled — TUI System tab; explicit asks still work)\n\nProject mode: HOBBY (config.mode — TUI System tab) — work ships by direct merge through /sterling:merge.\n\nHandoff files: OFF (not set: config.handoff.enabled is absent and no handoff files are tracked in git — TUI System tab) — the portable OpenCode agents and the handoff projection for colleagues without Sterling are not written; existing ones are left in place.\n\nUNDECLARED SOURCE CHECK UNAVAILABLE: git ls-files exited 128",
     "calls": [
       "sync-agents --target <PROJECT>",
-      "stamp-contract --project <PROJECT>"
+      "stamp-contract --apply-inserts --project <PROJECT>"
     ],
     "marker": "EISDIR"
   },
@@ -361,7 +367,7 @@ test('postUpdateSync, host opencode: the async runner syncs and the text names O
     assert.equal(markerOf(project), `${VERSION}\n`);
     assert.match(r.context, /^\n\nPOST-UPDATE SYNC \(OpenCode plugin\): Sterling 0\.0\.1→9\.9\.9-fixture — agents synced — RESTART to load them \(EXIT AND RELAUNCH OpenCode; a \/new is NOT enough\)\. RESTART REQUIRED — agents load when OpenCode starts/);
     assert.doesNotMatch(r.context, /Claude Code/);
-    assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), [`sync-agents --target ${project}`, `stamp-contract --project ${project}`]);
+    assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), [`sync-agents --target ${project}`, `stamp-contract --apply-inserts --project ${project}`]);
   } finally {
     delete process.env.FIXTURE_LOG;
   }
@@ -661,4 +667,188 @@ test('OpenCode sync, a copy outside the npm cache: no dashboard is materialized'
   } finally {
     delete process.env.FIXTURE_LOG;
   }
+});
+
+// ---- OpenCode: the domain map notice (scripts/hooks/lib/domain-notice.mjs), same rule as H1 ----
+
+const PENDING_REL = join('.sterling', 'domain-map-pending');
+// Replaces the fixture root's no-proposal domains.mjs with one that proposes 'salesforce'.
+function proposeSalesforce(plugin) {
+  const map = { proposal: { add: [{ domain: 'salesforce', reason: 'its own subject' }], sibling_steps: [] } };
+  writeFileSync(join(plugin, 'scripts', 'domains.mjs'), `process.stdout.write(${JSON.stringify(JSON.stringify(map))});\n`);
+}
+const DOMAIN_NOTICE = /^DOMAIN MAP \(OpenCode plugin, once after the Sterling update\): the map proposes adding 'salesforce'[^\n]*\/sterling:domains/m;
+
+test('OpenCode sync: the session whose sync succeeds carries the domain map line, once; a failed sync holds it back', async () => {
+  const plugin = makePluginRoot();
+  proposeSalesforce(plugin);
+  const project = makeProject({ marker: '0.0.1', store: false });
+  process.env.FIXTURE_LOG = join(tmp('sterling-pus-log-'), 'calls.log');
+  try {
+    process.env.FIXTURE_SYNC_EXIT = '1';
+    const failing = ocSync(plugin, sessionStub({ ses_root: {} }));
+    await failing(project, 'ses_root');
+    await failing.idle();
+    assert.equal(noticeTexts(project).length, 1);
+    assert.match(noticeTexts(project)[0], /^POST-UPDATE SYNC FAILED/);
+    assert.doesNotMatch(noticeTexts(project)[0], /DOMAIN MAP/, 'no domain line until the sync succeeds');
+    delete process.env.FIXTURE_SYNC_EXIT;
+
+    // A new plugin process: the sync is still due, and now succeeds.
+    const synced = ocSync(plugin, sessionStub({ ses_root: {} }));
+    await synced(project, 'ses_root');
+    await synced.idle();
+    const texts = noticeTexts(project);
+    assert.equal(texts.length, 2, 'the sync notice and the domain line are one notice');
+    assert.match(texts[1], /^POST-UPDATE SYNC \(OpenCode plugin\)/);
+    assert.match(texts[1], DOMAIN_NOTICE);
+    assert.match(texts[1], /Nothing was applied/);
+
+    // The next process: versions are equal, so nothing is due and nothing is said.
+    const later = ocSync(plugin, sessionStub({ ses_root: {} }));
+    await later(project, 'ses_root');
+    await later.idle();
+    assert.equal(noticeTexts(project).length, 2);
+  } finally {
+    delete process.env.FIXTURE_SYNC_EXIT;
+    delete process.env.FIXTURE_LOG;
+  }
+});
+
+test('OpenCode sync: on a clone, the pending file /sterling:update left is read by the first ROOT session, which prints the line and removes the file', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  proposeSalesforce(plugin);
+  const project = makeProject({ marker: '0.0.1', store: false });
+  writeFileSync(join(project, PENDING_REL), '2026-10-04T00:00:00.000Z\n');
+  const session = sessionStub({ ses_child: { parentID: 'ses_root' }, ses_root: {} });
+  const syncOnce = ocSync(plugin, session);
+  await syncOnce(project, 'ses_child');
+  await syncOnce.idle();
+  assert.ok(existsSync(join(project, PENDING_REL)), 'a child session leaves the file');
+  assert.deepEqual(noticeTexts(project), []);
+
+  await syncOnce(project, 'ses_root');
+  await syncOnce.idle();
+  assert.ok(!existsSync(join(project, PENDING_REL)), 'the root session that prints the line removes the file');
+  const texts = noticeTexts(project);
+  assert.equal(texts.length, 1);
+  assert.match(texts[0], DOMAIN_NOTICE);
+  assert.equal(markerOf(project), '0.0.1\n', 'a clone still runs no post-update sync');
+
+  const next = ocSync(plugin, sessionStub({ ses_root: {} }));
+  await next(project, 'ses_root');
+  await next.idle();
+  assert.equal(noticeTexts(project).length, 1, 'once');
+});
+
+test('OpenCode sync: the maintenance worker child never reads the pending file or runs the map', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  proposeSalesforce(plugin);
+  const project = makeProject({ marker: '0.0.1', store: false });
+  writeFileSync(join(project, PENDING_REL), '2026-10-04T00:00:00.000Z\n');
+  const session = sessionStub({ ses_worker: {} });
+  const syncOnce = ocSync(plugin, session, { env: { ...process.env, STERLING_MAINTENANCE_WORKER: '1' } });
+  await syncOnce(project, 'ses_worker');
+  await syncOnce.idle();
+  assert.ok(existsSync(join(project, PENDING_REL)), 'the file is left for the user\'s own session');
+  assert.deepEqual(session.calls, []);
+  assert.deepEqual(noticeTexts(project), []);
+});
+
+// An existing project's instruction files: the current templates rendered, minus the Domains
+// section, with one tracked bullet (Anti-speculation) in an older template wording.
+const STALE_ANTI_SPEC = '- **Anti-speculation:** never invent an API, field, flag, or behavior. Verify in docs or code first. If you cannot verify, say so and ask.';
+function writeOldContractFiles(dir) {
+  const render = (rel) =>
+    renderClaudeText(readFileSync(join(repo, rel), 'utf8'), rel)
+      .replaceAll('{{PROJECT_NAME}}', 'fixture')
+      .replaceAll('{{STACK_TAGS}}', 'sterling')
+      .replaceAll('{{TOOLCHAINS}}', 'node (**/*.mjs)')
+      .replaceAll('{{DOMAINS}}', '~/.sterling/domains/sterling/')
+      .replaceAll('{{BACKUP_PATH}}', '(opted out — recorded)')
+      .replaceAll('{{CONVENTIONS_SECTION}}', '(nothing yet)');
+  const agents = render('templates/target-agents-md.md')
+    .replace(/## Domains\n[\s\S]*?(?=## Conventions)/, '')
+    .replace(/^- \*\*Anti-speculation:\*\*.*$/m, STALE_ANTI_SPEC);
+  writeFileSync(join(dir, 'AGENTS.md'), agents);
+  writeFileSync(join(dir, 'CLAUDE.md'), render('templates/target-claude-md.md'));
+  return agents;
+}
+
+test('post-update sync: an existing project gains the Domains section with no --apply, old wording stays, the insert is surfaced, and a second sync writes nothing', async () => {
+  const { ProjectRegistry } = await import(pathToFileURL(join(repo, 'packages', 'store', 'dist', 'index.js')).href);
+  const plugin = makePluginRoot({ syncOut: 'up_to_date: implementor\n' });
+  // The fixture root's stamp-contract is the real one, run from the repo it belongs to.
+  writeFileSync(join(plugin, 'scripts', 'stamp-contract.mjs'), `await import(${JSON.stringify(pathToFileURL(join(repo, 'scripts', 'stamp-contract.mjs')).href)});\n`);
+  const project = makeProject({ marker: '0.0.1' });
+  const before = writeOldContractFiles(project);
+  const savedRegistry = process.env.STERLING_REGISTRY_DB;
+  process.env.STERLING_REGISTRY_DB = join(tmp('sterling-pus-registry-'), 'registry.db');
+  process.env.FIXTURE_LOG = join(tmp('sterling-pus-log-'), 'calls.log');
+  try {
+    const registry = new ProjectRegistry(process.env.STERLING_REGISTRY_DB);
+    try {
+      registry.register({ repo_path: project, name: 'fixture', stack_tags: [], toolchains: [], sterling_version: null, at: '2026-10-01T00:00:00.000Z' });
+    } finally {
+      registry.close();
+    }
+    assert.ok(!before.includes('## Domains'));
+    const first = await postUpdateSync({ root: plugin, project, host: 'claude' });
+    assert.equal(first.outcome, 'synced', first.context);
+    const after = readFileSync(join(project, 'AGENTS.md'), 'utf8');
+    assert.match(after, /## Domains\n\n- \*\*A domain is a shared knowledge store for one subject\.\*\*/);
+    assert.ok(after.includes(STALE_ANTI_SPEC), 'the old-wording bullet is not rewritten');
+    assert.match(first.context, /stamp-contract inserted new text[^\n]*section_inserted ## Domains/);
+    assert.match(first.warning, /1 insert/);
+
+    writeFileSync(join(project, '.sterling', 'synced-version'), '0.0.1\n');
+    const second = await postUpdateSync({ root: plugin, project, host: 'claude' });
+    assert.equal(second.outcome, 'synced', second.context);
+    assert.doesNotMatch(second.context, /inserted/);
+    assert.equal(readFileSync(join(project, 'AGENTS.md'), 'utf8'), after, 'a second sync writes nothing');
+  } finally {
+    delete process.env.FIXTURE_LOG;
+    if (savedRegistry === undefined) delete process.env.STERLING_REGISTRY_DB;
+    else process.env.STERLING_REGISTRY_DB = savedRegistry;
+  }
+});
+
+test('OpenCode sync: on a clone, a pending file written while OpenCode runs is read by the next root session', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  proposeSalesforce(plugin);
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const syncOnce = ocSync(plugin, sessionStub({ ses_1: {}, ses_2: {} }));
+  await syncOnce(project, 'ses_1');
+  await syncOnce.idle();
+  assert.deepEqual(noticeTexts(project), []);
+
+  writeFileSync(join(project, PENDING_REL), '2026-10-04T00:00:00.000Z\n');
+  await syncOnce(project, 'ses_2');
+  await syncOnce.idle();
+  assert.equal(noticeTexts(project).length, 1, 'the clone branch did not latch');
+  assert.match(noticeTexts(project)[0], DOMAIN_NOTICE);
+  assert.ok(!existsSync(join(project, PENDING_REL)));
+});
+
+test('OpenCode sync: a pending file that cannot be removed is said once; the root is latched so the map and the notice do not repeat', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  // A map script that counts its runs (the notice store drops a repeated text, so the notice count alone proves nothing).
+  const runsLog = join(tmp('sterling-pus-log-'), 'map-runs.log');
+  const map = { proposal: { add: [{ domain: 'salesforce', reason: 'its own subject' }], sibling_steps: [] } };
+  writeFileSync(join(plugin, 'scripts', 'domains.mjs'), `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(runsLog)}, 'run\\n');\nprocess.stdout.write(${JSON.stringify(JSON.stringify(map))});\n`);
+  const mapRuns = () => readFileSync(runsLog, 'utf8').trim().split('\n').length;
+  const project = makeProject({ marker: '0.0.1', store: false });
+  // A non-empty directory where the file would be: rmSync without recursive refuses it.
+  mkdirSync(join(project, PENDING_REL));
+  writeFileSync(join(project, PENDING_REL, 'x'), '');
+  const syncOnce = ocSync(plugin, sessionStub({ ses_1: {}, ses_2: {} }));
+  await syncOnce(project, 'ses_1');
+  await syncOnce.idle();
+  assert.equal(noticeTexts(project).length, 1);
+  assert.match(noticeTexts(project)[0], /domain-map-pending could not be removed/);
+  assert.equal(mapRuns(), 1);
+  await syncOnce(project, 'ses_2');
+  await syncOnce.idle();
+  assert.equal(mapRuns(), 1, 'the map is not run again for the next session in this process');
+  assert.equal(noticeTexts(project).length, 1);
 });

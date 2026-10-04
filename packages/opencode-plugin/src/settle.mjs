@@ -20,7 +20,7 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { parseConfig } from '@sterling/schemas';
+import { KNOWLEDGE_WRITES_REL, parseConfig } from '@sterling/schemas';
 import { gitIgnored, loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { agentRole } from './agent-name.mjs';
 import {
@@ -121,13 +121,28 @@ const describe = (d) => {
  * domain store that exists on disk (openDutyRecords, shared with H10), opened
  * with `opener` and closed before this returns. A domain store that cannot be
  * read pays nothing and gets its own notice.
+ *
+ * A domain record pays only when this project's MCP server logged a write of
+ * it inside the window, in the domain-write ledger under `root`
+ * (KNOWLEDGE_WRITES_REL; decision
+ * domain-record-duty-credit-comes-from-a-per-project-write-ledger). Settlement
+ * reads the ledger and never writes or clears it. A ledger that cannot be read
+ * pays nothing and gets its own notice. The maintenance-worker child runs
+ * under the same root, so a domain record it writes pays like any other.
  */
 export function settleDuties(store, root, git, at, { opener } = {}) {
   const config = parseConfig(loadConfig(root) ?? {});
   const unreadable = [];
-  const records = openDutyRecords(store, config, { ...(opener ? { opener } : {}), onUnreadable: (name, error) => unreadable.push(`'${name}' (${error})`) });
+  const ledgerErrors = [];
+  const records = openDutyRecords(store, config, {
+    ...(opener ? { opener } : {}),
+    onUnreadable: (name, error) => unreadable.push(`'${name}' (${error})`),
+    root,
+    onLedgerUnreadable: (error) => ledgerErrors.push(error),
+  });
   try {
     const { notices } = weighDuties(store, records, config, root, at, git);
+    if (ledgerErrors.length) notices.push(`Sterling settlement: the domain-write ledger ${KNOWLEDGE_WRITES_REL} could not be read (${ledgerErrors.join('; ')}); no domain-scoped record was counted toward the capture and research duties. Fix or remove the file.`);
     if (unreadable.length) notices.push(`Sterling settlement: domain store(s) ${unreadable.join(', ')} could not be read; a record written there was not counted toward the capture and research duties.`);
     return { notices };
   } finally {
