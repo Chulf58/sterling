@@ -25,6 +25,13 @@
 //          domain-scoped finding: the declaration is held, nothing is nagged.
 //   DF-e — capture_pending + a live dispatch + an UNPAID research duty: the
 //          research demand still fires (the declaration covers capture only).
+//   DF-g — the capture duty reads the domain stores too: a domain-scoped
+//          decision written after the edit discharges it; one written before
+//          the edit does not.
+//
+// The concept duty is not covered here on purpose: a feature_article is always
+// project-scoped (packages/store/src/mounted.ts, §3.3), so no concept article
+// can live in a domain store.
 //
 // Harness and fixtures follow scripts/tests/h10-capture-pending-grace.test.mjs
 // and scripts/tests/h10-research-no-capture-and-concept-prewrite.test.mjs.
@@ -45,6 +52,7 @@ const BEFORE_EVENT = '2026-06-10T10:00:00.000Z';
 const AFTER_EVENT = '2026-06-10T11:30:00.000Z';
 const PENDING_AT = '2026-06-10T11:40:00.000Z';
 const TOUCH_AT = '2026-06-10T11:45:00.000Z';
+const AFTER_TOUCH = '2026-06-10T11:50:00.000Z';
 const WORKFILE = 'src/feature/work.mjs';
 
 let SterlingStore;
@@ -164,6 +172,16 @@ function domainFinding(domain, at) {
   });
 }
 
+function domainDecision(domain, at) {
+  return domain.create({
+    ...envelope('decision', at, `domain:${DOMAIN}`),
+    title: 'webhook secrets are per-org',
+    statement: 's',
+    alternatives_rejected: [],
+    rationale: 'r',
+  });
+}
+
 const owed = (store, reason) => store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === reason);
 
 test('DF-a (RED before the fix): a research_finding with scope domain:<name>, created after the research event, discharges the research duty', () => {
@@ -220,7 +238,7 @@ test('DF-f: a mounted domain store that cannot be opened is announced in the nag
     const r = stopOnce(dir);
     assert.equal(r.code, 2, 'an unreadable domain store never discharges the duty');
     assert.match(r.stderr, /genesys webhook signature validation/);
-    assert.match(r.stderr, new RegExp(`domain store '${DOMAIN}' could not be read for the research duty`), 'the degraded read is stated, not silent');
+    assert.match(r.stderr, new RegExp(`domain store '${DOMAIN}' could not be read`), 'the degraded read is stated, not silent');
   } finally {
     cleanup();
   }
@@ -261,5 +279,30 @@ test('DF-e: capture_pending with a live dispatch does not hold an UNPAID researc
     assert.match(r.stderr, /genesys webhook signature validation/);
   } finally {
     cleanup();
+  }
+});
+
+test('DF-g (RED before the fix): a domain-scoped decision written after the edit discharges the capture duty; one written before the edit does not', () => {
+  const early = makeProject();
+  try {
+    touchRegister(early.dir, [WORKFILE], TOUCH_AT);
+    domainDecision(early.domain, AFTER_EVENT); // before the touch
+    const r = stopOnce(early.dir);
+    assert.equal(r.code, 2, 'a domain record older than the edit pays nothing');
+    assert.match(r.stderr, /nothing was captured/);
+  } finally {
+    early.cleanup();
+  }
+
+  const late = makeProject();
+  try {
+    touchRegister(late.dir, [WORKFILE], TOUCH_AT);
+    domainDecision(late.domain, AFTER_TOUCH);
+    const r = stopOnce(late.dir);
+    assert.doesNotMatch(r.stderr, /nothing was captured/, 'DOMAIN-CAPTURE-UNSEEN SHAPE if this matches: the decision lives in the mounted domain store and must pay the capture duty');
+    assert.equal(r.code, 0);
+    assert.equal(owed(late.store, 'capture_owed').length, 0, 'nothing owed');
+  } finally {
+    late.cleanup();
   }
 });

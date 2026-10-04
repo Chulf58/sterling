@@ -6,7 +6,9 @@
 // block); this file holds only the rules, so the two hosts cannot drift apart
 // on what "owed" means. The rationale for each rule stays at its H10 call site.
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { matchesGlob } from '@sterling/schemas';
+import { SterlingStore, resolveDomainMounts } from '@sterling/store';
 import { isForeignTree } from './working-tree.mjs';
 
 // Register timestamps are compared LEXICALLY, so only a canonical ISO stamp is
@@ -57,6 +59,70 @@ export function conceptFamiliesFrom(sessionEvents) {
     if (at !== null && (prior === null || at < prior)) conceptFamilies.set(e.detail, at);
   }
   return conceptFamilies;
+}
+
+/**
+ * The records a "was one written since X" duty read covers, as a store-like
+ * `{ query, close }`: the project store plus every mounted domain store that
+ * exists on disk (GitHub issue #12). A record with scope `domain:<name>` is
+ * written to that domain's own store, never to the project store, so a read of
+ * the project store alone cannot see it and the duty it paid stays open.
+ *
+ * - `store` is the caller's open project store; it is read, never closed here.
+ * - The mounts are `resolveDomainMounts(config)` (the manifest the MCP server
+ *   mounts); `config` is the parsed project config. They are opened on the
+ *   first query, with `opener(dbPath)`, and closed by `close()`.
+ * - A missing domain store is skipped and never created.
+ * - A domain store that cannot be opened, or whose query throws, is dropped,
+ *   reported once through `onUnreadable(name, errorText)` and counts as holding
+ *   nothing, so the duty stays armed.
+ * - `query` returns each store's own result for the same options, project
+ *   first, concatenated: `cap` applies per store.
+ *
+ * Not for ownership reads: a feature_article is always project-scoped, and a
+ * domain record's file_keys name files in other repos.
+ */
+export function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore(dbPath), onUnreadable }) {
+  let domains = null;
+  const unreadable = (name, e) => onUnreadable(name, String((e && e.message) || e));
+  const mounted = () => {
+    if (domains === null) {
+      domains = [];
+      for (const m of resolveDomainMounts(config)) {
+        if (!existsSync(m.dbPath)) continue;
+        try {
+          domains.push({ name: m.name, store: opener(m.dbPath) });
+        } catch (e) {
+          unreadable(m.name, e);
+        }
+      }
+    }
+    return domains;
+  };
+  return {
+    query(opts) {
+      const out = [...store.query(opts)];
+      for (const d of [...mounted()]) {
+        try {
+          out.push(...d.store.query(opts));
+        } catch (e) {
+          domains = domains.filter((x) => x !== d);
+          unreadable(d.name, e);
+          try {
+            d.store.close();
+          } catch {
+            /* the domain is already reported unreadable; a failed close adds nothing */
+          }
+        }
+      }
+      return out;
+    },
+    close() {
+      const open = domains ?? [];
+      domains = [];
+      for (const d of open) d.store.close();
+    },
+  };
 }
 
 /** Record types whose write since `earliest` pays the capture duty. */

@@ -43,7 +43,6 @@ import { pluginRoot } from './lib/plugin-root-walk.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy, fileEntriesOf } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
-import { SterlingStore, resolveDomainMounts } from '@sterling/store';
 import { publishNotice } from './lib/delivery.mjs';
 import { evaluatePrLoop, prLoopNext, prLoopOwedText, prLoopReminderText } from './lib/pr-loop-duty.mjs';
 import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
@@ -59,6 +58,7 @@ import {
   hasOpenSystemTodo,
   isValidAt,
   noCaptureCutoffs,
+  openDutyRecords,
   ownershipJoin,
   researchCapturedSince,
   researchOwedText,
@@ -1701,45 +1701,23 @@ try {
     return !dischargedOnResearchLaneForDispatch(e);
   });
 
-  // RESEARCH RECORDS LIVE IN THE DOMAIN STORES TOO (GitHub issue #12). A record
-  // with scope `domain:<name>` is written to that mounted domain's own store,
-  // never to the project store, so a research_finding filed under a domain was
-  // invisible to both research-duty reads below and the duty stayed open. They
-  // read the project store first and then each mounted domain store that exists
-  // on disk (the same resolveDomainMounts manifest the MCP server mounts).
-  // Opened lazily, at most once per Stop, and only when a research read
-  // actually runs. A missing domain store is skipped and never created; one
-  // that cannot be opened or read is announced in the nag and counts as holding
-  // nothing, so the duty stays armed (P5).
-  let domainResearchStores = null;
-  const researchStores = () => {
-    if (domainResearchStores === null) {
-      domainResearchStores = [];
-      for (const mount of resolveDomainMounts(config)) {
-        if (!existsSync(mount.dbPath)) continue;
-        const unreadable = (e) =>
-          degradationParts.push(
-            `H10: domain store '${mount.name}' could not be read for the research duty — ${String((e && e.message) || e)}; a research record written there this session is not counted`
-          );
-        try {
-          const domainStore = new SterlingStore(mount.dbPath);
-          domainResearchStores.push({
-            query: (q) => {
-              try {
-                return domainStore.query(q);
-              } catch (e) {
-                unreadable(e);
-                return [];
-              }
-            },
-          });
-        } catch (e) {
-          unreadable(e);
-        }
-      }
-    }
-    return [store, ...domainResearchStores];
-  };
+  // DUTY READS COVER THE DOMAIN STORES TOO (GitHub issue #12). A record with
+  // scope `domain:<name>` is written to that mounted domain's own store, never
+  // to the project store, so a finding or decision filed under a domain was
+  // invisible to the "written since X" reads and the duty it paid stayed open.
+  // The research reads below and the capture read (`captured`) go through
+  // openDutyRecords (lib/session-duties.mjs, shared with the OpenCode
+  // settlement): project store first, then each mounted domain store that
+  // exists on disk, opened on the first read. A missing domain store is skipped
+  // and never created; one that cannot be opened or read is announced in the
+  // nag and counts as holding nothing, so the duty stays armed (P5).
+  // Left on the project store on purpose: the concept duty and the ownership
+  // join (a feature_article is always project-scoped), and every queue read
+  // (system todos live in the project store).
+  const dutyRecords = openDutyRecords(store, config, {
+    onUnreadable: (name, error) =>
+      degradationParts.push(`H10: domain store '${name}' could not be read for the session-end duties — ${error}; a record written there this session is not counted`),
+  });
 
   // OUTSTANDING DEFERRED RESEARCH EVENTS — what clearRegisters() must PRESERVE
   // on a deferring release (review fix, HIGH found on commit 5306735). Among
@@ -1765,7 +1743,7 @@ try {
   // query here would be wasted work on every ordinary Stop.
   const hasLiveAgentDispatchEvents = researchEvents.some((e) => isLaneResearchEvent(e) && isDispatchEventLive(e));
   const researchSatisfyingRecords = hasLiveAgentDispatchEvents
-    ? researchStores().flatMap((s) => s.query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 }))
+    ? dutyRecords.query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
     : [];
   const individuallyResearchSatisfied = (at) =>
     isValidAt(at) && researchSatisfyingRecords.some((r) => r.created_at >= at || r.updated_at >= at);
@@ -2393,7 +2371,7 @@ try {
   // hypotheses IS a durable capture — the session's knowledge landed in the
   // store even though it landed as a question rather than an answer, so nagging
   // for capture after one is a false demand.
-  const captured = capturedSince(store, earliest);
+  const captured = capturedSince(dutyRecords, earliest);
 
   // Research duty satisfaction: research_finding|decision|anti_pattern since earliest
   // ACTIVE research event (no_capture-discharged events excluded — item 353416a9).
@@ -2406,7 +2384,7 @@ try {
     // store, satisfying the duty with knowledge written months ago.
     const rts = activeResearchEvents.map((e) => e.at).filter(isValidAt).sort();
     earliestResearch = rts.length ? rts[0] : now;
-    researchSatisfied = researchStores().some((s) => researchCapturedSince(s, earliestResearch));
+    researchSatisfied = researchCapturedSince(dutyRecords, earliestResearch);
   }
 
   // Concept duty satisfaction (decision foreign_7208729b): per FAMILY, a feature_article

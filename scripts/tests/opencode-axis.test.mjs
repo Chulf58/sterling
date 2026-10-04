@@ -588,6 +588,57 @@ test('a torn notices file cannot reject the event handler, so the subscription l
   }
 });
 
+// A record with scope domain:<name> lives in that domain's own store, so the
+// settlement duty reads cover the project store and every mounted domain store
+// (GitHub issue #12; the H10 side is h10-research-duty-domain-finding.test.mjs).
+function makeDomainProject() {
+  const domainDb = join(tmpdir(), `sterling-oc-duty-domain-${randomUUID()}`, 'sterling.db');
+  const p = makeProject({ records: [], config: { stack_tags: ['alpha'], domain_paths: { alpha: domainDb } } });
+  mkdirSync(dirname(domainDb), { recursive: true });
+  createDomain('alpha', 'Alpha reactor facts', domainDb);
+  const writeDomain = (record) => {
+    const at = new Date().toISOString();
+    const d = new SterlingStore(domainDb);
+    d.create({ ...envelope(record.type), ...record, created_at: at, updated_at: at, scope: 'domain:alpha' });
+    d.close();
+  };
+  return { ...p, writeDomain, cleanup: () => (p.cleanup(), rmSync(dirname(domainDb), { recursive: true, force: true })) };
+}
+
+test('settlement: a domain-scoped research_finding written after the research dispatch pays the research duty', async () => {
+  const p = makeDomainProject();
+  try {
+    const { ctx, plugin, cleanup } = await setup(p.dir);
+    await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+    await call(ctx, { tool: 'subagent', id: 'call_r1', input: { agent: 'sterling/researcher', description: 'r', prompt: 'how does settlement work' }, metadata: { sessionID: 'ses_rchild', status: 'completed' } });
+    p.writeDomain({ type: 'research_finding', question: 'how does settlement work?', answer: 'per execution', source_urls: ['https://example.com/x'], source_date: '2026-10-02', capture_date: '2026-10-02' });
+    await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+    assert.doesNotMatch(noticeTexts(p.dir).join('\n'), /research owed/, 'the finding in the mounted domain store pays the duty');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('settlement: a domain-scoped decision written after the edit pays the capture duty; without one the duty is raised', async () => {
+  for (const captured of [false, true]) {
+    const p = makeDomainProject();
+    try {
+      const { plugin, cleanup } = await setup(p.dir);
+      await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+      writeFileSync(join(p.dir, 'src', 'a.mjs'), 'export const a = 2;\n');
+      if (captured) p.writeDomain({ type: 'decision', title: 'a is two', statement: 's', alternatives_rejected: [], rationale: 'r' });
+      await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_root' } });
+      const text = noticeTexts(p.dir).join('\n');
+      if (captured) assert.doesNotMatch(text, /capture owed/, 'the decision in the mounted domain store pays the duty');
+      else assert.match(text, /capture owed: 1 changed file/, 'control: the edit raises the duty');
+      await cleanup?.();
+    } finally {
+      p.cleanup();
+    }
+  }
+});
+
 test('the maintenance worker child never sweeps: a parent\'s live background implementor stays live', async () => {
   const p = makeProject({ records: [] });
   try {
