@@ -42,7 +42,7 @@ import { latestUsage, fillPct } from './lib/transcript.mjs';
 import { pluginRoot } from './lib/plugin-root-walk.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy, fileEntriesOf } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
-import { matchesGlob, parseConfig } from '@sterling/schemas';
+import { KNOWLEDGE_WRITES_REL, matchesGlob, parseConfig } from '@sterling/schemas';
 import { publishNotice } from './lib/delivery.mjs';
 import { evaluatePrLoop, prLoopNext, prLoopOwedText, prLoopReminderText } from './lib/pr-loop-duty.mjs';
 import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
@@ -59,6 +59,7 @@ import {
   isValidAt,
   noCaptureCutoffs,
   openDutyRecords,
+  paysSince,
   ownershipJoin,
   researchCapturedSince,
   researchOwedText,
@@ -1711,12 +1712,22 @@ try {
   // exists on disk, opened on the first read. A missing domain store is skipped
   // and never created; one that cannot be opened or read is announced in the
   // nag and counts as holding nothing, so the duty stays armed (P5).
+  // A DOMAIN RECORD PAYS ONLY WHEN THIS PROJECT WROTE IT (decision
+  // domain-record-duty-credit-comes-from-a-per-project-write-ledger): a domain
+  // store is shared by every project on the machine, so openDutyRecords counts
+  // one of its records only when the domain-write ledger under this root
+  // (.sterling/transient/knowledge-writes.json, written by the MCP server)
+  // holds an entry for it inside the window. The ledger is a separate file
+  // from the registers clearRegisters() consumes and is never cleared here.
   // Left on the project store on purpose: the concept duty and the ownership
   // join (a feature_article is always project-scoped), and every queue read
   // (system todos live in the project store).
   const dutyRecords = openDutyRecords(store, config, {
     onUnreadable: (name, error) =>
       degradationParts.push(`H10: domain store '${name}' could not be read for the session-end duties — ${error}; a record written there this session is not counted`),
+    root: input.cwd,
+    onLedgerUnreadable: (error) =>
+      degradationParts.push(`H10: the domain-write ledger (${KNOWLEDGE_WRITES_REL}) could not be read — ${error}; no domain-scoped record is counted toward the session-end duties. Fix or remove the file`),
   });
 
   // OUTSTANDING DEFERRED RESEARCH EVENTS — what clearRegisters() must PRESERVE
@@ -1746,7 +1757,7 @@ try {
     ? dutyRecords.query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
     : [];
   const individuallyResearchSatisfied = (at) =>
-    isValidAt(at) && researchSatisfyingRecords.some((r) => r.created_at >= at || r.updated_at >= at);
+    isValidAt(at) && researchSatisfyingRecords.some((r) => paysSince(dutyRecords, r, at));
   const outstandingDeferredResearchEvents = researchEvents.filter(
     (e) =>
       isLaneResearchEvent(e) &&

@@ -6,8 +6,9 @@
 // block); this file holds only the rules, so the two hosts cannot drift apart
 // on what "owed" means. The rationale for each rule stays at its H10 call site.
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { matchesGlob } from '@sterling/schemas';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { KNOWLEDGE_WRITES_REL, knowledgeWriteSchema, matchesGlob } from '@sterling/schemas';
 import { SterlingStore, resolveDomainMounts } from '@sterling/store';
 import { isForeignTree } from './working-tree.mjs';
 
@@ -82,10 +83,24 @@ export function conceptFamiliesFrom(sessionEvents) {
  *   the stores that failed to close as [{name, error}], for the caller to
  *   report. The reads are already done, so a close error changes no duty.
  *
- * Known limit: a mounted domain store is shared by every project on the
- * machine and its records carry no origin project. A record that another
- * project's session wrote into the same domain inside the duty window also
- * pays this project's capture or research duty.
+ * - `pays(record, since)` is the "written since X" test for one record a
+ *   `query` returned. A project-store record pays on its own timestamps. A
+ *   mounted domain store is shared by every project on the machine and its
+ *   records carry no origin project, so a domain record pays only when this
+ *   project's MCP server logged a write of it: the domain-write ledger
+ *   (KNOWLEDGE_WRITES_REL under `root`, written by packages/mcp-server) holds
+ *   an entry with the same id AND an `at` at or after `since`. The id alone
+ *   is not enough: an old entry of ours must not let a later write by another
+ *   project pay. A domain record with no entry, which includes every record
+ *   written before the ledger existed, never pays (decision
+ *   domain-record-duty-credit-comes-from-a-per-project-write-ledger).
+ * - The ledger is read once, on the first domain record weighed, and never
+ *   written or cleared here. An absent ledger is empty. One that cannot be
+ *   read or is not a JSON array is reported once through
+ *   `onLedgerUnreadable(errorText)` and counts as empty, so no domain record
+ *   pays and the duty stays armed. An entry that is not the shared shape or
+ *   whose `at` is not a canonical stamp is ignored. With no `root` there is no
+ *   ledger to read and no domain record pays.
  *
  * Not for ownership reads: a feature_article is always project-scoped, and a
  * domain record's file_keys name files in other repos.
@@ -93,8 +108,18 @@ export function conceptFamiliesFrom(sessionEvents) {
  * Deliberately separate from subject-fan.mjs's openSubjectFan, which splits one
  * cap across the stores by shares; a "since X" read needs each store's full cap.
  */
-export function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore(dbPath), onUnreadable }) {
+export function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore(dbPath), onUnreadable, root, onLedgerUnreadable }) {
   let domains = null;
+  const domainRows = new WeakSet();
+  let ledger = null;
+  const loggedWrites = () => {
+    if (ledger === null) {
+      const read = root ? readKnowledgeWrites(root) : { entries: [] };
+      if (read.error) onLedgerUnreadable(read.error);
+      ledger = read.entries;
+    }
+    return ledger;
+  };
   const unreadable = (name, e) => onUnreadable(name, String((e && e.message) || e));
   const mounted = () => {
     if (domains === null) {
@@ -115,7 +140,9 @@ export function openDutyRecords(store, config, { opener = (dbPath) => new Sterli
       const out = [...store.query(opts)];
       for (const d of [...mounted()]) {
         try {
-          out.push(...d.store.query(opts));
+          const rows = d.store.query(opts);
+          for (const r of rows) domainRows.add(r);
+          out.push(...rows);
         } catch (e) {
           domains = domains.filter((x) => x !== d);
           unreadable(d.name, e);
@@ -127,6 +154,11 @@ export function openDutyRecords(store, config, { opener = (dbPath) => new Sterli
         }
       }
       return out;
+    },
+    pays(r, since) {
+      if (!writtenSince(r, since)) return false;
+      if (!domainRows.has(r)) return true;
+      return loggedWrites().some((e) => e.id === r.id && e.at >= since);
     },
     close() {
       const open = domains ?? [];
@@ -144,15 +176,42 @@ export function openDutyRecords(store, config, { opener = (dbPath) => new Sterli
   };
 }
 
+/** A record created or updated at or after `since` (lexical compare of canonical stamps). */
+const writtenSince = (r, since) => r.created_at >= since || r.updated_at >= since;
+
+/**
+ * The domain-write ledger under `root`: `{ entries }`, plus `error` when the
+ * file exists and cannot be used. Entries keep only the shared shape with a
+ * canonical `at`, since `at` is compared lexically against the window start.
+ */
+export function readKnowledgeWrites(root) {
+  const p = join(root, KNOWLEDGE_WRITES_REL);
+  if (!existsSync(p)) return { entries: [] };
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(p, 'utf8'));
+  } catch (e) {
+    return { entries: [], error: String((e && e.message) || e) };
+  }
+  if (!Array.isArray(parsed)) return { entries: [], error: 'it is not a JSON array' };
+  return { entries: parsed.filter((e) => knowledgeWriteSchema.safeParse(e).success && isValidAt(e.at)) };
+}
+
+/**
+ * Whether `r`, a record `store.query` returned, pays a duty whose window opens
+ * at `since`. `store` is an openDutyRecords result, whose `pays` applies the
+ * domain-write ledger; a bare project store holds only project records, which
+ * pay on their own timestamps.
+ */
+export const paysSince = (store, r, since) => (typeof store.pays === 'function' ? store.pays(r, since) : writtenSince(r, since));
+
 /** Record types whose write since `earliest` pays the capture duty. */
 export const CAPTURE_TYPES = ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'open_question'];
-export const capturedSince = (store, earliest) =>
-  store.query({ types: CAPTURE_TYPES, cap: 1000 }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
+export const capturedSince = (store, earliest) => store.query({ types: CAPTURE_TYPES, cap: 1000 }).some((r) => paysSince(store, r, earliest));
 
 /** Record types whose write since `earliest` pays the research duty. */
 export const RESEARCH_TYPES = ['research_finding', 'decision', 'anti_pattern'];
-export const researchCapturedSince = (store, earliest) =>
-  store.query({ types: RESEARCH_TYPES, cap: 1000 }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
+export const researchCapturedSince = (store, earliest) => store.query({ types: RESEARCH_TYPES, cap: 1000 }).some((r) => paysSince(store, r, earliest));
 
 /** An article written up to this long BEFORE its family's concept_designed event still satisfies it (item c520be20). */
 export const CONCEPT_PRE_EVENT_WINDOW_MS = 15 * 60_000;

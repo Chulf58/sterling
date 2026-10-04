@@ -83,3 +83,34 @@ export const sessionEventSchema = z.object({
   target: z.string().trim().min(1).optional(),
 });
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
+
+// Domain-write ledger (decision domain-record-duty-credit-comes-from-a-per-project-write-ledger).
+// A mounted domain store is shared by every project on the machine and its
+// records carry no origin project, so the record alone cannot say whose session
+// wrote it. The MCP server therefore appends one entry here after each write of
+// a record held by a domain store (create, update, promote), to
+// KNOWLEDGE_WRITES_REL under its own project root. H10 and the OpenCode
+// settlement count a domain record toward the capture or research duty only
+// when this ledger holds an entry with the same id and an `at` inside the duty
+// window. Project-store records never appear here and pay as before.
+//
+// A SEPARATE file from the session-event register on purpose: H10's
+// clearRegisters rewrites and deletes that register at Stop, which would lose
+// the write evidence while later work re-arms the duty. Nothing clears this
+// file; it is bounded instead. The server keeps one entry per record id (the
+// latest `at`, which is all an "at or after X" read needs) and the newest
+// KNOWLEDGE_WRITES_CAP ids, so only writes to more than that many DISTINCT
+// domain records push the oldest id out.
+//
+// Strict: an entry is exactly {id, type, at}. Nothing about the writing project
+// or session enters it, and nothing from this file enters any store.
+export const KNOWLEDGE_WRITES_REL = '.sterling/transient/knowledge-writes.json';
+export const KNOWLEDGE_WRITES_CAP = 500;
+export const knowledgeWriteSchema = z
+  .object({
+    id: z.string().min(1),
+    type: z.string().min(1),
+    at: z.string().min(1),
+  })
+  .strict();
+export type KnowledgeWrite = z.infer<typeof knowledgeWriteSchema>;

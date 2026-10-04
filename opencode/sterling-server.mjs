@@ -4982,7 +4982,7 @@ var init_records = __esm({
 });
 
 // packages/schemas/dist/transient.js
-var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema;
+var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_REL, knowledgeWriteSchema;
 var init_transient = __esm({
   "packages/schemas/dist/transient.js"() {
     "use strict";
@@ -5011,6 +5011,12 @@ var init_transient = __esm({
       // Trimmed before the length check, so a whitespace-only target is refused.
       target: external_exports.string().trim().min(1).optional()
     });
+    KNOWLEDGE_WRITES_REL = ".sterling/transient/knowledge-writes.json";
+    knowledgeWriteSchema = external_exports.object({
+      id: external_exports.string().min(1),
+      type: external_exports.string().min(1),
+      at: external_exports.string().min(1)
+    }).strict();
   }
 });
 
@@ -5513,6 +5519,7 @@ var init_dist = __esm({
     init_paths();
     init_envelope();
     init_records();
+    init_transient();
     init_transient();
     init_config();
     init_registry();
@@ -15514,14 +15521,15 @@ TUI selection (one-shot): the user has selected ${selection.type} '${selection.r
 init_dist();
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync25, mkdirSync as mkdirSync16, readFileSync as readFileSync20, renameSync as renameSync8, rmSync as rmSync9, writeFileSync as writeFileSync12 } from "node:fs";
-import { dirname as dirname15, join as join36 } from "node:path";
+import { existsSync as existsSync25, mkdirSync as mkdirSync16, readFileSync as readFileSync21, renameSync as renameSync8, rmSync as rmSync9, writeFileSync as writeFileSync12 } from "node:fs";
+import { dirname as dirname15, join as join37 } from "node:path";
 
 // scripts/hooks/lib/session-duties.mjs
 init_dist();
 init_dist2();
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { existsSync as existsSync24 } from "node:fs";
+import { existsSync as existsSync24, readFileSync as readFileSync19 } from "node:fs";
+import { join as join35 } from "node:path";
 var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 var isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
 var IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
@@ -15552,8 +15560,18 @@ function conceptFamiliesFrom(sessionEvents) {
   }
   return conceptFamilies;
 }
-function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore(dbPath), onUnreadable }) {
+function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore(dbPath), onUnreadable, root, onLedgerUnreadable }) {
   let domains = null;
+  const domainRows = /* @__PURE__ */ new WeakSet();
+  let ledger = null;
+  const loggedWrites = () => {
+    if (ledger === null) {
+      const read = root ? readKnowledgeWrites(root) : { entries: [] };
+      if (read.error) onLedgerUnreadable(read.error);
+      ledger = read.entries;
+    }
+    return ledger;
+  };
   const unreadable = (name, e) => onUnreadable(name, String(e && e.message || e));
   const mounted = () => {
     if (domains === null) {
@@ -15574,7 +15592,9 @@ function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore
       const out = [...store.query(opts)];
       for (const d of [...mounted()]) {
         try {
-          out.push(...d.store.query(opts));
+          const rows = d.store.query(opts);
+          for (const r of rows) domainRows.add(r);
+          out.push(...rows);
         } catch (e) {
           domains = domains.filter((x) => x !== d);
           unreadable(d.name, e);
@@ -15585,6 +15605,11 @@ function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore
         }
       }
       return out;
+    },
+    pays(r, since) {
+      if (!writtenSince(r, since)) return false;
+      if (!domainRows.has(r)) return true;
+      return loggedWrites().some((e) => e.id === r.id && e.at >= since);
     },
     close() {
       const open = domains ?? [];
@@ -15601,10 +15626,24 @@ function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore
     }
   };
 }
+var writtenSince = (r, since) => r.created_at >= since || r.updated_at >= since;
+function readKnowledgeWrites(root) {
+  const p = join35(root, KNOWLEDGE_WRITES_REL);
+  if (!existsSync24(p)) return { entries: [] };
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync19(p, "utf8"));
+  } catch (e) {
+    return { entries: [], error: String(e && e.message || e) };
+  }
+  if (!Array.isArray(parsed)) return { entries: [], error: "it is not a JSON array" };
+  return { entries: parsed.filter((e) => knowledgeWriteSchema.safeParse(e).success && isValidAt(e.at)) };
+}
+var paysSince = (store, r, since) => typeof store.pays === "function" ? store.pays(r, since) : writtenSince(r, since);
 var CAPTURE_TYPES = ["decision", "anti_pattern", "feature_article", "research_finding", "disconfirmed_hypothesis", "open_question"];
-var capturedSince = (store, earliest) => store.query({ types: CAPTURE_TYPES, cap: 1e3 }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
+var capturedSince = (store, earliest) => store.query({ types: CAPTURE_TYPES, cap: 1e3 }).some((r) => paysSince(store, r, earliest));
 var RESEARCH_TYPES = ["research_finding", "decision", "anti_pattern"];
-var researchCapturedSince = (store, earliest) => store.query({ types: RESEARCH_TYPES, cap: 1e3 }).some((r) => r.created_at >= earliest || r.updated_at >= earliest);
+var researchCapturedSince = (store, earliest) => store.query({ types: RESEARCH_TYPES, cap: 1e3 }).some((r) => paysSince(store, r, earliest));
 var CONCEPT_PRE_EVENT_WINDOW_MS = 15 * 6e4;
 function unmetConceptFamilies(store, conceptFamilies, earliestSessionAt) {
   const articles = store.query({ types: ["feature_article"], cap: 1e3 });
@@ -15669,12 +15708,12 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 // scripts/hooks/lib/settlement.mjs
 init_dist2();
 import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
-import { readFileSync as readFileSync19, writeFileSync as writeFileSync11, mkdirSync as mkdirSync15, rmSync as rmSync8, statSync as statSync7, renameSync as renameSync7 } from "node:fs";
+import { readFileSync as readFileSync20, writeFileSync as writeFileSync11, mkdirSync as mkdirSync15, rmSync as rmSync8, statSync as statSync7, renameSync as renameSync7 } from "node:fs";
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { join as join35, dirname as dirname14 } from "node:path";
+import { join as join36, dirname as dirname14 } from "node:path";
 function hashFile(root, rel) {
   try {
-    return createHash3("sha256").update(readFileSync19(join35(root, rel))).digest("hex");
+    return createHash3("sha256").update(readFileSync20(join36(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -15688,7 +15727,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync19(join35(root, ".sterling", "config.json"), "utf8");
+    const raw = readFileSync20(join36(root, ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -15755,7 +15794,7 @@ function changedSince(root, base2) {
 var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
 function readGitSettled(root) {
   try {
-    const s2 = JSON.parse(readFileSync19(join35(root, GIT_SETTLED_REL), "utf8"));
+    const s2 = JSON.parse(readFileSync20(join36(root, GIT_SETTLED_REL), "utf8"));
     return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
   } catch {
     return null;
@@ -15794,7 +15833,7 @@ function gitTouches(root, now) {
     const candidates = [...changed].map((path) => {
       let at = settled.at;
       try {
-        at = statSync7(join35(root, path)).mtime.toISOString();
+        at = statSync7(join36(root, path)).mtime.toISOString();
       } catch {
       }
       return { path, at: typeof at === "string" ? at : now };
@@ -15805,7 +15844,7 @@ function gitTouches(root, now) {
   }
 }
 function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
-  const p = join35(root, GIT_SETTLED_REL);
+  const p = join36(root, GIT_SETTLED_REL);
   mkdirSync15(dirname14(p), { recursive: true });
   if (ifAbsent) {
     try {
@@ -15836,17 +15875,17 @@ var EVENTS_REL = ".sterling/transient/session-events.json";
 var WEIGHED_KINDS = /* @__PURE__ */ new Set(["concept_designed", "research_tool", "agent_dispatch"]);
 var eventKey = (e) => `${e.kind}|${e.detail ?? ""}|${e.at ?? ""}`;
 function readDutyState(root) {
-  const p = join36(root, DUTIES_REL);
+  const p = join37(root, DUTIES_REL);
   if (!existsSync25(p)) return { owed: [], weighed: [] };
-  const parsed = JSON.parse(readFileSync20(p, "utf8"));
+  const parsed = JSON.parse(readFileSync21(p, "utf8"));
   if (!parsed || !Array.isArray(parsed.owed) || !Array.isArray(parsed.weighed)) throw new Error(`${DUTIES_REL} is not a {owed, weighed} object`);
   return parsed;
 }
 function readSessionEvents(root) {
-  const p = join36(root, EVENTS_REL);
+  const p = join37(root, EVENTS_REL);
   if (!existsSync25(p)) return { events: [] };
   try {
-    const parsed = JSON.parse(readFileSync20(p, "utf8"));
+    const parsed = JSON.parse(readFileSync21(p, "utf8"));
     if (!Array.isArray(parsed)) return { events: [], error: "it is not a JSON array" };
     return { events: parsed.filter((e) => e && typeof e === "object") };
   } catch (e) {
@@ -15863,7 +15902,7 @@ function newSince(root, base2, paths) {
 function articleDemand(store, root, config, paths, base2, degraded) {
   const exempt = demandExemption(config, loadGeneratedProjections(root));
   const { isUnowned } = ownershipJoin(store, root);
-  let unowned = paths.filter((p) => existsSync25(join36(root, p)) && !exempt(p) && isUnowned(p));
+  let unowned = paths.filter((p) => existsSync25(join37(root, p)) && !exempt(p) && isUnowned(p));
   if (unowned.length) {
     const ignored = gitIgnored(unowned, root);
     if (ignored === null) degraded.push("git check-ignore failed, so ignored files may be named");
@@ -15885,9 +15924,16 @@ var describe = (d) => {
 function settleDuties(store, root, git, at, { opener } = {}) {
   const config = parseConfig(loadConfig(root) ?? {});
   const unreadable = [];
-  const records = openDutyRecords(store, config, { ...opener ? { opener } : {}, onUnreadable: (name, error) => unreadable.push(`'${name}' (${error})`) });
+  const ledgerErrors = [];
+  const records = openDutyRecords(store, config, {
+    ...opener ? { opener } : {},
+    onUnreadable: (name, error) => unreadable.push(`'${name}' (${error})`),
+    root,
+    onLedgerUnreadable: (error) => ledgerErrors.push(error)
+  });
   try {
     const { notices } = weighDuties(store, records, config, root, at, git);
+    if (ledgerErrors.length) notices.push(`Sterling settlement: the domain-write ledger ${KNOWLEDGE_WRITES_REL} could not be read (${ledgerErrors.join("; ")}); no domain-scoped record was counted toward the capture and research duties. Fix or remove the file.`);
     if (unreadable.length) notices.push(`Sterling settlement: domain store(s) ${unreadable.join(", ")} could not be read; a record written there was not counted toward the capture and research duties.`);
     return { notices };
   } finally {
@@ -15934,7 +15980,7 @@ function weighDuties(store, records, config, root, at, git) {
   if (queued.length) notices.push(`Sterling settlement: duties the previous turn left unpaid are now queued as maintenance items: ${queued.join(", ")}. Pay them, or drain them with /sterling:drain.`);
   const owed = [];
   const windowStart = isValidAt(git.settled.at) ? git.settled.at : at;
-  const changed = git.candidates.filter((c) => existsSync25(join36(root, c.path)));
+  const changed = git.candidates.filter((c) => existsSync25(join37(root, c.path)));
   const generated = loadGeneratedProjections(root);
   const touched = changed.filter((c) => !IMAGE_BINARY_EXT.test(c.path) && !generated.has(c.path) && !dischargedByCutoff(c.at, cutoffs.capture));
   if (touched.length && !capturedSince(records, windowStart)) {
@@ -15962,7 +16008,7 @@ ${owed.map((d) => `- ${describe(d)}`).join("\n")}`);
   if (degraded.length) notices.push(`Sterling settlement: the article demand was checked with a degraded probe: ${degraded.join("; ")}.`);
   const present = new Set(events.map(eventKey));
   const nextWeighed = [.../* @__PURE__ */ new Set([...state.weighed.filter((k) => present.has(k)), ...fresh.map(eventKey)])];
-  writeJsonAtomic2(join36(root, DUTIES_REL), { owed, weighed: nextWeighed });
+  writeJsonAtomic2(join37(root, DUTIES_REL), { owed, weighed: nextWeighed });
   return { notices };
 }
 function writeJsonAtomic2(path, value) {
@@ -16007,7 +16053,7 @@ function createSettle({ openStore, now, launchWorkerFor }) {
     const dispatch = liveDispatch(root);
     let store;
     try {
-      store = openStore(join36(root, ".sterling", "sterling.db"));
+      store = openStore(join37(root, ".sterling", "sterling.db"));
       const minted = mintSettlementReconcile(store, root, git.candidates.map((c) => c.path), at);
       const duties = settleDuties(store, root, git, at, { opener: openStore });
       if (!dispatch.live) writeGitSettled(root, git.next);
