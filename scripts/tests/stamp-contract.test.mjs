@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -498,6 +498,334 @@ test('stamp-contract: Solve and Close-on-commit bullets under their OLD leads ar
     assert.match(r.stdout, /HAND_TUNED_REFUSED\s+- \*\*Close-on-commit: a commit/);
     assert.ok(!/inserted|would_insert/.test(r.stdout), `no insert beside an old-lead bullet:\n${r.stdout}`);
     assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'the old-lead bullets are left byte-for-byte untouched');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// ---- the Domains section (TARGET_SECTIONS in scripts/lib/contract-bullets.mjs) ----
+// An AGENTS.md written before the section existed gets the whole section, heading included,
+// ahead of its Conventions heading; after that its bullets are ordinary tracked leads.
+
+const DOMAINS_SECTION = /## Domains\n[\s\S]*?(?=## Conventions)/;
+const DOMAIN_DESCRIPTION_LEAD = '- **A domain needs a description**';
+
+function sectionFixture(name, mutateAgents) {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), `sterling-stamp-${name}-`));
+  writeCompleteSibling(dir, name);
+  const complete = { agents: readFileSync(join(dir, 'AGENTS.md'), 'utf8'), claude: readFileSync(join(dir, 'CLAUDE.md'), 'utf8') };
+  assert.match(complete.agents, DOMAINS_SECTION, 'fixture sanity: the rendered template carries the Domains section');
+  writeFileSync(join(dir, 'AGENTS.md'), mutateAgents(complete.agents));
+  const registry = new ProjectRegistry(regDb);
+  try {
+    registry.register({ repo_path: dir, name, stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+  } finally {
+    registry.close();
+  }
+  const read = () => ({ agents: readFileSync(join(dir, 'AGENTS.md'), 'utf8'), claude: readFileSync(join(dir, 'CLAUDE.md'), 'utf8') });
+  const cleanup = () => {
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  };
+  return { regDb, complete, read, cleanup };
+}
+
+test('stamp-contract: an AGENTS.md with no Domains section gains the whole section before Conventions; a dry run writes nothing and a second run changes nothing', () => {
+  const f = sectionFixture('no-domains', (agents) => agents.replace(DOMAINS_SECTION, ''));
+  try {
+    const before = f.read();
+    assert.ok(!before.agents.includes('## Domains'), 'fixture sanity: the section is gone');
+
+    const dry = runStampContract(f.regDb, []);
+    assert.equal(dry.status, 0, `${dry.stdout}\n${dry.stderr}`);
+    assert.match(dry.stdout, /would_insert_section {2}## Domains/);
+    assert.deepEqual(f.read(), before, 'a dry run writes nothing');
+
+    const applied = runStampContract(f.regDb);
+    assert.equal(applied.status, 0, `inserting the section is not a refusal: ${applied.stdout}\n${applied.stderr}`);
+    assert.match(applied.stdout, /section_inserted {2}## Domains/);
+    assert.deepEqual(f.read(), f.complete, 'the result is byte-identical to the current template render; CLAUDE.md is untouched');
+
+    const again = runStampContract(f.regDb);
+    assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+    assert.ok(!/inserted|updated|renamed/.test(again.stdout), `a second run has nothing to do:\n${again.stdout}`);
+    assert.deepEqual(f.read(), f.complete, 'a second run changes nothing');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: an AGENTS.md that already has the Domains section (a newer init wrote it) is left byte-identical', () => {
+  const f = sectionFixture('has-domains', (agents) => agents);
+  try {
+    const r = runStampContract(f.regDb);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.ok(!/section/.test(r.stdout), 'no section action on a file that has the heading');
+    assert.deepEqual(f.read(), f.complete);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: a Domains bullet is a tracked lead: hand-tuned text is HAND_TUNED_REFUSED and untouched, and a deleted bullet comes back in template order', () => {
+  const tuned = sectionFixture('tuned-domains', (agents) => agents.replace(/^- \*\*A domain needs a description\*\*.*$/m, `${DOMAIN_DESCRIPTION_LEAD} and we write ours in Danish.`));
+  try {
+    const before = tuned.read();
+    assert.notEqual(before.agents, tuned.complete.agents, 'fixture sanity: the bullet was changed');
+    const r = runStampContract(tuned.regDb);
+    assert.equal(r.status, 2, 'hand-tuned text is drift');
+    assert.match(r.stdout, /HAND_TUNED_REFUSED {2}- \*\*A domain needs a description\*\*/);
+    assert.deepEqual(tuned.read(), before, 'nothing written');
+  } finally {
+    tuned.cleanup();
+  }
+
+  const dropped = sectionFixture('dropped-domain-bullet', (agents) => dropBlock(agents, DOMAIN_DESCRIPTION_LEAD));
+  try {
+    assert.ok(!dropped.read().agents.includes(DOMAIN_DESCRIPTION_LEAD), 'fixture sanity: the bullet is gone');
+    const r = runStampContract(dropped.regDb);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /inserted {2}- \*\*A domain needs a description\*\*/);
+    assert.deepEqual(dropped.read(), dropped.complete, 'the bullet is back where the template has it');
+  } finally {
+    dropped.cleanup();
+  }
+});
+
+test('stamp-contract: no Domains section and no Conventions heading to put it before is one loud refusal, with nothing written', () => {
+  const f = sectionFixture('no-conventions', (agents) => agents.replace(DOMAINS_SECTION, '').replace(/^## Conventions.*$/m, '## House rules'));
+  try {
+    const before = f.read();
+    const r = runStampContract(f.regDb);
+    assert.equal(r.status, 2, `a section with nowhere to go is drift, never a silent skip: ${r.stdout}`);
+    assert.match(r.stdout, /SECTION_ANCHOR_MISSING_REFUSED {2}## Domains/);
+    assert.match(r.stdout, /no '## Conventions' heading/);
+    assert.equal((r.stdout.match(/REFUSED {2}/g) ?? []).length, 1, `one refusal for the section, not one per bullet:\n${r.stdout}`);
+    assert.deepEqual(f.read(), before, 'nothing written');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// ---- --apply-inserts: what /sterling:update and the post-update sync run (user-ruled
+// 2026-10-04, "Auto-insert, new text only") ----
+
+const STALE_ANTI_SPEC = '- **Anti-speculation:** never invent an API, field, flag, or behavior. Verify in docs or code first. If you cannot verify, say so and ask.';
+const withStaleAntiSpec = (agents) => agents.replace(/^- \*\*Anti-speculation:\*\*.*$/m, STALE_ANTI_SPEC);
+
+test('stamp-contract --apply-inserts: text that is entirely absent is written, old wording is only reported, and a second run writes nothing', () => {
+  const f = sectionFixture('inserts-only', (agents) => withStaleAntiSpec(agents).replace(DOMAINS_SECTION, ''));
+  try {
+    const expected = { agents: withStaleAntiSpec(f.complete.agents), claude: f.complete.claude };
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /section_inserted {2}## Domains/);
+    assert.match(r.stdout, /would_update {2}- \*\*Anti-speculation:\*\*/, 'a replace is reported exactly as the dry run reports it');
+    assert.match(r.stdout, /INSERTS APPLIED/);
+    assert.deepEqual(f.read(), expected, 'the section is in; the old-wording bullet is byte-for-byte what it was');
+
+    const again = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+    assert.ok(!/inserted/.test(again.stdout), `nothing left to insert:\n${again.stdout}`);
+    assert.deepEqual(f.read(), expected, 'a second run writes nothing');
+
+    const full = runStampContract(f.regDb, ['--apply']);
+    assert.equal(full.status, 0, `${full.stdout}\n${full.stderr}`);
+    assert.deepEqual(f.read(), f.complete, 'the by-hand --apply is what replaces old wording');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: a missing tracked bullet is inserted too', () => {
+  const f = sectionFixture('inserts-bullet', (agents) => dropBlock(agents, DOMAIN_DESCRIPTION_LEAD));
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /inserted {2}- \*\*A domain needs a description\*\*/);
+    assert.deepEqual(f.read(), f.complete);
+  } finally {
+    f.cleanup();
+  }
+});
+
+for (const heading of ['## Domains', '## Domains and hosting']) {
+  test(`stamp-contract: a project's own '${heading}' heading with none of the section's bullets is ONE section refusal with what to do`, () => {
+    const f = sectionFixture('own-heading', (agents) => agents.replace(DOMAINS_SECTION, `${heading}\n\nWe host at example.org.\n\n`));
+    try {
+      const before = f.read();
+      const r = runStampContract(f.regDb);
+      assert.equal(r.status, 2, r.stdout);
+      assert.match(r.stdout, /SECTION_HEADING_WITHOUT_BULLETS_REFUSED {2}## Domains/);
+      assert.match(r.stdout, /already has a '## Domains[^']*' heading/);
+      assert.equal((r.stdout.match(/REFUSED {2}/g) ?? []).length, 1, `one refusal, not one per bullet:\n${r.stdout}`);
+      assert.deepEqual(f.read(), before, 'nothing written');
+    } finally {
+      f.cleanup();
+    }
+  });
+}
+
+test("stamp-contract: the section goes before the template's Conventions heading, never before a project heading that only starts the same", () => {
+  const decoy = '## Conventions of naming\n\nWe name things plainly.\n\n';
+  const f = sectionFixture('decoy-conventions', (agents) => agents.replace(DOMAINS_SECTION, '').replace('## Project facts', `${decoy}## Project facts`));
+  try {
+    assert.ok(f.read().agents.indexOf('## Conventions of naming') < f.read().agents.indexOf('## Conventions ('), 'fixture sanity: the decoy sits above the real heading');
+    const r = runStampContract(f.regDb);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.equal(f.read().agents, f.complete.agents.replace('## Project facts', `${decoy}## Project facts`), 'the section sits where the template has it');
+  } finally {
+    f.cleanup();
+  }
+
+  const only = sectionFixture('only-decoy', (agents) => agents.replace(DOMAINS_SECTION, '').replace(/^## Conventions.*$/m, '## Conventions of naming'));
+  try {
+    const before = only.read();
+    const r = runStampContract(only.regDb);
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stdout, /SECTION_ANCHOR_MISSING_REFUSED {2}## Domains/);
+    assert.deepEqual(only.read(), before);
+  } finally {
+    only.cleanup();
+  }
+});
+
+// ---- the write path (--apply and --apply-inserts): a file that cannot be written is that
+// project's refusal, never a crash, and never hides what was written elsewhere ----
+
+const AS_ROOT = process.getuid?.() === 0 && 'root writes a read-only file';
+
+// Several registered projects in one registry, each a complete sibling with no Domains section.
+function projectsWithoutSection(names) {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const registry = new ProjectRegistry(regDb);
+  const dirs = {};
+  try {
+    for (const name of names) {
+      const dir = mkdtempSync(join(tmpdir(), `sterling-stamp-${name}-`));
+      writeCompleteSibling(dir, name);
+      writeFileSync(join(dir, 'AGENTS.md'), readFileSync(join(dir, 'AGENTS.md'), 'utf8').replace(DOMAINS_SECTION, ''));
+      registry.register({ repo_path: dir, name, stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+      dirs[name] = dir;
+    }
+  } finally {
+    registry.close();
+  }
+  const agents = (name) => readFileSync(join(dirs[name], 'AGENTS.md'), 'utf8');
+  const cleanup = () => {
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    for (const dir of Object.values(dirs)) {
+      for (const f of ['AGENTS.md', 'CLAUDE.md']) chmodSync(join(dir, f), 0o644);
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  };
+  return { regDb, dirs, agents, cleanup };
+}
+
+test('stamp-contract --apply-inserts: a read-only AGENTS.md is a refusal naming the path (exit 2, no stack), and no insert is claimed', { skip: AS_ROOT }, () => {
+  const f = projectsWithoutSection(['solo']);
+  try {
+    const path = join(f.dirs.solo, 'AGENTS.md');
+    const before = f.agents('solo');
+    chmodSync(path, 0o444);
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 2, `a file that cannot be written is drift, not a crash:\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /WRITE_FAILED_REFUSED/);
+    assert.ok(r.stdout.includes(path), 'the refusal names the path');
+    assert.match(r.stdout, /EACCES|EPERM/);
+    assert.ok(!/ section_inserted {2}/.test(r.stdout), `nothing was written, so no insert is claimed:\n${r.stdout}`);
+    assert.match(r.stdout, /would_insert_section {2}## Domains/);
+    assert.doesNotMatch(r.stderr, /\n\s+at /, 'no stack trace');
+    assert.equal(f.agents('solo'), before);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: with one unwritable project among three, the others are written and reported, and the run exits 2', { skip: AS_ROOT }, () => {
+  const f = projectsWithoutSection(['aa', 'bb', 'cc']);
+  try {
+    chmodSync(join(f.dirs.bb, 'AGENTS.md'), 0o444);
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 2, `${r.stdout}\n${r.stderr}`);
+    for (const name of ['aa', 'cc']) {
+      assert.match(f.agents(name), /## Domains\n/, `${name} was written`);
+      assert.match(r.stdout, new RegExp(`• ${name} \\([^\\n]*\\n    section_inserted {2}## Domains`), `${name}'s insert is reported`);
+    }
+    assert.doesNotMatch(f.agents('bb'), /## Domains\n/);
+    assert.match(r.stdout, /✗ bb \(/);
+    assert.ok(r.stdout.includes(join(f.dirs.bb, 'AGENTS.md')), 'the refusal names the path');
+    assert.match(r.stdout, /3 project\(s\) processed/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: a read-only CLAUDE.md that needs no change is never written, so the AGENTS.md insert succeeds and is reported', { skip: AS_ROOT }, () => {
+  const f = projectsWithoutSection(['solo']);
+  try {
+    chmodSync(join(f.dirs.solo, 'CLAUDE.md'), 0o444);
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /section_inserted {2}## Domains/);
+    assert.match(f.agents('solo'), /## Domains\n/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: in a file with mixed line endings the inserted lines take the neighbouring line ending and every existing byte stays; an untouched mixed file is not rewritten', () => {
+  const f = projectsWithoutSection(['mixed']);
+  try {
+    const dir = f.dirs.mixed;
+    const lf = f.agents('mixed');
+    const at = lf.indexOf('## Conventions');
+    assert.ok(at > 0);
+    // CRLF above the Conventions heading, LF from it on.
+    const head = lf.slice(0, at).replace(/\n/g, '\r\n');
+    const tail = lf.slice(at);
+    writeFileSync(join(dir, 'AGENTS.md'), head + tail);
+    const claudeLines = readFileSync(join(dir, 'CLAUDE.md'), 'utf8').split('\n');
+    const claudeMixed = claudeLines.map((l, i) => (i === claudeLines.length - 1 ? l : l + (i % 2 ? '\r\n' : '\n'))).join('');
+    writeFileSync(join(dir, 'CLAUDE.md'), claudeMixed);
+
+    const complete = renderTemplate('templates/target-agents-md.md', 'mixed');
+    const section = DOMAINS_SECTION.exec(complete)[0];
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.equal(f.agents('mixed'), head + section.replace(/\n/g, '\r\n') + tail, 'the section is CRLF like the line above it; nothing else moved');
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), claudeMixed, 'the untouched file is byte-identical');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: a bullet still under its old lead is kept and reported would_rename, and a new bullet anchored after it is inserted', () => {
+  const NOTES_LEAD = "- **Notes are the user's surface.**";
+  const oldBlock = JSON.parse(readFileSync(join(root, 'bin', 'contract-history.json'), 'utf8'))[NOTES_LEAD][0];
+  assert.ok(oldBlock?.startsWith(NOTES_LEAD), 'fixture sanity: a historical block under the old lead');
+  const f = stampFixture('rename-anchor', (complete) => {
+    const lines = dropBlock(dropBlock(complete, CODEX_LEAD), READY_LEAD).split('\n');
+    const i = lines.findIndex((l) => l.startsWith(KNOWLEDGE_LEAD));
+    assert.notEqual(i, -1);
+    lines[i] = oldBlock;
+    const planted = lines.join('\n');
+    const codex = complete.split('\n').find((l) => l.startsWith(CODEX_LEAD));
+    const ready = complete.split('\n').find((l) => l.startsWith(READY_LEAD));
+    const out = [...lines];
+    out.splice(i + 1, 0, codex, ready);
+    return { planted, expected: out.join('\n') };
+  });
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /would_rename {2}- \*\*Knowledge is born structured\./);
+    assert.match(r.stdout, /inserted {2}- \*\*Codex runs through the MCP tool/);
+    assert.match(r.stdout, /inserted {2}- \*\*Say `READY TO CLEAR`/);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.expected, 'the old block is byte-for-byte kept, with the two new bullets after it');
   } finally {
     f.cleanup();
   }

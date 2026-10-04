@@ -19,6 +19,16 @@ export const AGENTS_TEMPLATE_REL = 'templates/target-agents-md.md';
 export const CLAUDE_TEMPLATE_REL = 'templates/target-claude-md.md';
 export const TEMPLATE_RELS = [AGENTS_TEMPLATE_REL, CLAUDE_TEMPLATE_REL];
 
+// The bullets of the Domains section, in template order. The third lead runs past its bold
+// part: '- **What not to do:**' alone could match a project's own bullet anywhere in either file.
+const DOMAINS_LEADS = [
+  '- **A domain is a shared knowledge store for one subject.**',
+  '- **Mount every subject the project works with, its own subject included.**',
+  '- **What not to do:** a Salesforce project',
+  '- **A domain needs a description**',
+  '- **Run `/sterling:domains` to see and change mounts.**',
+];
+
 // The propagated bullets, identified by their bold lead at line start.
 export const TARGET_LEADS = [
   '- **Reconcile _every affected_ article, not just the primary one**',
@@ -81,7 +91,22 @@ export const TARGET_LEADS = [
   // (decision projects-file-sterling-issues-as-scrubbed-github-issues-automatically). The bullet
   // already exists in every sibling under this lead, so the REPLACE path carries the new wording.
   "- **Stamp Sterling's version when reporting on Sterling.**",
+  // 2026-10-04: the Domains section of AGENTS.md (decision
+  // consumers-learn-domain-mounting-from-agents-md-and-a-domain-check-command). A project
+  // initialized before the section existed has none of these and no heading for them, so the
+  // whole section arrives through TARGET_SECTIONS below; from then on each bullet is an
+  // ordinary tracked lead (replace, hand-tuned refusal, re-insert after the bullet before it).
+  ...DOMAINS_LEADS,
 ];
+
+// Tracked sections: a heading plus its bullets, inserted as one block before the `before`
+// heading when the home file has neither the heading nor any of the bullets. A file with
+// no `before` heading is refused (SECTION_ANCHOR_MISSING_REFUSED in scripts/stamp-contract.mjs),
+// because a place for the section is never invented. A file that has a heading starting with
+// the section's own heading but none of its bullets is refused too
+// (SECTION_HEADING_WITHOUT_BULLETS_REFUSED): that heading is the project's, or the bullets
+// were deleted on purpose. See headingIndex for how the two headings are matched.
+export const TARGET_SECTIONS = [{ heading: '## Domains', before: '## Conventions', leads: DOMAINS_LEADS }];
 
 // Renamed bullets: new lead → the old lead(s) it replaced. When the new lead is
 // absent from a sibling, a block under an old lead is replaced by the new bullet
@@ -129,6 +154,16 @@ function unfencedLineIndexes(lines) {
   const fenced = new Set();
   for (const [open, close] of fenceSpans(lines)) for (let k = open; k <= close; k++) fenced.add(k);
   return lines.map((_, i) => i).filter((i) => !fenced.has(i));
+}
+// The index of the first line outside every fence that is `heading`; -1 when there is none.
+// Strict (the default, used to find where a section goes): the whole line, or the heading
+// followed by ' (' as the templates write '## Conventions (lean …)'. A project's
+// '## Conventions of naming' is not that heading. Loose (used to ask whether a project
+// already has a heading of its own by that name): the heading followed by any text.
+export function headingIndex(text, heading, { loose = false } = {}) {
+  const lines = text.split('\n');
+  const tail = loose ? ' ' : ' (';
+  return unfencedLineIndexes(lines).find((i) => lines[i].trimEnd() === heading || lines[i].startsWith(`${heading}${tail}`)) ?? -1;
 }
 export function extractBlock(text, lead) {
   const lines = text.split('\n');

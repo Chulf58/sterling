@@ -16,6 +16,7 @@ import { agentRole } from './agent-name.mjs';
 import { remember } from './bounded.mjs';
 import { sessionKind } from './dispatch.mjs';
 import { inWorkerChild } from './worker.mjs';
+import { refreshRegistryRow } from '../../../scripts/hooks/lib/registry-refresh.mjs';
 
 const STATUS_TTL_MS = 10_000;
 // The undeclared-source scan spawns git twice, so a process reuses its answer for this long.
@@ -40,6 +41,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   const stagedCache = new Map();
   // H1's board readiness block, per project root, refreshed on the status line's TTL.
   const boardCache = new Map();
+  // The last root session whose start refreshed each project's registry row.
+  const registrySeen = new Map();
 
   function statusLine(root) {
     const hit = statusCache.get(root);
@@ -201,6 +204,18 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
           if (line) {
             logLine(root, `context: ${line}`);
             blocks.push(line);
+          }
+        }
+        // H1's registry step, once per root session: last-seen and the row's stack tags
+        // (scripts/hooks/lib/registry-refresh.mjs). Never in the worker child, whose
+        // session is not the user's (anti-pattern e40bf982).
+        if (!inWorkerChild(env) && registrySeen.get(root) !== input.sessionID) {
+          registrySeen.set(root, input.sessionID);
+          try {
+            refreshRegistryRow(root, { config: state.config, at: now() });
+          } catch (e) {
+            logLine(root, `context: project registry refresh failed: ${errText(e)}`);
+            blocks.push(`STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
           }
         }
         const undeclared = undeclaredBlock(root, state.config);
