@@ -116,6 +116,27 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "use only listed skills.\n",
     after: "use only listed skills.\n- **Run Sterling init yourself.** When a project needs init (a plugin cutover, a new project, a launcher still on `--plugin-dir`), run it; never print the init command for the user to run. Only an interactive login is a `! <command>` case (user-ruled 2026-10-03 through the question form, 'Add it', after a conductor handed the user a broken init command twice; GitHub issue #4).\n",
   },
+  {
+    commit: 'fix/instructions-name-bin-entries',
+    date: '2026-10-04',
+    reason: 'the merge path is named by its bundled bin/ entry, not scripts/direct-merge.mjs, which fails on an installed plugin copy (GitHub issue #16)',
+    before: 'sanctioned merge path — `node scripts/direct-merge.mjs` via `/sterling:merge` — never',
+    after: 'sanctioned merge path — `/sterling:merge`, which runs the bundled `bin/direct-merge.mjs` — never',
+  },
+  {
+    commit: 'fix/instructions-name-bin-entries',
+    date: '2026-10-04',
+    reason: 'the rotation note is written by the bundled bin/ entry through the plugin root, not <clone>/scripts/rotation-note.mjs (GitHub issue #16)',
+    before: '`node <clone>/scripts/rotation-note.mjs --next-slice "<exact next slice>" --lane "<agent type; files; what it found or changed; what is left>"`; H1 injects',
+    after: '`node "${CLAUDE_PLUGIN_ROOT}/bin/rotation-note.mjs" --next-slice "<exact next slice>" --lane "<agent type; files; what it found or changed; what is left>"`; H1 injects',
+  },
+  {
+    commit: 'fix/instructions-name-bin-entries',
+    date: '2026-10-04',
+    reason: 'the plan lock release is run through the bundled bin/ entry (GitHub issue #16)',
+    before: 'release it with `plan-lock.mjs --release --reason "<why>"` only when',
+    after: 'release it with `node "${CLAUDE_PLUGIN_ROOT}/bin/plan-lock.mjs" --release --reason "<why>"` only when',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
