@@ -16,6 +16,12 @@
 // the boolean true, a missing session id. If Claude Code renames either, the
 // guard stops firing; it never starts skipping real sessions.
 //
+// ONE DISSENTING FILE WINS. The files are named by pid, so a file left behind
+// by a dead spare can sit beside the real session's own file for the same id.
+// Every file for the id is therefore read before answering: a file whose pid
+// names a process that no longer exists is ignored, and of the rest a single
+// one without `spare === true` answers "not a spare".
+//
 // Dependency-light: node builtins only, no workspace imports, never throws.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -30,18 +36,36 @@ export const SESSION_FILE_CAP = 256;
 // A measured session file is a few hundred bytes; anything this large is not one.
 const SESSION_FILE_MAX_BYTES = 64 * 1024;
 
-/** <CLAUDE_CONFIG_DIR, else <home>/.claude>/sessions, the directory Claude Code writes its per-process session files to. */
-export function claudeSessionsDir({ env = process.env, home = homedir() } = {}) {
-  return join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'sessions');
+/**
+ * <CLAUDE_CONFIG_DIR, else <home>/.claude>/sessions, the directory Claude Code
+ * writes its per-process session files to. `home` is a path or a function
+ * returning one; it is resolved only when CLAUDE_CONFIG_DIR is empty. Throws
+ * when that lookup throws.
+ */
+export function claudeSessionsDir({ env = process.env, home = homedir } = {}) {
+  return join(env.CLAUDE_CONFIG_DIR || join(typeof home === 'function' ? home() : home, '.claude'), 'sessions');
+}
+
+// A file's pid is usable when it is a positive integer. Only ESRCH proves the
+// process is gone; EPERM means it exists under another user, and any other
+// failure is doubt, which keeps the file in the count.
+function pidIsDead(pid, kill) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    kill(pid, 0);
+    return false;
+  } catch (e) {
+    return e?.code === 'ESRCH';
+  }
 }
 
 /**
- * True only when a regular file `<sessions dir>/*.json` parses to an object
- * whose `sessionId === sessionId` and whose `spare === true`. Names that do not
- * end in `.json` (the `<pid>.<hex>.key` files) are never opened. False for
- * everything else, including every error.
+ * True only when at least one regular file `<sessions dir>/*.json` has
+ * `sessionId === sessionId` and a pid that is not dead, and EVERY such file has
+ * `spare === true`. Names that do not end in `.json` (the `<pid>.<hex>.key`
+ * files) are never opened. False for everything else, including every error.
  */
-export function isSpareSession(sessionId, { env = process.env, home = homedir(), cap = SESSION_FILE_CAP } = {}) {
+export function isSpareSession(sessionId, { env = process.env, home = homedir, cap = SESSION_FILE_CAP, kill = process.kill.bind(process) } = {}) {
   try {
     if (typeof sessionId !== 'string' || !sessionId) return false;
     const dir = claudeSessionsDir({ env, home });
@@ -50,17 +74,22 @@ export function isSpareSession(sessionId, { env = process.env, home = homedir(),
       .map((e) => e.name)
       .sort()
       .slice(0, cap);
+    let spares = 0;
     for (const name of names) {
+      let entry;
       try {
         const file = join(dir, name);
         if (statSync(file).size > SESSION_FILE_MAX_BYTES) continue;
-        const entry = JSON.parse(readFileSync(file, 'utf8'));
-        if (entry && typeof entry === 'object' && entry.sessionId === sessionId && entry.spare === true) return true;
+        entry = JSON.parse(readFileSync(file, 'utf8'));
       } catch {
-        // an unreadable or non-JSON file says nothing about this session
+        continue; // an unreadable or non-JSON file says nothing about this session
       }
+      if (!entry || typeof entry !== 'object' || entry.sessionId !== sessionId) continue;
+      if (pidIsDead(entry.pid, kill)) continue;
+      if (entry.spare !== true) return false;
+      spares += 1;
     }
-    return false;
+    return spares > 0;
   } catch {
     return false;
   }

@@ -13,7 +13,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -114,8 +114,18 @@ function claudeDir(sessions) {
   return cfg;
 }
 
-const spareFile = (sessionId, extra = { spare: true }) => ({ pid: 2824593, sessionId, cwd: '/x', kind: 'bg', agent: 'conductor', jobId: sessionId.slice(-8), ...extra, status: 'idle' });
-const realFile = (sessionId) => ({ pid: 2824500, sessionId, cwd: '/x', kind: 'interactive', status: 'busy' });
+// A sessions file whose pid names a dead process is ignored by the helper, so the fixtures carry
+// this test process's pid: it is alive for as long as the hook child it spawns runs.
+const spareFile = (sessionId, extra = { spare: true }) => ({ pid: process.pid, sessionId, cwd: '/x', kind: 'bg', agent: 'conductor', jobId: sessionId.slice(-8), ...extra, status: 'idle' });
+const realFile = (sessionId) => ({ pid: process.pid, sessionId, cwd: '/x', kind: 'interactive', status: 'busy' });
+
+// The pid of a process that has already exited and been reaped.
+function deadPid() {
+  const r = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.throws(() => process.kill(r.pid, 0), { code: 'ESRCH' }, 'the fixture pid must be dead');
+  return r.pid;
+}
 
 function runH1(dir, { session_id = SPARE, source = 'startup', env }) {
   const input = { session_id, transcript_path: join(dir, 't', `${session_id}.jsonl`), cwd: dir, permission_mode: 'default', hook_event_name: 'SessionStart', source };
@@ -182,6 +192,51 @@ test('H1 spare skip: an existing git-settled snapshot is left byte-identical too
     cleanup();
   }
 });
+
+test('H1 spare skip: no git process is started', () => {
+  try {
+    const dir = project();
+    const cfg = claudeDir({ '2824593.json': spareFile(SPARE) });
+    const bin = tmp('sterling-h1-spare-bin-');
+    const marker = join(bin, 'git-ran');
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\ntouch "${marker}"\nexit 1\n`);
+    chmodSync(join(bin, 'git'), 0o755);
+    const PATH = `${bin}:${process.env.PATH}`;
+    const before = snapshot(dir);
+    assertSkipped(dir, runH1(dir, { env: { ...fakeEnv(cfg), PATH } }), before, 'git shim');
+    assert.ok(!existsSync(marker), 'the git shim first on PATH was never run');
+    const shim = spawnSync('git', ['status'], { cwd: dir, env: { ...process.env, PATH } });
+    assert.equal(shim.status, 1, 'the shim is the git that this PATH resolves');
+    assert.ok(existsSync(marker), 'and running it does write the marker');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 fallback: a lone spare file whose pid is dead is ignored, so session start runs as before', () => {
+  try {
+    const dir = project();
+    const cfg = claudeDir({ '100.json': spareFile(SPARE, { spare: true, pid: deadPid() }) });
+    assertRanAsToday(dir, runH1(dir, { env: fakeEnv(cfg) }), SPARE, 'dead-pid spare');
+  } finally {
+    cleanup();
+  }
+});
+
+for (const [label, spareName, realName] of [
+  ['spare file first in name order', '100.json', '200.json'],
+  ['real file first in name order', '200.json', '100.json'],
+]) {
+  test(`H1 fallback: a stale spare file beside the real session's own file for the same id (${label}) is not a spare`, () => {
+    try {
+      const dir = project();
+      const cfg = claudeDir({ [spareName]: spareFile(SPARE, { spare: true, pid: deadPid() }), [realName]: realFile(SPARE) });
+      assertRanAsToday(dir, runH1(dir, { env: fakeEnv(cfg) }), SPARE, label);
+    } finally {
+      cleanup();
+    }
+  });
+}
 
 test('H1 spare skip: without CLAUDE_CONFIG_DIR the sessions directory is <HOME>/.claude/sessions', () => {
   try {
@@ -277,6 +332,57 @@ test('helper: true only for a matching sessionId whose spare is the boolean true
     assert.equal(isSpareSession(LIVE, helperOpts(cfg)), false, 'a real session has no spare key');
     assert.equal(isSpareSession('unknown', helperOpts(cfg)), false);
     for (const bad of [undefined, null, '', 42, {}, true]) assert.equal(isSpareSession(bad, helperOpts(cfg)), false, `session_id ${JSON.stringify(bad)}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('helper: every file matching the id must say spare; one that does not answers "not a spare" in either name order', () => {
+  try {
+    for (const [spareName, realName] of [['100.json', '200.json'], ['200.json', '100.json']]) {
+      const live = claudeDir({ [spareName]: spareFile(SPARE), [realName]: realFile(SPARE) });
+      assert.equal(isSpareSession(SPARE, helperOpts(live)), false, `both pids alive, spare in ${spareName}`);
+      const stale = claudeDir({ [spareName]: spareFile(SPARE, { spare: true, pid: deadPid() }), [realName]: realFile(SPARE) });
+      assert.equal(isSpareSession(SPARE, helperOpts(stale)), false, `stale spare in ${spareName}`);
+    }
+    const two = claudeDir({ '100.json': spareFile(SPARE), '200.json': spareFile(SPARE) });
+    assert.equal(isSpareSession(SPARE, helperOpts(two)), true, 'two matching files that both say spare');
+  } finally {
+    cleanup();
+  }
+});
+
+test('helper: a matching file whose pid names a dead process is ignored; a live pid or no usable pid counts', () => {
+  try {
+    const file = (extra) => claudeDir({ '1.json': { sessionId: SPARE, spare: true, ...extra } });
+    assert.equal(isSpareSession(SPARE, helperOpts(file({ pid: deadPid() }))), false, 'a lone spare file with a dead pid');
+    assert.equal(isSpareSession(SPARE, helperOpts(file({ pid: process.pid }))), true, 'a lone spare file with a live pid');
+    assert.equal(isSpareSession(SPARE, helperOpts(file({}))), true, 'no pid field');
+    for (const pid of ['123', 0, -1, 1.5, null]) assert.equal(isSpareSession(SPARE, helperOpts(file({ pid }))), true, `pid ${JSON.stringify(pid)} is not usable, so the file counts`);
+    const calls = [];
+    const kill = (code) => (pid, sig) => {
+      calls.push([pid, sig]);
+      if (code) throw Object.assign(new Error(code), { code });
+    };
+    assert.equal(isSpareSession(SPARE, { ...helperOpts(file({ pid: 4242 })), kill: kill('EPERM') }), true, 'EPERM means the process exists');
+    assert.equal(isSpareSession(SPARE, { ...helperOpts(file({ pid: 4242 })), kill: kill('ESRCH') }), false, 'ESRCH means it does not');
+    assert.deepEqual(calls, [[4242, 0], [4242, 0]], 'the probe is signal 0, which delivers nothing');
+    const mixed = claudeDir({ '1.json': spareFile(SPARE, { spare: true, pid: deadPid() }), '2.json': spareFile(SPARE) });
+    assert.equal(isSpareSession(SPARE, helperOpts(mixed)), true, 'a dead spare file does not hide a live one');
+  } finally {
+    cleanup();
+  }
+});
+
+test('helper: a home lookup that throws answers false and does not throw; it is not called when CLAUDE_CONFIG_DIR is set', () => {
+  try {
+    const boom = () => {
+      throw new Error('no home');
+    };
+    assert.equal(isSpareSession(SPARE, { env: {}, home: boom }), false);
+    assert.equal(isSpareSession(SPARE, { env: { CLAUDE_CONFIG_DIR: '' }, home: boom }), false);
+    const cfg = claudeDir({ '1.json': spareFile(SPARE) });
+    assert.equal(isSpareSession(SPARE, { env: { CLAUDE_CONFIG_DIR: cfg }, home: boom }), true, 'home is never resolved when the config dir is given');
   } finally {
     cleanup();
   }
