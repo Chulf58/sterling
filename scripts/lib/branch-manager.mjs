@@ -5,8 +5,17 @@
 // scripts/direct-merge.mjs drives.
 import { spawnSync } from 'node:child_process';
 
-function git(cwd, args, { allowFail = false } = {}) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000 });
+// treeWrite: a step that rewrites the working tree (checkout, merge) gets NO
+// wall-clock timeout. spawnSync's timeout kills git with SIGTERM, and git killed
+// while it writes the tree leaves the base checked out at its old commit with a
+// partly written tree, no MERGE_HEAD and no lock: thousands of paths that look
+// like local edits, one `git add` away from a half-merge on the base (Dome
+// Farmer, 2026-10-03: a merge of 325 commits on a Windows drive under WSL2
+// outran the 60 s below). No finite value is safe on a slow drive, so there is
+// none. maxBuffer is lifted for the same reason: spawnSync also kills the child
+// when its output passes 1 MB, and a large merge prints a long diffstat.
+function git(cwd, args, { allowFail = false, treeWrite = false } = {}) {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', ...(treeWrite ? { maxBuffer: Infinity } : { timeout: 60_000 }) });
   if (r.status !== 0 && !allowFail) {
     // Evidence capture for the unreproduced 'fatal: stash failed' class (board
     // aa01da07): a spawnSync that never ran or timed out has status null and an
@@ -62,6 +71,49 @@ export function defaultBranch(cwd) {
   throw new Error('branch-manager: cannot determine the default branch (no origin/HEAD, no main, no master) — pass --into');
 }
 
+/** What a failed tree-writing step left behind, and how to get back to the
+ *  feature branch. Read-only: it never resets or checks out anything, because
+ *  discarding tree contents is the user's call. A value git could not give is
+ *  printed as unknown and treated as not clean. */
+function repoStateReport({ cwd, branch, step }) {
+  const read = (args) => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000, maxBuffer: Infinity });
+    return r.error || r.signal ? null : r;
+  };
+  const sym = read(['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  const onBranch = sym === null ? null : sym.status === 0 ? sym.stdout.trim() : '(detached HEAD)';
+  const headR = read(['rev-parse', 'HEAD']);
+  const head = headR?.status === 0 ? headR.stdout.trim() : null;
+  const mergeR = read(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']);
+  const mergeHead = mergeR === null ? null : mergeR.status === 0;
+  const statusR = read(['status', '--porcelain']);
+  const changed = statusR?.status === 0 ? statusR.stdout.split('\n').filter(Boolean).length : null;
+  const unknown = 'unknown (git could not answer)';
+  const lines = [
+    `REPO STATE after the failed \`git ${step}\` (nothing was reset or discarded for you):`,
+    `  branch:     ${onBranch ?? unknown}`,
+    `  HEAD:       ${head ?? unknown}`,
+    `  MERGE_HEAD: ${mergeHead === null ? unknown : mergeHead ? 'present (a merge is in progress)' : 'absent'}`,
+    `  changed paths: ${changed === null ? unknown : `${changed} (git status --porcelain)`}`,
+  ];
+  if (changed === 0 && mergeHead === false) {
+    lines.push(
+      onBranch === branch
+        ? `The working tree is clean and still on ${branch}. Nothing to recover.`
+        : `The working tree is clean. Return to the branch with: git checkout ${branch}`
+    );
+    return lines.join('\n');
+  }
+  lines.push(
+    'Do NOT `git add` or commit here until `git status --short` prints nothing: the changed',
+    `paths are a partly written merge of ${branch}, not your edits, and committing them puts a half-merge on ${onBranch ?? 'the checked-out branch'}.`,
+    `Recover (this discards the partly written files; every commit on ${branch} is intact):`
+  );
+  if (mergeHead !== false) lines.push('  git merge --abort');
+  lines.push(`  git checkout -f ${branch}`, 'then check that `git status --short` prints nothing, and rerun the merge.');
+  return lines.join('\n');
+}
+
 /** Conductor-direct merge: --no-ff merge `branch` into `into`, then SAFE-delete `branch`. Requires a clean tree (fail loud, never stash). */
 export function mergeBranchInto({ cwd, branch, into, message }) {
   const status = git(cwd, ['status', '--porcelain']);
@@ -85,8 +137,16 @@ export function mergeBranchInto({ cwd, branch, into, message }) {
     }
     throw new Error(parts.join('\n'));
   }
-  git(cwd, ['checkout', into]);
-  git(cwd, ['merge', '--no-ff', branch, '-m', message ?? `Merge ${branch} into ${into}`]);
+  for (const args of [
+    ['checkout', into],
+    ['merge', '--no-ff', branch, '-m', message ?? `Merge ${branch} into ${into}`],
+  ]) {
+    try {
+      git(cwd, args, { treeWrite: true });
+    } catch (e) {
+      throw new Error(`${e.message}\n${repoStateReport({ cwd, branch, step: args[0] })}`);
+    }
+  }
   git(cwd, ['branch', '-d', branch]);
   return { merged_into: into, branch_merged: branch };
 }
