@@ -7,6 +7,9 @@
 //     template-descended block). Anything else is hand-tuned → refuse loudly,
 //     print the diff, leave the file untouched (P5).
 //   - a missing anchor bullet is drift → reported, never invented.
+//   - a tracked SECTION (TARGET_SECTIONS: a heading plus its bullets) that a sibling lacks
+//     entirely is inserted whole before the heading it sits ahead of in the template; a
+//     sibling with no such heading is refused, and its bullets are then not reported one by one.
 //   - dry-run by default; --apply writes.
 //   - QUIET ON CLEAN: an in-sync project prints nothing and is counted in the
 //     summary; --verbose restores the per-bullet listing. The caller that matters
@@ -23,12 +26,14 @@ import {
   CLAUDE_TEMPLATE_REL,
   TEMPLATE_RELS,
   TARGET_LEADS,
+  TARGET_SECTIONS,
   RENAMED_LEADS,
   HISTORY_LEADS,
   FENCE,
   fenceSpans,
   extractBlock,
   extractTemplateBlock,
+  headingIndex,
   readTemplateBullets,
 } from './lib/contract-bullets.mjs';
 
@@ -62,6 +67,14 @@ const INSERT_AFTER = new Map([
   ["- **Solve, don't board.**", ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', '- **Instruction-file proposals replace memory.**', "- **Ask, don't guess — through the AskUserQuestion tool.**"]],
   ['- **Close-on-commit: a commit that fulfils a board item pays it**', ["- **Solve, don't board.**"]],
 ]);
+// A section bullet missing from a sibling that has the section goes after the nearest
+// section bullet above it. The first bullet has no anchor: without it the section's start is
+// unknown, and that is ANCHOR_MISSING_REFUSED.
+for (const section of TARGET_SECTIONS) {
+  section.leads.forEach((lead, i) => {
+    if (i > 0) INSERT_AFTER.set(lead, section.leads.slice(0, i).reverse());
+  });
+}
 
 // CRLF handling (Sol review fix round, finding 6): comparisons run on a CR-stripped copy so a
 // CRLF sibling is never spuriously treated as hand-tuned (the recorded stamp-contract CRLF
@@ -157,7 +170,36 @@ for (const p of projects) {
   // anchor an insert — a refused block is never restructured by an insert beside it.
   const VALID_ANCHOR = new Set(['matches', 'updated', 'would_update', 'inserted', 'would_insert', 'renamed', 'would_rename']);
   const outcome = (lead) => [...actions].reverse().find((a) => a.lead === lead)?.action;
+  // Whole sections first. A sibling with the heading, or with any of the section's bullets
+  // in either file, is left to the per-lead loop below.
+  const sectionRefused = new Set();
+  for (const section of TARGET_SECTIONS) {
+    const home = leadLayer.get(section.leads[0]);
+    const target = siblingFiles.get(home);
+    if (headingIndex(target.text, section.heading) !== -1) continue;
+    if (section.leads.some((lead) => [...siblingFiles.values()].some((f) => extractBlock(f.text, lead)))) continue;
+    const label = `${section.heading} (section)`;
+    const at = headingIndex(target.text, section.before);
+    if (at === -1) {
+      actions.push({
+        lead: label,
+        action: 'SECTION_ANCHOR_MISSING_REFUSED',
+        file: layerFileName(home),
+        detail: `${layerFileName(home)} has no '${section.before}' heading to put the section before. Copy the '${section.heading}' section from ${home} to where it belongs and re-run.`,
+      });
+      drift++;
+      for (const lead of section.leads) sectionRefused.add(lead);
+      continue;
+    }
+    const lines = target.text.split('\n');
+    const block = [section.heading, '', ...section.leads.flatMap((lead) => current.get(lead).split('\n')), ''];
+    if (at > 0 && lines[at - 1].trim() !== '') block.unshift('');
+    lines.splice(at, 0, ...block);
+    target.text = lines.join('\n');
+    actions.push({ lead: label, action: APPLY ? 'section_inserted' : 'would_insert_section', file: layerFileName(home) });
+  }
   for (const lead of TARGET_LEADS) {
+    if (sectionRefused.has(lead)) continue;
     const home = leadLayer.get(lead);
     const other = TEMPLATE_RELS.find((rel) => rel !== home);
     const want = current.get(lead);
@@ -231,7 +273,7 @@ for (const p of projects) {
     drift++;
   }
 
-  const dirty = actions.some((a) => ['updated', 'inserted', 'renamed'].includes(a.action));
+  const dirty = actions.some((a) => ['updated', 'inserted', 'renamed', 'section_inserted'].includes(a.action));
   if (APPLY && dirty) {
     for (const { path, text, eol } of siblingFiles.values()) writeFileSync(path, withEol(text, eol));
   }
@@ -258,6 +300,7 @@ for (const r of results) {
   console.log(`${r.actions.some((a) => a.action.includes('REFUSED')) ? '✗' : '•'} ${r.project} (${r.file})`);
   for (const a of VERBOSE ? r.actions : notable) {
     console.log(`    ${a.action}  ${a.lead.slice(0, 60)}…`);
+    if (a.detail) console.log(`      ${a.detail}`);
     if (a.have) console.log(`      sibling text (hand-tuned, NOT touched):\n      ${a.have.split('\n').join('\n      ')}`);
   }
 }

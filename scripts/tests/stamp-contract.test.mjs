@@ -502,3 +502,109 @@ test('stamp-contract: Solve and Close-on-commit bullets under their OLD leads ar
     f.cleanup();
   }
 });
+
+// ---- the Domains section (TARGET_SECTIONS in scripts/lib/contract-bullets.mjs) ----
+// An AGENTS.md written before the section existed gets the whole section, heading included,
+// ahead of its Conventions heading; after that its bullets are ordinary tracked leads.
+
+const DOMAINS_SECTION = /## Domains\n[\s\S]*?(?=## Conventions)/;
+const DOMAIN_DESCRIPTION_LEAD = '- **A domain needs a description**';
+
+function sectionFixture(name, mutateAgents) {
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
+  const regDb = join(scratch, 'registry.db');
+  const dir = mkdtempSync(join(tmpdir(), `sterling-stamp-${name}-`));
+  writeCompleteSibling(dir, name);
+  const complete = { agents: readFileSync(join(dir, 'AGENTS.md'), 'utf8'), claude: readFileSync(join(dir, 'CLAUDE.md'), 'utf8') };
+  assert.match(complete.agents, DOMAINS_SECTION, 'fixture sanity: the rendered template carries the Domains section');
+  writeFileSync(join(dir, 'AGENTS.md'), mutateAgents(complete.agents));
+  const registry = new ProjectRegistry(regDb);
+  try {
+    registry.register({ repo_path: dir, name, stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
+  } finally {
+    registry.close();
+  }
+  const read = () => ({ agents: readFileSync(join(dir, 'AGENTS.md'), 'utf8'), claude: readFileSync(join(dir, 'CLAUDE.md'), 'utf8') });
+  const cleanup = () => {
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  };
+  return { regDb, complete, read, cleanup };
+}
+
+test('stamp-contract: an AGENTS.md with no Domains section gains the whole section before Conventions; a dry run writes nothing and a second run changes nothing', () => {
+  const f = sectionFixture('no-domains', (agents) => agents.replace(DOMAINS_SECTION, ''));
+  try {
+    const before = f.read();
+    assert.ok(!before.agents.includes('## Domains'), 'fixture sanity: the section is gone');
+
+    const dry = runStampContract(f.regDb, []);
+    assert.equal(dry.status, 0, `${dry.stdout}\n${dry.stderr}`);
+    assert.match(dry.stdout, /would_insert_section {2}## Domains/);
+    assert.deepEqual(f.read(), before, 'a dry run writes nothing');
+
+    const applied = runStampContract(f.regDb);
+    assert.equal(applied.status, 0, `inserting the section is not a refusal: ${applied.stdout}\n${applied.stderr}`);
+    assert.match(applied.stdout, /section_inserted {2}## Domains/);
+    assert.deepEqual(f.read(), f.complete, 'the result is byte-identical to the current template render; CLAUDE.md is untouched');
+
+    const again = runStampContract(f.regDb);
+    assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+    assert.ok(!/inserted|updated|renamed/.test(again.stdout), `a second run has nothing to do:\n${again.stdout}`);
+    assert.deepEqual(f.read(), f.complete, 'a second run changes nothing');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: an AGENTS.md that already has the Domains section (a newer init wrote it) is left byte-identical', () => {
+  const f = sectionFixture('has-domains', (agents) => agents);
+  try {
+    const r = runStampContract(f.regDb);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.ok(!/section/.test(r.stdout), 'no section action on a file that has the heading');
+    assert.deepEqual(f.read(), f.complete);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: a Domains bullet is a tracked lead: hand-tuned text is HAND_TUNED_REFUSED and untouched, and a deleted bullet comes back in template order', () => {
+  const tuned = sectionFixture('tuned-domains', (agents) => agents.replace(/^- \*\*A domain needs a description\*\*.*$/m, `${DOMAIN_DESCRIPTION_LEAD} and we write ours in Danish.`));
+  try {
+    const before = tuned.read();
+    assert.notEqual(before.agents, tuned.complete.agents, 'fixture sanity: the bullet was changed');
+    const r = runStampContract(tuned.regDb);
+    assert.equal(r.status, 2, 'hand-tuned text is drift');
+    assert.match(r.stdout, /HAND_TUNED_REFUSED {2}- \*\*A domain needs a description\*\*/);
+    assert.deepEqual(tuned.read(), before, 'nothing written');
+  } finally {
+    tuned.cleanup();
+  }
+
+  const dropped = sectionFixture('dropped-domain-bullet', (agents) => dropBlock(agents, DOMAIN_DESCRIPTION_LEAD));
+  try {
+    assert.ok(!dropped.read().agents.includes(DOMAIN_DESCRIPTION_LEAD), 'fixture sanity: the bullet is gone');
+    const r = runStampContract(dropped.regDb);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /inserted {2}- \*\*A domain needs a description\*\*/);
+    assert.deepEqual(dropped.read(), dropped.complete, 'the bullet is back where the template has it');
+  } finally {
+    dropped.cleanup();
+  }
+});
+
+test('stamp-contract: no Domains section and no Conventions heading to put it before is one loud refusal, with nothing written', () => {
+  const f = sectionFixture('no-conventions', (agents) => agents.replace(DOMAINS_SECTION, '').replace(/^## Conventions.*$/m, '## House rules'));
+  try {
+    const before = f.read();
+    const r = runStampContract(f.regDb);
+    assert.equal(r.status, 2, `a section with nowhere to go is drift, never a silent skip: ${r.stdout}`);
+    assert.match(r.stdout, /SECTION_ANCHOR_MISSING_REFUSED {2}## Domains/);
+    assert.match(r.stdout, /no '## Conventions' heading/);
+    assert.equal((r.stdout.match(/REFUSED {2}/g) ?? []).length, 1, `one refusal for the section, not one per bullet:\n${r.stdout}`);
+    assert.deepEqual(f.read(), before, 'nothing written');
+  } finally {
+    f.cleanup();
+  }
+});
