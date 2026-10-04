@@ -71,6 +71,13 @@ const notApplicableExemptionSchema = z
 export const ARTICLE_KINDS = ['feature', 'probe', 'tool', 'concept'] as const;
 export const NOT_APPLICABLE_EXEMPT_KINDS: readonly (typeof ARTICLE_KINDS)[number][] = ['probe', 'tool'];
 
+// The feature_article states that require companion fields. Read by the
+// superRefine refusal and by knowledge_schema's conditions on state and on
+// each named field.
+export const ARTICLE_STATE_REQUIRES: Readonly<Record<string, readonly ('state_reason' | 'wiring_todo_id')[]>> = {
+  dormant: ['state_reason', 'wiring_todo_id'],
+};
+
 const currentAcItemSchema = z.object({
   ac_id: z.string().min(1),
   text: z.string().min(1),
@@ -280,8 +287,9 @@ export const featureArticleSchema = base
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
-    if (rec.state === 'dormant' && (!rec.state_reason || !rec.wiring_todo_id)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (§3.2.3)" });
+    const stateNeeds = ARTICLE_STATE_REQUIRES[rec.state];
+    if (stateNeeds?.some((field) => !rec[field])) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `state '${rec.state}' requires ${stateNeeds.join(' and ')} (§3.2.3)` });
     }
     // Board a9280db7 (decision foreign_c48380bf): the not_applicable exemption on
     // live_test_refs/current_ac is gated by article_kind — accepted ONLY on
@@ -457,6 +465,11 @@ export const disconfirmedHypothesisSchema = base
 // axes are genuinely different questions — whether the RECORD still serves
 // (envelope) versus whether the QUESTION is still open (this field) — so they
 // get different names rather than one overloaded one.
+// The resolution_status value that names a terminus, and the field holding it.
+// Read by the superRefine pair below and by knowledge_schema's conditions.
+export const OPEN_QUESTION_CLOSED = 'closed';
+export const OPEN_QUESTION_TERMINUS_FIELD = 'closed_into';
+
 export const openQuestionSchema = base
   .extend({
     type: z.literal('open_question'),
@@ -487,19 +500,19 @@ export const openQuestionSchema = base
     // The one invariant the type carries beyond its shape: a closed question
     // must NAME where its answer went. Without this, closing is indistinguishable
     // from abandoning, and the answered-question type stops being the terminus.
-    if (rec.resolution_status === 'closed' && !rec.closed_into) {
+    if (rec.resolution_status === OPEN_QUESTION_CLOSED && !rec[OPEN_QUESTION_TERMINUS_FIELD]) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "resolution_status 'closed' requires closed_into (the research_finding the answer landed in)",
+        message: `resolution_status '${OPEN_QUESTION_CLOSED}' requires ${OPEN_QUESTION_TERMINUS_FIELD} (the research_finding the answer landed in)`,
       });
     }
     // The mirror, so 'open' cannot carry a phantom terminus: an open question
     // pointing at a finding is a record that contradicts itself, and a reader
     // would have no way to tell which half is true.
-    if (rec.resolution_status !== 'closed' && rec.closed_into) {
+    if (rec.resolution_status !== OPEN_QUESTION_CLOSED && rec[OPEN_QUESTION_TERMINUS_FIELD]) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "closed_into is set but resolution_status is 'open' — close the question or drop the terminus",
+        message: `${OPEN_QUESTION_TERMINUS_FIELD} is set but resolution_status is 'open' — close the question or drop the terminus`,
       });
     }
   });
@@ -620,6 +633,18 @@ export const DRAIN_VERBS = {
   restore_performed: 'resolved',
 } as const satisfies Record<(typeof SYSTEM_REASONS)[number], string>;
 
+// The todo cross-field rules, read by the superRefine below and by
+// knowledge_schema's conditions: what a maintenance-queue item must carry, and
+// the user-only fields it must not (each with the verb its refusal uses).
+export const TODO_SYSTEM_SOURCE = 'system';
+export const TODO_SYSTEM_REQUIRES = ['system_reason'] as const;
+export const TODO_USER_ONLY_FIELDS = { blocked_by: 'orders', needs: 'marks' } as const;
+
+/** True when a board item lists its own slug among its blockers. */
+export function todoBlocksItself(rec: { slug?: string; blocked_by?: string[] }): boolean {
+  return rec.slug !== undefined && rec.blocked_by?.includes(rec.slug) === true;
+}
+
 // §3.2.7 — the board and the maintenance queue. There is no 'done' status:
 // done = removed by the artifact-writing event (P4).
 export const todoSchema = base
@@ -677,27 +702,39 @@ export const todoSchema = base
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
-    if (rec.source === 'system' && !rec.system_reason) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "source 'system' requires system_reason (§3.2.7)" });
+    if (rec.source === TODO_SYSTEM_SOURCE) {
+      for (const field of TODO_SYSTEM_REQUIRES) {
+        if (!rec[field]) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `source '${TODO_SYSTEM_SOURCE}' requires ${field} (§3.2.7)` });
+        }
+      }
+      for (const [field, verb] of Object.entries(TODO_USER_ONLY_FIELDS) as [keyof typeof TODO_USER_ONLY_FIELDS, string][]) {
+        if (rec[field] !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [field],
+            message: `${field} ${verb} source:'user' board tasks only — maintenance-queue items never carry it`,
+          });
+        }
+      }
     }
-    if (rec.blocked_by !== undefined && rec.source === 'system') {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['blocked_by'],
-        message: "blocked_by orders source:'user' board tasks only — maintenance-queue items never carry it",
-      });
-    }
-    if (rec.needs !== undefined && rec.source === 'system') {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['needs'],
-        message: "needs marks source:'user' board tasks only — maintenance-queue items never carry it",
-      });
-    }
-    if (rec.slug !== undefined && rec.blocked_by?.includes(rec.slug)) {
+    if (todoBlocksItself(rec)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['blocked_by'], message: `blocked_by lists '${rec.slug}', the item itself — an item cannot block itself` });
     }
   });
+
+/**
+ * The phase interface names a brief does not declare in
+ * technical_design.interfaces. Read by the superRefine refusal below; the
+ * knowledge_schema condition on phases[].interfaces is tested against it.
+ */
+export function undeclaredPhaseInterfaces(rec: {
+  technical_design: { interfaces: { name: string }[] };
+  phases: { phase_id: string; interfaces?: string[] }[];
+}): { phase_id: string; name: string }[] {
+  const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
+  return rec.phases.flatMap((phase) => (phase.interfaces ?? []).filter((name) => !declared.has(name)).map((name) => ({ phase_id: phase.phase_id, name })));
+}
 
 // §4 — the brief-as-contract; the single authoritative copy lives in the store.
 export const briefSchema = base
@@ -752,16 +789,11 @@ export const briefSchema = base
     refineSupersession(rec, ctx);
     // a phase's interface slice must reference declared design interfaces —
     // a dangling name would hand the test-writer a contract that doesn't exist
-    const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
-    for (const phase of rec.phases) {
-      for (const name of phase.interfaces ?? []) {
-        if (!declared.has(name)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: `phase '${phase.phase_id}' references undeclared interface '${name}' (§8.1 interface slice must come from technical_design.interfaces)`,
-          });
-        }
-      }
+    for (const { phase_id, name } of undeclaredPhaseInterfaces(rec)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `phase '${phase_id}' references undeclared interface '${name}' (§8.1 interface slice must come from technical_design.interfaces)`,
+      });
     }
   });
 
@@ -1183,19 +1215,37 @@ export interface FieldShape {
   /**
    * Present only when this field's top-level type is an array-of-objects
    * (e.g. files[]'s `{path, role}[]`, current_ac[]'s `{ac_id, text,
-   * verifiable_at}[]`) — the element object's OWN sub-fields, one level deep,
-   * with their own type + enum_values (board db0e2799). Without this, a
+   * verifiable_at}[]`) — the element object's OWN sub-fields, each a full
+   * FieldShape with its own type + enum_values (board db0e2799). Without this, a
    * nested enum (e.g. current_ac[].verifiable_at) was invisible in
    * knowledge_schema and only discoverable by having a write on that
    * sub-field rejected.
    */
   element_fields?: FieldShape[];
   /**
-   * Present only when the field's accepted shape depends on another field of
-   * the same record, which the type string alone cannot say (GitHub issue #15:
-   * current_ac and live_test_refs read `{...}[] | {not_applicable}` while the
-   * `{not_applicable}` branch is accepted on only some article_kind values).
-   * Plain words, derived from the same constants the validator uses.
+   * Present only when the field is a plain object, or a union with an object
+   * branch: the object's own members with their requiredness, the way
+   * element_fields describes an array's element (dependencies, user_stated,
+   * technical_design, blast_radius, catalog, and the {not_applicable} branch).
+   */
+  member_fields?: FieldShape[];
+  /** Present on a string that must not be empty (`.min(n)`); on an array, it applies to each element. */
+  min_length?: number;
+  /**
+   * Present on a string with a format the type string does not carry. The one
+   * value is REPO_PATH_FORMAT; on an array it applies to each element. The
+   * field's condition lists what the format refuses.
+   */
+  format?: string;
+  /** The value the schema fills in when the field is absent, rendered like `example`. */
+  default?: string;
+  /**
+   * Present when a write can be refused for a reason the type string cannot
+   * say: the accepted shape depends on another field of the same record
+   * (GitHub issue #15: current_ac and live_test_refs read `{...}[] |
+   * {not_applicable}` while the `{not_applicable}` branch is accepted on only
+   * some article_kind values), or the value itself is constrained (a repo
+   * path). Plain words, derived from the same constants the validator uses.
    */
   condition?: string;
   /**
@@ -1227,14 +1277,26 @@ export interface FieldShape {
  * be why a call fails.
  *
  * Internal — carries the full descriptor (enum_values/element_fields) that
- * schemaFor/describeElementFields need. The exported `describeZod` below is
+ * schemaFor/fieldShape need. The exported `describeZod` below is
  * the thin public projection (just the type string) board be5e1d04 pins
  * directly. EXAMPLE VALUES ARE NOT COMPUTED HERE: they come from the one
  * derivation `exampleFor` owns (board 89672420), so the type projection and
  * the value projection cannot answer differently about the same node.
  */
-function describeZodDetailed(node: unknown, depth = 0): { type: string; enum_values?: string[]; element_fields?: FieldShape[] } {
+interface Described {
+  type: string;
+  enum_values?: string[];
+  element_fields?: FieldShape[];
+  member_fields?: FieldShape[];
+  min_length?: number;
+  format?: string;
+}
+
+function describeZodDetailed(node: unknown, depth = 0): Described {
   if (!node || typeof node !== 'object' || depth > 6) return { type: 'unknown' };
+  // A repo path is a transform over a plain string, so its node identity is the
+  // only thing that tells it from any other string.
+  if (node === repoPath) return { type: 'string', format: REPO_PATH_FORMAT };
   const def = (node as { _def?: Record<string, unknown> })._def;
   const name = def?.typeName as string | undefined;
   switch (name) {
@@ -1250,16 +1312,19 @@ function describeZodDetailed(node: unknown, depth = 0): { type: string; enum_val
       // and the earlier version returned at the first match — silently
       // dropping the others. Compose every present constraint into one
       // description instead of picking one.
-      const checks = (def?.checks as Array<{ kind?: string; regex?: RegExp }> | undefined) ?? [];
+      const checks = (def?.checks as Array<{ kind?: string; regex?: RegExp; value?: number; offset?: boolean; local?: boolean }> | undefined) ?? [];
       const regexCheck = checks.find((c) => c.kind === 'regex' && c.regex);
       const datetimeCheck = checks.find((c) => c.kind === 'datetime');
       const uuidCheck = checks.find((c) => c.kind === 'uuid');
-      if (!regexCheck && !datetimeCheck && !uuidCheck) return { type: 'string' };
+      const minCheck = checks.find((c) => c.kind === 'min' && typeof c.value === 'number' && c.value > 0);
+      const minLength = minCheck ? { min_length: minCheck.value } : {};
+      if (!regexCheck && !datetimeCheck && !uuidCheck) return { type: 'string', ...minLength };
       const annotations: string[] = [];
-      if (datetimeCheck) annotations.push('ISO datetime');
+      // zod's datetime() accepts only the UTC `Z` form unless offset or local is switched on.
+      if (datetimeCheck) annotations.push(datetimeCheck.offset || datetimeCheck.local ? 'ISO datetime' : 'ISO datetime, UTC Z form');
       if (uuidCheck) annotations.push('uuid');
       const base = annotations.length ? `string (${annotations.join(', ')})` : 'string';
-      return { type: regexCheck?.regex ? `${base} matching ${regexCheck.regex}` : base };
+      return { type: regexCheck?.regex ? `${base} matching ${regexCheck.regex}` : base, ...minLength };
     }
     case 'ZodNumber':
       return { type: 'number' };
@@ -1280,19 +1345,21 @@ function describeZodDetailed(node: unknown, depth = 0): { type: string; enum_val
       return { type: `literal ${JSON.stringify(def?.value)}` };
     case 'ZodArray': {
       const inner = describeZodDetailed(def?.type, depth + 1);
-      const elementFields = describeElementFields(def?.type, depth + 1);
       return {
         type: `${inner.type}[]`,
         ...(inner.enum_values ? { enum_values: inner.enum_values } : {}),
-        ...(elementFields ? { element_fields: elementFields } : {}),
+        ...(inner.member_fields ? { element_fields: inner.member_fields } : {}),
+        ...(inner.min_length !== undefined ? { min_length: inner.min_length } : {}),
+        ...(inner.format ? { format: inner.format } : {}),
       };
     }
     case 'ZodObject': {
       const shape = (node as { shape?: Record<string, unknown> }).shape ?? {};
-      return { type: `{${Object.keys(shape).join(', ')}}` };
+      const members = Object.entries(shape).map(([memberName, memberNode]) => fieldShape(memberName, memberNode, depth + 1));
+      return { type: `{${Object.keys(shape).join(', ')}}`, ...(members.length ? { member_fields: members } : {}) };
     }
     case 'ZodRecord':
-      return { type: 'record<string, string>' };
+      return { type: `record<string, ${describeZodDetailed(def?.valueType, depth + 1).type}>` };
     case 'ZodUnion': {
       const rawOptions = (def?.options as unknown[]) ?? [];
       const opts = rawOptions.map((o) => describeZodDetailed(o, depth + 1));
@@ -1309,9 +1376,13 @@ function describeZodDetailed(node: unknown, depth = 0): { type: string; enum_val
       // silently losing the nested shape because the top-level node is now a
       // union and not a bare ZodArray.
       const arrayElementFields = opts.find((o) => o.element_fields && o.type.endsWith('[]'))?.element_fields;
+      // The object branch's members, so the {not_applicable} form is described
+      // from its own schema rather than restated in prose.
+      const objectMemberFields = opts.find((o) => o.member_fields && !o.type.endsWith('[]'))?.member_fields;
       return {
         type: opts.map((o) => o.type).join(' | '),
         ...(arrayElementFields ? { element_fields: arrayElementFields } : {}),
+        ...(objectMemberFields ? { member_fields: objectMemberFields } : {}),
       };
     }
     // Wrappers: describe what they wrap. optionality is reported separately, so
@@ -1563,8 +1634,11 @@ function exampleCandidates(node: unknown, name: string | undefined, depth: numbe
       return ((def?.options as unknown[] | undefined) ?? []).flatMap((o) => exampleCandidates(o, name, depth + 1));
     // Wrappers contribute their inner candidates, but the PROOF still runs
     // against the outer node, so a refinement the wrapper adds still rules.
-    case 'ZodOptional':
     case 'ZodNullable':
+      // null comes last: the worked value is the informative one, and null is
+      // there for a record where a sibling field rules the value out.
+      return [...exampleCandidates(def?.innerType, name, depth + 1), null];
+    case 'ZodOptional':
     case 'ZodDefault':
       return exampleCandidates(def?.innerType, name, depth + 1);
     case 'ZodEffects':
@@ -1594,65 +1668,229 @@ function deriveExampleValue(node: unknown, name: string | undefined, depth: numb
  */
 export function exampleFor(node: unknown, name?: string): string | undefined {
   const derived = deriveExampleValue(node, name, 0);
-  if (!derived) return undefined;
-  const rendered = typeof derived.value === 'string' ? derived.value : JSON.stringify(derived.value);
+  return derived ? renderValue(derived.value) : undefined;
+}
+
+/** Scalars bare, composites as JSON text; nothing for a value that renders empty. */
+function renderValue(value: unknown): string | undefined {
+  const rendered = typeof value === 'string' ? value : JSON.stringify(value);
   return rendered === undefined || rendered.length === 0 ? undefined : rendered;
 }
 
-/**
- * An array field's ELEMENT sub-fields, one level deep, when the element is an
- * object (board db0e2799) — e.g. files[]'s {path, role}, current_ac[]'s
- * {ac_id, text, verifiable_at}. Only unwraps the same optional/nullable/
- * default/effects wrappers describeZod already unwraps (never recurses INTO
- * a nested array-of-objects-within-an-object — one level is what the reported
- * gap needed). Returns undefined for a non-object array element (e.g.
- * string[]), so `element_fields` is omitted entirely rather than reported
- * empty.
- */
-function describeElementFields(node: unknown, depth = 0): FieldShape[] | undefined {
-  if (!node || typeof node !== 'object' || depth > 6) return undefined;
-  const def = (node as { _def?: Record<string, unknown> })._def;
-  const name = def?.typeName as string | undefined;
-  switch (name) {
-    case 'ZodObject': {
-      const shape = (node as { shape?: Record<string, unknown> }).shape ?? {};
-      return Object.entries(shape).map(([fieldName, fieldNode]) => {
-        const described = describeZodDetailed(fieldNode, depth + 1);
-        const required = !(fieldNode as { isOptional?: () => boolean }).isOptional?.();
-        const example = exampleFor(fieldNode, fieldName);
-        return {
-          name: fieldName,
-          required,
-          type: described.type,
-          ...(described.enum_values ? { enum_values: described.enum_values } : {}),
-          ...(example ? { example } : {}),
-        };
-      });
+/** The value a ZodDefault fills in, looking through the wrappers describeZod also looks through. */
+function defaultOf(node: unknown): unknown {
+  let current = node;
+  for (let i = 0; i < 6 && current && typeof current === 'object'; i++) {
+    const def = (current as { _def?: Record<string, unknown> })._def;
+    switch (def?.typeName as string | undefined) {
+      case 'ZodDefault':
+        return (def?.defaultValue as (() => unknown) | undefined)?.();
+      case 'ZodOptional':
+      case 'ZodNullable':
+        current = def?.innerType;
+        break;
+      case 'ZodEffects':
+        current = def?.schema;
+        break;
+      default:
+        return undefined;
     }
-    case 'ZodOptional':
-    case 'ZodNullable':
-    case 'ZodDefault':
-      return describeElementFields(def?.innerType, depth + 1);
-    case 'ZodEffects':
-      return describeElementFields(def?.schema, depth + 1);
+  }
+  return undefined;
+}
+
+/**
+ * The format knowledge_schema reports for a repoPath field, and what the
+ * boundary refuses, each with a sample the tests run through repoPath itself.
+ * The refusals are raised by normalizeRepoPath in paths.ts; this list is the
+ * describer's copy of their names, and repo-path-condition tests fail when a
+ * sample here stops being refused.
+ */
+export const REPO_PATH_FORMAT = 'repo-relative POSIX path';
+export const REPO_PATH_REFUSALS = [
+  { label: 'absolute', sample: '/abs/file.ts' },
+  { label: 'drive-prefixed', sample: 'C:/abs/file.ts' },
+  { label: "escaping through '..'", sample: '../file.ts' },
+  { label: 'empty', sample: '' },
+] as const;
+
+function repoPathCondition(): string {
+  return `Refused: ${REPO_PATH_REFUSALS.map((r) => r.label).join(', ')}.`;
+}
+
+/**
+ * One field as knowledge_schema reports it, at any depth: the top-level
+ * fields, an array's element_fields (board db0e2799) and an object's
+ * member_fields all come from here, so a nested field is described exactly
+ * like a top-level one. `exampleValue` overrides the field's own first valid
+ * example with the one schemaFor chose for the whole record.
+ */
+function fieldShape(name: string, node: unknown, depth: number, exampleValue?: { value: unknown }): FieldShape {
+  const described = describeZodDetailed(node, depth);
+  const required = !(node as { isOptional?: () => boolean }).isOptional?.();
+  const example = exampleValue ? renderValue(exampleValue.value) : exampleFor(node, name);
+  const fallback = defaultOf(node);
+  const defaultText = fallback === undefined ? undefined : renderValue(fallback);
+  return {
+    name,
+    required,
+    type: described.type,
+    ...(described.enum_values ? { enum_values: described.enum_values } : {}),
+    ...(described.element_fields ? { element_fields: described.element_fields } : {}),
+    ...(described.member_fields ? { member_fields: described.member_fields } : {}),
+    ...(described.min_length !== undefined ? { min_length: described.min_length } : {}),
+    ...(described.format ? { format: described.format, condition: repoPathCondition() } : {}),
+    ...(defaultText !== undefined ? { default: defaultText } : {}),
+    ...(example ? { example } : {}),
+  };
+}
+
+/**
+ * The field at a dotted path into a knowledge_schema field list: `a[].b` steps
+ * into a's element_fields, `a.b` into its member_fields. Undefined when a step
+ * does not exist.
+ */
+export function fieldShapeAt(fields: FieldShape[], path: string): FieldShape | undefined {
+  let level: FieldShape[] | undefined = fields;
+  let found: FieldShape | undefined;
+  for (const segment of path.split('.')) {
+    const intoElements = segment.endsWith('[]');
+    const name = intoElements ? segment.slice(0, -2) : segment;
+    found = level?.find((f) => f.name === name);
+    if (!found) return undefined;
+    level = intoElements ? found.element_fields : found.member_fields;
+  }
+  return found;
+}
+
+/** Add a sentence to the condition of the field at `path`; a path that names no field is skipped. */
+export function addFieldCondition(fields: FieldShape[], path: string, text: string): void {
+  const shape = fieldShapeAt(fields, path);
+  if (shape) shape.condition = shape.condition ? `${shape.condition} ${text}` : text;
+}
+
+/**
+ * The cross-field rules of a record type as condition text, keyed by field
+ * path. Every sentence is built from the constants the type's superRefine
+ * reads (ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES,
+ * TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS,
+ * OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD), so the words cannot
+ * drift from the refusal. Two rules have no constant to read (a todo blocking
+ * itself, a brief's phase interfaces): their sentences are tested against the
+ * predicates todoBlocksItself and undeclaredPhaseInterfaces.
+ */
+function recordFieldConditions(type: string): [path: string, text: string][] {
+  switch (type) {
+    case 'feature_article': {
+      // GitHub issue #15, decision article-kind-marker-gates-structured-na-exemption.
+      const exempt = NOT_APPLICABLE_EXEMPT_KINDS.join(' or ');
+      const others = ARTICLE_KINDS.filter((k) => !NOT_APPLICABLE_EXEMPT_KINDS.includes(k)).join(', ');
+      const members = Object.entries(notApplicableExemptionSchema.shape.not_applicable.shape)
+        .map(([key, node]) => (node.isOptional() ? `${key}?` : key))
+        .join(', ');
+      const kindRule =
+        `The {not_applicable: {${members}}} form is accepted only when article_kind is ${exempt} ` +
+        `(on those kinds an empty array is refused). Other kinds (${others}) pass an array, which may be [].`;
+      const out: [string, string][] = [
+        ['current_ac', kindRule],
+        ['live_test_refs', kindRule],
+      ];
+      for (const [state, needed] of Object.entries(ARTICLE_STATE_REQUIRES)) {
+        out.push(['state', `state '${state}' requires ${needed.join(' and ')}.`]);
+        for (const field of needed) out.push([field, `Required when state is '${state}'.`]);
+      }
+      return out;
+    }
+    case 'todo': {
+      const userOnly = Object.keys(TODO_USER_ONLY_FIELDS);
+      const out: [string, string][] = [
+        ['source', `source '${TODO_SYSTEM_SOURCE}' requires ${TODO_SYSTEM_REQUIRES.join(' and ')} and refuses ${userOnly.join(' and ')}.`],
+      ];
+      for (const field of TODO_SYSTEM_REQUIRES) out.push([field, `Required when source is '${TODO_SYSTEM_SOURCE}'.`]);
+      for (const field of userOnly) out.push([field, `Refused when source is '${TODO_SYSTEM_SOURCE}'.`]);
+      out.push(['blocked_by', "An item cannot list its own slug."]);
+      return out;
+    }
+    case 'open_question':
+      return [
+        ['resolution_status', `'${OPEN_QUESTION_CLOSED}' requires ${OPEN_QUESTION_TERMINUS_FIELD}; any other value refuses it.`],
+        [OPEN_QUESTION_TERMINUS_FIELD, `Required when resolution_status is '${OPEN_QUESTION_CLOSED}', refused otherwise.`],
+      ];
+    case 'brief':
+      return [['phases[].interfaces', 'Every name must be the name of a technical_design.interfaces entry.']];
     default:
-      return undefined;
+      return [];
   }
 }
 
 /**
- * The article_kind condition on feature_article's current_ac and live_test_refs
- * (GitHub issue #15), built from ARTICLE_KINDS and NOT_APPLICABLE_EXEMPT_KINDS —
- * the constants the superRefine gate reads — so the words cannot drift from the
- * refusal. Decision article-kind-marker-gates-structured-na-exemption.
+ * One example value per field, chosen so the whole record validates together
+ * (the finding behind this: open_question's own examples were
+ * resolution_status 'open' beside a closed_into, which the type refuses as a
+ * pair). Each field starts on its first valid candidate, as before. While the
+ * full schema still refuses the record, the single change that removes the
+ * most issues is applied: a swap to another valid candidate or, for an
+ * optional field, leaving it out (tried after its swaps). Later fields go
+ * first, since a dependent field is declared after the field it depends on;
+ * that is why open_question keeps resolution_status 'open' and prints no
+ * closed_into example, so a writer copying the examples opens a question
+ * rather than a closed one. A required field is never left out. When no change
+ * helps, the per-field values are returned as they stand: no worse than the
+ * old answer, and the all-examples test names the type.
  */
-function featureArticleFieldConditions(): Record<string, string> {
-  const exempt = NOT_APPLICABLE_EXEMPT_KINDS.join(' or ');
-  const others = ARTICLE_KINDS.filter((k) => !NOT_APPLICABLE_EXEMPT_KINDS.includes(k)).join(', ');
-  const condition =
-    `The {not_applicable: {reason, ruling_record_id?}} form is accepted only when article_kind is ${exempt} ` +
-    `(on those kinds an empty array is refused). Other kinds (${others}) pass an array, which may be [].`;
-  return { current_ac: condition, live_test_refs: condition };
+const OMIT_EXAMPLE = Symbol('omit example');
+
+function exampleValuesFor(type: string, shape: Record<string, unknown>): Map<string, unknown> {
+  const candidates = new Map<string, unknown[]>();
+  for (const [name, node] of Object.entries(shape)) {
+    const valid = exampleCandidates(node, name, 0).filter((c) => satisfies(node, c));
+    if (!valid.length) continue;
+    const optional = (node as { isOptional?: () => boolean }).isOptional?.() === true;
+    candidates.set(name, optional ? [...valid, OMIT_EXAMPLE] : valid);
+  }
+  const withChange = (values: Map<string, unknown>, name: string, value: unknown): Map<string, unknown> => {
+    const next = new Map(values);
+    if (value === OMIT_EXAMPLE) next.delete(name);
+    else next.set(name, value);
+    return next;
+  };
+  let chosen = new Map<string, unknown>([...candidates].map(([name, valid]) => [name, valid[0]]));
+  const schema = RECORD_TYPES[type]?.schema;
+  const issueCount = (values: Map<string, unknown>): number => {
+    try {
+      const result = schema?.safeParse(Object.fromEntries(values));
+      return !result || result.success ? 0 : result.error.issues.length;
+    } catch {
+      // A schema that throws on this record has not accepted it.
+      return Infinity;
+    }
+  };
+  const order = [...candidates].reverse();
+  let remaining = issueCount(chosen);
+  for (let round = 0; remaining > 0 && round < 8; round++) {
+    let best: { name: string; value: unknown; issues: number } | undefined;
+    for (const [name, valid] of order) {
+      for (const value of valid) {
+        if (value === OMIT_EXAMPLE ? !chosen.has(name) : chosen.has(name) && value === chosen.get(name)) continue;
+        const issues = issueCount(withChange(chosen, name, value));
+        if (issues < (best?.issues ?? remaining)) best = { name, value, issues };
+      }
+    }
+    if (!best) break;
+    chosen = withChange(chosen, best.name, best.value);
+    remaining = best.issues;
+  }
+  return chosen;
+}
+
+/**
+ * Every field's example as one record: what knowledge_schema's examples add up
+ * to. Server-owned envelope fields are included; a caller building a create
+ * body drops those.
+ */
+export function exampleRecordFor(type: string): Record<string, unknown> | undefined {
+  const shape = objectShapeFor(type);
+  return shape ? Object.fromEntries(exampleValuesFor(type, shape)) : undefined;
 }
 
 /**
@@ -1678,25 +1916,16 @@ function featureArticleFieldConditions(): Record<string, string> {
 export function schemaFor(type: string): { type: string; fields: FieldShape[] } | undefined {
   const shape = objectShapeFor(type);
   if (!shape) return undefined;
-  const conditions = type === 'feature_article' ? featureArticleFieldConditions() : {};
-  const fields: FieldShape[] = Object.entries(shape).map(([name, node]) => {
-    const described = describeZodDetailed(node);
-    const required = !(node as { isOptional?: () => boolean }).isOptional?.();
-    // One worked value per field, derived and proven by the field's own node —
-    // the SHAPE half of the answer (board 89672420). Four of six schema
-    // rejections a consuming project hit were shape errors, not missing-field
-    // errors: {option, reason}[] written as string[] is the canonical one.
-    const example = exampleFor(node, name);
-    return {
-      name,
-      required,
-      type: described.type,
-      ...(described.enum_values ? { enum_values: described.enum_values } : {}),
-      ...(described.element_fields ? { element_fields: described.element_fields } : {}),
-      ...(conditions[name] ? { condition: conditions[name] } : {}),
-      ...(example ? { example } : {}),
-    };
-  });
+  // One worked value per field, derived and proven by the field's own node —
+  // the SHAPE half of the answer (board 89672420). Four of six schema
+  // rejections a consuming project hit were shape errors, not missing-field
+  // errors: {option, reason}[] written as string[] is the canonical one.
+  const examples = exampleValuesFor(type, shape);
+  const fields: FieldShape[] = Object.entries(shape).map(([name, node]) =>
+    // A field the whole-record choice left out is still listed, without an example.
+    fieldShape(name, node, 0, examples.has(name) ? { value: examples.get(name) } : { value: undefined })
+  );
+  for (const [path, text] of recordFieldConditions(type)) addFieldCondition(fields, path, text);
   return { type, fields };
 }
 

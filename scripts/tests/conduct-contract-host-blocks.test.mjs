@@ -41,7 +41,11 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // pull-quality-closed-at-the-floor-of-retrieval-mechanics-phrasing-rule-no-new-mechanism). The
 // sparring bullet says one consult before a non-trivial design settles and that a diff goes to one
 // reviewer, and the "TWO-ROUND ADVERSARIAL DESIGN SPARRING" bullet is removed.
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'b37e87bf9971547ac531cecf21c6d100f6328b35218c7f9020460918d81bef70';
+// Moved 2026-10-04 (from b37e87bf…): the concept_designed and report-issue commands name
+// node "<Sterling root>/bin/<name>.mjs" and say the root is the path the STERLING ROOT line printed
+// at session start, because ${CLAUDE_PLUGIN_ROOT} is not in the Bash tool's environment (decision
+// session-start-prints-the-sterling-root-plain-text-instructions-use-it; GitHub issue #16).
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = 'd148b6e3c9e4a88319f1affc823ed08f991a9cccb63fdd44a2b49d911db90564';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);

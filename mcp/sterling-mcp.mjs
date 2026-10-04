@@ -21190,6 +21190,7 @@ function normalizeLocation(location) {
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
+var WRITE_REFUSED_LINK_RELS = ["supersedes"];
 var linkSchema = external_exports.object({
   rel: external_exports.enum(LINK_RELS),
   target_id: external_exports.string().uuid()
@@ -21277,6 +21278,9 @@ var notApplicableExemptionSchema = external_exports.object({
 }).strict();
 var ARTICLE_KINDS = ["feature", "probe", "tool", "concept"];
 var NOT_APPLICABLE_EXEMPT_KINDS = ["probe", "tool"];
+var ARTICLE_STATE_REQUIRES = {
+  dormant: ["state_reason", "wiring_todo_id"]
+};
 var currentAcItemSchema = external_exports.object({
   ac_id: external_exports.string().min(1),
   text: external_exports.string().min(1),
@@ -21383,8 +21387,9 @@ var featureArticleSchema = base.extend({
   last_executed: external_exports.string().datetime().optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
-  if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (\xA73.2.3)" });
+  const stateNeeds = ARTICLE_STATE_REQUIRES[rec.state];
+  if (stateNeeds?.some((field) => !rec[field])) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `state '${rec.state}' requires ${stateNeeds.join(" and ")} (\xA73.2.3)` });
   }
   const exemptKind = NOT_APPLICABLE_EXEMPT_KINDS.includes(rec.article_kind);
   const isExempt = (v) => typeof v === "object" && v !== null && !Array.isArray(v) && "not_applicable" in v;
@@ -21498,6 +21503,8 @@ var disconfirmedHypothesisSchema = base.extend({
   evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
+var OPEN_QUESTION_CLOSED = "closed";
+var OPEN_QUESTION_TERMINUS_FIELD = "closed_into";
 var openQuestionSchema = base.extend({
   type: external_exports.literal("open_question"),
   // Stable handle, minted from the question — see decisionSchema.slug.
@@ -21523,16 +21530,16 @@ var openQuestionSchema = base.extend({
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
-  if (rec.resolution_status === "closed" && !rec.closed_into) {
+  if (rec.resolution_status === OPEN_QUESTION_CLOSED && !rec[OPEN_QUESTION_TERMINUS_FIELD]) {
     ctx.addIssue({
       code: external_exports.ZodIssueCode.custom,
-      message: "resolution_status 'closed' requires closed_into (the research_finding the answer landed in)"
+      message: `resolution_status '${OPEN_QUESTION_CLOSED}' requires ${OPEN_QUESTION_TERMINUS_FIELD} (the research_finding the answer landed in)`
     });
   }
-  if (rec.resolution_status !== "closed" && rec.closed_into) {
+  if (rec.resolution_status !== OPEN_QUESTION_CLOSED && rec[OPEN_QUESTION_TERMINUS_FIELD]) {
     ctx.addIssue({
       code: external_exports.ZodIssueCode.custom,
-      message: "closed_into is set but resolution_status is 'open' \u2014 close the question or drop the terminus"
+      message: `${OPEN_QUESTION_TERMINUS_FIELD} is set but resolution_status is 'open' \u2014 close the question or drop the terminus`
     });
   }
 });
@@ -21615,6 +21622,12 @@ var SYSTEM_REASONS = [
   // getting reverted", not "an event happened".
   "restore_performed"
 ];
+var TODO_SYSTEM_SOURCE = "system";
+var TODO_SYSTEM_REQUIRES = ["system_reason"];
+var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+function todoBlocksItself(rec) {
+  return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
+}
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
   // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -21665,27 +21678,30 @@ var todoSchema = base.extend({
   needs: external_exports.enum(BOARD_NEEDS).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
-  if (rec.source === "system" && !rec.system_reason) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "source 'system' requires system_reason (\xA73.2.7)" });
+  if (rec.source === TODO_SYSTEM_SOURCE) {
+    for (const field of TODO_SYSTEM_REQUIRES) {
+      if (!rec[field]) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `source '${TODO_SYSTEM_SOURCE}' requires ${field} (\xA73.2.7)` });
+      }
+    }
+    for (const [field, verb] of Object.entries(TODO_USER_ONLY_FIELDS)) {
+      if (rec[field] !== void 0) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: [field],
+          message: `${field} ${verb} source:'user' board tasks only \u2014 maintenance-queue items never carry it`
+        });
+      }
+    }
   }
-  if (rec.blocked_by !== void 0 && rec.source === "system") {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      path: ["blocked_by"],
-      message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
-    });
-  }
-  if (rec.needs !== void 0 && rec.source === "system") {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      path: ["needs"],
-      message: "needs marks source:'user' board tasks only \u2014 maintenance-queue items never carry it"
-    });
-  }
-  if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
+  if (todoBlocksItself(rec)) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["blocked_by"], message: `blocked_by lists '${rec.slug}', the item itself \u2014 an item cannot block itself` });
   }
 });
+function undeclaredPhaseInterfaces(rec) {
+  const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
+  return rec.phases.flatMap((phase) => (phase.interfaces ?? []).filter((name) => !declared.has(name)).map((name) => ({ phase_id: phase.phase_id, name })));
+}
 var briefSchema = base.extend({
   type: external_exports.literal("brief"),
   slug: external_exports.string().min(1),
@@ -21732,16 +21748,11 @@ var briefSchema = base.extend({
   decisions_made: external_exports.array(external_exports.string().uuid())
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
-  const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
-  for (const phase of rec.phases) {
-    for (const name of phase.interfaces ?? []) {
-      if (!declared.has(name)) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          message: `phase '${phase.phase_id}' references undeclared interface '${name}' (\xA78.1 interface slice must come from technical_design.interfaces)`
-        });
-      }
-    }
+  for (const { phase_id, name } of undeclaredPhaseInterfaces(rec)) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: `phase '${phase_id}' references undeclared interface '${name}' (\xA78.1 interface slice must come from technical_design.interfaces)`
+    });
   }
 });
 var AGENT_MODEL_KEY = {
@@ -21954,6 +21965,8 @@ function knownFieldsFor(type) {
 function describeZodDetailed(node, depth = 0) {
   if (!node || typeof node !== "object" || depth > 6)
     return { type: "unknown" };
+  if (node === repoPath)
+    return { type: "string", format: REPO_PATH_FORMAT };
   const def = node._def;
   const name = def?.typeName;
   switch (name) {
@@ -21962,15 +21975,17 @@ function describeZodDetailed(node, depth = 0) {
       const regexCheck = checks.find((c) => c.kind === "regex" && c.regex);
       const datetimeCheck = checks.find((c) => c.kind === "datetime");
       const uuidCheck = checks.find((c) => c.kind === "uuid");
+      const minCheck = checks.find((c) => c.kind === "min" && typeof c.value === "number" && c.value > 0);
+      const minLength = minCheck ? { min_length: minCheck.value } : {};
       if (!regexCheck && !datetimeCheck && !uuidCheck)
-        return { type: "string" };
+        return { type: "string", ...minLength };
       const annotations = [];
       if (datetimeCheck)
-        annotations.push("ISO datetime");
+        annotations.push(datetimeCheck.offset || datetimeCheck.local ? "ISO datetime" : "ISO datetime, UTC Z form");
       if (uuidCheck)
         annotations.push("uuid");
       const base2 = annotations.length ? `string (${annotations.join(", ")})` : "string";
-      return { type: regexCheck?.regex ? `${base2} matching ${regexCheck.regex}` : base2 };
+      return { type: regexCheck?.regex ? `${base2} matching ${regexCheck.regex}` : base2, ...minLength };
     }
     case "ZodNumber":
       return { type: "number" };
@@ -21991,19 +22006,21 @@ function describeZodDetailed(node, depth = 0) {
       return { type: `literal ${JSON.stringify(def?.value)}` };
     case "ZodArray": {
       const inner = describeZodDetailed(def?.type, depth + 1);
-      const elementFields = describeElementFields(def?.type, depth + 1);
       return {
         type: `${inner.type}[]`,
         ...inner.enum_values ? { enum_values: inner.enum_values } : {},
-        ...elementFields ? { element_fields: elementFields } : {}
+        ...inner.member_fields ? { element_fields: inner.member_fields } : {},
+        ...inner.min_length !== void 0 ? { min_length: inner.min_length } : {},
+        ...inner.format ? { format: inner.format } : {}
       };
     }
     case "ZodObject": {
       const shape = node.shape ?? {};
-      return { type: `{${Object.keys(shape).join(", ")}}` };
+      const members = Object.entries(shape).map(([memberName, memberNode]) => fieldShape(memberName, memberNode, depth + 1));
+      return { type: `{${Object.keys(shape).join(", ")}}`, ...members.length ? { member_fields: members } : {} };
     }
     case "ZodRecord":
-      return { type: "record<string, string>" };
+      return { type: `record<string, ${describeZodDetailed(def?.valueType, depth + 1).type}>` };
     case "ZodUnion": {
       const rawOptions = def?.options ?? [];
       const opts = rawOptions.map((o) => describeZodDetailed(o, depth + 1));
@@ -22012,9 +22029,11 @@ function describeZodDetailed(node, depth = 0) {
         return { type: opts.map((o) => o.type.replace("literal ", "")).join(" | ") };
       }
       const arrayElementFields = opts.find((o) => o.element_fields && o.type.endsWith("[]"))?.element_fields;
+      const objectMemberFields = opts.find((o) => o.member_fields && !o.type.endsWith("[]"))?.member_fields;
       return {
         type: opts.map((o) => o.type).join(" | "),
-        ...arrayElementFields ? { element_fields: arrayElementFields } : {}
+        ...arrayElementFields ? { element_fields: arrayElementFields } : {},
+        ...objectMemberFields ? { member_fields: objectMemberFields } : {}
       };
     }
     // Wrappers: describe what they wrap. optionality is reported separately, so
@@ -22242,8 +22261,9 @@ function exampleCandidates(node, name, depth) {
       return (def?.options ?? []).flatMap((o) => exampleCandidates(o, name, depth + 1));
     // Wrappers contribute their inner candidates, but the PROOF still runs
     // against the outer node, so a refinement the wrapper adds still rules.
-    case "ZodOptional":
     case "ZodNullable":
+      return [...exampleCandidates(def?.innerType, name, depth + 1), null];
+    case "ZodOptional":
     case "ZodDefault":
       return exampleCandidates(def?.innerType, name, depth + 1);
     case "ZodEffects":
@@ -22261,67 +22281,183 @@ function deriveExampleValue(node, name, depth) {
 }
 function exampleFor(node, name) {
   const derived = deriveExampleValue(node, name, 0);
-  if (!derived)
-    return void 0;
-  const rendered = typeof derived.value === "string" ? derived.value : JSON.stringify(derived.value);
+  return derived ? renderValue(derived.value) : void 0;
+}
+function renderValue(value) {
+  const rendered = typeof value === "string" ? value : JSON.stringify(value);
   return rendered === void 0 || rendered.length === 0 ? void 0 : rendered;
 }
-function describeElementFields(node, depth = 0) {
-  if (!node || typeof node !== "object" || depth > 6)
-    return void 0;
-  const def = node._def;
-  const name = def?.typeName;
-  switch (name) {
-    case "ZodObject": {
-      const shape = node.shape ?? {};
-      return Object.entries(shape).map(([fieldName, fieldNode]) => {
-        const described = describeZodDetailed(fieldNode, depth + 1);
-        const required2 = !fieldNode.isOptional?.();
-        const example = exampleFor(fieldNode, fieldName);
-        return {
-          name: fieldName,
-          required: required2,
-          type: described.type,
-          ...described.enum_values ? { enum_values: described.enum_values } : {},
-          ...example ? { example } : {}
-        };
-      });
+function defaultOf(node) {
+  let current = node;
+  for (let i = 0; i < 6 && current && typeof current === "object"; i++) {
+    const def = current._def;
+    switch (def?.typeName) {
+      case "ZodDefault":
+        return def?.defaultValue?.();
+      case "ZodOptional":
+      case "ZodNullable":
+        current = def?.innerType;
+        break;
+      case "ZodEffects":
+        current = def?.schema;
+        break;
+      default:
+        return void 0;
     }
-    case "ZodOptional":
-    case "ZodNullable":
-    case "ZodDefault":
-      return describeElementFields(def?.innerType, depth + 1);
-    case "ZodEffects":
-      return describeElementFields(def?.schema, depth + 1);
-    default:
+  }
+  return void 0;
+}
+var REPO_PATH_FORMAT = "repo-relative POSIX path";
+var REPO_PATH_REFUSALS = [
+  { label: "absolute", sample: "/abs/file.ts" },
+  { label: "drive-prefixed", sample: "C:/abs/file.ts" },
+  { label: "escaping through '..'", sample: "../file.ts" },
+  { label: "empty", sample: "" }
+];
+function repoPathCondition() {
+  return `Refused: ${REPO_PATH_REFUSALS.map((r) => r.label).join(", ")}.`;
+}
+function fieldShape(name, node, depth, exampleValue) {
+  const described = describeZodDetailed(node, depth);
+  const required2 = !node.isOptional?.();
+  const example = exampleValue ? renderValue(exampleValue.value) : exampleFor(node, name);
+  const fallback = defaultOf(node);
+  const defaultText = fallback === void 0 ? void 0 : renderValue(fallback);
+  return {
+    name,
+    required: required2,
+    type: described.type,
+    ...described.enum_values ? { enum_values: described.enum_values } : {},
+    ...described.element_fields ? { element_fields: described.element_fields } : {},
+    ...described.member_fields ? { member_fields: described.member_fields } : {},
+    ...described.min_length !== void 0 ? { min_length: described.min_length } : {},
+    ...described.format ? { format: described.format, condition: repoPathCondition() } : {},
+    ...defaultText !== void 0 ? { default: defaultText } : {},
+    ...example ? { example } : {}
+  };
+}
+function fieldShapeAt(fields, path) {
+  let level = fields;
+  let found;
+  for (const segment of path.split(".")) {
+    const intoElements = segment.endsWith("[]");
+    const name = intoElements ? segment.slice(0, -2) : segment;
+    found = level?.find((f) => f.name === name);
+    if (!found)
       return void 0;
+    level = intoElements ? found.element_fields : found.member_fields;
+  }
+  return found;
+}
+function addFieldCondition(fields, path, text) {
+  const shape = fieldShapeAt(fields, path);
+  if (shape)
+    shape.condition = shape.condition ? `${shape.condition} ${text}` : text;
+}
+function recordFieldConditions(type) {
+  switch (type) {
+    case "feature_article": {
+      const exempt = NOT_APPLICABLE_EXEMPT_KINDS.join(" or ");
+      const others = ARTICLE_KINDS.filter((k) => !NOT_APPLICABLE_EXEMPT_KINDS.includes(k)).join(", ");
+      const members = Object.entries(notApplicableExemptionSchema.shape.not_applicable.shape).map(([key, node]) => node.isOptional() ? `${key}?` : key).join(", ");
+      const kindRule = `The {not_applicable: {${members}}} form is accepted only when article_kind is ${exempt} (on those kinds an empty array is refused). Other kinds (${others}) pass an array, which may be [].`;
+      const out = [
+        ["current_ac", kindRule],
+        ["live_test_refs", kindRule]
+      ];
+      for (const [state, needed] of Object.entries(ARTICLE_STATE_REQUIRES)) {
+        out.push(["state", `state '${state}' requires ${needed.join(" and ")}.`]);
+        for (const field of needed)
+          out.push([field, `Required when state is '${state}'.`]);
+      }
+      return out;
+    }
+    case "todo": {
+      const userOnly = Object.keys(TODO_USER_ONLY_FIELDS);
+      const out = [
+        ["source", `source '${TODO_SYSTEM_SOURCE}' requires ${TODO_SYSTEM_REQUIRES.join(" and ")} and refuses ${userOnly.join(" and ")}.`]
+      ];
+      for (const field of TODO_SYSTEM_REQUIRES)
+        out.push([field, `Required when source is '${TODO_SYSTEM_SOURCE}'.`]);
+      for (const field of userOnly)
+        out.push([field, `Refused when source is '${TODO_SYSTEM_SOURCE}'.`]);
+      out.push(["blocked_by", "An item cannot list its own slug."]);
+      return out;
+    }
+    case "open_question":
+      return [
+        ["resolution_status", `'${OPEN_QUESTION_CLOSED}' requires ${OPEN_QUESTION_TERMINUS_FIELD}; any other value refuses it.`],
+        [OPEN_QUESTION_TERMINUS_FIELD, `Required when resolution_status is '${OPEN_QUESTION_CLOSED}', refused otherwise.`]
+      ];
+    case "brief":
+      return [["phases[].interfaces", "Every name must be the name of a technical_design.interfaces entry."]];
+    default:
+      return [];
   }
 }
-function featureArticleFieldConditions() {
-  const exempt = NOT_APPLICABLE_EXEMPT_KINDS.join(" or ");
-  const others = ARTICLE_KINDS.filter((k) => !NOT_APPLICABLE_EXEMPT_KINDS.includes(k)).join(", ");
-  const condition = `The {not_applicable: {reason, ruling_record_id?}} form is accepted only when article_kind is ${exempt} (on those kinds an empty array is refused). Other kinds (${others}) pass an array, which may be [].`;
-  return { current_ac: condition, live_test_refs: condition };
+var OMIT_EXAMPLE = /* @__PURE__ */ Symbol("omit example");
+function exampleValuesFor(type, shape) {
+  const candidates = /* @__PURE__ */ new Map();
+  for (const [name, node] of Object.entries(shape)) {
+    const valid = exampleCandidates(node, name, 0).filter((c) => satisfies(node, c));
+    if (!valid.length)
+      continue;
+    const optional2 = node.isOptional?.() === true;
+    candidates.set(name, optional2 ? [...valid, OMIT_EXAMPLE] : valid);
+  }
+  const withChange = (values, name, value) => {
+    const next = new Map(values);
+    if (value === OMIT_EXAMPLE)
+      next.delete(name);
+    else
+      next.set(name, value);
+    return next;
+  };
+  let chosen = new Map([...candidates].map(([name, valid]) => [name, valid[0]]));
+  const schema = RECORD_TYPES[type]?.schema;
+  const issueCount = (values) => {
+    try {
+      const result = schema?.safeParse(Object.fromEntries(values));
+      return !result || result.success ? 0 : result.error.issues.length;
+    } catch {
+      return Infinity;
+    }
+  };
+  const order = [...candidates].reverse();
+  let remaining = issueCount(chosen);
+  for (let round = 0; remaining > 0 && round < 8; round++) {
+    let best;
+    for (const [name, valid] of order) {
+      for (const value of valid) {
+        if (value === OMIT_EXAMPLE ? !chosen.has(name) : chosen.has(name) && value === chosen.get(name))
+          continue;
+        const issues = issueCount(withChange(chosen, name, value));
+        if (issues < (best?.issues ?? remaining))
+          best = { name, value, issues };
+      }
+    }
+    if (!best)
+      break;
+    chosen = withChange(chosen, best.name, best.value);
+    remaining = best.issues;
+  }
+  return chosen;
+}
+function exampleRecordFor(type) {
+  const shape = objectShapeFor(type);
+  return shape ? Object.fromEntries(exampleValuesFor(type, shape)) : void 0;
 }
 function schemaFor(type) {
   const shape = objectShapeFor(type);
   if (!shape)
     return void 0;
-  const conditions = type === "feature_article" ? featureArticleFieldConditions() : {};
-  const fields = Object.entries(shape).map(([name, node]) => {
-    const described = describeZodDetailed(node);
-    const required2 = !node.isOptional?.();
-    const example = exampleFor(node, name);
-    return {
-      name,
-      required: required2,
-      type: described.type,
-      ...described.enum_values ? { enum_values: described.enum_values } : {},
-      ...described.element_fields ? { element_fields: described.element_fields } : {},
-      ...conditions[name] ? { condition: conditions[name] } : {},
-      ...example ? { example } : {}
-    };
-  });
+  const examples = exampleValuesFor(type, shape);
+  const fields = Object.entries(shape).map(([name, node]) => (
+    // A field the whole-record choice left out is still listed, without an example.
+    fieldShape(name, node, 0, examples.has(name) ? { value: examples.get(name) } : { value: void 0 })
+  ));
+  for (const [path, text] of recordFieldConditions(type))
+    addFieldCondition(fields, path, text);
   return { type, fields };
 }
 function unknownFieldsIn(type, candidate) {
@@ -26907,6 +27043,9 @@ function mountedDomainSurface(stores) {
   };
 }
 var UNPROMOTABLE_TYPES = ["feature_article", "todo", "attestation"];
+function declaredRepoPathsField(type) {
+  return type === "feature_article" ? "files" : "file_keys";
+}
 function declaredRepoPaths(type, record2) {
   if (type === "feature_article") {
     return (record2.files ?? []).map((f) => f?.path).filter((p) => typeof p === "string");
@@ -27027,6 +27166,13 @@ var WRITE_REFUSED_FIELDS = [
 var SERVER_OWNED_FIELDS = [...WRITE_REFUSED_FIELDS, "version"];
 var CREATE_DEFAULTED_FIELDS = ["author", "links", "scope", "stack_tags"];
 var MUTATION_REFUSED_FIELDS = ["scope"];
+var DEDUP_OVERRIDE_FIELD = "dedup_override";
+var DEDUP_GUARDED_TYPE = "anti_pattern";
+var HANDLE_NAMESPACE_TYPES = ["decision", "anti_pattern", "research_finding", "open_question", "attestation", "todo"];
+var SLUG_COLLISION_CONDITIONS = {
+  ...Object.fromEntries(HANDLE_NAMESPACE_TYPES.map((t) => [t, "An explicit slug that any record already holds is refused: slugs are one namespace across record types. Omit it to have one derived."])),
+  feature_article: "A slug that another feature_article already holds is refused."
+};
 function elementOwnsScalar(el, key) {
   if (!el || typeof el !== "object")
     return false;
@@ -28732,8 +28878,32 @@ var SterlingTools = class _SterlingTools {
       const withConsumer = consumedBy !== void 0 ? { consumed_by: consumedBy } : {};
       return serverOwned.has(f.name) ? { ...f, ...withConsumer, required: false, server_owned: true } : defaulted.has(f.name) ? { ...f, ...withConsumer, required: false } : { ...f, ...withConsumer };
     });
+    addFieldCondition(fields, "type", `knowledge_create requires fields.type set to '${described.type}', equal to its outer type argument: it selects this schema. Fixed afterwards: every other write refuses it.`);
+    for (const name of MUTATION_REFUSED_FIELDS) {
+      addFieldCondition(fields, name, "Creation-only: knowledge_create routes the record by it, and every later write refuses it.");
+    }
+    const slugRule = SLUG_COLLISION_CONDITIONS[described.type];
+    if (slugRule)
+      addFieldCondition(fields, "slug", slugRule);
+    addFieldCondition(fields, "links[].rel", `${WRITE_REFUSED_LINK_RELS.map((rel) => `'${rel}'`).join(", ")} is refused on knowledge_create, on knowledge_link and as a new entry on knowledge_update: use knowledge_supersede, which also retires the old record.`);
+    const exampleRecord = { ...exampleRecordFor(described.type) ?? {}, type: described.type };
+    const pathExtras = /* @__PURE__ */ new Map();
+    const addPathExtra = (path, text) => void pathExtras.set(path, [...pathExtras.get(path) ?? [], text]);
+    for (const claim of _SterlingTools.claimedPaths(exampleRecord))
+      addPathExtra(claim.field, "an existing directory");
+    if (declaredRepoPaths(described.type, exampleRecord).length) {
+      addPathExtra(declaredRepoPathsField(described.type), "any path when scope is domain:<name>");
+    }
+    for (const [path, extras] of pathExtras)
+      addFieldCondition(fields, path, `Also refused: ${extras.join("; ")}.`);
+    const rules = [
+      "knowledge_create requires fields.type equal to its outer type argument.",
+      `${DEDUP_OVERRIDE_FIELD}: true is accepted in the fields of every knowledge_create; it is a directive and is never stored.`,
+      ...described.type === DEDUP_GUARDED_TYPE ? [`A new ${DEDUP_GUARDED_TYPE} that overlaps an existing one is refused unless ${DEDUP_OVERRIDE_FIELD}: true is set.`] : []
+    ];
     return {
       type: described.type,
+      rules,
       fields,
       required: fields.filter((f) => f.required && !serverOwned.has(f.name)).map((f) => f.name),
       optional: fields.filter((f) => !f.required && !serverOwned.has(f.name)).map((f) => f.name)
@@ -28827,8 +28997,8 @@ var SterlingTools = class _SterlingTools {
       version: 1
     };
     candidate.links = this.resolveLinksTargets(candidate.links, "knowledge_create") ?? [];
-    const dedupOverride = candidate.dedup_override === true;
-    delete candidate.dedup_override;
+    const dedupOverride = candidate[DEDUP_OVERRIDE_FIELD] === true;
+    delete candidate[DEDUP_OVERRIDE_FIELD];
     const registered = RECORD_TYPES[type];
     this.refuseUnknownFields(type, candidate);
     let parsed;
@@ -28843,7 +29013,7 @@ var SterlingTools = class _SterlingTools {
     if (scopeValue.startsWith("domain:")) {
       const paths = declaredRepoPaths(type, parsed);
       if (paths.length) {
-        const field = type === "feature_article" ? "files" : "file_keys";
+        const field = declaredRepoPathsField(type);
         throw new Error(`knowledge_create: scope '${scopeValue}' is a shared domain store, and this ${type} declares repo paths in ${field} (${paths.slice(0, 5).join(", ")}${paths.length > 5 ? ", \u2026" : ""}). A record about this repo's files stays scope 'project'; a record about the domain's subject goes to '${scopeValue}' without repo paths. Drop the ${field} or create it project-scoped. Nothing was written.`);
       }
     }
@@ -28853,7 +29023,7 @@ var SterlingTools = class _SterlingTools {
       parsed.file_baselines = candidate.file_baselines;
     }
     const skipped = [];
-    if (type === "anti_pattern") {
+    if (type === DEDUP_GUARDED_TYPE) {
       if (!dedupOverride) {
         const match = this.findAntiPatternOverlap(parsed);
         if (match) {
@@ -28875,7 +29045,7 @@ var SterlingTools = class _SterlingTools {
     } else {
       skipped.push(this.skip("dedup-merge", this.activeRunId(), persistSkips));
     }
-    if (type === "decision" || type === "anti_pattern" || type === "research_finding" || type === "open_question" || type === "attestation" || type === "todo") {
+    if (HANDLE_NAMESPACE_TYPES.includes(type)) {
       const explicit = parsed.slug;
       if (explicit) {
         if (this.slugHolders(explicit).length) {
@@ -32688,7 +32858,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       notices.push(`no checkable evidence in this item's text \u2014 it reads as a CONCLUSION rather than the evidence for one, so a later reader cannot re-check it and it will rot invisibly (measured: of eight defects re-audited in one consuming project, 5 of 8 were wrong at HEAD). Quote the deciding reference: a file:line citation such as src/foo.ts:42, a repo-relative path, the literal string you saw, a measured count, or the id of the record this concerns. The item WAS saved \u2014 fix it in place with board_edit.`);
     }
     if (source === "user" && !res.record.slug) {
-      notices.push(`no handle could be derived from this item's headline \u2014 it slugifies to nothing (non-Latin script, digits or symbols only), so this item has no readable name and can be cited only by its id; give it one via board_add {slug: "<handle>"} on a re-add, or lead the text with a Latin-script headline line`);
+      notices.push(`no handle could be derived from this item's headline \u2014 it slugifies to nothing (non-Latin script, digits or symbols only), so this item has no readable name and can be cited only by its id; board_add takes no slug and a later edit never mints one, so to give it a name remove it and add it again with a Latin-script headline as its first line`);
     }
     if (notices.length)
       return { ...res, notice: notices.join(" | ") };
@@ -34318,7 +34488,7 @@ var KNOWLEDGE_CREATE_FIELD_VARIANTS = Object.keys(RECORD_TYPES).map((type) => {
     fieldsShape[key] = defaulted.has(key) ? node.optional() : node;
   }
   fieldsShape.type = external_exports.literal(type);
-  fieldsShape.dedup_override = external_exports.boolean().optional();
+  fieldsShape[DEDUP_OVERRIDE_FIELD] = external_exports.boolean().optional();
   return external_exports.object(fieldsShape).strict();
 });
 if (KNOWLEDGE_CREATE_FIELD_VARIANTS.length < 2) {
@@ -34424,7 +34594,7 @@ function createSterlingServer(storePath2) {
     })
   }, ({ id, field, find, replace, new_record, reason, resolves }) => json(tools.knowledgeExtractResult({ id, field, find, replace, new_record, reason, resolves })));
   server2.registerTool("knowledge_schema", {
-    description: "Describe what a record type accepts before writing it. Returns {type, fields:[{name, required, type, enum_values?, element_fields?, condition?, example?, server_owned?}], required[], optional[]}, derived from the registered schema. `condition` is present on a field whose accepted shape depends on another field of the same record (feature_article current_ac and live_test_refs: the {not_applicable} form is accepted only for some article_kind values). `example` is a schema-validated worked value (absent when none is derivable). server_owned fields are listed but refused on write and excluded from required/optional. An unregistered type lists the registered ones.",
+    description: "Describe what a record type accepts before writing it. Returns {type, rules[], fields:[{name, required, type, enum_values?, element_fields?, member_fields?, min_length?, format?, default?, condition?, example?, server_owned?}], required[], optional[]}, derived from the registered schema. `condition` states a refusal the type string cannot: a rule tying the field to another field of the record, or a limit on the value itself (a repo path, a slug already held, a link rel with its own tool). `rules` holds what applies to the whole create and fits no field (dedup_override). element_fields describes an array's element and member_fields an object's members, each entry in the same form as a field. min_length marks a string that must not be empty and format a repo-relative path; on an array both apply to each element. `default` is the value used when the field is absent. `example` is a schema-validated worked value (absent when none is derivable); the examples of one type validate together as one record. server_owned fields are assigned by the server, refused on write and excluded from required/optional, except `type`, which knowledge_create requires as fields.type (see its condition). An unregistered type lists the registered ones.",
     inputSchema: strict({ type: external_exports.string() })
   }, ({ type }) => json(tools.knowledgeSchema(type)));
   server2.registerTool("knowledge_stats", {
@@ -34509,7 +34679,7 @@ function createSterlingServer(storePath2) {
       objective: external_exports.string().optional(),
       file_keys: external_exports.array(external_exports.string()).optional(),
       priority: external_exports.enum(["low", "normal", "high"]).optional(),
-      feature_link: external_exports.string().optional(),
+      feature_link: external_exports.string().describe("full record uuid; a slug or an 8-char prefix is refused").optional(),
       system_reason: external_exports.string().optional(),
       stack_tags: external_exports.array(external_exports.string()).optional(),
       measured_at_head: external_exports.string().optional(),

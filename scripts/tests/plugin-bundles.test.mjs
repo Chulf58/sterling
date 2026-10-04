@@ -167,8 +167,8 @@ test('bin/ bundles the scripts an installed copy spawns: the consumer checks and
     assert.ok(existsSync(join(root, 'bin', `${name}.mjs`)), `bin/${name}.mjs is committed`);
   }
   const claudeTemplate = readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8');
-  assert.ok(claudeTemplate.includes('${CLAUDE_PLUGIN_ROOT}/bin/concept-designed.mjs'), 'the template names the bundled fallback');
-  assert.ok(!claudeTemplate.includes('${CLAUDE_PLUGIN_ROOT}/scripts/concept-designed.mjs'), 'and no longer the source that needs node_modules');
+  assert.ok(claudeTemplate.includes('<Sterling root>/bin/concept-designed.mjs'), 'the template names the bundled fallback');
+  assert.ok(!claudeTemplate.includes('<Sterling root>/scripts/concept-designed.mjs'), 'and no longer the source that needs node_modules');
 });
 
 test('bin/concept-designed.mjs runs standalone from a tree with no node_modules', () => {

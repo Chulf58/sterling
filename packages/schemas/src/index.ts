@@ -2,6 +2,7 @@ export { normalizeRepoPath, repoPath, toRepoRelative, matchesGlob, samePath, isA
 export type { LocationKind } from './paths.js';
 export {
   LINK_RELS,
+  WRITE_REFUSED_LINK_RELS,
   linkSchema,
   AUTHOR_RE,
   SCOPE_RE,
@@ -49,6 +50,19 @@ export {
   REVIEWER_ROLES,
   ARTICLE_KINDS,
   NOT_APPLICABLE_EXEMPT_KINDS,
+  ARTICLE_STATE_REQUIRES,
+  OPEN_QUESTION_CLOSED,
+  OPEN_QUESTION_TERMINUS_FIELD,
+  TODO_SYSTEM_SOURCE,
+  TODO_SYSTEM_REQUIRES,
+  TODO_USER_ONLY_FIELDS,
+  todoBlocksItself,
+  undeclaredPhaseInterfaces,
+  REPO_PATH_FORMAT,
+  REPO_PATH_REFUSALS,
+  fieldShapeAt,
+  addFieldCondition,
+  exampleRecordFor,
 } from './records.js';
 export type { RecordType, RecordTypeEntry, DurableRecord, FieldShape, BoardNeeds } from './records.js';
 export { sessionEventSchema, NO_CAPTURE_LANES, noCaptureLaneSchema } from './transient.js';

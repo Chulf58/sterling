@@ -4240,6 +4240,9 @@ var notApplicableExemptionSchema = external_exports.object({
 }).strict();
 var ARTICLE_KINDS = ["feature", "probe", "tool", "concept"];
 var NOT_APPLICABLE_EXEMPT_KINDS = ["probe", "tool"];
+var ARTICLE_STATE_REQUIRES = {
+  dormant: ["state_reason", "wiring_todo_id"]
+};
 var currentAcItemSchema = external_exports.object({
   ac_id: external_exports.string().min(1),
   text: external_exports.string().min(1),
@@ -4346,8 +4349,9 @@ var featureArticleSchema = base.extend({
   last_executed: external_exports.string().datetime().optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
-  if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (\xA73.2.3)" });
+  const stateNeeds = ARTICLE_STATE_REQUIRES[rec.state];
+  if (stateNeeds?.some((field) => !rec[field])) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `state '${rec.state}' requires ${stateNeeds.join(" and ")} (\xA73.2.3)` });
   }
   const exemptKind = NOT_APPLICABLE_EXEMPT_KINDS.includes(rec.article_kind);
   const isExempt = (v) => typeof v === "object" && v !== null && !Array.isArray(v) && "not_applicable" in v;
@@ -4461,6 +4465,8 @@ var disconfirmedHypothesisSchema = base.extend({
   evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
+var OPEN_QUESTION_CLOSED = "closed";
+var OPEN_QUESTION_TERMINUS_FIELD = "closed_into";
 var openQuestionSchema = base.extend({
   type: external_exports.literal("open_question"),
   // Stable handle, minted from the question — see decisionSchema.slug.
@@ -4486,16 +4492,16 @@ var openQuestionSchema = base.extend({
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
-  if (rec.resolution_status === "closed" && !rec.closed_into) {
+  if (rec.resolution_status === OPEN_QUESTION_CLOSED && !rec[OPEN_QUESTION_TERMINUS_FIELD]) {
     ctx.addIssue({
       code: external_exports.ZodIssueCode.custom,
-      message: "resolution_status 'closed' requires closed_into (the research_finding the answer landed in)"
+      message: `resolution_status '${OPEN_QUESTION_CLOSED}' requires ${OPEN_QUESTION_TERMINUS_FIELD} (the research_finding the answer landed in)`
     });
   }
-  if (rec.resolution_status !== "closed" && rec.closed_into) {
+  if (rec.resolution_status !== OPEN_QUESTION_CLOSED && rec[OPEN_QUESTION_TERMINUS_FIELD]) {
     ctx.addIssue({
       code: external_exports.ZodIssueCode.custom,
-      message: "closed_into is set but resolution_status is 'open' \u2014 close the question or drop the terminus"
+      message: `${OPEN_QUESTION_TERMINUS_FIELD} is set but resolution_status is 'open' \u2014 close the question or drop the terminus`
     });
   }
 });
@@ -4578,6 +4584,12 @@ var SYSTEM_REASONS = [
   // getting reverted", not "an event happened".
   "restore_performed"
 ];
+var TODO_SYSTEM_SOURCE = "system";
+var TODO_SYSTEM_REQUIRES = ["system_reason"];
+var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+function todoBlocksItself(rec) {
+  return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
+}
 var todoSchema = base.extend({
   type: external_exports.literal("todo"),
   // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -4628,27 +4640,30 @@ var todoSchema = base.extend({
   needs: external_exports.enum(BOARD_NEEDS).optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
-  if (rec.source === "system" && !rec.system_reason) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "source 'system' requires system_reason (\xA73.2.7)" });
+  if (rec.source === TODO_SYSTEM_SOURCE) {
+    for (const field of TODO_SYSTEM_REQUIRES) {
+      if (!rec[field]) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `source '${TODO_SYSTEM_SOURCE}' requires ${field} (\xA73.2.7)` });
+      }
+    }
+    for (const [field, verb] of Object.entries(TODO_USER_ONLY_FIELDS)) {
+      if (rec[field] !== void 0) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: [field],
+          message: `${field} ${verb} source:'user' board tasks only \u2014 maintenance-queue items never carry it`
+        });
+      }
+    }
   }
-  if (rec.blocked_by !== void 0 && rec.source === "system") {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      path: ["blocked_by"],
-      message: "blocked_by orders source:'user' board tasks only \u2014 maintenance-queue items never carry it"
-    });
-  }
-  if (rec.needs !== void 0 && rec.source === "system") {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      path: ["needs"],
-      message: "needs marks source:'user' board tasks only \u2014 maintenance-queue items never carry it"
-    });
-  }
-  if (rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug)) {
+  if (todoBlocksItself(rec)) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["blocked_by"], message: `blocked_by lists '${rec.slug}', the item itself \u2014 an item cannot block itself` });
   }
 });
+function undeclaredPhaseInterfaces(rec) {
+  const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
+  return rec.phases.flatMap((phase) => (phase.interfaces ?? []).filter((name) => !declared.has(name)).map((name) => ({ phase_id: phase.phase_id, name })));
+}
 var briefSchema = base.extend({
   type: external_exports.literal("brief"),
   slug: external_exports.string().min(1),
@@ -4695,16 +4710,11 @@ var briefSchema = base.extend({
   decisions_made: external_exports.array(external_exports.string().uuid())
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
-  const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
-  for (const phase of rec.phases) {
-    for (const name of phase.interfaces ?? []) {
-      if (!declared.has(name)) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          message: `phase '${phase.phase_id}' references undeclared interface '${name}' (\xA78.1 interface slice must come from technical_design.interfaces)`
-        });
-      }
-    }
+  for (const { phase_id, name } of undeclaredPhaseInterfaces(rec)) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: `phase '${phase_id}' references undeclared interface '${name}' (\xA78.1 interface slice must come from technical_design.interfaces)`
+    });
   }
 });
 var AGENT_MODEL_KEY = {
