@@ -32,7 +32,7 @@ import { buildHandoffFiles, planHandoff, registeredProjections, isSterlingClone,
 import { ignoredPaths, ignoredRemedy } from './lib/git-ignore-check.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const USAGE = 'Usage: node scripts/handoff-projection.mjs [<project root>]\n'
+const USAGE = 'Usage: node "<Sterling root>/bin/handoff-projection.mjs" [<project root>]\n'
   + 'Projects the target project\'s store into architecture.md, rulings.md and docs/sterling/. The root defaults to the current directory.';
 const cliArg = process.argv[2];
 if (cliArg === '--help' || cliArg === '-h') {

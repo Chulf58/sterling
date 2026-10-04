@@ -227,7 +227,8 @@ test('legacy-schema store found in WAL over 9p is refused, distinctly', (t) => {
       (e: unknown) =>
         e instanceof JournalDemotionRefusedError &&
         /legacy/i.test((e as Error).message) &&
-        /migrate-stores/.test((e as Error).message),
+        (e as Error).message.includes('node "<Sterling root>/bin/migrate-stores.mjs"') &&
+        !/scripts\/migrate-stores/.test((e as Error).message),
       'legacy-in-WAL-over-9p must refuse distinctly, naming the migration remedy',
     );
     assert.equal(rawMode(path), 'wal', 'refused read-only open must have written nothing');

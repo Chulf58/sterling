@@ -80,7 +80,7 @@ test('stamp-contract: an AGENTS.md-homed lead is updated in AGENTS.md (ancestry 
     assert.ok(!claudeMdAfter.includes('- **Anti-speculation:**'), 'the AGENTS.md-homed lead was not also duplicated into CLAUDE.md');
 
     assert.equal(r.status, 2, 'a not_migrated sibling counts as a refusal — exit 2');
-    assert.match(r.stdout, /not_migrated.*run: node scripts\/init\.mjs --target/, 'the legacy sibling (no AGENTS.md) is reported not_migrated, naming the ensure command');
+    assert.match(r.stdout, /not_migrated.*run: node "<Sterling root>\/bin\/init\.mjs" --target/,'the legacy sibling (no AGENTS.md) is reported not_migrated, naming the ensure command');
     // legacy sibling untouched — no CLAUDE.md write, no AGENTS.md guessed into existence
     assert.equal(readFileSync(join(legacyDir, 'CLAUDE.md'), 'utf8'), '# CLAUDE.md\n\n(pre-split project, never migrated)\n', 'not_migrated sibling: nothing written');
   } finally {
