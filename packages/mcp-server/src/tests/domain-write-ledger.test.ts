@@ -283,6 +283,10 @@ test('a garbage line and a torn last line do not stop the append, and the lines 
   }
 });
 
+// The shared root is under os.tmpdir(), so this proves the property on a Linux
+// filesystem only. It does NOT hold on /mnt/c under WSL2, where concurrent
+// appends can overwrite each other (finding
+// o-append-is-not-atomic-across-processes-on-wsl2-mnt-c).
 test('concurrency: several server processes appending under one root lose no entry', async () => {
   const root = mkdtempSync(join(tmpdir(), 'sterling-write-ledger-shared-'));
   try {

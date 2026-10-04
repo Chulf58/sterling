@@ -9750,12 +9750,18 @@ export class SterlingTools {
    * type and this server's clock. No caller field reaches an entry.
    *
    * APPEND-ONLY: the entry is one JSON line, written with a single O_APPEND
-   * call and no read before it, so several servers under one root (the
-   * session's and a maintenance worker's) cannot lose each other's entries.
+   * call and no read before it. Appends from several processes under one root
+   * (the session's server and a maintenance worker's) are safe on a Linux
+   * filesystem. On /mnt/c under WSL2 they are NOT: concurrent appends within a
+   * few milliseconds can overwrite each other. The lost entry's record then
+   * does not pay, and nothing reports it (finding
+   * o-append-is-not-atomic-across-processes-on-wsl2-mnt-c; the follow-up is
+   * boarded).
    * The line opens with a newline as well as ending with one, so it stands on
    * its own even after a predecessor a crash cut short. Nothing clears the
-   * file; compactDomainWrites bounds it. No lock file, by ruling (the repo's
-   * history with lock directories).
+   * file; compactDomainWrites bounds it. No lock file, by conductor decision:
+   * decision dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own
+   * (48f5209d) records why lock directories are avoided here.
    *
    * NEVER fails the knowledge write. Returns undefined when the entry was
    * logged (or queued for a caller's post-commit flush), otherwise the warning

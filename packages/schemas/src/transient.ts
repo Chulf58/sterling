@@ -96,10 +96,14 @@ export type SessionEvent = z.infer<typeof sessionEventSchema>;
 // as before.
 //
 // FORMAT: JSON Lines, one entry per line, append-only. Each write is a single
-// O_APPEND call with no read before it, so several servers under one root (the
-// session's, a maintenance worker's) cannot lose each other's entries the way a
-// read-modify-write of one JSON array did. A reader takes the latest `at` per
-// id and skips a line that does not parse or is not the shape below.
+// O_APPEND call with no read before it. Appends from several processes under
+// one root (the session's server, a maintenance worker's) are safe on a Linux
+// filesystem. On /mnt/c under WSL2 they are not: concurrent appends within a
+// few milliseconds can overwrite each other, the lost entry's record then does
+// not pay, and nothing reports it (finding
+// o-append-is-not-atomic-across-processes-on-wsl2-mnt-c; the follow-up is
+// boarded). A reader takes the latest `at` per id and skips a line that does
+// not parse or is not the shape below.
 //
 // A SEPARATE file from the session-event register on purpose: H10's
 // clearRegisters rewrites and deletes that register at Stop, which would lose
