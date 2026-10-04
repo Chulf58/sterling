@@ -301,6 +301,19 @@ try {
   // fail-open — a broken plan lock costs its own section, never the rest of H1
 }
 
+// STERLING ROOT (decision session-start-prints-the-sterling-root-plain-text-instructions-use-it):
+// printed on every source, from the hook's own location only (the walk-up, never the
+// STERLING_PLUGIN_ROOT env seam, because the model runs scripts from this path). Unresolved is
+// stated loudly by sterlingRootLine, never silenced. Computed above the `if (!store)` exit so a
+// Sterling project with a blocked or missing store gets it too.
+let rootLocation = null;
+try {
+  rootLocation = walkUpPluginRoot();
+} catch {
+  // an unresolvable root is stated by sterlingRootLine as UNRESOLVED
+}
+const rootContext = `\n\n${sterlingRootLine(rootLocation)}`;
+
 // STORE-VERSION PROBE (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
 // ruling point 1 'Explicit command'): read the SQLite header user_version of the project
 // store and every ~/.sterling/domains/*/sterling.db — no connection opened — and on a
@@ -383,13 +396,17 @@ if (!store) {
   // main path: a project can hold an approved plan before its store exists, and
   // a section computed but never emitted would consume its one-shot markers
   // silently — disclosing nothing while spending the disclosure.
-  if (planLockContext || dispatchResidueLines.length || earlyWarning) {
+  // A project with a Sterling config or a blocked store is a Sterling project: its instructions
+  // name <Sterling root>, so this exit prints the STERLING ROOT line too. A directory with no
+  // Sterling state prints nothing.
+  const sterlingProject = projectStoreBlocked || existsSync(join(input.cwd, '.sterling', 'config.json'));
+  if (planLockContext || dispatchResidueLines.length || earlyWarning || sterlingProject) {
     process.stdout.write(
       JSON.stringify({
         ...(earlyWarning ? { systemMessage: earlyWarning.trim() } : {}),
         hookSpecificOutput: {
           hookEventName: 'SessionStart',
-          additionalContext: planLockContext + dispatchResidueLines.join('\n\n') + storeVersionContext + postUpdateContext,
+          additionalContext: planLockContext + dispatchResidueLines.join('\n\n') + (sterlingProject ? rootContext : '') + storeVersionContext + postUpdateContext,
         },
       })
     );
@@ -422,17 +439,6 @@ const { config, configUnreadable } = readProjectConfig(input.cwd);
 // ceiling keep degrading to their own defaults. Each line below is guarded like
 // every other H1 read: a malformed config or unresolved plugin root costs only
 // that line (fail-open).
-// STERLING ROOT: printed on every source, from the hook's own location only (the walk-up, never
-// the STERLING_PLUGIN_ROOT env seam, because the model runs scripts from this path). Unresolved
-// is stated loudly by sterlingRootLine, never silenced.
-let rootLocation = null;
-try {
-  rootLocation = walkUpPluginRoot();
-} catch {
-  // an unresolvable root is stated by sterlingRootLine as UNRESOLVED
-}
-const rootContext = `\n\n${sterlingRootLine(rootLocation)}`;
-
 let roleContext = '';
 try {
   const root = pluginRoot();
