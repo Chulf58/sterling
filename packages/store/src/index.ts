@@ -3303,8 +3303,8 @@ export class SterlingStore {
 
   /**
    * READ-ONLY damage count for issue #14: how many live reference_material
-   * records hold a URL location whose '//' an earlier write collapsed to '/'
-   * ('https:/host/…'). The shape is isCollapsedUrlLocation's, the one
+   * records hold a web URL location (http, https, ftp) whose '//' an earlier
+   * write collapsed to '/' ('https:/host/…'). The shape is isCollapsedUrlLocation's, the one
    * definition in packages/schemas. Nothing is repaired here: each such record
    * is fixed by a knowledge_edit on `location` restoring the second slash.
    */

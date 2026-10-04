@@ -67,6 +67,19 @@ test('only collapsed URL locations are counted, whatever the kind; intact URLs, 
   }
 });
 
+test('only http, https and ftp collapses count: file:/ and s3:/ single-slash forms are legitimate', () => {
+  const { store, cleanup } = harness();
+  try {
+    store.create(ref('doc', 'ftp:/example.com/file'));
+    store.create(ref('doc', 'file:/tmp/x'));
+    store.create(ref('url', 's3:/bucket/key'));
+    store.create(ref('doc', 'mailto:a@b.com'));
+    assert.equal(store.countCollapsedUrlLocations(), 1);
+  } finally {
+    cleanup();
+  }
+});
+
 test('the count is read-only: no record version or timestamp moves', () => {
   const { store, cleanup } = harness();
   try {

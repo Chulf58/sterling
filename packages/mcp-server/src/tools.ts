@@ -4994,6 +4994,7 @@ export class SterlingTools {
         ...this.articleOversizeWarnings(record),
         ...this.citedIdWarnings(replace),
         ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+        ...this.staleLocationItemWarnings(record, this.supersedeChain(old)),
         ...SterlingTools.normalizedOnWrite(field, next, stored),
       ],
     };
@@ -5734,6 +5735,7 @@ export class SterlingTools {
     // debt — named here so it is visible at the exact moment the writer is
     // looking, never silent (P5). Empty when nothing is owed (P1).
     if (before) warnings.push(...this.openReconcileLaneWarnings(this.supersedeChain(before)));
+    if (before) warnings.push(...this.staleLocationItemWarnings(record, this.supersedeChain(before)));
     const findability = this.findabilityDisclosure(record);
     warnings.push(...findability.warnings);
     return { record, warnings, ...findability.central, ...(same_subject ? { same_subject } : {}), ...(claims_check ? { claims_check } : {}) };
@@ -7772,6 +7774,29 @@ export class SterlingTools {
       );
     }
     return warnings;
+  }
+
+  /**
+   * A refresh_reference item still open on a reference_material whose location
+   * is NOT a repo path (a URL, prose, an external path) is false debt: nothing
+   * on disk can be missing or changed (issue #13). No read closes it — decision
+   * 68988832 rejects auto-closure, an item closes only through a write that
+   * names it in `resolves` or maintenance_remove — so the write receipt names
+   * each such item's FULL id and both ways to close it. Called AFTER the write:
+   * an item this write's `resolves` claimed is already gone.
+   */
+  private staleLocationItemWarnings(record: DurableRecord, chain: Set<string>): string[] {
+    if (record.type !== 'reference_material') return [];
+    const location = (record as unknown as { location?: unknown }).location;
+    if (typeof location !== 'string' || repoPathOfLocation(location) !== undefined) return [];
+    return this.maintenanceQuery({ system_reason: 'refresh_reference', cap: 1000 })
+      .map((item) => item as unknown as { id: string; feature_link?: string })
+      .filter((it) => it.feature_link !== undefined && chain.has(it.feature_link))
+      .map(
+        (it) =>
+          `refresh_reference item '${it.id}' is open on this record, but its location is not a file (a URL, prose or an external path), so nothing on disk can be missing — ` +
+          `close it by passing resolves: ['${it.id}'] on a knowledge_update or knowledge_edit of this record, or with maintenance_remove('${it.id}').`
+      );
   }
 
   /**

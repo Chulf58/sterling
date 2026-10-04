@@ -86,6 +86,67 @@ test('schema: a kind:doc prose location parses verbatim; a path location is stil
   assert.equal((parseRecord(ref({ location: '.\\docs\\spec.md' })) as unknown as { location: string }).location, 'docs/spec.md');
 });
 
+// Review round: a path with whitespace, slash-less schemes, and which collapses count.
+
+test('a path-shaped location with whitespace (a separator and a file extension) is a PATH: keyed and normalized', () => {
+  assert.equal(classifyLocation('docs/Design Notes/spec.md'), 'path');
+  assert.equal(classifyLocation('docs\\Design Notes\\spec.md'), 'path');
+  assert.equal(repoPathOfLocation('./docs//Design Notes/spec.md'), 'docs/Design Notes/spec.md');
+  assert.equal((parseRecord(ref({ location: '.\\docs\\Design Notes\\spec.md' })) as unknown as { location: string }).location, 'docs/Design Notes/spec.md');
+  assert.deepEqual(RECORD_TYPES.reference_material.fileKeys(ref({ location: 'docs/Design Notes/spec.md' })), ['docs/Design Notes/spec.md']);
+});
+
+test('whitespace without the path shape is prose: no separator, or no file extension at the end', () => {
+  for (const p of ['See the vendor portal, section 4', 'Confluence page Design Notes', 'Design Notes.md', 'docs/Design Notes/spec']) {
+    assert.equal(classifyLocation(p), 'prose', p);
+    assert.deepEqual(RECORD_TYPES.reference_material.fileKeys(ref({ location: p })), [], p);
+  }
+});
+
+test('the accepted cost: a sentence that ends in a file path reads as a path', () => {
+  assert.equal(classifyLocation('see docs/foo.md'), 'path');
+});
+
+test('prose that mentions a URL is never path-shaped, so its :// is not collapsed', () => {
+  const text = 'the portal, mirrored at https://example.com/spec.html';
+  assert.equal(classifyLocation(text), 'prose');
+  assert.equal(normalizeLocation(text), text);
+});
+
+test('a slash-less scheme is a url-kind location: verbatim, no file key', () => {
+  for (const u of ['mailto:a@b.com', 'urn:isbn:1', 'jira:ABC-12', 'arxiv:2401.1', 'MAILTO:a@b.com']) {
+    assert.equal(classifyLocation(u), 'url', u);
+    assert.equal(normalizeLocation(u), u);
+    assert.equal(repoPathOfLocation(u), undefined, u);
+    assert.deepEqual(RECORD_TYPES.reference_material.fileKeys(ref({ location: u })), [], u);
+  }
+});
+
+test('single-slash and bare scheme forms are url-kind; a Windows drive path is still a path', () => {
+  for (const u of ['https:/', 's3:/bucket/key', 'file:/tmp/x', 'https:/example.com/a']) {
+    assert.equal(classifyLocation(u), 'url', u);
+    assert.equal(normalizeLocation(u), u);
+  }
+  for (const p of ['c:/docs', 'C:\\docs', 'C:\\My Docs\\spec.md']) {
+    assert.equal(classifyLocation(p), 'path', p);
+    assert.equal(repoPathOfLocation(p), undefined, p);
+    assert.equal(normalizeLocation(p), p);
+  }
+});
+
+test('a word and a colon followed by a space is prose, not a scheme', () => {
+  assert.equal(classifyLocation('Note: ask the platform team'), 'prose');
+});
+
+test('isCollapsedUrlLocation counts only http, https and ftp collapses; file:/ and s3:/ are legitimate forms', () => {
+  for (const u of ['https:/example.com/a', 'http:/example.com', 'ftp:/example.com/f', 'HTTPS:/example.com']) {
+    assert.equal(isCollapsedUrlLocation(u), true, u);
+  }
+  for (const u of ['file:/tmp/x', 's3:/bucket/key', 'https:/', 'https://example.com', 'mailto:a@b.com', 'c:/docs/spec.md']) {
+    assert.equal(isCollapsedUrlLocation(u), false, u);
+  }
+});
+
 test('file keys: a path location is a file key; a URL, a collapsed URL and prose are not', () => {
   const keys = (location: string) => RECORD_TYPES.reference_material.fileKeys(ref({ location }));
   assert.deepEqual(keys('./docs/spec.md'), ['docs/spec.md']);

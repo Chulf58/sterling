@@ -234,6 +234,115 @@ test('#13 a path missing from its working_tree mints the item even when the proj
   }
 });
 
+// Review round.
+
+test('#13 a repo path containing whitespace is still drift-checked: present mints nothing, missing mints', () => {
+  const { dir, store, tools, cleanup } = fixture();
+  try {
+    mkdirSync(join(dir, 'docs', 'Design Notes'), { recursive: true });
+    writeFileSync(join(dir, 'docs', 'Design Notes', 'spec.md'), 'x');
+    const ref = mkRef(tools, './docs/Design Notes/spec.md');
+    assert.equal(stored(store, ref.id).location, 'docs/Design Notes/spec.md');
+    assert.deepEqual(Object.keys((stored(store, ref.id).file_baselines ?? {}) as Loose), ['docs/Design Notes/spec.md']);
+    readRefs(tools);
+    assert.equal(refreshItems(tools).length, 0);
+    rmSync(join(dir, 'docs', 'Design Notes', 'spec.md'));
+    readRefs(tools);
+    assert.deepEqual(
+      refreshItems(tools).map((i) => i.file_keys),
+      [['docs/Design Notes/spec.md']]
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('#13 a slash-less scheme location (mailto:, urn:, jira:) is stored verbatim and mints nothing', () => {
+  const { store, tools, cleanup } = fixture();
+  try {
+    for (const location of ['mailto:a@b.com', 'urn:isbn:1', 'jira:ABC-12', 'arxiv:2401.1', 's3:/bucket/key', 'file:/tmp/x']) {
+      const ref = mkRef(tools, location);
+      assert.equal(stored(store, ref.id).location, location);
+      assert.equal(readRefs(tools).find((r) => r.id === ref.id)?.verify_before_use, undefined, location);
+    }
+    assert.equal(refreshItems(tools).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+// No read-time close exists for a maintenance item, by decision (auto-closure
+// and auto-drain are rejected; an item closes only when a write names it in
+// `resolves` or through maintenance_remove). So an already-open false item on a
+// record whose location is not a file stays open on a read, and the write
+// receipt names its full id and how to close it.
+const enqueueFalseItem = (tools: SterlingTools, ref: Loose, key: string): string =>
+  String(
+    (
+      tools.maintenanceEnqueue({
+        reason: 'refresh_reference',
+        text: `refresh reference '${String(ref.title)}' — ${key} no longer exists on disk; repoint location`,
+        file_keys: [key],
+        feature_link: String(ref.id),
+      }).record as unknown as Loose
+    ).id
+  );
+
+test('#13 a pre-existing false item on a URL record: a read leaves it open, a write names its full id and resolves', () => {
+  const { tools, cleanup } = fixture();
+  try {
+    const ref = mkRef(tools, URL);
+    const itemId = enqueueFalseItem(tools, ref, COLLAPSED);
+    readRefs(tools);
+    assert.deepEqual(
+      refreshItems(tools).map((i) => i.id),
+      [itemId],
+      'a read closes nothing'
+    );
+    const res = tools.knowledgeEdit(String(ref.id), 'summary', 'a summary', 'another summary');
+    const hits = res.warnings.filter((w) => /not a file/.test(w));
+    assert.equal(hits.length, 1);
+    assert.ok(hits[0].includes(itemId), 'the warning carries the full item id');
+    assert.match(hits[0], /resolves/);
+    const viaUpdate = tools.knowledgeUpdateResult(String(ref.id), { summary: 'a third summary' });
+    assert.equal(viaUpdate.warnings.filter((w) => /not a file/.test(w) && w.includes(itemId)).length, 1);
+    assert.equal(refreshItems(tools).length, 1, 'a write that does not name the item leaves it open');
+  } finally {
+    cleanup();
+  }
+});
+
+test('#13 the repairing knowledge_edit closes the pre-existing false item when it passes it in resolves', () => {
+  const { store, tools, cleanup } = fixture();
+  try {
+    const ref = mkRef(tools, COLLAPSED);
+    const itemId = enqueueFalseItem(tools, ref, COLLAPSED);
+    const res = tools.knowledgeEdit(String(ref.id), 'location', 'https:/example.com', 'https://example.com', [itemId]);
+    assert.equal(stored(store, ref.id).location, URL);
+    assert.equal(refreshItems(tools).length, 0);
+    assert.equal(res.warnings.filter((w) => /not a file/.test(w)).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('#13 a prose record with a pre-existing false item gets the same warning; a path record does not', () => {
+  const { tools, cleanup } = fixture();
+  try {
+    const prose = mkRef(tools, 'the vendor portal, section 3');
+    const itemId = enqueueFalseItem(tools, prose, 'the vendor portal, section 3');
+    const res = tools.knowledgeEdit(String(prose.id), 'summary', 'a summary', 'another summary');
+    assert.equal(res.warnings.filter((w) => /not a file/.test(w) && w.includes(itemId)).length, 1);
+    const path = mkRef(tools, 'docs/gone.md');
+    readRefs(tools);
+    assert.equal(refreshItems(tools).filter((i) => i.feature_link === path.id).length, 1);
+    const onPath = tools.knowledgeEdit(String(path.id), 'summary', 'a summary', 'another summary');
+    assert.equal(onPath.warnings.filter((w) => /not a file/.test(w)).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
 test('#13 a genuinely missing local file still mints ONE refresh_reference item', () => {
   const { tools, cleanup } = fixture();
   try {
