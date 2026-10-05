@@ -58,7 +58,13 @@ Each question is its own `AskUserQuestion` call:
 
 ## 5. Before closure
 
+<!-- claude-only -->
 - **Astra sparring, when warranted** (a new mechanism, persistent state, a deletion boundary, anything hard to unship): put the ruled design, your proposal and your own objections through the `codex` MCP tool — `model: gpt-6-astra`, `sandbox: read-only`, `approval-policy: never`, `config: {model_reasoning_effort: "high"}`. It runs **before** closure; a new trade-off it raises goes back to the tree as a form.
+<!-- /claude-only -->
+<!-- opencode-only -->
+On OpenCode, the Astra sparring bullet reads as follows.
+- **Astra sparring, when warranted** (a new mechanism, persistent state, a deletion boundary, anything hard to unship): put the ruled design, your proposal and your own objections to the `sterling/reviewer` agent through the `subagent` tool with `model` set to `openai/gpt-6-astra#high`, and say in the prompt not to modify the worktree. The `codex` MCP tool is the Claude Code route only and is not used here. It runs **before** closure; a new trade-off it raises goes back to the tree as a form.
+<!-- /opencode-only -->
 - **Close** when each consequential branch is resolved or **explicitly deferred** (named, with why). Never close with a "done?" or "is this ready?" form.
 - **Ending the interview does not authorize building.** Building is its own ask unless the user already asked for it.
 - **Clear `needs: grill` at the end.** When the grill was for a board item marked `needs: grill`, clear the mark with `board_update {needs: ""}` once the interview closes (or set `needs: user` if a ruling is still owed), so the item leaves WAITING ON YOU and can start (decision `board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start`).

@@ -244,6 +244,31 @@ test('every opencode-only block in a raw-read command or skill opens with "On Op
   assert.ok(blocks >= 1, 'the check saw at least one block (dashboard.md has one)');
 });
 
+// GitHub issue #24: on OpenCode the Sol, Astra and Terra lanes are native subagent dispatches on
+// openai models, and the `codex` MCP tool is the Claude Code route only. The three skills that
+// name the route carry a host block each, and their Claude text is the text before the blocks.
+test('review-brief, grill and delegating-to-subagents: the OpenCode render names the native route and no codex MCP call; the Claude render keeps the codex MCP wording', async () => {
+  const { renderClaudeText } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'agent-fences.mjs')).href);
+  const expected = {
+    'review-brief': { opencode: ['sterling/reviewer', 'openai/gpt-5.6-sol#high', 'do not modify the worktree'], claude: 'call the `codex` MCP tool at `sandbox: read-only`' },
+    grill: { opencode: ['sterling/reviewer', 'openai/gpt-6-astra#high'], claude: 'through the `codex` MCP tool — `model: gpt-6-astra`, `sandbox: read-only`' },
+    'delegating-to-subagents': { opencode: ['sterling/implementor', 'openai/gpt-5.6-terra'], claude: '(`gpt-5.6-terra`, through the `codex` MCP tool)' },
+  };
+  for (const [dir, want] of Object.entries(expected)) {
+    const rel = `skills/${dir}/SKILL.md`;
+    const source = readFileSync(join(repo, rel), 'utf8').replace(/\r\n/g, '\n');
+    const opencode = cfg.hostMapText(source, '/r', rel);
+    for (const text of want.opencode) assert.ok(opencode.includes(text), `${rel}: the OpenCode render lacks ${JSON.stringify(text)}`);
+    assert.ok(!opencode.includes(want.claude), `${rel}: the OpenCode render still carries the codex MCP call`);
+    assert.doesNotMatch(opencode, /(call|through) the `codex` MCP tool/, `${rel}: the OpenCode render routes a lane through the codex MCP tool`);
+    const claude = renderClaudeText(source, rel);
+    assert.ok(claude.includes(want.claude), `${rel}: the Claude render keeps the codex MCP wording`);
+    assert.doesNotMatch(claude, /<!--|openai\//, `${rel}: no marker or OpenCode route reaches the Claude render`);
+    const unfenced = source.replace(/<!-- opencode-only -->\n[\s\S]*?<!-- \/opencode-only -->\n/g, '').replace(/^<!-- \/?claude-only -->\n/gm, '');
+    assert.equal(claude, unfenced, `${rel}: the Claude render is the source without the fences`);
+  }
+});
+
 test('dashboard.md: the OpenCode render names the TUI plugin and no tmux or launcher; the Claude render is the unfenced text', async (t) => {
   const { renderClaudeText } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'agent-fences.mjs')).href);
   const source = readFileSync(join(repo, 'commands', 'dashboard.md'), 'utf8');

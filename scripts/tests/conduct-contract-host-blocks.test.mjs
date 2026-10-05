@@ -124,8 +124,18 @@ test('every mapping the old phrase map carried has its OpenCode text in the rend
       'review-territory-h22': 'OpenCode has no H22; the line is still required',
       'store-guard-h15': "the Sterling plugin's evaluate hook denies a shell command with a write shape aimed at the store while letting reads through",
       'platform-mechanics': "OpenCode's plugin hooks, agent files and config move between versions",
-      'codex-availability': 'only when a `codex` MCP server is configured for it',
-      'codex-background': 'How OpenCode handles a long Codex call is unmeasured',
+      // GitHub issue #24 (user-ruled 2026-10-05 through the question form): the OpenCode bullet
+      // no longer routes these lanes through a codex MCP server, so the two entries that pinned
+      // that wording ('codex-availability', 'codex-background') are replaced by the native route.
+      'native-review': 'agent `sterling/reviewer` with `model` `openai/gpt-5.6-sol#high` to review',
+      'native-sparring': '`openai/gpt-6-astra#high` to spar',
+      'native-implement': 'agent `sterling/implementor` with `model` `openai/gpt-5.6-terra` to implement',
+      'native-no-sandbox': 'do not modify the worktree',
+      'native-model-standing': 'Setting `model` on these dispatches is a standing user instruction',
+      'codex-claude-code-only': 'The `codex` MCP tool is the Claude Code route only',
+      'codex-ruling-2026-09-20': '*"Add that to all instruction files, that we use the codex mcp over whatever you were doing"*',
+      'codex-ruling-2026-10-05': 'narrowed to Claude Code on 2026-10-05',
+      'openai-not-logged-in': 'If the openai provider is not logged in, say so and use the fallbacks',
       'ready-for-new-session': '- **Say `READY FOR NEW SESSION` plainly when it is time.**',
       'version-banner': `read it from \`${root}/.claude-plugin/plugin.json\``,
       'agent-currency': 'on OpenCode say that no agent-currency check ran',
@@ -133,6 +143,35 @@ test('every mapping the old phrase map carried has its OpenCode text in the rend
     };
     for (const [id, text] of Object.entries(expected)) assert.ok(out.includes(text), `${id}: OpenCode text missing: ${text}`);
     assert.match(out, /`node "[^"]+\/bin\/rotation-note\.mjs"`.*\/new/s, 'the new-session line names rotation-note by root and /new');
+    for (const codexRoute of ['uses the `codex` MCP tool', 'only when a `codex` MCP server is configured', '`sandbox` (`read-only`', 'How OpenCode handles a long Codex call']) {
+      assert.ok(!out.includes(codexRoute), `the OpenCode render still routes a lane through the codex MCP tool: ${codexRoute}`);
+    }
+    const claude = renderClaudeText(template(), 'target-claude-md.md');
+    assert.ok(claude.includes('uses the `codex` MCP tool (the pinned Codex 0.153.4 MCP server is the one supported route'), 'the Claude render keeps the codex MCP route');
+    assert.ok(!claude.includes('openai/') && !claude.includes('sterling/reviewer'), 'the native OpenCode route does not reach the Claude render');
+  } finally {
+    p.cleanup();
+  }
+});
+
+// This repo's own CLAUDE.md fences its Codex bullet itself (decision
+// sterling-repo-claude-md-restamp-template-bullets-fence-only-project-specific), so its OpenCode
+// render is checked apart from the template's (GitHub issue #24).
+test("this repo's CLAUDE.md: the OpenCode render names the native route, the Claude render keeps the codex MCP route", () => {
+  const own = readFileSync(join(repo, 'CLAUDE.md'), 'utf8');
+  const p = project(own);
+  try {
+    const out = layer.renderSterlingLayer(p.dir, layer.sterlingRoot());
+    for (const text of ['sterling/reviewer', 'openai/gpt-5.6-sol#high', 'openai/gpt-6-astra#high', 'sterling/implementor', 'openai/gpt-5.6-terra', 'The `codex` MCP tool is the Claude Code route only', 'narrowed to Claude Code on 2026-10-05', 'do not modify the worktree']) {
+      assert.ok(out.includes(text), `OpenCode render of CLAUDE.md lacks ${JSON.stringify(text)}`);
+    }
+    for (const codexRoute of ['uses the `codex` MCP tool', 'only when a `codex` MCP server is configured', '`sandbox` (`read-only`']) {
+      assert.ok(!out.includes(codexRoute), `OpenCode render of CLAUDE.md still carries ${JSON.stringify(codexRoute)}`);
+    }
+    assert.doesNotMatch(out, /opencode-only block at CLAUDE\.md:\d+ does not open with "On OpenCode,"/);
+    const claude = renderClaudeText(own, 'CLAUDE.md');
+    assert.ok(claude.includes('uses the `codex` MCP tool (the pinned Codex 0.153.4 MCP server is the one supported route'), 'the Claude render keeps the codex MCP route');
+    assert.ok(!claude.includes('openai/gpt-'), 'the native OpenCode route does not reach the Claude render');
   } finally {
     p.cleanup();
   }

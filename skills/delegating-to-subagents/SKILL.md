@@ -43,7 +43,13 @@ Return: files changed, the diff rationale, pasted pytest output, blockers.
 
 ## Picking the agent
 
+<!-- claude-only -->
 The roster, each role's return shape, and the escalate-on-evidence rule are in `agent-templates/conductor.md`, "The roster"; each role's shipped default model and effort are in `templates/default-config.json` (`models`), and a project's own values in `.sterling/config.json`. In short: `scout` locates, `researcher` traces and answers web facts (it has WebSearch and WebFetch; the scout has no web tools), `implementor` changes code and owns its tests (Sonnet 5.5 by default; pin Opus 5.5 on a dispatch for a lane that needs careful judgment), `reviewer` reviews a finished diff read-only, `librarian` applies conductor-drafted store writes, and **Terra** (`gpt-5.6-terra`, through the `codex` MCP tool) is an alternative to the implementor's default. Every dispatch carries an explicitly pinned model.
+<!-- /claude-only -->
+<!-- opencode-only -->
+On OpenCode, the roster paragraph reads as follows.
+The roster, each role's return shape, and the escalate-on-evidence rule are in `agent-templates/conductor.md`, "The roster"; each role's shipped default model and effort are in `templates/default-config.json` (`models`), and a project's own values in `.sterling/config.json`. In short: `scout` locates, `researcher` traces and answers web facts (it has WebSearch and WebFetch; the scout has no web tools), `implementor` changes code and owns its tests (Sonnet 5.5 by default; pin Opus 5.5 on a dispatch for a lane that needs careful judgment), `reviewer` reviews a finished diff read-only, `librarian` applies conductor-drafted store writes, and **Terra** (the `sterling/implementor` agent dispatched with `model` set to `openai/gpt-5.6-terra`; the `codex` MCP tool is the Claude Code route only) is an alternative to the implementor's default. Every dispatch carries an explicitly pinned model.
+<!-- /opencode-only -->
 
 `reviewer` (read-only, one review rubric, model pinned per dispatch) takes review, re-check and sparring lanes; brief it per the `review-brief` skill. Who reviews what — the cross-family pairing, and in a WORK-mode project Sol before the PR, which takes precedence over the Terra→Opus pairing — is in `agent-templates/conductor.md`, "Review sparsely, and only when a task is done".
 
