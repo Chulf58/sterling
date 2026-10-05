@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { boardDisplayLabel } from '@sterling/schemas';
 import type { SterlingStore } from '@sterling/store';
 import { KNOWLEDGE_TAB, type UiEvent, type UiState } from '@sterling/tui/dist/state.js';
-import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS, type AssignState } from '@sterling/tui/dist/avatars/index.js';
+import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_BG, TILE_COLS, type AssignState } from '@sterling/tui/dist/avatars/index.js';
 
 /** OpenCode 2.0.21's sidebar content width, measured: a session title wraps at 34 columns. */
 export const SIDEBAR_WIDTH = 34;
@@ -207,16 +207,29 @@ export function stepAvatars(prev: AvatarState, familyIds: readonly string[], rng
   return assign(familyIds, prev.current, rng, { poolSize: POOL_SIZE, freed: prev.freed });
 }
 
+/** An idle portrait's colour: the grey of the same luma, mixed halfway into the
+ *  tile colour. Greying drops the hue, the mix darkens it; the sprite stays legible. */
+function dimHex(hex: string): string {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)) as [number, number, number];
+  const grey = 0.299 * r + 0.587 * g + 0.114 * b;
+  const tile = [1, 3, 5].map((i) => parseInt(TILE_BG.slice(i, i + 2), 16));
+  return '#' + tile.map((t) => Math.round((grey + t) / 2).toString(16).padStart(2, '0')).join('');
+}
+
 /** A portrait on its tinted tile, no drawn frame: the sprite as half blocks
  *  with a fg and bg span per colour run. Every span carries a bg (the tile
- *  colour wherever a pixel is transparent), so nothing is left unset. */
-export function portraitLines(avatar: number, frame: number): SpanLine[] {
+ *  colour wherever a pixel is transparent), so nothing is left unset. An idle
+ *  agent's portrait is drawn dimmed; only a running one keeps its full colour. */
+export function portraitLines(avatar: number, frame: number, status: SubagentRow['status'] = 'active'): SpanLine[] {
+  const shade = (hex: string | undefined) => (hex !== undefined && status === 'idle' ? dimHex(hex) : hex);
   return tileCells(avatar, frame).map((row) => {
     const line: SpanLine = [];
     for (const c of row) {
+      const fg = shade(c.fg);
+      const bg = shade(c.bg);
       const last = line[line.length - 1];
-      if (last && last.fg === c.fg && last.bg === c.bg) last.text += c.ch;
-      else line.push({ text: c.ch, fg: c.fg, bg: c.bg });
+      if (last && last.fg === fg && last.bg === bg) last.text += c.ch;
+      else line.push({ text: c.ch, fg, bg });
     }
     return line;
   });
@@ -234,7 +247,7 @@ function rowText(r: SubagentRow, width: number): SpanLine[] {
 /** One sub-agent row: the tile on the left with the three text lines beside it,
  *  or the text under the tile when `width` cannot hold both. No avatar number is shown. */
 export function subagentRowLines(r: SubagentRow, avatar: number, tick: number, width: number): SpanLine[] {
-  const portrait = portraitLines(avatar, frameAt(tick, phaseFor(avatar), r.status === 'active'));
+  const portrait = portraitLines(avatar, frameAt(tick, phaseFor(avatar), r.status === 'active'), r.status);
   const sideWidth = width - PORTRAIT_WIDTH - GAP;
   if (sideWidth < SIDE_TEXT_MIN) return [...portrait, ...rowText(r, width)];
   const text = rowText(r, sideWidth);

@@ -190,6 +190,33 @@ test('portrait: a 6x3 quadrant-block sprite on an 8x3 tinted tile, no drawn fram
   }
 });
 
+test('portrait: idle is the same sprite with every colour desaturated and darkened; active is unchanged', () => {
+  const active = portraitLines(5, 0, 'active');
+  const idle = portraitLines(5, 0, 'idle');
+  assert.deepEqual(active, portraitLines(5, 0), 'active (and the default) draws the sprite as before');
+  assert.deepEqual(idle.map(plain), active.map(plain), 'same glyphs, only the colours change');
+  const lum = (hex: string) => 0.299 * parseInt(hex.slice(1, 3), 16) + 0.587 * parseInt(hex.slice(3, 5), 16) + 0.114 * parseInt(hex.slice(5, 7), 16);
+  const channels = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const colours = (lines: SpanLine[]) => lines.flat().flatMap((sp) => [sp.fg, sp.bg]).filter((c): c is string => c !== undefined);
+  const dimmed = colours(idle);
+  assert.ok(dimmed.length > 0);
+  assert.ok(dimmed.every((c) => /^#[0-9a-f]{6}$/.test(c)));
+  const spread = (hex: string) => Math.max(...channels(hex)) - Math.min(...channels(hex));
+  const bright = colours(active);
+  assert.ok(Math.max(...dimmed.map(spread)) < Math.max(...bright.map(spread)), 'idle colours are less saturated');
+  assert.ok(Math.max(...dimmed.map(lum)) < Math.max(...bright.map(lum)), 'idle colours are darker');
+  assert.notEqual(idle[0]![0]!.bg, TILE_BG, 'the tile itself is dimmed too');
+});
+
+test('subagent row: an idle row draws its portrait dimmed and an active row in full colour', () => {
+  const active = subagentRowLines(row({ status: 'active' }), 7, 0, 60);
+  const idle = subagentRowLines(row({ status: 'idle' }), 7, 0, 60);
+  const tile = (lines: SpanLine[]) => lines.map((l) => l.slice(0, 1));
+  assert.deepEqual(active.map((l) => l[0]), portraitLines(7, 0, 'active').map((l) => l[0]));
+  assert.deepEqual(idle.map((l) => l[0]), portraitLines(7, 0, 'idle').map((l) => l[0]));
+  assert.notDeepEqual(tile(idle), tile(active));
+});
+
 test('subagent row: tile left with title, `status · ctx · model` and description on its right, and no avatar number', () => {
   const lines = subagentRowLines(row({ description: 'check the new tile layout' }), 7, 0, 60);
   assert.equal(lines.length, PORTRAIT_HEIGHT);

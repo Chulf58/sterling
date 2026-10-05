@@ -13292,13 +13292,22 @@ var emptyAvatars = () => ({ current: /* @__PURE__ */ new Map(), freed: [] });
 function stepAvatars(prev, familyIds, rng) {
   return assign(familyIds, prev.current, rng, { poolSize: POOL_SIZE, freed: prev.freed });
 }
-function portraitLines(avatar, frame2) {
+function dimHex(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const grey = 0.299 * r + 0.587 * g + 0.114 * b;
+  const tile = [1, 3, 5].map((i) => parseInt(TILE_BG.slice(i, i + 2), 16));
+  return "#" + tile.map((t) => Math.round((grey + t) / 2).toString(16).padStart(2, "0")).join("");
+}
+function portraitLines(avatar, frame2, status = "active") {
+  const shade = (hex) => hex !== void 0 && status === "idle" ? dimHex(hex) : hex;
   return tileCells(avatar, frame2).map((row) => {
     const line = [];
     for (const c of row) {
+      const fg = shade(c.fg);
+      const bg = shade(c.bg);
       const last = line[line.length - 1];
-      if (last && last.fg === c.fg && last.bg === c.bg) last.text += c.ch;
-      else line.push({ text: c.ch, fg: c.fg, bg: c.bg });
+      if (last && last.fg === fg && last.bg === bg) last.text += c.ch;
+      else line.push({ text: c.ch, fg, bg });
     }
     return line;
   });
@@ -13311,7 +13320,7 @@ function rowText(r, width) {
   ];
 }
 function subagentRowLines(r, avatar, tick2, width) {
-  const portrait = portraitLines(avatar, frameAt(tick2, phaseFor(avatar), r.status === "active"));
+  const portrait = portraitLines(avatar, frameAt(tick2, phaseFor(avatar), r.status === "active"), r.status);
   const sideWidth = width - PORTRAIT_WIDTH - GAP;
   if (sideWidth < SIDE_TEXT_MIN) return [...portrait, ...rowText(r, width)];
   const text = rowText(r, sideWidth);
