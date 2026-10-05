@@ -2,14 +2,13 @@
 // write code path, imported by mcp-server AND tui; zod validation (shared
 // @sterling/schemas) guards every write including the TUI's.
 //
-// Substrate (verified at build against §3.1 criteria): SQLite via node:sqlite
-// (Node ≥24, bundled SQLite 3.51.x — WAL, FTS5/bm25, VACUUM INTO; zero native
-// dependencies). node:sqlite is API-experimental, so all driver contact stays
-// inside this module; swapping drivers is a one-file change.
+// Substrate: SterlingStore talks to a StoreDriver (driver.ts) and names no
+// database library. The SQLite driver (sqlite-driver.ts) is the one
+// implementation: it holds the connection, the DDL, the open-time PRAGMAs and
+// the SQLite spelling of the dialect hooks.
 
-import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, existsSync, realpathSync, statSync } from 'node:fs';
-import { dirname, basename, join, resolve as resolvePath } from 'node:path';
+import { mkdirSync, existsSync, statSync } from 'node:fs';
+import { dirname, join, resolve as resolvePath } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -34,6 +33,17 @@ export { fitDomains, DOMAIN_FIT_MIN_TERMS } from './domain-fit.js';
 export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
 export * from './axis.js';
 import { AXIS_MAX_TERM_LEN } from './axis.js';
+export type { StoreDriver, StoreStatement, StoreRunResult, StoreDialect, SqlParam } from './driver.js';
+export {
+  SqliteDriver,
+  sqliteDialect,
+  DEFAULT_BUSY_TIMEOUT_MS,
+  journalDemotionRequired,
+  JournalDemotionRefusedError,
+  type SqliteDriverOptions,
+} from './sqlite-driver.js';
+import type { StoreDriver } from './driver.js';
+import { SqliteDriver } from './sqlite-driver.js';
 
 /** The verdict on ONE claimed repo-relative path (decision
  *  [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]). */
@@ -107,123 +117,6 @@ export function decodeLiveRecordRow(op: string, row: { body: string; scope: stri
   record.scope = row.scope;
   return record;
 }
-
-const DDL = `
-CREATE TABLE IF NOT EXISTS records (
-  id TEXT PRIMARY KEY,
-  type TEXT NOT NULL,
-  status TEXT NOT NULL,
-  superseded_by TEXT,
-  lifecycle TEXT NOT NULL DEFAULT 'live',
-  freshness TEXT NOT NULL DEFAULT 'fresh',
-  version INTEGER NOT NULL DEFAULT 1,
-  scope TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  author TEXT NOT NULL,
-  derived_unconfirmed INTEGER NOT NULL DEFAULT 0,
-  body TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_records_type_status ON records(type, status);
--- Schema v2 identity tables [stable-identity-design-v2].
--- record_versions: FULL-RECORD JSON snapshots, one per (record_id, version).
--- Append-only and permanent — NEVER indexed into records_fts, so an archived
--- version's text can never rank in query() (the whole point of contract 1).
-CREATE TABLE IF NOT EXISTS record_versions (
-  record_id TEXT NOT NULL,
-  version INTEGER NOT NULL,
-  archived_at TEXT NOT NULL,
-  body TEXT NOT NULL,
-  PRIMARY KEY (record_id, version)
-);
--- record_aliases: dead-id lookup (historical_id -> canonical_id + the version
--- archived under that historical id). NOTHING writes it in S2 — the S4
--- migration runner populates it once; it is an index, not a namespace.
-CREATE TABLE IF NOT EXISTS record_aliases (
-  historical_id TEXT PRIMARY KEY,
-  canonical_id TEXT NOT NULL,
-  archived_version INTEGER NOT NULL,
-  created_at TEXT NOT NULL
-);
--- remove() deletes aliases by canonical_id.
-CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON record_aliases(canonical_id);
--- record_relations: the AUTHORITATIVE home of typed edges (supersedes,
--- cites, ...). Replaces record_links: served links[] materializes from here,
--- and supersession is a relation rather than a column value a caller sets.
-CREATE TABLE IF NOT EXISTS record_relations (
-  source_id TEXT NOT NULL,
-  rel TEXT NOT NULL,
-  target_id TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (source_id, rel, target_id)
-);
-CREATE INDEX IF NOT EXISTS idx_relations_target ON record_relations(target_id);
-CREATE INDEX IF NOT EXISTS idx_relations_rel_target ON record_relations(rel, target_id);
-CREATE TABLE IF NOT EXISTS record_stack_tags (
-  record_id TEXT NOT NULL,
-  tag TEXT NOT NULL,
-  PRIMARY KEY (record_id, tag)
-);
-CREATE TABLE IF NOT EXISTS record_file_keys (
-  record_id TEXT NOT NULL,
-  path TEXT NOT NULL,
-  PRIMARY KEY (record_id, path)
-);
-CREATE INDEX IF NOT EXISTS idx_file_keys_path ON record_file_keys(path);
-CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(record_id UNINDEXED, text);
-CREATE TABLE IF NOT EXISTS runs (
-  id TEXT PRIMARY KEY,
-  machine_state TEXT NOT NULL,
-  pending_exit TEXT,
-  body TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS handoffs (
-  run_id TEXT NOT NULL,
-  phase_id TEXT NOT NULL,
-  agent_role TEXT NOT NULL,
-  body TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_handoffs_run_phase ON handoffs(run_id, phase_id);
-CREATE TABLE IF NOT EXISTS check_skipped (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT,
-  check_name TEXT NOT NULL,
-  reason TEXT NOT NULL,
-  at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS selection (
-  slot INTEGER PRIMARY KEY CHECK (slot = 1),
-  type TEXT NOT NULL,
-  record_id TEXT NOT NULL,
-  at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS queue_drain_log (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  drained_at TEXT NOT NULL,
-  system_reason TEXT NOT NULL,
-  text TEXT NOT NULL,
-  file_keys TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS activity_log (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  at TEXT NOT NULL,
-  verb TEXT NOT NULL,
-  type TEXT NOT NULL,
-  record_id TEXT NOT NULL,
-  title TEXT NOT NULL
-);
--- Store-level key/value metadata (board 675daf9d, decision
--- projects-mount-domains-and-sibling-projects): a domain store's description is
--- its 'description' key. Additive: CREATE IF NOT EXISTS on every v2 open, so no
--- user_version bump; a pre-v2 store opens read-only before this DDL runs.
-CREATE TABLE IF NOT EXISTS store_meta (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-`;
 
 // ---------------------------------------------------------------------------
 // Schema-version guard (stable-identity S1, extended by S2; decision
@@ -1140,58 +1033,6 @@ export function unrecognizedKeyPaths(error: unknown): string[] {
 }
 
 /**
- * Journal-mode policy (decision store-journal-policy-delete-on-9p): SQLite WAL
- * needs coherent shared memory (-shm) across every process that opens the
- * database, and the 9p/drvfs mount WSL uses for Windows drives does not
- * provide it — measured twice on that topology as intermittent
- * SQLITE_IOERR_SHORT_READ / 'database is locked' incident families. A store
- * reached over such a mount is demoted to journal_mode=DELETE (no -shm at
- * all), and the demotion is STICKY: a non-9p open of an EXISTING store
- * already in DELETE leaves it alone rather than flipping it back, so a
- * native-Windows open never fights a WSL demotion. Fresh stores are
- * classified explicitly because a brand-new SQLite file is born in DELETE
- * mode — without the freshness arm a fresh single-context store would never
- * enter WAL at all.
- */
-export function journalDemotionRequired(
-  absPath: string,
-  platform: NodeJS.Platform = process.platform,
-): boolean {
-  if (platform !== 'linux') return false;
-  return /^\/mnt\/[a-zA-Z]\//.test(absPath.replace(/\\/g, '/'));
-}
-
-/**
- * A required 9p demotion did not land — refusing the open (P5): proceeding in
- * WAL would keep the exact unsafe topology the policy exists to remove.
- *
- * fixer-mode F1: `options.cause` carries the original thrown error when the
- * refusal came from a PRAGMA that threw (e.g. SQLITE_BUSY under a live
- * holder) rather than one that merely returned an unexpected mode; readers
- * needing the raw driver error read `.cause`. `options.message` lets a caller
- * override the default 9p-demotion wording entirely for a refusal that is NOT
- * a demotion-under-contention case (fixer-mode F2's legacy-schema arm has its
- * own remedy — migrate the store — and must not tell the reader to close
- * connections and retry, which would not help there).
- */
-export class JournalDemotionRefusedError extends Error {
-  constructor(
-    readonly dbPath: string,
-    readonly returnedMode: string,
-    options?: { cause?: unknown; message?: string },
-  ) {
-    super(
-      options?.message ??
-        `journal_mode=DELETE demotion refused for '${dbPath}' (PRAGMA returned '${returnedMode}') — ` +
-          `this store is reached over a 9p mount where WAL is unsupported (decision ` +
-          `store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`,
-      options?.cause !== undefined ? { cause: options.cause } : undefined,
-    );
-    this.name = 'JournalDemotionRefusedError';
-  }
-}
-
-/**
  * THE ONE reconcile_needed text builder (board b0bb9d96 / I-29), used by every
  * minter — settlement.mjs's grouped mint AND enqueueSystemTodo's own
  * fold-to-union below — so a surviving item's prose always names the FULL set
@@ -1270,8 +1111,16 @@ export function buildReconcileText(owner: { type: 'feature_article' | 'reference
     : `reconcile article '${owner.slug ?? ''}' — owned file(s) changed content in direct mode (settled): ${files.join(', ')}`;
 }
 
+export interface SterlingStoreOptions {
+  /** Busy timeout in milliseconds for the SQLite driver this store opens (SqliteDriverOptions.busyTimeoutMs). Refused together with `driver`. */
+  busyTimeoutMs?: number;
+  /** An already-opened driver to use instead of opening a SqliteDriver on `path`. The store takes it over and closes it. */
+  driver?: StoreDriver;
+}
+
 export class SterlingStore {
-  private db: DatabaseSync;
+  /** The one connection, behind the driver seam (driver.ts). Every statement, transaction and open step goes through it. */
+  private db: StoreDriver;
 
   /**
    * Set ONLY when an existing, non-empty store below SUPPORTED_SCHEMA_VERSION
@@ -1306,178 +1155,53 @@ export class SterlingStore {
    */
   private readonly dbPath: string;
 
-  constructor(path: string) {
+  constructor(path: string, options: SterlingStoreOptions = {}) {
     this.dbPath = resolvePath(path);
-    this.db = new DatabaseSync(path);
-
-    // fixer-mode F4 (Codex MEDIUM): classify the REAL path, not the lexical
-    // one — a symlinked project dir (e.g. /home/x/proj -> /mnt/c/...) dodges
-    // journalDemotionRequired's lexical /mnt/<drive>/ match on this.dbPath.
-    // realpathSync resolves the CONTAINING DIRECTORY (the db file itself may
-    // not exist yet on a fresh store, so resolving dirname alone survives
-    // that case) and the file's basename is rejoined onto it. Any realpath
-    // error (permission, exotic FS, race) falls back to the lexical dbPath —
-    // that is this code's pre-existing behavior, not a new gap. The exported
-    // journalDemotionRequired itself stays lexical-only and keeps its
-    // existing unit pins; only the CALL SITE below is fed the resolved path.
-    let classifiedPath = this.dbPath;
-    try {
-      classifiedPath = join(realpathSync(dirname(this.dbPath)), basename(this.dbPath));
-    } catch {
-      /* fall back to the lexical path */
+    if (options.driver !== undefined && options.busyTimeoutMs !== undefined) {
+      throw new Error(
+        'SterlingStore: busyTimeoutMs configures the SQLite driver this store opens itself; it cannot be combined with an injected driver — set it on that driver.'
+      );
     }
+    this.db = options.driver ?? new SqliteDriver(path, { busyTimeoutMs: options.busyTimeoutMs });
 
-    // Schema-version guard — checked BEFORE journal_mode/foreign_keys/DDL land
+    // Schema-version guard — checked BEFORE the driver prepares the store
     // (stable-identity design-v2 / 2176748e; fixer-mode F1): this ordering
-    // guarantees that a too-new store is refused with NOTHING touched — not
-    // even a WAL journal-mode header rewrite or the -wal/-shm sidecar files a
-    // refusal AFTER `PRAGMA journal_mode=WAL` would have persistently
-    // materialized on a non-WAL too-new db. `busy_timeout` is connection-local
-    // and writes nothing to the db file, so it is safe to set first for
-    // contention safety on the read below without weakening that guarantee.
-    this.db.exec('PRAGMA busy_timeout=5000');
-    const foundSchemaVersion = (this.db.prepare('PRAGMA user_version').get() as { user_version: number })
-      .user_version;
+    // guarantees that a too-new store is refused with NOTHING touched — on
+    // SQLite, not even a WAL journal-mode header rewrite or the -wal/-shm
+    // sidecar files a refusal AFTER `PRAGMA journal_mode=WAL` would have
+    // persistently materialized on a non-WAL too-new db. Opening the driver
+    // writes nothing to the store (see SqliteDriver's constructor).
+    const foundSchemaVersion = this.db.schemaVersion();
     if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
       this.db.close();
       throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
     }
 
-    // S2 [stable-identity-design-v2]: distinguish a FRESH file (build it as v2)
+    // S2 [stable-identity-design-v2]: distinguish a FRESH store (build it as v2)
     // from an EXISTING pre-v2 store (open READ-ONLY, refuse every write). The
-    // probe is sqlite_master BEFORE the DDL runs — the only moment at which
-    // "this file has no schema yet" is still observable — and it is a read, so
-    // the refusal path still writes nothing.
+    // probe is hasSchema() BEFORE the driver creates the schema — the only
+    // moment at which "this store has no schema yet" is still observable — and
+    // it is a read, so the refusal path still writes nothing.
     let isFresh = false;
     if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
-      const objects = (
-        this.db.prepare('SELECT COUNT(*) AS n FROM sqlite_master').get() as { n: number }
-      ).n;
-      if (objects > 0) {
-        // fixer-mode F2 (Codex HIGH): a legacy store reached over 9p must not
-        // stay in WAL — this read-only branch RETURNS before the journal-mode
-        // PRAGMA below ever runs, so without this check a pre-migration store
-        // opened from WSL would keep an -shm-coordinated WAL handle open on
-        // the exact 9p topology [store-journal-policy-delete-on-9p] exists to
-        // remove. This is a REFUSAL, not a demotion: PRAGMA journal_mode=DELETE
-        // WRITES to the file even when it "succeeds", and a legacy connection
-        // is read-only by contract (assertV2Surface/assertWritable refuse
-        // every write), so it can never legitimately perform the demotion
-        // itself — the remedy is migrating the store, never "close other
-        // connections and retry" (there is no live holder here for that
-        // remedy to help with). Already-DELETE (or any non-WAL) legacy stores
-        // are untouched, matching the sticky/read-only behavior above.
-        if (journalDemotionRequired(classifiedPath)) {
-          let legacyMode: string;
-          try {
-            legacyMode = (
-              this.db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }
-            ).journal_mode;
-          } catch (e) {
-            // The mode probe itself failing must not leak the constructor's
-            // handle — close, then propagate the driver error unchanged (this
-            // is a probe failure, not a refused demotion).
-            this.db.close();
-            throw e;
-          }
-          if (legacyMode === 'wal') {
-            this.db.close();
-            throw new JournalDemotionRefusedError(this.dbPath, legacyMode, {
-              message:
-                `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, ` +
-                `PRAGMA journal_mode='${legacyMode}') — this store is reached over a 9p mount where WAL is ` +
-                `unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema ` +
-                `version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. ` +
-                `Migrate the store first (\`node "<Sterling root>/bin/migrate-stores.mjs"\`) or open it from a non-9p context — ` +
-                `closing other connections will not help here.`,
-            });
-          }
-        }
+      if (this.db.hasSchema()) {
+        // The driver refuses here (closing itself) when it cannot serve this
+        // store read-only: SQLite does for a WAL store reached over 9p.
+        this.db.prepareReadOnly();
         this.legacySchemaVersion = foundSchemaVersion;
         this.openedSchemaVersion = foundSchemaVersion;
-        return; // read-only: no journal_mode, no DDL, no stamp — nothing written
+        return; // read-only: no connection settings, no DDL, no stamp — nothing written
       }
-      isFresh = true; // no schema objects yet: this very open created the file
+      isFresh = true; // no schema objects yet: this very open created the store
     }
 
-    // Journal-mode policy [store-journal-policy-delete-on-9p]: over 9p, demote
-    // to DELETE and REFUSE the open when the demotion does not land; elsewhere
-    // assert WAL — except on an existing store already demoted to DELETE,
-    // which stays demoted (sticky; see journalDemotionRequired's doc block).
-    if (journalDemotionRequired(classifiedPath)) {
-      let returnedMode: string;
-      try {
-        returnedMode = (
-          this.db.prepare('PRAGMA journal_mode=DELETE').get() as { journal_mode: string }
-        ).journal_mode;
-      } catch (e) {
-        // fixer-mode F1 (joint finding): a PRAGMA that THROWS (SQLITE_BUSY
-        // under a live holder) used to close and rethrow the raw driver
-        // error, so callers got a generic SQLite error instead of the typed
-        // refusal every other demotion-failure path promises. Wrap it the
-        // same way the returned-mode arm below does, carrying the original
-        // error as `cause` so nothing about the underlying failure is lost.
-        this.db.close();
-        const detail = e instanceof Error ? e.message : String(e);
-        throw new JournalDemotionRefusedError(this.dbPath, detail, {
-          cause: e,
-          message:
-            `journal_mode=DELETE demotion refused for '${this.dbPath}' (PRAGMA threw: ${detail}) — ` +
-            `this store is reached over a 9p mount where WAL is unsupported (decision ` +
-            `store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`,
-        });
-      }
-      if (returnedMode !== 'delete') {
-        this.db.close();
-        throw new JournalDemotionRefusedError(this.dbPath, returnedMode);
-      }
-    } else {
-      const currentMode = (
-        this.db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }
-      ).journal_mode;
-      if (currentMode !== 'delete') {
-        this.db.exec('PRAGMA journal_mode=WAL');
-      } else if (isFresh) {
-        // fixer-mode F3 (Codex HIGH): `isFresh` was captured from the
-        // pre-DDL sqlite_master probe above, before any of this open's own
-        // work ran. A concurrent opener of the SAME file can initialize
-        // (and even 9p-demote) the store in the gap between that probe and
-        // this decision, leaving `isFresh` stale — execing WAL here on the
-        // stale flag would flip a store the other opener just observed and
-        // left in `delete` back to WAL. Re-probe AT DECISION TIME instead of
-        // trusting the flag: only treat the store as still-fresh if
-        // sqlite_master is STILL empty right now. This closes the
-        // cross-context fresh-open race described above; it does NOT close
-        // the (much smaller) window still remaining between THIS COUNT(*)
-        // read and the WAL exec immediately below — that residual race is
-        // accepted, not closed. PREDICTED to close the race described above;
-        // the guard expected to carry the verdict is this `stillFresh`
-        // re-probe. Not executed — no multi-process test exists for this
-        // fix (review-verified, not pinned, per the fixer-mode brief).
-        const stillFresh = (
-          this.db.prepare('SELECT COUNT(*) AS n FROM sqlite_master').get() as { n: number }
-        ).n === 0;
-        if (stillFresh) {
-          this.db.exec('PRAGMA journal_mode=WAL');
-        }
-      }
-    }
-    this.db.exec('PRAGMA foreign_keys=ON');
-    this.db.exec(DDL);
-    // Additive migration (board 97d773ef): queue_drain_log gains record_id so a
-    // remove on an already-drained id can answer "already removed <when>"
-    // instead of a bare "no record". CREATE IF NOT EXISTS never alters an
-    // existing table, so the column is added here; the duplicate-column throw
-    // on an already-migrated store is the expected no-op path.
-    try {
-      this.db.exec('ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT');
-    } catch {
-      /* column already exists */
-    }
+    // Connection settings and the schema. On SQLite: the journal-mode policy
+    // [store-journal-policy-delete-on-9p], foreign_keys and the DDL.
+    this.db.prepareWritable(isFresh);
 
     // Stamp the supported version onto a FRESH file (S2 [stable-identity-
     // design-v2]: an existing pre-v2 store returned read-only above and never
-    // reaches here), RE-READING user_version inside the same BEGIN IMMEDIATE
+    // reaches here), RE-READING the schema version inside the same write
     // transaction that writes it (fixer-mode F2 —
     // closes a TOCTOU: the fast check above only skips work for a store
     // already known too new at open time; without a re-read here, a
@@ -1522,12 +1246,12 @@ export class SterlingStore {
     if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
       try {
         this.tx(() => {
-          const current = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+          const current = this.db.schemaVersion();
           if (current > SUPPORTED_SCHEMA_VERSION) {
             throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
           }
           if (current < SUPPORTED_SCHEMA_VERSION) {
-            this.db.exec(`PRAGMA user_version = ${SUPPORTED_SCHEMA_VERSION}`);
+            this.db.setSchemaVersion(SUPPORTED_SCHEMA_VERSION);
           }
         });
       } catch (e) {
@@ -1540,7 +1264,7 @@ export class SterlingStore {
     // any) has committed — reading fresh rather than assuming
     // SUPPORTED_SCHEMA_VERSION so this stays correct even if a future change
     // stamps something else.
-    this.openedSchemaVersion = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+    this.openedSchemaVersion = this.db.schemaVersion();
 
     // TOO-NEW RE-CHECK ON THE CAPTURED BASELINE (review finding, MEDIUM). The
     // conditional stamp above skips a body that also held the only re-read of
@@ -1559,7 +1283,7 @@ export class SterlingStore {
   }
 
   journalMode(): string {
-    return (this.db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode;
+    return this.db.journalMode();
   }
 
   // -------------------------------------------------------------------------
@@ -1592,7 +1316,7 @@ export class SterlingStore {
    */
   private assertLiveSchemaVersion(operation: string): void {
     if (this.openedSchemaVersion === undefined) return;
-    const current = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+    const current = this.db.schemaVersion();
     if (current !== this.openedSchemaVersion) {
       throw new Error(
         `Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ` +
@@ -1735,7 +1459,7 @@ export class SterlingStore {
     const ids = [...new Set(v2.map((r) => r.id))];
     const linkRows = this.db
       .prepare(
-        `SELECT source_id, rel, target_id FROM record_relations WHERE source_id IN (${ids.map(() => '?').join(',')}) ORDER BY rowid`
+        `SELECT source_id, rel, target_id FROM record_relations WHERE source_id IN (${ids.map(() => '?').join(',')}) ORDER BY ${this.db.dialect.insertionOrder()}`
       )
       .all(...ids) as { source_id: string; rel: string; target_id: string }[];
     const bySource = new Map<string, { rel: string; target_id: string }[]>();
@@ -1753,7 +1477,7 @@ export class SterlingStore {
       const rows = this.db
         .prepare(
           `SELECT source_id, target_id FROM record_relations
-            WHERE rel = 'supersedes' AND target_id IN (${retiredIds.map(() => '?').join(',')}) ORDER BY rowid`
+            WHERE rel = 'supersedes' AND target_id IN (${retiredIds.map(() => '?').join(',')}) ORDER BY ${this.db.dialect.insertionOrder()}`
         )
         .all(...retiredIds) as { source_id: string; target_id: string }[];
       for (const row of rows) {
@@ -1887,7 +1611,7 @@ export class SterlingStore {
       );
     }
     this.db
-      .prepare('INSERT OR IGNORE INTO record_relations (source_id, rel, target_id, created_at) VALUES (?, ?, ?, ?)')
+      .prepare(this.db.dialect.insertIgnore('record_relations', ['source_id', 'rel', 'target_id', 'created_at']))
       .run(sourceId, rel, targetId, at);
   }
 
@@ -2011,7 +1735,7 @@ export class SterlingStore {
   recordAliases(): { historical_id: string; canonical_id: string; archived_version: number }[] {
     if (this.legacySchemaVersion !== undefined) return [];
     return this.db
-      .prepare('SELECT historical_id, canonical_id, archived_version FROM record_aliases ORDER BY rowid')
+      .prepare(`SELECT historical_id, canonical_id, archived_version FROM record_aliases ORDER BY ${this.db.dialect.insertionOrder()}`)
       .all() as { historical_id: string; canonical_id: string; archived_version: number }[];
   }
 
@@ -3062,7 +2786,7 @@ export class SterlingStore {
     const rows = this.db
       .prepare(
         `SELECT body, scope FROM records
-          WHERE type = 'feature_article' AND status != 'superseded' AND json_extract(body, '$.slug') = ?
+          WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
           ORDER BY updated_at DESC`
       )
       .all(slug) as { body: string; scope: string }[];
@@ -3086,7 +2810,7 @@ export class SterlingStore {
     const rows = this.db
       .prepare(
         `SELECT body, scope FROM records
-          WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
+          WHERE status != 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
           ORDER BY updated_at DESC`
       )
       .all(slug) as { body: string; scope: string }[];
@@ -3188,8 +2912,8 @@ export class SterlingStore {
     const rows = this.db
       .prepare(
         `SELECT body, scope FROM records
-          WHERE status = 'superseded' AND json_extract(body, '$.slug') = ?
-          ORDER BY updated_at DESC, rowid DESC`
+          WHERE status = 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
+          ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`
       )
       .all(slug) as { body: string; scope: string }[];
     return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('supersededRecordsBySlug', rows));
@@ -3246,7 +2970,7 @@ export class SterlingStore {
   inboundSupersedes(id: string): DurableRecord[] {
     const rows = this.db
       .prepare(
-        `SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY rowid`
+        `SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`
       )
       .all(id) as { source_id: string }[];
     return rows.map((r) => this.get(r.source_id)).filter((r): r is DurableRecord => r !== undefined);
@@ -3283,7 +3007,7 @@ export class SterlingStore {
     // Source filter applied in the base filter (before cap/order) so a capped
     // query never drops matching items of the wanted source (audit finding 38/43).
     if (opts.source) {
-      where.push("json_extract(r.body, '$.source') = ?");
+      where.push(`${this.db.dialect.jsonText('r.body', 'source')} = ?`);
       params.push(opts.source);
     }
     return { where, params, fileKeys };
@@ -3346,21 +3070,21 @@ export class SterlingStore {
     }
     const { where, params } = this.baseFilter(opts);
     const match = this.ftsMatchExpr(terms, opts.match_all);
-    const sql = `SELECT COUNT(*) AS n FROM records r JOIN records_fts f ON f.record_id = r.id
-      WHERE ${where.join(' AND ')} AND records_fts MATCH ? AND (-bm25(records_fts)) >= ?`;
+    const d = this.db.dialect;
+    const sql = `SELECT COUNT(*) AS n FROM records r ${d.searchJoin}
+      WHERE ${where.join(' AND ')} AND ${d.searchMatch} AND ${d.searchScore} >= ?`;
     const row = this.db.prepare(sql).get(...params, match, minScore) as { n: number };
     return row.n;
   }
 
   /**
-   * The FTS5 MATCH expression rank_terms compiles to — shared by query() and
-   * countAboveScore() so the two can never rank two different match sets. A
-   * trailing '*' marks an FTS5 prefix query ("stor*" matches "store") — the
-   * star must sit OUTSIDE the quoted token to act as the prefix operator.
+   * The search expression rank_terms compiles to — shared by query() and
+   * countAboveScore() so the two can never rank two different match sets. The
+   * syntax is the driver's (dialect.searchQuery): on SQLite an FTS5 MATCH
+   * expression.
    */
   private ftsMatchExpr(terms: string[], matchAll: boolean | undefined): string {
-    const joiner = matchAll ? ' AND ' : ' OR ';
-    return terms.map((t) => (t.endsWith('*') && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`)).join(joiner);
+    return this.db.dialect.searchQuery(terms, matchAll);
   }
 
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
@@ -3372,9 +3096,10 @@ export class SterlingStore {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
         const match = this.ftsMatchExpr(terms, opts.match_all);
-        const sql = `SELECT r.body, r.scope FROM records r JOIN records_fts f ON f.record_id = r.id
-          WHERE ${where.join(' AND ')} AND records_fts MATCH ?
-          ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
+        const d = this.db.dialect;
+        const sql = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
+          WHERE ${where.join(' AND ')} AND ${d.searchMatch}
+          ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
         const rows = this.db.prepare(sql).all(...params, match, cap) as { body: string; scope: string }[];
         return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('query', rows));
       }
@@ -3729,14 +3454,14 @@ export class SterlingStore {
       .all(limit) as { at: string; verb: string; type: string; id: string; title: string }[];
   }
 
-  /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */
+  /** Backup snapshot (§2.3): the driver copies the store to the configured backup path (SQLite: VACUUM INTO). Refuses to overwrite. */
   snapshot(targetPath: string): void {
     const target = targetPath.replace(/\\/g, '/');
     if (existsSync(target)) {
       throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
     }
     mkdirSync(dirname(target), { recursive: true });
-    this.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+    this.db.snapshot(target);
   }
 
   close(): void {
@@ -4170,7 +3895,7 @@ export class SterlingStore {
     // transaction" branch with NO transaction open, so each statement
     // autocommitted individually and atomicity silently disappeared for the
     // life of the connection.
-    this.db.exec('BEGIN IMMEDIATE');
+    this.db.begin();
     this.txDepth++;
     try {
       // Live-version recheck INSIDE the write lock (closes the TOCTOU above):
@@ -4180,12 +3905,12 @@ export class SterlingStore {
       // guarantees the version cannot move again before fn() writes.
       this.assertLiveSchemaVersion('transaction');
       fn();
-      this.db.exec('COMMIT');
+      this.db.commit();
     } catch (e) {
       // A ROLLBACK that itself throws must never REPLACE the original failure —
       // the caller would be told about the cleanup and never about the cause.
       try {
-        this.db.exec('ROLLBACK');
+        this.db.rollback();
       } catch {
         /* the original error below is the one that matters */
       }
