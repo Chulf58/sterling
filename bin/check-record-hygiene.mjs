@@ -5103,7 +5103,15 @@ var configSchema = external_exports.object({
   // because install/sync fill an omitted key from this zod default, not the
   // template.
   maintenance_worker: external_exports.object({
-    enabled: external_exports.boolean().default(true)
+    enabled: external_exports.boolean().default(true),
+    // The OpenCode runner's model as provider/model (decision
+    // opencode-maintenance-worker-refuses-without-a-configured-model): the
+    // worker REFUSES to start without it, so config_set must not call it
+    // unread (GitHub issue 23). No default, deliberately. Reader:
+    // scripts/hooks/lib/maintenance-worker.mjs opencodeModelOf(). PERMISSIVE
+    // like `mode`: a non-string is preserved raw and refused loudly by that
+    // reader, never thrown on here (a throw would fail the MCP server's boot).
+    opencode_model: external_exports.unknown().optional()
   }).default({}),
   // Board 8390f8fa: a registry-style feature_article can outgrow its own
   // round-trip — knowledge_append responses on mcp-tool-surface (29 history
