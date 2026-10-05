@@ -874,6 +874,86 @@ test('authoring role: --no-projects is a stated no-op; --force is stated as mean
   }
 });
 
+// board 7a8986e2: a launcher baked before the plugin layout runs packages/tui/bundle/sterling-tui.mjs,
+// an old gitignored build that shows an outdated dashboard with no error. The consumer path says so;
+// the authoring branch returns before that line, so it reads the INVOKING project's launcher itself.
+// Read-only: the launcher is never rewritten (commands/update.md: the authoring update touches no launchers).
+function authoringProject(launcher) {
+  const proj = mkdtempSync(join(tmpdir(), 'sterling-update-authoring-proj-'));
+  if (launcher !== undefined) writeFileSync(join(proj, 'sterling-launch.sh'), launcher);
+  return proj;
+}
+
+async function authoringUpdateOf(proj, cwd) {
+  const { exec } = fakeExec();
+  const lines = [];
+  const report = await runUpdate({ cwd, exec, log: (l) => lines.push(String(l)), projects: [{ name: 'proj', repo_path: proj }], invokingProject: proj, opts: {} });
+  return { report, text: lines.join('\n') };
+}
+
+test('authoring role: a launcher naming packages/tui/bundle gets a loud warning that names the project and the remedy, and is not rewritten', async () => {
+  const cwd = authoringCwd();
+  const launcher = '#!/usr/bin/env bash\nTUI_BUNDLE="/clone/packages/tui/bundle/sterling-tui.mjs"\n';
+  const proj = authoringProject(launcher);
+  try {
+    const { report, text } = await authoringUpdateOf(proj, cwd);
+    assert.equal(report.exit, 0, text);
+    assert.ok(text.includes(`✗ ${proj}: sterling-launch.sh still runs`), 'the warning line itself names the project');
+    assert.match(text, /sterling-launch\.sh still runs packages\/tui\/bundle\/sterling-tui\.mjs/);
+    assert.match(text, /re-run \/sterling:init in this project so its launcher runs tui\/sterling-tui\.mjs/i, 'the remedy is named');
+    assert.equal(readFileSync(join(proj, 'sterling-launch.sh'), 'utf8'), launcher, 'read-only: the launcher is never rewritten');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: a launcher naming the shipped tui/sterling-tui.mjs prints no launcher warning', async () => {
+  const cwd = authoringCwd();
+  const proj = authoringProject('#!/usr/bin/env bash\nTUI_BUNDLE="/clone/tui/sterling-tui.mjs"\n');
+  try {
+    const { report, text } = await authoringUpdateOf(proj, cwd);
+    assert.equal(report.exit, 0, text);
+    assert.doesNotMatch(text, /packages\/tui\/bundle/);
+    assert.doesNotMatch(text, /sterling-launch\.sh/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: a project with no sterling-launch.sh prints no launcher warning and no error', async () => {
+  const cwd = authoringCwd();
+  const proj = authoringProject(undefined);
+  try {
+    const { report, text } = await authoringUpdateOf(proj, cwd);
+    assert.equal(report.exit, 0, text);
+    assert.doesNotMatch(text, /packages\/tui\/bundle/);
+    assert.doesNotMatch(text, /sterling-launch\.sh/);
+    assert.doesNotMatch(text, /✗/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+// Chosen: an unreadable launcher is reported loudly but does not fail the update (the sync it
+// came for succeeded; this check is advisory). Silence would let the stale dashboard hide again (P5).
+test('authoring role: an unreadable sterling-launch.sh is reported with the reason, never silently skipped, and does not fail the update', async () => {
+  const cwd = authoringCwd();
+  const proj = authoringProject(undefined);
+  mkdirSync(join(proj, 'sterling-launch.sh'));
+  try {
+    const { report, text } = await authoringUpdateOf(proj, cwd);
+    assert.equal(report.exit, 0, text);
+    assert.match(text, /could not read .*sterling-launch\.sh/);
+    assert.match(text, /EISDIR/, 'the underlying reason is printed');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
 test('consumer and undeclared roles keep the full sequence unchanged (fetch, merge, build, check, test, fan-out)', async () => {
   for (const role of ['consumer', null]) {
     const cwd = authoringCwd(role);
