@@ -107,6 +107,20 @@ export class EntryReachability {
     return null;
   }
 
+  /**
+   * Why judge() returns null for this entry, or null when it is judged. The
+   * write receipt of a state_review close uses it to say the entry was not
+   * reach-checked (board 12e97ef5).
+   */
+  unjudgedReason(path: string, role: string): string | null {
+    if (!(this.sterlingClone ??= this.isSterlingClone())) {
+      return 'this tree is not a Sterling clone, whose registries the check reads, so reachability was not checked';
+    }
+    return this.judge(path, role) === null
+      ? 'no registry (hooks, commands, skills, tools, bin entries, agents) covers its kind, so reachability was not checked'
+      : null;
+  }
+
   private judgeHook(path: string, bundle: string): EntryVerdict {
     const commands = (this.hookCommands ??= this.load('hooks/hooks.json', (text) => {
       const out: string[] = [];

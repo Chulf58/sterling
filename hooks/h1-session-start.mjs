@@ -4967,7 +4967,7 @@ var init_records = __esm({
 });
 
 // packages/schemas/dist/transient.js
-var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, knowledgeWriteSchema;
+var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_RETENTION_MS, knowledgeWriteSchema;
 var init_transient = __esm({
   "packages/schemas/dist/transient.js"() {
     "use strict";
@@ -4996,6 +4996,9 @@ var init_transient = __esm({
       // Trimmed before the length check, so a whitespace-only target is refused.
       target: external_exports.string().trim().min(1).optional()
     });
+    KNOWLEDGE_WRITES_DIR_REL = ".sterling/transient";
+    KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/knowledge-writes.jsonl`;
+    KNOWLEDGE_WRITES_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
     knowledgeWriteSchema = external_exports.object({
       id: external_exports.string().min(1),
       type: external_exports.string().min(1),

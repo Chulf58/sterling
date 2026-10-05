@@ -4,7 +4,7 @@
 // stays byte-identical; the h10-*.test.mjs suite pins the hook's behaviour.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -286,13 +286,15 @@ test('ledger: a file that cannot be read is announced once and pays nothing', ()
     assert.match(broken.said.ledger[0], /EISDIR/);
   }));
 
-test('ledger: a line that does not parse or is not the entry shape is skipped, and the entries around it still count', () =>
+test('ledger: a line that does not parse or is not the entry shape is skipped, and the entries around it still count; a file left with no valid entry is reported', () =>
   withSharedDomain(({ domain, a }) => {
     const rec = domain.create(domainDecision(IN_WINDOW));
     for (const bad of [{ id: rec.id, type: 'decision', at: '0' }, { id: rec.id, type: 'decision' }, { id: rec.id, type: 'decision', at: IN_WINDOW, project: a.root }, null, [{ id: rec.id, type: 'decision', at: IN_WINDOW }]]) {
       writeLedger(a.root, [bad]);
       assert.equal(a.paid().capture, false, `ignored: ${JSON.stringify(bad)}`);
-      assert.deepEqual(a.paid().said.ledger, [], 'a skipped line is not an unreadable ledger');
+      const said = a.paid().said.ledger;
+      assert.equal(said.length, 1, 'a non-empty file with no valid entry is reported, once');
+      assert.match(said[0], /none of its 1 line\(s\) is a valid entry/);
     }
     assert.deepEqual([...duties.readKnowledgeWrites(a.root).latestAt], []);
 
@@ -329,4 +331,121 @@ test('ledger: an unreadable domain store is still announced and pays nothing, ev
     assert.equal(r.capture, false, 'the ledger names an id; only a record actually read can pay');
     assert.equal(r.research, false);
     assert.deepEqual(r.said.domains, ['shared: open boom'], 'the unreadable-domain announcement is kept');
+  }));
+
+// One ledger file per server process (board 813fe004): the reader takes the
+// union of the legacy single file and every file whose name is exactly the
+// per-process pattern, latest `at` per id.
+const DEAD_PID = 2147483646; // above any Linux pid_max, so no process can hold it
+const processLedgerName = (pid = DEAD_PID, uuid = randomUUID()) => `knowledge-writes.${pid}-${uuid}.jsonl`;
+const asLines = (entries) => (typeof entries === 'string' ? entries : entries.map((e) => `${JSON.stringify(e)}\n`).join(''));
+function writeLedgerFile(root, name, entries) {
+  const p = join(root, '.sterling', 'transient', name);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, asLines(entries));
+  return p;
+}
+
+test('ledger union: the legacy file and every per-process file count, with the latest at per id across files', () =>
+  withSharedDomain(({ domain, a }) => {
+    const inLegacy = domain.create(domainDecision(IN_WINDOW));
+    const inProcess = domain.create(domainDecision(IN_WINDOW));
+    const inBoth = domain.create(domainDecision(IN_WINDOW));
+    const line = (rec, at) => ({ id: rec.id, type: 'decision', at });
+    writeLedger(a.root, [line(inLegacy, IN_WINDOW), line(inBoth, BEFORE_W0)]);
+    assert.deepEqual([...duties.readKnowledgeWrites(a.root).latestAt], [[inLegacy.id, IN_WINDOW], [inBoth.id, BEFORE_W0]], 'the legacy file alone still reads');
+
+    writeLedgerFile(a.root, processLedgerName(101), [line(inProcess, IN_WINDOW)]);
+    writeLedgerFile(a.root, processLedgerName(202), [line(inBoth, IN_WINDOW), line(inLegacy, BEFORE_W0)]);
+    const read = duties.readKnowledgeWrites(a.root);
+    assert.deepEqual(new Map(read.latestAt), new Map([[inLegacy.id, IN_WINDOW], [inProcess.id, IN_WINDOW], [inBoth.id, IN_WINDOW]]), 'LEDGER-UNION SHAPE if an id is missing or older: every file counts and the newest at wins');
+    assert.deepEqual(read.unreadable, []);
+    const r = a.paid();
+    assert.deepEqual({ capture: r.capture, research: r.research, said: r.said.ledger }, { capture: true, research: true, said: [] });
+  }));
+
+test('ledger union: only the exact per-process name is read; a compaction temp file and a near-miss name are not', () =>
+  withSharedDomain(({ domain, a }) => {
+    const rec = domain.create(domainDecision(IN_WINDOW));
+    const entry = [{ id: rec.id, type: 'decision', at: IN_WINDOW }];
+    const real = processLedgerName(101);
+    for (const name of [`${real}.tmp-101-${randomUUID()}`, `knowledge-writes.jsonl.tmp-101-${randomUUID()}`, 'knowledge-writes.101.jsonl', `knowledge-writes.0-${randomUUID()}.jsonl`, `knowledge-writes.x-${randomUUID()}.jsonl`, `knowledge-writes.101-${randomUUID()}.jsonl.bak`, `other.101-${randomUUID()}.jsonl`]) {
+      writeLedgerFile(a.root, name, entry);
+    }
+    assert.deepEqual([...duties.readKnowledgeWrites(a.root).latestAt], [], 'TEMP-FILE-PAYS SHAPE if an entry shows: none of these names is a ledger file');
+    assert.equal(a.paid().capture, false);
+    assert.deepEqual(a.paid().said.ledger, [], 'a file that is not a ledger file is not an unreadable ledger');
+
+    writeLedgerFile(a.root, real, entry);
+    assert.equal(a.paid().capture, true, 'control: the exact name is read');
+  }));
+
+test('ledger union: a corrupt file is reported by name and the valid files still pay', () =>
+  withSharedDomain(({ domain, a }) => {
+    const rec = domain.create(domainDecision(IN_WINDOW));
+    const good = processLedgerName(101);
+    const garbage = processLedgerName(202);
+    const badStamps = processLedgerName(303);
+    const unreadable = processLedgerName(404);
+    writeLedgerFile(a.root, good, [{ id: rec.id, type: 'decision', at: IN_WINDOW }]);
+    writeLedgerFile(a.root, garbage, 'not json at all\n{"id":"torn","type":"decis\n');
+    writeLedgerFile(a.root, badStamps, [{ id: rec.id, type: 'decision', at: '2026-10-04 12:30' }, { id: 'x', type: 'decision', at: '0' }, { id: 'y', type: 'decision', at: 'yesterday' }]);
+    mkdirSync(join(a.root, '.sterling', 'transient', unreadable)); // a directory where a file belongs
+    writeLedgerFile(a.root, processLedgerName(505), '\n\n'); // blank lines only: empty, nothing to report
+
+    const said = [];
+    const r = a.paid({ onLedgerUnreadable: (error, file) => said.push({ error, file }) });
+    assert.deepEqual({ capture: r.capture, research: r.research }, { capture: true, research: true }, 'CORRUPT-FILE-HIDES-VALID SHAPE if false: the valid file still pays');
+    const rel = (name) => `.sterling/transient/${name}`;
+    assert.deepEqual(said.map((x) => x.file).sort(), [rel(garbage), rel(badStamps), rel(unreadable)].sort(), 'each bad file is reported once, by its own name; the valid and the blank ones are not');
+    const errorOf = (name) => said.find((x) => x.file === rel(name)).error;
+    assert.match(errorOf(garbage), /none of its 2 line\(s\) is a valid entry/);
+    assert.match(errorOf(badStamps), /none of its 3 line\(s\) is a valid entry/);
+    assert.match(errorOf(unreadable), /EISDIR/);
+    assert.equal(errorOf(unreadable).includes(a.root), false, 'PATH-IN-NOTICE SHAPE if true: the error is the fs code, never the absolute path an fs message holds');
+    assert.deepEqual(duties.readKnowledgeWrites(a.root).unreadable.map((u) => u.file).sort(), said.map((x) => x.file).sort());
+  }));
+
+test('ledger union: a file whose only invalid content is one unterminated last line is not reported; a complete invalid line still is', () =>
+  withSharedDomain(({ domain, a }) => {
+    const rec = domain.create(domainDecision(IN_WINDOW));
+    writeLedgerFile(a.root, processLedgerName(101), '{"id":"a","type":"deci'); // a first append caught half written, no newline at all
+    writeLedgerFile(a.root, processLedgerName(202), '\n{"id":"b","type":"deci'); // blank complete line, then the torn tail
+    assert.deepEqual(duties.readKnowledgeWrites(a.root).unreadable, [], 'HALF-WRITTEN-REPORTED SHAPE if listed: nothing complete is invalid');
+
+    const complete = processLedgerName(303);
+    writeLedgerFile(a.root, complete, 'garbage\n{"id":"c","type":"deci');
+    assert.deepEqual(duties.readKnowledgeWrites(a.root).unreadable.map((u) => u.file), [`.sterling/transient/${complete}`], 'a complete invalid line with no valid entry is reported once');
+
+    const complete2 = processLedgerName(404);
+    writeLedgerFile(a.root, complete2, 'garbage\n');
+    assert.equal(duties.readKnowledgeWrites(a.root).unreadable.length, 2, 'control: a complete invalid line ending in a newline is reported');
+
+    writeLedgerFile(a.root, processLedgerName(505), `${JSON.stringify({ id: rec.id, type: 'decision', at: IN_WINDOW })}\n{"id":"d","type":"deci`);
+    assert.equal(duties.readKnowledgeWrites(a.root).latestAt.get(rec.id), IN_WINDOW, 'a valid entry beside a torn tail still counts');
+  }));
+
+test('ledger union: the reader never removes a file, however old it is and whether or not its owner is alive', () =>
+  withSharedDomain(({ domain, a }) => {
+    const rec = domain.create(domainDecision(IN_WINDOW));
+    const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const stale = writeLedgerFile(a.root, processLedgerName(DEAD_PID), [{ id: rec.id, type: 'decision', at: IN_WINDOW }]);
+    writeLedger(a.root, []);
+    for (const p of [stale, ledgerFile(a.root)]) utimesSync(p, old, old);
+    assert.equal(a.paid().capture, true, 'an old file of a dead process still counts while it exists');
+    assert.equal(existsSync(stale), true, 'READER-DELETES SHAPE if gone: removal is the server\'s, at its start');
+    assert.equal(existsSync(ledgerFile(a.root)), true);
+  }));
+
+test('ledger union: a transient folder that cannot be listed is reported and pays nothing', () =>
+  withSharedDomain(({ domain, a }) => {
+    domain.create(domainDecision(IN_WINDOW));
+    writeFileSync(join(a.root, '.sterling', 'transient'), 'a file where the folder belongs');
+    const said = [];
+    const r = a.paid({ onLedgerUnreadable: (error, file) => said.push({ error, file }) });
+    assert.equal(r.capture, false);
+    assert.equal(said.length, 1);
+    assert.equal(said[0].file, '.sterling/transient');
+    assert.match(said[0].error, /ENOTDIR/);
+    assert.equal(said[0].error.includes(a.root), false, 'the folder error holds no absolute path');
   }));

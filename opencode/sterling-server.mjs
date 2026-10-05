@@ -4982,7 +4982,7 @@ var init_records = __esm({
 });
 
 // packages/schemas/dist/transient.js
-var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_REL, knowledgeWriteSchema;
+var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_RETENTION_MS, knowledgeWriteSchema;
 var init_transient = __esm({
   "packages/schemas/dist/transient.js"() {
     "use strict";
@@ -5011,7 +5011,10 @@ var init_transient = __esm({
       // Trimmed before the length check, so a whitespace-only target is refused.
       target: external_exports.string().trim().min(1).optional()
     });
-    KNOWLEDGE_WRITES_REL = ".sterling/transient/knowledge-writes.jsonl";
+    KNOWLEDGE_WRITES_DIR_REL = ".sterling/transient";
+    KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/knowledge-writes.jsonl`;
+    KNOWLEDGE_WRITES_PROCESS_FILE = /^knowledge-writes\.([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/;
+    KNOWLEDGE_WRITES_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
     knowledgeWriteSchema = external_exports.object({
       id: external_exports.string().min(1),
       type: external_exports.string().min(1),
@@ -15645,7 +15648,7 @@ import { dirname as dirname16, join as join38 } from "node:path";
 init_dist();
 init_dist2();
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { existsSync as existsSync25, readFileSync as readFileSync19 } from "node:fs";
+import { existsSync as existsSync25, readFileSync as readFileSync19, readdirSync as readdirSync8 } from "node:fs";
 import { join as join36 } from "node:path";
 var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 var isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
@@ -15683,8 +15686,8 @@ function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore
   let ledger = null;
   const loggedWrites = () => {
     if (ledger === null) {
-      const read = root ? readKnowledgeWrites(root) : { latestAt: /* @__PURE__ */ new Map() };
-      if (read.error) onLedgerUnreadable(read.error);
+      const read = root ? readKnowledgeWrites(root) : { latestAt: /* @__PURE__ */ new Map(), unreadable: [] };
+      for (const u of read.unreadable) onLedgerUnreadable(u.error, u.file);
       ledger = read.latestAt;
     }
     return ledger;
@@ -15746,28 +15749,50 @@ function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore
 }
 var writtenSince = (r, since) => r.created_at >= since || r.updated_at >= since;
 function readKnowledgeWrites(root) {
-  const p = join36(root, KNOWLEDGE_WRITES_REL);
   const latestAt = /* @__PURE__ */ new Map();
-  if (!existsSync25(p)) return { latestAt };
-  let text;
+  const unreadable = [];
+  const errorText2 = (e) => e && typeof e.code === "string" && e.code || "unknown error";
+  let names;
   try {
-    text = readFileSync19(p, "utf8");
+    names = readdirSync8(join36(root, KNOWLEDGE_WRITES_DIR_REL));
   } catch (e) {
-    return { latestAt, error: String(e && e.message || e) };
+    if (e && e.code === "ENOENT") return { latestAt, unreadable };
+    unreadable.push({ file: KNOWLEDGE_WRITES_DIR_REL, error: errorText2(e) });
+    return { latestAt, unreadable };
   }
-  for (const line of text.split("\n")) {
-    if (line === "") continue;
-    let entry;
+  const legacy = KNOWLEDGE_WRITES_REL.slice(KNOWLEDGE_WRITES_DIR_REL.length + 1);
+  for (const name of names.filter((n) => n === legacy || KNOWLEDGE_WRITES_PROCESS_FILE.test(n)).sort()) {
+    const file = `${KNOWLEDGE_WRITES_DIR_REL}/${name}`;
+    let text;
     try {
-      entry = JSON.parse(line);
-    } catch {
+      text = readFileSync19(join36(root, file), "utf8");
+    } catch (e) {
+      if (!(e && e.code === "ENOENT")) unreadable.push({ file, error: errorText2(e) });
       continue;
     }
-    if (!knowledgeWriteSchema.safeParse(entry).success || !isValidAt(entry.at)) continue;
-    const prior = latestAt.get(entry.id);
-    if (prior === void 0 || entry.at > prior) latestAt.set(entry.id, entry.at);
+    let lines = 0;
+    let valid = 0;
+    let completeLines = 0;
+    const parts = text.split("\n");
+    const unterminatedAt = parts.length - 1;
+    for (const [i, line] of parts.entries()) {
+      if (line === "") continue;
+      lines += 1;
+      if (i !== unterminatedAt) completeLines += 1;
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!knowledgeWriteSchema.safeParse(entry).success || !isValidAt(entry.at)) continue;
+      valid += 1;
+      const prior = latestAt.get(entry.id);
+      if (prior === void 0 || entry.at > prior) latestAt.set(entry.id, entry.at);
+    }
+    if (completeLines > 0 && valid === 0) unreadable.push({ file, error: `none of its ${lines} line(s) is a valid entry` });
   }
-  return { latestAt };
+  return { latestAt, unreadable };
 }
 var paysSince = (store, r, since) => typeof store.pays === "function" ? store.pays(r, since) : writtenSince(r, since);
 var CAPTURE_TYPES = ["decision", "anti_pattern", "feature_article", "research_finding", "disconfirmed_hypothesis", "open_question"];
@@ -16059,11 +16084,11 @@ function settleDuties(store, root, git, at, { opener } = {}) {
     ...opener ? { opener } : {},
     onUnreadable: (name, error) => unreadable.push(`'${name}' (${error})`),
     root,
-    onLedgerUnreadable: (error) => ledgerErrors.push(error)
+    onLedgerUnreadable: (error, file) => ledgerErrors.push(`${file} (${error})`)
   });
   try {
     const { notices } = weighDuties(store, records, config, root, at, git);
-    if (ledgerErrors.length) notices.push(`Sterling settlement: the domain-write ledger ${KNOWLEDGE_WRITES_REL} could not be read (${ledgerErrors.join("; ")}); no domain-scoped record was counted toward the capture and research duties. Fix or remove the file.`);
+    if (ledgerErrors.length) notices.push(`Sterling settlement: domain-write ledger file(s) could not be read: ${ledgerErrors.join("; ")}. A domain-scoped record logged only there was not counted toward the capture and research duties; entries in this project's other ledger files still counted. Fix or remove the file(s).`);
     if (unreadable.length) notices.push(`Sterling settlement: domain store(s) ${unreadable.join(", ")} could not be read; a record written there was not counted toward the capture and research duties.`);
     return { notices };
   } finally {

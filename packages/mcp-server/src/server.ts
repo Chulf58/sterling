@@ -201,6 +201,11 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   // store lives at <project>/.sterling/sterling.db (§2.3) — project root is two up;
   // §3.2.5 repo-located doc mtime checks resolve against it
   const tools = new SterlingTools({ store, config, repoRoot: dirname(dirname(storePath)), domains: mountedDomainSurface(store) });
+  // Server start is the one moment expired domain-write ledger files of other
+  // processes are removed (the rule is at removeExpiredDomainWriteLedgers). A
+  // file that could not be removed is announced once here and never fails boot.
+  const ledgerRemoval = tools.removeExpiredDomainWriteLedgers();
+  if (ledgerRemoval) process.stderr.write(ledgerRemoval + '\n');
   // knowledge_create's description names the domains mounted at boot (Domains
   // D2). Each create receipt lists them live as mounted_domains, so a
   // description changed later through domain_describe shows there. A

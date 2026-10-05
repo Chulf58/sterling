@@ -323,6 +323,36 @@ const normPath = (p) => {
   return process.platform === 'win32' ? t.toLowerCase() : t;
 };
 
+// A launcher baked before the plugin layout runs the old, gitignored TUI build, which
+// shows an outdated dashboard with no error (board 7a8986e2). The consumer path prints one
+// line for every project; the authoring branch returns before it, so it reads the
+// invoking project's launcher itself. READ-ONLY: the authoring update touches no launcher
+// (commands/update.md), and re-baking is init's job.
+const OLD_TUI_BUNDLE = 'packages/tui/bundle/sterling-tui.mjs';
+const SHIPPED_TUI_BUNDLE = 'tui/sterling-tui.mjs';
+
+/**
+ * Warn when `<repoPath>/sterling-launch.sh` still names the old TUI bundle path. No
+ * launcher is normal (not every project has one) and prints nothing. A launcher that
+ * cannot be read is reported with the reason and does not fail the update: the sync it
+ * came for succeeded and this check is advisory, but staying silent would let the stale
+ * dashboard hide again (P5).
+ */
+export function warnIfLauncherNamesOldBundle(repoPath, log) {
+  const launcher = join(repoPath, 'sterling-launch.sh');
+  if (!existsSync(launcher)) return;
+  let text;
+  try {
+    text = readFileSync(launcher, 'utf8');
+  } catch (err) {
+    log(`✗ could not read ${launcher} (${err.code ?? err.message}), so it was not checked for the old TUI bundle path ${OLD_TUI_BUNDLE}. Open it and confirm it runs ${SHIPPED_TUI_BUNDLE}.`);
+    return;
+  }
+  if (text.includes(OLD_TUI_BUNDLE)) {
+    log(`✗ ${repoPath}: sterling-launch.sh still runs ${OLD_TUI_BUNDLE}, which no longer ships, so its dashboard is outdated and shows no error. Re-run /sterling:init in this project so its launcher runs ${SHIPPED_TUI_BUNDLE} (this update did not touch the launcher).`);
+  }
+}
+
 /**
  * Which registered project an authoring-machine update was invoked for: the
  * directory (CLAUDE_PROJECT_DIR when set, else the shell cwd) must EQUAL or sit
@@ -831,6 +861,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     log(`\nAUTHORING clone — nothing to pull; syncing ${project.repo_path} only`);
     if (opts.force) log('  (--force has no meaning on the authoring machine: there is no rebuild to force)');
     refreshProjects([project], { launchers: false, handoff: false });
+    warnIfLauncherNamesOldBundle(project.repo_path, log);
     if (normPath(project.repo_path) === normPath(cwd)) {
       log("▸ the clone's contract files are hand-maintained — not checked");
     } else if (existsSync(join(cwd, 'scripts', 'stamp-contract.mjs'))) {
@@ -1225,7 +1256,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone). Nothing
   // in this fan-out re-bakes them, so a consumer is told once. Only a consumer clone
   // reaches this point: the authoring branch above returns before any pull.
-  log('\n▸ launchers — re-run /sterling:init in each Sterling project so its launchers run tui/sterling-tui.mjs (launchers baked before this version point at packages/tui/bundle/sterling-tui.mjs, which no longer ships).');
+  log(`\n▸ launchers — re-run /sterling:init in each Sterling project so its launchers run ${SHIPPED_TUI_BUNDLE} (launchers baked before this version point at ${OLD_TUI_BUNDLE}, which no longer ships).`);
   // S6 (decision s6-consumer-cutover-init-on-installed-copy-fixes-launchers): init run
   // through a --plugin-dir launcher is the CLONE's init and re-bakes the clone launcher,
   // so the route off the clone is named here too.

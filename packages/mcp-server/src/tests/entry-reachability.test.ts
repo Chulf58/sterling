@@ -401,3 +401,105 @@ test('when the finding changes between reads, the ONE state_review item updates 
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// The write receipt: a state_review item closed on an entry Sterling cannot
+// reach-check says so (board 12e97ef5; user-ruled 2026-10-05, "Say unverified").
+// The item still closes and nothing is blocked; the receipt discloses.
+// ---------------------------------------------------------------------------
+
+const UNCHECKED = /was not reach-checked/;
+
+/** An active article with no entry mints one state_review item on read; returns it. */
+function openStateReview(tools: SterlingTools, files: FileEntry[], slug: string) {
+  const art = mkArticle(tools, 'active', files, slug);
+  tools.knowledgeQuery({ types: ['feature_article'] });
+  const [item] = stateReviews(tools);
+  assert.ok(item, 'precondition: the read minted one state_review item');
+  return { art, item };
+}
+
+test('closing a state_review item on an entry of no registry kind says the entry was not reach-checked, and why', () => {
+  for (const entry of ['src/lib.ts', 'packages/schemas/src/index.ts', '.claude-plugin/sterling-mcp.json']) {
+    const { dir, tools, cleanup } = project();
+    try {
+      write(dir, entry, '// library\n');
+      const { art, item } = openStateReview(tools, [{ path: entry, role: 'the library' }], 'library');
+      const result = tools.knowledgeUpdateResult(art.id, { files: [{ path: entry, role: 'the library', entry: true }] }, [item.id]);
+      assert.deepEqual(stateReviews(tools), [], `${entry}: the item still closes`);
+      const line = result.warnings.filter((w) => UNCHECKED.test(w));
+      assert.equal(line.length, 1, `${entry}: exactly one line`);
+      assert.ok(line[0].includes(entry), 'names the file');
+      assert.match(line[0], /no registry \(hooks, commands, skills, tools, bin entries, agents\) covers its kind, so reachability was not checked/);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+test('the same line rides a knowledge_edit that sets the entry flag and closes the item', () => {
+  const { tools, cleanup } = project();
+  try {
+    const { art, item } = openStateReview(tools, [{ path: 'src/lib.ts', role: 'the library' }], 'edit-lib');
+    const result = tools.knowledgeEdit(art.id, 'files[path=src/lib.ts].entry', 'false', 'true', [item.id]);
+    assert.deepEqual(stateReviews(tools), []);
+    assert.equal(result.warnings.filter((w) => UNCHECKED.test(w) && w.includes('src/lib.ts')).length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('closing a state_review item on a checkable, reached entry carries no not-reach-checked line', () => {
+  const { tools, cleanup } = project();
+  try {
+    const { art, item } = openStateReview(tools, [{ path: 'skills/drain/SKILL.md', role: 'the SOP' }], 'reached');
+    const result = tools.knowledgeUpdateResult(art.id, { files: [{ path: 'skills/drain/SKILL.md', role: 'the SOP', entry: true }] }, [item.id]);
+    assert.deepEqual(stateReviews(tools), []);
+    assert.equal(result.warnings.filter((w) => /reach-?checked|reachability was not checked/.test(w)).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a checkable entry nothing reaches behaves as before on the write: the claim closes the item and no not-reach-checked line appears', () => {
+  const { tools, cleanup } = project();
+  try {
+    const { art, item } = openStateReview(tools, [{ path: 'scripts/hooks/h9-unregistered.mjs', role: 'the hook' }], 'unreached');
+    const result = tools.knowledgeUpdateResult(art.id, { files: [{ path: 'scripts/hooks/h9-unregistered.mjs', role: 'the hook', entry: true }] }, [item.id]);
+    assert.deepEqual(stateReviews(tools), [], 'the item closes on the claim, as today');
+    assert.equal(result.warnings.filter((w) => /reach-?checked|reachability was not checked/.test(w)).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a write that closes no state_review item carries no not-reach-checked line, even over an unjudged entry', () => {
+  const { tools, cleanup } = project();
+  try {
+    const art = mkArticle(tools, 'active', [{ path: 'src/lib.ts', role: 'the library', entry: true }], 'no-claim');
+    const result = tools.knowledgeUpdateResult(art.id, { what_it_does: 'y', intended_behavior: 'y' });
+    assert.equal(result.warnings.filter((w) => UNCHECKED.test(w)).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('outside a Sterling clone the line says the tree is not a Sterling clone, not that no registry covers the kind', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-entry-consumer-write-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  write(dir, 'src/lib.ts', 'export const x = 1;\n');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  try {
+    const { art, item } = openStateReview(tools, [{ path: 'src/lib.ts', role: 'the library' }], 'consumer-lib');
+    const result = tools.knowledgeUpdateResult(art.id, { files: [{ path: 'src/lib.ts', role: 'the library', entry: true }] }, [item.id]);
+    const line = result.warnings.filter((w) => UNCHECKED.test(w));
+    assert.equal(line.length, 1);
+    assert.ok(line[0].includes('src/lib.ts'));
+    assert.match(line[0], /not a Sterling clone/);
+    assert.doesNotMatch(line[0], /covers its kind/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
