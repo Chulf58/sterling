@@ -5,7 +5,12 @@ description: Use before dispatching a review of a finished diff — the brief fo
 
 # Review brief
 
+<!-- claude-only -->
 When a review happens, who reviews whose work, and the loop cap are in the conductor prompt (`agent-templates/conductor.md`, installed in each project as `.claude/agents/conductor.md`), section "Review sparsely, and only when a task is done": one review per task, over the riskiest part of the whole branch's diff; Codex **Sol** (`gpt-5.6-sol`) for Claude-executed work and Claude **Opus** for Terra-executed work; in a WORK-mode project, Sol reviews before the PR and takes precedence over the Terra→Opus pairing; one review, one fix round, one re-check by the same warm reviewer.
+<!-- /claude-only -->
+<!-- opencode-only -->
+On OpenCode, when a review happens, who reviews whose work, and the loop cap are in the conductor prompt (`agent-templates/conductor.md`, installed in each project as `.opencode/agents/sterling/conductor.md`), section "Review sparsely, and only when a task is done": one review per task, over the riskiest part of the whole branch's diff; **Sol** (`gpt-6.1-sol`) for Claude-executed work and Claude **Opus** for Terra-executed work; in a WORK-mode project, Sol reviews before the PR and takes precedence over the Terra→Opus pairing; one review, one fix round, one re-check by the same warm reviewer.
+<!-- /opencode-only -->
 
 The rubric is the body of the `reviewer` agent (`agent-templates/reviewer.md`, installed as `.claude/agents/reviewer.md`): riskiest part first, every changed test read in full, findings ranked `CRITICAL` to `LOW` with a `file:line`, a failure scenario and a fix, a test-integrity verdict per changed test file, and the areas checked with nothing found. This skill holds no copy of it, so the Claude and Codex review surfaces cannot drift apart (decision `reviewer-agent-is-the-one-review-rubric-for-claude-and-codex`). The brief carries what the reviewer cannot infer; the rubric is not retyped into it.
 
@@ -17,7 +22,7 @@ The rubric is the body of the `reviewer` agent (`agent-templates/reviewer.md`, i
 <!-- /claude-only -->
 <!-- opencode-only -->
 On OpenCode, the Sol bullet reads as follows.
-- **Sol**: dispatch the `subagent` tool with agent `sterling/reviewer` and `model` set to `openai/gpt-5.6-sol#high`. The rubric is that agent's body, so do not paste it: the prompt is only the brief below. The agent's permissions deny edits, but shell stays available to it and no sandbox was shown, so add "do not modify the worktree" to the brief. The `codex` MCP tool is the Claude Code route only and is not used here. If the openai provider is not logged in, say so and dispatch the Opus reviewer instead.
+- **Sol**: dispatch the `subagent` tool with agent `sterling/reviewer` and `model` set to `openai/gpt-6.1-sol#high`. The rubric is that agent's body, so do not paste it: the prompt is only the brief below. The agent's permissions deny edits, but shell stays available to it and no sandbox was shown, so add "do not modify the worktree" to the brief. The `codex` MCP tool is the Claude Code route only and is not used here. If the openai provider is not logged in, say so and dispatch the Opus reviewer instead.
 <!-- /opencode-only -->
 
 Riskiest means runtime/product code, config, permissions, credentials, lifecycle, migrations, generated catalogs, third-party patches; docs, probe scripts and generated projections go unreviewed.
