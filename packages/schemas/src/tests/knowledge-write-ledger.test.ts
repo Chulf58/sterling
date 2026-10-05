@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { knowledgeWriteSchema, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWritesProcessFile, knowledgeWritesOwnerPid } from '../index.js';
+import { knowledgeWriteSchema, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, KNOWLEDGE_WRITES_TEMP_FILE, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid } from '../index.js';
 
 // The domain-write ledger entry (decision
 // domain-record-duty-credit-comes-from-a-per-project-write-ledger): the shape
@@ -40,4 +40,18 @@ test('one ledger file per server process: the name carries the owner pid, and on
   assert.equal(knowledgeWritesOwnerPid('knowledge-writes.jsonl'), null, 'the legacy file has no owner');
   assert.equal(knowledgeWritesOwnerPid(`${name}.tmp-4321-${uuid}`), null, 'a compaction temp file is not a ledger file');
   assert.equal(KNOWLEDGE_WRITES_RETENTION_MS, 7 * 24 * 60 * 60 * 1000);
+});
+
+test('a compaction temp file is a ledger file name plus .tmp-<pid>-<uuid>, and carries the compacting pid', () => {
+  const uuid = '0b0d5cf6-f282-4d29-b7f0-aeb649697361';
+  const ledger = knowledgeWritesProcessFile(4321, uuid);
+  const temp = knowledgeWritesTempFile(ledger, 777, uuid);
+  assert.equal(temp, `${ledger}.tmp-777-${uuid}`);
+  assert.equal(KNOWLEDGE_WRITES_TEMP_FILE.test(temp), true);
+  assert.equal(knowledgeWritesTempOwnerPid(temp), 777, 'the pid after .tmp- is the one that was compacting');
+  assert.equal(knowledgeWritesTempOwnerPid(knowledgeWritesTempFile('knowledge-writes.jsonl', 777, uuid)), 777, 'a temp file of the legacy ledger, left by a build before the split');
+  assert.equal(KNOWLEDGE_WRITES_PROCESS_FILE.test(temp), false, 'a temp file is never a ledger file');
+  for (const name of [ledger, 'knowledge-writes.jsonl', `${temp}.bak`, `${ledger}.tmp-0-${uuid}`, `${ledger}.tmp-777`, `session-events.json.tmp-777-${uuid}`, `x${temp}`]) {
+    assert.equal(knowledgeWritesTempOwnerPid(name), null, `${name} is not a compaction temp file`);
+  }
 });

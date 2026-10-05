@@ -6,8 +6,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_KEEP_IDS, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_RETENTION_MS, knowledgeWriteSchema, knowledgeWritesOwnerPid, knowledgeWritesProcessFile, parseConfig, type KnowledgeWrite } from '@sterling/schemas';
+import { KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_KEEP_IDS, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_RETENTION_MS, knowledgeWriteSchema, knowledgeWritesOwnerPid, knowledgeWritesProcessFile, knowledgeWritesTempFile, parseConfig, type KnowledgeWrite } from '@sterling/schemas';
 import { MountedStores, createDomain } from '@sterling/store';
+import { createSterlingServer } from '../server.js';
 import { PROCESS_KNOWLEDGE_WRITES_REL, SterlingTools } from '../tools.js';
 
 // The domain-write ledger, server side (decision
@@ -470,7 +471,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const daysAgo = (days: number) => new Date(Date.now() - days * DAY_MS);
 const ENTRY = seedLines([{ id: 'kept-or-not', type: 'decision', at: T0 }]);
 
-/** A project root with ledger files of other processes in it, and a server starting under it. */
+/** A project root with ledger files of other processes in it, and the removal a server start runs under it. */
 function startHarness() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-write-ledger-start-'));
   const transient = join(dir, KNOWLEDGE_WRITES_DIR_REL);
@@ -486,8 +487,8 @@ function startHarness() {
       utimesSync(p, daysAgo(ageDays), daysAgo(ageDays));
       return name;
     },
-    /** A server start under this root: the constructor runs the removal. */
-    start: () => new SterlingTools({ store, repoRoot: dir }),
+    /** The removal a server start runs under this root (createSterlingServer calls it once); returns its report. */
+    start: () => new SterlingTools({ store, repoRoot: dir }).removeExpiredDomainWriteLedgers(),
     names: () => readdirSync(transient).sort(),
     cleanup: () => {
       store.close();
@@ -507,11 +508,11 @@ test('server start removes another process\'s ledger file only when it is older 
     const freshDead = h.file(knowledgeWritesProcessFile(DEAD_PID, randomUUID()), 0);
     const ownPidOtherRun = h.file(knowledgeWritesProcessFile(process.pid, randomUUID()), 30);
     const own = h.file(PROCESS_KNOWLEDGE_WRITES_REL.slice(KNOWLEDGE_WRITES_DIR_REL.length + 1), 30);
-    const tempFile = h.file(`${knowledgeWritesProcessFile(DEAD_PID, randomUUID())}.tmp-${DEAD_PID}-${randomUUID()}`, 30);
+    const tempFile = h.file(`${knowledgeWritesProcessFile(DEAD_PID, randomUUID())}.tmp-${DEAD_PID}`, 30); // not exactly the temp pattern
     const nearMiss = h.file(`knowledge-writes.${DEAD_PID}.jsonl`, 30);
     const unrelated = h.file('session-events.json', 30, '[]');
 
-    h.start();
+    assert.equal(h.start(), undefined, 'nothing to report');
     const left = h.names();
     assert.equal(left.includes(expiredDead), false, 'EXPIRED-DEAD-KEPT SHAPE if present: older than 7 days and the owner is gone, so it is removed');
     assert.equal(left.includes(expiredLive), true, 'LIVE-OWNER-REMOVED SHAPE if missing: an expired file whose owner is alive is kept');
@@ -520,7 +521,7 @@ test('server start removes another process\'s ledger file only when it is older 
     assert.equal(left.includes(freshDead), true);
     assert.equal(left.includes(ownPidOtherRun), true, 'a live pid keeps the file, whichever run wrote it');
     assert.equal(left.includes(own), true, 'this process\'s own file is never removed');
-    assert.deepEqual([tempFile, nearMiss, unrelated].filter((n) => !left.includes(n)), [], 'a name that is not exactly a ledger file name is never removed');
+    assert.deepEqual([tempFile, nearMiss, unrelated].filter((n) => !left.includes(n)), [], 'a name that is not exactly a ledger or temp file name is never removed');
     assert.equal(left.length, 9);
   } finally {
     h.cleanup();
@@ -532,11 +533,11 @@ test('server start removes the legacy ledger file on age alone: it has no owner 
   const expired = startHarness();
   try {
     recent.file('knowledge-writes.jsonl', 6);
-    recent.start();
+    assert.equal(recent.start(), undefined);
     assert.deepEqual(recent.names(), ['knowledge-writes.jsonl'], 'inside 7 days it is kept, and still read by the union');
 
     expired.file('knowledge-writes.jsonl', 8);
-    expired.start();
+    assert.equal(expired.start(), undefined);
     assert.deepEqual(expired.names(), [], 'EXPIRED-LEGACY-KEPT SHAPE if present: older than 7 days, removed');
   } finally {
     recent.cleanup();
@@ -560,7 +561,95 @@ test('removal runs at server start only: no write and no later call path removes
   }
 });
 
-test('a removal that fails is reported in one message and never fails server start; a root with no transient folder reports nothing', () => {
+test('a compaction temp file a crash left is removed by the same rule: older than 7 days AND its pid gone', () => {
+  const h = startHarness();
+  try {
+    const ledgerOf = (pid: number) => knowledgeWritesProcessFile(pid, randomUUID());
+    const expiredDead = h.file(knowledgeWritesTempFile(ledgerOf(DEAD_PID), DEAD_PID, randomUUID()), 8);
+    const expiredDeadLegacy = h.file(knowledgeWritesTempFile('knowledge-writes.jsonl', DEAD_PID, randomUUID()), 8);
+    const expiredLive = h.file(knowledgeWritesTempFile(ledgerOf(process.ppid), process.ppid, randomUUID()), 30);
+    const expiredOwn = h.file(knowledgeWritesTempFile(PROCESS_KNOWLEDGE_WRITES_REL.slice(KNOWLEDGE_WRITES_DIR_REL.length + 1), process.pid, randomUUID()), 30);
+    const expiredNotOurs = h.file(knowledgeWritesTempFile(ledgerOf(1), 1, randomUUID()), 30);
+    // The pid that decides is the temp file's own, not the one in the ledger name before it.
+    const expiredLiveCompactor = h.file(knowledgeWritesTempFile(ledgerOf(DEAD_PID), process.ppid, randomUUID()), 30);
+    const recentDead = h.file(knowledgeWritesTempFile(ledgerOf(DEAD_PID), DEAD_PID, randomUUID()), 6);
+
+    assert.equal(h.start(), undefined);
+    const left = h.names();
+    assert.deepEqual([expiredDead, expiredDeadLegacy].filter((n) => left.includes(n)), [], 'TEMP-LEFTOVER-KEPT SHAPE if any is listed: expired and its pid gone, so it is removed');
+    assert.equal(left.includes(expiredLive), true, 'LIVE-COMPACTOR-TEMP-REMOVED SHAPE if missing: a live pid may be about to rename it');
+    assert.equal(left.includes(expiredOwn), true);
+    assert.equal(left.includes(expiredNotOurs), true, 'a pid that cannot be probed as gone keeps its temp file');
+    assert.equal(left.includes(expiredLiveCompactor), true);
+    assert.equal(left.includes(recentDead), true, 'a dead pid alone does not remove a temp file inside 7 days');
+    assert.equal(left.length, 5);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('constructing SterlingTools removes nothing and writes nothing to stderr: the removal is the server start\'s call', () => {
+  const h = startHarness();
+  const written: string[] = [];
+  const realWrite = process.stderr.write;
+  try {
+    const expiredDead = h.file(knowledgeWritesProcessFile(DEAD_PID, randomUUID()), 30);
+    const stuck = knowledgeWritesProcessFile(DEAD_PID, randomUUID());
+    mkdirSync(join(h.transient, stuck));
+    utimesSync(join(h.transient, stuck), daysAgo(30), daysAgo(30));
+    const store = new MountedStores(join(h.dir, '.sterling', 'second.db'), []);
+    process.stderr.write = ((chunk: unknown) => (written.push(String(chunk)), true)) as typeof process.stderr.write;
+    try {
+      new SterlingTools({ store, repoRoot: h.dir });
+    } finally {
+      process.stderr.write = realWrite;
+      store.close();
+    }
+    assert.deepEqual(h.names(), [expiredDead, stuck].sort(), 'CONSTRUCTOR-SWEEPS SHAPE if a file is gone: a tools object built outside a server start (a test harness, knowledge-eval) removes nothing');
+    assert.deepEqual(written, [], 'and reports nothing');
+  } finally {
+    process.stderr.write = realWrite;
+    h.cleanup();
+  }
+});
+
+test('server start (createSterlingServer) runs the removal once, announces a failed removal once on stderr, and still starts', async () => {
+  const h = startHarness();
+  const written: string[] = [];
+  const realWrite = process.stderr.write;
+  try {
+    const removable = h.file(knowledgeWritesProcessFile(DEAD_PID, randomUUID()), 30);
+    const leftoverTemp = h.file(knowledgeWritesTempFile(knowledgeWritesProcessFile(DEAD_PID, randomUUID()), DEAD_PID, randomUUID()), 30);
+    const recent = h.file(knowledgeWritesProcessFile(DEAD_PID, randomUUID()), 1);
+    const stuck = knowledgeWritesProcessFile(DEAD_PID, randomUUID());
+    mkdirSync(join(h.transient, stuck)); // cannot be unlinked: a directory where a file belongs
+    utimesSync(join(h.transient, stuck), daysAgo(30), daysAgo(30));
+
+    process.stderr.write = ((chunk: unknown) => (written.push(String(chunk)), true)) as typeof process.stderr.write;
+    let started;
+    try {
+      started = createSterlingServer(join(h.dir, '.sterling', 'server.db')); // REMOVAL-FAILS-START SHAPE if this throws
+    } finally {
+      process.stderr.write = realWrite;
+    }
+    try {
+      assert.deepEqual(h.names().filter((n) => n.startsWith('knowledge-writes.')), [recent, stuck].sort(), 'the start removed what the rule allows, a crash-left temp file included, and kept the rest');
+      assert.equal([removable, leftoverTemp].some((n) => h.names().includes(n)), false);
+      const said = written.filter((w) => /domain-write ledger/.test(w));
+      assert.equal(said.length, 1, `announced once: ${JSON.stringify(written)}`);
+      assert.equal(said[0].startsWith('domain-write ledger: 1 expired ledger file(s) in .sterling/transient could not be removed ('), true, said[0]);
+      assert.equal(said[0].includes(stuck), true);
+      assert.equal(typeof started.tools.knowledgeCreate, 'function', 'the server started');
+    } finally {
+      started.store.close();
+    }
+  } finally {
+    process.stderr.write = realWrite;
+    h.cleanup();
+  }
+});
+
+test('a removal that fails is reported in one message naming each file; a root with no transient folder reports nothing', () => {
   const h = startHarness();
   try {
     // Two expired dead-owner entries that cannot be unlinked: each is a directory where a file belongs.
@@ -571,9 +660,9 @@ test('a removal that fails is reported in one message and never fails server sta
     }
     const removable = h.file(knowledgeWritesProcessFile(DEAD_PID, randomUUID()), 30);
 
-    const tools = h.start(); // REMOVAL-FAILS-START SHAPE if this throws
+    const said = h.start();
     assert.equal(h.names().includes(removable), false, 'the removable file is still removed');
-    const said = tools.removeExpiredDomainWriteLedgers();
+    assert.equal(h.start(), said, 'a later start reports the same files again: they are still there');
     assert.match(said ?? '', /^domain-write ledger: 2 expired ledger file\(s\) in \.sterling\/transient could not be removed \(/, 'ONE message for both files');
     for (const name of stuck) assert.equal(said?.includes(name), true, 'each file that stays is named');
     assert.match(said ?? '', /they stay until a later server start removes them\.$/);

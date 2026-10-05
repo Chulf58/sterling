@@ -120,7 +120,8 @@ export type SessionEvent = z.infer<typeof sessionEventSchema>;
 // passes KNOWLEDGE_WRITES_COMPACT_LINES lines that process rewrites it to the
 // latest entry of the newest KNOWLEDGE_WRITES_KEEP_IDS record ids (tmp file,
 // then rename). And a server removes, at its start only, another process's
-// file that is older than KNOWLEDGE_WRITES_RETENTION_MS and whose owner pid is
+// file, or a compaction temp file a crash left (KNOWLEDGE_WRITES_TEMP_FILE),
+// that is older than KNOWLEDGE_WRITES_RETENTION_MS and whose owner pid is
 // gone; the rule and its accepted limit are stated at
 // removeExpiredDomainWriteLedgers in packages/mcp-server/src/tools.ts.
 //
@@ -137,6 +138,22 @@ export const knowledgeWritesProcessFile = (pid: number, uuid: string): string =>
 /** The owner pid a per-process ledger file's name carries, or null when the name is not exactly that pattern. */
 export function knowledgeWritesOwnerPid(fileName: string): number | null {
   const m = KNOWLEDGE_WRITES_PROCESS_FILE.exec(fileName);
+  if (!m) return null;
+  const pid = Number(m[1]);
+  return Number.isSafeInteger(pid) ? pid : null;
+}
+/**
+ * A compaction temp file's name: a ledger file's name (per-process, or the
+ * legacy one a build before the split compacted) followed by
+ * .tmp-<pid>-<uuid>. Group 1 is the pid of the process that was compacting. A
+ * compaction renames its temp file away at once, so one that stays is what a
+ * crash left. No reader reads it.
+ */
+export const KNOWLEDGE_WRITES_TEMP_FILE = /^knowledge-writes\.(?:[1-9]\d*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.)?jsonl\.tmp-([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const knowledgeWritesTempFile = (ledgerFileName: string, pid: number, uuid: string): string => `${ledgerFileName}.tmp-${pid}-${uuid}`;
+/** The pid of the process that wrote a compaction temp file, or null when the name is not exactly that pattern. */
+export function knowledgeWritesTempOwnerPid(fileName: string): number | null {
+  const m = KNOWLEDGE_WRITES_TEMP_FILE.exec(fileName);
   if (!m) return null;
   const pid = Number(m[1]);
   return Number.isSafeInteger(pid) ? pid : null;

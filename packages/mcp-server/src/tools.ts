@@ -5,10 +5,10 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -1740,10 +1740,6 @@ export class SterlingTools {
     this.newId = deps.newId ?? randomUUID;
     this.repoRoot = deps.repoRoot;
     this.domains = deps.domains ?? (deps.store instanceof MountedStores ? mountedDomainSurface(deps.store) : undefined);
-    // Server start: the one moment expired ledger files of other processes are
-    // removed. A failure is announced once on stderr and never fails the start.
-    const ledgerRemoval = this.removeExpiredDomainWriteLedgers();
-    if (ledgerRemoval) process.stderr.write(ledgerRemoval + '\n');
   }
 
   /** Every mounted domain with its description (null when its store has none),
@@ -9861,7 +9857,7 @@ export class SterlingTools {
       latest.set(ok.data.id, ok.data);
     }
     const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
-    const tmp = `${ledgerPath}.tmp-${process.pid}-${randomUUID()}`;
+    const tmp = join(dirname(ledgerPath), knowledgeWritesTempFile(basename(ledgerPath), process.pid, randomUUID()));
     try {
       writeFileSync(tmp, kept.map((e) => `${JSON.stringify(e)}\n`).join(''));
       renameSync(tmp, ledgerPath);
@@ -9876,16 +9872,19 @@ export class SterlingTools {
   }
 
   /**
-   * Ends the life of ledger files nothing will write again. Run at server
-   * start only (the constructor), never by a reader and never on a write.
+   * Ends the life of ledger files nothing will write again. Called at server
+   * start only (createSterlingServer in server.ts, once, right after it builds
+   * its SterlingTools), never by the constructor, a reader or a write.
    *
    * THE RULE. Another process's ledger file is removed only when BOTH hold:
    *   1. its mtime is older than KNOWLEDGE_WRITES_RETENTION_MS (7 days), AND
    *   2. its owner pid, read from the file name, is positively dead:
    *      process.kill(pid, 0) throws ESRCH.
-   * Any doubt keeps the file: a name that is not exactly the per-process
-   * pattern (a compaction temp file included), a stat that fails, a pid this
-   * user may not signal (EPERM), any other probe error. A dead owner alone
+   * A compaction temp file a crash left (KNOWLEDGE_WRITES_TEMP_FILE) falls
+   * under the same two conditions, with the pid its own name carries.
+   * Any doubt keeps the file: a name that is neither pattern exactly, a stat
+   * that fails, a pid this user may not signal (EPERM), any other probe
+   * error. A dead owner alone
    * never removes a file: a short-lived writer such as the maintenance worker
    * exits seconds after writing, and the session still needs its entries.
    * This process's own file is never a candidate.
@@ -9921,7 +9920,7 @@ export class SterlingTools {
     const failed: string[] = [];
     for (const name of names) {
       if (name === own) continue;
-      const ownerPid = name === legacy ? null : knowledgeWritesOwnerPid(name);
+      const ownerPid = name === legacy ? null : (knowledgeWritesOwnerPid(name) ?? knowledgeWritesTempOwnerPid(name));
       if (name !== legacy && ownerPid === null) continue; // not a ledger file name: kept
       const path = join(dir, name);
       let mtimeMs: number;
