@@ -7353,7 +7353,34 @@ export class SterlingTools {
     // `ledger_warning` likewise: it leaves the record and joins the receipt's
     // warnings (an array, so a re-wrapper spreads it without a presence check).
     const { same_subject, claims_check, ledger_warning, ...record } = rec;
-    return { record: record as DurableRecord, same_subject, claims_check, ledger_warnings: ledger_warning ? [ledger_warning] : [] };
+    return {
+      record: record as DurableRecord,
+      same_subject,
+      claims_check,
+      ledger_warnings: [...(ledger_warning ? [ledger_warning] : []), ...this.entryNotCheckedWarnings(record as unknown as Record<string, unknown>)],
+    };
+  }
+
+  /**
+   * The receipt line for a state_review item closed on an entry of a kind
+   * Sterling cannot reach-check (board 12e97ef5; user-ruled 2026-10-05, "Say
+   * unverified": the item still closes, nothing is blocked, the receipt
+   * discloses). Judged the way the read-time state_review arm judges: only an
+   * article claiming or looking wired (wired_in, active, built) has its entries
+   * checked, so only those can be closed on the strength of one. An entry judge()
+   * does judge, reached or not, gets no line.
+   */
+  private entryNotCheckedWarnings(article: Record<string, unknown>): string[] {
+    const closed = (article.resolved_items as { system_reason?: string }[] | undefined) ?? [];
+    if (article.type !== 'feature_article' || !closed.some((item) => item.system_reason === 'state_review')) return [];
+    if (article.state !== 'wired_in' && article.state !== 'active' && article.state !== 'built') return [];
+    const entries = ((article.files ?? []) as { path: string; role?: string; entry?: boolean }[]).filter((f) => f.entry);
+    const root = this.treeRootFor(article).root ?? this.repoRoot;
+    const reachability = root ? new EntryReachability(root) : undefined;
+    return entries.flatMap((f) => {
+      const why = reachability ? reachability.unjudgedReason(f.path, f.role ?? '') : 'its working tree could not be resolved, so reachability was not checked';
+      return why ? [`state_review item closed, but entry ${f.path} was not reach-checked: ${why}.`] : [];
+    });
   }
 
   /**
