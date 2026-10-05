@@ -224,7 +224,7 @@ for (const p of projects) {
   const agentsMd = join(repo, 'AGENTS.md');
   const claudeMd = join(repo, 'CLAUDE.md');
   if (!existsSync(agentsMd)) {
-    record({ project: p.name, status: 'not_migrated', detail: `no AGENTS.md — run: node scripts/init.mjs --target ${repo}` });
+    record({ project: p.name, status: 'not_migrated', detail: `no AGENTS.md — run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
     drift++;
     continue;
   }

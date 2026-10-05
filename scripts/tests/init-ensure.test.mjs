@@ -843,7 +843,7 @@ test('config_drift on re-init: a config.models bump is reported differs with bot
     assert.equal(rerun.code, 0, rerun.stderr);
     assert.match(
       rerun.stdout,
-      /^\.claude\/agents\/librarian\.md\s+differs\s+model\/effort drift — installed model=claude-sonnet-5-5 effort=low, config\.models resolves model=claude-drift-probe-9 effort=high; not rewritten — realize it with node scripts\/install-agents\.mjs \(--target <dir> for a sibling\)/m
+      /^\.claude\/agents\/librarian\.md\s+differs\s+model\/effort drift — installed model=claude-sonnet-5-5 effort=low, config\.models resolves model=claude-drift-probe-9 effort=high; not rewritten — realize it with node "<Sterling root>\/bin\/install-agents\.mjs" \(--target <dir> for a sibling\)/m
     );
     assert.equal(readFileSync(agentPath, 'utf8'), agentBefore, 'config_drift writes nothing');
   } finally {

@@ -86,6 +86,26 @@ test('work, owed, NO file changes: the first Stop blocks once with the PR link a
   }
 });
 
+// Decision session-start-prints-the-sterling-root-plain-text-instructions-use-it:
+// the nag is plain text the model reads, and scripts/pr-review-wait.mjs imports
+// @sterling/* packages (fails on an installed plugin copy), while ${CLAUDE_PLUGIN_ROOT}
+// is not set in the Bash tool. It names the bundled bin entry in the Sterling root form.
+test('the nag names the bundled bin entry as node "<Sterling root>/bin/pr-review-wait.mjs" for both the wait and the settle, never scripts/ or CLAUDE_PLUGIN_ROOT', () => {
+  const p = makeProject('work');
+  try {
+    arm(p.dir);
+    const first = stop(p.dir);
+    assert.equal(first.code, 2, `the first Stop nags (exit 2): ${first.stdout} ${first.stderr}`);
+    const entry = 'node "<Sterling root>/bin/pr-review-wait.mjs"';
+    assert.ok(first.stderr.includes(`wait with ${entry} ${PR_URL}`), `names the wait command in the Sterling root form: ${first.stderr}`);
+    assert.ok(first.stderr.includes(`${entry} --settle <clean|capped|escalated> --pr 7`), `names the settle command in the Sterling root form: ${first.stderr}`);
+    assert.doesNotMatch(first.stderr, /scripts\/pr-review-wait/, 'never the scripts/ file, which does not exist on an installed copy');
+    assert.doesNotMatch(first.stderr, /CLAUDE_PLUGIN_ROOT/, 'never the unsubstituted plugin-root variable');
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('the debt is preserved across sessions: a NEW session is nagged once again; a re-arm (new push) is nagged once again', () => {
   const p = makeProject('work');
   try {

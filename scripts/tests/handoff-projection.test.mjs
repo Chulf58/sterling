@@ -484,7 +484,7 @@ test('--help and -h print usage and exit 0 without resolving a target or touchin
     for (const flag of ['--help', '-h']) {
       const r = cli([flag], dir);
       assert.equal(r.code, 0, `${flag}: ${r.stdout}${r.stderr}`);
-      assert.match(r.stdout, /^Usage: node scripts\/handoff-projection\.mjs \[<project root>\]/m, flag);
+      assert.match(r.stdout, /^Usage: node "<Sterling root>\/bin\/handoff-projection\.mjs" \[<project root>\]/m, flag);
       assert.doesNotMatch(r.stdout, /handoff projection:/, `${flag} is not a projection run`);
     }
     assert.deepEqual(snapshot(dir), before, 'help writes nothing into the cwd project');
@@ -499,7 +499,7 @@ test('an unknown --flag is an error with exit 2, never read as a project root', 
     const r = cli(['--bogus'], dir);
     assert.equal(r.code, 2, `${r.stdout}${r.stderr}`);
     assert.match(r.stderr, /unknown option --bogus/);
-    assert.match(r.stderr, /Usage: node scripts\/handoff-projection\.mjs/);
+    assert.match(r.stderr, /Usage: node "<Sterling root>\/bin\/handoff-projection\.mjs"/);
     assert.deepEqual(listTree(dir), [], 'nothing was projected');
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -290,7 +290,9 @@ export function describeConfigDrift(r) {
   return parts.join('; ');
 }
 
-export const CONFIG_DRIFT_FIX = 'node scripts/install-agents.mjs (--target <dir> for a sibling)';
+// Plain text the model reads (decision session-start-prints-the-sterling-root-plain-text-instructions-use-it):
+// the bundled bin entry in the Sterling root form; scripts/install-agents.mjs does not exist on an installed copy.
+export const CONFIG_DRIFT_FIX = 'node "<Sterling root>/bin/install-agents.mjs" (--target <dir> for a sibling)';
 
 // Surgical model/effort swap (design 98064d77 §b): the TUI System tab's write
 // projection. Given an ALREADY-INSTALLED agent file, rewrite ONLY the frontmatter
