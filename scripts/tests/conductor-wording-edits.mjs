@@ -238,6 +238,13 @@ export const IMPLEMENTOR_WORDING_EDITS = [
     before: '- what you added or updated, and what it proves\n',
     after: '- what you added or updated, and what it proves; for a regression test, that it failed before the fix and passes with it\n',
   },
+  {
+    commit: 'board b43ddc10',
+    date: '2026-10-05',
+    reason: 'the background-job rule names the project\'s own check command; `npm run check` is only what that is in a Node project with the script, because the template installs into projects of any stack (user-ruled, "Project lint and check commands")',
+    before: 'never start the full suite or `npm run check` as a background job',
+    after: 'never start the full suite or the project\'s check command (`npm run check` in a Node project that has that script) as a background job',
+  },
 ];
 
 const occurrences = (text, needle) => text.split(needle).length - 1;

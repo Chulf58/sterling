@@ -138,6 +138,8 @@ test('the implementor bug-fix rule asks for a regression test that fails without
     assert.match(rule, /add a regression test that fails without the fix, or say in the report why that could not be shown/, host);
     const testsSlot = content.match(/^Tests:\n(- .*)$/m)?.[1] ?? '';
     assert.match(testsSlot, /failed before the fix and passes with it/, `${host}: the report format asks for the red-then-green evidence`);
+    assert.ok(content.includes("never start the full suite or the project's check command (`npm run check` in a Node project that has that script) as a background job"), `${host}: the background-job rule names the project's own check command`);
+    assert.equal(content.split('`npm run check`').length - 1, 1, `${host}: \`npm run check\` appears once, inside the conditional`);
   }
 });
 
