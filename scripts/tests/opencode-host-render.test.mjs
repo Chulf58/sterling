@@ -96,7 +96,7 @@ test('the OpenCode conductor names no Claude-only mechanism and carries the Open
 // Claude Code route only. The model-string form is the one measured; only the Sol dispatch was run live.
 test('the OpenCode conductor routes Sol, Astra and Terra through native subagent dispatches; the Claude conductor keeps the codex MCP route', () => {
   const opencode = fullRender('conductor');
-  for (const native of ['sterling/reviewer', 'openai/gpt-5.6-sol#high', 'openai/gpt-6-astra#high', 'sterling/implementor', 'openai/gpt-5.6-terra', 'do not modify the worktree', 'user-ruled 2026-10-05']) {
+  for (const native of ['sterling/reviewer', 'openai/gpt-6.1-sol#high', 'openai/gpt-6-astra#high', 'sterling/implementor', 'openai/gpt-5.6-terra', 'do not modify the worktree', 'user-ruled 2026-10-05']) {
     assert.ok(opencode.includes(native), `OpenCode conductor lacks ${JSON.stringify(native)}`);
   }
   for (const codexRoute of ['dispatched through the `codex` MCP tool', 'as on Claude Code', 'through the `codex` MCP tool, never a shelled `codex exec`', 'through the `review-brief` skill', 'sandbox: read-only']) {
@@ -112,6 +112,50 @@ test('the OpenCode conductor routes Sol, Astra and Terra through native subagent
   for (const openCodeOnly of ['openai/', 'sterling/reviewer', 'sterling/implementor']) {
     assert.ok(!claude.includes(openCodeOnly), `Claude conductor carries the OpenCode route ${JSON.stringify(openCodeOnly)}`);
   }
+});
+
+// Board f40400d6 (user-ruled 2026-10-05 through the question form, "Add the rule (Recommended)"):
+// an OpenCode dispatch blocks the conductor's turn and nothing reminds it to speak (finding
+// opencode-2-subagent-dispatch-blocks-by-default-text-between-tool-calls-is-live-october-2026),
+// so the OpenCode conductor is told to report between dispatches. Claude Code needs no such rule.
+test('the OpenCode conductor carries the progress rule; the Claude conductor does not', () => {
+  const opencode = fullRender('conductor');
+  const claude = renderClaudeText(read('agent-templates/conductor.md'), 'conductor.md');
+  const rule = [
+    '**Report as you work.**',
+    'Before each dispatch, say in one or two lines what just landed (the result and its evidence), what you decided, and what you are starting now.',
+    'Say at once when something fails or is denied.',
+    'Stay quiet only after a notification that carries no report',
+    'A dispatch blocks until its lane returns and nothing here reminds you to speak, so a turn with no text between dispatches leaves the user with no news for as long as the work takes',
+    'user-ruled 2026-10-05 through the question form, "Add the rule (Recommended)"',
+    '*"the conductor in opencode is very quiet. It works for even hours without saying anything about progress or thoughts until it comes to and end"*',
+  ];
+  for (const sentence of rule) {
+    assert.ok(opencode.includes(sentence), `OpenCode conductor lacks ${JSON.stringify(sentence)}`);
+    assert.ok(!claude.includes(sentence), `Claude conductor carries ${JSON.stringify(sentence)}`);
+  }
+  // The silent rule for a notification with no report is shared text and stays on both hosts.
+  for (const [host, content] of Object.entries({ opencode, claude })) {
+    assert.ok(content.includes('A task notification carrying no report'), `${host}: the silent rule is still there`);
+    assert.ok(content.includes('End the turn without text'), `${host}: the silent rule still ends the turn without text`);
+  }
+});
+
+// Board 52a82da8 (user-stated 2026-10-05: "we should use the newest 6.1 one of it is the same
+// price"): Sol is gpt-6.1-sol on OpenCode. Claude Code stays on gpt-5.6-sol, because Codex on a
+// ChatGPT account refuses the 6.x Sol models (finding
+// gpt-6-1-sol-price-and-serving-codex-chatgpt-account-refuses-opencode-serves-october-2026).
+test('Sol is gpt-6.1-sol on the OpenCode conductor and stays gpt-5.6-sol on the Claude conductor', () => {
+  const opencode = fullRender('conductor');
+  assert.ok(opencode.includes('openai/gpt-6.1-sol#high'), 'OpenCode conductor pins the new Sol id');
+  assert.ok(opencode.includes('**Sol** (`gpt-6.1-sol`)'), 'the OpenCode pairing paragraph names the new Sol id');
+  assert.ok(!opencode.includes('openai/gpt-5.6-sol'), 'OpenCode conductor no longer dispatches the old Sol id');
+  assert.ok(opencode.includes('Claude Code stays on `gpt-5.6-sol` because Codex on a ChatGPT account refuses the 6.x Sol models'), 'the OpenCode conductor says why the hosts differ');
+  assert.equal(opencode.split('gpt-5.6-sol').length - 1, 1, 'the old id is named once on OpenCode, in that sentence');
+
+  const claude = renderClaudeText(read('agent-templates/conductor.md'), 'conductor.md');
+  assert.ok(!claude.includes('gpt-6.1-sol'), 'Claude conductor does not name gpt-6.1-sol');
+  assert.ok(claude.includes('Codex **Sol** (`gpt-5.6-sol`, dispatched through the `codex` MCP tool at `sandbox: read-only`)'), 'Claude conductor still names gpt-5.6-sol');
 });
 
 // Board b43ddc10 (user-ruled 2026-10-05 through the question form, "Reviewer checks reuse",
