@@ -127,7 +127,7 @@ test('every mapping the old phrase map carried has its OpenCode text in the rend
       // GitHub issue #24 (user-ruled 2026-10-05 through the question form): the OpenCode bullet
       // no longer routes these lanes through a codex MCP server, so the two entries that pinned
       // that wording ('codex-availability', 'codex-background') are replaced by the native route.
-      'native-review': 'agent `sterling/reviewer` with `model` `openai/gpt-5.6-sol#high` to review',
+      'native-review': 'agent `sterling/reviewer` with `model` `openai/gpt-6.1-sol#high` to review',
       'native-sparring': '`openai/gpt-6-astra#high` to spar',
       'native-implement': 'agent `sterling/implementor` with `model` `openai/gpt-5.6-terra` to implement',
       'native-no-sandbox': 'do not modify the worktree',
@@ -162,7 +162,7 @@ test("this repo's CLAUDE.md: the OpenCode render names the native route, the Cla
   const p = project(own);
   try {
     const out = layer.renderSterlingLayer(p.dir, layer.sterlingRoot());
-    for (const text of ['sterling/reviewer', 'openai/gpt-5.6-sol#high', 'openai/gpt-6-astra#high', 'sterling/implementor', 'openai/gpt-5.6-terra', 'The `codex` MCP tool is the Claude Code route only', 'narrowed to Claude Code on 2026-10-05', 'do not modify the worktree']) {
+    for (const text of ['sterling/reviewer', 'openai/gpt-6.1-sol#high', 'openai/gpt-6-astra#high', 'sterling/implementor', 'openai/gpt-5.6-terra', 'The `codex` MCP tool is the Claude Code route only', 'narrowed to Claude Code on 2026-10-05', 'do not modify the worktree', 'Claude Code stays on `gpt-5.6-sol` because Codex on a ChatGPT account refuses the 6.x Sol models']) {
       assert.ok(out.includes(text), `OpenCode render of CLAUDE.md lacks ${JSON.stringify(text)}`);
     }
     for (const codexRoute of ['uses the `codex` MCP tool', 'only when a `codex` MCP server is configured', '`sandbox` (`read-only`']) {
@@ -172,6 +172,9 @@ test("this repo's CLAUDE.md: the OpenCode render names the native route, the Cla
     const claude = renderClaudeText(own, 'CLAUDE.md');
     assert.ok(claude.includes('uses the `codex` MCP tool (the pinned Codex 0.153.4 MCP server is the one supported route'), 'the Claude render keeps the codex MCP route');
     assert.ok(!claude.includes('openai/gpt-'), 'the native OpenCode route does not reach the Claude render');
+    assert.ok(!out.includes('openai/gpt-5.6-sol'), 'the OpenCode render no longer dispatches the old Sol id');
+    assert.ok(!claude.includes('gpt-6.1-sol'), 'the Claude render does not name gpt-6.1-sol');
+    assert.ok(claude.includes('`gpt-5.6-sol` to review'), 'the Claude render still names gpt-5.6-sol');
   } finally {
     p.cleanup();
   }
