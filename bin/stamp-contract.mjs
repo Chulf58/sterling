@@ -5711,6 +5711,12 @@ var TARGET_LEADS = [
   // Both are NEW to every sibling, so both arrive through INSERT_AFTER; the plain-writing bullet
   // is AGENTS.md-homed, the de-ai-writing pass bullet is CLAUDE.md-homed.
   "- **Write plainly; no AI tells.**",
+  // 2026-10-05: lint and tests before a code change is reported done (user-ruled through the
+  // question form). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
+  // two bullets above it in the template, which were already tracked. It stays AFTER the
+  // plain-writing lead here: both anchor on "No false action claims", so a sibling missing
+  // both gets them back in template order.
+  "- **Lint and tests before done.**",
   "- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**",
   // 2026-10-01: board every user ask at intake (decision
   // every-user-ask-is-boarded-at-intake-with-slim-blocked-by). Both bullets already exist in
@@ -5806,6 +5812,7 @@ var INSERT_AFTER = /* @__PURE__ */ new Map([
   ["- **Say `READY TO CLEAR` plainly when it is time.**", ["- **Codex runs through the MCP tool, never the shell.**", "- **Knowledge is born structured.**"]],
   ["- **Instruction-file proposals replace memory.**", ["- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Write plainly; no AI tells.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Lint and tests before done.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", ["- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Solve, don't board.**", ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", "- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Solve, don't board.**"]]
