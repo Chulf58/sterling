@@ -434,7 +434,9 @@ test('the injected layer is fully host-mapped: no unmapped Claude-only phrase, e
     assert.match(layer, /capture_owed.*article_missing.*concept_article_missing.*research_owed/s, 'the four H10 duties are named as minted');
     assert.doesNotMatch(layer, /not minted on OpenCode yet|OpenCode does not mint it yet/, 'no stale disclosure of missing H10 duties');
     assert.doesNotMatch(layer, /not yet to shell or patch|but not the shell/, 'no stale disclosure of shell and patch gaps');
-    assert.match(layer, /codex.*MCP server is configured/s);
+    assert.match(layer, /native subagent dispatches/, 'the OpenCode Codex bullet is the subagent-dispatch one');
+    assert.ok(layer.includes('sterling/reviewer') && layer.includes('openai/gpt-5.6-sol#high'), 'the bullet names the reviewer agent and the Sol model');
+    assert.ok(!layer.includes('MCP server is the one supported route'), 'the Claude Code Codex bullet is not carried into the OpenCode layer');
     // Every /sterling:<command> named in the layer carries its OpenCode equivalent.
     for (const m of layer.matchAll(/\/sterling:([a-z][a-z-]*)/g)) {
       const after = layer.slice(m.index, m.index + 200);
