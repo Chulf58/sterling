@@ -132,6 +132,7 @@ test('every mapping the old phrase map carried has its OpenCode text in the rend
       'native-implement': 'agent `sterling/implementor` with `model` `openai/gpt-5.6-terra` to implement',
       'native-no-sandbox': 'do not modify the worktree',
       'native-model-pinned': 'The user pins which model runs these lanes (user-asked 2026-10-03',
+      'claude-code-stays-on-5.6-sol': 'Claude Code stays on `gpt-5.6-sol` because Codex on a ChatGPT account refuses the 6.x Sol models',
       'codex-claude-code-only': 'The `codex` MCP tool is the Claude Code route only',
       'codex-ruling-2026-09-20': '*"Add that to all instruction files, that we use the codex mcp over whatever you were doing"*',
       'codex-ruling-2026-10-05': 'narrowed to Claude Code on 2026-10-05',
@@ -149,6 +150,7 @@ test('every mapping the old phrase map carried has its OpenCode text in the rend
     const claude = renderClaudeText(template(), 'target-claude-md.md');
     assert.ok(claude.includes('uses the `codex` MCP tool (the pinned Codex 0.153.4 MCP server is the one supported route'), 'the Claude render keeps the codex MCP route');
     assert.ok(!claude.includes('openai/') && !claude.includes('sterling/reviewer'), 'the native OpenCode route does not reach the Claude render');
+    assert.ok(!claude.includes('gpt-6.1-sol'), 'the Claude render of the template does not name gpt-6.1-sol');
   } finally {
     p.cleanup();
   }
