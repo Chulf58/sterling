@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -677,6 +677,25 @@ test('a removal that fails is reported in one message naming each file; a root w
       bare.cleanup();
       fresh.cleanup();
     }
+  } finally {
+    h.cleanup();
+  }
+});
+
+// A symlink to itself makes statSync fail with ELOOP, a stat failure that needs no root and no child process.
+test('a ledger file whose age cannot be read is kept and reported by err.code only, with no path in the message', () => {
+  const h = startHarness();
+  try {
+    const loop = knowledgeWritesProcessFile(DEAD_PID, randomUUID());
+    symlinkSync(loop, join(h.transient, loop));
+    const removable = h.file(knowledgeWritesProcessFile(DEAD_PID, randomUUID()), 30);
+
+    const said = h.start();
+    assert.equal(lstatSync(join(h.transient, loop)).isSymbolicLink(), true, 'STAT-FAILURE-REMOVED SHAPE if gone: a file with an unknown age is kept');
+    assert.equal(h.names().includes(removable), false, 'the removable file is still removed');
+    assert.match(said ?? '', /^domain-write ledger: 1 expired ledger file\(s\) in \.sterling\/transient could not be removed \(/, 'the stat failure joins the one failure report');
+    assert.equal(said?.includes(`${loop}: ELOOP`), true, said);
+    assert.equal(said?.includes(h.dir), false, 'PATH-IN-NOTICE SHAPE if true: the report holds the file name and err.code, never an absolute path');
   } finally {
     h.cleanup();
   }

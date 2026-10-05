@@ -402,7 +402,27 @@ test('ledger union: a corrupt file is reported by name and the valid files still
     assert.match(errorOf(garbage), /none of its 2 line\(s\) is a valid entry/);
     assert.match(errorOf(badStamps), /none of its 3 line\(s\) is a valid entry/);
     assert.match(errorOf(unreadable), /EISDIR/);
+    assert.equal(errorOf(unreadable).includes(a.root), false, 'PATH-IN-NOTICE SHAPE if true: the error is the fs code, never the absolute path an fs message holds');
     assert.deepEqual(duties.readKnowledgeWrites(a.root).unreadable.map((u) => u.file).sort(), said.map((x) => x.file).sort());
+  }));
+
+test('ledger union: a file whose only invalid content is one unterminated last line is not reported; a complete invalid line still is', () =>
+  withSharedDomain(({ domain, a }) => {
+    const rec = domain.create(domainDecision(IN_WINDOW));
+    writeLedgerFile(a.root, processLedgerName(101), '{"id":"a","type":"deci'); // a first append caught half written, no newline at all
+    writeLedgerFile(a.root, processLedgerName(202), '\n{"id":"b","type":"deci'); // blank complete line, then the torn tail
+    assert.deepEqual(duties.readKnowledgeWrites(a.root).unreadable, [], 'HALF-WRITTEN-REPORTED SHAPE if listed: nothing complete is invalid');
+
+    const complete = processLedgerName(303);
+    writeLedgerFile(a.root, complete, 'garbage\n{"id":"c","type":"deci');
+    assert.deepEqual(duties.readKnowledgeWrites(a.root).unreadable.map((u) => u.file), [`.sterling/transient/${complete}`], 'a complete invalid line with no valid entry is reported once');
+
+    const complete2 = processLedgerName(404);
+    writeLedgerFile(a.root, complete2, 'garbage\n');
+    assert.equal(duties.readKnowledgeWrites(a.root).unreadable.length, 2, 'control: a complete invalid line ending in a newline is reported');
+
+    writeLedgerFile(a.root, processLedgerName(505), `${JSON.stringify({ id: rec.id, type: 'decision', at: IN_WINDOW })}\n{"id":"d","type":"deci`);
+    assert.equal(duties.readKnowledgeWrites(a.root).latestAt.get(rec.id), IN_WINDOW, 'a valid entry beside a torn tail still counts');
   }));
 
 test('ledger union: the reader never removes a file, however old it is and whether or not its owner is alive', () =>
@@ -427,4 +447,5 @@ test('ledger union: a transient folder that cannot be listed is reported and pay
     assert.equal(said.length, 1);
     assert.equal(said[0].file, '.sterling/transient');
     assert.match(said[0].error, /ENOTDIR/);
+    assert.equal(said[0].error.includes(a.root), false, 'the folder error holds no absolute path');
   }));

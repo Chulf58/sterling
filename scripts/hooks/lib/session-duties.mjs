@@ -198,7 +198,8 @@ const writtenSince = (r, since) => r.created_at >= since || r.updated_at >= sinc
  *
  * `unreadable` lists, as [{ file, error }] with `file` relative to `root`, each
  * file that could not be read and each file that holds lines but no valid
- * entry, plus the folder itself when it cannot be listed. Such a file adds
+ * entry (an unterminated last line alone, a first append caught half written,
+ * is not a report), plus the folder itself when it cannot be listed. Such a file adds
  * nothing; the other files still count. A file that vanishes between the
  * listing and the read (the server removed it at its start) is not an error.
  *
@@ -207,7 +208,8 @@ const writtenSince = (r, since) => r.created_at >= since || r.updated_at >= sinc
 export function readKnowledgeWrites(root) {
   const latestAt = new Map();
   const unreadable = [];
-  const errorText = (e) => String((e && e.message) || e);
+  // err.code only: an fs error message holds the absolute path, and this text lands in one-line notices.
+  const errorText = (e) => (e && typeof e.code === 'string' && e.code) || 'unknown error';
   let names;
   try {
     names = readdirSync(join(root, KNOWLEDGE_WRITES_DIR_REL));
@@ -228,9 +230,13 @@ export function readKnowledgeWrites(root) {
     }
     let lines = 0;
     let valid = 0;
-    for (const line of text.split('\n')) {
+    let completeLines = 0;
+    const parts = text.split('\n');
+    const unterminatedAt = parts.length - 1; // the text after the final newline: a first append can be caught half written
+    for (const [i, line] of parts.entries()) {
       if (line === '') continue;
       lines += 1;
+      if (i !== unterminatedAt) completeLines += 1;
       let entry;
       try {
         entry = JSON.parse(line);
@@ -242,7 +248,7 @@ export function readKnowledgeWrites(root) {
       const prior = latestAt.get(entry.id);
       if (prior === undefined || entry.at > prior) latestAt.set(entry.id, entry.at);
     }
-    if (lines > 0 && valid === 0) unreadable.push({ file, error: `none of its ${lines} line(s) is a valid entry` });
+    if (completeLines > 0 && valid === 0) unreadable.push({ file, error: `none of its ${lines} line(s) is a valid entry` });
   }
   return { latestAt, unreadable };
 }

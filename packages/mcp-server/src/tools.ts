@@ -9899,8 +9899,9 @@ export class SterlingTools {
    * Never throws and never fails server start. Returns undefined when nothing
    * went wrong, otherwise ONE message naming every file that could not be
    * removed (and the folder, when it could not be listed); the files stay for
-   * a later start to remove. A file already gone is not a failure: another
-   * server starting at the same moment removed it.
+   * a later start to remove; a file whose age cannot be read (a stat failure
+   * other than ENOENT) is kept and named the same way. A file already gone is
+   * not a failure: another server starting at the same moment removed it.
    */
   removeExpiredDomainWriteLedgers(): string | undefined {
     if (!this.repoRoot) return undefined;
@@ -9926,8 +9927,10 @@ export class SterlingTools {
       let mtimeMs: number;
       try {
         mtimeMs = statSync(path).mtimeMs;
-      } catch {
-        continue; // its age is unknown: kept
+      } catch (err) {
+        // Its age is unknown, so it is kept, and named with err.code only (an fs message holds the absolute path).
+        if (!gone(err)) failed.push(`${name}: ${(err as NodeJS.ErrnoException)?.code ?? 'unknown error'}`);
+        continue;
       }
       if (!(mtimeMs < expiredBefore)) continue;
       if (ownerPid !== null && !pidIsGone(ownerPid)) continue;
