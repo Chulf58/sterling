@@ -293,7 +293,7 @@ export class SchemaMigrationRequiredError extends Error {
     super(
       `Schema migration required: the store at '${dbPath}' is at schema version ${found}, but this build requires version ${supported}. ` +
         `The store is open READ-ONLY — '${operation}' and every other write refuses until the stable-identity migration has run. ` +
-        `Run from the Sterling clone: node scripts/migrate-stores.mjs --db ${shellQuoteSingle(dbPath)} (decision stable-identity-design-v2; the runner ` +
+        `Run: node "<Sterling root>/bin/migrate-stores.mjs" --db ${shellQuoteSingle(dbPath)} (decision stable-identity-design-v2; the runner ` +
         `takes a VACUUM INTO backup first, and bumps user_version last). Nothing was written.`
     );
     this.name = 'SchemaMigrationRequiredError';
@@ -1388,7 +1388,7 @@ export class SterlingStore {
                 `PRAGMA journal_mode='${legacyMode}') — this store is reached over a 9p mount where WAL is ` +
                 `unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema ` +
                 `version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. ` +
-                `Migrate the store first (\`node scripts/migrate-stores.mjs\`) or open it from a non-9p context — ` +
+                `Migrate the store first (\`node "<Sterling root>/bin/migrate-stores.mjs"\`) or open it from a non-9p context — ` +
                 `closing other connections will not help here.`,
             });
           }

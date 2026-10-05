@@ -161,6 +161,62 @@ export const IMPLEMENTOR_WORDING_EDITS = [
     before: "# Output contract\n\n```text\nChanges:",
     after: "# Output contract\n\nThe first line is `complete` or `blocked`, followed by this block:\n\n```text\nChanges:",
   },
+  {
+    commit: 'board efd77feb',
+    date: '2026-10-05',
+    reason: 'new rubric item 3, the build-less-first order (user-ruled, board efd77feb); the items after it move down one number, highest first so no rewrite collides with another',
+    before: '\n9. Sterling hook-delivered',
+    after: '\n10. Sterling hook-delivered',
+  },
+  {
+    commit: 'board efd77feb',
+    date: '2026-10-05',
+    reason: 'renumber for the new item 3: the Sterling write-grant item (8 to 9)',
+    before: '\n8. Your write grant is code and tests, not',
+    after: '\n9. Your write grant is code and tests, not',
+  },
+  {
+    commit: 'board efd77feb',
+    date: '2026-10-05',
+    reason: 'renumber for the new item 3: the portable write-grant item (8 to 9)',
+    before: '\n8. Your write grant is code and tests. If',
+    after: '\n9. Your write grant is code and tests. If',
+  },
+  {
+    commit: 'board efd77feb',
+    date: '2026-10-05',
+    reason: 'renumber for the new item 3: clean up (7 to 8)',
+    before: '\n7. Clean up as you go',
+    after: '\n8. Clean up as you go',
+  },
+  {
+    commit: 'board efd77feb',
+    date: '2026-10-05',
+    reason: 'renumber for the new item 3: verify (6 to 7)',
+    before: '\n6. Verify with commands',
+    after: '\n7. Verify with commands',
+  },
+  {
+    commit: 'board efd77feb',
+    date: '2026-10-05',
+    reason: 'renumber for the new item 3: never ship weakened tests (5 to 6)',
+    before: '\n5. Never ship weakened',
+    after: '\n6. Never ship weakened',
+  },
+  {
+    commit: 'board efd77feb',
+    date: '2026-10-05',
+    reason: 'renumber for the new item 3: bug report (4 to 5)',
+    before: '\n4. A bug report is',
+    after: '\n5. A bug report is',
+  },
+  {
+    commit: 'board efd77feb',
+    date: '2026-10-05',
+    reason: 'new rubric item 3: stop at the first that holds before writing new code (not needed, repo helper, standard library, installed dependency); never add a dependency for a few lines; never shortens the tests or the report (user-ruled, board efd77feb, finding a7138a10)',
+    before: '\n3. Match the surrounding code',
+    after: '\n3. Before writing new code, stop at the first that holds: it is not needed (say so in one line); a helper, type or pattern already in this repo does it; the standard library or a platform feature does it; an installed dependency does it. Never add a dependency for what a few lines can do. This never shortens the tests or the report.\n4. Match the surrounding code',
+  },
 ];
 
 const occurrences = (text, needle) => text.split(needle).length - 1;

@@ -7,9 +7,11 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { pluginRoot as sharedPluginRoot, walkUpPluginRoot as sharedWalkUpPluginRoot } from './lib/plugin-root-walk.mjs';
 import { readStdin, allow, exitAfterWrite, openStore } from './lib/common.mjs';
+import { codexRegistrationLine, userScopeCodexServer } from '../lib/codex-mcp.mjs';
+import { SPARE_SKIP_LINE, isSpareSession } from './lib/claude-session-kind.mjs';
 // Plan-lock primitives — ONE implementation, shared with h31-plan-lock.mjs,
 // h19-dispatch-staging.mjs and scripts/plan-lock.mjs. Aliased on import so the
 // PLAN LOCK section's names read locally while the definitions stay shared.
@@ -210,6 +212,21 @@ function computeH1DeadDispatchResidue(cwd, source) {
 }
 
 const input = readStdin();
+
+// DAEMON SPARE GUARD (decision `h1-skips-a-claude-code-daemon-spare-session`).
+// Claude Code's background supervisor keeps an idle spare session beside the
+// real one, and a named spare runs this hook under its own session id. Every
+// write, delete, claim and consume below assumes one live session per
+// worktree, so a spare's SessionStart would overwrite session.json and wipe
+// the real session's register and transient state. This sits BEFORE all of
+// them and must stay first. A claimed spare fires SessionStart again without
+// the marker, so the session that does real work still gets everything below.
+// Any doubt in the lookup answers "not a spare" and H1 runs as it always has.
+if (isSpareSession(input.session_id)) {
+  exitAfterWrite(`${SPARE_SKIP_LINE}\n`, 0);
+  // exitAfterWrite exits from the write callback; nothing below may run meanwhile.
+  await new Promise(() => {});
+}
 
 // H10's missing-snapshot policy intentionally yields no git candidates. Seed
 // before startup/clear work begins, so only post-start edits reach first Stop.
@@ -525,6 +542,20 @@ try {
 }
 const issueReportsLine = pendingIssueReportsLine({ cwd: input.cwd, pluginRoot: issueReportsRoot });
 if (issueReportsLine) issueReportsContext = `\n\n${issueReportsLine}`;
+
+// CODEX REGISTRATION (decision codex-route-stays-the-pinned-0-153-4-mcp-server): one line
+// when the user-level Claude config registers no `codex` MCP server. It reads
+// <CLAUDE_CONFIG_DIR or home>/.claude.json and never spawns codex (anti_pattern
+// codex-mcp-probe-by-exit-status). userScopeCodexServer reports an unreadable config as
+// `unreadable`, which the line states. A throw from the check itself still prints one line
+// naming the error code, so the section never costs the rest of H1 and never goes silent.
+let codexContext = '';
+try {
+  const codexLine = codexRegistrationLine(userScopeCodexServer(), { nodeBinDir: dirname(process.execPath) });
+  if (codexLine) codexContext = `\n\n${codexLine}`;
+} catch (err) {
+  codexContext = `\n\nCodex MCP: the Codex registration could not be checked (${err?.code ?? 'unknown error'})`;
+}
 
 // CLONE-CURRENCY SIGNAL (closes the gap decision foreign_be9168e8 surfaced and parked:
 // "a machine that never runs /sterling:update has no passive signal that it is
@@ -1494,7 +1525,7 @@ const output = {
   systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + handoffContext + domainsContext + issueReportsContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + handoffContext + domainsContext + issueReportsContext + codexContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the

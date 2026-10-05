@@ -7327,7 +7327,7 @@ CREATE TABLE IF NOT EXISTS store_meta (
        */
       db_path;
       constructor(found, supported, operation, dbPath2) {
-        super(`Schema migration required: the store at '${dbPath2}' is at schema version ${found}, but this build requires version ${supported}. The store is open READ-ONLY \u2014 '${operation}' and every other write refuses until the stable-identity migration has run. Run from the Sterling clone: node scripts/migrate-stores.mjs --db ${shellQuoteSingle(dbPath2)} (decision stable-identity-design-v2; the runner takes a VACUUM INTO backup first, and bumps user_version last). Nothing was written.`);
+        super(`Schema migration required: the store at '${dbPath2}' is at schema version ${found}, but this build requires version ${supported}. The store is open READ-ONLY \u2014 '${operation}' and every other write refuses until the stable-identity migration has run. Run: node "<Sterling root>/bin/migrate-stores.mjs" --db ${shellQuoteSingle(dbPath2)} (decision stable-identity-design-v2; the runner takes a VACUUM INTO backup first, and bumps user_version last). Nothing was written.`);
         this.name = "SchemaMigrationRequiredError";
         this.found = found;
         this.supported = supported;
@@ -7429,7 +7429,7 @@ CREATE TABLE IF NOT EXISTS store_meta (
               if (legacyMode === "wal") {
                 this.db.close();
                 throw new JournalDemotionRefusedError(this.dbPath, legacyMode, {
-                  message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, PRAGMA journal_mode='${legacyMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. Migrate the store first (\`node scripts/migrate-stores.mjs\`) or open it from a non-9p context \u2014 closing other connections will not help here.`
+                  message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, PRAGMA journal_mode='${legacyMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. Migrate the store first (\`node "<Sterling root>/bin/migrate-stores.mjs"\`) or open it from a non-9p context \u2014 closing other connections will not help here.`
                 });
               }
             }
@@ -10215,7 +10215,7 @@ function describeConfigDrift(r) {
   }
   return parts.join("; ");
 }
-var CONFIG_DRIFT_FIX = "node scripts/install-agents.mjs (--target <dir> for a sibling)";
+var CONFIG_DRIFT_FIX = 'node "<Sterling root>/bin/install-agents.mjs" (--target <dir> for a sibling)';
 var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
 var OPENCODE_PERMISSION_VALUES = ["allow", "ask", "deny"];
 function validateOpenCodeEntry(entry, where) {
@@ -11320,14 +11320,14 @@ function userScopeCodexServer({ env = process.env, home = homedir5(), readFile =
     raw = readFile(path, "utf8");
   } catch (err) {
     if (err?.code === "ENOENT") return { found: false, path };
-    return { found: false, path, unreadable: err?.code ?? err?.message ?? String(err) };
+    return { found: false, path, unreadable: err?.code ?? "unknown error" };
   }
   try {
     const servers = JSON.parse(raw)?.mcpServers;
     const found = Boolean(servers && typeof servers === "object" && Object.prototype.hasOwnProperty.call(servers, "codex"));
     return { found, path };
-  } catch (err) {
-    return { found: false, path, unreadable: `not valid JSON (${err?.message ?? err})` };
+  } catch {
+    return { found: false, path, unreadable: "not valid JSON" };
   }
 }
 var CODEX_USER_ADD_COMMAND = "claude mcp add --scope user codex -- codex mcp-server";

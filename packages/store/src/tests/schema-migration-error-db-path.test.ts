@@ -11,7 +11,9 @@
 // SchemaMigrationRequiredError gains a `db_path` property equal to that
 // path, and its message includes BOTH the offending absolute path AND the
 // remediation command as the literal substring
-// "scripts/migrate-stores.mjs --db '<path>'" — the path is POSIX
+// "node "<Sterling root>/bin/migrate-stores.mjs" --db '<path>'" (the bundled bin
+// entry in the Sterling root form, decision
+// session-start-prints-the-sterling-root-plain-text-instructions-use-it) — the path is POSIX
 // SINGLE-quoted (double quotes would still let $/backtick expand), both
 // quote characters present around the FULL path, an embedded single quote
 // escaped as '\'', so the command stays copy-paste safe even when the path
@@ -134,7 +136,7 @@ test('E1: a write against a legacy (pre-v2) store throws SchemaMigrationRequired
       'the message includes the offending absolute db path, so a multi-store machine can tell which store is legacy'
     );
     assert.ok(
-      (caught as Error).message.includes(`scripts/migrate-stores.mjs --db '${path}'`),
+      (caught as Error).message.includes(`node "<Sterling root>/bin/migrate-stores.mjs" --db '${path}'`),
       'the message includes the remediation command with the path substituted in and POSIX SINGLE-quoted, so the user can copy-paste the fix'
     );
   } finally {
@@ -207,7 +209,7 @@ test('E4 (boundary, quoting): a legacy store whose path contains a space — the
       'db_path is the exact space-containing path, unmodified/unescaped'
     );
     assert.ok(
-      (caught as Error).message.includes(`scripts/migrate-stores.mjs --db '${path}'`),
+      (caught as Error).message.includes(`node "<Sterling root>/bin/migrate-stores.mjs" --db '${path}'`),
       'the remediation command single-quotes the FULL path verbatim — both single-quote characters present, one immediately before and one immediately after the path — so a space inside the path cannot split the command into two shell arguments'
     );
   } finally {
@@ -250,7 +252,7 @@ test('E5 (boundary, embedded quote — skipped if this platform cannot create su
       'db_path is the exact quote-containing path, unmodified/unescaped — escaping is a MESSAGE-rendering concern only'
     );
     assert.ok(
-      (caught as Error).message.includes(`scripts/migrate-stores.mjs --db ${expectedQuoted}`),
+      (caught as Error).message.includes(`node "<Sterling root>/bin/migrate-stores.mjs" --db ${expectedQuoted}`),
       "the remediation command escapes the embedded single quote as the standard POSIX '\\'' form, so the command remains a single valid shell argument"
     );
   } finally {

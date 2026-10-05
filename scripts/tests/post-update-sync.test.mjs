@@ -109,14 +109,19 @@ function withoutRootLine(ctx) {
   return parts.join('');
 }
 
+// The goldens pin bytes from before H1 gained its Codex registration line. The fixture's user-level
+// Claude config registers a `codex` server, so that line stays out of ctx and the pinned bytes are
+// unchanged. CLAUDE_CONFIG_DIR is pinned to the same dir so a developer's own value cannot leak in.
 function runH1(project, plugin, env = {}) {
   const log = join(tmp('sterling-pus-log-'), 'calls.log');
+  const home = tmp('sterling-pus-home-');
+  writeFileSync(join(home, '.claude.json'), JSON.stringify({ mcpServers: { codex: { command: 'codex', args: ['mcp-server'] } } }));
   const r = spawnSync(process.execPath, [seam.hookPath], {
     input: JSON.stringify({ session_id: 's1', transcript_path: join(project, 't.jsonl'), cwd: project, hook_event_name: 'SessionStart', source: 'startup' }),
     encoding: 'utf8',
     cwd: project,
     timeout: 60_000,
-    env: { ...process.env, NO_COLOR: '1', STERLING_NO_BANNER: '1', STERLING_CURRENCY_DISABLE: '1', STERLING_PLUGIN_ROOT: plugin, FIXTURE_LOG: log, ...env, HOME: tmp('sterling-pus-home-') },
+    env: { ...process.env, NO_COLOR: '1', STERLING_NO_BANNER: '1', STERLING_CURRENCY_DISABLE: '1', STERLING_PLUGIN_ROOT: plugin, FIXTURE_LOG: log, ...env, HOME: home, CLAUDE_CONFIG_DIR: home },
   });
   assert.equal(r.status, 0, r.stderr);
   const out = JSON.parse(r.stdout);

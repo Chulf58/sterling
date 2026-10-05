@@ -110,7 +110,7 @@ export function codexSkipLine(reason, version) {
 // Claude config (`claude mcp add --scope user`), which Claude Code keeps in
 // `<CLAUDE_CONFIG_DIR or home>/.claude.json` under a top-level `mcpServers`. init only
 // READS that file: a missing file is "not registered", an unparseable one is reported as
-// unreadable (never guessed at). Pure apart from the read; env/home are injectable.
+// unreadable (never guessed at): `unreadable` is a fixed phrase or an error code, never a message. Pure apart from the read; env/home are injectable.
 export function userScopeCodexServer({ env = process.env, home = homedir(), readFile = readFileSync } = {}) {
   const path = join(env.CLAUDE_CONFIG_DIR || home, '.claude.json');
   let raw;
@@ -118,14 +118,16 @@ export function userScopeCodexServer({ env = process.env, home = homedir(), read
     raw = readFile(path, 'utf8');
   } catch (err) {
     if (err?.code === 'ENOENT') return { found: false, path };
-    return { found: false, path, unreadable: err?.code ?? err?.message ?? String(err) };
+    return { found: false, path, unreadable: err?.code ?? 'unknown error' };
   }
   try {
     const servers = JSON.parse(raw)?.mcpServers;
     const found = Boolean(servers && typeof servers === 'object' && Object.prototype.hasOwnProperty.call(servers, 'codex'));
     return { found, path };
-  } catch (err) {
-    return { found: false, path, unreadable: `not valid JSON (${err?.message ?? err})` };
+  } catch {
+    // never embed JSON.parse's message: V8 adds a source excerpt (and, on Node 24, newlines), which
+    // would break the one-line guarantee and carry config content into the session context
+    return { found: false, path, unreadable: 'not valid JSON' };
   }
 }
 
@@ -138,6 +140,17 @@ export const CODEX_USER_ADD_COMMAND = 'claude mcp add --scope user codex -- code
 const PINNED_INSTALL = 'npm i -g --prefix ~/.local/codex-mcp-0.153.4 @openai/codex@0.153.4';
 const pinnedAddCommand = (nodeBinDir) =>
   `claude mcp add --scope user -e PATH=${nodeBinDir}:/usr/local/bin:/usr/bin:/bin codex -- ~/.local/codex-mcp-0.153.4/bin/codex mcp-server`;
+
+// The ONE line session start (H1) prints when no `codex` server is registered at user scope
+// (decision codex-route-stays-the-pinned-0-153-4-mcp-server). `registration` is
+// userScopeCodexServer's result; this reads nothing and spawns nothing, so no probe is
+// involved (anti_pattern codex-mcp-probe-by-exit-status). A registered server returns '' and
+// an unreadable config still returns the line, with the reason appended, as init's line does.
+export function codexRegistrationLine(registration, { nodeBinDir } = {}) {
+  if (registration.found) return '';
+  const unread = registration.unreadable ? ` (the user-level Claude config could not be read: ${registration.unreadable})` : '';
+  return `Codex MCP: no \`codex\` MCP server is registered at user scope${unread}. The supported route is the pinned Codex 0.153.4 MCP server. Install and register it: ${PINNED_INSTALL} && ${pinnedAddCommand(nodeBinDir ?? '<node bin dir>')}`;
+}
 
 // The ONE loud line init prints (P5) when no codex server is in the user-level config.
 // `probe` is probeCodex's result (or the STERLING_CODEX_PROBE forced equivalent) and only

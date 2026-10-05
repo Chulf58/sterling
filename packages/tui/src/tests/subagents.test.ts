@@ -83,7 +83,7 @@ test('register: in the current session a row with no ended is running and an end
   }
 });
 
-test('register: a row from another session is not listed, running or ended', () => {
+test('register: a live row from another session is listed and counted as foreign, an ended row from another session is not listed', () => {
   const root = project();
   try {
     writeSession(root, 's2');
@@ -93,7 +93,26 @@ test('register: a row from another session is not listed, running or ended', () 
       row('a3', 'scout', 60_000, { session_id: 's2' }),
       row('a4', 'scout', 3_600_000, { session_id: 's2', ended: { at: iso(3_000_000), event: 'subagent-stop' } }),
     ]);
-    assert.deepEqual(readSubagents(root, NOW).rows.map((r) => [r.agentId, r.status]), [['a3', 'running'], ['a4', 'resumable']]);
+    const src = readSubagents(root, NOW);
+    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status]), [['a1', 'running'], ['a3', 'running'], ['a4', 'resumable']], 'a1 is live in s1 while session.json names s2: listed; a2 ended in s1: not listed');
+    assert.equal(src.foreignLive, 1);
+    assert.equal(src.rows[0]!.sessionId, 's1', 'the row keeps its own session, which names its transcript directory');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('register: a residue-stamped row from another session counts as ended, so it is not listed and not foreign-live; the foreign count is 0 when every live row is in the current session', () => {
+  const root = project();
+  try {
+    writeSession(root, 's2');
+    writeRegister(root, [
+      row('a1', 'implementor', 600_000, { residue_reported_at: iso(30_000) }),
+      row('a2', 'scout', 60_000, { session_id: 's2' }),
+    ]);
+    const src = readSubagents(root, NOW);
+    assert.deepEqual(src.rows.map((r) => r.agentId), ['a2']);
+    assert.equal(src.foreignLive, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -672,6 +691,34 @@ test('tracker: a resumed agent (round 2, no ended) is running again with the sam
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('tracker: the view carries the foreign-live count from the source', () => {
+  const root = project();
+  try {
+    writeSession(root, 's2');
+    writeRegister(root, [row('a1', 'implementor', 10_000), row('a2', 'scout', 10_000, { session_id: 's2' })]);
+    const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: join(root, 'none') }).view(NOW);
+    assert.equal(v.foreignLive, 1);
+    assert.equal(v.active, 2, 'both live agents are running');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('block: live agents from another session add one dim line saying the session marker names another session; none when the count is 0 or unset', () => {
+  const agents = [AGENT('a1', 7)];
+  const plain = composeSubagentBlock(view(agents), 160, 30, 0);
+  assert.equal(plain.puts.some((p) => /another session/.test(p.text)), false);
+  assert.equal(composeSubagentBlock({ ...view(agents), foreignLive: 0 }, 160, 30, 0).height, plain.height);
+  const b = composeSubagentBlock({ ...view(agents), foreignLive: 1 }, 160, 30, 0);
+  assert.equal(b.height, plain.height + 1);
+  const line = b.puts.find((p) => /another session/.test(p.text))!;
+  assert.equal(line.text, 'session.json names another session; live agents from the other one are listed');
+  assert.deepEqual([line.x, line.y, line.attr.dim], [0, plain.height, true]);
+  assert.equal(composeSubagentBlock({ ...view(agents), foreignLive: 1 }, 160, plain.height, 0).height, plain.height, 'no room: the cards win');
+  const none = composeSubagentBlock({ ...view(agents), foreignLive: 1 }, 0, 30, 0);
+  assert.deepEqual([none.height, none.puts.length, none.pixels.length], [0, 0, 0], 'width < 1: the cards block is empty, so the note is not appended on its own');
 });
 
 test('formatElapsed', () => {
