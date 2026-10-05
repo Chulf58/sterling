@@ -898,7 +898,7 @@ test('authoring role: a launcher naming packages/tui/bundle gets a loud warning 
   try {
     const { report, text } = await authoringUpdateOf(proj, cwd);
     assert.equal(report.exit, 0, text);
-    assert.ok(text.includes(proj), 'the warning names the project');
+    assert.ok(text.includes(`✗ ${proj}: sterling-launch.sh still runs`), 'the warning line itself names the project');
     assert.match(text, /sterling-launch\.sh still runs packages\/tui\/bundle\/sterling-tui\.mjs/);
     assert.match(text, /re-run \/sterling:init in this project so its launcher runs tui\/sterling-tui\.mjs/i, 'the remedy is named');
     assert.equal(readFileSync(join(proj, 'sterling-launch.sh'), 'utf8'), launcher, 'read-only: the launcher is never rewritten');
