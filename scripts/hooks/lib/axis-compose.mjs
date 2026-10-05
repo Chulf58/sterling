@@ -184,7 +184,12 @@ export function codexModelPin(root, { opener, toolInput }) {
   // An EMPTY configured value is the TUI's clear-to-unset signal, not a model id
   // (main.ts applySparringModel deletes the key on an empty commit) — the two
   // are one state, and codex would 400 on ''.
-  const configured = sp && typeof sp.model === 'string' && sp.model !== '' ? sp.model : null;
+  // This reads the RAW file, not parseConfig, so the old key's conversion to
+  // sparring_partner.models.openai is done here too: the new key wins, the old
+  // key is the fallback.
+  const pinned = sp && sp.models && typeof sp.models === 'object' ? sp.models.openai?.model : undefined;
+  const chosen = typeof pinned === 'string' ? pinned : sp ? sp.model : undefined;
+  const configured = typeof chosen === 'string' && chosen !== '' ? chosen : null;
 
   if (callModel !== null) {
     lines.push(
