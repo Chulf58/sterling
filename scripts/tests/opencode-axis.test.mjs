@@ -750,8 +750,29 @@ test('settlement: a domain-write ledger that cannot be read raises its own notic
       mkdirSync(p.ledgerPath); // a directory where the file belongs: the read fails
     });
     assert.match(text, /capture owed: 1 changed file/, 'nothing pays through an unreadable ledger');
-    assert.match(text, /Sterling settlement: the domain-write ledger \.sterling\/transient\/knowledge-writes\.jsonl could not be read \(.+\); no domain-scoped record was counted toward the capture and research duties\./);
+    assert.match(text, /Sterling settlement: domain-write ledger file\(s\) could not be read: \.sterling\/transient\/knowledge-writes\.jsonl \(.*EISDIR.*\)\. A domain-scoped record logged only there was not counted toward the capture and research duties; entries in this project's other ledger files still counted\./, 'the notice names the file and claims only that file\'s entries are lost');
+    assert.doesNotMatch(text, /no domain-scoped record was counted/, 'with one ledger file per server process an unreadable file no longer means no domain record counted');
     assert.doesNotMatch(text, /settlement failed/, 'the settlement itself completes');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('settlement: with one ledger file per server process, a corrupt file is named in a notice and a write logged in another file still pays', async () => {
+  const p = makeDomainProject();
+  const corrupt = `knowledge-writes.4242-${randomUUID()}.jsonl`;
+  try {
+    const text = await settleAnEdit(p, {}, () => {
+      p.writeDomain({ type: 'decision', title: 'a is two', statement: 's', alternatives_rejected: [], rationale: 'r' });
+      // The server's own file, as this build writes it; the legacy file the fixture wrote is renamed to it.
+      const dir = dirname(p.ledgerPath);
+      writeFileSync(join(dir, `knowledge-writes.4141-${randomUUID()}.jsonl`), readFileSync(p.ledgerPath, 'utf8'));
+      rmSync(p.ledgerPath);
+      writeFileSync(join(dir, corrupt), 'not json at all\n');
+    });
+    assert.doesNotMatch(text, /capture owed/, 'CORRUPT-FILE-HIDES-VALID SHAPE if owed: the write logged in the readable per-process file pays');
+    assert.ok(text.includes(`Sterling settlement: domain-write ledger file(s) could not be read: .sterling/transient/${corrupt} (none of its 1 line(s) is a valid entry).`), `the notice names the corrupt file: ${text}`);
+    assert.match(text, /entries in this project's other ledger files still counted/);
   } finally {
     p.cleanup();
   }

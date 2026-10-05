@@ -42,7 +42,7 @@ import { latestUsage, fillPct } from './lib/transcript.mjs';
 import { pluginRoot } from './lib/plugin-root-walk.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy, fileEntriesOf } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
-import { KNOWLEDGE_WRITES_REL, matchesGlob, parseConfig } from '@sterling/schemas';
+import { matchesGlob, parseConfig } from '@sterling/schemas';
 import { publishNotice } from './lib/delivery.mjs';
 import { evaluatePrLoop, prLoopNext, prLoopOwedText, prLoopReminderText } from './lib/pr-loop-duty.mjs';
 import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
@@ -1718,9 +1718,11 @@ try {
   // domain-record-duty-credit-comes-from-a-per-project-write-ledger): a domain
   // store is shared by every project on the machine, so openDutyRecords counts
   // one of its records only when the domain-write ledger under this root
-  // (.sterling/transient/knowledge-writes.jsonl, appended by the MCP server)
-  // holds an entry for it inside the window. The ledger is a separate file
-  // from the registers clearRegisters() consumes and is never cleared here.
+  // (.sterling/transient/knowledge-writes.<pid>-<uuid>.jsonl, one file per MCP
+  // server process, plus the legacy knowledge-writes.jsonl) holds an entry for
+  // it inside the window. The ledger files are separate from the registers
+  // clearRegisters() consumes and are never cleared here. A ledger file that
+  // cannot be read costs only its own entries; the other files still count.
   // Left on the project store on purpose: the concept duty and the ownership
   // join (a feature_article is always project-scoped), and every queue read
   // (system todos live in the project store).
@@ -1728,8 +1730,8 @@ try {
     onUnreadable: (name, error) =>
       degradationParts.push(`H10: domain store '${name}' could not be read for the session-end duties — ${error}; a record written there this session is not counted`),
     root: input.cwd,
-    onLedgerUnreadable: (error) =>
-      degradationParts.push(`H10: the domain-write ledger (${KNOWLEDGE_WRITES_REL}) could not be read — ${error}; no domain-scoped record is counted toward the session-end duties. Fix or remove the file`),
+    onLedgerUnreadable: (error, file) =>
+      degradationParts.push(`H10: the domain-write ledger (${file}) could not be read — ${error}; a domain-scoped record logged only in that file is not counted toward the session-end duties, and entries in this project's other ledger files still count. Fix or remove the file`),
   });
 
   // OUTSTANDING DEFERRED RESEARCH EVENTS — what clearRegisters() must PRESERVE

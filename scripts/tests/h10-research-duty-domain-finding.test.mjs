@@ -388,6 +388,31 @@ test('DF-j: a domain-write ledger that cannot be read is announced in the nag an
     assert.equal(r.code, 2, 'an unreadable ledger never discharges the duty');
     assert.match(r.stderr, /genesys webhook signature validation/);
     assert.match(r.stderr, /the domain-write ledger \(\.sterling\/transient\/knowledge-writes\.jsonl\) could not be read/, 'the degraded read is stated, not silent');
+    assert.match(r.stderr, /a domain-scoped record logged only in that file is not counted toward the session-end duties, and entries in this project's other ledger files still count/, 'the nag claims only the named file\'s entries are lost');
+    assert.doesNotMatch(r.stderr, /no domain-scoped record is counted/, 'with one ledger file per server process an unreadable file no longer means no domain record counted');
+  } finally {
+    cleanup();
+  }
+});
+
+test('DF-k: with one ledger file per server process, a corrupt file is named in the release and a write logged in another file still pays', () => {
+  const { dir, store, domain, cleanup } = makeProject();
+  try {
+    writeSessionEvents(dir, [rEvent('genesys webhook signature validation')]);
+    const finding = domainFinding(domain, AFTER_EVENT);
+    const transient = join(dir, '.sterling', 'transient');
+    mkdirSync(transient, { recursive: true });
+    writeFileSync(join(transient, `knowledge-writes.4141-${randomUUID()}.jsonl`), `${JSON.stringify({ id: finding.id, type: finding.type, at: AFTER_EVENT })}\n`);
+    const corrupt = `knowledge-writes.4242-${randomUUID()}.jsonl`;
+    writeFileSync(join(transient, corrupt), 'not json at all\n');
+
+    const r = stopOnce(dir);
+    assert.equal(r.code, 0, 'CORRUPT-FILE-HIDES-VALID SHAPE if this is 2: the write logged in the readable per-process file pays the research duty');
+    assert.equal(owed(store, 'research_owed').length, 0, 'nothing owed');
+    const said = r.stdout + r.stderr;
+    assert.ok(said.includes(`the domain-write ledger (.sterling/transient/${corrupt}) could not be read`), `the corrupt file is named: ${said}`);
+    assert.match(said, /none of its 1 line\(s\) is a valid entry/);
+    assert.match(said, /entries in this project's other ledger files still count/);
   } finally {
     cleanup();
   }

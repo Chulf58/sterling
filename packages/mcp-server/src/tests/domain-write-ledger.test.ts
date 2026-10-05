@@ -2,21 +2,26 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, KNOWLEDGE_WRITES_REL, knowledgeWriteSchema, parseConfig, type KnowledgeWrite } from '@sterling/schemas';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_KEEP_IDS, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_RETENTION_MS, knowledgeWriteSchema, knowledgeWritesOwnerPid, knowledgeWritesProcessFile, parseConfig, type KnowledgeWrite } from '@sterling/schemas';
 import { MountedStores, createDomain } from '@sterling/store';
-import { SterlingTools } from '../tools.js';
+import { PROCESS_KNOWLEDGE_WRITES_REL, SterlingTools } from '../tools.js';
 
 // The domain-write ledger, server side (decision
 // domain-record-duty-credit-comes-from-a-per-project-write-ledger): after each
 // write of a record a mounted domain store holds, the server appends one
-// {id, type, at} line to <repoRoot>/.sterling/transient/knowledge-writes.jsonl.
-// The session-end duty reads (scripts/hooks/lib/session-duties.mjs) count a
-// domain record only when this file holds an in-window entry for it; that side
-// is pinned in scripts/tests/session-duties.test.mjs.
+// {id, type, at} line to its OWN file under the project root,
+// .sterling/transient/knowledge-writes.<pid>-<uuid>.jsonl
+// (PROCESS_KNOWLEDGE_WRITES_REL): one file per server process (board 813fe004),
+// because appends from two processes to one file overwrite each other on
+// /mnt/c under WSL2. The session-end duty reads
+// (scripts/hooks/lib/session-duties.mjs) take the union of those files and the
+// legacy knowledge-writes.jsonl, and count a domain record only when the union
+// holds an in-window entry for it; that side is pinned in
+// scripts/tests/session-duties.test.mjs.
 
 const T0 = '2026-10-04T12:00:00.000Z';
 const T1 = '2026-10-04T12:05:00.000Z';
@@ -48,10 +53,14 @@ function harness({ repoRoot = true }: { repoRoot?: boolean | string } = {}) {
   const clock = { now: T0 };
   const root = typeof repoRoot === 'string' ? repoRoot.replace('<dir>', dir) : repoRoot ? dir : undefined;
   const tools = new SterlingTools({ store, config: parseConfig({ stack_tags: ['genesys'] }), now: () => clock.now, newId: randomUUID, ...(root ? { repoRoot: root } : {}) });
-  const ledgerPath = join(dir, KNOWLEDGE_WRITES_REL);
+  // This process's own ledger file: every SterlingTools in this test process writes the same name under its own root.
+  const ledgerPath = join(dir, PROCESS_KNOWLEDGE_WRITES_REL);
   const ledger = () => readLedger(ledgerPath);
   return {
     dir,
+    root,
+    legacyPath: join(dir, KNOWLEDGE_WRITES_REL),
+    transientDir: join(dir, KNOWLEDGE_WRITES_DIR_REL),
     store,
     tools,
     clock,
@@ -283,12 +292,21 @@ test('a garbage line and a torn last line do not stop the append, and the lines 
   }
 });
 
-// The shared root is under os.tmpdir(), so this proves the property on a Linux
-// filesystem only. It does NOT hold on /mnt/c under WSL2, where concurrent
-// appends can overwrite each other (finding
-// o-append-is-not-atomic-across-processes-on-wsl2-mnt-c).
-test('concurrency: several server processes appending under one root lose no entry', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'sterling-write-ledger-shared-'));
+type LedgerRead = { latestAt: Map<string, string>; unreadable: { file: string; error: string }[] };
+/** The reader H10 and the OpenCode settlement share, loaded from its source: the union this suite's writer side must satisfy. */
+async function unionReader(): Promise<(root: string) => LedgerRead> {
+  const src = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'scripts', 'hooks', 'lib', 'session-duties.mjs');
+  const mod = (await import(pathToFileURL(src).href)) as { readKnowledgeWrites: (root: string) => LedgerRead };
+  return mod.readKnowledgeWrites;
+}
+
+// The probe behind board 813fe004. The shared root defaults to os.tmpdir(), a
+// Linux filesystem; point STERLING_LEDGER_PROBE_DIR at a directory on /mnt/c
+// to run it where appends from several processes to ONE file lost entries
+// (finding o-append-is-not-atomic-across-processes-on-wsl2-mnt-c). The ledger
+// files are written under that directory; each child's stores stay in tmpdir.
+test('concurrency: several server processes writing under one root lose no entry, each in its own ledger file', async (t) => {
+  const root = mkdtempSync(join(process.env.STERLING_LEDGER_PROBE_DIR ?? tmpdir(), 'sterling-write-ledger-shared-'));
   try {
     mkdirSync(join(root, '.sterling'));
     const child = join(dirname(fileURLToPath(import.meta.url)), 'test-helpers', 'ledger-writer-child.js');
@@ -311,10 +329,19 @@ test('concurrency: several server processes appending under one root lose no ent
     );
     const written = runs.flat();
     assert.equal(written.length, PROCESSES * WRITES, 'fixture: every child made all its writes');
-    const logged = new Set(readLedger(join(root, KNOWLEDGE_WRITES_REL)).map((e) => e.id));
-    const lost = written.filter((id) => !logged.has(id));
-    assert.equal(lost.length, 0, `LOST-APPEND SHAPE: ${lost.length} of ${written.length} writes have no ledger line`);
-    assert.equal(readFileSync(join(root, KNOWLEDGE_WRITES_REL), 'utf8').split('\n').filter(Boolean).length, written.length, 'and no line is torn or doubled');
+    const read = (await unionReader())(root);
+    const lost = written.filter((id) => !read.latestAt.has(id));
+    t.diagnostic(`ledger probe: ${written.length - lost.length} of ${written.length} entries in the union under ${root}`);
+    assert.equal(lost.length, 0, `LOST-APPEND SHAPE: ${lost.length} of ${written.length} writes have no entry in the union of the ledger files`);
+    assert.deepEqual(read.unreadable, []);
+
+    const files = readdirSync(join(root, KNOWLEDGE_WRITES_DIR_REL));
+    assert.equal(files.length, PROCESSES, 'one ledger file per process, and no temp file left behind');
+    assert.equal(files.every((f) => KNOWLEDGE_WRITES_PROCESS_FILE.test(f)), true, 'each is named by the per-process pattern; nothing wrote the legacy file');
+    assert.equal(new Set(files.map(knowledgeWritesOwnerPid)).size, PROCESSES, 'each carries its own owner pid');
+    for (const f of files) {
+      assert.equal(readFileSync(join(root, KNOWLEDGE_WRITES_DIR_REL, f), 'utf8').split('\n').filter(Boolean).length, WRITES, `${f}: no line is torn or doubled`);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -324,7 +351,7 @@ test('a repo root spelled with a trailing slash writes the same ledger file', ()
   const h = harness({ repoRoot: '<dir>/' });
   try {
     const made = h.tools.knowledgeCreate('decision', decision('domain:genesys')).record;
-    assert.deepEqual(h.ledger(), [{ id: made.id, type: 'decision', at: T0 }], 'read back at join(dir, KNOWLEDGE_WRITES_REL), the spelling the hooks use');
+    assert.deepEqual(h.ledger(), [{ id: made.id, type: 'decision', at: T0 }], 'read back at join(dir, PROCESS_KNOWLEDGE_WRITES_REL), the spelling the hooks use');
   } finally {
     h.cleanup();
   }
@@ -402,5 +429,215 @@ test('the maintenance-worker child logs like any other server under the same roo
     h.cleanup();
     if (before === undefined) delete process.env.STERLING_MAINTENANCE_WORKER;
     else process.env.STERLING_MAINTENANCE_WORKER = before;
+  }
+});
+
+// -- one file per server process (board 813fe004) ---------------------------
+
+test('the ledger file is this process\'s own: named by its pid, fixed for the process, created by the first domain write, and the legacy file is never written', () => {
+  const h = harness();
+  const other = harness();
+  try {
+    const name = PROCESS_KNOWLEDGE_WRITES_REL.slice(KNOWLEDGE_WRITES_DIR_REL.length + 1);
+    assert.equal(PROCESS_KNOWLEDGE_WRITES_REL.startsWith(`${KNOWLEDGE_WRITES_DIR_REL}/`), true);
+    assert.match(name, KNOWLEDGE_WRITES_PROCESS_FILE);
+    assert.equal(knowledgeWritesOwnerPid(name), process.pid);
+    assert.equal(existsSync(h.transientDir), false, 'nothing is created before the first domain write');
+
+    h.tools.knowledgeCreate('decision', decision('domain:genesys'));
+    h.tools.knowledgeCreate('decision', decision('domain:genesys', 'callbacks retry three times'));
+    other.tools.knowledgeCreate('decision', decision('domain:genesys'));
+    assert.deepEqual(readdirSync(h.transientDir), [name], 'every write of this process goes to the one file');
+    assert.deepEqual(readdirSync(other.transientDir), [name], 'a second tools instance in the same process uses the same name under its own root');
+    assert.equal(existsSync(h.legacyPath), false, 'LEGACY-APPEND SHAPE if this exists: nothing appends to knowledge-writes.jsonl any more');
+    assert.equal(h.ledger().length, 2);
+  } finally {
+    h.cleanup();
+    other.cleanup();
+  }
+});
+
+test('the file name pattern is exact: a pid and a uuid, nothing before or after', () => {
+  const uuid = randomUUID();
+  assert.equal(knowledgeWritesOwnerPid(knowledgeWritesProcessFile(4321, uuid)), 4321);
+  for (const name of ['knowledge-writes.jsonl', `knowledge-writes.4321-${uuid}.jsonl.tmp-4321-${randomUUID()}`, `knowledge-writes.0-${uuid}.jsonl`, `knowledge-writes.-1-${uuid}.jsonl`, `knowledge-writes.4321-${uuid.toUpperCase()}.jsonl`, 'knowledge-writes.4321.jsonl', `x-knowledge-writes.4321-${uuid}.jsonl`, `knowledge-writes.4321-${uuid}.json`, `knowledge-writes.99999999999999999999-${uuid}.jsonl`]) {
+    assert.equal(knowledgeWritesOwnerPid(name), null, `${name} names no owner`);
+  }
+});
+
+const DEAD_PID = 2147483646; // above any Linux pid_max (at most 2^22), so no process can hold it
+const DAY_MS = 24 * 60 * 60 * 1000;
+const daysAgo = (days: number) => new Date(Date.now() - days * DAY_MS);
+const ENTRY = seedLines([{ id: 'kept-or-not', type: 'decision', at: T0 }]);
+
+/** A project root with ledger files of other processes in it, and a server starting under it. */
+function startHarness() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-write-ledger-start-'));
+  const transient = join(dir, KNOWLEDGE_WRITES_DIR_REL);
+  mkdirSync(transient, { recursive: true });
+  const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), []);
+  return {
+    dir,
+    transient,
+    /** Writes one file in the transient folder with the given age. */
+    file: (name: string, ageDays: number, text = ENTRY) => {
+      const p = join(transient, name);
+      writeFileSync(p, text);
+      utimesSync(p, daysAgo(ageDays), daysAgo(ageDays));
+      return name;
+    },
+    /** A server start under this root: the constructor runs the removal. */
+    start: () => new SterlingTools({ store, repoRoot: dir }),
+    names: () => readdirSync(transient).sort(),
+    cleanup: () => {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+test('server start removes another process\'s ledger file only when it is older than 7 days AND its owner pid is gone', () => {
+  const h = startHarness();
+  try {
+    assert.equal(KNOWLEDGE_WRITES_RETENTION_MS, 7 * DAY_MS);
+    const expiredDead = h.file(knowledgeWritesProcessFile(DEAD_PID, randomUUID()), 8);
+    const expiredLive = h.file(knowledgeWritesProcessFile(process.ppid, randomUUID()), 30);
+    const expiredNotOurs = h.file(knowledgeWritesProcessFile(1, randomUUID()), 30); // pid 1: alive, and EPERM for a non-root user
+    const recentDead = h.file(knowledgeWritesProcessFile(DEAD_PID, randomUUID()), 6);
+    const freshDead = h.file(knowledgeWritesProcessFile(DEAD_PID, randomUUID()), 0);
+    const ownPidOtherRun = h.file(knowledgeWritesProcessFile(process.pid, randomUUID()), 30);
+    const own = h.file(PROCESS_KNOWLEDGE_WRITES_REL.slice(KNOWLEDGE_WRITES_DIR_REL.length + 1), 30);
+    const tempFile = h.file(`${knowledgeWritesProcessFile(DEAD_PID, randomUUID())}.tmp-${DEAD_PID}-${randomUUID()}`, 30);
+    const nearMiss = h.file(`knowledge-writes.${DEAD_PID}.jsonl`, 30);
+    const unrelated = h.file('session-events.json', 30, '[]');
+
+    h.start();
+    const left = h.names();
+    assert.equal(left.includes(expiredDead), false, 'EXPIRED-DEAD-KEPT SHAPE if present: older than 7 days and the owner is gone, so it is removed');
+    assert.equal(left.includes(expiredLive), true, 'LIVE-OWNER-REMOVED SHAPE if missing: an expired file whose owner is alive is kept');
+    assert.equal(left.includes(expiredNotOurs), true, 'a pid that cannot be probed as gone keeps its file');
+    assert.equal(left.includes(recentDead), true, 'DEAD-OWNER-ALONE-REMOVES SHAPE if missing: a dead owner with a file inside 7 days is kept, the session still needs its entries');
+    assert.equal(left.includes(freshDead), true);
+    assert.equal(left.includes(ownPidOtherRun), true, 'a live pid keeps the file, whichever run wrote it');
+    assert.equal(left.includes(own), true, 'this process\'s own file is never removed');
+    assert.deepEqual([tempFile, nearMiss, unrelated].filter((n) => !left.includes(n)), [], 'a name that is not exactly a ledger file name is never removed');
+    assert.equal(left.length, 9);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('server start removes the legacy ledger file on age alone: it has no owner and no writer', () => {
+  const recent = startHarness();
+  const expired = startHarness();
+  try {
+    recent.file('knowledge-writes.jsonl', 6);
+    recent.start();
+    assert.deepEqual(recent.names(), ['knowledge-writes.jsonl'], 'inside 7 days it is kept, and still read by the union');
+
+    expired.file('knowledge-writes.jsonl', 8);
+    expired.start();
+    assert.deepEqual(expired.names(), [], 'EXPIRED-LEGACY-KEPT SHAPE if present: older than 7 days, removed');
+  } finally {
+    recent.cleanup();
+    expired.cleanup();
+  }
+});
+
+test('removal runs at server start only: no write and no later call path removes a file that expires afterwards', () => {
+  const h = harness();
+  try {
+    h.tools.knowledgeCreate('decision', decision('domain:genesys'));
+    const late = join(h.transientDir, knowledgeWritesProcessFile(DEAD_PID, randomUUID()));
+    writeFileSync(late, ENTRY);
+    utimesSync(late, daysAgo(30), daysAgo(30));
+    h.tools.knowledgeCreate('decision', decision('domain:genesys', 'callbacks retry three times'));
+    assert.equal(existsSync(late), true, 'a domain write does not run the removal');
+    assert.equal(h.tools.removeExpiredDomainWriteLedgers(), undefined, 'control: the rule itself removes it and reports nothing');
+    assert.equal(existsSync(late), false);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a removal that fails is reported in one message and never fails server start; a root with no transient folder reports nothing', () => {
+  const h = startHarness();
+  try {
+    // Two expired dead-owner entries that cannot be unlinked: each is a directory where a file belongs.
+    const stuck = [knowledgeWritesProcessFile(DEAD_PID, randomUUID()), knowledgeWritesProcessFile(DEAD_PID, randomUUID())];
+    for (const name of stuck) {
+      mkdirSync(join(h.transient, name));
+      utimesSync(join(h.transient, name), daysAgo(30), daysAgo(30));
+    }
+    const removable = h.file(knowledgeWritesProcessFile(DEAD_PID, randomUUID()), 30);
+
+    const tools = h.start(); // REMOVAL-FAILS-START SHAPE if this throws
+    assert.equal(h.names().includes(removable), false, 'the removable file is still removed');
+    const said = tools.removeExpiredDomainWriteLedgers();
+    assert.match(said ?? '', /^domain-write ledger: 2 expired ledger file\(s\) in \.sterling\/transient could not be removed \(/, 'ONE message for both files');
+    for (const name of stuck) assert.equal(said?.includes(name), true, 'each file that stays is named');
+    assert.match(said ?? '', /they stay until a later server start removes them\.$/);
+
+    const bare = harness({ repoRoot: false });
+    const fresh = harness();
+    try {
+      assert.equal(bare.tools.removeExpiredDomainWriteLedgers(), undefined, 'no repoRoot: nothing to list');
+      assert.equal(fresh.tools.removeExpiredDomainWriteLedgers(), undefined, 'no transient folder yet: nothing to remove, nothing to report');
+      assert.equal(existsSync(fresh.transientDir), false, 'and the removal never creates the folder');
+    } finally {
+      bare.cleanup();
+      fresh.cleanup();
+    }
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('compaction rewrites only this process\'s own file: another process\'s file and the legacy file stay byte-identical', () => {
+  const h = harness();
+  try {
+    const big = seedLines(Array.from({ length: KNOWLEDGE_WRITES_COMPACT_LINES + 50 }, (_, i): KnowledgeWrite => ({ id: `other-${i}`, type: 'decision', at: new Date(Date.parse(T0) + i * 1000).toISOString() })));
+    mkdirSync(h.transientDir, { recursive: true });
+    const foreign = join(h.transientDir, knowledgeWritesProcessFile(DEAD_PID, randomUUID()));
+    writeFileSync(foreign, big);
+    writeFileSync(h.legacyPath, big);
+    h.seed(seedLines(Array.from({ length: KNOWLEDGE_WRITES_COMPACT_LINES }, (): KnowledgeWrite => ({ id: 'busy', type: 'decision', at: T0 }))));
+
+    h.clock.now = T1;
+    const made = h.tools.knowledgeCreate('decision', decision('domain:genesys'));
+    assert.deepEqual(h.ledger(), [{ id: 'busy', type: 'decision', at: T0 }, { id: made.record.id, type: 'decision', at: T1 }], 'fixture: the own file was compacted');
+    assert.equal(readFileSync(foreign, 'utf8'), big, 'COMPACTS-ANOTHER-PROCESS SHAPE if this differs: a file past the threshold that is not ours is left alone');
+    assert.equal(readFileSync(h.legacyPath, 'utf8'), big, 'the legacy file is never compacted either');
+    assert.deepEqual(readdirSync(h.transientDir).filter((n) => n.includes('.tmp-')), [], 'no temp file is left behind');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// A read-only folder stops the temp file, not the append to the existing file.
+// Root ignores the mode bits, so the case cannot be staged as root.
+test('a compaction that fails says so on the receipt: the write was logged, the file was not compacted', { skip: process.getuid?.() === 0 ? 'runs as root: a read-only folder does not stop root' : false }, () => {
+  const h = harness();
+  try {
+    h.seed(seedLines(Array.from({ length: KNOWLEDGE_WRITES_COMPACT_LINES }, (): KnowledgeWrite => ({ id: 'busy', type: 'decision', at: T0 }))));
+    chmodSync(h.transientDir, 0o555);
+    let made;
+    try {
+      made = h.tools.knowledgeCreate('decision', decision('domain:genesys'));
+    } finally {
+      chmodSync(h.transientDir, 0o755);
+    }
+    assert.equal(h.tools.knowledgeGet(made.record.id).id, made.record.id, 'the knowledge write itself succeeded');
+    const said = made.warnings.filter((w) => /domain-write ledger/.test(w));
+    assert.equal(said.length, 1);
+    assert.equal(said[0].startsWith(`domain-write ledger: this write was logged, but ${PROCESS_KNOWLEDGE_WRITES_REL} could not be compacted (`), true, said[0]);
+    assert.match(said[0], /EACCES/);
+    assert.match(said[0], /the file keeps growing until a compaction succeeds\.$/);
+    assert.equal(notLogged(made.warnings).length, 0, 'it is not the not-logged warning: the entry is in the file');
+    assert.deepEqual(h.latest(made.record.id), { id: made.record.id, type: 'decision', at: T0 });
+    assert.equal(h.ledger().length, KNOWLEDGE_WRITES_COMPACT_LINES + 1, 'nothing was rewritten');
+    assert.deepEqual(readdirSync(h.transientDir).filter((n) => n.includes('.tmp-')), [], 'no temp file is left behind');
+  } finally {
+    h.cleanup();
   }
 });
