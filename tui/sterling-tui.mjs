@@ -44190,7 +44190,15 @@ var configSchema = external_exports.object({
   // because install/sync fill an omitted key from this zod default, not the
   // template.
   maintenance_worker: external_exports.object({
-    enabled: external_exports.boolean().default(true)
+    enabled: external_exports.boolean().default(true),
+    // The OpenCode runner's model as provider/model (decision
+    // opencode-maintenance-worker-refuses-without-a-configured-model): the
+    // worker REFUSES to start without it, so config_set must not call it
+    // unread (GitHub issue 23). No default, deliberately. Reader:
+    // scripts/hooks/lib/maintenance-worker.mjs opencodeModelOf(). PERMISSIVE
+    // like `mode`: a non-string is preserved raw and refused loudly by that
+    // reader, never thrown on here (a throw would fail the MCP server's boot).
+    opencode_model: external_exports.unknown().optional()
   }).default({}),
   // Board 8390f8fa: a registry-style feature_article can outgrow its own
   // round-trip — knowledge_append responses on mcp-tool-surface (29 history
@@ -52485,6 +52493,16 @@ var TILE_PAD = 1;
 var TILE_COLS = SPRITE_COLS + 2 * TILE_PAD;
 var TILE_BG = "#2a2e37";
 var FRAME_COUNT = 4;
+var DONE_FADE = 0.55;
+function rgb(hex) {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return [n >> 16 & 255, n >> 8 & 255, n & 255];
+}
+function fadeToTile(hex, amount) {
+  const [a, b] = [rgb(hex), rgb(TILE_BG)];
+  const mix = a.map((v, i) => Math.round(v + (b[i] - v) * amount));
+  return `#${mix.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
 var QUADRANTS = " \u2598\u259D\u2580\u2596\u258C\u259E\u259B\u2597\u259A\u2590\u259C\u2584\u2599\u259F\u2588";
 var palette = pool_default.palette;
 function colourAt(rows, r, c) {
@@ -52847,21 +52865,11 @@ var TILE_GAP = 1;
 var SIDE_MIN_W = TILE_COLS + TILE_GAP + CARD_W;
 var CARD_GAP = 2;
 var ROW_GAP = 1;
-var DONE_FADE = 0.55;
 function clip(text, width) {
   const chars = [...text];
   if (chars.length <= width)
     return text;
   return width <= 1 ? chars.slice(0, width).join("") : chars.slice(0, width - 1).join("") + "\u2026";
-}
-function rgb(hex) {
-  const n = Number.parseInt(hex.slice(1), 16);
-  return [n >> 16 & 255, n >> 8 & 255, n & 255];
-}
-function fadeToTile(hex, amount) {
-  const [a, b] = [rgb(hex), rgb(TILE_BG)];
-  const mix = a.map((v, i) => Math.round(v + (b[i] - v) * amount));
-  return `#${mix.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
 }
 function composeSubagentBlock(view, width, maxHeight, tick) {
   const cards = composeCards(view, width, maxHeight, tick);
