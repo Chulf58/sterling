@@ -5592,7 +5592,21 @@ var init_records = __esm({
 });
 
 // packages/schemas/dist/transient.js
-var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema;
+function knowledgeWritesOwnerPid(fileName) {
+  const m = KNOWLEDGE_WRITES_PROCESS_FILE.exec(fileName);
+  if (!m)
+    return null;
+  const pid = Number(m[1]);
+  return Number.isSafeInteger(pid) ? pid : null;
+}
+function knowledgeWritesTempOwnerPid(fileName) {
+  const m = KNOWLEDGE_WRITES_TEMP_FILE.exec(fileName);
+  if (!m)
+    return null;
+  const pid = Number(m[1]);
+  return Number.isSafeInteger(pid) ? pid : null;
+}
+var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_PROCESS_FILE, knowledgeWritesProcessFile, KNOWLEDGE_WRITES_TEMP_FILE, knowledgeWritesTempFile, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema;
 var init_transient = __esm({
   "packages/schemas/dist/transient.js"() {
     "use strict";
@@ -5621,7 +5635,13 @@ var init_transient = __esm({
       // Trimmed before the length check, so a whitespace-only target is refused.
       target: external_exports.string().trim().min(1).optional()
     });
-    KNOWLEDGE_WRITES_REL = ".sterling/transient/knowledge-writes.jsonl";
+    KNOWLEDGE_WRITES_DIR_REL = ".sterling/transient";
+    KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/knowledge-writes.jsonl`;
+    KNOWLEDGE_WRITES_PROCESS_FILE = /^knowledge-writes\.([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/;
+    knowledgeWritesProcessFile = (pid, uuid) => `knowledge-writes.${pid}-${uuid}.jsonl`;
+    KNOWLEDGE_WRITES_TEMP_FILE = /^knowledge-writes\.(?:[1-9]\d*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.)?jsonl\.tmp-([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    knowledgeWritesTempFile = (ledgerFileName, pid, uuid) => `${ledgerFileName}.tmp-${pid}-${uuid}`;
+    KNOWLEDGE_WRITES_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
     KNOWLEDGE_WRITES_COMPACT_LINES = 1e3;
     KNOWLEDGE_WRITES_KEEP_IDS = 500;
     knowledgeWriteSchema = external_exports.object({
@@ -6198,8 +6218,12 @@ __export(dist_exports, {
   FRESHNESS_VALUES: () => FRESHNESS_VALUES,
   HEADLINE_CLIP: () => HEADLINE_CLIP,
   KNOWLEDGE_WRITES_COMPACT_LINES: () => KNOWLEDGE_WRITES_COMPACT_LINES,
+  KNOWLEDGE_WRITES_DIR_REL: () => KNOWLEDGE_WRITES_DIR_REL,
   KNOWLEDGE_WRITES_KEEP_IDS: () => KNOWLEDGE_WRITES_KEEP_IDS,
+  KNOWLEDGE_WRITES_PROCESS_FILE: () => KNOWLEDGE_WRITES_PROCESS_FILE,
   KNOWLEDGE_WRITES_REL: () => KNOWLEDGE_WRITES_REL,
+  KNOWLEDGE_WRITES_RETENTION_MS: () => KNOWLEDGE_WRITES_RETENTION_MS,
+  KNOWLEDGE_WRITES_TEMP_FILE: () => KNOWLEDGE_WRITES_TEMP_FILE,
   LIFECYCLE_VALUES: () => LIFECYCLE_VALUES,
   LINK_RELS: () => LINK_RELS,
   NAME_CLIP: () => NAME_CLIP,
@@ -6242,6 +6266,10 @@ __export(dist_exports, {
   isCollapsedUrlLocation: () => isCollapsedUrlLocation,
   isUnderLocationAnyHost: () => isUnderLocationAnyHost,
   knowledgeWriteSchema: () => knowledgeWriteSchema,
+  knowledgeWritesOwnerPid: () => knowledgeWritesOwnerPid,
+  knowledgeWritesProcessFile: () => knowledgeWritesProcessFile,
+  knowledgeWritesTempFile: () => knowledgeWritesTempFile,
+  knowledgeWritesTempOwnerPid: () => knowledgeWritesTempOwnerPid,
   knownFieldsFor: () => knownFieldsFor,
   linkSchema: () => linkSchema,
   matchesGlob: () => matchesGlob,
@@ -11171,6 +11199,22 @@ var normPath = (p) => {
   const t = String(p).replace(/\\/g, "/").replace(/\/+$/, "");
   return process.platform === "win32" ? t.toLowerCase() : t;
 };
+var OLD_TUI_BUNDLE = "packages/tui/bundle/sterling-tui.mjs";
+var SHIPPED_TUI_BUNDLE = "tui/sterling-tui.mjs";
+function warnIfLauncherNamesOldBundle(repoPath2, log) {
+  const launcher = join13(repoPath2, "sterling-launch.sh");
+  if (!existsSync8(launcher)) return;
+  let text;
+  try {
+    text = readFileSync6(launcher, "utf8");
+  } catch (err) {
+    log(`\u2717 could not read ${launcher} (${err.code ?? err.message}), so it was not checked for the old TUI bundle path ${OLD_TUI_BUNDLE}. Open it and confirm it runs ${SHIPPED_TUI_BUNDLE}.`);
+    return;
+  }
+  if (text.includes(OLD_TUI_BUNDLE)) {
+    log(`\u2717 ${repoPath2}: sterling-launch.sh still runs ${OLD_TUI_BUNDLE}, which no longer ships, so its dashboard is outdated and shows no error. Re-run /sterling:init in this project so its launcher runs ${SHIPPED_TUI_BUNDLE} (this update did not touch the launcher).`);
+  }
+}
 function resolveInvokingProject(list, { projectDir, cwd }) {
   const dir = normPath(projectDir || cwd);
   let best = null;
@@ -11480,6 +11524,7 @@ AUTHORING clone \u2014 nothing to pull; syncing ${invokedFrom} only`);
 AUTHORING clone \u2014 nothing to pull; syncing ${project.repo_path} only`);
     if (opts2.force) log("  (--force has no meaning on the authoring machine: there is no rebuild to force)");
     refreshProjects([project], { launchers: false, handoff: false });
+    warnIfLauncherNamesOldBundle(project.repo_path, log);
     if (normPath(project.repo_path) === normPath(cwd)) {
       log("\u25B8 the clone's contract files are hand-maintained \u2014 not checked");
     } else if (existsSync8(join13(cwd, "scripts", "stamp-contract.mjs"))) {
@@ -11746,7 +11791,8 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
     );
   }
   stampConsumerRoleIfAbsent(cwd, log);
-  log("\n\u25B8 launchers \u2014 re-run /sterling:init in each Sterling project so its launchers run tui/sterling-tui.mjs (launchers baked before this version point at packages/tui/bundle/sterling-tui.mjs, which no longer ships).");
+  log(`
+\u25B8 launchers \u2014 re-run /sterling:init in each Sterling project so its launchers run ${SHIPPED_TUI_BUNDLE} (launchers baked before this version point at ${OLD_TUI_BUNDLE}, which no longer ships).`);
   log("  To move this machine off the clone instead: run `claude plugin marketplace add Chulf58/sterling` and `claude plugin install sterling@sterling`, then in each project start `claude` directly, not through sterling-launch.sh (its --plugin-dir overrides the installed plugin), and run /sterling:init there. That init replaces the clone launcher, deletes the clone's sterling-update.bat, and names this clone for you to delete by hand.");
   const resolvedList = opts2.projects === false ? [] : await resolveProjects();
   const registryFailed = resolvedList === null;

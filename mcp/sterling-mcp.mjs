@@ -22503,7 +22503,27 @@ var sessionEventSchema = external_exports.object({
   // Trimmed before the length check, so a whitespace-only target is refused.
   target: external_exports.string().trim().min(1).optional()
 });
-var KNOWLEDGE_WRITES_REL = ".sterling/transient/knowledge-writes.jsonl";
+var KNOWLEDGE_WRITES_DIR_REL = ".sterling/transient";
+var KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/knowledge-writes.jsonl`;
+var KNOWLEDGE_WRITES_PROCESS_FILE = /^knowledge-writes\.([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/;
+var knowledgeWritesProcessFile = (pid, uuid2) => `knowledge-writes.${pid}-${uuid2}.jsonl`;
+function knowledgeWritesOwnerPid(fileName) {
+  const m = KNOWLEDGE_WRITES_PROCESS_FILE.exec(fileName);
+  if (!m)
+    return null;
+  const pid = Number(m[1]);
+  return Number.isSafeInteger(pid) ? pid : null;
+}
+var KNOWLEDGE_WRITES_TEMP_FILE = /^knowledge-writes\.(?:[1-9]\d*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.)?jsonl\.tmp-([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+var knowledgeWritesTempFile = (ledgerFileName, pid, uuid2) => `${ledgerFileName}.tmp-${pid}-${uuid2}`;
+function knowledgeWritesTempOwnerPid(fileName) {
+  const m = KNOWLEDGE_WRITES_TEMP_FILE.exec(fileName);
+  if (!m)
+    return null;
+  const pid = Number(m[1]);
+  return Number.isSafeInteger(pid) ? pid : null;
+}
+var KNOWLEDGE_WRITES_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
 var KNOWLEDGE_WRITES_COMPACT_LINES = 1e3;
 var KNOWLEDGE_WRITES_KEEP_IDS = 500;
 var knowledgeWriteSchema = external_exports.object({
@@ -26624,8 +26644,8 @@ var SterlingStore = class _SterlingStore {
 // packages/mcp-server/dist/tools.js
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync as existsSync4, lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, realpathSync as realpathSync2, renameSync, statSync as statSync2, unlinkSync, writeFileSync } from "node:fs";
-import { dirname as dirname4, isAbsolute, join as join5, relative, sep } from "node:path";
+import { appendFileSync, chmodSync, existsSync as existsSync4, lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, readdirSync as readdirSync2, realpathSync as realpathSync2, renameSync, statSync as statSync2, unlinkSync, writeFileSync } from "node:fs";
+import { basename as basename2, dirname as dirname4, isAbsolute, join as join5, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 // packages/mcp-server/dist/attestation-proof.js
@@ -26863,6 +26883,17 @@ var EntryReachability = class {
     if (/^scripts\/[^/]+\.mjs$/.test(path) || /^bin\/[^/]+\.mjs$/.test(path))
       return this.judgeScript(path);
     return null;
+  }
+  /**
+   * Why judge() returns null for this entry, or null when it is judged. The
+   * write receipt of a state_review close uses it to say the entry was not
+   * reach-checked (board 12e97ef5).
+   */
+  unjudgedReason(path, role) {
+    if (!(this.sterlingClone ??= this.isSterlingClone())) {
+      return "this tree is not a Sterling clone, whose registries the check reads, so reachability was not checked";
+    }
+    return this.judge(path, role) === null ? "no registry (hooks, commands, skills, tools, bin entries, agents) covers its kind, so reachability was not checked" : null;
   }
   judgeHook(path, bundle) {
     const commands = this.hookCommands ??= this.load("hooks/hooks.json", (text) => {
@@ -27334,6 +27365,15 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
   const warnings = unreadKeyWarnings(path, unreadConfigKeys(mutated));
   return warnings.length > 0 ? { path, previous_value: previousValue, value, digest, warnings } : { path, previous_value: previousValue, value, digest };
 }
+function pidIsGone(pid) {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return err?.code === "ESRCH";
+  }
+}
+var PROCESS_KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/${knowledgeWritesProcessFile(process.pid, randomUUID2())}`;
 var SterlingTools = class _SterlingTools {
   store;
   config;
@@ -31327,7 +31367,35 @@ ${JSON.stringify(value, null, 2)}` : void 0;
    */
   splitSameSubject(rec) {
     const { same_subject, claims_check, ledger_warning, ...record2 } = rec;
-    return { record: record2, same_subject, claims_check, ledger_warnings: ledger_warning ? [ledger_warning] : [] };
+    return {
+      record: record2,
+      same_subject,
+      claims_check,
+      ledger_warnings: [...ledger_warning ? [ledger_warning] : [], ...this.entryNotCheckedWarnings(record2)]
+    };
+  }
+  /**
+   * The receipt line for a state_review item closed on an entry of a kind
+   * Sterling cannot reach-check (board 12e97ef5; user-ruled 2026-10-05, "Say
+   * unverified": the item still closes, nothing is blocked, the receipt
+   * discloses). Judged the way the read-time state_review arm judges: only an
+   * article claiming or looking wired (wired_in, active, built) has its entries
+   * checked, so only those can be closed on the strength of one. An entry judge()
+   * does judge, reached or not, gets no line.
+   */
+  entryNotCheckedWarnings(article) {
+    const closed = article.resolved_items ?? [];
+    if (article.type !== "feature_article" || !closed.some((item) => item.system_reason === "state_review"))
+      return [];
+    if (article.state !== "wired_in" && article.state !== "active" && article.state !== "built")
+      return [];
+    const entries = (article.files ?? []).filter((f) => f.entry);
+    const root = this.treeRootFor(article).root ?? this.repoRoot;
+    const reachability = root ? new EntryReachability(root) : void 0;
+    return entries.flatMap((f) => {
+      const why = reachability ? reachability.unjudgedReason(f.path, f.role ?? "") : "its working tree could not be resolved, so reachability was not checked";
+      return why ? [`state_review item closed, but entry ${f.path} was not reach-checked: ${why}.`] : [];
+    });
   }
   /**
    * The whole supersede lineage a maintenance item's feature_link may point
@@ -32643,30 +32711,31 @@ ${JSON.stringify(value, null, 2)}` : void 0;
   }
   /**
    * Logs one write of a record a mounted DOMAIN store holds to this project's
-   * transient ledger (KNOWLEDGE_WRITES_REL under repoRoot), so the session-end
-   * duty reads can tell this project's domain writes from another project's
-   * (decision domain-record-duty-credit-comes-from-a-per-project-write-ledger).
+   * transient ledger, so the session-end duty reads can tell this project's
+   * domain writes from another project's (decision
+   * domain-record-duty-credit-comes-from-a-per-project-write-ledger).
    * A domain store is shared by every project on the machine and its records
    * carry no origin; H10 and the OpenCode settlement count a domain record
-   * toward the capture or research duty only when this ledger holds an entry
+   * toward the capture or research duty only when the ledger holds an entry
    * for its id inside the duty window. A project-scoped write logs nothing.
    *
    * Called AFTER the store write returned, with the stored record's own id and
    * type and this server's clock. No caller field reaches an entry.
    *
+   * ONE FILE PER PROCESS: the entry goes to PROCESS_KNOWLEDGE_WRITES_REL under
+   * repoRoot, a file only this process writes. Several servers run under one
+   * root (the session's, a maintenance worker's, OpenCode's), and on /mnt/c
+   * under WSL2 appends from two processes to ONE file overwrite each other
+   * (finding o-append-is-not-atomic-across-processes-on-wsl2-mnt-c). With a
+   * file each there is nothing to overwrite; the readers take the union of the
+   * files. Nothing appends to the legacy single file KNOWLEDGE_WRITES_REL.
+   *
    * APPEND-ONLY: the entry is one JSON line, written with a single O_APPEND
-   * call and no read before it. Appends from several processes under one root
-   * (the session's server and a maintenance worker's) are safe on a Linux
-   * filesystem. On /mnt/c under WSL2 they are NOT: concurrent appends within a
-   * few milliseconds can overwrite each other. The lost entry's record then
-   * does not pay, and nothing reports it (finding
-   * o-append-is-not-atomic-across-processes-on-wsl2-mnt-c; the follow-up is
-   * boarded).
-   * The line opens with a newline as well as ending with one, so it stands on
-   * its own even after a predecessor a crash cut short. Nothing clears the
-   * file; compactDomainWrites bounds it. No lock file, by conductor decision:
-   * decision dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own
-   * (48f5209d) records why lock directories are avoided here.
+   * call and no read before it. The line opens with a newline as well as
+   * ending with one, so it stands on its own even after a predecessor a crash
+   * cut short. compactDomainWrites bounds the file and
+   * removeExpiredDomainWriteLedgers ends its life. No lock file: a file with
+   * one writer needs none.
    *
    * NEVER fails the knowledge write. Returns undefined when the entry was
    * logged (or queued for a caller's post-commit flush), otherwise the warning
@@ -32689,34 +32758,35 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         throw new Error("no project root is known to this server");
       if (!existsSync4(join5(this.repoRoot, ".sterling")))
         throw new Error(`${this.repoRoot} has no .sterling directory`);
-      ledgerPath = join5(this.repoRoot, KNOWLEDGE_WRITES_REL);
+      ledgerPath = join5(this.repoRoot, PROCESS_KNOWLEDGE_WRITES_REL);
       mkdirSync3(dirname4(ledgerPath), { recursive: true });
       const entry = knowledgeWriteSchema.parse({ id: record2.id, type: record2.type, at: this.now() });
       appendFileSync(ledgerPath, `
 ${JSON.stringify(entry)}
 `);
     } catch (err) {
-      return `domain-write ledger: this write was NOT logged to ${KNOWLEDGE_WRITES_REL} (${err instanceof Error ? err.message : String(err)}). The record ${record2.id} is stored in ${scope}, but it will not count toward this project's capture or research duty at session end.`;
+      return `domain-write ledger: this write was NOT logged to ${PROCESS_KNOWLEDGE_WRITES_REL} (${err instanceof Error ? err.message : String(err)}). The record ${record2.id} is stored in ${scope}, but it will not count toward this project's capture or research duty at session end.`;
     }
     try {
       this.compactDomainWrites(ledgerPath);
     } catch (err) {
-      return `domain-write ledger: this write was logged, but ${KNOWLEDGE_WRITES_REL} could not be compacted (${err instanceof Error ? err.message : String(err)}); the file keeps growing until a compaction succeeds.`;
+      return `domain-write ledger: this write was logged, but ${PROCESS_KNOWLEDGE_WRITES_REL} could not be compacted (${err instanceof Error ? err.message : String(err)}); the file keeps growing until a compaction succeeds.`;
     }
     return void 0;
   }
   /**
-   * Bounds the ledger: once it holds more than KNOWLEDGE_WRITES_COMPACT_LINES
-   * lines it is rewritten to the latest entry of each of the newest
-   * KNOWLEDGE_WRITES_KEEP_IDS record ids (newest by where an id last appears),
-   * through a temp file and a rename. Keeping only the latest `at` per id loses
-   * nothing for an "at or after X" read; an id past the newest
-   * KNOWLEDGE_WRITES_KEEP_IDS is dropped, and so is a line that does not parse.
+   * Bounds this process's ledger file: once it holds more than
+   * KNOWLEDGE_WRITES_COMPACT_LINES lines it is rewritten to the latest entry
+   * of each of the newest KNOWLEDGE_WRITES_KEEP_IDS record ids (newest by
+   * where an id last appears), through a temp file and a rename. Keeping only
+   * the latest `at` per id loses nothing for an "at or after X" read; an id
+   * past the newest KNOWLEDGE_WRITES_KEEP_IDS is dropped, and so is a line
+   * that does not parse.
    *
-   * This is the ledger's only read-modify-write. An entry another process
-   * appends between the read and the rename is lost, once per several hundred
-   * writes at most; that entry's record then does not pay (the duty stays
-   * armed, the fail-closed side).
+   * Only ever called on the process's own file. This read-modify-write is
+   * synchronous and no other process appends to that file, so no entry can
+   * land between the read and the rename. Another process's file and the
+   * legacy file are never touched here.
    *
    * The size check keeps the read off most writes: a line cannot be shorter
    * than MIN_LINE_BYTES, so a smaller file cannot be past the line threshold.
@@ -32743,7 +32813,7 @@ ${JSON.stringify(entry)}
       latest.set(ok.data.id, ok.data);
     }
     const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
-    const tmp = `${ledgerPath}.tmp-${process.pid}-${randomUUID2()}`;
+    const tmp = join5(dirname4(ledgerPath), knowledgeWritesTempFile(basename2(ledgerPath), process.pid, randomUUID2()));
     try {
       writeFileSync(tmp, kept.map((e) => `${JSON.stringify(e)}
 `).join(""));
@@ -32755,6 +32825,86 @@ ${JSON.stringify(entry)}
       }
       throw err;
     }
+  }
+  /**
+   * Ends the life of ledger files nothing will write again. Called at server
+   * start only (createSterlingServer in server.ts, once, right after it builds
+   * its SterlingTools), never by the constructor, a reader or a write.
+   *
+   * THE RULE. Another process's ledger file is removed only when BOTH hold:
+   *   1. its mtime is older than KNOWLEDGE_WRITES_RETENTION_MS (7 days), AND
+   *   2. its owner pid, read from the file name, is positively dead:
+   *      process.kill(pid, 0) throws ESRCH.
+   * A compaction temp file a crash left (KNOWLEDGE_WRITES_TEMP_FILE) falls
+   * under the same two conditions, with the pid its own name carries.
+   * Any doubt keeps the file: a name that is neither pattern exactly, a stat
+   * that fails, a pid this user may not signal (EPERM), any other probe
+   * error. A dead owner alone
+   * never removes a file: a short-lived writer such as the maintenance worker
+   * exits seconds after writing, and the session still needs its entries.
+   * This process's own file is never a candidate.
+   * The legacy single file KNOWLEDGE_WRITES_REL has no owner and no writer
+   * left, so it is removed on age alone.
+   *
+   * RETENTION LIMIT, accepted: a duty whose window started more than 7 days
+   * ago can get a reminder for a domain write that was made, because the file
+   * holding that write's entry was removed. It fails closed: a removed entry
+   * can only withhold credit, never grant it.
+   *
+   * Never throws and never fails server start. Returns undefined when nothing
+   * went wrong, otherwise ONE message naming every file that could not be
+   * removed (and the folder, when it could not be listed); the files stay for
+   * a later start to remove; a file whose age cannot be read (a stat failure
+   * other than ENOENT) is kept and named the same way. A file already gone is
+   * not a failure: another server starting at the same moment removed it.
+   */
+  removeExpiredDomainWriteLedgers() {
+    if (!this.repoRoot)
+      return void 0;
+    const dir = join5(this.repoRoot, KNOWLEDGE_WRITES_DIR_REL);
+    const gone = (err) => err?.code === "ENOENT";
+    const text = (err) => err instanceof Error ? err.message : String(err);
+    let names;
+    try {
+      names = readdirSync2(dir);
+    } catch (err) {
+      if (gone(err))
+        return void 0;
+      return `domain-write ledger: ${KNOWLEDGE_WRITES_DIR_REL} could not be listed (${text(err)}); no expired ledger file was removed at this start.`;
+    }
+    const legacy = KNOWLEDGE_WRITES_REL.slice(KNOWLEDGE_WRITES_DIR_REL.length + 1);
+    const own = PROCESS_KNOWLEDGE_WRITES_REL.slice(KNOWLEDGE_WRITES_DIR_REL.length + 1);
+    const expiredBefore = Date.now() - KNOWLEDGE_WRITES_RETENTION_MS;
+    const failed = [];
+    for (const name of names) {
+      if (name === own)
+        continue;
+      const ownerPid = name === legacy ? null : knowledgeWritesOwnerPid(name) ?? knowledgeWritesTempOwnerPid(name);
+      if (name !== legacy && ownerPid === null)
+        continue;
+      const path = join5(dir, name);
+      let mtimeMs;
+      try {
+        mtimeMs = statSync2(path).mtimeMs;
+      } catch (err) {
+        if (!gone(err))
+          failed.push(`${name}: ${err?.code ?? "unknown error"}`);
+        continue;
+      }
+      if (!(mtimeMs < expiredBefore))
+        continue;
+      if (ownerPid !== null && !pidIsGone(ownerPid))
+        continue;
+      try {
+        unlinkSync(path);
+      } catch (err) {
+        if (!gone(err))
+          failed.push(`${name}: ${text(err)}`);
+      }
+    }
+    if (!failed.length)
+      return void 0;
+    return `domain-write ledger: ${failed.length} expired ledger file(s) in ${KNOWLEDGE_WRITES_DIR_REL} could not be removed (${failed.join("; ")}); they stay until a later server start removes them.`;
   }
   // -- session-event register writers (boards 75b1a05f + 1af5d630) ------------
   /**
@@ -34677,6 +34827,9 @@ function createSterlingServer(storePath2) {
   for (const d of store.unreadableDomains)
     process.stderr.write(unreadableDomainWarning(d) + "\n");
   const tools = new SterlingTools({ store, config: config2, repoRoot: dirname5(dirname5(storePath2)), domains: mountedDomainSurface(store) });
+  const ledgerRemoval = tools.removeExpiredDomainWriteLedgers();
+  if (ledgerRemoval)
+    process.stderr.write(ledgerRemoval + "\n");
   const bootDomains = store.domainNames().map((name) => {
     let description;
     try {

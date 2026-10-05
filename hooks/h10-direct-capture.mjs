@@ -4910,7 +4910,10 @@ var sessionEventSchema = external_exports.object({
   // Trimmed before the length check, so a whitespace-only target is refused.
   target: external_exports.string().trim().min(1).optional()
 });
-var KNOWLEDGE_WRITES_REL = ".sterling/transient/knowledge-writes.jsonl";
+var KNOWLEDGE_WRITES_DIR_REL = ".sterling/transient";
+var KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/knowledge-writes.jsonl`;
+var KNOWLEDGE_WRITES_PROCESS_FILE = /^knowledge-writes\.([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/;
+var KNOWLEDGE_WRITES_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
 var knowledgeWriteSchema = external_exports.object({
   id: external_exports.string().min(1),
   type: external_exports.string().min(1),
@@ -9529,7 +9532,7 @@ function ageText(iso, nowMs = Date.now()) {
 
 // scripts/hooks/lib/session-duties.mjs
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { existsSync as existsSync10, readFileSync as readFileSync9 } from "node:fs";
+import { existsSync as existsSync10, readFileSync as readFileSync9, readdirSync as readdirSync4 } from "node:fs";
 import { join as join15 } from "node:path";
 var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 var isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
@@ -9567,8 +9570,8 @@ function openDutyRecords(store2, config, { opener = (dbPath) => new SterlingStor
   let ledger = null;
   const loggedWrites = () => {
     if (ledger === null) {
-      const read = root ? readKnowledgeWrites(root) : { latestAt: /* @__PURE__ */ new Map() };
-      if (read.error) onLedgerUnreadable(read.error);
+      const read = root ? readKnowledgeWrites(root) : { latestAt: /* @__PURE__ */ new Map(), unreadable: [] };
+      for (const u of read.unreadable) onLedgerUnreadable(u.error, u.file);
       ledger = read.latestAt;
     }
     return ledger;
@@ -9630,28 +9633,50 @@ function openDutyRecords(store2, config, { opener = (dbPath) => new SterlingStor
 }
 var writtenSince = (r, since) => r.created_at >= since || r.updated_at >= since;
 function readKnowledgeWrites(root) {
-  const p = join15(root, KNOWLEDGE_WRITES_REL);
   const latestAt = /* @__PURE__ */ new Map();
-  if (!existsSync10(p)) return { latestAt };
-  let text;
+  const unreadable = [];
+  const errorText = (e) => e && typeof e.code === "string" && e.code || "unknown error";
+  let names;
   try {
-    text = readFileSync9(p, "utf8");
+    names = readdirSync4(join15(root, KNOWLEDGE_WRITES_DIR_REL));
   } catch (e) {
-    return { latestAt, error: String(e && e.message || e) };
+    if (e && e.code === "ENOENT") return { latestAt, unreadable };
+    unreadable.push({ file: KNOWLEDGE_WRITES_DIR_REL, error: errorText(e) });
+    return { latestAt, unreadable };
   }
-  for (const line of text.split("\n")) {
-    if (line === "") continue;
-    let entry;
+  const legacy = KNOWLEDGE_WRITES_REL.slice(KNOWLEDGE_WRITES_DIR_REL.length + 1);
+  for (const name of names.filter((n) => n === legacy || KNOWLEDGE_WRITES_PROCESS_FILE.test(n)).sort()) {
+    const file = `${KNOWLEDGE_WRITES_DIR_REL}/${name}`;
+    let text;
     try {
-      entry = JSON.parse(line);
-    } catch {
+      text = readFileSync9(join15(root, file), "utf8");
+    } catch (e) {
+      if (!(e && e.code === "ENOENT")) unreadable.push({ file, error: errorText(e) });
       continue;
     }
-    if (!knowledgeWriteSchema.safeParse(entry).success || !isValidAt(entry.at)) continue;
-    const prior = latestAt.get(entry.id);
-    if (prior === void 0 || entry.at > prior) latestAt.set(entry.id, entry.at);
+    let lines = 0;
+    let valid = 0;
+    let completeLines = 0;
+    const parts = text.split("\n");
+    const unterminatedAt = parts.length - 1;
+    for (const [i, line] of parts.entries()) {
+      if (line === "") continue;
+      lines += 1;
+      if (i !== unterminatedAt) completeLines += 1;
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!knowledgeWriteSchema.safeParse(entry).success || !isValidAt(entry.at)) continue;
+      valid += 1;
+      const prior = latestAt.get(entry.id);
+      if (prior === void 0 || entry.at > prior) latestAt.set(entry.id, entry.at);
+    }
+    if (completeLines > 0 && valid === 0) unreadable.push({ file, error: `none of its ${lines} line(s) is a valid entry` });
   }
-  return { latestAt };
+  return { latestAt, unreadable };
 }
 var paysSince = (store2, r, since) => typeof store2.pays === "function" ? store2.pays(r, since) : writtenSince(r, since);
 var CAPTURE_TYPES = ["decision", "anti_pattern", "feature_article", "research_finding", "disconfirmed_hypothesis", "open_question"];
@@ -10410,7 +10435,7 @@ try {
   const dutyRecords = openDutyRecords(store, config, {
     onUnreadable: (name, error) => degradationParts.push(`H10: domain store '${name}' could not be read for the session-end duties \u2014 ${error}; a record written there this session is not counted`),
     root: input.cwd,
-    onLedgerUnreadable: (error) => degradationParts.push(`H10: the domain-write ledger (${KNOWLEDGE_WRITES_REL}) could not be read \u2014 ${error}; no domain-scoped record is counted toward the session-end duties. Fix or remove the file`)
+    onLedgerUnreadable: (error, file) => degradationParts.push(`H10: the domain-write ledger (${file}) could not be read \u2014 ${error}; a domain-scoped record logged only in that file is not counted toward the session-end duties, and entries in this project's other ledger files still count. Fix or remove the file`)
   });
   const hasLiveAgentDispatchEvents = researchEvents.some((e) => isLaneResearchEvent(e) && isDispatchEventLive(e));
   const researchSatisfyingRecords = hasLiveAgentDispatchEvents ? dutyRecords.query({ types: ["research_finding", "decision", "anti_pattern"], cap: 1e3 }) : [];
