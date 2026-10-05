@@ -38,7 +38,7 @@ import { AGENT_MODEL_KEY, parseConfig } from '@sterling/schemas';
 import { readRegister, dispatchStateDir, dispatchStateKey, type RegisterEntry } from '../../../scripts/lib/dispatch-register.mjs';
 import { deriveAgentTranscript, fillPct, latestUsage } from '../../../scripts/hooks/lib/transcript.mjs';
 import { sterlingRootFrom } from '../../../scripts/lib/opencode-install.mjs';
-import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_BG, TILE_COLS, type AssignState } from './avatars/index.js';
+import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS, DONE_FADE, fadeToTile, type AssignState } from './avatars/index.js';
 
 /** How long a missing subagent transcript is left unsearched before the next look. */
 const TRANSCRIPT_RETRY_MS = 10_000;
@@ -474,25 +474,11 @@ const TILE_GAP = 1;
 const SIDE_MIN_W = TILE_COLS + TILE_GAP + CARD_W;
 const CARD_GAP = 2;
 const ROW_GAP = 1;
-/** a done card's portrait is blended this far toward the tile colour */
-const DONE_FADE = 0.55;
 
 function clip(text: string, width: number): string {
   const chars = [...text];
   if (chars.length <= width) return text;
   return width <= 1 ? chars.slice(0, width).join('') : chars.slice(0, width - 1).join('') + '…';
-}
-
-function rgb(hex: string): [number, number, number] {
-  const n = Number.parseInt(hex.slice(1), 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-
-/** `hex` blended toward the tile colour by `amount` (0 keeps it, 1 is the tile colour). */
-function fadeToTile(hex: string, amount: number): string {
-  const [a, b] = [rgb(hex), rgb(TILE_BG)];
-  const mix = a.map((v, i) => Math.round(v + (b[i]! - v) * amount));
-  return `#${mix.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
 }
 
 /** The cards, then, when live agents come from a session other than the one
