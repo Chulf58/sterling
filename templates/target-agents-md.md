@@ -26,6 +26,7 @@ Durable conventions and project facts, for any engineer or agent working in this
 
 - **Anti-speculation:** never invent an API, field, flag, or behavior; cite tool-call evidence from this turn, or say "I don't know, checking" and check.
 - **No false action claims:** never imply something was saved, run, recorded, or changed unless it was actually performed this turn with evidence.
+- **Lint and tests before done.** Before reporting a code change done, run this project's lint/format command (under Project facts) and the tests for what changed. Red lint is a blocker, not a note. If no lint/format command is recorded, say so in the report.
 - **Write plainly; no AI tells.** Prose for people (docs, READMEs, store records, commit and PR text, UI copy, reports) says specific things in ordinary words: is/has rather than serves as/boasts, no em-dash chains, no "not just X, it's Y", no puffed-up significance, no stock AI vocabulary (delve, pivotal, robust, tapestry), no "it's important to note" or "In conclusion". Keep every fact; never invent detail to replace filler. Perfect grammar and a formal tone are not tells, so leave clean sentences alone. The full catalogue is Wikipedia's *Signs of AI writing*.
 - **An index or summary is a lookup, never a source.** A digest line, a quotation inside another record — these LOCATE the source; they never replace it. A cited line number is an instruction to OPEN THE FILE: the binding constraint often lives in the prose around the quoted line, which is exactly what the summary dropped.
 - **Read before edit; grep callers before changing a signature.**
@@ -37,15 +38,14 @@ Durable conventions and project facts, for any engineer or agent working in this
 - **Never self-verify.** A code-touching diff gets an independent reviewer — the author of a change is never its checker. Review happens **sparsely, once a task is done**: one reviewer over the riskiest part of the whole branch's diff plus every changed test in full, never per edit and never per commit. This is a practice, not a hook — nothing mechanically catches a skipped review, which is exactly why you do not skip it.
 - **Propose a better way.** You are a reasoning partner, not a note-taker. When you see an approach that materially beats the one asked for, say so before implementing — but only when it changes an outcome (avoids irreversible work, data loss, a security hole, broad rework), never for a prettier abstraction. Give the better path, the risk it protects, the tradeoff, and how to verify; then proceed with the asked path unless told otherwise.
 - **Disclose limitations, don't bury them.** A known limitation that weakens or defeats what the work is *for* is raised as an explicit keep-or-solve decision **before** you build. "It opens but can't do X" is unfit-for-purpose, not done-with-a-note.
-- **Canonical naming:** one name per concept, from the registries; no dead terms.
 - **Verbatim intent capture.** Intent-capture surfaces receive the user's words VERBATIM — no paraphrase, no pre-stuffing, no helpful tidying. A paraphrase silently substitutes your model of the intent for theirs.
 - **Never ship:** hardcoded secrets or credentials; swallowed errors, bare catch-alls or silent fallbacks that mask a real failure; weakened, skipped or deleted tests to make a suite green; leftover debug output or commented-out code unless a stub was asked for.
-- **A toolchain-invoked process's exit code can read as a crash when the real cause is a missing required flag.** Some test/build runners exit with an unfamiliar non-zero code when a required headless/CI-mode flag is omitted, rather than failing informatively — check the runner's own headless/CI documentation before treating a red run as a real regression.
 
 ## Project facts (generated)
 
 - Stack tags (= domain mount manifest): {{STACK_TAGS}}
 - Toolchains: {{TOOLCHAINS}}  <!-- path globs → adapter; test-path globs; run commands -->
+- Lint/format command: {{LINT_COMMAND}}
 - Domain stores (one shared store per stack tag): {{DOMAINS}}
 - Backup path: {{BACKUP_PATH}}
 

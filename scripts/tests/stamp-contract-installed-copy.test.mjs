@@ -72,6 +72,7 @@ function renderTemplate(rel) {
     .replaceAll('{{PROJECT_NAME}}', 'installed-sibling')
     .replaceAll('{{STACK_TAGS}}', 'node')
     .replaceAll('{{TOOLCHAINS}}', 'node (**/*.mjs)')
+    .replaceAll('{{LINT_COMMAND}}', 'not recorded yet; add it here')
     .replaceAll('{{DOMAINS}}', '~/.sterling/domains/node/ — created lazily on first need (§2.3)')
     .replaceAll('{{BACKUP_PATH}}', '(opted out — recorded)')
     .replaceAll('{{CONVENTIONS_SECTION}}', '(grows only via architecture-altering decision records — nothing yet)');

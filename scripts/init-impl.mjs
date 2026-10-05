@@ -496,6 +496,12 @@ const agentsMdTemplateRaw = readFileSync(join(pluginRoot, 'templates', 'target-a
   .replaceAll('{{PROJECT_NAME}}', eff.projectName)
   .replaceAll('{{STACK_TAGS}}', eff.stackTags.join(', '))
   .replaceAll('{{TOOLCHAINS}}', baked.map((t) => `${t.adapter} (${t.path_globs.join(', ')})`).join('; '))
+  // Filled from a toolchain's `lint` and `format` run commands. No registered adapter declares
+  // either today, so the line asks the project to record its own; an existing AGENTS.md is
+  // never rewritten, so what the project writes there stays.
+  .replaceAll('{{LINT_COMMAND}}', baked
+    .flatMap((t) => [t.run_commands?.lint, t.run_commands?.format].filter(Boolean).map((cmd) => `\`${cmd}\` (${t.adapter})`))
+    .join('; ') || 'not recorded yet; add it here')
   .replaceAll('{{DOMAINS}}', eff.stackTags.length
     ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(', ') + ' — each created by init with a description of what belongs in it (§2.3)'
     : '(none — declare stack tags to mount domain stores)')
