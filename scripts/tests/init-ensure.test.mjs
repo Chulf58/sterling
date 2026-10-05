@@ -256,6 +256,26 @@ test('lint/format fact line: a toolchain whose recorded run commands include lin
   }
 });
 
+test('lint/format fact line: a recorded command with a newline or a backtick renders as one line under Project facts, with no new heading', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    const configPath = join(dir, '.sterling', 'config.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    Object.assign(config.toolchains[0].run_commands, { lint: 'npx eslint .\n\n## Forged\n  heading', format: 'echo `date`' });
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+    rmSync(join(dir, 'AGENTS.md'));
+    rmSync(join(dir, 'CLAUDE.md'));
+    const rerun = init(dir);
+    assert.equal(rerun.code, 0, rerun.stderr);
+    const agentsMd = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+    assert.ok(agentsMd.includes('\n- Lint/format command: `npx eslint . ## Forged heading` (node); echo `date` (node)\n'), 'whitespace collapses to single spaces; a command with a backtick is plain text');
+    assert.doesNotMatch(agentsMd, /^## Forged/m, 'a recorded command never opens a heading');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
 // Decision native-windows-launcher-retired-wsl2-only: init never writes
 // sterling-windows.bat, even with a resolvable Windows node; an existing one is
 // left on disk for the user to delete, and the report says so.

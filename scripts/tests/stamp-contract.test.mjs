@@ -668,7 +668,7 @@ test('the AGENTS.md template carries the lint/format fact line and the lint bull
   const bullet = template.split('\n').find((l) => l.startsWith(LINT_LEAD));
   assert.ok(bullet, 'the lint bullet is in the template');
   assert.match(bullet, /Red lint is a blocker, not a note\./);
-  assert.match(bullet, /If no lint\/format command is recorded, say so in the report\./);
+  assert.match(bullet, /If no lint\/format command is recorded, say so in the report, and once you know the command add a `Lint\/format command:` line under Project facts\./);
   assert.ok(!template.includes('- **Canonical naming:**'), 'the naming bullet is gone');
   assert.ok(!template.includes('exit code can read as a crash'), 'the exit-code bullet is gone');
 });

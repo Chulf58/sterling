@@ -500,7 +500,12 @@ const agentsMdTemplateRaw = readFileSync(join(pluginRoot, 'templates', 'target-a
   // either today, so the line asks the project to record its own; an existing AGENTS.md is
   // never rewritten, so what the project writes there stays.
   .replaceAll('{{LINT_COMMAND}}', baked
-    .flatMap((t) => [t.run_commands?.lint, t.run_commands?.format].filter(Boolean).map((cmd) => `\`${cmd}\` (${t.adapter})`))
+    .flatMap((t) => [t.run_commands?.lint, t.run_commands?.format].filter(Boolean).map((cmd) => {
+      // One line in a Markdown list: whitespace (newlines included) collapses so a recorded command
+      // cannot open a heading, and a backtick would end the code span early, so that command is plain text.
+      const oneLine = cmd.replace(/\s+/g, ' ').trim();
+      return `${oneLine.includes('`') ? oneLine : `\`${oneLine}\``} (${t.adapter})`;
+    }))
     .join('; ') || 'not recorded yet; add it here')
   .replaceAll('{{DOMAINS}}', eff.stackTags.length
     ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(', ') + ' — each created by init with a description of what belongs in it (§2.3)'
