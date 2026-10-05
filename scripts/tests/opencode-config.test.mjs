@@ -250,7 +250,7 @@ test('every opencode-only block in a raw-read command or skill opens with "On Op
 test('review-brief, grill and delegating-to-subagents: the OpenCode render names the native route and no codex MCP call; the Claude render keeps the codex MCP wording', async () => {
   const { renderClaudeText } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'agent-fences.mjs')).href);
   const expected = {
-    'review-brief': { opencode: ['sterling/reviewer', 'openai/gpt-5.6-sol#high', 'do not modify the worktree'], claude: 'call the `codex` MCP tool at `sandbox: read-only`' },
+    'review-brief': { opencode: ['sterling/reviewer', 'openai/gpt-6.1-sol#high', 'do not modify the worktree'], claude: 'call the `codex` MCP tool at `sandbox: read-only`' },
     grill: { opencode: ['sterling/reviewer', 'openai/gpt-6-astra#high'], claude: 'through the `codex` MCP tool — `model: gpt-6-astra`, `sandbox: read-only`' },
     'delegating-to-subagents': { opencode: ['sterling/implementor', 'openai/gpt-5.6-terra'], claude: '(`gpt-5.6-terra`, through the `codex` MCP tool)' },
   };
@@ -267,6 +267,14 @@ test('review-brief, grill and delegating-to-subagents: the OpenCode render names
     const unfenced = source.replace(/<!-- opencode-only -->\n[\s\S]*?<!-- \/opencode-only -->\n/g, '').replace(/^<!-- \/?claude-only -->\n/gm, '');
     assert.equal(claude, unfenced, `${rel}: the Claude render is the source without the fences`);
   }
+  // Board 52a82da8: Sol is gpt-6.1-sol on OpenCode only; Codex on a ChatGPT account refuses it.
+  const briefSource = readFileSync(join(repo, 'skills/review-brief/SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
+  const briefOpenCode = cfg.hostMapText(briefSource, '/r', 'skills/review-brief/SKILL.md');
+  assert.ok(briefOpenCode.includes('**Sol** (`gpt-6.1-sol`) for Claude-executed work'), 'review-brief: the OpenCode render names the new Sol id in the pairing line');
+  assert.ok(!briefOpenCode.includes('gpt-5.6-sol'), 'review-brief: the OpenCode render no longer names the old Sol id');
+  const briefClaude = renderClaudeText(briefSource, 'skills/review-brief/SKILL.md');
+  assert.ok(briefClaude.includes('Codex **Sol** (`gpt-5.6-sol`) for Claude-executed work'), 'review-brief: the Claude render still names gpt-5.6-sol');
+  assert.ok(!briefClaude.includes('gpt-6.1-sol'), 'review-brief: the Claude render does not name gpt-6.1-sol');
 });
 
 test('dashboard.md: the OpenCode render names the TUI plugin and no tmux or launcher; the Claude render is the unfenced text', async (t) => {
