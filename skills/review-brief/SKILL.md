@@ -17,7 +17,7 @@ The rubric is the body of the `reviewer` agent (`agent-templates/reviewer.md`, i
 <!-- /claude-only -->
 <!-- opencode-only -->
 On OpenCode, the Sol bullet reads as follows.
-- **Sol**: dispatch the `subagent` tool with agent `sterling/reviewer` and `model` set to `openai/gpt-5.6-sol#high`. The rubric is that agent's body, so do not paste it: the prompt is only the brief below. The agent's permissions deny edits, but shell stays available to it and there is no sandbox, so add "do not modify the worktree" to the brief. The `codex` MCP tool is the Claude Code route only and is not used here. If the openai provider is not logged in, say so and dispatch the Opus reviewer instead.
+- **Sol**: dispatch the `subagent` tool with agent `sterling/reviewer` and `model` set to `openai/gpt-5.6-sol#high`. The rubric is that agent's body, so do not paste it: the prompt is only the brief below. The agent's permissions deny edits, but shell stays available to it and no sandbox was shown, so add "do not modify the worktree" to the brief. The `codex` MCP tool is the Claude Code route only and is not used here. If the openai provider is not logged in, say so and dispatch the Opus reviewer instead.
 <!-- /opencode-only -->
 
 Riskiest means runtime/product code, config, permissions, credentials, lifecycle, migrations, generated catalogs, third-party patches; docs, probe scripts and generated projections go unreviewed.

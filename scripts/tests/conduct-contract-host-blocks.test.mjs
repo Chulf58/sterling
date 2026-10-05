@@ -131,7 +131,7 @@ test('every mapping the old phrase map carried has its OpenCode text in the rend
       'native-sparring': '`openai/gpt-6-astra#high` to spar',
       'native-implement': 'agent `sterling/implementor` with `model` `openai/gpt-5.6-terra` to implement',
       'native-no-sandbox': 'do not modify the worktree',
-      'native-model-standing': 'Setting `model` on these dispatches is a standing user instruction',
+      'native-model-pinned': 'The user pins which model runs these lanes (user-asked 2026-10-03',
       'codex-claude-code-only': 'The `codex` MCP tool is the Claude Code route only',
       'codex-ruling-2026-09-20': '*"Add that to all instruction files, that we use the codex mcp over whatever you were doing"*',
       'codex-ruling-2026-10-05': 'narrowed to Claude Code on 2026-10-05',
