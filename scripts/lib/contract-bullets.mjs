@@ -79,6 +79,12 @@ export const TARGET_LEADS = [
   // Both are NEW to every sibling, so both arrive through INSERT_AFTER; the plain-writing bullet
   // is AGENTS.md-homed, the de-ai-writing pass bullet is CLAUDE.md-homed.
   '- **Write plainly; no AI tells.**',
+  // 2026-10-05: lint and tests before a code change is reported done (user-ruled through the
+  // question form). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
+  // two bullets above it in the template, which were already tracked. It stays AFTER the
+  // plain-writing lead here: both anchor on "No false action claims", so a sibling missing
+  // both gets them back in template order.
+  '- **Lint and tests before done.**',
   '- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**',
   // 2026-10-01: board every user ask at intake (decision
   // every-user-ask-is-boarded-at-intake-with-slim-blocked-by). Both bullets already exist in
