@@ -5457,7 +5457,7 @@ function describeConfigDrift(r) {
   }
   return parts.join("; ");
 }
-var CONFIG_DRIFT_FIX = "node scripts/install-agents.mjs (--target <dir> for a sibling)";
+var CONFIG_DRIFT_FIX = 'node "<Sterling root>/bin/install-agents.mjs" (--target <dir> for a sibling)';
 var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
 var OPENCODE_PERMISSION_VALUES = ["allow", "ask", "deny"];
 function validateOpenCodeEntry(entry, where) {

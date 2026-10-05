@@ -45388,7 +45388,7 @@ var SchemaMigrationRequiredError = class extends Error {
    */
   db_path;
   constructor(found, supported, operation, dbPath) {
-    super(`Schema migration required: the store at '${dbPath}' is at schema version ${found}, but this build requires version ${supported}. The store is open READ-ONLY \u2014 '${operation}' and every other write refuses until the stable-identity migration has run. Run from the Sterling clone: node scripts/migrate-stores.mjs --db ${shellQuoteSingle(dbPath)} (decision stable-identity-design-v2; the runner takes a VACUUM INTO backup first, and bumps user_version last). Nothing was written.`);
+    super(`Schema migration required: the store at '${dbPath}' is at schema version ${found}, but this build requires version ${supported}. The store is open READ-ONLY \u2014 '${operation}' and every other write refuses until the stable-identity migration has run. Run: node "<Sterling root>/bin/migrate-stores.mjs" --db ${shellQuoteSingle(dbPath)} (decision stable-identity-design-v2; the runner takes a VACUUM INTO backup first, and bumps user_version last). Nothing was written.`);
     this.name = "SchemaMigrationRequiredError";
     this.found = found;
     this.supported = supported;
@@ -45701,7 +45701,7 @@ var SterlingStore = class _SterlingStore {
           if (legacyMode === "wal") {
             this.db.close();
             throw new JournalDemotionRefusedError(this.dbPath, legacyMode, {
-              message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, PRAGMA journal_mode='${legacyMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. Migrate the store first (\`node scripts/migrate-stores.mjs\`) or open it from a non-9p context \u2014 closing other connections will not help here.`
+              message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, PRAGMA journal_mode='${legacyMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. Migrate the store first (\`node "<Sterling root>/bin/migrate-stores.mjs"\`) or open it from a non-9p context \u2014 closing other connections will not help here.`
             });
           }
         }
@@ -49048,14 +49048,14 @@ function userScopeCodexServer({ env = process.env, home = homedir2(), readFile =
     raw = readFile(path, "utf8");
   } catch (err) {
     if (err?.code === "ENOENT") return { found: false, path };
-    return { found: false, path, unreadable: err?.code ?? err?.message ?? String(err) };
+    return { found: false, path, unreadable: err?.code ?? "unknown error" };
   }
   try {
     const servers = JSON.parse(raw)?.mcpServers;
     const found = Boolean(servers && typeof servers === "object" && Object.prototype.hasOwnProperty.call(servers, "codex"));
     return { found, path };
-  } catch (err) {
-    return { found: false, path, unreadable: `not valid JSON (${err?.message ?? err})` };
+  } catch {
+    return { found: false, path, unreadable: "not valid JSON" };
   }
 }
 
@@ -52582,7 +52582,7 @@ function readCurrentSessionId(projectRoot) {
 function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
   const reg = readRegister(projectRoot);
   if (reg.availability !== "ok")
-    return { availability: reg.availability, rows: [] };
+    return { availability: reg.availability, rows: [], foreignLive: 0 };
   const currentSession = readCurrentSessionId(projectRoot);
   const byAgent = /* @__PURE__ */ new Map();
   for (const e of reg.entries) {
@@ -52591,10 +52591,13 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
     byAgent.set(e.agent_id, list);
   }
   const rows = [];
+  let foreignLive = 0;
   for (const [agentId, rounds] of byAgent) {
     rounds.sort((a, b) => roundOf(b) - roundOf(a) || Date.parse(b.at) - Date.parse(a.at));
     const latest = rounds[0];
-    if (currentSession !== null && latest.session_id !== currentSession)
+    const live = !latest.ended && !latest.residue_reported_at;
+    const foreign = currentSession !== null && latest.session_id !== currentSession;
+    if (foreign && !live)
       continue;
     const startedAt = Date.parse(latest.at);
     if (Number.isNaN(startedAt))
@@ -52605,6 +52608,8 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
     if (endedAt !== null && (Number.isNaN(endedAt) || !resumable && now - endedAt > lingerMs))
       continue;
     const withId = rounds.find((r) => typeof r.tool_use_id === "string" && r.tool_use_id !== "");
+    if (foreign && endedAt === null)
+      foreignLive++;
     rows.push({
       agentId,
       sessionId: latest.session_id,
@@ -52622,7 +52627,7 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
       return aRun ? -1 : 1;
     return aRun ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0);
   });
-  return { availability: "ok", rows };
+  return { availability: "ok", rows, foreignLive };
 }
 function readDispatchDescription(projectRoot, toolUseId) {
   const dir = dispatchStateDir(projectRoot);
@@ -52717,7 +52722,7 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
   let avatars = { current: /* @__PURE__ */ new Map(), freed: [] };
   const descriptions = /* @__PURE__ */ new Map();
   let lastRead = -Infinity;
-  let source = { availability: "absent", rows: [] };
+  let source = { availability: "absent", rows: [], foreignLive: 0 };
   let models = /* @__PURE__ */ new Map();
   const sharedWindows = readSharedWindows();
   const transcripts = /* @__PURE__ */ new Map();
@@ -52807,7 +52812,7 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
         contextTokens: context.get(r.agentId)?.tokens ?? null,
         idleMs: r.endedAt === null ? null : Math.max(0, now - r.endedAt)
       }));
-      return { availability: source.availability, active: agents.filter((a) => a.status === "running").length, agents };
+      return { availability: source.availability, active: agents.filter((a) => a.status === "running").length, agents, foreignLive: source.foreignLive };
     }
   };
 }
@@ -52856,6 +52861,16 @@ function fadeToTile(hex, amount) {
   return `#${mix.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
 }
 function composeSubagentBlock(view, width, maxHeight, tick) {
+  const cards = composeCards(view, width, maxHeight, tick);
+  if (!view.foreignLive || cards.height + 1 > maxHeight)
+    return cards;
+  if (cards.height === 0 && width < 1)
+    return cards;
+  const put = { x: 0, y: cards.height, attr: { dim: true }, text: clip(FOREIGN_SESSION_NOTE, width) };
+  return { ...cards, height: cards.height + 1, puts: [...cards.puts, put] };
+}
+var FOREIGN_SESSION_NOTE = "session.json names another session; live agents from the other one are listed";
+function composeCards(view, width, maxHeight, tick) {
   const empty = { height: 0, puts: [], pixels: [] };
   if (maxHeight < 1 || width < 1)
     return empty;

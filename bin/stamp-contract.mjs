@@ -5907,7 +5907,7 @@ for (const p of projects) {
   const agentsMd = join6(repo, "AGENTS.md");
   const claudeMd = join6(repo, "CLAUDE.md");
   if (!existsSync3(agentsMd)) {
-    record({ project: p.name, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node scripts/init.mjs --target ${repo}` });
+    record({ project: p.name, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
     drift++;
     continue;
   }
