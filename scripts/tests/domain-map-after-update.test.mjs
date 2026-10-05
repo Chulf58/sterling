@@ -273,6 +273,7 @@ function writeOldContractFiles(dir) {
       .replaceAll('{{PROJECT_NAME}}', 'fixture')
       .replaceAll('{{STACK_TAGS}}', 'sterling')
       .replaceAll('{{TOOLCHAINS}}', 'node (**/*.mjs)')
+      .replaceAll('{{LINT_COMMAND}}', 'not recorded yet; add it here')
       .replaceAll('{{DOMAINS}}', '~/.sterling/domains/sterling/')
       .replaceAll('{{BACKUP_PATH}}', '(opted out — recorded)')
       .replaceAll('{{CONVENTIONS_SECTION}}', '(nothing yet)');

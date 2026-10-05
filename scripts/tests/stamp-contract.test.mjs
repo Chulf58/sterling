@@ -32,6 +32,7 @@ function renderTemplate(rel, projectName) {
     .replaceAll('{{PROJECT_NAME}}', projectName)
     .replaceAll('{{STACK_TAGS}}', 'node')
     .replaceAll('{{TOOLCHAINS}}', 'node (**/*.mjs)')
+    .replaceAll('{{LINT_COMMAND}}', 'not recorded yet; add it here')
     .replaceAll('{{DOMAINS}}', '~/.sterling/domains/node/ — created lazily on first need (§2.3)')
     .replaceAll('{{BACKUP_PATH}}', '(opted out — recorded)')
     .replaceAll('{{CONVENTIONS_SECTION}}', '(grows only via architecture-altering decision records — nothing yet)');
@@ -646,6 +647,94 @@ test('stamp-contract --apply-inserts: a missing tracked bullet is inserted too',
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
     assert.match(r.stdout, /inserted {2}- \*\*A domain needs a description\*\*/);
     assert.deepEqual(f.read(), f.complete);
+  } finally {
+    f.cleanup();
+  }
+});
+
+// ---- lint and tests before done (2026-10-05) ----
+// The bullet is new to every existing project, so it arrives through the insert path, after
+// "No false action claims". The same change removed two untracked bullets from the template;
+// stamp-contract never deletes, so a project that has them keeps them and hears nothing.
+
+const LINT_LEAD = '- **Lint and tests before done.**';
+const WRITE_PLAINLY_LEAD = '- **Write plainly; no AI tells.**';
+const OLD_NAMING = '- **Canonical naming:** one name per concept, from the registries; no dead terms.';
+const OLD_EXIT_CODE = "- **A toolchain-invoked process's exit code can read as a crash when the real cause is a missing required flag.** Some test/build runners exit with an unfamiliar non-zero code when a required headless/CI-mode flag is omitted, rather than failing informatively — check the runner's own headless/CI documentation before treating a red run as a real regression.";
+
+test('the AGENTS.md template carries the lint/format fact line and the lint bullet, and neither removed bullet', () => {
+  const template = readFileSync(join(root, 'templates', 'target-agents-md.md'), 'utf8');
+  assert.match(template, /^- Lint\/format command: \{\{LINT_COMMAND\}\}$/m);
+  const bullet = template.split('\n').find((l) => l.startsWith(LINT_LEAD));
+  assert.ok(bullet, 'the lint bullet is in the template');
+  assert.match(bullet, /Red lint is a blocker, not a note\./);
+  assert.match(bullet, /If no lint\/format command is recorded, say so in the report, and once you know the command add a `Lint\/format command:` line under Project facts\./);
+  assert.ok(!template.includes('- **Canonical naming:**'), 'the naming bullet is gone');
+  assert.ok(!template.includes('exit code can read as a crash'), 'the exit-code bullet is gone');
+});
+
+test('stamp-contract: a project that still has the two bullets removed from the template keeps them byte for byte, and no mode reports them', () => {
+  const withOld = (agents) => agents.replace(/^- \*\*Never ship:\*\*.*$/m, (line) => `${OLD_NAMING}\n${line}\n${OLD_EXIT_CODE}`);
+  const f = sectionFixture('old-bullets', withOld);
+  try {
+    const expected = { agents: withOld(f.complete.agents), claude: f.complete.claude };
+    assert.ok(expected.agents.includes(OLD_NAMING) && expected.agents.includes(OLD_EXIT_CODE), 'fixture sanity: both old bullets are in the file');
+    for (const args of [['--verbose'], ['--apply-inserts', '--verbose'], ['--apply', '--verbose']]) {
+      const r = runStampContract(f.regDb, args);
+      assert.equal(r.status, 0, `${args.join(' ')}: ${r.stdout}\n${r.stderr}`);
+      assert.doesNotMatch(r.stdout + r.stderr, /Canonical naming|toolchain-invoked|REFUSED|inserted|would_/, `${args.join(' ')} says nothing about them`);
+      assert.deepEqual(f.read(), expected, `${args.join(' ')} leaves both files as they were`);
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: a project without the lint bullet gets it once, after "No false action claims", and a second run writes nothing', () => {
+  const f = sectionFixture('lint-bullet', (agents) => dropBlock(agents, LINT_LEAD));
+  try {
+    const dry = runStampContract(f.regDb, []);
+    assert.equal(dry.status, 0, `${dry.stdout}\n${dry.stderr}`);
+    assert.match(dry.stdout, /would_insert {2}- \*\*Lint and tests before done\.\*\*/);
+    assert.ok(!f.read().agents.includes(LINT_LEAD), 'a dry run writes nothing');
+
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /inserted {2}- \*\*Lint and tests before done\.\*\*/);
+    assert.deepEqual(f.read(), f.complete, 'the bullet is in its template position and nothing else changed');
+
+    const again = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+    assert.ok(!/inserted/.test(again.stdout), `nothing left to insert:\n${again.stdout}`);
+    assert.deepEqual(f.read(), f.complete, 'a second run writes nothing');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: a project missing both the plain-writing and the lint bullet gets them back in template order', () => {
+  const f = sectionFixture('lint-and-plain', (agents) => dropBlock(dropBlock(agents, LINT_LEAD), WRITE_PLAINLY_LEAD));
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.deepEqual(f.read(), f.complete);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: a hand-tuned "No false action claims" bullet is not an anchor, so the lint bullet falls back to "Anti-speculation"', () => {
+  const tuned = '- **No false action claims:** our own wording.';
+  const f = sectionFixture('lint-fallback', (agents) => dropBlock(agents, LINT_LEAD).replace(/^- \*\*No false action claims:\*\*.*$/m, tuned));
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 2, 'the hand-tuned bullet is still a refusal');
+    assert.match(r.stdout, /HAND_TUNED_REFUSED {2}- \*\*No false action claims:\*\*/);
+    assert.match(r.stdout, /inserted {2}- \*\*Lint and tests before done\.\*\*/);
+    const lines = f.read().agents.split('\n');
+    const at = lines.findIndex((l) => l.startsWith(LINT_LEAD));
+    assert.ok(lines[at - 1].startsWith('- **Anti-speculation:**'), 'inserted right after the fallback anchor');
+    assert.ok(lines.includes(tuned), 'the hand-tuned bullet is untouched');
   } finally {
     f.cleanup();
   }

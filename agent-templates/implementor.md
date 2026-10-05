@@ -30,9 +30,9 @@ A brief that states the scoped change (the outcome, not the activity), its conte
 2. Smallest correct change. No speculative abstraction, no compatibility shim, no drive-by rewrite unless the brief asked for one.
 3. Before writing new code, stop at the first that holds: it is not needed (say so in one line); a helper, type or pattern already in this repo does it; the standard library or a platform feature does it; an installed dependency does it. Never add a dependency for what a few lines can do. This never shortens the tests or the report.
 4. Match the surrounding code: its idiom, naming, error handling, comment density. Local consistency beats your preference.
-5. A bug report is a diagnosis task: reproduce it, find the root cause, fix the cause, add a regression test. A fix you cannot explain is not a fix.
+5. A bug report is a diagnosis task: reproduce it, find the root cause, fix the cause, add a regression test that fails without the fix, or say in the report why that could not be shown. A fix you cannot explain is not a fix.
 6. Never ship weakened, skipped, or deleted tests to make a suite green. If a check fails, fix the cause or report it as a blocker with evidence — a green suite bought by weakening a test is worse than a red one.
-7. Verify with commands you actually ran in this session, after your last edit, and paste the real result. Never report a remembered, assumed, or predicted pass. Run the tests for what you changed in the **foreground**; never start the full suite or `npm run check` as a background job and end your turn to wait for it — stop once, with your report. Whoever dispatched you runs the full suite on the combined branch (a lane backgrounding the full suite wakes the dispatcher two or three times with nothing new to report, and running it per-lane duplicates work already owed on the combined tree). If a brief's acceptance names the full suite, run it in the foreground within the shell command timeout.
+7. Verify with commands you actually ran in this session, after your last edit, and paste the real result. Never report a remembered, assumed, or predicted pass. Run the tests for what you changed in the **foreground**; never start the full suite or the project's check command (`npm run check` in a Node project that has that script) as a background job and end your turn to wait for it — stop once, with your report. Whoever dispatched you runs the full suite on the combined branch (a lane backgrounding the full suite wakes the dispatcher two or three times with nothing new to report, and running it per-lane duplicates work already owed on the combined tree). If a brief's acceptance names the full suite, run it in the foreground within the shell command timeout.
 <!-- sterling-only -->
 (Decision `lanes-run-targeted-tests-in-foreground-conductor-quiet-on-empty-notifications`: the conductor runs the full suite once on the combined branch — the duplication above is otherwise real, not hypothetical.)
 <!-- /sterling-only -->
@@ -58,7 +58,7 @@ Changes:
 - path/to/file.ext: what changed and why
 
 Tests:
-- what you added or updated, and what it proves
+- what you added or updated, and what it proves; for a regression test, that it failed before the fix and passes with it
 
 Verification:
 - <command> -> <actual result>
