@@ -13,6 +13,20 @@ export const TILE_COLS = SPRITE_COLS + 2 * TILE_PAD;
 /** Slightly lighter than a dark panel, so the portrait reads as a tile without a drawn frame. */
 export const TILE_BG = '#2a2e37';
 export const FRAME_COUNT = 4;
+/** A non-running agent's portrait is blended this far toward the tile colour. */
+export const DONE_FADE = 0.55;
+
+function rgb(hex: string): [number, number, number] {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** `hex` blended toward the tile colour by `amount` (0 keeps it, 1 is the tile colour). */
+export function fadeToTile(hex: string, amount: number): string {
+  const [a, b] = [rgb(hex), rgb(TILE_BG)];
+  const mix = a.map((v, i) => Math.round(v + (b[i]! - v) * amount));
+  return `#${mix.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+}
 
 /** One terminal cell: a quadrant block character (or space) drawn in fg over bg. A transparent
  *  pixel yields no colour, so an unset bg shows the host (or the tile) behind it. */

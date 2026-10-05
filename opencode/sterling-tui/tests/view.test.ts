@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { SterlingStore } from '@sterling/store';
 import { initialUi } from '@sterling/tui/dist/state.js';
-import { mulberry32, POOL_SIZE, SEQUENCE, TILE_BG } from '@sterling/tui/dist/avatars/index.js';
+import { mulberry32, POOL_SIZE, SEQUENCE, TILE_BG, DONE_FADE, fadeToTile } from '@sterling/tui/dist/avatars/index.js';
 import * as view from '../view.ts';
 import { SIDEBAR_WIDTH, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, readSubagents, sidebarLines, bodyLinesFor, emptyAvatars, portraitLines, stepAvatars, subagentRowLines, subagentSpanLines, PORTRAIT_HEIGHT, PORTRAIT_WIDTH, type SpanLine, type SubagentRow, type SidebarSummary, type SubagentSource } from '../view.ts';
 
@@ -190,31 +190,32 @@ test('portrait: a 6x3 quadrant-block sprite on an 8x3 tinted tile, no drawn fram
   }
 });
 
-test('portrait: idle is the same sprite with every colour desaturated and darkened; active is unchanged', () => {
+test('portrait: idle fades every portrait colour with the shared fadeToTile, the tile stays TILE_BG; active is unchanged', () => {
   const active = portraitLines(5, 0, 'active');
   const idle = portraitLines(5, 0, 'idle');
   assert.deepEqual(active, portraitLines(5, 0), 'active (and the default) draws the sprite as before');
   assert.deepEqual(idle.map(plain), active.map(plain), 'same glyphs, only the colours change');
-  const lum = (hex: string) => 0.299 * parseInt(hex.slice(1, 3), 16) + 0.587 * parseInt(hex.slice(3, 5), 16) + 0.114 * parseInt(hex.slice(5, 7), 16);
-  const channels = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
-  const colours = (lines: SpanLine[]) => lines.flat().flatMap((sp) => [sp.fg, sp.bg]).filter((c): c is string => c !== undefined);
-  const dimmed = colours(idle);
-  assert.ok(dimmed.length > 0);
-  assert.ok(dimmed.every((c) => /^#[0-9a-f]{6}$/.test(c)));
-  const spread = (hex: string) => Math.max(...channels(hex)) - Math.min(...channels(hex));
-  const bright = colours(active);
-  assert.ok(Math.max(...dimmed.map(spread)) < Math.max(...bright.map(spread)), 'idle colours are less saturated');
-  assert.ok(Math.max(...dimmed.map(lum)) < Math.max(...bright.map(lum)), 'idle colours are darker');
-  assert.notEqual(idle[0]![0]!.bg, TILE_BG, 'the tile itself is dimmed too');
+  // one entry per character, so run merging cannot hide a difference
+  const perChar = (lines: SpanLine[]) => lines.map((l) => l.flatMap((sp) => [...sp.text].map(() => ({ fg: sp.fg, bg: sp.bg }))));
+  const faded = (c: string | undefined) => (c === undefined ? undefined : fadeToTile(c, DONE_FADE));
+  assert.deepEqual(perChar(idle), perChar(active).map((l) => l.map((c) => ({ fg: faded(c.fg), bg: faded(c.bg) }))), 'the Claude dashboard fade, cell for cell');
+  assert.ok(perChar(active).flat().some((c) => c.fg !== undefined && faded(c.fg) !== c.fg), 'the fade changes at least one portrait colour');
+  for (const l of idle) {
+    assert.equal(l[0]!.bg, TILE_BG, 'the tile padding keeps TILE_BG');
+    assert.equal(l.at(-1)!.bg, TILE_BG);
+  }
 });
 
-test('subagent row: an idle row draws its portrait dimmed and an active row in full colour', () => {
+test('subagent row: an idle row draws its portrait faded and an active row in full colour', () => {
   const active = subagentRowLines(row({ status: 'active' }), 7, 0, 60);
   const idle = subagentRowLines(row({ status: 'idle' }), 7, 0, 60);
-  const tile = (lines: SpanLine[]) => lines.map((l) => l.slice(0, 1));
-  assert.deepEqual(active.map((l) => l[0]), portraitLines(7, 0, 'active').map((l) => l[0]));
-  assert.deepEqual(idle.map((l) => l[0]), portraitLines(7, 0, 'idle').map((l) => l[0]));
-  assert.notDeepEqual(tile(idle), tile(active));
+  const tile = (lines: SpanLine[], status: 'active' | 'idle') => {
+    const portrait = portraitLines(7, 0, status);
+    return lines.map((l, i) => l.slice(0, portrait[i]!.length));
+  };
+  assert.deepEqual(tile(active, 'active'), portraitLines(7, 0, 'active'));
+  assert.deepEqual(tile(idle, 'idle'), portraitLines(7, 0, 'idle'));
+  assert.notDeepEqual(portraitLines(7, 0, 'idle'), portraitLines(7, 0, 'active'));
 });
 
 test('subagent row: tile left with title, `status · ctx · model` and description on its right, and no avatar number', () => {
