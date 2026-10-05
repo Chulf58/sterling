@@ -91,6 +91,29 @@ test('the OpenCode conductor names no Claude-only mechanism and carries the Open
   assert.match(frontmatter(content), /^mode: primary$/m);
 });
 
+// GitHub issue #24 (user-ruled 2026-10-05 through the question form): on OpenCode the Sol, Astra
+// and Terra lanes are native `subagent` dispatches on openai models; the `codex` MCP tool is the
+// Claude Code route only. The forms are the ones measured on OpenCode 2.0.22.
+test('the OpenCode conductor routes Sol, Astra and Terra through native subagent dispatches; the Claude conductor keeps the codex MCP route', () => {
+  const opencode = fullRender('conductor');
+  for (const native of ['sterling/reviewer', 'openai/gpt-5.6-sol#high', 'openai/gpt-6-astra#high', 'sterling/implementor', 'openai/gpt-5.6-terra', 'do not modify the worktree', 'user-ruled 2026-10-05']) {
+    assert.ok(opencode.includes(native), `OpenCode conductor lacks ${JSON.stringify(native)}`);
+  }
+  for (const codexRoute of ['dispatched through the `codex` MCP tool', 'as on Claude Code', 'through the `codex` MCP tool, never a shelled `codex exec`', 'through the `review-brief` skill', 'sandbox: read-only']) {
+    assert.ok(!opencode.includes(codexRoute), `OpenCode conductor still carries ${JSON.stringify(codexRoute)}`);
+  }
+  assert.match(opencode, /The `codex` MCP tool is the Claude Code route only/);
+  assert.match(opencode, /openai provider is not logged in/);
+
+  const claude = renderClaudeText(read('agent-templates/conductor.md'), 'conductor.md');
+  for (const kept of ['dispatched through the `codex` MCP tool at `sandbox: read-only`', 'through the `codex` MCP tool, never a shelled `codex exec`', 'the Sol call is handed the same body through the `review-brief` skill']) {
+    assert.ok(claude.includes(kept), `Claude conductor lost ${JSON.stringify(kept)}`);
+  }
+  for (const openCodeOnly of ['openai/', 'sterling/reviewer', 'sterling/implementor']) {
+    assert.ok(!claude.includes(openCodeOnly), `Claude conductor carries the OpenCode route ${JSON.stringify(openCodeOnly)}`);
+  }
+});
+
 test('roster: all six roles render for OpenCode, the conductor primary and the rest subagents', () => {
   assert.deepEqual([...ROSTER].sort(), ['conductor', 'implementor', 'librarian', 'researcher', 'reviewer', 'scout']);
   const home = mkdtempSync(join(tmpdir(), 'oc-host-home-'));
