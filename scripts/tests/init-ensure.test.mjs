@@ -214,6 +214,11 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     assert.doesNotMatch(claudeMd, /<!-- \/?(claude|opencode)-only -->|READY FOR NEW SESSION|\{\{STERLING_ROOT\}\}/);
     assert.match(agentsMd, /^# AGENTS\.md — ensure-target\n/, 'AGENTS.md renders the project name');
     assert.ok(agentsMd.includes('Stack tags (= domain mount manifest): node, sterling'), 'AGENTS.md carries the project facts');
+    // No registered adapter declares a lint or format command, so the fact line asks for one.
+    assert.match(agentsMd, /^- Lint\/format command: not recorded yet; add it here$/m, 'AGENTS.md has a place for the lint/format command');
+    assert.match(agentsMd, /^- \*\*Lint and tests before done\.\*\* .*Red lint is a blocker, not a note\./m, 'AGENTS.md carries the lint rule');
+    assert.ok(!agentsMd.includes('- **Canonical naming:**'), 'the registries naming bullet is not rendered');
+    assert.ok(!agentsMd.includes('exit code can read as a crash'), 'the test-runner exit-code bullet is not rendered');
     assert.ok(!claudeMd.includes('{{'), 'no unresolved placeholder survives in CLAUDE.md');
     assert.ok(!agentsMd.includes('{{'), 'no unresolved placeholder survives in AGENTS.md');
     assert.match(r.stdout, /RESTART REQUIRED/, 'agents installed → restart instruction');
@@ -221,6 +226,31 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     assert.equal(config.project_name, 'ensure-target', 'project name recorded for flagless re-runs');
     assert.ok(config.backup_path.endsWith('/backups'), 'backup path recorded absolute, forward slashes');
     assert.deepEqual(config.stack_tags, ['node', 'sterling'], 'fresh init gets the universal sterling domain on top of declared tags (decision 47be4388)'); // not-a-citation: fixture id
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('lint/format fact line: a toolchain whose recorded run commands include lint and format renders them; an existing AGENTS.md is left as the project wrote it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    const configPath = join(dir, '.sterling', 'config.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    Object.assign(config.toolchains[0].run_commands, { lint: 'npx eslint .', format: 'npx prettier --check .' });
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+    const kept = readFileSync(join(dir, 'AGENTS.md'), 'utf8').replace('not recorded yet; add it here', '`ruff check .`');
+    writeFileSync(join(dir, 'AGENTS.md'), kept);
+    assert.equal(init(dir).code, 0);
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), kept, 'a command the project recorded by hand survives a re-run');
+
+    // Both files go: a CLAUDE.md with no AGENTS.md beside it is the migration case.
+    rmSync(join(dir, 'AGENTS.md'));
+    rmSync(join(dir, 'CLAUDE.md'));
+    const rerun = init(dir);
+    assert.equal(rerun.code, 0, rerun.stderr);
+    assert.match(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), /^- Lint\/format command: `npx eslint \.` \(node\); `npx prettier --check \.` \(node\)$/m);
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
