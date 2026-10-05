@@ -137,6 +137,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'release it with `plan-lock.mjs --release --reason "<why>"` only when',
     after: 'release it with `node "<Sterling root>/bin/plan-lock.mjs" --release --reason "<why>"` only when',
   },
+  {
+    commit: 'board b43ddc10',
+    date: '2026-10-05',
+    reason: 'the conductor owns the project\'s own full test suite and check command; `npm run check` is only what that is in a Node project with the script, because the template installs into projects of any stack (user-ruled, "Project lint and check commands")',
+    before: 'You own the full suite and `npm run check`, run once,',
+    after: 'You own the project\'s own full test suite and check command (`npm run check` in a Node project that has that script), run once,',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
@@ -216,6 +223,27 @@ export const IMPLEMENTOR_WORDING_EDITS = [
     reason: 'new rubric item 3: stop at the first that holds before writing new code (not needed, repo helper, standard library, installed dependency); never add a dependency for a few lines; never shortens the tests or the report (user-ruled, board efd77feb, finding a7138a10)',
     before: '\n3. Match the surrounding code',
     after: '\n3. Before writing new code, stop at the first that holds: it is not needed (say so in one line); a helper, type or pattern already in this repo does it; the standard library or a platform feature does it; an installed dependency does it. Never add a dependency for what a few lines can do. This never shortens the tests or the report.\n4. Match the surrounding code',
+  },
+  {
+    commit: 'board b43ddc10',
+    date: '2026-10-05',
+    reason: 'the bug-fix rule asks for a regression test that fails without the fix, or a report that says why that could not be shown (user-ruled, "Regression test must fail first")',
+    before: 'fix the cause, add a regression test. A fix',
+    after: 'fix the cause, add a regression test that fails without the fix, or say in the report why that could not be shown. A fix',
+  },
+  {
+    commit: 'board b43ddc10',
+    date: '2026-10-05',
+    reason: 'the report\'s Tests slot asks for the red-then-green evidence of a regression test (user-ruled, "Regression test must fail first")',
+    before: '- what you added or updated, and what it proves\n',
+    after: '- what you added or updated, and what it proves; for a regression test, that it failed before the fix and passes with it\n',
+  },
+  {
+    commit: 'board b43ddc10',
+    date: '2026-10-05',
+    reason: 'the background-job rule names the project\'s own check command; `npm run check` is only what that is in a Node project with the script, because the template installs into projects of any stack (user-ruled, "Project lint and check commands")',
+    before: 'never start the full suite or `npm run check` as a background job',
+    after: 'never start the full suite or the project\'s check command (`npm run check` in a Node project that has that script) as a background job',
   },
 ];
 
