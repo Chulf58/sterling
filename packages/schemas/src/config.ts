@@ -293,6 +293,14 @@ export const configSchema = z.object({
   maintenance_worker: z
     .object({
       enabled: z.boolean().default(true),
+      // The OpenCode runner's model as provider/model (decision
+      // opencode-maintenance-worker-refuses-without-a-configured-model): the
+      // worker REFUSES to start without it, so config_set must not call it
+      // unread (GitHub issue 23). No default, deliberately. Reader:
+      // scripts/hooks/lib/maintenance-worker.mjs opencodeModelOf(). PERMISSIVE
+      // like `mode`: a non-string is preserved raw and refused loudly by that
+      // reader, never thrown on here (a throw would fail the MCP server's boot).
+      opencode_model: z.unknown().optional(),
     })
     .default({}),
   // Board 8390f8fa: a registry-style feature_article can outgrow its own

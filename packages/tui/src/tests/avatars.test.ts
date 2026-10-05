@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assign, mulberry32, cells, quadrantCell, QUADRANTS, tileCells, frameAt, phaseFor, POOL_SIZE, SPRITE_ROWS, SPRITE_COLS, TILE_BG, TILE_COLS } from '../avatars/index.js';
+import { assign, mulberry32, cells, quadrantCell, QUADRANTS, tileCells, frameAt, phaseFor, POOL_SIZE, SPRITE_ROWS, SPRITE_COLS, TILE_BG, TILE_COLS, DONE_FADE, fadeToTile } from '../avatars/index.js';
 import { ANIMATION_MS, SEQUENCE } from '../avatars/sprite.js';
 import pool from '../avatars/pool.json' with { type: 'json' };
 
@@ -262,4 +262,12 @@ test('frameAt: index-adjacent avatars are never mid-move on the same tick', () =
       assert.equal(both, false, `avatars ${a} and ${a + 1} both pose at tick ${t}`);
     }
   }
+});
+
+test('fadeToTile: 0 keeps the colour, 1 is the tile colour, DONE_FADE sits between; the tile colour is a fixed point', () => {
+  assert.equal(fadeToTile('#ff8000', 0), '#ff8000');
+  assert.equal(fadeToTile('#ff8000', 1), TILE_BG);
+  assert.equal(fadeToTile(TILE_BG, DONE_FADE), TILE_BG);
+  assert.equal(DONE_FADE, 0.55);
+  assert.equal(fadeToTile('#ff0000', DONE_FADE), '#' + [Math.round(255 + (0x2a - 255) * 0.55), Math.round(0x2e * 0.55), Math.round(0x37 * 0.55)].map((v) => v.toString(16).padStart(2, '0')).join(''));
 });

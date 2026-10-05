@@ -427,6 +427,17 @@ test('unreadConfigKeys: top-level and NESTED keys the schema strips are named by
   assert.deepEqual(unreadConfigKeys([1, 2]), []);
 });
 
+test('unreadConfigKeys: maintenance_worker.opencode_model is read (the OpenCode worker refuses to start without it) and survives parseConfig', () => {
+  assert.deepEqual(unreadConfigKeys({ maintenance_worker: { enabled: true, opencode_model: 'opencode/some-model' } }), []);
+  assert.deepEqual(
+    unreadConfigKeys({ maintenance_worker: { opencode_model: 'x', daily_budget_usd: 5 } }).map((k) => k.path),
+    ['maintenance_worker.daily_budget_usd'],
+    'a key nothing reads still warns',
+  );
+  assert.equal(parseConfig({ maintenance_worker: { opencode_model: 'opencode/some-model' } }).maintenance_worker.opencode_model, 'opencode/some-model', 'a parsed config keeps the key the worker reads');
+  assert.equal(parseConfig({ maintenance_worker: { opencode_model: 7 } }).maintenance_worker.opencode_model, 7, 'a malformed value is preserved raw, so the worker (not the MCP boot) refuses it loudly');
+});
+
 test('unreadConfigKeys: the Dome Farmer pre-rename models keys are each named, with the known renames', () => {
   const me = { model: 'm', effort: 'low' };
   const keys = unreadConfigKeys({ models: { implementor: me, coder: me, coder_hard: me, explorer: me, test_writer: me, reviewers: me, implementation_architect: me, debugger: me } });

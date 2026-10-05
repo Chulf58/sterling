@@ -1313,3 +1313,18 @@ test("CS-29: models.coder (a known rename) warns AND names its rename target —
 // for every dead key, renamed or not) → the `/renamed to models\.implementor/`
 // assertion fires alone, while CS-27's arm (which asserts the ABSENCE of a
 // rename clause) stays green — proving the two arms are independent.
+
+test('CS-30: maintenance_worker.opencode_model (read by the OpenCode maintenance worker) writes with no warnings; a key nothing reads still warns', () => {
+  const h = harness();
+  try {
+    const call = handler(h.tools);
+    const live = call({ path: 'maintenance_worker.opencode_model', value: 'opencode/some-model' }) as Receipt & { warnings?: string[] };
+    assert.equal(live.value, 'opencode/some-model', 'the write lands');
+    assert.equal(live.warnings, undefined, 'the key the worker requires is read, so it carries no unread-key warning (GitHub issue 23)');
+    const dead = call({ path: 'maintenance_worker.no_such_key', value: 1 }) as Receipt & { warnings?: string[] };
+    assert.equal(dead.warnings?.length, 1, 'a sibling key nothing reads still warns');
+    assert.match(dead.warnings?.[0] ?? '', /maintenance_worker\.no_such_key is not read by Sterling/);
+  } finally {
+    h.cleanup();
+  }
+});
