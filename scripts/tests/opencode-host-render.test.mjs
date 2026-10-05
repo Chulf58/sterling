@@ -114,6 +114,41 @@ test('the OpenCode conductor routes Sol, Astra and Terra through native subagent
   }
 });
 
+// Board b43ddc10 (user-ruled 2026-10-05 through the question form, "Reviewer checks reuse",
+// "Regression test must fail first", "Project lint and check commands"). The templates install
+// into projects of any stack, so each rule is asserted on both hosts' renders.
+const bothRenders = (name) => ({
+  claude: renderClaudeText(read(`agent-templates/${name}.md`), `${name}.md`),
+  opencode: fullRender(name),
+});
+
+test('the reviewer flags a new dependency, a duplicate helper and reuse that drops a requirement, on both hosts', () => {
+  for (const [host, content] of Object.entries(bothRenders('reviewer'))) {
+    assert.match(content, /a new dependency, or a new helper that duplicates code already in the repo, the standard library or the platform/, host);
+    assert.match(content, /Reuse must fit the requirement, not just resemble it/, host);
+    assert.match(content, /reuse that drops a requirement is a finding/, host);
+    const medium = content.match(/`MEDIUM`:[^`]*/)[0];
+    assert.match(medium, /a new dependency or a duplicate helper/, `${host}: the severity list ranks it`);
+  }
+});
+
+test('the implementor bug-fix rule asks for a regression test that fails without the fix, and the report shows it, on both hosts', () => {
+  for (const [host, content] of Object.entries(bothRenders('implementor'))) {
+    const rule = content.match(/^\d+\. A bug report is a diagnosis task:.*$/m)?.[0] ?? '';
+    assert.match(rule, /add a regression test that fails without the fix, or say in the report why that could not be shown/, host);
+    const testsSlot = content.match(/^Tests:\n(- .*)$/m)?.[1] ?? '';
+    assert.match(testsSlot, /failed before the fix and passes with it/, `${host}: the report format asks for the red-then-green evidence`);
+  }
+});
+
+test('the conductor owns the project\'s own test and check commands; `npm run check` is named only as the Node case, on both hosts', () => {
+  for (const [host, content] of Object.entries(bothRenders('conductor'))) {
+    assert.doesNotMatch(content, /You own the full suite and `npm run check`/, host);
+    assert.ok(content.includes("You own the project's own full test suite and check command (`npm run check` in a Node project that has that script), run once, on the combined branch"), host);
+    assert.equal(content.split('`npm run check`').length - 1, 1, `${host}: \`npm run check\` appears once, inside the conditional`);
+  }
+});
+
 test('roster: all six roles render for OpenCode, the conductor primary and the rest subagents', () => {
   assert.deepEqual([...ROSTER].sort(), ['conductor', 'implementor', 'librarian', 'researcher', 'reviewer', 'scout']);
   const home = mkdtempSync(join(tmpdir(), 'oc-host-home-'));
