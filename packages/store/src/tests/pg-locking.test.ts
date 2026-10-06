@@ -206,3 +206,43 @@ try {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('four processes opening one fresh store at the same moment all succeed: the table setup is serialized (board e05f5127)', { skip: PG_SKIP }, async () => {
+  ensurePgLayout(adminBridge(), meta);
+  const schema = `${prefix}_${++counter}`;
+  // Registered and empty: the first open creates the tables, which is the step that raced.
+  createPgStore(adminBridge(), { kind: 'test', name: schema, schema, metaSchema: meta });
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-pg-openers-'));
+  try {
+    const script = join(dir, 'opener.mjs');
+    const index = new URL('../index.js', import.meta.url).href;
+    writeFileSync(
+      script,
+      `import { SterlingStore, PgBridge, PgDriver, readPgCredentials } from ${JSON.stringify(index)};
+const [schema, meta, at] = process.argv.slice(2);
+const bridge = new PgBridge(readPgCredentials());
+// Every process has its connection before the start time, so the opens overlap.
+const wait = Number(at) - Date.now();
+if (wait > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
+const store = new SterlingStore('/tmp/opener.pg', { driver: new PgDriver(bridge, { schema, metaSchema: meta }) });
+store.close();
+bridge.close();
+console.log('opened');
+`,
+    );
+    const at = String(Date.now() + 6000);
+    const open = () =>
+      new Promise<{ code: number | null; out: string }>((resolve) => {
+        const child = spawn(process.execPath, [script, schema, meta, at], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let out = '';
+        child.stdout.on('data', (d) => (out += d));
+        child.stderr.on('data', (d) => (out += d));
+        child.on('exit', (code) => resolve({ code, out }));
+      });
+    const results = await Promise.all([open(), open(), open(), open()]);
+    for (const [i, r] of results.entries()) assert.equal(r.code, 0, `opener ${i}: ${r.out}`);
+    assert.equal(adminBridge().query('SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = $2', [schema, 'records']).rows.length, 1, 'the tables exist');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

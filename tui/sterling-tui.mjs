@@ -45600,9 +45600,27 @@ var PgDriver = class {
   /** Nothing to prepare: SterlingStore refuses every write on an older store itself, and opening writes nothing here. */
   prepareReadOnly() {
   }
+  /**
+   * Creates the store's tables when missing. Postgres does not make concurrent
+   * CREATE ... IF NOT EXISTS safe: two processes opening one fresh store at once
+   * failed with 23505 on pg_type_typname_nsp_index (board e05f5127). So the DDL
+   * runs in one transaction under the same locks a write takes (the global lock
+   * shared, then this store's lock): concurrent opens take turns, and the later
+   * ones find every object already there. A lock that cannot be had within
+   * lock_timeout throws PgLockTimeoutError, as a write would.
+   */
   prepareWritable(_isFresh) {
     this.assertOpen();
-    this.run(storeDdl(this.s), void 0, `creating the tables of store '${this.schema}'`);
+    const where = `creating the tables of store '${this.schema}'`;
+    this.bridge.claimTransaction(this, `table setup on store '${this.schema}'`);
+    try {
+      this.bridge.query(`BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)}); ${storeDdl(this.s)};
+COMMIT`);
+    } catch (e) {
+      abandon(this.bridge, this);
+      mapPgError(e, where);
+    }
+    this.bridge.releaseTransaction(this);
   }
   /**
    * 'postgres'. SQLite's answer names its rollback-journal mode, which the
