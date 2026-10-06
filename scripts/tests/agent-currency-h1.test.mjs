@@ -902,3 +902,222 @@ test('F11: a hand-edited agent that is LEVEL with its template is worded differe
 // for "a header sync would REPAIR" needs the repair rule itself, which is
 // implementation I cannot read; guessing at it would produce an arm that pins my
 // guess rather than the fix.
+
+// #############################################################################
+// APPENDED 2026-10-06: CLONE AGENT SYNC (user-ruled 2026-10-06 through the question
+// form, "Sync at session start (Recommended)", current project only).
+//
+// Every arm above runs against a plugin root with no `.git`, which the installed-copy
+// predicate reads as an INSTALLED COPY. Those arms are unchanged: an installed copy
+// syncs by version marker (scripts/lib/post-update-sync.mjs) and this check only warns.
+// The arms below give the fixture a `.git`, so it is a CLONE (a --plugin-dir launch),
+// where plugin.json's version does not move between template edits and the hash
+// compare of this check is the only signal. Written before the implementation; the
+// installed-copy arm at the end is the control that passes for the opposite reason.
+//
+// The clone's sync-agents.mjs is a fixture entry that calls the REAL syncAgents
+// (scripts/lib/agent-distribution.mjs) and prints the lines the real entry prints,
+// so the refusal of a locally modified agent is the shipped rule, not a stand-in.
+// #############################################################################
+
+import { existsSync } from 'node:fs';
+
+const DIST_LIB = pathToFileURL(join(root, 'scripts', 'lib', 'agent-distribution.mjs')).href;
+const CLONE_VERSION = '1.2.3';
+
+/** Turns a makeClone() fixture into a git clone (or, with git:false, an installed copy) that can run the two sync steps. */
+function makeSyncable(clone, { git = true, version = CLONE_VERSION } = {}) {
+  if (git) mkdirSync(join(clone.dir, '.git'));
+  mkdirSync(join(clone.dir, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(clone.dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version }));
+  const scripts = join(clone.dir, 'scripts');
+  mkdirSync(scripts, { recursive: true });
+  writeFileSync(
+    join(scripts, 'sync-agents.mjs'),
+    `import { appendFileSync } from 'node:fs';\n` +
+      `import { join } from 'node:path';\n` +
+      `import { syncAgents, agentChangesRequireRestart } from ${JSON.stringify(DIST_LIB)};\n` +
+      `const target = process.argv[process.argv.indexOf('--target') + 1];\n` +
+      `appendFileSync(process.env.FIXTURE_LOG, 'sync-agents ' + process.argv.slice(2).join(' ') + '\\n');\n` +
+      `const { report, restartInstruction } = syncAgents({ templatesDir: ${JSON.stringify(clone.templatesDir)}, registryPath: ${JSON.stringify(clone.registryPath)}, targetAgentsDir: join(target, '.claude', 'agents'), pluginVersion: ${JSON.stringify(version)}, now: '2026-10-06T00:00:00.000Z', vars: ${JSON.stringify(clone.vars)} });\n` +
+      `let refused = 0;\n` +
+      `for (const r of report) {\n  console.log(r.status + ': ' + r.name);\n  if (r.instruction) {\n    if (r.refused) refused += 1;\n    console.error('\\n' + r.instruction + '\\n');\n  }\n}\n` +
+      `if (agentChangesRequireRestart(report)) console.log('\\n' + restartInstruction);\n` +
+      `process.exit(refused > 0 ? 2 : 0);\n`
+  );
+  writeFileSync(
+    join(scripts, 'stamp-contract.mjs'),
+    `import { appendFileSync } from 'node:fs';\n` +
+      `appendFileSync(process.env.FIXTURE_LOG, 'stamp-contract ' + process.argv.slice(2).join(' ') + '\\n');\n` +
+      `process.stdout.write('stamp-contract: 1 already in sync — 1 project(s) processed\\n');\n`
+  );
+  return clone;
+}
+
+/** Runs H1 with a call log; returns the result plus the steps the hook spawned. */
+function h1Logged(dir, clone) {
+  const logDir = mkdtempSync(join(tmpdir(), 'sterling-agentcur-log-'));
+  const log = join(logDir, 'calls.log');
+  try {
+    const r = h1(dir, clone.dir, { FIXTURE_LOG: log });
+    return { ...r, calls: existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [] };
+  } finally {
+    rmSync(logDir, { recursive: true, force: true });
+  }
+}
+
+const installedBytes = (agentsDir, file) => readFileSync(join(agentsDir, file), 'utf8');
+const RESTART_SHORT = 'agents synced — RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough)';
+const RESTART_LONG = 'RESTART REQUIRED — project subagents load at session start: EXIT AND RELAUNCH the Claude Code CLI before dispatching any agent.';
+
+test('CLONE CONTROL: a clone whose installed agents are current spawns nothing and says nothing', () => {
+  const clone = makeSyncable(makeClone({ 'coder.md': TPL('coder', 'Fixture body v1 for coder.') }));
+  const { dir, cleanup, agentsDir } = makeProject();
+  try {
+    installInto(clone, agentsDir);
+    const r = h1Logged(dir, clone);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.out, `H1 must emit parseable JSON: ${r.stdout}${r.stderr}`);
+    assert.deepEqual(r.calls, [], 'no step runs when nothing is behind');
+    assert.doesNotMatch(messageOf(r) + contextOf(r), /CLONE AGENT SYNC|Sterling clone:|AGENT CURRENCY|agents synced/);
+  } finally {
+    cleanup();
+    clone.cleanup();
+  }
+});
+
+test('CLONE: stale agents are synced at session start for this project, the result and the restart line are printed, and no sync marker is written', () => {
+  const clone = makeSyncable(makeClone({ 'coder.md': TPL('coder', 'Fixture body v1 for coder.'), 'librarian.md': TPL('librarian', 'Fixture body v1 for librarian.') }));
+  const { dir, cleanup, agentsDir } = makeProject();
+  try {
+    installInto(clone, agentsDir);
+    const librarianBefore = installedBytes(agentsDir, 'librarian.md');
+    bumpTemplate(clone, 'coder.md', 'coder');
+
+    const r = h1Logged(dir, clone);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.out, `H1 must emit parseable JSON: ${r.stdout}${r.stderr}`);
+    assert.deepEqual(r.calls, [`sync-agents --target ${dir}`, `stamp-contract --apply-inserts --project ${dir}`], 'the same two steps an installed copy runs, scoped to this project');
+    assert.match(installedBytes(agentsDir, 'coder.md'), /Fixture body v2 for coder\./, 'the stale agent now carries the clone template');
+    assert.equal(installedBytes(agentsDir, 'librarian.md'), librarianBefore, 'the current agent is not rewritten');
+    assert.ok(messageOf(r).includes(`⚠ Sterling clone: installed agents were behind its templates (coder.md) — ${RESTART_SHORT}. `), messageOf(r));
+    assert.ok(
+      contextOf(r).includes(`\n\nCLONE AGENT SYNC (H1): this project's installed agents were behind the clone's templates (coder.md) — ${RESTART_SHORT}. sync-agents reported: refreshed: coder. ${RESTART_LONG}`),
+      contextOf(r)
+    );
+    assert.equal(markerCount(messageOf(r)), 0, 'nothing is stale after the sync, so the stale warning is gone');
+    assert.equal(markerCount(contextOf(r)), 0);
+    assert.equal(existsSync(join(dir, '.sterling', 'synced-version')), false, 'the clone sync never writes the version marker: an installed copy of the same version must still run its own sync');
+
+    const again = h1Logged(dir, clone);
+    assert.deepEqual(again.calls, [], 'the next session start finds nothing behind and spawns nothing');
+    assert.doesNotMatch(messageOf(again) + contextOf(again), /CLONE AGENT SYNC|Sterling clone:|AGENT CURRENCY/);
+  } finally {
+    cleanup();
+    clone.cleanup();
+  }
+});
+
+test('CLONE: the plugin root as its own project syncs too', () => {
+  const clone = makeSyncable(makeClone({ 'coder.md': TPL('coder', 'Fixture body v1 for coder.') }));
+  try {
+    mkdirSync(join(clone.dir, '.sterling'), { recursive: true });
+    writeFileSync(join(clone.dir, '.sterling', 'config.json'), JSON.stringify(BASE_CONFIG));
+    new SterlingStore(join(clone.dir, '.sterling', 'sterling.db')).close();
+    const agentsDir = join(clone.dir, '.claude', 'agents');
+    installInto(clone, agentsDir);
+    bumpTemplate(clone, 'coder.md', 'coder');
+
+    const r = h1Logged(clone.dir, clone);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.out, `H1 must emit parseable JSON: ${r.stdout}${r.stderr}`);
+    assert.deepEqual(r.calls, [`sync-agents --target ${clone.dir}`, `stamp-contract --apply-inserts --project ${clone.dir}`]);
+    assert.match(installedBytes(agentsDir, 'coder.md'), /Fixture body v2 for coder\./);
+    assert.ok(messageOf(r).includes(RESTART_SHORT), messageOf(r));
+  } finally {
+    clone.cleanup();
+  }
+});
+
+test('CLONE: a locally modified agent is refused loudly and never overwritten; the rest syncs, the warning stays and the next start retries', () => {
+  const clone = makeSyncable(makeClone({ 'coder.md': TPL('coder', 'Fixture body v1 for coder.'), 'test-writer.md': TPL('test-writer', 'Fixture body v1 for test-writer.') }));
+  const { dir, cleanup, agentsDir } = makeProject();
+  try {
+    installInto(clone, agentsDir);
+    bumpTemplate(clone, 'coder.md', 'coder');
+    bumpTemplate(clone, 'test-writer.md', 'test-writer');
+    editInstalled(agentsDir, 'test-writer.md');
+    const edited = installedBytes(agentsDir, 'test-writer.md');
+
+    const r = h1Logged(dir, clone);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.out, `H1 must emit parseable JSON: ${r.stdout}${r.stderr}`);
+    assert.deepEqual(r.calls, [`sync-agents --target ${dir}`], 'a refusal stops before the contract step, as on an installed copy');
+    assert.equal(installedBytes(agentsDir, 'test-writer.md'), edited, 'the hand-edited agent is byte-identical after the refusal');
+    assert.match(installedBytes(agentsDir, 'coder.md'), /Fixture body v2 for coder\./, 'the unmodified stale agent was still refreshed');
+    assert.match(messageOf(r), /✗ Sterling clone: agent sync FAILED — sync-agents REFUSED \(exit 2/, messageOf(r));
+    assert.ok(messageOf(r).includes(RESTART_SHORT), 'coder was refreshed before the refusal, so the restart is owed and said');
+    assert.match(contextOf(r), /CLONE AGENT SYNC FAILED \(H1\): .*sync-agents REFUSED \(exit 2.*retries at the next session start/s);
+    assert.ok(contextOf(r).includes(RESTART_LONG), contextOf(r));
+    const section = currencySection(contextOf(r));
+    assert.match(section, /refused_local_modification \(behind template\): test-writer\.md/, 'the stale warning stays for the refused agent');
+    assert.equal(lineFor(section, 'coder.md'), '', 'the refreshed agent is no longer reported');
+    assert.equal(existsSync(join(dir, '.sterling', 'synced-version')), false);
+
+    const again = h1Logged(dir, clone);
+    assert.deepEqual(again.calls, [`sync-agents --target ${dir}`], 'the next session start retries');
+    assert.match(messageOf(again), /✗ Sterling clone: agent sync FAILED — sync-agents REFUSED/);
+    assert.doesNotMatch(messageOf(again), /RESTART to load them/, 'nothing changed on the retry, so no restart is claimed');
+    assert.equal(installedBytes(agentsDir, 'test-writer.md'), edited, 'still never overwritten');
+    assert.equal(markerCount(messageOf(again)), 1, 'and it is warned about again');
+  } finally {
+    cleanup();
+    clone.cleanup();
+  }
+});
+
+test('CLONE: a clone OLDER than the project sync marker refuses loudly, spawns nothing and keeps the stale warning', () => {
+  const clone = makeSyncable(makeClone({ 'coder.md': TPL('coder', 'Fixture body v1 for coder.') }));
+  const { dir, cleanup, agentsDir } = makeProject();
+  try {
+    installInto(clone, agentsDir);
+    const before = installedBytes(agentsDir, 'coder.md');
+    bumpTemplate(clone, 'coder.md', 'coder');
+    writeFileSync(join(dir, '.sterling', 'synced-version'), '10.0.0\n');
+
+    const r = h1Logged(dir, clone);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.out, `H1 must emit parseable JSON: ${r.stdout}${r.stderr}`);
+    assert.deepEqual(r.calls, []);
+    assert.equal(installedBytes(agentsDir, 'coder.md'), before, 'nothing is downgraded');
+    assert.equal(readFileSync(join(dir, '.sterling', 'synced-version'), 'utf8'), '10.0.0\n');
+    assert.ok(messageOf(r).includes(`✗ Sterling clone ${CLONE_VERSION} is OLDER than this project's sync marker 10.0.0: agent sync REFUSED, nothing downgraded — pull this clone. `), messageOf(r));
+    assert.match(contextOf(r), /CLONE AGENT SYNC REFUSED \(H1\)/);
+    assert.match(lineFor(currencySection(contextOf(r)), 'coder'), /stale/i, 'the stale warning stays');
+  } finally {
+    cleanup();
+    clone.cleanup();
+  }
+});
+
+test('INSTALLED-COPY CONTROL: the same stale fixture without .git and with an equal marker still only warns; nothing is spawned or rewritten', () => {
+  const clone = makeSyncable(makeClone({ 'coder.md': TPL('coder', 'Fixture body v1 for coder.') }), { git: false });
+  const { dir, cleanup, agentsDir } = makeProject();
+  try {
+    installInto(clone, agentsDir);
+    const before = installedBytes(agentsDir, 'coder.md');
+    bumpTemplate(clone, 'coder.md', 'coder');
+    writeFileSync(join(dir, '.sterling', 'synced-version'), `${CLONE_VERSION}\n`);
+
+    const r = h1Logged(dir, clone);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.out, `H1 must emit parseable JSON: ${r.stdout}${r.stderr}`);
+    assert.deepEqual(r.calls, [], 'an installed copy syncs by version marker only');
+    assert.equal(installedBytes(agentsDir, 'coder.md'), before);
+    assert.match(lineFor(currencySection(contextOf(r)), 'coder'), /stale/i);
+    assert.doesNotMatch(messageOf(r) + contextOf(r), /CLONE AGENT SYNC|Sterling clone:/);
+  } finally {
+    cleanup();
+    clone.cleanup();
+  }
+});

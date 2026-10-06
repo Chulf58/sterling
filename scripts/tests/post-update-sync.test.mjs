@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildSeamHook } from './lib/seam-hook.mjs';
-import { compareVersions, parseVersion, postUpdateSync, runStepAsync } from '../lib/post-update-sync.mjs';
+import { cloneAgentSync, compareVersions, parseVersion, postUpdateSync, runStepAsync } from '../lib/post-update-sync.mjs';
 import { sterlingRootLine } from '../hooks/lib/operating-state.mjs';
 import { renderClaudeText } from '../lib/agent-fences.mjs';
 
@@ -336,6 +336,94 @@ test('postUpdateSync: stamp-contract exit 2 with some projects processed is stil
   const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep });
   assert.equal(r.outcome, 'synced');
   assert.equal(markerOf(project), `${VERSION}\n`);
+});
+
+// CLONE AGENT SYNC (user-ruled 2026-10-06, "Sync at session start (Recommended)"): the
+// same two steps on a git clone, triggered by H1's agent-currency hash compare and
+// never recorded in the version marker. The H1 end of it, with the real syncAgents, is
+// pinned in scripts/tests/agent-currency-h1.test.mjs.
+function recordingSteps(results = {}) {
+  const calls = [];
+  const runStep = async (root, name, args) => {
+    calls.push(`${name} ${args.join(' ')}`);
+    return results[name] ?? (name === 'sync-agents.mjs'
+      ? { status: 0, error: null, out: 'refreshed: implementor\n\nRESTART REQUIRED — project subagents load at session start.', tail: 'refreshed: implementor' }
+      : { status: 0, error: null, out: 'stamp-contract: 1 already in sync — 1 project(s) processed', tail: '' });
+  };
+  return { calls, runStep };
+}
+
+test('cloneAgentSync: an installed copy is not a clone, so nothing runs and nothing is said', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const { calls, runStep } = recordingSteps();
+  assert.equal(await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep }), null);
+  assert.deepEqual(calls, []);
+});
+
+test('cloneAgentSync: a clone runs both steps for the project and never writes or moves the version marker', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  for (const marker of [null, VERSION, '0.0.1']) {
+    const project = makeProject({ marker, store: false });
+    const before = markerOf(project);
+    const { calls, runStep } = recordingSteps();
+    const r = await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep });
+    assert.equal(r.outcome, 'synced');
+    assert.deepEqual(calls, [`sync-agents.mjs --target ${project}`, `stamp-contract.mjs --apply-inserts --project ${project}`]);
+    assert.equal(markerOf(project), before, `marker ${marker} is left as it was: an installed copy newer than it still runs its own sync`);
+    assert.equal(r.warning, '⚠ Sterling clone: installed agents were behind its templates (implementor.md) — agents synced — RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough). ');
+    assert.ok(r.context.startsWith("\n\nCLONE AGENT SYNC (H1): this project's installed agents were behind the clone's templates (implementor.md) — agents synced — RESTART to load them"), r.context);
+    assert.ok(r.context.includes('sync-agents reported: refreshed: implementor.'), r.context);
+  }
+});
+
+test('cloneAgentSync: the clone as its own project is synced (the project is the plugin root)', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  mkdirSync(join(plugin, '.sterling'), { recursive: true });
+  writeFileSync(join(plugin, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby' }));
+  const { calls, runStep } = recordingSteps();
+  const r = await cloneAgentSync({ root: plugin, project: plugin, behind: [], runStep });
+  assert.equal(r.outcome, 'synced');
+  assert.deepEqual(calls, [`sync-agents.mjs --target ${plugin}`, `stamp-contract.mjs --apply-inserts --project ${plugin}`]);
+  assert.equal(markerOf(plugin), 'ENOENT');
+});
+
+test('cloneAgentSync: a clone older than the marker refuses and runs nothing; a clone version that cannot be ordered against a marker is a loud SKIP', async () => {
+  const older = makePluginRoot({ clone: true });
+  const project = makeProject({ marker: '10.0.0', store: false });
+  const a = recordingSteps();
+  const refused = await cloneAgentSync({ root: older, project, behind: ['implementor.md'], runStep: a.runStep });
+  assert.equal(refused.outcome, 'refused-older');
+  assert.deepEqual(a.calls, []);
+  assert.equal(refused.warning, `✗ Sterling clone ${VERSION} is OLDER than this project's sync marker 10.0.0: agent sync REFUSED, nothing downgraded — pull this clone. `);
+  assert.equal(markerOf(project), '10.0.0\n');
+
+  const b = recordingSteps();
+  const skipped = await cloneAgentSync({ root: makePluginRoot({ clone: true, version: 'dev' }), project, behind: [], runStep: b.runStep });
+  assert.equal(skipped.outcome, 'skipped');
+  assert.deepEqual(b.calls, []);
+  assert.match(skipped.warning, /^⚠ Sterling clone agent sync SKIPPED — /);
+
+  const c = recordingSteps();
+  const unmarked = await cloneAgentSync({ root: makePluginRoot({ clone: true, version: 'dev' }), project: makeProject({ store: false }), behind: [], runStep: c.runStep });
+  assert.equal(unmarked.outcome, 'synced', 'with no marker there is nothing to order against, so nothing can be downgraded');
+});
+
+test('cloneAgentSync: a refusal is a failed sync that says what was refused, and owes the restart when sync-agents changed another agent first', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  const project = makeProject({ store: false });
+  const out = 'refreshed: implementor\nrefused_local_modification: reviewer\nrefreshed: .opencode/agents/scout.md';
+  const a = recordingSteps({ 'sync-agents.mjs': { status: 2, error: null, out, tail: out.split('\n').join(' | ') } });
+  const r = await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep: a.runStep });
+  assert.equal(r.outcome, 'failed');
+  assert.deepEqual(a.calls, [`sync-agents.mjs --target ${project}`]);
+  assert.match(r.warning, /^✗ Sterling clone: agent sync FAILED — sync-agents REFUSED \(exit 2 .*refused_local_modification: reviewer .*\. agents synced — RESTART to load them/);
+  assert.ok(r.context.includes('sync-agents DID change agents before the failure (refreshed: implementor): RESTART REQUIRED'), r.context);
+
+  const portableOnly = 'refused_local_modification: reviewer\nrefreshed: .opencode/agents/scout.md';
+  const b = recordingSteps({ 'sync-agents.mjs': { status: 2, error: null, out: portableOnly, tail: portableOnly } });
+  const quiet = await cloneAgentSync({ root: plugin, project, behind: [], runStep: b.runStep });
+  assert.doesNotMatch(quiet.warning + quiet.context, /RESTART/, 'a portable OpenCode copy needs no restart, and nothing else changed');
 });
 
 test('compareVersions: semver precedence, prerelease below release, build metadata ignored, null for non-versions', () => {

@@ -36,7 +36,7 @@ import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict }
 import { parseInstalledHeader, extractBakedCommandPaths, isLocallyModified, loadRegistry, sha256 } from '../lib/agent-distribution.mjs';
 import { gitTouches, writeInitialGitSettled } from './lib/settlement.mjs';
 import { isInstalledCopy } from '../lib/installed-copy.mjs';
-import { pluginScript, postUpdateSync, samePath } from '../lib/post-update-sync.mjs';
+import { cloneAgentSync, pluginScript, postUpdateSync, samePath } from '../lib/post-update-sync.mjs';
 import { DOMAIN_MAP_PENDING_REL, machineStores, probeSchemaVersion } from '../lib/update.mjs';
 import { domainMapDue, domainNotice, pendingFileNote, runDomainMap } from './lib/domain-notice.mjs';
 import { refreshRegistryRow } from './lib/registry-refresh.mjs';
@@ -389,8 +389,8 @@ try {
 // copy is NEWER than <project>/.sterling/synced-version syncs THIS project's agents and checks
 // its contract; an OLDER copy refuses loudly. The rule, the steps and their text live in
 // scripts/lib/post-update-sync.mjs, shared with the OpenCode server plugin. INSTALLED COPIES
-// ONLY: on a clone /sterling:update owns these steps. Runs before the agent-currency block,
-// which then sees the synced agents.
+// ONLY: a clone has no version trigger and syncs from the agent-currency block instead (see
+// AGENT CURRENCY below). Runs before that block, which then sees the synced agents.
 //
 // DOMAIN MAP NOTICE (scripts/hooks/lib/domain-notice.mjs): the first session start after an
 // update runs the domain map and prints one line when it proposes a mount. The map runs
@@ -1266,9 +1266,22 @@ try {
 // which is correctly SILENT in the failing case because the clone is not
 // behind — another clone-currency banner would close nothing.
 //
-// WARN ONLY, on BOTH surfaces, exactly as the 946125ff (c) precedent does:
-// never a block, never a dispatch gate, and never a rewrite of an installed
-// file (user-ruled 2026-08-29 — fixes (a) and (c) only).
+// NEVER A BLOCK and never a dispatch gate; the warning goes to BOTH surfaces.
+//
+// ON A CLONE IT ALSO SYNCS (user-ruled 2026-10-06 through the question form, "Sync
+// at session start (Recommended)", chosen over "Sync every registered project" and
+// "Keep warn-only"): when this check finds agents of THIS project behind the clone's
+// templates (stale, or behind and hand-edited), H1 runs the two steps an installed
+// copy runs after an update (sync-agents, then stamp-contract --apply-inserts), each
+// bounded by POST_UPDATE_STEP_TIMEOUT_MS, through cloneAgentSync in
+// scripts/lib/post-update-sync.mjs. The trigger is this hash compare because a clone's
+// plugin.json version does not move between template edits. The check then runs again,
+// so the warning below reports what is still behind: a hand-edited agent is refused by
+// sync-agents, never overwritten, and is warned about and retried at every start until
+// it is resolved. No other project is touched, and the version marker is neither read
+// as a trigger nor written (decision dual-host-post-update-sync-newest-copy-wins: a
+// clone older than the marker refuses). An INSTALLED COPY stays warn-only here; it
+// syncs by version marker in the post-update block above.
 //
 // DEGRADE LOUD, NEVER SILENT: a clone template that cannot be read is reported
 // as UNKNOWN currency, never omitted. anti_pattern foreign_02a1ed39 is precisely this
@@ -1279,7 +1292,9 @@ try {
 // nothing to report on at all.
 let agentCurrencyWarning = '';
 let agentCurrencyContext = '';
-try {
+const currencyName = (line) => line.match(/- ([^ —]+)/)?.[1] ?? 'agent';
+/** One pass of the check over this project's installed agents; null when there is nothing to report. */
+function agentCurrencyState() {
   const agentsDir = join(input.cwd, '.claude', 'agents');
   const installed = [];
   // UNKNOWN lines are seeded HERE, before any classification: a per-file failure
@@ -1397,28 +1412,52 @@ try {
       }
     }
     if (stale.length || modified.length || refusedModified.length || unknown.length) {
-      const inspected = installed.length + unreadableBeforeClassification;
-      const parts = [
-        stale.length ? `${stale.length} stale` : null,
-        modified.length ? `${modified.length} locally modified (current template)` : null,
-        refusedModified.length ? `${refusedModified.length} refused_local_modification (behind template)` : null,
-        unknown.length ? `${unknown.length} of UNKNOWN currency` : null,
-      ].filter(Boolean);
-      const named = [...stale, ...unknown];
-      const stateLines = [
-        stale.length ? `stale: ${stale.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? 'agent').join(', ')}` : null,
-        modified.length ? `locally modified (current template): ${modified.join(', ')}` : null,
-        refusedModified.length ? `refused_local_modification (behind template): ${refusedModified.join(', ')}` : null,
-        unknown.length ? `unknown: ${unknown.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? 'agent').join(', ')}` : null,
-      ].filter(Boolean);
-      agentCurrencyWarning =
-        `⚠ AGENT CURRENCY: ${parts.join(', ')} of ${inspected} installed Sterling agent file(s) — ` +
-        `run /sterling:sync-agents in this project, then restart. `;
-      agentCurrencyContext =
-        `\n\nAGENT CURRENCY (H1): ${parts.join(', ')} of ${inspected} generated agent file(s): ` +
-        stateLines.join('; ') +
-        `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`;
+      return { stale, modified, refusedModified, unknown, inspected: installed.length + unreadableBeforeClassification };
     }
+  }
+  return null;
+}
+let cloneSyncWarning = '';
+let cloneSyncContext = '';
+try {
+  let state = agentCurrencyState();
+  const behind = state ? [...state.stale.map(currencyName), ...state.refusedModified] : [];
+  if (behind.length) {
+    try {
+      const synced = await cloneAgentSync({ root: pluginRoot(), project: input.cwd, behind, host: 'claude' });
+      if (synced) {
+        cloneSyncWarning = synced.warning;
+        cloneSyncContext = synced.context;
+        // The steps ran, so the files on disk may have changed: report what is behind NOW.
+        if (synced.outcome === 'synced' || synced.outcome === 'failed') state = agentCurrencyState();
+      }
+    } catch (err) {
+      const why = String(err?.message ?? err).split('\n')[0];
+      cloneSyncWarning = `✗ Sterling clone: agent sync FAILED (${why}) — it retries at the next session start. `;
+      cloneSyncContext = `\n\nCLONE AGENT SYNC FAILED (H1): ${why}. It retries at the next session start while an installed agent is behind; tell the user.`;
+    }
+  }
+  if (state) {
+    const { stale, modified, refusedModified, unknown, inspected } = state;
+    const parts = [
+      stale.length ? `${stale.length} stale` : null,
+      modified.length ? `${modified.length} locally modified (current template)` : null,
+      refusedModified.length ? `${refusedModified.length} refused_local_modification (behind template)` : null,
+      unknown.length ? `${unknown.length} of UNKNOWN currency` : null,
+    ].filter(Boolean);
+    const stateLines = [
+      stale.length ? `stale: ${stale.map(currencyName).join(', ')}` : null,
+      modified.length ? `locally modified (current template): ${modified.join(', ')}` : null,
+      refusedModified.length ? `refused_local_modification (behind template): ${refusedModified.join(', ')}` : null,
+      unknown.length ? `unknown: ${unknown.map(currencyName).join(', ')}` : null,
+    ].filter(Boolean);
+    agentCurrencyWarning =
+      `⚠ AGENT CURRENCY: ${parts.join(', ')} of ${inspected} installed Sterling agent file(s) — ` +
+      `run /sterling:sync-agents in this project, then restart. `;
+    agentCurrencyContext =
+      `\n\nAGENT CURRENCY (H1): ${parts.join(', ')} of ${inspected} generated agent file(s): ` +
+      stateLines.join('; ') +
+      `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`;
   }
 } catch {
   // fail-open — never break SessionStart (P1). This is now a LAST RESORT only:
@@ -1426,6 +1465,9 @@ try {
   // per-agent template read and the clone-registry load each carry their own
   // catch and each degrades LOUD. Nothing routine reaches here (02a1ed39).
 }
+// The sync's own line leads, and survives a check that failed after the sync ran.
+agentCurrencyWarning = cloneSyncWarning + agentCurrencyWarning;
+agentCurrencyContext = cloneSyncContext + agentCurrencyContext;
 
 // UNDECLARED-SOURCE DISCLOSURE (decision undeclared-source-disclosure-per-
 // file-coverage-live-h1-scan, board 44ef6838). Per-FILE live coverage scan
