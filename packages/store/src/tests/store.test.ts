@@ -2198,3 +2198,21 @@ test('recordCheckSkipped/listCheckSkipped with runId undefined: recording, listi
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('move fence: a store whose store_meta holds the move fence refuses a create with StoreMovedError and writes nothing; reads still work', () => {
+  const { dir, store } = tempStore();
+  try {
+    const before = store.create(decision({ title: 'before the move' }));
+    // The mover writes the fence through a raw driver, as store-move.ts does.
+    (store as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => unknown } } }).db
+      .prepare('INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?)')
+      .run('move_fence', '{"moved_to":"elsewhere"}', NOW);
+    const blocked = decision({ title: 'after the move' });
+    assert.throws(() => store.create(blocked), (e: Error) => e instanceof storeMod.StoreMovedError && e.name === 'StoreMovedError' && /writes to it are refused; nothing was written/.test(e.message));
+    assert.equal(store.get(blocked.id as string), undefined, 'nothing was written');
+    assert.deepEqual(store.query({ types: ['decision'] }).map((r) => r.id), [before.id], 'reads still answer, and only the pre-move record is there');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

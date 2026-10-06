@@ -163,10 +163,11 @@ export const DEFAULT_PG_STATEMENT_TIMEOUT_MS = 5000;
 // Advisory-lock keys, two int4 halves: a namespace and a 32-bit FNV-1a hash of
 // the schema name. The global lock is keyed by the META schema, so separate
 // test layouts never block each other. A hash collision only serializes more.
-const LOCK_NS_GLOBAL = 0x53544d47; // 'STMG'
-const LOCK_NS_STORE = 0x53545354; // 'STST'
+// Exported for store-move.ts, whose move transaction takes the same locks.
+export const LOCK_NS_GLOBAL = 0x53544d47; // 'STMG'
+export const LOCK_NS_STORE = 0x53545354; // 'STST'
 
-function lockHash(name: string): number {
+export function lockHash(name: string): number {
   let h = 0x811c9dc5;
   for (const byte of Buffer.from(name, 'utf8')) {
     h ^= byte;

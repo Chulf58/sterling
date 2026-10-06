@@ -146,6 +146,19 @@ export const DOMAIN_DESCRIPTION_KEY = 'description';
  *  createDomain takes one (board 675daf9d (c), decision
  *  projects-mount-domains-and-sibling-projects: "creating a domain without one
  *  fails loud"). */
+/** The mounted stores rank on different score scales (e.g. one on SQLite, one on Postgres). */
+export class MixedScoreScaleError extends Error {
+  constructor(
+    operation: string,
+    readonly scales: { source: string; scale: string }[],
+  ) {
+    super(
+      `${operation}: the mounted stores rank on different score scales (${scales.map((x) => `${x.source}: ${x.scale}`).join(', ')}), so a min_score cannot be applied across them. Nothing was counted.`
+    );
+    this.name = 'MixedScoreScaleError';
+  }
+}
+
 export class DomainNotCreatedError extends Error {
   readonly domain: string;
   readonly db_path: string;
@@ -571,7 +584,19 @@ export class MountedStores {
   /** Cross-mount twin of countAboveScore (board a577a69d) — summed
    *  project-first across every mounted store, same fan as count(). */
   countAboveScore(opts: QueryOptions, minScore: number): number {
+    this.commonScoreScale('countAboveScore');
     return this.fanValues((s) => s.countAboveScore(opts, minScore)).reduce((n, c) => n + c, 0);
+  }
+
+  /** The one score scale every mounted store ranks on (SterlingStore.scoreScale). Mixed scales are refused: neither their scores nor their counts above one min_score compare. */
+  scoreScale(): string {
+    return this.commonScoreScale('scoreScale');
+  }
+
+  private commonScoreScale(operation: string): string {
+    const scales = [...this.fanRead((s) => s.scoreScale())].map((r) => ({ source: r.source, scale: r.value }));
+    if (new Set(scales.map((x) => x.scale)).size > 1) throw new MixedScoreScaleError(operation, scales);
+    return scales[0].scale;
   }
 
   /** Per-source projection (AC2): project store FIRST, then each mounted domain

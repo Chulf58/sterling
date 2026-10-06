@@ -553,8 +553,9 @@ export interface KnowledgeQueryResult {
   by_type?: Record<string, number>;
   /**
    * ABSENCE QUERY (board a577a69d): present only when `min_score` was passed.
-   * The count of records scoring >= min_score on the `-bm25(records_fts)`
-   * scale (higher is more relevant — see countAboveScore), computed over the
+   * The count of records scoring >= min_score on the store's score scale,
+   * named by score_scale (`-bm25(records_fts)` on SQLite; higher is more
+   * relevant on every scale — see countAboveScore), computed over the
    * FULL rank_terms match set, never the capped `records` window — so
    * above_threshold:0 is a usable "nothing scored that high", the thing a
    * capped/ranked window alone can never establish. matched_filter/returned/
@@ -562,6 +563,8 @@ export interface KnowledgeQueryResult {
    * capped-window disclosure, never a replacement for it.
    */
   above_threshold?: number;
+  /** Present with above_threshold: the versioned scale min_score was applied on ('fts5_bm25' is -bm25 on SQLite, 'pg_bm25_v1' on Postgres). A min_score is not portable across scales. */
+  score_scale?: string;
   /** Configured domains not mounted because their store is missing, so this
    *  read did not search them. Present only when non-empty. Each record also
    *  carries `source`: 'project' or 'domain:<name>', the store that holds it. */
@@ -6022,7 +6025,7 @@ export class SterlingTools {
       answerability,
       provenance,
       records: records.map(projectRecord),
-      ...(aboveThreshold !== undefined ? { above_threshold: aboveThreshold } : {}),
+      ...(aboveThreshold !== undefined ? { above_threshold: aboveThreshold, score_scale: this.store.scoreScale() } : {}),
       ...this.unreadDomainsDisclosure(),
       ...(mintFailures.length > 0 ? { maintenance_mint_failed: mintFailures } : {}),
     };

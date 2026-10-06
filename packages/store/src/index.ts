@@ -27,7 +27,7 @@ import {
   type Freshness,
 } from '@sterling/schemas';
 
-export { MountedStores, type DomainMount, resolveDomainMounts, createDomain, DomainNotCreatedError, DOMAIN_DESCRIPTION_KEY, missingDomainWarning } from './mounted.js';
+export { MountedStores, MixedScoreScaleError, type DomainMount, resolveDomainMounts, createDomain, DomainNotCreatedError, DOMAIN_DESCRIPTION_KEY, missingDomainWarning } from './mounted.js';
 export { allocateShares, DEFAULT_PROJECT_SHARE } from './shares.js';
 export { fitDomains, DOMAIN_FIT_MIN_TERMS } from './domain-fit.js';
 export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
@@ -218,6 +218,21 @@ export class OperationRepeatedError extends Error {
       `operation '${operation_id}' already ran: it wrote record '${original_id}'. A repeated operation is refused, never applied twice; nothing was written. Read '${original_id}' to see what landed.`
     );
     this.name = 'OperationRepeatedError';
+  }
+}
+
+/**
+ * A write to a store that a store move left (store-move.ts): its store_meta
+ * holds the move fence, so the store's records now live on the other backend.
+ * Checked inside the write lock by SterlingStore.tx(); the mover's own writes
+ * go through raw drivers and are not refused.
+ */
+export class StoreMovedError extends Error {
+  constructor(readonly db_path: string) {
+    super(
+      `store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`
+    );
+    this.name = 'StoreMovedError';
   }
 }
 
@@ -579,6 +594,9 @@ export type ToolStore = Pick<
   // knowledge_query's min_score ABSENCE QUERY (board a577a69d) — the
   // uncapped, full-match-set threshold count beside query()'s own window.
   | 'countAboveScore'
+  // The versioned scale countAboveScore's min_score is a floor on, reported
+  // beside above_threshold.
+  | 'scoreScale'
   | 'get'
   // PHYSICAL mount membership — the append-join discharge's project-local owner
   // lookup and its target refusal (packages/mcp-server/src/tools.ts) both need
@@ -4106,6 +4124,10 @@ export class SterlingStore {
       // silently admitted. Re-reading here, while the write lock is held,
       // guarantees the version cannot move again before fn() writes.
       this.assertLiveSchemaVersion('transaction');
+      // The move fence (store-move.ts, MOVE_FENCE_KEY; spelled out here because
+      // importing it would make a cycle), read under the same lock: a store a
+      // move left refuses every write.
+      if (this.db.prepare("SELECT 1 FROM store_meta WHERE key = 'move_fence'").get()) throw new StoreMovedError(this.dbPath);
       fn();
       this.db.commit();
     } catch (e) {

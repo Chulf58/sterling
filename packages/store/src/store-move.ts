@@ -15,10 +15,10 @@
 //
 // The fence is a row in the store's own store_meta table on BOTH backends
 // (key 'move_fence'), so one check in SterlingStore.tx(), after begin(),
-// enforces it everywhere. Until that check lands the fence binds nothing.
+// enforces it everywhere (StoreMovedError).
 //
-// What this does NOT guarantee: a writer on an older release, or any writer
-// before the tx() check lands, can still write into a fenced store; writes
+// What this does NOT guarantee: a writer on an older release, one without the
+// tx() check, can still write into a fenced store; writes
 // that land after the snapshot are not copied. Only the store's own SQL
 // writers see the fence; nothing stops a process from editing the file.
 //
@@ -38,12 +38,15 @@ import { resolveDomainMounts } from './mounted.js';
 import { SqliteDriver, sqliteDialect } from './sqlite-driver.js';
 import { PgConfigError, PgQueryError, readPgCredentials, type PgBridge } from './pg-bridge.js';
 import {
+  LOCK_NS_GLOBAL,
+  LOCK_NS_STORE,
   PG_META_SCHEMA,
   PgDriver,
   PgLockTimeoutError,
   PgStatementTimeoutError,
   assertSterlingSchemaName,
   createPgStore,
+  lockHash,
   pgDialect,
 } from './pg-driver.js';
 import { PG_TEST_NAMESPACE_ENV, pgStoreNames } from './routing.js';
@@ -576,20 +579,9 @@ function insertSqliteRows(driver: SqliteDriver, t: TableSpec, rows: Row[]): void
 // Postgres side
 // ---------------------------------------------------------------------------
 
-// The advisory-lock keys PgDriver.begin() takes (pg-driver.ts: LOCK_NS_GLOBAL,
-// LOCK_NS_STORE, lockHash), repeated because pg-driver.ts does not export them.
-// store-move.test.ts pins that the two agree: a move transaction blocks a
-// PgDriver write on the same store.
-const LOCK_NS_GLOBAL = 0x53544d47;
-const LOCK_NS_STORE = 0x53545354;
-function lockHash(name: string): number {
-  let h = 0x811c9dc5;
-  for (const byte of Buffer.from(name, 'utf8')) {
-    h ^= byte;
-    h = Math.imul(h, 0x01000193);
-  }
-  return h | 0;
-}
+// The advisory-lock keys are PgDriver.begin()'s own (LOCK_NS_GLOBAL,
+// LOCK_NS_STORE, lockHash from pg-driver.ts). store-move.test.ts pins that a
+// move transaction blocks a PgDriver write on the same store.
 
 const q = (schema: string): string => {
   assertSterlingSchemaName(schema);
