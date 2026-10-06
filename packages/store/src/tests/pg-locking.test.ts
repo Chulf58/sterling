@@ -207,7 +207,43 @@ try {
   }
 });
 
-test('four processes opening one fresh store at the same moment all succeed: the table setup is serialized (board e05f5127)', { skip: PG_SKIP }, async () => {
+test('an opener that read version 0 before another opener published the store opens it writable, never as a legacy store (board e05f5127)', { skip: PG_SKIP }, () => {
+  ensurePgLayout(adminBridge(), meta);
+  const schema = `${prefix}_${++counter}`;
+  createPgStore(adminBridge(), { kind: 'test', name: schema, schema, metaSchema: meta });
+  const late = new PgDriver(bridge(), { schema, metaSchema: meta });
+  let versionReads = 0;
+  // The late opener's first version read sees the empty store; the other opener
+  // then runs its whole open (tables and version stamp) before the late one goes on.
+  const interleaved = new Proxy(late, {
+    get(target, key) {
+      const value = Reflect.get(target, key, target);
+      if (key === 'schemaVersion') {
+        return () => {
+          const version = target.schemaVersion();
+          if (++versionReads === 1) {
+            assert.equal(version, 0, 'the late opener read the empty store');
+            const first = new SterlingStore(join(tmpdir(), `${schema}-first.pg`), { driver: new PgDriver(bridge(), { schema, metaSchema: meta }) });
+            first.setMeta('first', 'wrote');
+            first.close();
+          }
+          return version;
+        };
+      }
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const store = new SterlingStore(join(tmpdir(), `${schema}-late.pg`), { driver: interleaved });
+  try {
+    store.setMeta('late', 'wrote');
+    assert.equal(store.getMeta('first'), 'wrote');
+    assert.equal(store.getMeta('late'), 'wrote');
+  } finally {
+    store.close();
+  }
+});
+
+test('four processes opening one fresh store at the same moment all succeed: the table setup is serialized and every handle writes (board e05f5127)', { skip: PG_SKIP }, async () => {
   ensurePgLayout(adminBridge(), meta);
   const schema = `${prefix}_${++counter}`;
   // Registered and empty: the first open creates the tables, which is the step that raced.
@@ -219,29 +255,49 @@ test('four processes opening one fresh store at the same moment all succeed: the
     writeFileSync(
       script,
       `import { SterlingStore, PgBridge, PgDriver, readPgCredentials } from ${JSON.stringify(index)};
-const [schema, meta, at] = process.argv.slice(2);
+const [schema, meta, id] = process.argv.slice(2);
 const bridge = new PgBridge(readPgCredentials());
-// Every process has its connection before the start time, so the opens overlap.
-const wait = Number(at) - Date.now();
-if (wait > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
+// Ready once the connection is up; the parent releases all four together.
+const go = new Promise((resolve) => process.once('message', resolve));
+process.send('ready');
+await go;
 const store = new SterlingStore('/tmp/opener.pg', { driver: new PgDriver(bridge, { schema, metaSchema: meta }) });
+store.setMeta('opener-' + id, 'wrote');
 store.close();
 bridge.close();
 console.log('opened');
+process.disconnect();
 `,
     );
-    const at = String(Date.now() + 6000);
-    const open = () =>
-      new Promise<{ code: number | null; out: string }>((resolve) => {
-        const child = spawn(process.execPath, [script, schema, meta, at], { stdio: ['ignore', 'pipe', 'pipe'] });
-        let out = '';
-        child.stdout.on('data', (d) => (out += d));
-        child.stderr.on('data', (d) => (out += d));
-        child.on('exit', (code) => resolve({ code, out }));
-      });
-    const results = await Promise.all([open(), open(), open(), open()]);
-    for (const [i, r] of results.entries()) assert.equal(r.code, 0, `opener ${i}: ${r.out}`);
+    const children = [0, 1, 2, 3].map((id) => spawn(process.execPath, [script, schema, meta, String(id)], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }));
+    const results = children.map(
+      (child) =>
+        new Promise<{ code: number | null; out: string }>((resolve) => {
+          let out = '';
+          child.stdout!.on('data', (d) => (out += d));
+          child.stderr!.on('data', (d) => (out += d));
+          child.on('exit', (code) => resolve({ code, out }));
+        }),
+    );
+    const ready = children.map(
+      (child) =>
+        new Promise<void>((resolve, reject) => {
+          child.once('message', (m) => (m === 'ready' ? resolve() : reject(new Error(`unexpected message ${String(m)}`))));
+          child.once('exit', (code) => reject(new Error(`opener exited with ${String(code)} before it was ready`)));
+        }),
+    );
+    try {
+      await Promise.all(ready);
+    } catch (e) {
+      for (const child of children) child.kill();
+      throw e;
+    }
+    for (const child of children) child.send('go');
+    const done = await Promise.all(results);
+    for (const [i, r] of done.entries()) assert.equal(r.code, 0, `opener ${i}: ${r.out}`);
     assert.equal(adminBridge().query('SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = $2', [schema, 'records']).rows.length, 1, 'the tables exist');
+    const written = adminBridge().query(`SELECT key FROM "${schema}".store_meta WHERE key LIKE 'opener-%' ORDER BY key`).rows.map((r) => r.key);
+    assert.deepEqual(written, ['opener-0', 'opener-1', 'opener-2', 'opener-3'], 'every opener got a writable handle');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

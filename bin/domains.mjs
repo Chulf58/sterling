@@ -6729,7 +6729,27 @@ var SterlingStore = class _SterlingStore {
       throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
     }
     let isFresh = false;
-    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
+    let published = false;
+    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION && this.db.publishFresh !== void 0) {
+      let settled;
+      try {
+        settled = this.db.publishFresh(SUPPORTED_SCHEMA_VERSION);
+      } catch (e) {
+        this.db.close();
+        throw e;
+      }
+      if (settled > SUPPORTED_SCHEMA_VERSION) {
+        this.db.close();
+        throw new UnsupportedSchemaVersionError(settled, SUPPORTED_SCHEMA_VERSION);
+      }
+      if (settled < SUPPORTED_SCHEMA_VERSION) {
+        this.db.prepareReadOnly();
+        this.legacySchemaVersion = settled;
+        this.openedSchemaVersion = settled;
+        return;
+      }
+      published = true;
+    } else if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
       if (this.db.hasSchema()) {
         this.db.prepareReadOnly();
         this.legacySchemaVersion = foundSchemaVersion;
@@ -6738,8 +6758,9 @@ var SterlingStore = class _SterlingStore {
       }
       isFresh = true;
     }
-    this.db.prepareWritable(isFresh);
-    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+    if (!published)
+      this.db.prepareWritable(isFresh);
+    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION && !published) {
       try {
         this.tx(() => {
           const current2 = this.db.schemaVersion();

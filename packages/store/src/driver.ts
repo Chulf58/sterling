@@ -104,6 +104,18 @@ export interface StoreDriver {
   prepareReadOnly(): void;
   /** Connection settings plus the schema, created when missing. `isFresh` is true when hasSchema() was false at open. A driver that refuses closes itself and throws. */
   prepareWritable(isFresh: boolean): void;
+  /**
+   * Optional, for a backend that several processes open at once (PgDriver).
+   * When schemaVersion() read below `supported`, SterlingStore calls this in
+   * place of hasSchema(), prepareReadOnly()/prepareWritable() and the stamp. In
+   * ONE transaction under the write lock it re-reads the version; when that is
+   * below `supported` and the store has no schema objects yet, it creates them
+   * and stamps `supported`. Returns the version the store holds when that
+   * transaction ends. A concurrent opener therefore never sees a store with
+   * its schema but without its stamp, and never classifies a store another
+   * opener just published as an older one.
+   */
+  publishFresh?(supported: number): number;
 
   /** The backend's journaling mode, as SterlingStore.journalMode() reports it. */
   journalMode(): string;

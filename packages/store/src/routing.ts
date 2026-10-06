@@ -385,6 +385,9 @@ class RoutedPgDriver implements StoreDriver {
   prepareWritable(isFresh: boolean): void {
     this.inner.prepareWritable(isFresh);
   }
+  publishFresh(supported: number): number {
+    return this.inner.publishFresh(supported);
+  }
   journalMode(): string {
     return this.inner.journalMode();
   }

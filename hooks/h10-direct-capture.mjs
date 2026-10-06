@@ -6617,13 +6617,53 @@ var PgDriver = class {
     const where = `creating the tables of store '${this.schema}'`;
     this.bridge.claimTransaction(this, `table setup on store '${this.schema}'`);
     try {
-      this.bridge.query(`BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)}); ${storeDdl(this.s)};
+      this.bridge.query(`${this.setupBeginText()}; ${storeDdl(this.s)};
 COMMIT`);
     } catch (e) {
       abandon(this.bridge, this);
       mapPgError(e, where);
     }
     this.bridge.releaseTransaction(this);
+  }
+  /**
+   * StoreDriver.publishFresh. prepareWritable() followed by the store's own
+   * stamp transaction left a window between the two commits: a concurrent
+   * opener that had read version 0 saw the tables and opened the store as a
+   * legacy, read-only one (Codex review of be2b7f7a, board e05f5127). Here the
+   * version and table probe, the DDL and the stamp are one transaction under
+   * the write locks, so the tables and the stamp become visible together, and
+   * an opener that read 0 before someone else published re-reads the stamped
+   * version under the lock. An older store that already has its tables is
+   * left untouched: nothing is written and its version is returned.
+   */
+  publishFresh(supported) {
+    this.assertOpen();
+    if (!Number.isInteger(supported) || supported < 1)
+      throw new Error(`PgDriver: the supported schema version must be a positive integer, got ${String(supported)}`);
+    const where = `publishing store '${this.schema}'`;
+    this.bridge.claimTransaction(this, `table setup on store '${this.schema}'`);
+    let version;
+    try {
+      const row = this.bridge.query(`SELECT (SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1) AS version, EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has_tables`, [this.schema], this.setupBeginText()).rows[0];
+      if (row.version === null)
+        throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+      version = Number(row.version);
+      if (version < supported && !row.has_tables) {
+        this.bridge.query(storeDdl(this.s));
+        this.bridge.query(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [supported, this.schema]);
+        version = supported;
+      }
+      this.bridge.query("COMMIT");
+    } catch (e) {
+      abandon(this.bridge, this);
+      mapPgError(e, where);
+    }
+    this.bridge.releaseTransaction(this);
+    return version;
+  }
+  /** BEGIN for table setup: lock_timeout, then the write locks in begin()'s order (the global lock shared, then this store's). */
+  setupBeginText() {
+    return `BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`;
   }
   /**
    * 'postgres'. SQLite's answer names its rollback-journal mode, which the
@@ -8123,7 +8163,27 @@ var SterlingStore = class _SterlingStore {
       throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
     }
     let isFresh = false;
-    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
+    let published = false;
+    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION && this.db.publishFresh !== void 0) {
+      let settled;
+      try {
+        settled = this.db.publishFresh(SUPPORTED_SCHEMA_VERSION);
+      } catch (e) {
+        this.db.close();
+        throw e;
+      }
+      if (settled > SUPPORTED_SCHEMA_VERSION) {
+        this.db.close();
+        throw new UnsupportedSchemaVersionError(settled, SUPPORTED_SCHEMA_VERSION);
+      }
+      if (settled < SUPPORTED_SCHEMA_VERSION) {
+        this.db.prepareReadOnly();
+        this.legacySchemaVersion = settled;
+        this.openedSchemaVersion = settled;
+        return;
+      }
+      published = true;
+    } else if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
       if (this.db.hasSchema()) {
         this.db.prepareReadOnly();
         this.legacySchemaVersion = foundSchemaVersion;
@@ -8132,8 +8192,9 @@ var SterlingStore = class _SterlingStore {
       }
       isFresh = true;
     }
-    this.db.prepareWritable(isFresh);
-    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+    if (!published)
+      this.db.prepareWritable(isFresh);
+    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION && !published) {
       try {
         this.tx(() => {
           const current = this.db.schemaVersion();
@@ -10516,6 +10577,9 @@ var RoutedPgDriver = class {
   }
   prepareWritable(isFresh) {
     this.inner.prepareWritable(isFresh);
+  }
+  publishFresh(supported) {
+    return this.inner.publishFresh(supported);
   }
   journalMode() {
     return this.inner.journalMode();

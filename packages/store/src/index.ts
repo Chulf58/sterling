@@ -1298,8 +1298,34 @@ export class SterlingStore {
     // probe is hasSchema() BEFORE the driver creates the schema — the only
     // moment at which "this store has no schema yet" is still observable — and
     // it is a read, so the refusal path still writes nothing.
+    //
+    // A driver that several processes open at once (PgDriver) does the probe,
+    // the DDL and the stamp in one transaction under its write lock instead
+    // (StoreDriver.publishFresh, board e05f5127): the read above happened
+    // outside any lock, so another opener may have published the store since,
+    // and only the version re-read under that lock may classify it as older.
     let isFresh = false;
-    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
+    let published = false;
+    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION && this.db.publishFresh !== undefined) {
+      let settled: number;
+      try {
+        settled = this.db.publishFresh(SUPPORTED_SCHEMA_VERSION);
+      } catch (e) {
+        this.db.close();
+        throw e;
+      }
+      if (settled > SUPPORTED_SCHEMA_VERSION) {
+        this.db.close();
+        throw new UnsupportedSchemaVersionError(settled, SUPPORTED_SCHEMA_VERSION);
+      }
+      if (settled < SUPPORTED_SCHEMA_VERSION) {
+        this.db.prepareReadOnly();
+        this.legacySchemaVersion = settled;
+        this.openedSchemaVersion = settled;
+        return; // read-only: publishFresh wrote nothing to an older store that has its schema
+      }
+      published = true;
+    } else if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
       if (this.db.hasSchema()) {
         // The driver refuses here (closing itself) when it cannot serve this
         // store read-only: SQLite does for a WAL store reached over 9p.
@@ -1313,7 +1339,8 @@ export class SterlingStore {
 
     // Connection settings and the schema. On SQLite: the journal-mode policy
     // [store-journal-policy-delete-on-9p], foreign_keys and the DDL.
-    this.db.prepareWritable(isFresh);
+    // publishFresh already created and stamped the store, or found it stamped.
+    if (!published) this.db.prepareWritable(isFresh);
 
     // Stamp the supported version onto a FRESH file (S2 [stable-identity-
     // design-v2]: an existing pre-v2 store returned read-only above and never
@@ -1359,7 +1386,7 @@ export class SterlingStore {
     // write against an unsupported schema (review finding, MEDIUM). The skipped
     // body's `current > SUPPORTED → throw` is therefore restored below, outside
     // the transaction, where it costs no write lock.
-    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION && !published) {
       try {
         this.tx(() => {
           const current = this.db.schemaVersion();
