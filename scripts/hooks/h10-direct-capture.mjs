@@ -1361,7 +1361,7 @@ try {
       if (git.ok && git.base_lost) {
         const text = `capture owed: settlement history rewritten — persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}; duties for commits between them could not be derived. Reconcile them by hand from git log.`;
         const exists = store.query({ types: ['todo'], cap: 1000 }).some((t) => t.source === 'system' && t.system_reason === 'capture_owed' && t.text === text);
-        if (!exists) store.enqueueSystemTodo({ id: randomUUID(), type: 'todo', created_at: now, updated_at: now, author: 'system', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [], text, source: 'system', system_reason: 'capture_owed', file_keys: [] });
+        if (!exists) store.enqueueSystemTodo({ id: randomUUID(), type: 'todo', created_at: now, updated_at: now, author: 'system', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [], text, source: 'system', system_reason: 'capture_owed', file_keys: [] }, { operation_id: randomUUID() });
       }
       // Advance the git snapshot ONLY after the range's duties minted, and
       // never past a path a live dispatch still owns (its debt must re-derive
@@ -1842,7 +1842,7 @@ try {
         source: 'system',
         system_reason: 'capture_owed',
         file_keys: owedKeys,
-      });
+      }, { operation_id: randomUUID() });
     }
   };
   // Research duty: triggered by research events not covered by a no-capture
@@ -2754,7 +2754,7 @@ try {
     // Undeclared capture debt keeps the broader "any capture_owed open" gate,
     // unchanged.
     if (!hasOpenSystemTodo(store, 'capture_owed')) {
-      store.enqueueSystemTodo(systemTodo(now, { text: captureOwedText(activePaths.length, clipped), system_reason: 'capture_owed', file_keys: owedKeys }));
+      store.enqueueSystemTodo(systemTodo(now, { text: captureOwedText(activePaths.length, clipped), system_reason: 'capture_owed', file_keys: owedKeys }), { operation_id: randomUUID() });
     }
   }
   if (articleDemand) {
@@ -2831,7 +2831,7 @@ try {
     // that is undrainable debt H1 counts forever (the same reasoning the live
     // recompute above gives for REMOVING an item it heals to empty).
     if (demandKeys.length) {
-      store.enqueueSystemTodo(systemTodo(now, { text: articleMissingText(demandKeys, { newlyCreated: newUnowned.length }), system_reason: 'article_missing', file_keys: demandKeys }));
+      store.enqueueSystemTodo(systemTodo(now, { text: articleMissingText(demandKeys, { newlyCreated: newUnowned.length }), system_reason: 'article_missing', file_keys: demandKeys }), { operation_id: randomUUID() });
     }
   }
   if (!conceptSatisfied) {
@@ -2840,7 +2840,7 @@ try {
     // dedupes it — the text is deterministic per family, so the old
     // text.includes() pre-check duplicated exactly what the choke does; removed.
     for (const family of unmetFamilies) {
-      store.enqueueSystemTodo(systemTodo(now, { text: conceptArticleMissingText(family), system_reason: 'concept_article_missing' }));
+      store.enqueueSystemTodo(systemTodo(now, { text: conceptArticleMissingText(family), system_reason: 'concept_article_missing' }), { operation_id: randomUUID() });
     }
   }
   if (hasResearchDuty && !researchSatisfied) {
@@ -2848,7 +2848,7 @@ try {
     // (its text carries session-specific query details) — kept deliberately.
     if (!hasOpenSystemTodo(store, 'research_owed')) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join('; ');
-      store.enqueueSystemTodo(systemTodo(now, { text: researchOwedText(queryTexts), system_reason: 'research_owed' }));
+      store.enqueueSystemTodo(systemTodo(now, { text: researchOwedText(queryTexts), system_reason: 'research_owed' }), { operation_id: randomUUID() });
     }
   }
   // R2 (board c198866d round-3 fixer, BLOCKING): the final terminal release —

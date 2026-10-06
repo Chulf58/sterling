@@ -1000,7 +1000,7 @@ try {
               source: 'system',
               system_reason: 'capture_owed',
               file_keys: paths.slice(0, 20),
-            });
+            }, { operation_id: randomUUID() });
             residueContext =
               `\n\nSESSION-BOUNDARY RESIDUE (H1): a previous session left unsettled transient registers` +
               (pending ? ` (including a capture_pending declaration: ${pending})` : '') +

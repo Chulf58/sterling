@@ -162,8 +162,12 @@ function tempDbPath(prefix = 'migration-runner-') {
   return { dir, path: join(dir, 'sterling.db') };
 }
 
+// Spawned from an empty temp cwd: this repo's own .sterling/config.json is in
+// work mode, and migration-preflight refuses there (hobby-only, exit 4).
 function run(script, args) {
-  const r = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', timeout: 60_000 });
+  const cwd = mkdtempSync(join(tmpdir(), 'migration-runner-cwd-'));
+  const r = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', cwd, timeout: 60_000 });
+  rmSync(cwd, { recursive: true, force: true });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 

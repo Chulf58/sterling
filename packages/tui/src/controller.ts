@@ -300,7 +300,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
         rationale:
           'Model/effort pin changed from the TUI System tab (config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL↔Windows machine boundary, d53dc92c).',
         alternatives_rejected: [],
-      });
+      }, { operation_id: randomUUID() });
     } catch (err) {
       // P5: never silent. The next activation's drift marker still backstops a
       // partial write.
