@@ -7,9 +7,9 @@ var __export = (target, all) => {
 };
 
 // scripts/domains.mjs
-import { existsSync as existsSync4, readFileSync as readFileSync2, readdirSync, writeFileSync, renameSync, realpathSync as realpathSync4 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { basename as basename3, dirname as dirname6, join as join7, resolve as resolve3 } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync5, readdirSync, writeFileSync, renameSync, realpathSync as realpathSync4 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { basename as basename3, dirname as dirname6, join as join10, resolve as resolve5 } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 
 // node_modules/zod/v3/external.js
@@ -4055,15 +4055,15 @@ var NEVER = INVALID;
 
 // packages/schemas/dist/paths.js
 function normalizeRepoPath(input) {
-  const fwd2 = input.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(fwd2)) {
+  const fwd3 = input.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(fwd3)) {
     throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
   }
-  if (fwd2.startsWith("/")) {
+  if (fwd3.startsWith("/")) {
     throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
   }
   const parts = [];
-  for (const seg of fwd2.split("/")) {
+  for (const seg of fwd3.split("/")) {
     if (seg === "" || seg === ".")
       continue;
     if (seg === "..") {
@@ -5327,13 +5327,22 @@ var configSchema = external_exports.object({
   // S1): any other value is PRESERVED raw, never coerced to hobby and never
   // thrown on — a typo here must not turn every parseConfig reader (the MCP
   // server's boot included) into a startup failure. The strict judge is
-  // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
+  // readProjectMode() in packages/schemas/src/project.ts (re-exported by scripts/lib/handoff-projection.mjs), which every
   // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
   // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.
   // The default lives twice (anti_pattern 85d15143): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // Where the project's stores live (decision
+  // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
+  // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
+  // the Served database, valid only with mode 'work'. Only
+  // scripts/move-store.mjs writes it, after the stores have moved; config_set
+  // and the TUI refuse it. Strict, unlike `mode`: a wrong value must never
+  // route a project to the wrong backend. The reader is
+  // packages/store/src/routing.ts (resolveStoreRoute). No default on purpose.
+  storage: external_exports.enum(["sqlite", "postgres"]).optional(),
   // Handoff files (decision
   // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
   // `enabled` says whether Sterling writes the files for colleagues who do not
@@ -5425,19 +5434,556 @@ var runtimeMarkerSchema = external_exports.object({
   booted_at: external_exports.string()
 }).strict();
 
+// packages/schemas/dist/project.js
+import { lstatSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+var PROJECT_MODES = ["hobby", "work"];
+var ProjectModeError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectModeError";
+  }
+};
+var ProjectIdentityError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectIdentityError";
+  }
+};
+var CONFIG_REL = ".sterling/config.json";
+var PROJECT_IDENTITY_REL = ".sterling/project.json";
+var fwd = (p) => p.replace(/\\/g, "/");
+var UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
+function readContainedText(root, rel, ErrorClass, subject) {
+  const segments = rel.split("/");
+  let cursor = resolve(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join(cursor, part);
+    let st;
+    try {
+      st = lstatSync(cursor);
+    } catch (err) {
+      if (err?.code === "ENOENT")
+        return null;
+      throw err;
+    }
+    const shown = segments.slice(0, index + 1).join("/");
+    const isLeaf = index === segments.length - 1;
+    if (st.isSymbolicLink())
+      throw new ErrorClass(`${shown} is a symlink \u2014 refusing to follow it out of the project; ${subject} cannot be read`);
+    if (isLeaf ? !st.isFile() : !st.isDirectory()) {
+      throw new ErrorClass(`${shown} exists but is not a ${isLeaf ? "regular file" : "directory"} \u2014 ${subject} cannot be read`);
+    }
+  }
+  return readFileSync(cursor, "utf8");
+}
+function readJsonObject(root, rel, ErrorClass, subject) {
+  const where = `${fwd(resolve(root))}/${rel}`;
+  const text = readContainedText(root, rel, ErrorClass, subject);
+  if (text === null)
+    return { where, parsed: void 0 };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
+  }
+  return { where, parsed };
+}
+function readProjectMode(root) {
+  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
+  if (parsed === void 0 || parsed.mode === void 0)
+    return "hobby";
+  if (!PROJECT_MODES.includes(parsed.mode)) {
+    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  }
+  return parsed.mode;
+}
+function readProjectIdentity(root) {
+  const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
+  if (parsed === void 0)
+    return null;
+  if (!isProjectId(parsed.project_id)) {
+    throw new ProjectIdentityError(`project_id is ${JSON.stringify(parsed.project_id)} in ${where} \u2014 it must be a UUID v4 string; fix the file by hand (init never overwrites it) or restore it from git`);
+  }
+  return { project_id: parsed.project_id };
+}
+
+// packages/schemas/dist/broker.js
+var BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
+var BROKER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+var BROKER_REGISTRY_MAX_BYTES = 16 * 1024;
+var BROKER_MAX_ARGS = 6;
+var brokerIdentitySchema = external_exports.object({
+  instance_id: external_exports.string().regex(/^[0-9a-f]{32}$/),
+  protocol: external_exports.number().int(),
+  build_id: external_exports.string(),
+  project_id: external_exports.string(),
+  root: external_exports.string(),
+  storage: external_exports.object({ backend: external_exports.literal("postgres"), database: external_exports.string(), meta_schema: external_exports.string(), project_schema: external_exports.string() }),
+  pid: external_exports.number().int()
+});
+var brokerRegistrationSchema = brokerIdentitySchema.extend({ socket: external_exports.string() });
+var brokerHelloSchema = external_exports.object({
+  type: external_exports.literal("hello"),
+  protocol: external_exports.number().int(),
+  instance_id: external_exports.string(),
+  project_id: external_exports.string(),
+  root: external_exports.string()
+});
+var brokerErrorSchema = external_exports.object({
+  name: external_exports.string(),
+  message: external_exports.string(),
+  /** Enumerable string or number fields of the original error (domain, location, schema, code). */
+  fields: external_exports.record(external_exports.union([external_exports.string(), external_exports.number()])).default({})
+});
+var brokerWelcomeSchema = external_exports.union([
+  external_exports.object({ type: external_exports.literal("welcome"), identity: brokerIdentitySchema }),
+  external_exports.object({ type: external_exports.literal("refused"), error: brokerErrorSchema })
+]);
+var brokerCallSchema = external_exports.object({
+  type: external_exports.literal("call"),
+  id: external_exports.number().int().nonnegative(),
+  target: external_exports.enum(["project", "mounted"]),
+  op: external_exports.string(),
+  args: external_exports.array(external_exports.unknown()).max(BROKER_MAX_ARGS),
+  /** Client clock (ms since epoch) when the call was sent; client and server share the machine clock. */
+  sent_at: external_exports.number()
+});
+var brokerResultSchema = external_exports.union([
+  external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(true), result: external_exports.unknown().optional() }),
+  /** `executed` false means the server did not start the operation, so the caller may fall back; true or absent means it may have run. */
+  external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(false), executed: external_exports.boolean(), error: brokerErrorSchema })
+]);
+
 // packages/store/dist/index.js
-import { mkdirSync as mkdirSync3, existsSync as existsSync2, statSync } from "node:fs";
-import { dirname as dirname4, join as join4, resolve as resolvePath2 } from "node:path";
+import { mkdirSync as mkdirSync3, existsSync as existsSync2, statSync as statSync2 } from "node:fs";
+import { dirname as dirname4, join as join6, resolve as resolvePath2 } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // packages/store/dist/mounted.js
 import { mkdirSync, existsSync, rmSync, openSync, closeSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join as join3 } from "node:path";
+import { homedir as homedir2 } from "node:os";
+
+// packages/store/dist/pg-bridge.js
+import { MessageChannel, Worker, receiveMessageOnPort } from "node:worker_threads";
+import { readFileSync as readFileSync2, statSync } from "node:fs";
 import { homedir } from "node:os";
+import { join as join2 } from "node:path";
+var STATE_WAITING = 0;
+var STATE_REPLY = 1;
+var STATE_DEAD = 2;
+var DEFAULT_PG_CREDENTIALS_PATH = join2(homedir(), ".sterling", "credentials", "served.json");
+var DEFAULT_PG_WAIT_TIMEOUT_MS = 1e4;
+var HANDSHAKE_MARGIN_MS = 5e3;
+var PgConfigError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "PgConfigError";
+  }
+};
+var PgBridgeTimeoutError = class extends Error {
+  phase;
+  timeoutMs;
+  constructor(phase, timeoutMs, detail) {
+    super(`Postgres bridge: no reply within ${timeoutMs} ms during the ${phase} (${detail}); the worker was terminated and its connection closed.`);
+    this.phase = phase;
+    this.timeoutMs = timeoutMs;
+    this.name = "PgBridgeTimeoutError";
+  }
+};
+var PgWorkerDiedError = class extends Error {
+  reason;
+  code;
+  constructor(reason, code) {
+    super(`Postgres bridge: the worker died (${reason}); the bridge is closed.`);
+    this.reason = reason;
+    this.code = code;
+    this.name = "PgWorkerDiedError";
+  }
+};
+var PgBridgeClosedError = class extends Error {
+  constructor(why) {
+    super(`Postgres bridge is closed (${why}); open a new one.`);
+    this.name = "PgBridgeClosedError";
+  }
+};
+var PgTransactionOpenError = class extends Error {
+  constructor(wanted2, holder) {
+    super(`Postgres bridge: ${wanted2} cannot begin a transaction: this connection already has one open for ${holder}. One connection holds one transaction; nothing was sent.`);
+    this.name = "PgTransactionOpenError";
+  }
+};
+var PgQueryError = class extends Error {
+  code;
+  constructor(message, code) {
+    super(message);
+    this.code = code;
+    this.name = "PgQueryError";
+  }
+};
+var CREDENTIAL_KEYS = ["host", "port", "database", "user", "password", "ssl", "gssencmode", "connect_timeout_ms"];
+var SSL_KEYS = ["mode", "negotiation", "servername", "rejectUnauthorized"];
+function isPlainObject2(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+function buildPgConnectionConfig(creds) {
+  if (!isPlainObject2(creds))
+    throw new PgConfigError("credentials must be a JSON object");
+  for (const key of Object.keys(creds)) {
+    if (!CREDENTIAL_KEYS.includes(key))
+      throw new PgConfigError(`credentials key '${key}' is not recognised; allowed: ${CREDENTIAL_KEYS.join(", ")}`);
+  }
+  for (const field of ["host", "database", "user"]) {
+    if (typeof creds[field] !== "string" || creds[field].length === 0)
+      throw new PgConfigError(`credentials.${field} must be a non-empty string`);
+  }
+  if (!Number.isInteger(creds.port) || creds.port < 1 || creds.port > 65535) {
+    throw new PgConfigError("credentials.port must be an integer between 1 and 65535");
+  }
+  if (typeof creds.password !== "string")
+    throw new PgConfigError("credentials.password must be a string");
+  if (creds.gssencmode !== void 0 && creds.gssencmode !== "disable") {
+    throw new PgConfigError("credentials.gssencmode must be 'disable' (node-postgres has no GSS encryption)");
+  }
+  const timeout = creds.connect_timeout_ms;
+  if (!Number.isInteger(timeout) || timeout <= 0)
+    throw new PgConfigError("credentials.connect_timeout_ms must be a positive integer");
+  let ssl = false;
+  let sslnegotiation = "postgres";
+  if (creds.ssl !== void 0) {
+    const s2 = creds.ssl;
+    if (!isPlainObject2(s2))
+      throw new PgConfigError("credentials.ssl must be an object");
+    for (const key of Object.keys(s2)) {
+      if (!SSL_KEYS.includes(key))
+        throw new PgConfigError(`credentials.ssl key '${key}' is not recognised; allowed: ${SSL_KEYS.join(", ")}`);
+    }
+    if (s2.mode !== "require" && s2.mode !== "verify-full")
+      throw new PgConfigError("credentials.ssl.mode must be 'require' or 'verify-full'");
+    if (typeof s2.rejectUnauthorized !== "boolean")
+      throw new PgConfigError("credentials.ssl.rejectUnauthorized must be a boolean");
+    if (s2.rejectUnauthorized !== (s2.mode === "verify-full")) {
+      throw new PgConfigError(`credentials.ssl.rejectUnauthorized must be ${s2.mode === "verify-full"} for mode '${s2.mode}' (verify-full verifies the certificate, require does not)`);
+    }
+    if (s2.servername !== void 0 && (typeof s2.servername !== "string" || s2.servername.length === 0)) {
+      throw new PgConfigError("credentials.ssl.servername must be a non-empty string when given");
+    }
+    if (s2.negotiation !== void 0 && s2.negotiation !== "postgres" && s2.negotiation !== "direct") {
+      throw new PgConfigError("credentials.ssl.negotiation must be 'postgres' or 'direct'");
+    }
+    ssl = { rejectUnauthorized: s2.rejectUnauthorized, ...s2.servername !== void 0 ? { servername: s2.servername } : {} };
+    sslnegotiation = s2.negotiation ?? "postgres";
+  }
+  return {
+    host: creds.host,
+    port: creds.port,
+    database: creds.database,
+    user: creds.user,
+    password: creds.password,
+    ssl,
+    sslnegotiation,
+    connectionTimeoutMillis: timeout
+  };
+}
+function readPgCredentials(path = DEFAULT_PG_CREDENTIALS_PATH) {
+  let mode;
+  try {
+    mode = statSync(path).mode;
+  } catch (e) {
+    throw new PgConfigError(`Postgres credentials file '${path}' cannot be read: ${e.code ?? String(e)}`);
+  }
+  if ((mode & 63) !== 0) {
+    throw new PgConfigError(`Postgres credentials file '${path}' is readable by group or other (mode ${(mode & 511).toString(8)}); set it to mode 600`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync2(path, "utf8"));
+  } catch (e) {
+    throw new PgConfigError(`Postgres credentials file '${path}' is not valid JSON: ${e.message}`);
+  }
+  return buildPgConnectionConfig(parsed);
+}
+function redactSecrets(text, secrets) {
+  let out = text;
+  for (const secret of secrets) {
+    if (!secret)
+      continue;
+    out = out.split(secret).join("[redacted]");
+    const encoded = encodeURIComponent(secret);
+    if (encoded !== secret)
+      out = out.split(encoded).join("[redacted]");
+  }
+  return out;
+}
+var PgBridge = class {
+  worker;
+  port;
+  control;
+  secrets;
+  seq = 0;
+  closedReason;
+  txOwner;
+  txOwnerLabel = "";
+  /** How long one statement waits for its reply. Server-side timeouts must be shorter, so the named server error arrives first. */
+  waitTimeoutMs;
+  constructor(config, options = {}) {
+    this.waitTimeoutMs = options.waitTimeoutMs ?? DEFAULT_PG_WAIT_TIMEOUT_MS;
+    const handshakeTimeoutMs = options.handshakeTimeoutMs ?? config.connectionTimeoutMillis + HANDSHAKE_MARGIN_MS;
+    for (const [name, v] of [["waitTimeoutMs", this.waitTimeoutMs], ["handshakeTimeoutMs", handshakeTimeoutMs]]) {
+      if (!Number.isInteger(v) || v <= 0)
+        throw new PgConfigError(`PgBridge: ${name} must be a positive integer`);
+    }
+    this.secrets = [config.password];
+    this.control = new Int32Array(new SharedArrayBuffer(4));
+    const { port1, port2 } = new MessageChannel();
+    this.port = port1;
+    this.port.unref();
+    this.worker = options.workerUrl === void 0 ? new Worker(new URL("./pg-worker.js", import.meta.url)) : new Worker(options.workerUrl);
+    this.worker.unref();
+    this.worker.on("error", () => {
+    });
+    Atomics.store(this.control, 0, STATE_WAITING);
+    this.worker.postMessage({ control: this.control.buffer, port: port2, config }, [port2]);
+    this.await(0, "handshake", handshakeTimeoutMs, "the worker did not report ready; it may have died at load, or the server did not answer");
+  }
+  get closed() {
+    return this.closedReason !== void 0;
+  }
+  /** The handle whose transaction is open on this connection, if any. */
+  get transactionOwner() {
+    return this.txOwner;
+  }
+  /** Records that `owner` opens a transaction. Refuses when any handle, `owner` included, already holds one. */
+  claimTransaction(owner, label) {
+    if (this.txOwner !== void 0)
+      throw new PgTransactionOpenError(label, this.txOwnerLabel);
+    this.txOwner = owner;
+    this.txOwnerLabel = label;
+  }
+  /** Records that `owner`'s transaction ended. A no-op for any other handle. */
+  releaseTransaction(owner) {
+    if (this.txOwner === owner) {
+      this.txOwner = void 0;
+      this.txOwnerLabel = "";
+    }
+  }
+  /** Runs one statement. With `values` it is a parameterised query ($1, $2, ...); without, a simple query that may hold several statements. */
+  query(text, values) {
+    const reply = this.send({ op: "query", text, values }, "query", this.waitTimeoutMs);
+    return { rows: reply.rows ?? [], rowCount: reply.rowCount ?? 0 };
+  }
+  /** Ends the connection and stops the worker. Idempotent. */
+  close() {
+    if (this.closed)
+      return;
+    try {
+      this.send({ op: "close" }, "close", this.waitTimeoutMs);
+    } finally {
+      this.shutDown("close() was called");
+    }
+  }
+  send(req, phase, timeoutMs) {
+    if (this.closedReason !== void 0)
+      throw new PgBridgeClosedError(this.closedReason);
+    const queued = receiveMessageOnPort(this.port)?.message;
+    const previous = Atomics.compareExchange(this.control, 0, STATE_REPLY, STATE_WAITING);
+    if (queued?.dead || previous === STATE_DEAD) {
+      const reason = queued?.error ? this.redact(queued.error.message) : "it stopped between calls";
+      this.shutDown(`the worker died: ${reason}`);
+      throw new PgWorkerDiedError(reason, queued?.error?.code);
+    }
+    const seq = ++this.seq;
+    this.port.postMessage({ seq, ...req });
+    return this.await(seq, phase, timeoutMs, phase === "query" ? "the statement did not finish" : "the connection did not end");
+  }
+  await(seq, phase, timeoutMs, detail) {
+    const outcome = Atomics.wait(this.control, 0, STATE_WAITING, timeoutMs);
+    if (outcome === "timed-out") {
+      this.shutDown(`a ${phase} wait timed out after ${timeoutMs} ms`);
+      throw new PgBridgeTimeoutError(phase, timeoutMs, detail);
+    }
+    const state = Atomics.load(this.control, 0);
+    const reply = receiveMessageOnPort(this.port)?.message;
+    if (state === STATE_DEAD || reply?.dead) {
+      const reason = reply?.error ? this.redact(reply.error.message) : "no reason given";
+      this.shutDown(`the worker died: ${reason}`);
+      throw new PgWorkerDiedError(reason, reply?.error?.code);
+    }
+    if (!reply || reply.seq !== seq) {
+      this.shutDown("protocol error");
+      throw new PgWorkerDiedError(`protocol error: expected the reply to message ${seq}, got ${reply ? `message ${reply.seq}` : "nothing"}`);
+    }
+    if (!reply.ok) {
+      const message = this.redact(reply.error?.message ?? "unknown error");
+      if (phase === "handshake") {
+        this.shutDown(`the connection failed: ${message}`);
+        throw new PgWorkerDiedError(`connecting failed: ${message}`, reply.error?.code);
+      }
+      throw new PgQueryError(message, reply.error?.code);
+    }
+    return reply;
+  }
+  redact(message) {
+    return redactSecrets(message, this.secrets);
+  }
+  shutDown(reason) {
+    if (this.closedReason !== void 0)
+      return;
+    this.closedReason = reason;
+    this.port.close();
+    void this.worker.terminate();
+  }
+};
+
+// packages/store/dist/search-fold.js
+var LATIN_LETTER = new RegExp("^\\p{Script=Latin}$", "u");
+var LETTER_OR_NUMBER_OR_PRIVATE = /^[\p{L}\p{N}\p{Co}]$/u;
+var COMBINING_MARK = new RegExp("^\\p{M}$", "u");
+function foldSearchText(s2) {
+  let kept = "";
+  let afterLatinLetter = false;
+  for (const ch of s2.toLowerCase().normalize("NFD")) {
+    if (COMBINING_MARK.test(ch)) {
+      if (!afterLatinLetter)
+        kept += ch;
+      continue;
+    }
+    afterLatinLetter = LATIN_LETTER.test(ch) && new RegExp("^\\p{L}$", "u").test(ch);
+    kept += ch;
+  }
+  let out = "";
+  for (const ch of kept.normalize("NFC"))
+    out += LETTER_OR_NUMBER_OR_PRIVATE.test(ch) ? ch : " ";
+  return out.replace(/ {2,}/g, " ").trim();
+}
+
+// packages/store/dist/pg-driver.js
+var PG_META_SCHEMA = "sterling_meta";
+var SCHEMA_NAME = /^sterling_[a-z0-9_]*[a-z0-9]$/;
+var MAX_IDENTIFIER_BYTES = 63;
+var PgSchemaNameRefusedError = class extends Error {
+  constructor(name, why) {
+    super(`Postgres schema name '${name}' refused: ${why}. Sterling only touches schemas named sterling_<lowercase letters, digits, _>.`);
+    this.name = "PgSchemaNameRefusedError";
+  }
+};
+function assertSterlingSchemaName(name) {
+  if (typeof name !== "string" || !SCHEMA_NAME.test(name))
+    throw new PgSchemaNameRefusedError(String(name), "not of the form sterling_<a-z0-9_>");
+  if (Buffer.byteLength(name) > MAX_IDENTIFIER_BYTES)
+    throw new PgSchemaNameRefusedError(name, `longer than ${MAX_IDENTIFIER_BYTES} bytes`);
+}
+function pgProjectSchemaName(projectUuid) {
+  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(projectUuid)) {
+    throw new PgSchemaNameRefusedError(`sterling_p_${projectUuid}`, "the project id is not a UUID");
+  }
+  const name = `sterling_p_${projectUuid.replace(/-/g, "").toLowerCase()}`;
+  assertSterlingSchemaName(name);
+  return name;
+}
+function pgDomainSchemaName(domain) {
+  if (typeof domain !== "string" || domain.length === 0)
+    throw new PgSchemaNameRefusedError("sterling_d_", "the domain name is empty");
+  const name = `sterling_d_${domain.toLowerCase().replace(/[^a-z0-9]/g, "_")}`;
+  assertSterlingSchemaName(name);
+  return name;
+}
+var PG_RANKINGS = ["bm25", "idf_tsrank", "tsrank_cd"];
+var DEFAULT_PG_RANKING = "bm25";
+var PG_SCORE_SCALES = { bm25: "pg_bm25_v1", idf_tsrank: "pg_idf_tsrank_v1", tsrank_cd: "pg_tsrank_cd_v1" };
+function pgSearchQuery(terms, matchAll) {
+  const clauses = [];
+  let empty = false;
+  for (const term of terms) {
+    const prefix = term.length > 1 && term.endsWith("*");
+    const folded = foldSearchText(term);
+    if (folded === "") {
+      empty = true;
+      continue;
+    }
+    const w = folded.split(" ");
+    clauses.push({ q: w.map((x) => `'${x}'`).join(" <-> ") + (prefix ? ":*" : ""), w, p: prefix });
+  }
+  const none = clauses.length === 0 || matchAll === true && empty;
+  const prefixes = [...new Set(clauses.filter((c) => c.p).map((c) => c.w[c.w.length - 1]))];
+  const out = JSON.stringify({
+    match: none ? null : clauses.map((c) => `(${c.q})`).join(matchAll ? " & " : " | "),
+    clauses,
+    words: [...new Set(clauses.flatMap((c) => c.w))],
+    prefixes,
+    // The documents any prefix matches, so the statement can list the lexemes each prefix stands for once per query.
+    prefixq: prefixes.length ? prefixes.map((x) => `'${x}':*`).join(" | ") : null
+  });
+  return out;
+}
+var PG_SEARCH_STATS = `CROSS JOIN (SELECT q.j->>'match' AS m,
+    (SELECT count(*) FROM records_fts)::float8 AS n,
+    (SELECT coalesce(avg(dl), 0) FROM records_fts)::float8 AS avgdl,
+    ARRAY(SELECT json_array_elements_text(q.j->'words'))
+      || ARRAY(SELECT DISTINCT u.lexeme FROM records_fts x, unnest(x.tsv) u
+        WHERE x.tsv @@ (q.j->>'prefixq')::tsquery AND EXISTS (SELECT 1 FROM json_array_elements_text(q.j->'prefixes') pf WHERE starts_with(u.lexeme, pf))) AS lexemes,
+    (SELECT coalesce(json_agg(json_build_object('q', c.value->>'q', 'w', c.value->'w', 'p', c.value->'p',
+        'df', (SELECT count(*) FROM records_fts x WHERE x.tsv @@ (c.value->>'q')::tsquery)) ORDER BY c.ordinality), '[]'::json)
+      FROM json_array_elements(q.j->'clauses') WITH ORDINALITY c) AS cl
+  FROM (SELECT ?::json AS j) q) st`;
+var PG_IDF = "greatest(ln((st.n - c.df + 0.5) / (c.df + 0.5)), 1e-6)";
+var PG_BM25_SCORE = `CROSS JOIN LATERAL (SELECT array_agg(u.lexeme) AS lx, array_agg(p) AS ps
+    FROM unnest(ts_filter(setweight(f.tsv, 'A', st.lexemes), '{a}')) u, unnest(u.positions) p) lp
+  CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * (t.tf * 2.2) / (t.tf + 1.2 * (0.25 + 0.75 * f.dl / st.avgdl))), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(w text[], p boolean, df bigint)
+    CROSS JOIN LATERAL (SELECT count(*)::float8 AS tf FROM unnest(lp.lx, lp.ps) AS a(lex, pos)
+      WHERE (a.lex = c.w[1] OR (c.p AND cardinality(c.w) = 1 AND starts_with(a.lex, c.w[1])))
+        AND NOT EXISTS (SELECT 1 FROM generate_series(2, cardinality(c.w)) AS i
+          WHERE NOT EXISTS (SELECT 1 FROM unnest(lp.lx, lp.ps) AS b(lex, pos)
+            WHERE b.pos = a.pos + i - 1 AND (b.lex = c.w[i] OR (c.p AND i = cardinality(c.w) AND starts_with(b.lex, c.w[i])))))) t) sc`;
+var PG_IDF_TSRANK_SCORE = `CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * ts_rank(f.tsv, c.q::tsquery)), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(q text, df bigint) WHERE f.tsv @@ c.q::tsquery) sc`;
+var PG_TSRANK_CD_SCORE = "CROSS JOIN LATERAL (SELECT ts_rank_cd(f.tsv, st.m::tsquery)::float8 AS score) sc";
+var PG_SCORES = { bm25: PG_BM25_SCORE, idf_tsrank: PG_IDF_TSRANK_SCORE, tsrank_cd: PG_TSRANK_CD_SCORE };
+function pgDialectFor(ranking) {
+  if (!PG_RANKINGS.includes(ranking))
+    throw new Error(`Postgres ranking must be one of ${PG_RANKINGS.join(", ")}, got ${String(ranking)}`);
+  return {
+    // One statement per query (a round trip costs about 25 ms): the join binds
+    // the query once for the statistics, the match binds it again so the GIN
+    // index sees a constant tsquery.
+    searchJoin: `JOIN records_fts f ON f.record_id = r.id ${PG_SEARCH_STATS} ${PG_SCORES[ranking]}`,
+    searchJoinBinds: 1,
+    searchMatch: "f.tsv @@ (?::json->>'match')::tsquery",
+    searchScore: "sc.score",
+    searchOrder: "sc.score DESC",
+    scoreScale: PG_SCORE_SCALES[ranking],
+    searchQuery: pgSearchQuery,
+    searchText: foldSearchText,
+    // Postgres refuses \u0000 anywhere in a json value it parses (22P05), so the
+    // real \u0000 escapes are removed first. The pattern consumes an escaped
+    // backslash pair (\\) as a unit and puts it back, so \u0000 only matches
+    // where its backslash starts an escape: the literal text \\u0000 survives.
+    // strpos skips the regex for the bodies that hold no \u0000 at all.
+    jsonText: (column, key) => {
+      if (!/^[a-z_]+$/.test(key))
+        throw new Error(`pgDialect.jsonText: key '${key}' is not a plain identifier`);
+      if (!/^[a-z_]+(\.[a-z_]+)?$/.test(column))
+        throw new Error(`pgDialect.jsonText: column '${column}' is not a plain column reference`);
+      return String.raw`((CASE WHEN strpos(${column}, '\u0000') > 0 THEN regexp_replace(${column}, '(\\\\)|\\u0000', '\1', 'g') ELSE ${column} END)::json ->> '${key}')`;
+    },
+    insertionOrder: (alias) => alias ? `${alias}._seq` : "_seq",
+    insertIgnore: (table, columns) => `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")}) ON CONFLICT DO NOTHING`
+  };
+}
+var pgDialect = pgDialectFor(DEFAULT_PG_RANKING);
+
+// packages/store/dist/mounted.js
 function resolveDomainMounts(config) {
   return config.stack_tags.map((name) => ({
     name,
-    dbPath: config.domain_paths[name] ?? join(homedir(), ".sterling", "domains", name, "sterling.db")
+    dbPath: config.domain_paths[name] ?? join3(homedir2(), ".sterling", "domains", name, "sterling.db")
   }));
 }
 var DOMAIN_DESCRIPTION_KEY = "description";
@@ -5475,8 +6021,8 @@ var AXIS_MAX_TERM_LEN = 64;
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync as mkdirSync2 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { dirname as dirname2, join as join2 } from "node:path";
+import { homedir as homedir3 } from "node:os";
+import { dirname as dirname2, join as join4 } from "node:path";
 var REGISTRY_DDL = `
 CREATE TABLE IF NOT EXISTS projects (
   repo_path TEXT PRIMARY KEY,
@@ -5489,7 +6035,7 @@ CREATE TABLE IF NOT EXISTS projects (
   last_seen_at TEXT
 );`;
 function registryPath() {
-  return process.env.STERLING_REGISTRY_DB ?? join2(homedir2(), ".sterling", "registry.db");
+  return process.env.STERLING_REGISTRY_DB ?? join4(homedir3(), ".sterling", "registry.db");
 }
 var ProjectRegistry = class {
   db;
@@ -5548,7 +6094,7 @@ var ProjectRegistry = class {
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { realpathSync } from "node:fs";
-import { dirname as dirname3, basename, join as join3, resolve as resolvePath } from "node:path";
+import { dirname as dirname3, basename, join as join5, resolve as resolvePath } from "node:path";
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -5683,10 +6229,14 @@ var JournalDemotionRefusedError = class extends Error {
 var DEFAULT_BUSY_TIMEOUT_MS = 5e3;
 var sqliteDialect = {
   searchJoin: "JOIN records_fts f ON f.record_id = r.id",
+  searchJoinBinds: 0,
   searchMatch: "records_fts MATCH ?",
   // FTS5's bm25() is LOWER for a better match, so the score is its negation.
   searchScore: "(-bm25(records_fts))",
   searchOrder: "bm25(records_fts) ASC",
+  scoreScale: "fts5_bm25",
+  // FTS5's unicode61 tokenizer does its own folding; the text goes in as built.
+  searchText: (text) => text,
   /**
    * The FTS5 MATCH expression rank_terms compiles to. A trailing '*' marks an
    * FTS5 prefix query ("stor*" matches "store") — the star must sit OUTSIDE the
@@ -5716,7 +6266,7 @@ var SqliteDriver = class {
     this.db = new DatabaseSync2(path);
     let classifiedPath = this.dbPath;
     try {
-      classifiedPath = join3(realpathSync(dirname3(this.dbPath)), basename(this.dbPath));
+      classifiedPath = join5(realpathSync(dirname3(this.dbPath)), basename(this.dbPath));
     } catch {
     }
     this.classifiedPath = classifiedPath;
@@ -5806,6 +6356,11 @@ var SqliteDriver = class {
       this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
     } catch {
     }
+    try {
+      this.db.exec("ALTER TABLE records ADD COLUMN operation_id TEXT");
+    } catch {
+    }
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON records(operation_id)");
   }
   journalMode() {
     return this.db.prepare("PRAGMA journal_mode").get().journal_mode;
@@ -5817,6 +6372,7 @@ var SqliteDriver = class {
 };
 
 // packages/store/dist/index.js
+var storeDriverFactory;
 var StoreRowDecodeError = class extends Error {
   op;
   constructor(op, cause) {
@@ -5839,6 +6395,33 @@ function decodeLiveRecordRow(op, row) {
   return record;
 }
 var SUPPORTED_SCHEMA_VERSION = 2;
+var OperationRepeatedError = class extends Error {
+  operation_id;
+  original_id;
+  constructor(operation_id, original_id) {
+    super(`operation '${operation_id}' already ran: it wrote record '${original_id}'. A repeated operation is refused, never applied twice; nothing was written. Read '${original_id}' to see what landed.`);
+    this.operation_id = operation_id;
+    this.original_id = original_id;
+    this.name = "OperationRepeatedError";
+  }
+};
+var StoreMovedError = class extends Error {
+  db_path;
+  constructor(db_path) {
+    super(`store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`);
+    this.db_path = db_path;
+    this.name = "StoreMovedError";
+  }
+};
+function operationIdOf(options, op) {
+  const id = options?.operation_id;
+  if (id === void 0)
+    return void 0;
+  if (typeof id !== "string" || id.length === 0 || id.length > 200) {
+    throw new Error(`${op}: operation_id must be a non-empty string of at most 200 characters; nothing was written.`);
+  }
+  return id;
+}
 var UnsupportedSchemaVersionError = class extends Error {
   found;
   supported;
@@ -6129,6 +6712,9 @@ var SterlingStore = class _SterlingStore {
     if (options.driver !== void 0 && options.busyTimeoutMs !== void 0) {
       options.driver.close();
       throw new Error("SterlingStore: busyTimeoutMs configures the SQLite driver this store opens itself; it cannot be combined with an injected driver \u2014 set it on that driver.");
+    }
+    if (options.driver === void 0 && storeDriverFactory !== void 0) {
+      options = { driver: storeDriverFactory(path, { busyTimeoutMs: options.busyTimeoutMs }) };
     }
     this.db = options.driver ?? new SqliteDriver(path, { busyTimeoutMs: options.busyTimeoutMs });
     const foundSchemaVersion = this.db.schemaVersion();
@@ -6469,8 +7055,9 @@ var SterlingStore = class _SterlingStore {
    *  legacy feature_article field, and the pin fixtures that pass version: 1).
    *  S3 STRIPS it — version becomes server-owned at every surface — so nothing
    *  new should start relying on setting it. */
-  create(input) {
+  create(input, options = {}) {
     this.assertWritable("create");
+    const operationId = operationIdOf(options, "create");
     const prepared = _SterlingStore.resolveIdentity(input, {
       lifecycle: "live",
       freshness: "fresh",
@@ -6492,7 +7079,8 @@ var SterlingStore = class _SterlingStore {
     assertNoFieldLoss("create", prepared.input, record);
     _SterlingStore.refuseRawSupersedesLinks("create", record.links, /* @__PURE__ */ new Set());
     this.tx(() => {
-      this.insertRecord(record);
+      this.refuseRepeatedOperation(operationId);
+      this.insertRecord(record, operationId);
       this.logActivity("created", record, record.created_at);
     });
     return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.storableBody(record)])[0]);
@@ -6761,7 +7349,7 @@ var SterlingStore = class _SterlingStore {
           throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal \u2014 the transaction was rolled back; re-read and retry.`);
         }
       }
-      this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
+      this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(this.db.dialect.searchText(entry.fts(stored)), id);
       this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
       if (opts2.resolves?.length)
         this.drainResolves(op, opts2.resolves, now, opts2.resolvedReceipt);
@@ -6889,19 +7477,21 @@ var SterlingStore = class _SterlingStore {
    * write would refuse is not validated here, the write path refuses it.
    */
   enqueueWouldBeNoop(input) {
-    if (input.system_reason === "reconcile_needed" && input.feature_link)
+    return this.readTx(() => {
+      if (input.system_reason === "reconcile_needed" && input.feature_link)
+        return false;
+      const wantKey = systemTodoKey(input);
+      const rows2 = input.feature_link ? this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0").all(input.feature_link) : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      for (const r of rows2) {
+        const t = _SterlingStore.decodeLiveRecord("enqueueWouldBeNoop", r);
+        if (t.source !== "system" || systemTodoKey(t) !== wantKey)
+          continue;
+        const priorFiles = [...t.file_keys ?? []].sort();
+        const nextFiles = [...input.file_keys ?? []].sort();
+        return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? "", input.text);
+      }
       return false;
-    const wantKey = systemTodoKey(input);
-    const rows2 = input.feature_link ? this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0").all(input.feature_link) : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
-    for (const r of rows2) {
-      const t = _SterlingStore.decodeLiveRecord("enqueueWouldBeNoop", r);
-      if (t.source !== "system" || systemTodoKey(t) !== wantKey)
-        continue;
-      const priorFiles = [...t.file_keys ?? []].sort();
-      const nextFiles = [...input.file_keys ?? []].sort();
-      return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? "", input.text);
-    }
-    return false;
+    });
   }
   /**
    * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
@@ -6952,8 +7542,9 @@ var SterlingStore = class _SterlingStore {
    * body UPDATE was invisible to expected_version, so a concurrent in-place
    * write could silently revert it, and the FTS row kept the old text).
    */
-  enqueueSystemTodo(input) {
+  enqueueSystemTodo(input, options = {}) {
     this.assertWritable("enqueueSystemTodo");
+    const operationId = operationIdOf(options, "enqueueSystemTodo");
     const prepared = _SterlingStore.resolveIdentity(input, {
       lifecycle: "live",
       freshness: "fresh",
@@ -6974,6 +7565,7 @@ var SterlingStore = class _SterlingStore {
     let textUpdated = false;
     let insertedText;
     this.tx(() => {
+      this.refuseRepeatedOperation(operationId);
       const rows2 = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
       if (isReconcileFold) {
         const matches = [];
@@ -6990,10 +7582,10 @@ var SterlingStore = class _SterlingStore {
           if (fileKeys.length > 1) {
             const owner = this.get(candidate.feature_link);
             const canonicalText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, fileKeys);
-            this.insertRecord({ ...candidate, text: canonicalText });
+            this.insertRecord({ ...candidate, text: canonicalText }, operationId);
             insertedText = canonicalText;
           } else {
-            this.insertRecord(candidate);
+            this.insertRecord(candidate, operationId);
           }
           return;
         }
@@ -7040,7 +7632,7 @@ var SterlingStore = class _SterlingStore {
         break;
       }
       if (!existing) {
-        this.insertRecord(candidate);
+        this.insertRecord(candidate, operationId);
         return;
       }
       const priorFiles = [...existing.file_keys ?? []].sort();
@@ -7072,10 +7664,12 @@ var SterlingStore = class _SterlingStore {
     };
   }
   get(id) {
-    const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
-    if (!row)
-      return void 0;
-    return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
+    return this.readTx(() => {
+      const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
+      if (!row)
+        return void 0;
+      return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
+    });
   }
   /**
    * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
@@ -7239,14 +7833,16 @@ var SterlingStore = class _SterlingStore {
    * '(lookup failed)' would trade one false payload for another.
    */
   articlesBySlug(slug) {
-    const rows2 = this.db.prepare(`SELECT body, scope FROM records
-          WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC`).all(slug);
-    const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows2));
-    if (!records.length)
-      return records;
-    const relations = this.activeArticleRelations();
-    return records.map((r) => this.withDerivedReliedBy(r, relations));
+    return this.readTx(() => {
+      const rows2 = this.db.prepare(`SELECT body, scope FROM records
+            WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC`).all(slug);
+      const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows2));
+      if (!records.length)
+        return records;
+      const relations = this.activeArticleRelations();
+      return records.map((r) => this.withDerivedReliedBy(r, relations));
+    });
   }
   /**
    * Every non-superseded record of ANY type carrying this exact slug, newest
@@ -7259,10 +7855,12 @@ var SterlingStore = class _SterlingStore {
    * live head while a version-pinned citation keeps using the id.
    */
   recordsBySlug(slug) {
-    const rows2 = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC`).all(slug);
-    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows2));
+    return this.readTx(() => {
+      const rows2 = this.db.prepare(`SELECT body, scope FROM records
+            WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC`).all(slug);
+      return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows2));
+    });
   }
   /**
    * THE ONE READINESS FUNCTION (decision
@@ -7278,48 +7876,50 @@ var SterlingStore = class _SterlingStore {
    * only; the stored blocked_by is never rewritten. No cycle detection.
    */
   boardReadiness(items) {
-    const total = this.count({ types: ["todo"], source: "user" });
-    const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
-    const bySlug = /* @__PURE__ */ new Map();
-    for (const t of live)
-      if (t.slug)
-        bySlug.set(t.slug, t);
-    const dependents = /* @__PURE__ */ new Map();
-    for (const t of live) {
-      for (const slug of new Set(t.blocked_by ?? [])) {
-        const list2 = dependents.get(slug);
-        if (list2)
-          list2.push(t);
-        else
-          dependents.set(slug, [t]);
+    return this.readTx(() => {
+      const total = this.count({ types: ["todo"], source: "user" });
+      const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+      const bySlug = /* @__PURE__ */ new Map();
+      for (const t of live)
+        if (t.slug)
+          bySlug.set(t.slug, t);
+      const dependents = /* @__PURE__ */ new Map();
+      for (const t of live) {
+        for (const slug of new Set(t.blocked_by ?? [])) {
+          const list2 = dependents.get(slug);
+          if (list2)
+            list2.push(t);
+          else
+            dependents.set(slug, [t]);
+        }
       }
-    }
-    const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
-    const targets = items ?? live;
-    return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
-      const blockers = [];
-      const blockersOpen = [];
-      for (const slug of t.blocked_by ?? []) {
-        const holder = openBlocker(slug);
-        blockers.push({ slug, state: holder ? "open" : "closed" });
-        if (holder)
-          blockersOpen.push(boardItemHandle(holder));
-      }
-      const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-      const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
-      return {
-        id: t.id,
-        ...t.slug ? { slug: t.slug } : {},
-        name: boardItemHandle(t),
-        ...t.priority ? { priority: t.priority } : {},
-        updated_at: t.updated_at,
-        file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
-        ...t.needs ? { needs: t.needs } : {},
-        blockers,
-        blockers_open: blockersOpen,
-        unblocks,
-        state
-      };
+      const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
+      const targets = items ?? live;
+      return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+        const blockers = [];
+        const blockersOpen = [];
+        for (const slug of t.blocked_by ?? []) {
+          const holder = openBlocker(slug);
+          blockers.push({ slug, state: holder ? "open" : "closed" });
+          if (holder)
+            blockersOpen.push(boardItemHandle(holder));
+        }
+        const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+        const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+        return {
+          id: t.id,
+          ...t.slug ? { slug: t.slug } : {},
+          name: boardItemHandle(t),
+          ...t.priority ? { priority: t.priority } : {},
+          updated_at: t.updated_at,
+          file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+          ...t.needs ? { needs: t.needs } : {},
+          blockers,
+          blockers_open: blockersOpen,
+          unblocks,
+          state
+        };
+      });
     });
   }
   /**
@@ -7333,10 +7933,12 @@ var SterlingStore = class _SterlingStore {
    * live head via recordsBySlug's own resolution.
    */
   supersededRecordsBySlug(slug) {
-    const rows2 = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status = 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`).all(slug);
-    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows2));
+    return this.readTx(() => {
+      const rows2 = this.db.prepare(`SELECT body, scope FROM records
+            WHERE status = 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`).all(slug);
+      return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows2));
+    });
   }
   /**
    * Follows superseded_by from `id` to the chain end (decision foreign_de1a7329: ids
@@ -7349,24 +7951,26 @@ var SterlingStore = class _SterlingStore {
    * the true, unreached terminus.
    */
   resolveTerminus(id) {
-    const MAX_HOPS = 32;
-    const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
-    const row = stmt.get(id);
-    if (!row)
-      return null;
-    const visited = /* @__PURE__ */ new Set([row.id]);
-    let current2 = row;
-    let hops = 0;
-    while (current2.status === "superseded" && current2.superseded_by) {
-      const next = stmt.get(current2.superseded_by);
-      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
-        return { id: current2.id, status: current2.status, hops, truncated: true };
+    return this.readTx(() => {
+      const MAX_HOPS = 32;
+      const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
+      const row = stmt.get(id);
+      if (!row)
+        return null;
+      const visited = /* @__PURE__ */ new Set([row.id]);
+      let current2 = row;
+      let hops = 0;
+      while (current2.status === "superseded" && current2.superseded_by) {
+        const next = stmt.get(current2.superseded_by);
+        if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+          return { id: current2.id, status: current2.status, hops, truncated: true };
+        }
+        visited.add(next.id);
+        current2 = next;
+        hops += 1;
       }
-      visited.add(next.id);
-      current2 = next;
-      hops += 1;
-    }
-    return { id: current2.id, status: current2.status, hops };
+      return { id: current2.id, status: current2.status, hops };
+    });
   }
   /**
    * INBOUND rel:'supersedes' edges — every record elsewhere holding a
@@ -7384,8 +7988,10 @@ var SterlingStore = class _SterlingStore {
    * source), which may sit in a different store than the target.
    */
   inboundSupersedes(id) {
-    const rows2 = this.db.prepare(`SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
-    return rows2.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
+    return this.readTx(() => {
+      const rows2 = this.db.prepare(`SELECT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
+      return rows2.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
+    });
   }
   /**
    * The §3.4 base filter (status + type + stack-tag + file-key join) shared
@@ -7456,7 +8062,9 @@ var SterlingStore = class _SterlingStore {
    * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
    * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
    * itself — knowledge_query's tool description names this scale so a caller
-   * never has to reverse-engineer bm25's own sign convention.
+   * never has to reverse-engineer bm25's own sign convention. That is the
+   * SQLite scale; on Postgres the score is the driver's ranking, also
+   * higher-is-better, and scoreScale() names which scale a store uses.
    *
    * Requires rank_terms — a threshold on a filter with no ranking has nothing
    * to threshold, so this refuses loudly rather than silently answering 0
@@ -7473,8 +8081,34 @@ var SterlingStore = class _SterlingStore {
     const d = this.db.dialect;
     const sql = `SELECT COUNT(*) AS n FROM records r ${d.searchJoin}
       WHERE ${where.join(" AND ")} AND ${d.searchMatch} AND ${d.searchScore} >= ?`;
-    const row = this.db.prepare(sql).get(...params, match, minScore);
+    const row = this.db.prepare(sql).get(...this.searchJoinParams(match), ...params, match, minScore);
     return row.n;
+  }
+  /**
+   * The scale countAboveScore()'s min_score is a floor on, as a versioned id
+   * (decision postgres-search-ranking-per-query-idf-no-stats-triggers, point
+   * 3): 'fts5_bm25' on SQLite, 'pg_bm25_v1' and the like on Postgres. Every
+   * scale is higher-is-better; a min_score is never carried across scales.
+   */
+  scoreScale() {
+    return this.db.dialect.scoreScale;
+  }
+  /**
+   * The text this store writes to records_fts for a record of `type` whose
+   * records.body is `body`: the type's fts builder, then the driver's
+   * searchText, as insertRecord() does. A copy that rebuilds the search index
+   * from the records (the knowledge-eval pg loader) calls this, so the rebuilt
+   * text is what this store would have written.
+   */
+  searchTextFor(type, body) {
+    const entry = RECORD_TYPES[type];
+    if (!entry)
+      throw new Error(`searchTextFor: unknown record type '${type}'`);
+    return this.db.dialect.searchText(entry.fts(JSON.parse(body)));
+  }
+  /** searchJoin's parameters: the match value once per placeholder it has, all before the filter's. */
+  searchJoinParams(match) {
+    return Array.from({ length: this.db.dialect.searchJoinBinds }, () => match);
   }
   /**
    * The search expression rank_terms compiles to — shared by query() and
@@ -7487,31 +8121,33 @@ var SterlingStore = class _SterlingStore {
   }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts2 = {}) {
-    const cap = opts2.cap ?? DEFAULT_QUERY_CAP;
-    const { where, params, fileKeys } = this.baseFilter(opts2);
-    if (opts2.rank_terms !== void 0) {
-      const terms = rankTerms.parse(opts2.rank_terms);
-      if (terms.length) {
-        const match = this.ftsMatchExpr(terms, opts2.match_all);
-        const d = this.db.dialect;
-        const sql2 = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
-          WHERE ${where.join(" AND ")} AND ${d.searchMatch}
-          ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
-        const rows3 = this.db.prepare(sql2).all(...params, match, cap);
-        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows3));
+    return this.readTx(() => {
+      const cap = opts2.cap ?? DEFAULT_QUERY_CAP;
+      const { where, params, fileKeys } = this.baseFilter(opts2);
+      if (opts2.rank_terms !== void 0) {
+        const terms = rankTerms.parse(opts2.rank_terms);
+        if (terms.length) {
+          const match = this.ftsMatchExpr(terms, opts2.match_all);
+          const d = this.db.dialect;
+          const sql2 = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
+            WHERE ${where.join(" AND ")} AND ${d.searchMatch}
+            ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
+          const rows3 = this.db.prepare(sql2).all(...this.searchJoinParams(match), ...params, match, cap);
+          return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows3));
+        }
       }
-    }
-    const orderBy = [];
-    const overlapParams = [];
-    if (fileKeys.length) {
-      orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
-      overlapParams.push(...fileKeys);
-    }
-    orderBy.push("r.updated_at DESC", "r.id DESC");
-    const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
-      ORDER BY ${orderBy.join(", ")} LIMIT ?`;
-    const rows2 = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
+      const orderBy = [];
+      const overlapParams = [];
+      if (fileKeys.length) {
+        orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
+        overlapParams.push(...fileKeys);
+      }
+      orderBy.push("r.updated_at DESC", "r.id DESC");
+      const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
+        ORDER BY ${orderBy.join(", ")} LIMIT ?`;
+      const rows2 = this.db.prepare(sql).all(...params, ...overlapParams, cap);
+      return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
+    });
   }
   /** query()'s two return paths share this: one relations scan for the whole
    *  result set (not one per feature_article row) before applying the derived
@@ -7528,8 +8164,9 @@ var SterlingStore = class _SterlingStore {
    * old; the old is retained with status 'superseded' + superseded_by set.
    * This is the ONLY change path for immutable types (decision, §3.2.1).
    */
-  supersede(oldId, newInput, authoritativeScope) {
+  supersede(oldId, newInput, authoritativeScope, options = {}) {
     this.assertWritable("supersede");
+    const operationId = operationIdOf(options, "supersede");
     const oldRecord = this.get(oldId);
     if (!oldRecord)
       throw new Error(`supersede: no record '${oldId}'`);
@@ -7563,7 +8200,8 @@ var SterlingStore = class _SterlingStore {
       updated_at: newRecord.updated_at
     });
     this.tx(() => {
-      this.insertRecord(newRecord);
+      this.refuseRepeatedOperation(operationId);
+      this.insertRecord(newRecord, operationId);
       const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
       if (res.changes === 0) {
@@ -7910,7 +8548,7 @@ var SterlingStore = class _SterlingStore {
       catalog: {
         entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
       }
-    });
+    }, { operation_id: randomUUID() });
   }
   /**
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
@@ -7948,7 +8586,7 @@ var SterlingStore = class _SterlingStore {
     if (catalogs.length > 0) {
       todo.feature_link = catalogs[0].id;
     }
-    this.create(todo);
+    this.create(todo, { operation_id: randomUUID() });
   }
   /**
    * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
@@ -7958,15 +8596,23 @@ var SterlingStore = class _SterlingStore {
    * pre-migration store still has): written here from the derived values in the
    * same statement, never read back as the served truth.
    */
-  insertRecord(record) {
+  /** Refuses an operation_id that already wrote a record. Runs inside the write transaction, before the insert: on Postgres a unique violation would abort the transaction. */
+  refuseRepeatedOperation(operationId) {
+    if (operationId === void 0)
+      return;
+    const row = this.db.prepare("SELECT id FROM records WHERE operation_id = ?").get(operationId);
+    if (row)
+      throw new OperationRepeatedError(operationId, row.id);
+  }
+  insertRecord(record, operationId) {
     const entry = RECORD_TYPES[record.type];
     const meta = record;
     const lifecycle = meta.lifecycle === "retired" ? "retired" : "live";
     const freshness = meta.freshness === "flagged_stale" ? "flagged_stale" : "fresh";
     const version = typeof meta.version === "number" ? meta.version : 1;
     const stored = _SterlingStore.storableBody(record);
-    this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version, record.scope, record.created_at, record.updated_at, record.author, JSON.stringify(stored));
+    this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body, operation_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version, record.scope, record.created_at, record.updated_at, record.author, JSON.stringify(stored), operationId ?? null);
     for (const tag of new Set(record.stack_tags)) {
       this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(record.id, tag);
     }
@@ -7981,7 +8627,7 @@ var SterlingStore = class _SterlingStore {
     if (lifecycle === "retired" && meta.superseded_by && meta.superseded_by !== record.id) {
       this.insertRelation(meta.superseded_by, "supersedes", record.id, record.updated_at);
     }
-    this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, entry.fts(stored));
+    this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, this.db.dialect.searchText(entry.fts(stored)));
   }
   /**
    * REENTRANT — every other write primitive (create, supersede, …) already
@@ -7995,16 +8641,52 @@ var SterlingStore = class _SterlingStore {
    * whole thing exactly once.
    */
   txDepth = 0;
+  /** Open read transactions on this handle (readTx). A write may not start inside one. */
+  readDepth = 0;
+  /**
+   * A multi-statement read sees one snapshot (decision
+   * postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+   * point 5): it joins an open write or read transaction, or else opens the
+   * driver's read transaction (REPEATABLE READ READ ONLY on Postgres). A driver
+   * with no beginRead (SQLite) keeps its autocommit reads.
+   */
+  readTx(fn) {
+    if (this.txDepth > 0 || this.readDepth > 0 || !this.db.beginRead)
+      return fn();
+    this.db.beginRead();
+    this.readDepth++;
+    let ok = false;
+    try {
+      const result = fn();
+      ok = true;
+      return result;
+    } finally {
+      this.readDepth--;
+      if (ok) {
+        this.db.endRead?.();
+      } else {
+        try {
+          this.db.endRead?.();
+        } catch {
+        }
+      }
+    }
+  }
   tx(fn) {
     this.assertV2Surface("transaction");
     if (this.txDepth > 0) {
       fn();
       return;
     }
+    if (this.readDepth > 0) {
+      throw new Error("SterlingStore: a write cannot start inside a read transaction (readTx); nothing was written.");
+    }
     this.db.begin();
     this.txDepth++;
     try {
       this.assertLiveSchemaVersion("transaction");
+      if (this.db.prepare("SELECT 1 FROM store_meta WHERE key = 'move_fence'").get())
+        throw new StoreMovedError(this.dbPath);
       fn();
       this.db.commit();
     } catch (e) {
@@ -8054,15 +8736,125 @@ var SterlingStore = class _SterlingStore {
   }
 };
 
+// packages/store/dist/routing.js
+import { lstatSync as lstatSync2, readFileSync as readFileSync3 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join7, resolve as resolve2 } from "node:path";
+var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
+var STORAGE_BACKENDS = ["sqlite", "postgres"];
+var MOVE_STORE_COMMAND = "node scripts/move-store.mjs --to pg|sqlite";
+var CONFIG_REL2 = ".sterling/config.json";
+var StoreSettingsError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "StoreSettingsError";
+  }
+};
+function routedCredentialsPath() {
+  return join7(homedir4(), ".sterling", "credentials", "served.json");
+}
+function readConfig(root) {
+  const path = join7(root, CONFIG_REL2);
+  try {
+    lstatSync2(path);
+  } catch (e) {
+    if (e?.code === "ENOENT")
+      return null;
+    throw new StoreSettingsError(`${path} cannot be read: ${e.message}`);
+  }
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync3(path, "utf8"));
+  } catch (e) {
+    throw new StoreSettingsError(`malformed ${path}: ${e.message}. Nothing was opened.`);
+  }
+  const storage = raw?.storage;
+  if (storage !== void 0 && !STORAGE_BACKENDS.includes(storage)) {
+    throw new StoreSettingsError(`config.storage is ${JSON.stringify(storage)} in ${path} \u2014 it must be 'sqlite' or 'postgres' (absent means 'sqlite'). Only ${MOVE_STORE_COMMAND} sets it. Nothing was opened.`);
+  }
+  try {
+    return { raw, config: parseConfig(raw) };
+  } catch (e) {
+    throw new StoreSettingsError(`malformed ${path}: ${e.message}. Nothing was opened.`);
+  }
+}
+function testNamespace() {
+  const ns = process.env[PG_TEST_NAMESPACE_ENV];
+  if (ns === void 0 || ns === "")
+    return void 0;
+  if (!/^sterling_test_[a-z0-9]+$/.test(ns)) {
+    throw new StoreSettingsError(`${PG_TEST_NAMESPACE_ENV}='${ns}' is refused: it must be sterling_test_<lowercase letters and digits>`);
+  }
+  return ns;
+}
+function pgStoreNames(projectId, stackTags) {
+  const ns = testNamespace();
+  const metaSchema = ns ? `${ns}_meta` : PG_META_SCHEMA;
+  const projectSchema = ns ? pgProjectSchemaName(projectId).replace(/^sterling_p_/, `${ns}_p_`) : pgProjectSchemaName(projectId);
+  assertSterlingSchemaName(metaSchema);
+  assertSterlingSchemaName(projectSchema);
+  const bySchema = /* @__PURE__ */ new Map();
+  const domains = stackTags.map((name) => {
+    const schema = ns ? pgDomainSchemaName(name).replace(/^sterling_d_/, `${ns}_d_`) : pgDomainSchemaName(name);
+    assertSterlingSchemaName(schema);
+    const other = bySchema.get(schema);
+    if (other !== void 0) {
+      throw new StoreSettingsError(`domains '${other}' and '${name}' both map to the Postgres schema '${schema}'; rename one in stack_tags. Nothing was opened.`);
+    }
+    bySchema.set(schema, name);
+    return { name, schema };
+  });
+  return { metaSchema, projectSchema, domains };
+}
+function resolveStoreRoute(root) {
+  const absRoot = resolve2(root);
+  const read = readConfig(absRoot);
+  if (read === null)
+    return null;
+  const { config } = read;
+  if (read.raw.storage !== "postgres") {
+    return { storage: "sqlite", root: absRoot, config, projectDbPath: join7(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
+  }
+  const shown = absRoot.replace(/\\/g, "/");
+  const mode = readProjectMode(absRoot);
+  if (mode !== "work") {
+    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node scripts/move-store.mjs --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
+  }
+  const identity = readProjectIdentity(absRoot);
+  if (identity === null) {
+    throw new ProjectIdentityError(`storage 'postgres' needs the project identity file ${shown}/.sterling/project.json ({"project_id": "<uuid v4>"}); it is missing. Restore it from git, or let init write it. Nothing was opened.`);
+  }
+  const credentialsPath = routedCredentialsPath();
+  try {
+    readPgCredentials(credentialsPath);
+  } catch (e) {
+    if (e instanceof PgConfigError)
+      throw new StoreSettingsError(`storage 'postgres': ${e.message}. Nothing was opened; Postgres storage never falls back to SQLite.`);
+    throw e;
+  }
+  const names = pgStoreNames(identity.project_id, config.stack_tags);
+  return {
+    storage: "postgres",
+    root: absRoot,
+    config,
+    projectId: identity.project_id,
+    credentialsPath,
+    metaSchema: names.metaSchema,
+    projectSchema: names.projectSchema,
+    domains: names.domains.map((d) => ({ ...d, dbPath: `postgres:${d.schema}` })),
+    ...testNamespace() ? { testNamespace: testNamespace() } : {}
+  };
+}
+
 // scripts/lib/project.mjs
-import { readFileSync, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2, realpathSync as realpathSync3 } from "node:fs";
+import { readFileSync as readFileSync4, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2, realpathSync as realpathSync3 } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join as join6, resolve as resolve2, dirname as dirname5, basename as basename2 } from "node:path";
+import { join as join9, resolve as resolve4, dirname as dirname5, basename as basename2 } from "node:path";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
 // scripts/lib/store-path.mjs
-import { lstatSync, realpathSync as realpathSync2 } from "node:fs";
-import { join as join5, resolve, sep } from "node:path";
+import { lstatSync as lstatSync3, realpathSync as realpathSync2 } from "node:fs";
+import { join as join8, resolve as resolve3, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
     super(message);
@@ -8085,8 +8877,8 @@ function resolveStoreWritePath(root, ...segments) {
       );
     }
   }
-  const rootResolved = resolve(root);
-  const target = resolve(rootResolved, ...segments);
+  const rootResolved = resolve3(root);
+  const target = resolve3(rootResolved, ...segments);
   for (const raw of segments) {
     if (isAbsoluteSegment(raw)) {
       throw new StorePathContainmentError(
@@ -8105,7 +8897,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   if (target !== rootResolved && !target.startsWith(rootResolved + sep)) {
     throw new StorePathContainmentError(
-      `resolveStoreWritePath: '${join5(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
+      `resolveStoreWritePath: '${join8(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
       { root: rootResolved, target }
     );
   }
@@ -8113,10 +8905,10 @@ function resolveStoreWritePath(root, ...segments) {
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
-    const next = join5(cursor, part);
+    const next = join8(cursor, part);
     let st;
     try {
-      st = lstatSync(next);
+      st = lstatSync3(next);
     } catch (e) {
       if (e && e.code === "ENOENT") break;
       throw new StorePathContainmentError(
@@ -8178,7 +8970,7 @@ function resolveStoreWritePath(root, ...segments) {
     );
   }
   const suffix = target.slice(deepestExisting.length);
-  const reconstructed = suffix ? join5(realDeepest, suffix) : realDeepest;
+  const reconstructed = suffix ? join8(realDeepest, suffix) : realDeepest;
   if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target}') resolves outside the project \u2014 refusing, nothing was written`,
@@ -8194,8 +8986,8 @@ function resolveLinkedWorktree(cwd = process.cwd()) {
   if (r.error || r.status !== 0) return null;
   const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = realpathSync3(resolve2(cwd, gitDir));
-  const commonReal = realpathSync3(resolve2(cwd, commonDir));
+  const gitDirReal = realpathSync3(resolve4(cwd, gitDir));
+  const commonReal = realpathSync3(resolve4(cwd, commonDir));
   if (gitDirReal === commonReal || basename2(commonReal) !== ".git") return null;
   return { worktree: realpathSync3(toplevel), mainRoot: dirname5(commonReal) };
 }
@@ -8359,7 +9151,7 @@ function renderDomainMap(map, { applyCommand = "/sterling:domains" } = {}) {
 }
 
 // scripts/domains.mjs
-var fwd = (p) => p.replace(/\\/g, "/");
+var fwd2 = (p) => p.replace(/\\/g, "/");
 var USAGE = "usage: domains.mjs [--target <dir>] [--json] | --apply --add <domain> [--add <domain> ...] [--description <domain>=<text> ...]";
 function refuse(reason) {
   console.error(`domains REFUSED: ${reason}`);
@@ -8394,8 +9186,8 @@ if (opts.descriptions.size && !opts.apply) refuse("--description is used only to
 if (opts.apply && !opts.add.length) refuse("--apply needs at least one --add <domain>");
 if (opts.apply && opts.json) refuse("--json prints the map; it cannot be combined with --apply");
 var projectRootOf = (dir) => resolveLinkedWorktree(dir)?.mainRoot ?? dir;
-var projectDir = projectRootOf(resolve3(opts.target ?? process.cwd()));
-var hasConfig = (dir) => existsSync4(join7(dir, ".sterling", "config.json"));
+var projectDir = projectRootOf(resolve5(opts.target ?? process.cwd()));
+var hasConfig = (dir) => existsSync4(join10(dir, ".sterling", "config.json"));
 function enclosingProject(dir) {
   for (let d = dir; ; d = dirname6(d)) {
     if (hasConfig(d)) return d;
@@ -8406,13 +9198,13 @@ var real = (p) => existsSync4(p) ? realpathSync4(p) : p;
 if (opts.apply && opts.target !== void 0) {
   const here = enclosingProject(projectRootOf(process.cwd()));
   if (!here || !sameLocationAnyHost(real(here), real(projectDir))) {
-    refuse(`--apply changes only the project the command runs in (${here ? fwd(here) : `${fwd(process.cwd())}, which is in no Sterling project`}), and --target names ${fwd(projectDir)}. Run the command from that project instead. --target is for report runs. Nothing was written.`);
+    refuse(`--apply changes only the project the command runs in (${here ? fwd2(here) : `${fwd2(process.cwd())}, which is in no Sterling project`}), and --target names ${fwd2(projectDir)}. Run the command from that project instead. --target is for report runs. Nothing was written.`);
   }
 }
 function readProject(dir) {
   const configPath = resolveStoreWritePath(dir, ".sterling", "config.json");
   if (!existsSync4(configPath)) return null;
-  const text = readFileSync2(configPath, "utf8");
+  const text = readFileSync5(configPath, "utf8");
   const raw = JSON.parse(text);
   return { dir, configPath, text, raw, config: parseConfig(raw) };
 }
@@ -8420,11 +9212,20 @@ var project;
 try {
   project = readProject(projectDir);
 } catch (e) {
-  refuse(`${fwd(projectDir)}/.sterling/config.json could not be read as a Sterling config (${e.message}). Repair it first; nothing was written.`);
+  refuse(`${fwd2(projectDir)}/.sterling/config.json could not be read as a Sterling config (${e.message}). Repair it first; nothing was written.`);
 }
-var domainsRoot = join7(homedir3(), ".sterling", "domains");
+var route = null;
+if (project) {
+  try {
+    route = resolveStoreRoute(projectDir);
+  } catch (e) {
+    refuse(`the store settings of ${fwd2(projectDir)} cannot be used (${e?.constructor?.name ?? "Error"}: ${e?.message ?? e}). Nothing was written.`);
+  }
+}
+var onPostgres = route?.storage === "postgres";
+var domainsRoot = join10(homedir5(), ".sterling", "domains");
 function inspectStore(name, dbPath) {
-  const entry = { name, path: fwd(dbPath), description: null, format: "current", unreadable: null };
+  const entry = { name, path: fwd2(dbPath), description: null, format: "current", unreadable: null };
   let db;
   try {
     db = new DatabaseSync4(dbPath, { readOnly: true });
@@ -8441,11 +9242,46 @@ function inspectStore(name, dbPath) {
   }
   return entry;
 }
+function quotedSchema(schema) {
+  assertSterlingSchemaName(schema);
+  return `"${schema}"`;
+}
+function listPostgresStores() {
+  let bridge;
+  try {
+    const config = readPgCredentials(route.credentialsPath);
+    bridge = new PgBridge({ ...config, connectionTimeoutMillis: Math.min(config.connectionTimeoutMillis, 2e3) });
+  } catch (e) {
+    refuse(`storage 'postgres': the Postgres store database could not be reached (${e?.constructor?.name ?? "Error"}: ${e?.message ?? e}). Nothing was written, and the domain folders under ~/.sterling/domains were not read in its place.`);
+  }
+  try {
+    const domainPrefix = `${route.testNamespace ?? "sterling"}_d_`;
+    const registered = bridge.query(`SELECT schema_name, name FROM ${quotedSchema(route.metaSchema)}.stores WHERE starts_with(schema_name, $1) ORDER BY name`, [domainPrefix]).rows;
+    return registered.map((r) => {
+      const schema = String(r.schema_name);
+      const entry = { name: String(r.name), schema, path: `postgres:${schema}`, description: null, format: "current", unreadable: null };
+      try {
+        const q = `${quotedSchema(schema)}.store_meta`;
+        if (bridge.query("SELECT to_regclass($1) AS t", [q]).rows[0]?.t) {
+          entry.description = String(bridge.query(`SELECT value FROM ${q} WHERE key = $1`, [DOMAIN_DESCRIPTION_KEY]).rows[0]?.value ?? "").trim() || null;
+        }
+      } catch (e) {
+        entry.unreadable = String(e?.message ?? e);
+      }
+      return entry;
+    });
+  } catch (e) {
+    refuse(`storage 'postgres': the domain stores could not be listed from the Postgres store registry (${e?.constructor?.name ?? "Error"}: ${e?.message ?? e}). Nothing was written.`);
+  } finally {
+    bridge.close();
+  }
+}
 function listStores() {
+  if (onPostgres) return listPostgresStores();
   const found = /* @__PURE__ */ new Map();
   if (existsSync4(domainsRoot)) {
     for (const d of readdirSync(domainsRoot, { withFileTypes: true })) {
-      const dbPath = join7(domainsRoot, d.name, "sterling.db");
+      const dbPath = join10(domainsRoot, d.name, "sterling.db");
       if (d.isDirectory() && existsSync4(dbPath)) found.set(d.name, dbPath);
     }
   }
@@ -8457,15 +9293,15 @@ function listStores() {
 }
 var notes = [];
 var projectName = project ? project.config.project_name ?? basename3(projectDir) : null;
-var currentPath = fwd(projectDir);
+var currentPath = fwd2(projectDir);
 var isCurrent = (row) => Boolean(project) && sameLocationAnyHost(row.repo_path, currentPath);
 if (!project) {
   const parent = enclosingProject(dirname6(projectDir));
-  if (parent) notes.push(`this folder is inside the Sterling project at ${fwd(parent)}. Run the command from there, or pass --target "${fwd(parent)}" for a report on it.`);
+  if (parent) notes.push(`this folder is inside the Sterling project at ${fwd2(parent)}. Run the command from there, or pass --target "${fwd2(parent)}" for a report on it.`);
 }
 var rows = [];
 var registeredByThisRun = false;
-var hasStore = project ? existsSync4(join7(projectDir, ".sterling", "sterling.db")) : false;
+var hasStore = project ? onPostgres || existsSync4(join10(projectDir, ".sterling", "sterling.db")) : false;
 if (existsSync4(registryPath()) || hasStore) {
   const registry = new ProjectRegistry(registryPath());
   try {
@@ -8493,7 +9329,7 @@ if (existsSync4(registryPath()) || hasStore) {
 }
 var projects = rows.map((p) => {
   if (isCurrent(p)) return { name: p.name, path: currentPath, stack_tags: project.config.stack_tags, exists: true };
-  const path = fwd(p.repo_path);
+  const path = fwd2(p.repo_path);
   const exists = existsSync4(path);
   let stack_tags = p.stack_tags;
   if (exists) {
@@ -8511,20 +9347,21 @@ var projects = rows.map((p) => {
   return { name: p.name, path, stack_tags, exists };
 });
 var current = project ? { name: projectName, path: currentPath, stack_tags: project.config.stack_tags } : null;
+if (onPostgres) notes.push(`${projectName} keeps its stores in Postgres (config.storage), so this map lists the Postgres domain stores, not the domain folders under ~/.sterling/domains.`);
 if (!opts.apply) {
   const map = buildDomainMap({ stores: listStores(), projects, current, notes });
   if (opts.json) console.log(JSON.stringify({ ...map, registered_by_this_run: registeredByThisRun }, null, 2));
   else {
     console.log("Knowledge domains on this machine, for this user");
     console.log("");
-    console.log(renderDomainMap(map, { applyCommand: `node "${fwd(process.argv[1])}"` }));
+    console.log(renderDomainMap(map, { applyCommand: `node "${fwd2(process.argv[1])}"` }));
   }
   process.exit(0);
 }
 if (!project) {
   const parent = enclosingProject(dirname6(projectDir));
-  if (parent) refuse(`${fwd(projectDir)} is inside the Sterling project at ${fwd(parent)}. Run the command from there. Nothing was written.`);
-  refuse(`${fwd(projectDir)} is not an initialized Sterling project (no .sterling/config.json). Run /sterling:init there first.`);
+  if (parent) refuse(`${fwd2(projectDir)} is inside the Sterling project at ${fwd2(parent)}. Run the command from there. Nothing was written.`);
+  refuse(`${fwd2(projectDir)} is not an initialized Sterling project (no .sterling/config.json). Run /sterling:init there first.`);
 }
 for (const name of opts.add) {
   if (!name.trim() || name !== name.trim() || /[\\/]/.test(name) || name === "." || name === "..") {
@@ -8551,9 +9388,27 @@ var mounted = project.config.stack_tags;
 }
 var wanted = [...new Set(opts.add)];
 var toAdd = wanted.filter((name) => !mounted.includes(name));
-var plan = resolveDomainMounts({ stack_tags: wanted, domain_paths: project.config.domain_paths }).map((m) => ({
+var planned;
+if (onPostgres) {
+  let schemaOf;
+  try {
+    schemaOf = new Map(pgStoreNames(route.projectId, wanted).domains.map((d) => [d.name, d.schema]));
+  } catch (e) {
+    refuse(`${e?.message ?? e} Nothing was written.`);
+  }
+  const have = new Set(listStores().map((st) => st.schema));
+  planned = wanted.map((name) => ({ name, dbPath: `postgres:${schemaOf.get(name)}`, exists: have.has(schemaOf.get(name)) }));
+  const absent = planned.filter((m) => !m.exists);
+  if (absent.length) {
+    refuse(
+      `${absent.map((m) => `'${m.name}'`).join(", ")} ${absent.length === 1 ? "has" : "have"} no Postgres domain store, and this command creates domain stores only on SQLite storage: ${projectName} keeps its stores in Postgres (config.storage). Only domains whose Postgres store exists can be added here. Nothing was written.`
+    );
+  }
+} else {
+  planned = resolveDomainMounts({ stack_tags: wanted, domain_paths: project.config.domain_paths }).map((m) => ({ ...m, exists: existsSync4(m.dbPath) }));
+}
+var plan = planned.map((m) => ({
   ...m,
-  exists: existsSync4(m.dbPath),
   listed: mounted.includes(m.name),
   description: opts.descriptions.get(m.name) ?? DEFAULT_DOMAIN_DESCRIPTIONS[m.name]
 }));
@@ -8572,15 +9427,15 @@ for (const m of plan) {
     try {
       createDomain(m.name, m.description, m.dbPath);
     } catch (e) {
-      refuse(`the domain store '${m.name}' could not be created at ${fwd(m.dbPath)} (${e?.message ?? e}). ${partial()} stack_tags was not changed.`);
+      refuse(`the domain store '${m.name}' could not be created at ${fwd2(m.dbPath)} (${e?.message ?? e}). ${partial()} stack_tags was not changed.`);
     }
     createdNames.push(m.name);
     created++;
-    done.push(`created the domain store '${m.name}' at ${fwd(m.dbPath)}: ${m.description}`);
+    done.push(`created the domain store '${m.name}' at ${fwd2(m.dbPath)}: ${m.description}`);
     if (m.listed) done.push(`'${m.name}' was already in stack_tags; it had no store until now`);
   } else {
     const unused = opts.descriptions.has(m.name) ? " (the --description given for it was not applied)" : "";
-    done.push(m.listed ? `'${m.name}' is already mounted; nothing to change for it${unused}` : `'${m.name}' already has a store at ${fwd(m.dbPath)}; its description is unchanged${unused}`);
+    done.push(m.listed ? `'${m.name}' is already mounted; nothing to change for it${unused}` : `'${m.name}' already has a store at ${fwd2(m.dbPath)}; its description is unchanged${unused}`);
   }
 }
 if (toAdd.length) {
