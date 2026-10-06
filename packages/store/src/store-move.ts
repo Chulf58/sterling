@@ -519,10 +519,24 @@ function upsertMetaSql(): string {
 
 /** Writes the fence row under BEGIN IMMEDIATE (the store's write lock). */
 export function writeSqliteFence(path: string, fence: MoveFence): void {
+  writeSqliteFenceChecked(path, fence, null);
+}
+
+/**
+ * Writes the fence row under BEGIN IMMEDIATE, after passing `check` (when given) the tables a
+ * move copies that hold rows, counted inside that same transaction, as
+ * nonEmptyTables names them. A check that throws rolls back with no fence
+ * written, and no other write can land between the count and the fence.
+ */
+function writeSqliteFenceChecked(path: string, fence: MoveFence, check: ((occupied: string[], records: number) => void) | null): void {
   const driver = new SqliteDriver(path);
   try {
     driver.begin();
     try {
+      if (check) {
+        const counts = MOVE_TABLES.map((t) => ({ name: t.name, n: Number((driver.prepare(`SELECT COUNT(*) AS n FROM ${t.name}${whereClause(t)}`).get() as { n: number | bigint }).n) }));
+        check(counts.filter((c) => c.n > 0).map((c) => `${c.name} (${c.n})`), counts.find((c) => c.name === 'records')!.n);
+      }
       driver.prepare(upsertMetaSql()).run(MOVE_FENCE_KEY, JSON.stringify(fence), new Date().toISOString());
       driver.commit();
     } catch (e) {
@@ -1522,12 +1536,17 @@ function checkAttachStore(bridge: PgBridge, metaSchema: string, s: { identity: S
   return { identity: s.identity, schema: s.schema, receipt: { move_id: receipt.move_id, source: receipt.source, committed_at: receipt.committed_at } };
 }
 
+export interface AttachHooks {
+  /** Test seam: runs after the local SQLite file's pre-check and before its fence is written (not on a dry run). */
+  beforeLocalFence?: (path: string) => void;
+}
+
 /**
  * Attaches this machine to the project's Postgres stores: every store is
  * checked first, then the local project SQLite file is fenced (see above),
  * then config.storage is written. A dry run runs every check and writes nothing.
  */
-export function attachProject(plan: AttachPlan, bridge: PgBridge, opts: { dryRun?: boolean } = {}): AttachResult {
+export function attachProject(plan: AttachPlan, bridge: PgBridge, opts: { dryRun?: boolean; hooks?: AttachHooks } = {}): AttachResult {
   const dryRun = opts.dryRun ?? false;
   const stores = plan.stores.map((s) => checkAttachStore(bridge, plan.metaSchema, s));
   assertAttachMountsUnchanged(plan, 'Nothing was changed.');
@@ -1547,21 +1566,32 @@ export function attachProject(plan: AttachPlan, bridge: PgBridge, opts: { dryRun
       if (existing.manifest_digest === null && !dryRun) writeSqliteFence(path, { ...existing, manifest_digest: buildManifest(snap).manifest.digest });
       local = { path, records, occupied, action: 'already_fenced' };
     } else {
-      if (occupied.length > 0 && !plan.fenceLocal) {
+      const refuseOccupied = (held: string[]): void => {
+        if (held.length === 0 || plan.fenceLocal) return;
         throw new MoveAttachError(
           'local_store',
           null,
-          `${label} holds ${occupied.join(', ')}. After the attach this project reads only Postgres, so none of it would be reachable from it. ` +
+          `${label} holds ${held.join(', ')}. After the attach this project reads only Postgres, so none of it would be reachable from it. ` +
             `Check what it is; to fence the file and attach anyway, pass --fence-local (the file is kept, and a later move back to SQLite from this machine replaces it). Nothing was changed.`,
         );
-      }
-      if (!dryRun) {
-        // As in importStore: fence first, then record the digest of what the fence froze.
+      };
+      refuseOccupied(occupied);
+      if (dryRun) {
+        local = { path, records, occupied, action: 'would_fence' };
+      } else {
+        opts.hooks?.beforeLocalFence?.(path);
+        // As in importStore: fence first, then record the digest of what the fence froze. The fence
+        // re-counts the copied tables under its own write lock, so a row written after the snapshot
+        // above is refused by name rather than fenced unseen.
         const fence: MoveFence = { move_id: randomUUID(), to: target, fenced_at: new Date().toISOString(), manifest_digest: null };
-        writeSqliteFence(path, fence);
+        let locked = { occupied, records };
+        writeSqliteFenceChecked(path, fence, (held, heldRecords) => {
+          refuseOccupied(held);
+          locked = { occupied: held, records: heldRecords };
+        });
         writeSqliteFence(path, { ...fence, manifest_digest: buildManifest(snapshotSqlite(path, label)).manifest.digest });
+        local = { path, ...locked, action: 'fenced' };
       }
-      local = { path, records, occupied, action: dryRun ? 'would_fence' : 'fenced' };
     }
   }
   if (!dryRun) assertAttachMountsUnchanged(plan, local.action === 'fenced' ? `The local SQLite store ${path} was fenced toward ${pgLabel(plan.stores[0].schema)}; config.storage was not changed.` : 'Nothing was changed.');
