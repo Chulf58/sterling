@@ -92,6 +92,8 @@ Make your final message the complete deliverable — it is the only thing that r
 
 <!-- sterling-only -->
 A choice that needs a user ruling goes back to the conductor as an open question in your report; never ask the user yourself and never pick a default for a gate.
+
+A design choice your brief states as settled (a form, placement, colour, name, structure) is a claim, not a ruling: run `knowledge_preflight` on it in the file's own terms before building it. A standing record that contradicts the brief is a blocker you report, not something you build.
 <!-- /sterling-only -->
 <!-- portable-only -->
 A choice that needs a user ruling goes back to whoever dispatched you as an open question in your report; never ask the user yourself and never pick a default for a gate.
