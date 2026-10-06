@@ -24410,7 +24410,7 @@ function brokerStorageIdentity(route) {
 var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var STORAGE_BACKENDS = ["sqlite", "postgres"];
-var MOVE_STORE_COMMAND = "node scripts/move-store.mjs --to pg|sqlite";
+var MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite';
 var CONFIG_REL2 = ".sterling/config.json";
 var StoreSettingsError = class extends Error {
   constructor(message) {
@@ -24429,7 +24429,7 @@ var StoreUnreachableError = class extends Error {
 var PostgresStoreNotMovedError = class extends PgStoreMissingError {
   constructor(cause) {
     super(cause.schema, "see the message");
-    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node scripts/move-store.mjs --to pg\`. Nothing was created.`;
+    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node "<Sterling root>/bin/move-store.mjs" --to pg\`. Nothing was created.`;
     this.name = "PostgresStoreNotMovedError";
   }
 };
@@ -24501,7 +24501,7 @@ function resolveStoreRoute(root) {
   const shown = absRoot.replace(/\\/g, "/");
   const mode = readProjectMode(absRoot);
   if (mode !== "work") {
-    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node scripts/move-store.mjs --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
+    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node "<Sterling root>/bin/move-store.mjs" --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
   }
   const identity = readProjectIdentity(absRoot);
   if (identity === null) {
@@ -29367,7 +29367,7 @@ function elementOwnsScalar(el, key) {
 var CONFIG_SET_FORBIDDEN_SEGMENTS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
 var StorageTransitionRequiredError = class extends Error {
   constructor(path) {
-    super(`config_set: '${path}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: \`node scripts/move-store.mjs --to pg|sqlite\`, which writes it after the move commits. Nothing was written.`);
+    super(`config_set: '${path}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: \`node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite\`, which writes it after the move commits. Nothing was written.`);
     this.name = "StorageTransitionRequiredError";
   }
 };
@@ -37250,7 +37250,7 @@ function createSterlingServer(target) {
     inputSchema: strict({ target: external_exports.string(), reason: external_exports.string() })
   }, ({ target: target2, reason }) => json(tools.capturePending(target2, reason)));
   server.registerTool("config_set", {
-    description: "Conductor-only (not granted to roster agents): set one key in the active project's .sterling/config.json, validating the whole document against the config schema before writing. `path` is a dotted key (e.g. 'tdd.enabled'; intermediate objects are created); `value` is required; __proto__/constructor/prototype in the path are refused, and so is `storage` (where the stores live; only `node scripts/move-store.mjs --to pg|sqlite` changes it, after moving them). `expected_digest` (sha256 of the current file bytes) makes the write conditional \u2014 a stale token is refused naming both digests. Pass it against concurrent writers such as the TUI: the call also re-checks the digest just before its atomic rename, but a small window between that re-check and the rename remains, so last write wins inside it. A symlinked or non-regular config.json or .sterling directory is refused. The file is re-serialized as 2-space LF JSON (BOM stripped; other keys preserved). Returns {path, previous_value, value, digest}; digest is the next expected_digest. If the written path is a key Sterling no longer reads (a rename, or a retired mechanism), the receipt also carries `warnings`: [string] naming it \u2014 the write still lands, this is disclosure, never a refusal.",
+    description: "Conductor-only (not granted to roster agents): set one key in the active project's .sterling/config.json, validating the whole document against the config schema before writing. `path` is a dotted key (e.g. 'tdd.enabled'; intermediate objects are created); `value` is required; __proto__/constructor/prototype in the path are refused, and so is `storage` (where the stores live; only `node \"<Sterling root>/bin/move-store.mjs\" --to pg|sqlite` changes it, after moving them). `expected_digest` (sha256 of the current file bytes) makes the write conditional \u2014 a stale token is refused naming both digests. Pass it against concurrent writers such as the TUI: the call also re-checks the digest just before its atomic rename, but a small window between that re-check and the rename remains, so last write wins inside it. A symlinked or non-regular config.json or .sterling directory is refused. The file is re-serialized as 2-space LF JSON (BOM stripped; other keys preserved). Returns {path, previous_value, value, digest}; digest is the next expected_digest. If the written path is a key Sterling no longer reads (a rename, or a retired mechanism), the receipt also carries `warnings`: [string] naming it \u2014 the write still lands, this is disclosure, never a refusal.",
     inputSchema: strict({
       path: external_exports.string(),
       value: external_exports.unknown().refine((v) => v !== void 0, { message: "'value' is required" }),

@@ -10420,7 +10420,7 @@ function assertAttachMountsUnchanged(plan, written) {
 function checkAttachStore(bridge, metaSchema, s2) {
   const label = attachLabel(s2);
   if (!pgStoreRegistered(bridge, metaSchema, s2.schema)) {
-    throw new MoveAttachError("registered", s2.schema, `${label} is not registered in ${metaSchema}.stores, so it was never moved to Postgres. Run move-store --to pg on the machine that holds this store first. Nothing was changed.`);
+    throw new MoveAttachError("registered", s2.schema, `${label} is not registered in ${metaSchema}.stores, so it was never moved to Postgres. Run \`node "<Sterling root>/bin/move-store.mjs" --to pg\` on the machine that holds this store first. Nothing was changed.`);
   }
   const receipt = latestPgReceipt(bridge, metaSchema, s2.schema);
   if (receipt === null) {
