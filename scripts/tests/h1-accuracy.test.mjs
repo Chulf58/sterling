@@ -160,7 +160,7 @@ test('AC1: 250 system maintenance items across lanes — H1 reports the TRUE tot
     // guard against the specific, plausible capped-read regression: a default read
     // cap of 100 (used elsewhere in this codebase, e.g. captureOwedItems' cap:100
     // convention) silently truncating the true 250 down to 100
-    assert.doesNotMatch(ctx, /\b100\b(?!\s*items? in lane|\s+unjudged)/, 'the total is not silently truncated to a common default cap of 100 (the 100-item reconcile_needed lane is named by its lane and by the worker state line\'s "100 unjudged")');
+    assert.doesNotMatch(ctx, /\b100\b(?!\s*items? in lane|\s+items \(oldest unjudged)/, 'the total is not silently truncated to a common default cap of 100 (the 100-item reconcile_needed lane is named by its lane and by the worker state line\'s "judge 100 items")');
   } finally {
     cleanup();
   }

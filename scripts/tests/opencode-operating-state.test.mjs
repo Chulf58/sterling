@@ -419,9 +419,9 @@ test('the root session context states a deep maintenance queue and the reconcile
     assert.match(textOf(i), /MAINTENANCE QUEUE IS DEEP — 2 drainable items/);
     assert.match(textOf(i), /plus 1 file_parked/);
     assert.match(textOf(i), /1 item in lane reconcile_needed is drained by the background worker/);
-    assert.match(textOf(i), /RECONCILE BACKLOG: 1 item in lane reconcile_needed, the oldest open since 2026-09-29T12:00:00\.000Z/);
+    assert.match(textOf(i), /RECONCILE BACKLOG: 1 item in lane reconcile_needed, the oldest of all items open since 2026-09-29T12:00:00\.000Z/);
     // "worker not running" is replaced by the worker's state: 1 unjudged item, waited long past 30 minutes.
-    assert.match(textOf(i), /worker due to launch at the next Stop or git commit \(1 unjudged, oldest /);
+    assert.match(textOf(i), /worker launches at your next Stop or git commit to judge 1 item \(oldest unjudged /);
   } finally {
     if (workerDisable !== undefined) process.env.STERLING_MAINTENANCE_WORKER_DISABLE = workerDisable;
     rmSync(dir, { recursive: true, force: true });
