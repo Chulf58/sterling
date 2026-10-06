@@ -245,6 +245,13 @@ export const IMPLEMENTOR_WORDING_EDITS = [
     before: 'never start the full suite or `npm run check` as a background job',
     after: 'never start the full suite or the project\'s check command (`npm run check` in a Node project that has that script) as a background job',
   },
+  {
+    commit: 'board 33489711',
+    date: '2026-10-06',
+    reason: 'a design choice the brief states as settled is a claim, not a ruling: the implementor runs knowledge_preflight on it and reports a contradicting record as a blocker (GitHub issue #29; user-ruled, "Implementor and reviewer check"); Sterling-only, so the portable render is unchanged',
+    before: 'goes back to the conductor as an open question in your report; never ask the user yourself and never pick a default for a gate.\n',
+    after: 'goes back to the conductor as an open question in your report; never ask the user yourself and never pick a default for a gate.\n\nA design choice your brief states as settled (a form, placement, colour, name, structure) is a claim, not a ruling: run `knowledge_preflight` on it in the file\'s own terms before building it. A standing record that contradicts the brief is a blocker you report, not something you build.\n',
+  },
 ];
 
 const occurrences = (text, needle) => text.split(needle).length - 1;
