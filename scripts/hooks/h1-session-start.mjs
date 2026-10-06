@@ -1429,10 +1429,11 @@ let cloneSyncContext = '';
 try {
   let state = agentCurrencyState();
   const behind = state ? [...state.stale.map(currencyName), ...state.refusedModified] : [];
-  // What the clone sync did, for the remedy below: 'off-base' adds its clause, and
-  // 'refused-older' must not be followed by advice to run the same sync by hand.
+  // What the clone sync did, for the remedy below: 'off-base' adds its clause, and both
+  // 'off-base' and 'refused-older' must not be followed by advice to run the same sync by hand.
   let cloneSyncOutcome = null;
   let cloneSyncClause = '';
+  let cloneBranchUnreadable = false;
   // The background maintenance worker's headless session never syncs: it would
   // rewrite agent files and spend the restart line where no person reads it. The
   // stale warning below still prints there, as it did before the clone sync existed.
@@ -1442,6 +1443,7 @@ try {
       if (synced) {
         cloneSyncOutcome = synced.outcome;
         cloneSyncClause = synced.clause ?? '';
+        cloneBranchUnreadable = synced.unreadable === true;
         cloneSyncWarning = synced.warning;
         cloneSyncContext = synced.context;
         // The steps ran, so the files on disk may have changed: report what is behind NOW.
@@ -1468,20 +1470,34 @@ try {
       unknown.length ? `unknown: ${unknown.map(currencyName).join(', ')}` : null,
     ].filter(Boolean);
     // A clone older than the project's sync marker refused to sync so that nothing is
-    // downgraded; running sync-agents by hand from that clone would do the downgrade.
+    // downgraded; running sync-agents by hand from that clone would do the downgrade. A
+    // clone off its base branch holds unmerged templates, and the same hand-run would
+    // install them (decision authoring-clone-syncs-agents-at-session-start-on-the-base-branch-only).
+    // 'off-base' also covers a branch that could not be read: the hand-run stays forbidden,
+    // but nothing is claimed about a branch nobody read.
     const refusedOlder = cloneSyncOutcome === 'refused-older';
+    const offBase = cloneSyncOutcome === 'off-base' && !cloneBranchUnreadable;
+    const branchUnread = cloneSyncOutcome === 'off-base' && cloneBranchUnreadable;
     agentCurrencyWarning =
       `⚠ AGENT CURRENCY: ${parts.join(', ')} of ${inspected} installed Sterling agent file(s) — ` +
       (refusedOlder
         ? `do NOT run /sterling:sync-agents from this clone (it would downgrade them); pull the clone, then restart. `
-        : `run /sterling:sync-agents in this project, then restart. `) +
+        : offBase
+          ? `do NOT run /sterling:sync-agents from this clone (its templates on this branch are not merged); check out its base branch, then restart. `
+          : branchUnread
+            ? `do NOT run /sterling:sync-agents from this clone (its checked-out branch could not be read); check the clone's checkout, then restart. `
+            : `run /sterling:sync-agents in this project, then restart. `) +
       (cloneSyncClause ? `Not synced at session start: ${cloneSyncClause}. ` : '');
     agentCurrencyContext =
       `\n\nAGENT CURRENCY (H1): ${parts.join(', ')} of ${inspected} generated agent file(s): ` +
       stateLines.join('; ') +
       (refusedOlder
         ? `. Do NOT run /sterling:sync-agents from this clone: it is older than the Sterling that synced this project and would downgrade these agents. Pull the clone, then restart.`
-        : `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`) +
+        : offBase
+          ? `. Do NOT run /sterling:sync-agents from this clone: it is not on its base branch, so it would install templates that are not merged. Check out the base branch, then restart.`
+          : branchUnread
+            ? `. Do NOT run /sterling:sync-agents from this clone: its checked-out branch could not be read, so whether its templates are merged is unknown. Check the clone's checkout, then restart.`
+            : `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`) +
       (cloneSyncClause ? ` The clone agent sync did not run: ${cloneSyncClause}.` : '');
   }
 } catch {

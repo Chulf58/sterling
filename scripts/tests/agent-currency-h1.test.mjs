@@ -1132,15 +1132,20 @@ function staleCloneRun({ head, env } = {}) {
 }
 
 const STALE_HEAD = '⚠ AGENT CURRENCY: 1 stale of 1 installed Sterling agent file(s) — run /sterling:sync-agents in this project, then restart. ';
+// Off the base branch the clone's templates are unmerged, so the usual remedy would install them.
+const OFF_BASE_HEAD = '⚠ AGENT CURRENCY: 1 stale of 1 installed Sterling agent file(s) — do NOT run /sterling:sync-agents from this clone (its templates on this branch are not merged); check out its base branch, then restart. ';
 
 test('CLONE: on a branch that is not the base nothing is synced, and the stale warning says which branch the clone is on', () => {
   const { r, unchanged } = staleCloneRun({ head: 'ref: refs/heads/integrate/0.18.88\n' });
   assert.deepEqual(r.calls, [], 'nothing is spawned');
   assert.ok(unchanged, 'the installed agent is not rewritten from an unmerged branch');
   const clause = 'the Sterling clone is on branch integrate/0.18.88, not its base branch main, so agents sync at session start after the merge';
-  assert.ok(messageOf(r).includes(`${STALE_HEAD}Not synced at session start: ${clause}. `), messageOf(r));
+  assert.ok(messageOf(r).includes(`${OFF_BASE_HEAD}Not synced at session start: ${clause}. `), messageOf(r));
+  assert.doesNotMatch(messageOf(r), /run \/sterling:sync-agents in this project/, 'the remedy that installs unmerged templates is gone');
   assert.match(lineFor(currencySection(contextOf(r)), 'coder'), /stale/i);
   assert.ok(currencySection(contextOf(r)).endsWith(` The clone agent sync did not run: ${clause}.`), contextOf(r));
+  assert.match(currencySection(contextOf(r)), /Do NOT run \/sterling:sync-agents from this clone: it is not on its base branch, so it would install templates that are not merged\. Check out the base branch, then restart\./);
+  assert.doesNotMatch(currencySection(contextOf(r)), /Run \/sterling:sync-agents, restart/);
   assert.doesNotMatch(messageOf(r) + contextOf(r), /CLONE AGENT SYNC|Sterling clone:/);
 });
 
@@ -1148,7 +1153,22 @@ test('CLONE: on a detached HEAD nothing is synced and the stale warning says so'
   const { r, unchanged } = staleCloneRun({ head: `${'a1b2c3d4'.repeat(5)}\n` });
   assert.deepEqual(r.calls, []);
   assert.ok(unchanged);
-  assert.ok(messageOf(r).includes(`${STALE_HEAD}Not synced at session start: the Sterling clone is on a detached HEAD, not its base branch main, so agents sync at session start once main is checked out. `), messageOf(r));
+  assert.ok(messageOf(r).includes(`${OFF_BASE_HEAD}Not synced at session start: the Sterling clone is on a detached HEAD, not its base branch main, so agents sync at session start once main is checked out. `), messageOf(r));
+});
+
+test('CLONE: an unreadable HEAD syncs nothing and still forbids the hand-run, but says the branch could not be read, never that the clone is on an unmerged branch', () => {
+  const { r, unchanged } = staleCloneRun({ head: 'garbage\n' });
+  assert.deepEqual(r.calls, [], 'nothing is spawned');
+  assert.ok(unchanged);
+  const clause = "the Sterling clone's checked-out branch could not be read (HEAD: not a branch or a commit), so no agents were synced";
+  const head = '⚠ AGENT CURRENCY: 1 stale of 1 installed Sterling agent file(s) — do NOT run /sterling:sync-agents from this clone (its checked-out branch could not be read); check the clone\'s checkout, then restart. ';
+  assert.ok(messageOf(r).includes(`${head}Not synced at session start: ${clause}. `), messageOf(r));
+  const section = currencySection(contextOf(r));
+  assert.match(section, /Do NOT run \/sterling:sync-agents from this clone: its checked-out branch could not be read, so whether its templates are merged is unknown\. Check the clone's checkout, then restart\./);
+  assert.ok(section.endsWith(` The clone agent sync did not run: ${clause}.`), contextOf(r));
+  assert.doesNotMatch(messageOf(r) + section, /not merged\)|not on its base branch|[Cc]heck out (its|the) base branch/, 'no claim about a branch that was never read');
+  assert.doesNotMatch(messageOf(r), /run \/sterling:sync-agents in this project/);
+  assert.doesNotMatch(section, /Run \/sterling:sync-agents, restart/);
 });
 
 test('CLONE: inside the maintenance worker child (STERLING_MAINTENANCE_WORKER=1) nothing is synced; the stale warning still prints, unchanged', () => {

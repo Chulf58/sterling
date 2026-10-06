@@ -10954,6 +10954,7 @@ function cloneBranchState(root) {
     onBase: false,
     branch: null,
     base: null,
+    unreadable: true,
     clause: `the Sterling clone's checked-out branch could not be read (${what}), so no agents were synced`
   });
   const dotGit = join20(root, ".git");
@@ -10966,9 +10967,12 @@ function cloneBranchState(root) {
       gitDir = resolve7(root, pointer[1].trim());
       commonDir = gitDir;
       try {
-        commonDir = resolve7(gitDir, readFileSync11(join20(gitDir, "commondir"), "utf8").trim());
+        const common = readFileSync11(join20(gitDir, "commondir"), "utf8").trim();
+        if (!common) return unreadable("commondir: empty");
+        commonDir = resolve7(gitDir, common);
+        if (!statSync5(commonDir).isDirectory()) return unreadable("commondir: not a directory");
       } catch (e) {
-        if (e?.code !== "ENOENT") return unreadable(`commondir: ${errCode(e)}`);
+        if (e?.code !== "ENOENT" || existsSync13(join20(gitDir, "commondir"))) return unreadable(`commondir: ${errCode(e)}`);
       }
     }
   } catch (e) {
@@ -10980,7 +10984,7 @@ function cloneBranchState(root) {
   } catch (e) {
     return unreadable(`HEAD: ${errCode(e)}`);
   }
-  const ref = /^ref: refs\/heads\/(\S+)\s*$/.exec(head);
+  const ref = /^ref: refs\/heads\/([A-Za-z0-9._\/@+-]{1,200})\s*$/.exec(head);
   const detached = /^[0-9a-f]{40,64}\s*$/.test(head);
   if (!ref && !detached) return unreadable("HEAD: not a branch or a commit");
   const branch = ref ? ref[1] : null;
@@ -11007,7 +11011,7 @@ async function cloneAgentSync({ root, project, behind = [], host = "claude", run
   const t = hostText(host);
   if (!cloneAgentSyncApplies(root, project)) return null;
   const checkedOut = cloneBranchState(root);
-  if (!checkedOut.onBase) return { outcome: "off-base", warning: "", context: "", clause: checkedOut.clause };
+  if (!checkedOut.onBase) return { outcome: "off-base", warning: "", context: "", clause: checkedOut.clause, unreadable: checkedOut.unreadable === true };
   const markerPath = join20(project, SYNC_MARKER_REL);
   let previous = null;
   try {
@@ -12363,12 +12367,14 @@ try {
   const behind = state ? [...state.stale.map(currencyName), ...state.refusedModified] : [];
   let cloneSyncOutcome = null;
   let cloneSyncClause = "";
+  let cloneBranchUnreadable = false;
   if (behind.length && process.env[WORKER_ENV_FLAG] !== "1") {
     try {
       const synced = await cloneAgentSync({ root: pluginRoot2(), project: input.cwd, behind, host: "claude" });
       if (synced) {
         cloneSyncOutcome = synced.outcome;
         cloneSyncClause = synced.clause ?? "";
+        cloneBranchUnreadable = synced.unreadable === true;
         cloneSyncWarning = synced.warning;
         cloneSyncContext = synced.context;
         if (synced.outcome === "synced" || synced.outcome === "failed") state = agentCurrencyState();
@@ -12396,10 +12402,12 @@ CLONE AGENT SYNC FAILED (H1): ${why}. It retries at the next session start while
       unknown.length ? `unknown: ${unknown.map(currencyName).join(", ")}` : null
     ].filter(Boolean);
     const refusedOlder = cloneSyncOutcome === "refused-older";
-    agentCurrencyWarning = `\u26A0 AGENT CURRENCY: ${parts.join(", ")} of ${inspected} installed Sterling agent file(s) \u2014 ` + (refusedOlder ? `do NOT run /sterling:sync-agents from this clone (it would downgrade them); pull the clone, then restart. ` : `run /sterling:sync-agents in this project, then restart. `) + (cloneSyncClause ? `Not synced at session start: ${cloneSyncClause}. ` : "");
+    const offBase = cloneSyncOutcome === "off-base" && !cloneBranchUnreadable;
+    const branchUnread = cloneSyncOutcome === "off-base" && cloneBranchUnreadable;
+    agentCurrencyWarning = `\u26A0 AGENT CURRENCY: ${parts.join(", ")} of ${inspected} installed Sterling agent file(s) \u2014 ` + (refusedOlder ? `do NOT run /sterling:sync-agents from this clone (it would downgrade them); pull the clone, then restart. ` : offBase ? `do NOT run /sterling:sync-agents from this clone (its templates on this branch are not merged); check out its base branch, then restart. ` : branchUnread ? `do NOT run /sterling:sync-agents from this clone (its checked-out branch could not be read); check the clone's checkout, then restart. ` : `run /sterling:sync-agents in this project, then restart. `) + (cloneSyncClause ? `Not synced at session start: ${cloneSyncClause}. ` : "");
     agentCurrencyContext = `
 
-AGENT CURRENCY (H1): ${parts.join(", ")} of ${inspected} generated agent file(s): ` + stateLines.join("; ") + (refusedOlder ? `. Do NOT run /sterling:sync-agents from this clone: it is older than the Sterling that synced this project and would downgrade these agents. Pull the clone, then restart.` : `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`) + (cloneSyncClause ? ` The clone agent sync did not run: ${cloneSyncClause}.` : "");
+AGENT CURRENCY (H1): ${parts.join(", ")} of ${inspected} generated agent file(s): ` + stateLines.join("; ") + (refusedOlder ? `. Do NOT run /sterling:sync-agents from this clone: it is older than the Sterling that synced this project and would downgrade these agents. Pull the clone, then restart.` : offBase ? `. Do NOT run /sterling:sync-agents from this clone: it is not on its base branch, so it would install templates that are not merged. Check out the base branch, then restart.` : branchUnread ? `. Do NOT run /sterling:sync-agents from this clone: its checked-out branch could not be read, so whether its templates are merged is unknown. Check the clone's checkout, then restart.` : `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`) + (cloneSyncClause ? ` The clone agent sync did not run: ${cloneSyncClause}.` : "");
   }
 } catch {
 }

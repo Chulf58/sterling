@@ -187,6 +187,27 @@ test('the implementor bug-fix rule asks for a regression test that fails without
   }
 });
 
+// GitHub issue #29 (board 33489711, user-ruled 2026-10-06 through the question form, "Implementor
+// and reviewer check"): a design choice a brief states as settled is checked against the store.
+test('the implementor treats a settled design choice in the brief as a claim and preflights it, on both hosts', () => {
+  const sentence = "A design choice your brief states as settled (a form, placement, colour, name, structure) is a claim, not a ruling: run `knowledge_preflight` on it in the file's own terms before building it. A standing record that contradicts the brief is a blocker you report, not something you build.";
+  for (const [host, content] of Object.entries(bothRenders('implementor'))) {
+    assert.ok(content.includes(sentence), host);
+  }
+  const portable = renderPortableText(read('agent-templates/implementor.md'), 'implementor.md');
+  assert.ok(!portable.includes('knowledge_preflight'), 'the portable agent has no store, so it names no store tool');
+});
+
+test('the reviewer store-checks a design choice no cited ruling covers, with the tools it holds, on both hosts', () => {
+  const clause = "A design choice the diff makes (a form, placement, name, structure) that no cited ruling covers gets a store check in the choice's own terms: `knowledge_preflight` when you hold it, otherwise `knowledge_query` or the generated `rulings.md`; a standing record that contradicts the choice is a finding.";
+  for (const [host, content] of Object.entries(bothRenders('reviewer'))) {
+    const step2 = content.match(/^2\. Read in this order:.*$/m)?.[0] ?? '';
+    assert.ok(step2.includes(clause), `${host}: the clause sits in rubric step 2`);
+  }
+  const tools = read('agent-templates/reviewer.md').match(/^tools:.*$/m)[0];
+  assert.ok(!tools.includes('knowledge_preflight'), 'the reviewer grant is unchanged: the clause names preflight only "when you hold it"');
+});
+
 test('the conductor owns the project\'s own test and check commands; `npm run check` is named only as the Node case, on both hosts', () => {
   for (const [host, content] of Object.entries(bothRenders('conductor'))) {
     assert.doesNotMatch(content, /You own the full suite and `npm run check`/, host);

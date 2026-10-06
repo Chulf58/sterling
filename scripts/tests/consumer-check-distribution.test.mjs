@@ -44,7 +44,8 @@ function git(dir, args) {
 function buildConsumerFixture(prefix) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
-  // init creates the declared domain stores under HOME: a scratch one, removed after the spawn
+  // init creates the declared domain stores under HOME: a scratch one, removed after the spawn.
+  // CLAUDE_CONFIG_DIR points inside it, so init never reads or writes the real ~/.claude.
   const home = mkdtempSync(join(tmpdir(), 'sterling-consumer-home-'));
   const initResult = spawnSync(
     process.execPath,
@@ -61,7 +62,7 @@ function buildConsumerFixture(prefix) {
       encoding: 'utf8',
       cwd: dir,
       timeout: 180_000,
-      env: { ...process.env, HOME: home, STERLING_REGISTRY_DB: join(dir, 'registry.db') },
+      env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: join(home, '.claude'), STERLING_REGISTRY_DB: join(dir, 'registry.db') },
     }
   );
   rmSync(home, { recursive: true, force: true });
