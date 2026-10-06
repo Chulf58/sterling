@@ -2,25 +2,26 @@
 // /sterling:init run from an INSTALLED plugin copy moves a consumer project off its old
 // clone. (1) a sterling-launch.sh that starts claude with --plugin-dir is replaced with
 // the installed shape; (2) a sterling-update.bat in the generated clone-updater shape is
-// deleted, anything else is left with a notice; (3) a warning with the exact settings
-// JSON when the sterling marketplace has no "autoUpdate": true; (4) the old clone is
+// deleted, anything else is left with a notice; (3) the sterling marketplace's auto-update
+// is switched on in the user's settings.json; (4) the old clone is
 // named for the user to delete by hand, never deleted. On an authoring clone nothing of
 // this runs.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, symlinkSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { renderTmuxLauncher } from '../lib/launcher-tmux.mjs';
 import { ensureUpdateLauncher, renderUpdateLauncher, cloneUpdateLauncherTarget, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
-import { cloneLauncherTarget, marketplaceAutoUpdate, autoUpdateWarning, cloneCleanupLines } from '../lib/consumer-cutover.mjs';
+import { cloneLauncherTarget, enableMarketplaceAutoUpdate, cloneCleanupLines } from '../lib/consumer-cutover.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const made = new Set();
 const tmp = (p) => { const d = mkdtempSync(join(tmpdir(), p)); made.add(d); return d; };
 after(() => { for (const d of made) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); });
+const fwd = (p) => p.replace(/\\/g, '/');
 const crlf = (s) => s.replace(/\r?\n/g, '\r\n');
 
 /** A plugin root carrying the real templates; `git` decides authoring vs installed. */
@@ -158,54 +159,222 @@ test('ensureUpdateLauncher on an authoring clone: the old updater follows the or
   assert.ok(existsSync(join(target, UPDATE_LAUNCHER_NAME)));
 });
 
-// ---- (3) the marketplace auto-update check ----
+// ---- (3) the marketplace auto-update switch ----
+//
+// Claude Code decides per marketplace: the extraKnownMarketplaces.<name>.autoUpdate in a
+// settings file first, else autoUpdate on the known_marketplaces.json entry (the /plugin
+// toggle writes it), else the default, which is off for sterling
+// (https://code.claude.com/docs/en/plugins/loading, "Which marketplaces and plugins
+// auto-update", read 2026-10-06). Init turns it on in the user's settings.json.
 
-function configDir(settings) {
+const SRC = { source: 'github', repo: 'Chulf58/sterling' };
+
+/** A Claude config dir: settings.json and plugins/known_marketplaces.json, each given as an object, a raw string, or undefined for "no file". */
+function configDir(settings, known) {
   const d = tmp('sterling-cut-cfg-');
-  if (settings !== undefined) writeFileSync(join(d, 'settings.json'), typeof settings === 'string' ? settings : JSON.stringify(settings));
+  const put = (path, v) => { if (v !== undefined) writeFileSync(path, typeof v === 'string' ? v : JSON.stringify(v)); };
+  put(join(d, 'settings.json'), settings);
+  if (known !== undefined) {
+    mkdirSync(join(d, 'plugins'));
+    put(join(d, 'plugins', 'known_marketplaces.json'), known);
+  }
   return d;
 }
+const settingsOf = (cfg) => join(cfg, 'settings.json');
+const readSettings = (cfg) => JSON.parse(readFileSync(settingsOf(cfg), 'utf8'));
+const run = (cfg, extra = {}) => enableMarketplaceAutoUpdate({ env: { CLAUDE_CONFIG_DIR: cfg }, ...extra });
 
-test('marketplaceAutoUpdate reads <CLAUDE_CONFIG_DIR>/settings.json, else <home>/.claude/settings.json', () => {
-  const cfg = configDir({ extraKnownMarketplaces: { sterling: { autoUpdate: true } } });
-  assert.deepEqual(marketplaceAutoUpdate({ env: { CLAUDE_CONFIG_DIR: cfg } }), { path: join(cfg, 'settings.json'), enabled: true, entry: { autoUpdate: true } });
+test('enableMarketplaceAutoUpdate reads <CLAUDE_CONFIG_DIR>/settings.json, else <home>/.claude/settings.json', () => {
+  const cfg = configDir({ extraKnownMarketplaces: { sterling: { source: SRC, autoUpdate: true } } });
+  assert.deepEqual(run(cfg), { status: 'already-on', path: settingsOf(cfg), line: null });
   const home = tmp('sterling-cut-home-');
   mkdirSync(join(home, '.claude'));
-  writeFileSync(join(home, '.claude', 'settings.json'), '{}');
-  const r = marketplaceAutoUpdate({ env: {}, home });
+  writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ extraKnownMarketplaces: { sterling: { source: SRC } } }));
+  const r = enableMarketplaceAutoUpdate({ env: {}, home });
+  assert.equal(r.status, 'written');
   assert.equal(r.path, join(home, '.claude', 'settings.json'));
-  assert.equal(r.enabled, false);
-  assert.equal(autoUpdateWarning(marketplaceAutoUpdate({ env: { CLAUDE_CONFIG_DIR: cfg } })), null, 'auto-update on: no warning');
+  assert.equal(JSON.parse(readFileSync(r.path, 'utf8')).extraKnownMarketplaces.sterling.autoUpdate, true);
 });
 
-test('autoUpdateWarning: an entry without autoUpdate gets that entry back with "autoUpdate": true, as exact JSON', () => {
-  const entry = { source: { source: 'github', repo: 'Chulf58/sterling' } };
-  const cfg = configDir({ extraKnownMarketplaces: { sterling: entry }, enabledPlugins: { 'sterling@sterling': true } });
-  const line = autoUpdateWarning(marketplaceAutoUpdate({ env: { CLAUDE_CONFIG_DIR: cfg } }));
-  assert.ok(line.includes(join(cfg, 'settings.json')), line);
-  assert.ok(line.includes(JSON.stringify({ sterling: { ...entry, autoUpdate: true } })), line);
-  const off = configDir({ extraKnownMarketplaces: { sterling: { ...entry, autoUpdate: false } } });
-  assert.ok(autoUpdateWarning(marketplaceAutoUpdate({ env: { CLAUDE_CONFIG_DIR: off } })).includes('"autoUpdate":true'), 'false is not on');
+test('2a: a settings entry without autoUpdate gets autoUpdate: true, its source and every other key keep their meaning, one line names file, key and next session', () => {
+  const settings = {
+    model: 'opus',
+    permissions: { allow: ['Bash(git status)'], deny: [] },
+    enabledPlugins: { 'sterling@sterling': true },
+    extraKnownMarketplaces: { other: { source: { source: 'github', repo: 'a/b' }, autoUpdate: false }, sterling: { source: SRC } },
+  };
+  const cfg = configDir(settings);
+  const r = run(cfg);
+  assert.equal(r.status, 'written');
+  assert.equal(r.path, settingsOf(cfg));
+  const after = readSettings(cfg);
+  assert.deepEqual(after, { ...settings, extraKnownMarketplaces: { ...settings.extraKnownMarketplaces, sterling: { source: SRC, autoUpdate: true } } });
+  assert.ok(!r.line.includes('\n'), 'one line');
+  assert.ok(r.line.includes(fwd(settingsOf(cfg))), r.line);
+  assert.match(r.line, /extraKnownMarketplaces\.sterling\.autoUpdate/);
+  assert.match(r.line, /next session/);
+  assert.deepEqual(readdirSync(cfg), ['settings.json'], 'no temp file left behind');
 });
 
-test('autoUpdateWarning: no sterling entry, a missing file and an unparseable file each warn and never throw', () => {
-  const none = autoUpdateWarning(marketplaceAutoUpdate({ env: { CLAUDE_CONFIG_DIR: configDir({}) } }));
-  assert.match(none, /no extraKnownMarketplaces\.sterling entry/);
-  assert.match(none, /"autoUpdate": true/);
-  const missing = autoUpdateWarning(marketplaceAutoUpdate({ env: { CLAUDE_CONFIG_DIR: configDir() } }));
-  assert.match(missing, /does not exist/);
-  const broken = autoUpdateWarning(marketplaceAutoUpdate({ env: { CLAUDE_CONFIG_DIR: configDir('{ not json') } }));
-  assert.match(broken, /could not be read: not valid JSON/);
+test('2a: a write keeps CRLF line endings and a missing trailing newline, and drops a leading BOM', () => {
+  const body = JSON.stringify({ extraKnownMarketplaces: { sterling: { source: SRC } } }, null, 2).replace(/\n/g, '\r\n');
+  const cfg = configDir('﻿' + body);
+  assert.equal(run(cfg).status, 'written');
+  const raw = readFileSync(settingsOf(cfg), 'utf8');
+  assert.ok(!raw.startsWith('﻿'), 'the BOM is not written back');
+  assert.ok(raw.includes('\r\n') && !/[^\r]\n/.test(raw), 'CRLF kept throughout');
+  assert.ok(!raw.endsWith('\n'), 'no trailing newline was added');
+  assert.equal(JSON.parse(raw).extraKnownMarketplaces.sterling.autoUpdate, true);
 });
 
-test('autoUpdateWarning: every form says what settings.json lacks and that a /plugin toggle already switched on makes it ignorable', () => {
-  const entry = { source: { source: 'github', repo: 'Chulf58/sterling' } };
-  for (const cfg of [configDir({ extraKnownMarketplaces: { sterling: entry } }), configDir({}), configDir(), configDir('{ not json')]) {
-    const line = autoUpdateWarning(marketplaceAutoUpdate({ env: { CLAUDE_CONFIG_DIR: cfg } }));
-    assert.match(line, /"autoUpdate": true is not set for the sterling marketplace in settings\.json/, line);
-    assert.match(line, /If you already switched auto-update on in \/plugin -> Marketplaces, ignore this warning/, line);
-    assert.doesNotMatch(line, /does not update itself/, 'never claims auto-update is off: the toggle setting is not read');
+test('2b: no settings entry but known_marketplaces.json has sterling with a source: the settings entry is created with exactly that source, known_marketplaces.json is never written', () => {
+  const known = { 'claude-plugins-official': { source: { source: 'github', repo: 'anthropics/claude-plugins-official' }, installLocation: '/x', lastUpdated: 't' }, sterling: { source: SRC, installLocation: '/y', lastUpdated: 't' } };
+  const settings = { model: 'opus', extraKnownMarketplaces: { other: { source: { source: 'github', repo: 'a/b' } } } };
+  const cfg = configDir(settings, known);
+  const knownPath = join(cfg, 'plugins', 'known_marketplaces.json');
+  const knownBefore = readFileSync(knownPath, 'utf8');
+  const r = run(cfg);
+  assert.equal(r.status, 'written');
+  assert.deepEqual(readSettings(cfg), { model: 'opus', extraKnownMarketplaces: { other: settings.extraKnownMarketplaces.other, sterling: { source: SRC, autoUpdate: true } } });
+  assert.equal(readFileSync(knownPath, 'utf8'), knownBefore, 'Claude Code\'s own state file is untouched');
+  assert.match(r.line, /next session/);
+});
+
+test('2b: no extraKnownMarketplaces key at all is created whole, with only the known source', () => {
+  const cfg = configDir({ model: 'opus' }, { sterling: { source: SRC } });
+  assert.equal(run(cfg).status, 'written');
+  assert.deepEqual(readSettings(cfg), { model: 'opus', extraKnownMarketplaces: { sterling: { source: SRC, autoUpdate: true } } });
+});
+
+test('2b: a known_marketplaces.json sterling entry with no source object writes nothing and says so', () => {
+  for (const known of [{ sterling: { installLocation: '/y' } }, { sterling: { source: 'github' } }]) {
+    const cfg = configDir({ model: 'opus' }, known);
+    const r = run(cfg);
+    assert.equal(r.status, 'no-source');
+    assert.deepEqual(readSettings(cfg), { model: 'opus' });
+    assert.match(r.line, /known_marketplaces\.json/);
   }
+});
+
+test('2c: neither file knows sterling: nothing is written and the line gives the /plugin steps', () => {
+  for (const cfg of [configDir({ model: 'opus' }), configDir({ model: 'opus' }, {}), configDir({ model: 'opus' }, { other: { source: SRC } })]) {
+    const before = readFileSync(settingsOf(cfg), 'utf8');
+    const r = run(cfg);
+    assert.equal(r.status, 'no-entry');
+    assert.equal(readFileSync(settingsOf(cfg), 'utf8'), before);
+    assert.match(r.line, /\/plugin/);
+    assert.match(r.line, /Marketplaces/);
+    assert.match(r.line, /Enable auto-update/);
+  }
+});
+
+test('2d: an explicit autoUpdate: false in the settings entry is not flipped; one line says it is off by setting and how to turn it on', () => {
+  const settings = { extraKnownMarketplaces: { sterling: { source: SRC, autoUpdate: false } } };
+  const cfg = configDir(settings, { sterling: { source: SRC, autoUpdate: true } });
+  const before = readFileSync(settingsOf(cfg), 'utf8');
+  const r = run(cfg);
+  assert.equal(r.status, 'explicit-off');
+  assert.equal(readFileSync(settingsOf(cfg), 'utf8'), before);
+  assert.ok(!r.line.includes('\n'), 'one line');
+  assert.match(r.line, /off by an explicit setting/);
+  assert.ok(r.line.includes(fwd(settingsOf(cfg))), r.line);
+  assert.match(r.line, /autoUpdate": true/);
+});
+
+test('an explicit autoUpdate: false on the known_marketplaces.json entry (the /plugin toggle off) is a deliberate choice too: not overridden', () => {
+  const cfg = configDir({ extraKnownMarketplaces: { sterling: { source: SRC } } }, { sterling: { source: SRC, autoUpdate: false } });
+  const before = readFileSync(settingsOf(cfg), 'utf8');
+  const r = run(cfg);
+  assert.equal(r.status, 'explicit-off');
+  assert.equal(readFileSync(settingsOf(cfg), 'utf8'), before);
+  assert.match(r.line, /known_marketplaces\.json/);
+});
+
+test('already on through the settings entry: no write, no line; the known file is not even needed', () => {
+  const cfg = configDir({ extraKnownMarketplaces: { sterling: { source: SRC, autoUpdate: true } } }, '{ not json');
+  const before = readFileSync(settingsOf(cfg), 'utf8');
+  assert.deepEqual(run(cfg), { status: 'already-on', path: settingsOf(cfg), line: null });
+  assert.equal(readFileSync(settingsOf(cfg), 'utf8'), before);
+});
+
+test('already on through known_marketplaces.json only (the toggle was used, settings carries no autoUpdate): no write, no line', () => {
+  for (const settings of [{ model: 'opus' }, { extraKnownMarketplaces: { sterling: { source: SRC } } }]) {
+    const cfg = configDir(settings, { sterling: { source: SRC, autoUpdate: true } });
+    const before = readFileSync(settingsOf(cfg), 'utf8');
+    assert.deepEqual(run(cfg), { status: 'already-on', path: settingsOf(cfg), line: null });
+    assert.equal(readFileSync(settingsOf(cfg), 'utf8'), before);
+  }
+});
+
+test('the settings value outranks the known one: a settings autoUpdate: true is on even when known says false', () => {
+  const cfg = configDir({ extraKnownMarketplaces: { sterling: { source: SRC, autoUpdate: true } } }, { sterling: { source: SRC, autoUpdate: false } });
+  assert.equal(run(cfg).status, 'already-on');
+});
+
+test('a missing settings.json is not created: nothing is written and the line names the file and the manual step', () => {
+  const cfg = configDir(undefined, { sterling: { source: SRC } });
+  const r = run(cfg);
+  assert.equal(r.status, 'settings-missing');
+  assert.ok(!existsSync(settingsOf(cfg)), 'never created');
+  assert.ok(r.line.includes(fwd(settingsOf(cfg))), r.line);
+  assert.match(r.line, /Enable auto-update/);
+});
+
+test('a malformed settings.json is left byte-identical and the line is one line holding none of its content', () => {
+  const secret = 'sk-ant-api03-DO-NOT-LEAK';
+  const bodies = ['{ not json', `{\n  "env": { "KEY": "${secret}" },\n  "x": nope\n}\n`, '[1, 2]', 'null'];
+  for (const body of bodies) {
+    const cfg = configDir(body, { sterling: { source: SRC } });
+    const r = run(cfg);
+    assert.equal(r.status, 'settings-invalid', body);
+    assert.equal(readFileSync(settingsOf(cfg), 'utf8'), body, 'untouched');
+    assert.ok(!r.line.includes('\n'), `one line: ${r.line}`);
+    assert.ok(!r.line.includes(secret) && !r.line.includes('nope'), `no file content in the notice: ${r.line}`);
+    assert.ok(r.line.includes(fwd(settingsOf(cfg))), r.line);
+    assert.match(r.line, /not valid JSON|not a JSON object/);
+  }
+});
+
+test('a settings.json whose extraKnownMarketplaces or sterling entry is not an object is left untouched with a loud line', () => {
+  for (const settings of [{ extraKnownMarketplaces: 'x' }, { extraKnownMarketplaces: [] }, { extraKnownMarketplaces: { sterling: 'github' } }]) {
+    const cfg = configDir(settings, { sterling: { source: SRC } });
+    const before = readFileSync(settingsOf(cfg), 'utf8');
+    const r = run(cfg);
+    assert.equal(r.status, 'settings-invalid');
+    assert.equal(readFileSync(settingsOf(cfg), 'utf8'), before);
+    assert.ok(!r.line.includes('\n'));
+  }
+});
+
+test('an unreadable settings.json reports only the error code, never the message', () => {
+  const cfg = configDir({});
+  const readFile = () => { const e = new Error('EACCES: permission denied, open /secret/path\nline two'); e.code = 'EACCES'; throw e; };
+  const r = run(cfg, { readFile });
+  assert.equal(r.status, 'settings-unreadable');
+  assert.match(r.line, /EACCES/);
+  assert.ok(!r.line.includes('permission denied') && !r.line.includes('/secret/path') && !r.line.includes('\n'), r.line);
+});
+
+test('a malformed known_marketplaces.json: no write, the line names that file and holds none of its content', () => {
+  const secret = 'ghp_DO-NOT-LEAK';
+  for (const settings of [{ model: 'opus' }, { extraKnownMarketplaces: { sterling: { source: SRC } } }]) {
+    const cfg = configDir(settings, `{\n  "sterling": { "token": "${secret}" },\n  "y": nope\n}`);
+    const before = readFileSync(settingsOf(cfg), 'utf8');
+    const r = run(cfg);
+    assert.equal(r.status, 'known-invalid');
+    assert.equal(readFileSync(settingsOf(cfg), 'utf8'), before, 'settings untouched');
+    assert.ok(r.line.includes('known_marketplaces.json'), r.line);
+    assert.ok(!r.line.includes(secret) && !r.line.includes('nope') && !r.line.includes('\n'), r.line);
+  }
+});
+
+test('known_marketplaces.json is found under CLAUDE_CODE_PLUGIN_CACHE_DIR when that is set (the plugins root Claude Code documents)', () => {
+  const cfg = configDir({ model: 'opus' });
+  const root = tmp('sterling-cut-plugins-');
+  writeFileSync(join(root, 'known_marketplaces.json'), JSON.stringify({ sterling: { source: SRC } }));
+  const r = enableMarketplaceAutoUpdate({ env: { CLAUDE_CONFIG_DIR: cfg, CLAUDE_CODE_PLUGIN_CACHE_DIR: root } });
+  assert.equal(r.status, 'written');
+  assert.equal(readSettings(cfg).extraKnownMarketplaces.sterling.source.repo, 'Chulf58/sterling');
 });
 
 // ---- (4) the manual clone-deletion step ----
@@ -375,12 +544,12 @@ function runInit(target, claudeConfigDir) {
 }
 const row = (out, item) => out.split('\n').find((l) => l.startsWith(item + ' ')) ?? '';
 
-test('init from an installed copy: replaces the clone launcher, deletes the clone updater, warns on auto-update, names the clone for manual deletion', () => {
+test('init from an installed copy: replaces the clone launcher, deletes the clone updater, switches on auto-update, names the clone for manual deletion', () => {
   const clone = fakeClone();
   const target = tmp('sterling-cut-project-');
   writeFileSync(join(target, 'sterling-launch.sh'), oldLauncher(clone));
   writeFileSync(join(target, UPDATE_LAUNCHER_NAME), oldUpdateBat(clone));
-  const cfg = installedConfigDir({ extraKnownMarketplaces: { sterling: { source: { source: 'github', repo: 'Chulf58/sterling' } } } });
+  const cfg = installedConfigDir({ extraKnownMarketplaces: { sterling: { source: SRC } } });
 
   const { code, out } = runInit(target, cfg);
   assert.equal(code, 0, out);
@@ -394,7 +563,10 @@ test('init from an installed copy: replaces the clone launcher, deletes the clon
   assert.ok(!existsSync(join(target, UPDATE_LAUNCHER_NAME)), 'the clone updater is deleted');
   assert.match(row(out, UPDATE_LAUNCHER_NAME), /removed/);
 
-  assert.ok(out.includes('"autoUpdate":true'), `the auto-update warning carries the JSON: ${out}`);
+  assert.equal(readSettings(cfg).extraKnownMarketplaces.sterling.autoUpdate, true, 'init switched auto-update on in the user settings');
+  assert.deepEqual(readSettings(cfg).extraKnownMarketplaces.sterling.source, SRC, 'the entry\'s source is untouched');
+  assert.ok(out.includes(fwd(join(cfg, 'settings.json'))) && out.includes('extraKnownMarketplaces.sterling.autoUpdate'), `one line names the file and key: ${out}`);
+  assert.doesNotMatch(out, /plugin auto-update: .*not set/, 'no old warning');
 
   const tail = out.slice(out.lastIndexOf('old Sterling clone'));
   assert.ok(tail.includes(clone), `the end of the run names the clone to delete: ${out}`);
@@ -450,11 +622,30 @@ test('init from the authoring clone: a clone launcher and a clone updater are no
   writeFileSync(join(target, 'sterling-launch.sh'), launcherBody);
   writeFileSync(join(target, UPDATE_LAUNCHER_NAME), oldUpdateBat(clone));
 
-  const { code, out } = runInit(target, configDir({}));
+  const cfg = configDir({ extraKnownMarketplaces: { sterling: { source: SRC } } }, { sterling: { source: SRC } });
+  const settingsBefore = readFileSync(join(cfg, 'settings.json'), 'utf8');
+  const { code, out } = runInit(target, cfg);
   assert.equal(code, 0, out);
+  assert.equal(readFileSync(join(cfg, 'settings.json'), 'utf8'), settingsBefore, 'the user settings are not touched on an authoring clone');
   assert.equal(readFileSync(join(target, 'sterling-launch.sh'), 'utf8'), launcherBody, 'a clone keeps today\'s leave-alone behaviour');
   assert.match(row(out, 'sterling-launch.sh'), /differs/);
   assert.ok(existsSync(join(target, UPDATE_LAUNCHER_NAME)), 'the updater is never deleted on a clone');
   assert.doesNotMatch(out, /autoUpdate/);
   assert.doesNotMatch(out, /old Sterling clone/);
+});
+
+test('init from an installed copy: the known_marketplaces.json source seeds the settings entry (2b), and a malformed settings.json is left untouched with a loud line', () => {
+  const target = tmp('sterling-cut-project-');
+  const cfg = installedConfigDir({ model: 'opus' });
+  writeFileSync(join(cfg, 'plugins', 'known_marketplaces.json'), JSON.stringify({ sterling: { source: SRC, installLocation: '/x' } }));
+  const first = runInit(target, cfg);
+  assert.equal(first.code, 0, first.out);
+  assert.deepEqual(readSettings(cfg), { model: 'opus', extraKnownMarketplaces: { sterling: { source: SRC, autoUpdate: true } } });
+
+  const target2 = tmp('sterling-cut-project-');
+  const bad = installedConfigDir('{ not json');
+  const second = runInit(target2, bad);
+  assert.equal(second.code, 0, second.out);
+  assert.equal(readFileSync(join(bad, 'settings.json'), 'utf8'), '{ not json');
+  assert.ok(second.out.includes(fwd(join(bad, 'settings.json'))) && /not valid JSON/.test(second.out), second.out);
 });

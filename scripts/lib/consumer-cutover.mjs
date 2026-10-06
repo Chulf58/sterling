@@ -1,17 +1,20 @@
 // Consumer cutover [S6] (decision s6-consumer-cutover-init-on-installed-copy-fixes-
 // launchers): what /sterling:init, run from an INSTALLED plugin copy, needs to move a
-// consumer project off its old clone. init owns the writes; this module only reads and
-// renders text:
+// consumer project off its old clone. init owns the writes, except the one settings.json
+// switch below; the rest only reads and renders text:
 //   - cloneLauncherTarget: is a sterling-launch.sh a clone launcher (one that starts
 //     claude with --plugin-dir, which overrides the installed plugin — finding 9bce09a9)?
-//   - marketplaceAutoUpdate / autoUpdateWarning: is "autoUpdate": true set on
-//     extraKnownMarketplaces.sterling in the user-level settings.json? Never written.
+//   - enableMarketplaceAutoUpdate: switches on "autoUpdate": true for the sterling marketplace
+//     in the user-level settings.json (user-ruled 2026-10-06 through the question form, "Init
+//     switches it on", over the warn-only rule of the decision above). The one user-level file
+//     init writes; deleting a clone stays manual.
 //   - cloneCleanupLines: the manual step naming each old clone. Nothing deletes a clone,
 //     and a clone that is the init target or a registered project is never offered for it.
 // The sterling-update.bat recogniser lives beside its renderer in update-launcher.mjs.
 //
 // Builtins plus the shared path comparison (@sterling/schemas), which init and update bundle.
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { sameLocationAnyHost, isUnderLocationAnyHost } from '@sterling/schemas';
@@ -51,52 +54,115 @@ export function userSettingsPath({ env = process.env, home = homedir() } = {}) {
   return join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'settings.json');
 }
 
-/**
- * Reads the user-level settings.json and reports whether
- * extraKnownMarketplaces.sterling.autoUpdate is true. Only reads; a missing file is
- * `missing`, an unreadable or unparseable one is `unreadable` (never guessed at).
- * @returns {{path: string, enabled: boolean, entry?: object, missing?: true, unreadable?: string}}
- */
-export function marketplaceAutoUpdate({ env = process.env, home = homedir(), readFile = readFileSync } = {}) {
-  const path = userSettingsPath({ env, home });
+// Claude Code's plugins root: CLAUDE_CODE_PLUGIN_CACHE_DIR when set, else <config dir>/plugins
+// (https://code.claude.com/docs/en/plugins/loading, "Find plugins on disk").
+function knownMarketplacesPath({ env, home }) {
+  return join(env.CLAUDE_CODE_PLUGIN_CACHE_DIR || join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'plugins'), 'known_marketplaces.json');
+}
+
+const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+// One JSON object read from disk. Failures carry only a fixed phrase or the error code,
+// never err.message: a JSON.parse message can span lines and quote the file (anti-pattern
+// putting-a-json-parse-or-file-read-error-message-into-one-lin). BOM, line endings and the
+// trailing newline are returned so a rewrite can keep them.
+function readJsonObject(path, readFile) {
   let raw;
   try {
     raw = readFile(path, 'utf8');
   } catch (err) {
-    if (err?.code === 'ENOENT') return { path, enabled: false, missing: true };
-    return { path, enabled: false, unreadable: err?.code ?? err?.message ?? String(err) };
+    if (err?.code === 'ENOENT') return { missing: true };
+    return { unreadable: err?.code ?? 'unknown error' };
   }
-  let settings;
+  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  let value;
   try {
-    settings = JSON.parse(raw);
-  } catch (err) {
-    return { path, enabled: false, unreadable: `not valid JSON (${err?.message ?? err})` };
+    value = JSON.parse(text);
+  } catch {
+    return { invalid: 'not valid JSON' };
   }
-  const entry = settings?.extraKnownMarketplaces?.sterling;
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return { path, enabled: false };
-  return { path, enabled: entry.autoUpdate === true, entry };
+  if (!isObject(value)) return { invalid: 'not a JSON object' };
+  return { value, eol: text.includes('\r\n') ? '\r\n' : '\n', trailingNewline: /\r?\n$/.test(text) };
 }
 
-// The /plugin -> Marketplaces toggle keeps its own setting in a file whose shape was
-// never measured, so init does not read it; the warning says so instead of guessing.
-const TOGGLE_NOTE = 'If you already switched auto-update on in /plugin -> Marketplaces, ignore this warning: init does not read that setting.';
+const MANUAL = 'To switch it on by hand: /plugin, Marketplaces, sterling, Enable auto-update.';
 
-/** The ONE loud line init prints when settings.json does not set auto-update, or null when it does. */
-export function autoUpdateWarning(check) {
-  if (check.enabled) return null;
-  const where = fwd(check.path);
-  const head = 'plugin auto-update: "autoUpdate": true is not set for the sterling marketplace in settings.json';
-  if (check.missing) {
-    return `${head} — ${where} does not exist. To set it, add "autoUpdate": true to extraKnownMarketplaces.sterling there. ${TOGGLE_NOTE}`;
+/**
+ * Switches on auto-update for the sterling marketplace in the user-level settings.json.
+ * Claude Code takes the first of these that is set: autoUpdate on the settings file's
+ * extraKnownMarketplaces entry, then on the known_marketplaces.json entry (the /plugin toggle
+ * writes it), then the default, off for sterling (code.claude.com/docs/en/plugins/loading,
+ * "Which marketplaces and plugins auto-update").
+ *   - already true by that rule: no write, line null.
+ *   - settings entry exists, autoUpdate unset: autoUpdate: true is set on it; its source and
+ *     every other key stay as they were.
+ *   - no settings entry but known_marketplaces.json has sterling with a source object: the entry
+ *     is created with exactly that source plus autoUpdate: true. known_marketplaces.json is
+ *     Claude Code's own state file and is never written; no source is ever invented.
+ *   - an explicit autoUpdate: false (settings entry, or the known entry when settings is silent)
+ *     is a deliberate choice: not flipped, a line says how to turn it on.
+ *   - settings.json missing, unreadable or malformed, or known_marketplaces.json unreadable or
+ *     malformed: nothing is written and the line names the file and the manual step.
+ * The call site runs this on an installed copy only; an authoring clone never reaches it.
+ * @returns {{status: string, path: string, line: string|null}} status is one of already-on,
+ *   written, explicit-off, no-entry, no-source, settings-missing, settings-unreadable,
+ *   settings-unwritable, settings-invalid, known-unreadable, known-invalid
+ */
+export function enableMarketplaceAutoUpdate({ env = process.env, home = homedir(), readFile = readFileSync, writeFile = writeFileSync, rename = renameSync } = {}) {
+  const path = userSettingsPath({ env, home });
+  const knownPath = knownMarketplacesPath({ env, home });
+  const where = fwd(path);
+  const knownWhere = fwd(knownPath);
+  const out = (status, line) => ({ status, path, line });
+  const stop = (status, file, why) => out(status, `plugin auto-update: not switched on, ${fwd(file)} ${why}. ${MANUAL}`);
+
+  const settings = readJsonObject(path, readFile);
+  if (settings.missing) return stop('settings-missing', path, 'does not exist, so init left it alone');
+  if (settings.unreadable) return stop('settings-unreadable', path, `could not be read (${settings.unreadable}), so init left it alone`);
+  if (settings.invalid) return stop('settings-invalid', path, `is ${settings.invalid}, so init left it alone`);
+
+  const markets = settings.value.extraKnownMarketplaces;
+  if (markets !== undefined && !isObject(markets)) return stop('settings-invalid', path, 'has an extraKnownMarketplaces that is not a JSON object, so init left it alone');
+  const entry = markets?.sterling;
+  if (entry !== undefined && !isObject(entry)) return stop('settings-invalid', path, 'has an extraKnownMarketplaces.sterling that is not a JSON object, so init left it alone');
+  if (entry?.autoUpdate === true) return out('already-on', null);
+  if (entry?.autoUpdate === false) {
+    return out('explicit-off', `plugin auto-update: off by an explicit setting, "autoUpdate": false on extraKnownMarketplaces.sterling in ${where}. Init does not override it; set "autoUpdate": true there, or use /plugin, Marketplaces, sterling, Enable auto-update.`);
   }
-  if (check.unreadable) {
-    return `${head} — ${where} could not be read: ${check.unreadable}. To set it, add "autoUpdate": true to extraKnownMarketplaces.sterling there. ${TOGGLE_NOTE}`;
+
+  const known = readJsonObject(knownPath, readFile);
+  if (known.unreadable) return stop('known-unreadable', knownPath, `could not be read (${known.unreadable}), so init cannot tell whether the /plugin toggle is on`);
+  if (known.invalid) return stop('known-invalid', knownPath, `is ${known.invalid}, so init cannot tell whether the /plugin toggle is on`);
+  const knownEntry = known.value?.sterling;
+  if (isObject(knownEntry) && knownEntry.autoUpdate === true) return out('already-on', null);
+  if (isObject(knownEntry) && knownEntry.autoUpdate === false) {
+    return out('explicit-off', `plugin auto-update: off by an explicit setting, "autoUpdate": false on the sterling entry in ${knownWhere} (the /plugin toggle). Init does not override it; use /plugin, Marketplaces, sterling, Enable auto-update.`);
   }
-  if (!check.entry) {
-    return `${head} — ${where} has no extraKnownMarketplaces.sterling entry. Add "autoUpdate": true to that entry. ${TOGGLE_NOTE}`;
+
+  let next;
+  if (entry) {
+    next = { ...markets, sterling: { ...entry, autoUpdate: true } };
+  } else if (isObject(knownEntry) && isObject(knownEntry.source)) {
+    next = { ...markets, sterling: { source: knownEntry.source, autoUpdate: true } };
+  } else if (isObject(knownEntry)) {
+    return stop('no-source', knownPath, 'has a sterling entry with no source object to copy into settings.json, so init wrote nothing');
+  } else {
+    return out('no-entry', `plugin auto-update: not switched on, no sterling marketplace entry in ${where} or ${knownWhere}. ${MANUAL}`);
   }
-  const fixed = JSON.stringify({ sterling: { ...check.entry, autoUpdate: true } });
-  return `${head} — extraKnownMarketplaces.sterling in ${where} has no "autoUpdate": true. To set it, replace that entry with: "extraKnownMarketplaces": ${fixed} (init never writes this file). ${TOGGLE_NOTE}`;
+
+  const { eol, trailingNewline } = settings;
+  let body = JSON.stringify({ ...settings.value, extraKnownMarketplaces: next }, null, 2);
+  if (eol === '\r\n') body = body.replace(/\n/g, '\r\n');
+  if (trailingNewline) body += eol;
+  const tmp = `${path}.tmp-${randomUUID()}`;
+  try {
+    writeFile(tmp, body);
+    rename(tmp, path);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* the temp file may never have been created */ }
+    return stop('settings-unwritable', path, `could not be written (${err?.code ?? 'unknown error'}), so init left it alone`);
+  }
+  return out('written', `plugin auto-update: switched on. Init set extraKnownMarketplaces.sterling.autoUpdate to true in ${where}; it takes effect from the next session.`);
 }
 
 // A JSON file read for one field. Absent (ENOENT, or ENOTDIR on the way) and malformed
