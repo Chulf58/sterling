@@ -8,7 +8,7 @@ import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSy
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, repoPathOfLocation, isAbsolutePathAnyHost, sameLocationAnyHost, parseConfig, normalizeRawConfig, configSchema, unreadConfigKeys, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, exampleRecordFor, addFieldCondition, WRITE_REFUSED_LINK_RELS, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid, type DurableRecord, type FieldShape, type KnowledgeWrite, type NoCaptureLane, type SessionEvent, type SterlingConfig, type UnreadConfigKey } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -1604,6 +1604,19 @@ function configSetImpl(
     raw = parsed as Record<string, unknown>;
   }
 
+  // The old sparring_partner.model is read only while sparring_partner.models.openai
+  // is absent (normalizeRawConfig converts it; the new key wins). Once the new key
+  // exists a write to the old path would validate, land on disk and change nothing.
+  if (path === 'sparring_partner.model') {
+    const sp = raw.sparring_partner;
+    const spModels = sp !== null && typeof sp === 'object' && !Array.isArray(sp) ? (sp as Record<string, unknown>).models : undefined;
+    if (spModels !== null && typeof spModels === 'object' && !Array.isArray(spModels) && (spModels as Record<string, unknown>).openai !== undefined) {
+      throw new Error(
+        `config_set: 'sparring_partner.model' is the old path and is not read once sparring_partner.models.openai exists, so this write would have no effect — set 'sparring_partner.models.openai.model' instead. Nothing was written.`
+      );
+    }
+  }
+
   // The path can be ANY depth now the allowlist is gone — a bare root key
   // (`machine_role`, 0 dots) or a path several segments deep
   // (`context_watch.windows.claude-fable-5-1`, 2 dots) alike. Walk the
@@ -1641,7 +1654,7 @@ function configSetImpl(
     }
   }
 
-  const validation = configSchema.safeParse(mutated);
+  const validation = configSchema.safeParse(normalizeRawConfig(mutated));
   if (!validation.success) {
     const issues = validation.error.issues.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
     throw new Error(`config_set: the resulting config.json would fail schema validation — ${issues}. Nothing was written.`);

@@ -185,6 +185,23 @@ test('M-C0 CONTROL: a codex consult that omits model gets config.sparring_partne
   }
 });
 
+// Vendor pins step 2: this hook reads the raw file, so it applies the same
+// old-key conversion parseConfig does — sparring_partner.models.openai wins, the
+// old sparring_partner.model is the fallback.
+test('M-C0b: sparring_partner.models.openai.model is injected, and wins over the old sparring_partner.model when both exist', () => {
+  const both = { sparring_partner: { enabled: true, model: 'gpt-old', models: { openai: { model: PINNED } } } };
+  const only = { sparring_partner: { enabled: true, models: { openai: { model: PINNED } } } };
+  for (const [what, config] of [['new key only', only], ['both keys', both]]) {
+    const { dir, cleanup } = makeProject(config);
+    try {
+      const obj = envelopeOf(runHook(consult(dir, { prompt: 'x' }), dir), `M-C0b ${what}`);
+      assert.equal(obj?.hookSpecificOutput?.updatedInput?.model, PINNED, `${what}: the models.openai pin is injected`);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
 // ===========================================================================
 // M-1 — an explicit call-site model WINS; config never overwrites it.
 // ===========================================================================

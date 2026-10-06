@@ -82,12 +82,12 @@ const withDir = (config, fn) => {
   }
 };
 
-test('BACKLOG worker state: waiting to batch names the numbers', () => {
+test('BACKLOG worker state: batching names the numbers', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const b = backlog(dir, reconcile(now, { count: 1, ageMin: 8 }), now);
-    assert.match(b.banner, /, oldest 8m, worker waiting to batch: 1 of 5 unjudged, oldest 8m of 30m$/);
-    assert.match(b.line, /worker waiting to batch: 1 of 5 unjudged, oldest 8m of 30m\.$/);
+    assert.match(b.banner, /, oldest 8m, worker batching: starts at 5 unjudged or after 30m \(1 now, oldest 8m\)\. No run recorded yet$/);
+    assert.match(b.line, /worker batching: starts at 5 unjudged or after 30m \(1 now, oldest 8m\)\. No run recorded yet\.$/);
     assert.doesNotMatch(b.line, /worker not running/);
   });
 });
@@ -96,7 +96,7 @@ test('BACKLOG worker state: a full batch (5 unjudged) is due at the next trigger
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const b = backlog(dir, reconcile(now, { count: 5, ageMin: 3 }), now);
-    assert.match(b.banner, /worker due to launch at the next Stop or git commit \(5 unjudged, oldest 3m\)$/);
+    assert.match(b.banner, /worker launches at your next Stop or git commit to judge 5 items \(oldest unjudged 3m\)\. No run recorded yet$/);
   });
 });
 
@@ -104,7 +104,7 @@ test('BACKLOG worker state: an oldest item that waited 30 minutes is due even be
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const b = backlog(dir, reconcile(now, { count: 2, ageMin: 31 }), now);
-    assert.match(b.banner, /worker due to launch at the next Stop or git commit \(2 unjudged, oldest 31m\)$/);
+    assert.match(b.banner, /worker launches at your next Stop or git commit to judge 2 items \(oldest unjudged 31m\)\. No run recorded yet$/);
   });
 });
 
@@ -112,7 +112,7 @@ test('BACKLOG worker state: idle when every open item is already judged owes-pro
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const b = backlog(dir, reconcile(now, { count: 2, unjudged: 0, ageMin: 90 }), now);
-    assert.match(b.banner, /worker idle, nothing to judge \(every open item is already judged 'owes prose'\)$/);
+    assert.match(b.banner, /worker has nothing left to judge: all 2 items wait on you\. No run recorded yet$/);
   });
 });
 
@@ -140,34 +140,143 @@ test('BACKLOG worker state: disabled by the environment switch', () => {
   });
 });
 
-test('BACKLOG worker state: backing off after a failed run, with the time left', () => {
+test('BACKLOG worker state: paused after a failed run, with the time left', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const at = iso(now - 10 * MIN);
     writeFileSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify({ last_run: { ok: false, at, error: 'exit 3' } }));
     const b = backlog(dir, reconcile(now), now);
-    assert.match(b.banner, /worker backing off after a failed run \(next launch in 20m\); last worker run FAILED at .*: exit 3 \(log: \.sterling\/maintenance-worker\.log\)$/);
+    assert.match(b.banner, /worker paused 20m after a failed run \(it retries by itself\); last worker run FAILED at .*: exit 3 \(log: \.sterling\/maintenance-worker\.log\)$/);
   });
 });
 
-test('BACKLOG worker state: backing off after a run that made no progress', () => {
+test('BACKLOG worker state: paused after a run that closed nothing', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const at = iso(now - 25 * MIN);
     writeFileSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify({ last_run: { ok: true, no_progress: true, at } }));
     const b = backlog(dir, reconcile(now), now);
-    assert.match(b.banner, /worker backing off after a run that made no progress \(next launch in 5m\)$/);
+    assert.match(b.banner, /worker paused 5m after a run that closed nothing \(it retries by itself\)$/);
   });
 });
 
-test('BACKLOG worker state: a failed run older than the back-off no longer backs off', () => {
+test('BACKLOG worker state: a failed run older than the back-off no longer pauses the worker', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const at = iso(now - 45 * MIN);
     writeFileSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify({ last_run: { ok: false, at, error: 'exit 3' } }));
     const b = backlog(dir, reconcile(now), now);
-    assert.match(b.banner, /worker waiting to batch: 1 of 5 unjudged, oldest 8m of 30m; last worker run FAILED/);
-    assert.doesNotMatch(b.banner, /backing off/);
+    assert.match(b.banner, /worker batching: starts at 5 unjudged or after 30m \(1 now, oldest 8m\); last worker run FAILED/);
+    assert.doesNotMatch(b.banner, /paused/);
+    assert.doesNotMatch(b.banner, /Last run:|No run recorded/, 'a failed run prints the FAILED note, never also a last-run clause');
+  });
+});
+
+const writeLastRun = (dir, lastRun) =>
+  writeFileSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'), JSON.stringify({ last_run: lastRun }));
+
+test('BACKLOG worker state: a recorded last run adds its age, verdicts and closes to a due worker', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeLastRun(dir, { ok: true, at: iso(now - 2 * 60 * MIN), verdicts: 3, closed: 1, closes_ok: 1 });
+    const b = backlog(dir, reconcile(now, { count: 5, ageMin: 3 }), now);
+    assert.match(b.banner, /worker launches at your next Stop or git commit to judge 5 items \(oldest unjudged 3m\)\. Last run: 2h ago, 3 verdicts, 1 closed$/);
+    assert.match(b.line, /Last run: 2h ago, 3 verdicts, 1 closed\.$/);
+    assert.doesNotMatch(b.banner, /No run recorded/);
+  });
+});
+
+test('BACKLOG worker state: the last-run clause reaches the batching and idle states and uses singular nouns', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeLastRun(dir, { ok: true, at: iso(now - 50 * MIN), verdicts: 1, closed: 0, closes_ok: 0 });
+    const batching = backlog(dir, reconcile(now, { count: 1, ageMin: 8 }), now);
+    assert.match(batching.banner, /worker batching: starts at 5 unjudged or after 30m \(1 now, oldest 8m\)\. Last run: 50m ago, 1 verdict, 0 closed$/);
+    const idle = backlog(dir, reconcile(now, { count: 1, unjudged: 0, ageMin: 90 }), now);
+    assert.match(idle.banner, /worker has nothing left to judge: the 1 item waits on you\. Last run: 50m ago, 1 verdict, 0 closed$/);
+  });
+});
+
+// `closed` is what the worker child CLAIMED in its verdicts; `closes_ok` is how many
+// closes the runner saw succeed (maintenance-worker.mjs runWorker). Only the second is printed.
+test('BACKLOG worker state: the close count is the verified closes_ok, never the claimed closed', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeLastRun(dir, { ok: true, at: iso(now - 2 * 60 * MIN), verdicts: 3, closed: 3, closes_ok: 0 });
+    const b = backlog(dir, reconcile(now, { count: 5, ageMin: 3 }), now);
+    assert.match(b.banner, /Last run: 2h ago, 3 verdicts, 0 closed$/);
+    assert.match(b.line, /Last run: 2h ago, 3 verdicts, 0 closed\.$/);
+    assert.doesNotMatch(b.banner + b.line, /3 closed/);
+  });
+});
+
+test('BACKLOG worker state: a state file with a claimed closed but no closes_ok (an older one) prints no close count', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeLastRun(dir, { ok: true, at: iso(now - 2 * 60 * MIN), verdicts: 3, closed: 3 });
+    const b = backlog(dir, reconcile(now, { count: 5, ageMin: 3 }), now);
+    assert.match(b.banner, /Last run: 2h ago, 3 verdicts$/);
+    assert.doesNotMatch(b.banner + b.line, /closed/);
+  });
+});
+
+test('BACKLOG worker state: a last run without verdict counts (an older state file) prints only its age', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeLastRun(dir, { ok: true, at: iso(now - 10 * MIN) });
+    const b = backlog(dir, reconcile(now, { count: 5, ageMin: 3 }), now);
+    assert.match(b.banner, /\(oldest unjudged 3m\)\. Last run: 10m ago$/);
+  });
+});
+
+test('BACKLOG worker state: no last-run clause while the worker runs, is paused, or is disabled', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeLastRun(dir, { ok: true, no_progress: true, at: iso(now - 25 * MIN), verdicts: 0, closed: 0 });
+    const paused = backlog(dir, reconcile(now), now);
+    assert.doesNotMatch(paused.banner, /Last run:|No run recorded/);
+    const off = backlog(dir, reconcile(now), now, { env: { STERLING_MAINTENANCE_WORKER_DISABLE: '1' } });
+    assert.doesNotMatch(off.banner, /Last run:|No run recorded/);
+  });
+});
+
+test('BACKLOG worker state: a failed last run prints the FAILED note and no last-run clause, even once the pause is over', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeLastRun(dir, { ok: false, at: iso(now - 90 * MIN), error: 'exit 3', verdicts: 2, closed: 1 });
+    const b = backlog(dir, reconcile(now, { count: 5, ageMin: 3 }), now);
+    assert.match(b.banner, /\(oldest unjudged 3m\); last worker run FAILED at .*: exit 3 \(log: \.sterling\/maintenance-worker\.log\)$/);
+    assert.doesNotMatch(b.banner, /Last run:|No run recorded/);
+    assert.doesNotMatch(b.line, /Last run:|No run recorded/);
+  });
+});
+
+test('BACKLOG line: the owes-prose sentence says N of the M items are the conductor\'s and the worker handles the rest', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    const b = backlog(dir, reconcile(now, { count: 5, unjudged: 3, ageMin: 90 }), now);
+    assert.match(b.line, /^RECONCILE BACKLOG: 5 items in lane reconcile_needed, the oldest of all items open since .* \(1h\)\. 2 of the 5 items were judged 'owes prose' by the worker and are yours to draft\. The worker handles the other 3\. worker /);
+    const one = backlog(dir, reconcile(now, { count: 5, unjudged: 4, ageMin: 90 }), now);
+    assert.match(one.line, /1 of the 5 items was judged 'owes prose' by the worker and is yours to draft\. The worker handles the other 4\./);
+  });
+});
+
+test('BACKLOG line: when every item owes prose there is no "other items" sentence', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    const b = backlog(dir, reconcile(now, { count: 4, unjudged: 0, ageMin: 90 }), now);
+    assert.match(b.line, /All 4 items were judged 'owes prose' by the worker and are yours to draft\. worker has nothing left to judge: all 4 items wait on you/);
+    assert.doesNotMatch(b.line, /The worker handles the other/);
+    const single = backlog(dir, reconcile(now, { count: 1, unjudged: 0, ageMin: 90 }), now);
+    assert.match(single.line, /The 1 item was judged 'owes prose' by the worker and is yours to draft\. worker has nothing/);
+  });
+});
+
+test('BACKLOG line: nothing judged owes prose, so no owes-prose sentence', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    const b = backlog(dir, reconcile(now, { count: 2, ageMin: 8 }), now);
+    assert.doesNotMatch(b.line, /owes prose|yours to draft/);
   });
 });
 
@@ -179,13 +288,13 @@ test('BACKLOG worker state: a malformed state file gives "state unknown" with a 
   withDir({ toolchains: [] }, (dir) => {
     // JSON.parse's own message can quote a prefix of the file, so the marker leads the content
     writeFileSync(join(dir, '.sterling', 'transient', 'maintenance-worker.state.json'), 'SECRET-MARKER-7f3a <html>not json');
-    // one hour-old unjudged item: without the state file this reads "due to launch"
+    // one hour-old unjudged item: without the state file this reads "launches at your next Stop"
     const b = backlog(dir, reconcile(now, { ageMin: 60 }), now);
     assert.ok(b.banner.endsWith(`, ${stateUnknown('invalid JSON')}`), b.banner);
     assert.ok(b.line.endsWith(`${stateUnknown('invalid JSON')}.`), b.line);
     assert.doesNotMatch(b.banner, /SECRET-MARKER/);
     assert.doesNotMatch(b.line, /SECRET-MARKER/);
-    assert.doesNotMatch(b.banner, /due to launch|waiting to batch|backing off|idle/);
+    assert.doesNotMatch(b.banner, /launches at your next|batching|paused|nothing left to judge/);
   });
 });
 
@@ -207,7 +316,7 @@ test('BACKLOG worker state: a state file that cannot be read (a directory at its
     assert.ok(b.banner.endsWith(`, ${stateUnknown('EISDIR')}`), b.banner);
     assert.ok(b.line.endsWith(`${stateUnknown('EISDIR')}.`), b.line);
     assert.doesNotMatch(b.banner, /illegal operation/);
-    assert.doesNotMatch(b.banner, /due to launch|waiting to batch|backing off|idle/);
+    assert.doesNotMatch(b.banner, /launches at your next|batching|paused|nothing left to judge/);
   });
 });
 
@@ -252,7 +361,7 @@ test('BACKLOG worker state: an absent state file means no run recorded, so due i
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const b = backlog(dir, reconcile(now, { ageMin: 60 }), now);
-    assert.match(b.banner, /worker due to launch at the next Stop or git commit \(1 unjudged, oldest 1h\)$/);
+    assert.match(b.banner, /worker launches at your next Stop or git commit to judge 1 item \(oldest unjudged 1h\)\. No run recorded yet$/);
     assert.doesNotMatch(b.banner, /state unknown/);
   });
 });

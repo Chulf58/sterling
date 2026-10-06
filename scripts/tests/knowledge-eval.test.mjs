@@ -4,7 +4,8 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { addWorktree, aggregateMetricValues, DEFAULT_PROJECTS, emittedLevel, linkNodeModules, lockfilesEquivalent, mrrFromHistogram, parseCaseDirectives, resolveProjects, scoreEventIndexes, caseProject, pluginTree, removeWorktrees, replayCommit, runWithCleanup, scorePull, scorePush, withWorktreeLedger } from '../knowledge-eval.mjs';
+import { fileURLToPath } from 'node:url';
+import { addWorktree, aggregateMetricValues, DEFAULT_PROJECTS, emittedLevel, linkNodeModules, lockfilesEquivalent, mrrFromHistogram, parseCaseDirectives, patchAdapter, resolveProjects, scoreEventIndexes, caseProject, pluginTree, removeWorktrees, replayCommit, runWithCleanup, scorePull, scorePush, withWorktreeLedger } from '../knowledge-eval.mjs';
 const id = '11111111-1111-4111-8111-111111111111';
 const r = { id, title: 'Hazard', trigger: 'exact trigger text', right_way: 'exact right way text', guidance: 'distinctive guidance passage' };
 test('pointer-only is not substance', () => assert.deepEqual(emittedLevel(id, r), { pointer: true, substance: false, whole: false, clipped: false, withheldOversize: false }));
@@ -285,4 +286,72 @@ test('linkNodeModules points @sterling at the tree\'s own packages and every oth
     assert.equal(realpathSync(join(tree, 'node_modules', 'left-pad')), realpathSync(join(source, 'left-pad')));
     assert.equal(realpathSync(join(tree, 'node_modules', '.bin')), realpathSync(join(source, '.bin')));
   } finally { rmSync(base, { recursive: true, force: true }); }
+});
+// patchAdapter makes a built store open its snapshot read-only. The store's
+// constructor changed shape at the driver seam, so it knows two builds.
+const PRE_SEAM_NEEDLE = 'this.db = new DatabaseSync(path);';
+const POST_SEAM_NEEDLE = 'this.db = options.driver ?? new SqliteDriver(path, { busyTimeoutMs: options.busyTimeoutMs });';
+const ADAPTER_MARK = 'knowledge-eval adapter: snapshot schema lacks records';
+function storeDistTree(files) {
+  const tree = mkdtempSync(join(tmpdir(), 'kev-adapter-'));
+  const dist = join(tree, 'packages', 'store', 'dist'); mkdirSync(dist, { recursive: true });
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dist, name), text);
+  return { tree, read: (name) => readFileSync(join(dist, name), 'utf8') };
+}
+test('patchAdapter patches a pre-seam store build: the constructor opens read-only and returns early', () => {
+  const t = storeDistTree({ 'index.js': `class SterlingStore {\n    constructor(path) {\n        ${PRE_SEAM_NEEDLE}\n        this.db.exec('PRAGMA busy_timeout=5000');\n    }\n}\n` });
+  try {
+    const sha = patchAdapter(t.tree); const out = t.read('index.js');
+    assert.match(sha, /^[0-9a-f]{64}$/);
+    assert.ok(out.includes('this.db = new DatabaseSync(path, { readOnly: true });'));
+    assert.ok(out.includes(ADAPTER_MARK) && out.includes("this.openedSchemaVersion = this.db.prepare('PRAGMA user_version').get().user_version;"));
+    assert.ok(out.indexOf('return; // evaluation-only') < out.indexOf("this.db.exec('PRAGMA busy_timeout=5000')"), 'the early return sits before the open-time writes');
+    assert.equal(patchAdapter(t.tree), sha, 'a second call changes nothing');
+    assert.equal(t.read('index.js'), out);
+  } finally { rmSync(t.tree, { recursive: true, force: true }); }
+});
+test('patchAdapter patches a post-seam store build: the SQLite driver opens read-only and the store constructor returns early', () => {
+  const t = storeDistTree({
+    'index.js': `class SterlingStore {\n    constructor(path, options = {}) {\n        ${POST_SEAM_NEEDLE}\n        const foundSchemaVersion = this.db.schemaVersion();\n        this.db.prepareWritable(isFresh);\n    }\n}\n`,
+    'sqlite-driver.js': `class SqliteDriver {\n    constructor(path, options = {}) {\n        ${PRE_SEAM_NEEDLE}\n        this.db.exec(\`PRAGMA busy_timeout=\${busyTimeoutMs}\`);\n    }\n}\n`,
+  });
+  try {
+    const sha = patchAdapter(t.tree); const index = t.read('index.js'); const driver = t.read('sqlite-driver.js');
+    assert.match(sha, /^[0-9a-f]{64}$/);
+    assert.ok(driver.includes('this.db = new DatabaseSync(path, { readOnly: true });') && !driver.includes(PRE_SEAM_NEEDLE));
+    assert.ok(index.includes(POST_SEAM_NEEDLE), 'the store still opens its driver');
+    assert.ok(index.includes(ADAPTER_MARK) && index.includes('this.openedSchemaVersion = this.db.schemaVersion();'));
+    assert.ok(index.indexOf(POST_SEAM_NEEDLE) < index.indexOf('return; // evaluation-only'));
+    assert.ok(index.indexOf('return; // evaluation-only') < index.indexOf('this.db.prepareWritable(isFresh)'), 'the early return sits before the open-time writes');
+    assert.equal(patchAdapter(t.tree), sha, 'a second call changes nothing');
+    assert.equal(t.read('index.js'), index); assert.equal(t.read('sqlite-driver.js'), driver);
+  } finally { rmSync(t.tree, { recursive: true, force: true }); }
+});
+test('patchAdapter refuses a store build with neither constructor shape, naming both needles, and writes nothing', () => {
+  const unknown = 'class SterlingStore {\n    constructor(path) {\n        this.db = openSomethingElse(path);\n    }\n}\n';
+  const t = storeDistTree({ 'index.js': unknown });
+  try {
+    assert.throws(() => patchAdapter(t.tree), (e) => e.message.includes('adapter seam missing') && e.message.includes(PRE_SEAM_NEEDLE) && e.message.includes(POST_SEAM_NEEDLE));
+    assert.equal(t.read('index.js'), unknown);
+  } finally { rmSync(t.tree, { recursive: true, force: true }); }
+});
+test('patchAdapter refuses a post-seam store whose SQLite driver does not open the way it expects, and leaves the store unpatched', () => {
+  const index = `class SterlingStore {\n    constructor(path, options = {}) {\n        ${POST_SEAM_NEEDLE}\n    }\n}\n`;
+  const t = storeDistTree({ 'index.js': index, 'sqlite-driver.js': 'class SqliteDriver {\n    constructor(path) {\n        this.db = openSomethingElse(path);\n    }\n}\n' });
+  try {
+    assert.throws(() => patchAdapter(t.tree), (e) => e.message.includes('adapter seam missing') && e.message.includes('sqlite-driver.js') && e.message.includes(PRE_SEAM_NEEDLE));
+    assert.equal(t.read('index.js'), index, 'a half-patched store would skip its open steps on a writable connection');
+  } finally { rmSync(t.tree, { recursive: true, force: true }); }
+});
+test('patchAdapter matches the store build of this tree', () => {
+  // The fixtures above are hand-written; this is the one that fails when the
+  // real constructor drifts from the needles.
+  const dist = join(fileURLToPath(new URL('../..', import.meta.url)), 'packages', 'store', 'dist');
+  const files = { 'index.js': readFileSync(join(dist, 'index.js'), 'utf8') };
+  if (existsSync(join(dist, 'sqlite-driver.js'))) files['sqlite-driver.js'] = readFileSync(join(dist, 'sqlite-driver.js'), 'utf8');
+  const t = storeDistTree(files);
+  try {
+    assert.match(patchAdapter(t.tree), /^[0-9a-f]{64}$/);
+    assert.ok(t.read('index.js').includes(ADAPTER_MARK));
+  } finally { rmSync(t.tree, { recursive: true, force: true }); }
 });

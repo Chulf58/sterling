@@ -814,6 +814,17 @@ test('modelsCatalogSchema: {entries:[{id,label,tier,status}]} round-trips; malfo
   }
 });
 
+test('modelsCatalogSchema: an entry carries an optional string vendor; a catalog written before vendors existed still parses (vendor pins step 2)', async () => {
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const schema = mod.modelsCatalogSchema as { parse: (v: unknown) => { entries: Record<string, unknown>[] } };
+  const anthropic = { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', tier: 'opus', status: 'active', vendor: 'anthropic' };
+  const openai = { id: 'gpt-6-astra', label: 'GPT-6 Astra', tier: 'astra', status: 'active', vendor: 'openai' };
+  assert.deepEqual(schema.parse({ entries: [anthropic, openai] }).entries, [anthropic, openai], 'vendor round-trips per entry');
+  const legacy = { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', tier: 'opus', status: 'active' };
+  assert.deepEqual(schema.parse({ entries: [legacy] }).entries[0], legacy, 'an entry without vendor parses and no vendor is invented');
+  assert.throws(() => schema.parse({ entries: [{ ...legacy, vendor: 42 }] }), 'vendor must be a string');
+});
+
 test('referenceMaterialSchema: optional typed catalog field — legacy round-trips; catalog persists; malformed catalog fails loud (AC7, file_baselines precedent 57d9a52d)', () => {
   // a LEGACY reference_material WITHOUT a catalog must round-trip untouched — the field is never
   // invented (same optional-field precedent as file_baselines / scope_amendments).

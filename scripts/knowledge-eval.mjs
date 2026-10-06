@@ -234,16 +234,39 @@ function snapshot(workDir, projects) {
   const manifest = { harness_version: HARNESS_VERSION, node: process.version, projects: Object.fromEntries(Object.entries(projects).map(([name, projectRoot]) => [name, snapshotProject(dir, name, projectRoot)])) };
   json(join(dir, 'manifest.json'), manifest); return dir;
 }
-function patchAdapter(tree) {
+export function patchAdapter(tree) {
   // Patch the committed runtime artifact, not product source: historical commits
   // can no longer typecheck under the current compiler, but their shipped dist is
   // the implementation the replay is measuring.
+  //
+  // Two constructor shapes. Before the driver seam SterlingStore opened the
+  // database itself, so one replacement in index.js does everything. Since the
+  // seam it opens a SqliteDriver, and the DatabaseSync line lives in
+  // sqlite-driver.js: that line is made read-only there, and the store
+  // constructor returns right after it has its driver, before any open step
+  // that writes.
   const p = join(tree, 'packages/store/dist/index.js'); let s = readFileSync(p, 'utf8');
+  const dp = join(tree, 'packages/store/dist/sqlite-driver.js');
   const needle = 'this.db = new DatabaseSync(path);';
-  if (s.includes('knowledge-eval adapter: snapshot schema lacks records')) return sha256(s);
-  if (!s.includes(needle)) throw new Error('adapter seam missing: SterlingStore constructor changed');
-  s = s.replace(needle, `this.db = new DatabaseSync(path, { readOnly: true });\n        const evalTables = this.db.prepare(\"SELECT name FROM sqlite_master WHERE type='table' AND name='records'\").get();\n        if (!evalTables) { this.db.close(); throw new Error('knowledge-eval adapter: snapshot schema lacks records'); }\n        this.openedSchemaVersion = this.db.prepare('PRAGMA user_version').get().user_version;\n        return; // evaluation-only: no pragma/DDL/migration writes`);
-  writeFileSync(p, s); return sha256(s);
+  const readOnlyOpen = 'this.db = new DatabaseSync(path, { readOnly: true });';
+  const seamNeedle = 'this.db = options.driver ?? new SqliteDriver(path, { busyTimeoutMs: options.busyTimeoutMs });';
+  const guard = `const evalTables = this.db.prepare(\"SELECT name FROM sqlite_master WHERE type='table' AND name='records'\").get();\n        if (!evalTables) { this.db.close(); throw new Error('knowledge-eval adapter: snapshot schema lacks records'); }`;
+  const postSeam = s.includes(seamNeedle);
+  // The post-seam hash covers both patched files; the pre-seam one is unchanged.
+  const digest = () => (postSeam ? sha256(`${s}\n${readFileSync(dp, 'utf8')}`) : sha256(s));
+  if (s.includes('knowledge-eval adapter: snapshot schema lacks records')) return digest();
+  if (s.includes(needle)) {
+    s = s.replace(needle, `${readOnlyOpen}\n        ${guard}\n        this.openedSchemaVersion = this.db.prepare('PRAGMA user_version').get().user_version;\n        return; // evaluation-only: no pragma/DDL/migration writes`);
+    writeFileSync(p, s); return digest();
+  }
+  if (!postSeam) throw new Error(`adapter seam missing: SterlingStore constructor changed. packages/store/dist/index.js has neither the pre-seam open \`${needle}\` nor the post-seam open \`${seamNeedle}\``);
+  // Check the driver before writing anything: a store that returns early on a
+  // writable connection would skip its open steps and still accept writes.
+  let d = existsSync(dp) ? readFileSync(dp, 'utf8') : '';
+  if (!d.includes(needle) && !d.includes(readOnlyOpen)) throw new Error(`adapter seam missing: SqliteDriver constructor changed. packages/store/dist/sqlite-driver.js has no \`${needle}\``);
+  if (d.includes(needle)) { d = d.replace(needle, readOnlyOpen); writeFileSync(dp, d); }
+  s = s.replace(seamNeedle, `${seamNeedle}\n        ${guard}\n        this.openedSchemaVersion = this.db.schemaVersion();\n        return; // evaluation-only: no pragma/DDL/migration writes`);
+  writeFileSync(p, s); return digest();
 }
 function patchReadOnlyTools(tree) {
   // Historical knowledgeQueryResult can lazily enqueue a maintenance item while

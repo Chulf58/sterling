@@ -230,6 +230,27 @@ function workerStateFileProblem(cwd) {
   return null;
 }
 
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/**
+ * How the last worker run went, as a clause that follows a routine state: its
+ * age, its verdict count and its close count (all three written by runWorker
+ * into last_run). The close count is closes_ok, the closes the runner saw
+ * succeed; last_run.closed is only what the worker child claimed in its
+ * verdicts and is never printed. A failed run gets the separate FAILED note
+ * instead, never both. A state file from before a count existed leaves that
+ * count out.
+ */
+function lastRunClause(last, nowMs) {
+  if (!last) return '. No run recorded yet';
+  if (last.ok === false) return '';
+  const age = ageText(last.at, nowMs);
+  const parts = [age === 'unknown' ? 'time unknown' : `${age} ago`];
+  if (Number.isFinite(last.verdicts)) parts.push(plural(last.verdicts, 'verdict'));
+  if (Number.isFinite(last.closes_ok)) parts.push(`${last.closes_ok} closed`);
+  return `. Last run: ${parts.join(', ')}`;
+}
+
 /**
  * What the background worker is doing right now, as one phrase for the RECONCILE
  * BACKLOG line (board 27c87783). It replaces a bare "worker not running", which
@@ -253,22 +274,37 @@ function workerStateText({ ws, reconcile, cwd, config, nowMs, env }) {
     const stalledAt = last && (last.ok === false || last.no_progress === true) ? Date.parse(last.at ?? '') : NaN;
     if (Number.isFinite(stalledAt) && nowMs - stalledAt < BACKOFF_MS) {
       const mins = Math.ceil((BACKOFF_MS - (nowMs - stalledAt)) / 60_000);
-      return `worker backing off after ${last.ok === false ? 'a failed run' : 'a run that made no progress'} (next launch in ${mins}m)`;
+      return `worker paused ${mins}m after ${last.ok === false ? 'a failed run' : 'a run that closed nothing'} (it retries by itself)`;
     }
     if (reconcile.unjudged === null || reconcile.unjudged === undefined) return 'worker state unknown (verdict journal unreadable)';
-    if (reconcile.unjudged === 0) return "worker idle, nothing to judge (every open item is already judged 'owes prose')";
+    if (reconcile.unjudged === 0) {
+      const waiting = reconcile.count === 1 ? 'the 1 item waits' : `all ${reconcile.count} items wait`;
+      return `worker has nothing left to judge: ${waiting} on you${lastRunClause(last, nowMs)}`;
+    }
     // The launcher dates the wait from created_at and counts an undatable item as
     // already waited, so the batch check can never strand work it cannot date.
     const created = Date.parse(reconcile.oldestUnjudged ?? '');
     const waitedMs = Number.isFinite(created) ? nowMs - created : Infinity;
     const waited = ageText(reconcile.oldestUnjudged, nowMs);
     if (reconcile.unjudged < BATCH_MIN_ITEMS && waitedMs < BATCH_MAX_WAIT_MS) {
-      return `worker waiting to batch: ${reconcile.unjudged} of ${BATCH_MIN_ITEMS} unjudged, oldest ${waited} of ${Math.round(BATCH_MAX_WAIT_MS / 60_000)}m`;
+      return `worker batching: starts at ${BATCH_MIN_ITEMS} unjudged or after ${Math.round(BATCH_MAX_WAIT_MS / 60_000)}m (${reconcile.unjudged} now, oldest ${waited})${lastRunClause(last, nowMs)}`;
     }
-    return `worker due to launch at the next Stop or git commit (${reconcile.unjudged} unjudged, oldest ${waited})`;
+    return `worker launches at your next Stop or git commit to judge ${plural(reconcile.unjudged, 'item')} (oldest unjudged ${waited})${lastRunClause(last, nowMs)}`;
   } catch (e) {
     return `worker state unknown (${stateUnknownReason(e)})`;
   }
+}
+
+/** The items the worker judged 'owes prose' are the conductor's to draft; it
+ *  handles the rest. Nothing owed is no sentence. */
+function owesProseSentence(owed, total) {
+  if (owed === 0) return '';
+  const drafts = owed === 1 ? 'was judged' : 'were judged';
+  const yours = owed === 1 ? 'is yours' : 'are yours';
+  if (owed === total) {
+    return `${total === 1 ? 'The 1 item' : `All ${total} items`} ${drafts} 'owes prose' by the worker and ${yours} to draft. `;
+  }
+  return `${owed} of the ${total} items ${drafts} 'owes prose' by the worker and ${yours} to draft. The worker handles the other ${total - owed}. `;
 }
 
 /**
@@ -283,10 +319,10 @@ export function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), e
   // conductor, who drafts the prose the worker leaves owed. Silent when there
   // is no reconcile item (P1). Worker state comes from its lockfile. A BROKEN
   // last run (workerBreakage: non-zero exit, error result, permission denials,
-  // MCP not connected) adds one clause naming its reason and the log; routine
-  // states (back-off, nothing eligible, no progress) add nothing, because the
-  // worker's routine status is not the session's business (decision
-  // maintenance-worker-notices-session-start-only-and-no-sliver-launch).
+  // MCP not connected) adds one clause naming its reason and the log, and then
+  // no last-run clause. Routine states are the one state clause on this line
+  // (decision maintenance-worker-notices-session-start-only-and-no-sliver-launch,
+  // 2026-10-03 amendment), plus a last-run clause for a run that did not fail.
   let reconcileBanner = '';
   let reconcileContext = '';
   if (reconcile.count > 0) {
@@ -306,10 +342,10 @@ export function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), e
     const inLane = (n) => `${n} item${n === 1 ? '' : 's'} in lane reconcile_needed`;
     reconcileBanner = ` · ${inLane(reconcile.count)}, oldest ${age}, ${worker}${lastRunNote}`;
     reconcileContext =
-      `\n\nRECONCILE BACKLOG: ${inLane(reconcile.count)}, the oldest open since ${reconcile.oldest ?? 'unknown'} (${age}). ` +
+      `\n\nRECONCILE BACKLOG: ${inLane(reconcile.count)}, the oldest of all items open since ${reconcile.oldest ?? 'unknown'} (${age}). ` +
       (reconcile.owesProse === null
         ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items owe prose is unknown. `
-        : `Of these, ${inLane(reconcile.owesProse)} are judged 'owes prose' by the background worker (.sterling/maintenance-worker.jsonl) and wait on you to draft the article change. `) +
+        : owesProseSentence(reconcile.owesProse, reconcile.count)) +
       `${worker}${lastRunNote}.`;
   }
   return { banner: reconcileBanner, line: reconcileContext.replace(/^\n\n/, '') };
