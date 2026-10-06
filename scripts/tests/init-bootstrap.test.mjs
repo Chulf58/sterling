@@ -48,7 +48,9 @@ after(() => {
 // (STERLING_PLUGIN_ROOT_MATCH pinned to a disposable scratch dir, registry
 // isolated, codex probe forced absent) so a spawn that reaches the
 // real implementation (the control test) never writes into or reads THIS
-// repo's own live .claude-plugin config or fires a real codex/WSL probe — a
+// repo's own live .claude-plugin config or fires a real codex/WSL probe, and
+// CLAUDE_CONFIG_DIR pinned to a scratch dir so init can never read or write the
+// real ~/.claude (its settings.json auto-update switch, the codex user-scope check) — a
 // suite run is not a deployment (anti_pattern
 // a-test-that-builds-in-place-ships-whatever-is-in-the-working-tree).
 function spawnInit(targetDir, args = [], extraEnv = {}) {
@@ -67,6 +69,7 @@ function spawnInit(targetDir, args = [], extraEnv = {}) {
         STERLING_PLUGIN_ROOT_MATCH: pluginRootMatch,
         STERLING_CODEX_PROBE: 'absent',
         STERLING_CLAUDE_PROBE: 'ok',
+        CLAUDE_CONFIG_DIR: scratchDir('sterling-claudecfg-'),
         ...extraEnv,
       },
     }
