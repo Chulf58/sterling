@@ -181,11 +181,12 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     const cfg = config as {
       models?: Record<string, { model: string; effort: string }>;
       models_catalog?: { staleness_days?: number };
-      sparring_partner?: { enabled?: boolean; model?: string };
+      sparring_partner?: { enabled?: boolean; models?: { openai?: { model?: string } } };
       tdd?: { enabled?: boolean };
     };
     const configModels = cfg.models ?? {};
-    const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.model };
+    // parseConfig converts the old sparring_partner.model into models.openai.
+    const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.models?.openai?.model };
     const tdd = { enabled: cfg.tdd?.enabled ?? true };
     const mode = readRawMode();
     const handoff = readHandoff();
@@ -218,15 +219,20 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, ...handoff };
   }
 
-  /** Execute a sparring_model effect: config.sparring_partner.model write. An
-   *  empty committed value CLEARS the field (unset = Codex CLI default). */
+  /** Execute a sparring_model effect: config.sparring_partner.models.openai
+   *  write (the old sparring_partner.model is dropped, so a new key cannot be
+   *  shadowed by a stale one). An empty committed value CLEARS the model
+   *  (unset = Codex CLI default) by removing the pin; a set keeps the effort. */
   function applySparringModel(e: SparringModelEffect): void {
     try {
-      const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { sparring_partner?: { enabled?: boolean; model?: string } };
-      const sp: { enabled?: boolean; model?: string } = { ...raw.sparring_partner };
-      if (e.model) sp.model = e.model;
-      else delete sp.model;
-      raw.sparring_partner = sp;
+      type Pin = { model?: string; effort?: string };
+      const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { sparring_partner?: { enabled?: boolean; model?: string; models?: { openai?: Pin } } };
+      const { model: _legacy, ...sp } = { ...raw.sparring_partner };
+      const { model: _previous, ...rest } = { ...sp.models?.openai };
+      const models = { ...sp.models };
+      if (e.model) models.openai = { ...rest, model: e.model };
+      else delete models.openai;
+      raw.sparring_partner = { ...sp, models };
       writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
     } catch (err) {
       ui = { ...ui, notice: `sparring partner model update failed — ${(err as Error).message}` };

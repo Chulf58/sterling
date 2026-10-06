@@ -13,10 +13,31 @@ import { z } from 'zod';
 // validation rather than silently persisted (config_set writes its caller's
 // raw merged object, so a non-strict shape here would let a typo'd field
 // land on disk unrefused, same rationale as the delivery leaf check below).
-const modelEffort = z.object({
+const effortLevel = z.enum(['low', 'medium', 'high', 'xhigh']);
+
+// Every pin is {model, effort?} (decision
+// system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks):
+// effort omitted means the host's own default, so none is invented here.
+const modelPin = z.object({
   model: z.string(),
-  effort: z.enum(['low', 'medium', 'high', 'xhigh']),
+  effort: effortLevel.optional(),
 }).strict();
+
+// models.<agent>: the default pin plus an optional hard_task pin the conductor
+// passes when it escalates that agent.
+const agentModelEntry = z.object({
+  model: z.string(),
+  effort: effortLevel.optional(),
+  hard_task: modelPin.optional(),
+}).strict();
+
+// One pin per vendor, shared by sparring_partner.models and review.models.
+const vendorPins = z
+  .object({
+    openai: modelPin.optional(),
+    anthropic: modelPin.optional(),
+  })
+  .default({});
 
 // Toolchain success predicates (decision foreign_98549344, slug
 // toolchain-success-predicates-run-gate, board babf3a9e). Lives ALONGSIDE
@@ -209,19 +230,25 @@ export const configSchema = z.object({
   // key.
   models: z
     .object({
-      implementor: modelEffort.default({ model: 'claude-sonnet-5-5', effort: 'high' }),
-      researcher: modelEffort.default({ model: 'claude-sonnet-5-5', effort: 'medium' }),
-      scout: modelEffort.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
-      classifiers: modelEffort.default({ model: 'claude-haiku-4-5', effort: 'low' }),
+      implementor: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'high' }),
+      researcher: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'medium' }),
+      scout: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
+      classifiers: agentModelEntry.default({ model: 'claude-haiku-4-5', effort: 'low' }),
       // librarian is mechanical clerking — cheap model, low effort (P8). The
       // roster is classless (decision agent-roster-is-classless-four-agents), and
       // the debugger role it rejected has no key here.
-      librarian: modelEffort.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
+      librarian: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
       // reviewer judges a diff (decision
       // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
       // dispatch pins its model explicitly; this is the install-time default.
-      reviewer: modelEffort.default({ model: 'claude-opus-5-5', effort: 'high' }),
+      reviewer: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high' }),
     })
+    // Any installed agent's name is a key (decision
+    // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks):
+    // the roster is discovered from the installed agent files, so the schema
+    // cannot list it. The pre-rename keys in RETIRED_MODEL_KEYS are dropped by
+    // normalizeRawConfig before this parse, so a stale value cannot fail it.
+    .catchall(agentModelEntry)
     .default({}),
   // Per-project agent tool extension (decision
   // per-project-agent-extra-tools-config-appended-at-render, 587472e3):
@@ -457,12 +484,25 @@ export const configSchema = z.object({
   sparring_partner: z
     .object({
       enabled: z.boolean().default(true),
-      // TUI System-tab model selector (article sparring-partner interaction i,
-      // board a0714d0b): the model argument sent on every consult. Absent/empty
-      // = the Codex CLI's own default. Deliberately a FREE string, no enum —
-      // codex validates model names server-side with a loud 400, so a client-
-      // side allowlist would only drift from what the CLI actually accepts.
-      model: z.string().optional(),
+      // Which vendor's model the consult runs on (decision
+      // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks).
+      // 'openai' is the behaviour before the setting existed.
+      vendor: z.enum(['openai', 'anthropic']).default('openai'),
+      // The model pinned per vendor. Absent = no pin (the host's default). The
+      // old sparring_partner.model is converted to models.openai by
+      // normalizeRawConfig, before this schema strips unknown keys. The default
+      // ships no pin: the decision names no model per vendor.
+      models: vendorPins,
+    })
+    .default({}),
+  // Reviews (same decision): the vendor policy and the model pinned per vendor.
+  // cross_vendor = the other family than the model that wrote the diff; openai
+  // and anthropic force one vendor even when that makes reviewer and author the
+  // same family (user-ruled 2026-10-03). Ships no pin, like sparring_partner.
+  review: z
+    .object({
+      policy: z.enum(['cross_vendor', 'openai', 'anthropic']).default('cross_vendor'),
+      models: vendorPins,
     })
     .default({}),
   // TDD-by-default posture toggle (decision foreign_752caf98,
@@ -525,8 +565,56 @@ export const configSchema = z.object({
 
 export type SterlingConfig = z.infer<typeof configSchema>;
 
+// Pre-rename models keys: never read, so dropped before the parse and named by
+// unreadConfigKeys. They must stay out of `models`, which now accepts any agent
+// name as a key.
+const RETIRED_MODEL_KEYS: readonly string[] = [
+  'coder',
+  'coder_hard',
+  'explorer',
+  'test_writer',
+  'reviewers',
+  'implementation_architect',
+  'debugger',
+];
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+/** The raw-config rewrites that must happen before configSchema strips unknown
+ *  keys. Returns a copy; the caller's object is never mutated (config_set
+ *  round-trips the raw document). Anything that is not a plain object passes
+ *  through for the schema to refuse.
+ *   - sparring_partner.model (the old single pin) becomes
+ *     sparring_partner.models.openai; when models.openai already exists the new
+ *     key wins and the old value is dropped. '' is the TUI's clear-to-unset
+ *     signal, not a model id, so it creates no pin. A non-string value is moved
+ *     as is so the pin schema refuses it loud.
+ *   - models keys in RETIRED_MODEL_KEYS are dropped. */
+export function normalizeRawConfig(raw: unknown): unknown {
+  if (!isPlainObject(raw)) return raw;
+  let out: Record<string, unknown> = raw;
+  const sp = raw.sparring_partner;
+  if (isPlainObject(sp) && Object.prototype.hasOwnProperty.call(sp, 'model')) {
+    const { model, ...rest } = sp;
+    if (model !== undefined && model !== '') {
+      const existing = rest.models;
+      if (existing === undefined || isPlainObject(existing)) {
+        const models = { ...(existing ?? {}) };
+        if (models.openai === undefined) models.openai = { model };
+        rest.models = models;
+      }
+    }
+    out = { ...out, sparring_partner: rest };
+  }
+  const models = raw.models;
+  if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
+    out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
+  }
+  return out;
+}
+
 export function parseConfig(raw: unknown): SterlingConfig {
-  return configSchema.parse(raw);
+  return configSchema.parse(normalizeRawConfig(raw));
 }
 
 // ── Config keys Sterling no longer reads (decision gap-hunt-2026-09-28-rulings
@@ -565,8 +653,6 @@ function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
   }
 }
 
-const isPlainObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
-
 export function unreadConfigKeys(raw: unknown): UnreadConfigKey[] {
   const out: UnreadConfigKey[] = [];
   const walk = (value: unknown, schema: z.ZodTypeAny, prefix: string): void => {
@@ -576,6 +662,10 @@ export function unreadConfigKeys(raw: unknown): UnreadConfigKey[] {
     for (const [key, child] of Object.entries(value)) {
       const path = prefix ? `${prefix}.${key}` : key;
       if (!Object.prototype.hasOwnProperty.call(shape, key)) {
+        // sparring_partner.model is converted by normalizeRawConfig, so it is read.
+        if (path === 'sparring_partner.model') continue;
+        // A catchall object (models) reads every key, so only the retired ones are unread.
+        if (!(s._def.catchall instanceof z.ZodNever) && !(prefix === 'models' && RETIRED_MODEL_KEYS.includes(key))) continue;
         const renamed = CONFIG_KEY_RENAMES[path];
         out.push(renamed ? { path, renamed_to: renamed } : { path });
       } else {

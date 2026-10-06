@@ -381,6 +381,9 @@ export const modelsCatalogSchema = z.object({
       label: z.string(),
       tier: z.string(),
       status: z.string(),
+      // Which vendor's model this is ('anthropic', 'openai'). Optional: a catalog
+      // written before vendors existed still parses, and none is invented.
+      vendor: z.string().optional(),
     })
   ),
 });
