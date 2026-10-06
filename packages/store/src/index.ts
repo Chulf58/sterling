@@ -1299,11 +1299,12 @@ export class SterlingStore {
     // moment at which "this store has no schema yet" is still observable — and
     // it is a read, so the refusal path still writes nothing.
     //
-    // A driver that several processes open at once (PgDriver) does the probe,
-    // the DDL and the stamp in one transaction under its write lock instead
-    // (StoreDriver.publishFresh, board e05f5127): the read above happened
-    // outside any lock, so another opener may have published the store since,
-    // and only the version re-read under that lock may classify it as older.
+    // A driver that several processes open at once (PgDriver, SqliteDriver)
+    // does the probe, the DDL and the stamp in one transaction under its write
+    // lock instead (StoreDriver.publishFresh, boards e05f5127 and 404228d7): the
+    // read above happened outside any lock, so another opener may have
+    // published the store since, and only a version read together with the
+    // schema probe may classify it as older.
     let isFresh = false;
     let published = false;
     if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION && this.db.publishFresh !== undefined) {
