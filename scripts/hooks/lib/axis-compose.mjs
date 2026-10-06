@@ -41,6 +41,7 @@ import {
   statusAnnotation,
   authorityMarker,
   withInboundSupersedesAll,
+  assertBatchShape,
   DECISION_STATEMENT_CLIP,
   DECISION_REJECTED_CLIP,
   boundedTermClause,
@@ -290,7 +291,7 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
     // can never deny a user's question.
     { types: ['open_question'], rank_terms: terms, cap: 40 },
   ];
-  const candidates = (typeof store.queryEach === 'function' ? store.queryEach(stageOne) : stageOne.map((opts) => store.query(opts))).flat();
+  const candidates = (typeof store.queryEach === 'function' ? assertBatchShape(store.queryEach(stageOne), stageOne.length, 'queryEach') : stageOne.map((opts) => store.query(opts))).flat();
 
   // MULTI-QUESTION CANDIDATE AUGMENTATION (post-commit follow-up, deny-once
   // recall floor): `terms` above is extractAxisTerms(outgoing, MAX_RANK_TERMS)

@@ -36,6 +36,7 @@ import { join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
 import { SterlingStore, resolveDomainMounts, allocateShares, DEFAULT_QUERY_CAP, DOMAIN_DESCRIPTION_KEY } from '@sterling/store';
 import { openRoutedForHook } from './broker-client.mjs';
+import { assertBatchShape } from './delivery.mjs';
 import { loadConfig } from './common.mjs';
 import { storeBackend } from './store-backend.mjs';
 
@@ -197,9 +198,11 @@ function openRoutedSubjectFan(cwd) {
      *  store call, so a broker hook pays one round trip and one read transaction per store. */
     queryEach(list) {
       if (list.some((opts) => opts.file_keys !== undefined)) return list.map((opts) => this.query(opts));
-      if (!stores.domainNames().length) return project.queryEach(list).map((records) => tag(records, 'project'));
+      if (!stores.domainNames().length) return assertBatchShape(project.queryEach(list), list.length, 'queryEach').map((records) => tag(records, 'project'));
       const capped = list.map((opts) => ({ ...opts, cap: opts.cap ?? DEFAULT_QUERY_CAP }));
       const perStore = stores.bySourceEach(capped);
+      if (!Array.isArray(perStore) || !perStore.length) throw new TypeError(`bySourceEach: expected one entry per store, project first, got ${Array.isArray(perStore) ? 'none' : typeof perStore}`);
+      for (const s of perStore) assertBatchShape(s?.results, list.length, `bySourceEach (source '${s?.source}')`);
       return capped.map((opts, j) => {
         const shares = allocateShares(perStore.map((s) => s.results[j].length), opts.cap);
         return perStore.flatMap((s, i) => tag(s.results[j].slice(0, shares[i]), s.source));

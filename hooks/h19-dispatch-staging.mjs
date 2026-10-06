@@ -11322,1091 +11322,12 @@ function repoRel(toolPath, cwd) {
 }
 
 // scripts/hooks/lib/subject-fan.mjs
-import { existsSync as existsSync5 } from "node:fs";
-import { join as join10 } from "node:path";
-var defaultOpener = (dbPath) => new SterlingStore(dbPath);
-function domainMountsFromConfig(config) {
-  if (config === null || config === void 0) return [];
-  return resolveDomainMounts(parseConfig({ stack_tags: config.stack_tags, domain_paths: config.domain_paths }));
-}
-var tag = (records, source) => records.map((r) => ({ ...r, source_store: source }));
-var errorText2 = (e) => String(e && e.message || e);
-function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
-  if (storeBackend(cwd) === "routed") return openRoutedSubjectFan(cwd);
-  const projectPath = join10(cwd, ".sterling", "sterling.db");
-  if (!existsSync5(projectPath)) return null;
-  let mounts = [];
-  let configError = null;
-  try {
-    mounts = domainMountsFromConfig(loadConfig(cwd));
-  } catch (e) {
-    configError = errorText2(e);
-  }
-  const project = opener(projectPath);
-  let domains = [];
-  const missingDomains = [];
-  const unreadableDomains = [];
-  const drop = (d, e) => {
-    unreadableDomains.push({ name: d.name, dbPath: d.dbPath, error: errorText2(e) });
-    domains = domains.filter((x) => x !== d);
-    try {
-      d.store.close();
-    } catch {
-    }
-  };
-  for (const m of mounts) {
-    if (!existsSync5(m.dbPath)) {
-      missingDomains.push({ name: m.name, dbPath: m.dbPath });
-      continue;
-    }
-    try {
-      domains.push({ name: m.name, dbPath: m.dbPath, store: opener(m.dbPath) });
-    } catch (e) {
-      unreadableDomains.push({ name: m.name, dbPath: m.dbPath, error: errorText2(e) });
-    }
-  }
-  const eachDomain = (fn) => {
-    const out = [];
-    for (const d of [...domains]) {
-      try {
-        out.push([d, fn(d.store)]);
-      } catch (e) {
-        drop(d, e);
-      }
-    }
-    return out;
-  };
-  return {
-    project,
-    get domainNames() {
-      return domains.map((d) => d.name);
-    },
-    missingDomains,
-    unreadableDomains,
-    configError,
-    query(opts = {}) {
-      if (opts.file_keys !== void 0 || !domains.length) return tag(project.query(opts), "project");
-      const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-      const perStore = [["project", project.query({ ...opts, cap })], ...eachDomain((s2) => s2.query({ ...opts, cap })).map(([d, r]) => [d.name, r])];
-      const shares = allocateShares(perStore.map(([, r]) => r.length), cap);
-      return perStore.flatMap(([name, records], i) => tag(records.slice(0, shares[i]), name));
-    },
-    /** query() for each entry of `list`; element i is what query(list[i]) returns. */
-    queryEach(list) {
-      return list.map((opts) => this.query(opts));
-    },
-    /** Supersedes edges live with their SOURCE record, so every mount is read; first seen wins. */
-    inboundSupersedes(id) {
-      const seen = /* @__PURE__ */ new Set();
-      const out = [];
-      const lists = [["project", project.inboundSupersedes(id)], ...eachDomain((s2) => s2.inboundSupersedes(id)).map(([d, r]) => [d.name, r])];
-      for (const [name, records] of lists) {
-        for (const r of records) {
-          if (seen.has(r.id)) continue;
-          seen.add(r.id);
-          out.push({ ...r, source_store: name });
-        }
-      }
-      return out;
-    },
-    articlesBySlug(slug) {
-      return project.articlesBySlug(slug);
-    },
-    close() {
-      let first;
-      for (const s2 of [project, ...domains.map((d) => d.store)]) {
-        try {
-          s2.close();
-        } catch (e) {
-          first ??= e;
-        }
-      }
-      if (first) throw first;
-    }
-  };
-}
-function openRoutedSubjectFan(cwd) {
-  const { stores } = openRoutedForHook(cwd, { mount: true });
-  const project = stores.project;
-  return {
-    project,
-    get domainNames() {
-      return stores.domainNames();
-    },
-    missingDomains: [],
-    unreadableDomains: [],
-    configError: null,
-    query(opts = {}) {
-      if (opts.file_keys !== void 0 || !stores.domainNames().length) return tag(project.query(opts), "project");
-      const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-      const perStore = stores.bySource({ ...opts, cap });
-      const shares = allocateShares(perStore.map((s2) => s2.records.length), cap);
-      return perStore.flatMap((s2, i) => tag(s2.records.slice(0, shares[i]), s2.source));
-    },
-    /** query() for each entry of `list` (element i is what query(list[i]) returns) in one
-     *  store call, so a broker hook pays one round trip and one read transaction per store. */
-    queryEach(list) {
-      if (list.some((opts) => opts.file_keys !== void 0)) return list.map((opts) => this.query(opts));
-      if (!stores.domainNames().length) return project.queryEach(list).map((records) => tag(records, "project"));
-      const capped = list.map((opts) => ({ ...opts, cap: opts.cap ?? DEFAULT_QUERY_CAP }));
-      const perStore = stores.bySourceEach(capped);
-      return capped.map((opts, j) => {
-        const shares = allocateShares(perStore.map((s2) => s2.results[j].length), opts.cap);
-        return perStore.flatMap((s2, i) => tag(s2.results[j].slice(0, shares[i]), s2.source));
-      });
-    },
-    /** MountedStores' own merge (project first, first seen wins). These records carry no
-     *  source_store: MountedStores does not say which mount held each edge, and the one
-     *  reader (delivery.mjs withInboundSupersedes) keeps only id, slug, title and status. */
-    inboundSupersedes(id) {
-      return stores.inboundSupersedes(id);
-    },
-    /** inboundSupersedes for each id in one store call (element i answers ids[i]). */
-    inboundSupersedesEach(ids) {
-      return stores.inboundSupersedesEach(ids);
-    },
-    articlesBySlug(slug) {
-      return project.articlesBySlug(slug);
-    },
-    close() {
-      stores.close();
-    }
-  };
-}
-function fanDegradedLine(fan, who) {
-  if (!fan) return null;
-  const parts = [];
-  if (fan.configError) parts.push(`config.json unreadable, no domains mounted (${fan.configError})`);
-  for (const d of fan.unreadableDomains) parts.push(`domain '${d.name}' unreadable at ${d.dbPath} (${d.error})`);
-  if (!parts.length) return null;
-  return `${who}: DEGRADED subject fan: ${parts.join("; ")}. Delivering from the project store only.`;
-}
-function warnFanDegraded(fan, who) {
-  const line = fanDegradedLine(fan, who);
-  if (!line) return;
-  try {
-    process.stderr.write(`${line}
-`);
-  } catch {
-  }
-}
+import { existsSync as existsSync6 } from "node:fs";
+import { join as join11 } from "node:path";
 
-// scripts/hooks/lib/hazard-lane-mode.mjs
-import { readFileSync as readFileSync7 } from "node:fs";
-import { join as join12 } from "node:path";
-
-// scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync6, writeFileSync as writeFileSync2, rmSync as rmSync3, rmdirSync, renameSync as renameSync2, existsSync as existsSync6, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync4, chmodSync } from "node:fs";
-import { join as join11, resolve as resolve4, dirname as dirname5, isAbsolute } from "node:path";
-import { hostname } from "node:os";
-import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
-import { randomBytes, createHash as createHash2 } from "node:crypto";
-
-// scripts/lib/review-errors.mjs
-var CODES = /* @__PURE__ */ new Set([
-  // §1.4 ledger verbs
-  "ledger_corrupt",
-  "ledger_absent",
-  "ledger_digest_mismatch",
-  "compatibility_lock_held",
-  "entry_not_found",
-  "entry_selector_ambiguous",
-  "entry_not_active",
-  "class_unknown",
-  "class_not_applicable",
-  "superseder_not_found",
-  "superseder_not_reviewer_class",
-  "superseder_not_newer",
-  "superseder_branch_mismatch",
-  "superseder_lifecycle_unacceptable",
-  "superseder_coverage_incomplete",
-  "superseder_commit_not_ancestor",
-  "superseder_commit_trailer_not_roster",
-  "superseder_commit_receipt_unbound",
-  "superseder_commit_blob_mismatch",
-  "covering_not_allowed",
-  "covering_receipt_invalid",
-  "no_live_territory_disproved",
-  "reconcile_no_match",
-  "reconcile_ambiguous",
-  "reconcile_nonce_split",
-  "reconcile_unresolved",
-  "record_external_duplicate",
-  "argument_invalid",
-  // commit operation
-  "nothing_staged",
-  "message_missing",
-  "no_spendable_receipt",
-  "receipt_bytes_mismatch",
-  "coverage_incomplete",
-  "reservation_conflict",
-  "commit_failed",
-  "finalize_failed",
-  "waiver_reason_missing",
-  // A13 additions
-  "target_sha_prior_receipt_unbound",
-  "commit_verify_failed",
-  "not_sterling_project",
-  "receipt_unscoped",
-  // §1.4 disclosures (never refuse)
-  "receipt_unattributable",
-  "receipt_foreign",
-  "receipt_identity_unknown",
-  "receipt_deferred",
-  "receipt_stale",
-  "receipt_age_unverifiable",
-  "receipt_no_overlap",
-  "multi_spend",
-  "bytes_waived",
-  "legacy_entries_present",
-  "receipt_not_spent_stale_bytes",
-  "register_unavailable",
-  "dispatch_status_unknown",
-  // A9 register/ledger additions
-  "register_entry_malformed",
-  "register_agent_id_duplicate",
-  "register_lock_held",
-  "receipt_not_active",
-  "receipt_foreign_session",
-  "receipt_foreign_branch",
-  // A9 --target-sha amend mode
-  "target_sha_unresolvable",
-  "target_sha_not_head",
-  "target_sha_tree_dirty",
-  "target_sha_published",
-  "target_sha_publication_unprovable",
-  // A11 additions
-  "territory_declaration_missing",
-  "territory_declaration_malformed",
-  "dispatch_overlap",
-  "dispatch_residue",
-  // ledger entry classification
-  "ledger_entry_malformed",
-  // A19 (security review): an env override of identity is disclosed, never silent
-  "session_identity_override",
-  // dispatch state machine (decision dispatch-state-machine-pre-slot-post-
-  // binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
-  "dispatch_state_collision",
-  "dispatch_post_late",
-  "dispatch_post_mismatch",
-  "dispatch_post_refused",
-  "dispatch_state_poisoned",
-  "dispatch_unattributable",
-  "dispatch_lock_held",
-  "dispatch_post_only"
-]);
-function assertCode(code) {
-  if (!CODES.has(code)) {
-    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
-  }
-}
-function refusal(code, facts = {}, message = code) {
-  assertCode(code);
-  const err = new Error(message);
-  err.kind = "refusal";
-  err.code = code;
-  err.facts = facts;
-  return err;
-}
-function disclosure(code, facts = {}, message = code) {
-  assertCode(code);
-  return { kind: "disclosure", code, facts, message };
-}
-function render(x) {
-  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
-  return `${label} [${x?.code}] ${x?.message ?? ""}`;
-}
-
-// scripts/lib/dispatch-register.mjs
-function registerPath(root) {
-  return join11(root, ".sterling", "transient", "dispatch-register.json");
-}
-function legacyRegisterLockDir(root) {
-  return join11(root, ".sterling", "transient", "dispatch-register.lock");
-}
-function parseRegisterEntry(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
-  }
-  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
-  }
-  if (typeof raw.session_id !== "string" || !raw.session_id) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
-  }
-  if (!Array.isArray(raw.files)) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
-  }
-  if (typeof raw.at !== "string" || !raw.at) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
-  }
-  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
-}
-function readRawArray(root) {
-  const p = registerPath(root);
-  if (!existsSync6(p)) return { availability: "absent", arr: [] };
-  let raw;
-  try {
-    raw = readFileSync6(p, "utf8");
-  } catch {
-    return { availability: "corrupt", arr: [] };
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { availability: "corrupt", arr: [] };
-  }
-  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
-  return { availability: "ok", arr: parsed };
-}
-function readRegister(root) {
-  const { availability, arr } = readRawArray(root);
-  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
-  let dropped = 0;
-  const entries = [];
-  for (const raw of arr) {
-    const r = parseRegisterEntry(raw);
-    if (r.ok) entries.push(r.entry);
-    else dropped += 1;
-  }
-  return { availability: "ok", entries, dropped };
-}
-var SQLITE_BUSY = 5;
-function currentUid() {
-  if (typeof process.getuid !== "function") {
-    throw new Error("dispatch-register: process.getuid() is unavailable \u2014 the register lock root is per POSIX user (Sterling runs under WSL2)");
-  }
-  return process.getuid();
-}
-function registerLockRoot() {
-  const uid2 = currentUid();
-  const xdg = process.env.XDG_RUNTIME_DIR;
-  if (typeof xdg === "string" && isAbsolute(xdg)) {
-    try {
-      const st = lstatSync4(xdg);
-      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid2) return join11(xdg, "sterling-locks");
-    } catch (e) {
-      if (!["ENOENT", "ENOTDIR", "EACCES"].includes(e?.code)) throw e;
-    }
-  }
-  return `/tmp/sterling-locks-${uid2}`;
-}
-function registerLockPath(root) {
-  const hash = createHash2("sha256").update(realpathSync4(resolve4(root))).digest("hex");
-  return join11(registerLockRoot(), `${hash}.db`);
-}
-function ensureLockRoot(dir) {
-  mkdirSync4(dir, { recursive: true, mode: 448 });
-  const st = lstatSync4(dir);
-  if (!st.isDirectory() || st.isSymbolicLink()) {
-    throw new Error(`dispatch-register: ${dir} is not a real directory \u2014 refusing to take the register lock through it`);
-  }
-  if (st.uid !== currentUid()) {
-    throw new Error(`dispatch-register: ${dir} is owned by uid ${st.uid}, not this user (${currentUid()}) \u2014 refusing to take the register lock through it`);
-  }
-  if ((st.mode & 63) !== 0) chmodSync(dir, 448);
-}
-function isBusy(e) {
-  return e?.errcode === SQLITE_BUSY;
-}
-function sleepAsync(ms) {
-  return new Promise((resolve5) => setTimeout(resolve5, ms));
-}
-var heldConnections = /* @__PURE__ */ new Set();
-var warnedLegacyDirs = /* @__PURE__ */ new Set();
-function warnLegacyOnce(legacy, text) {
-  if (warnedLegacyDirs.has(legacy)) return;
-  warnedLegacyDirs.add(legacy);
-  process.stderr.write(`dispatch-register: legacy lock dir ${legacy} ${text}
-`);
-}
-function isPidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e?.code !== "ESRCH";
-  }
-}
-function readLegacyOwner(legacy) {
-  try {
-    return JSON.parse(readFileSync6(join11(legacy, "owner.json"), "utf8"));
-  } catch (e) {
-    if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
-    throw e;
-  }
-}
-function legacyLockHolder(root) {
-  const legacy = legacyRegisterLockDir(root);
-  let entries;
-  try {
-    entries = readdirSync2(legacy);
-  } catch (e) {
-    if (e?.code === "ENOENT") return null;
-    warnLegacyOnce(legacy, `exists but could not be listed (${e?.code ?? e}) \u2014 no live pre-rebuild owner can be verified in it; left in place, proceeding`);
-    return null;
-  }
-  if (entries.length === 0) {
-    try {
-      rmdirSync(legacy);
-    } catch (e) {
-      if (e?.code === "ENOENT") return null;
-      if (e?.code === "ENOTEMPTY" || e?.code === "EEXIST") return legacyLockHolder(root);
-      throw e;
-    }
-    process.stderr.write(`dispatch-register: removed the EMPTY legacy lock dir ${legacy} \u2014 residue of the retired mkdir lock; the register lock is now kernel-held at ${registerLockPath(root)}
-`);
-    return null;
-  }
-  const owner = readLegacyOwner(legacy);
-  const pid = owner?.pid;
-  if (owner && owner.host === hostname() && Number.isInteger(pid) && pid > 0 && isPidAlive(pid)) {
-    return { legacy, owner };
-  }
-  const why = owner === null ? "has no readable owner.json" : owner.host !== hostname() ? `names another host (${owner.host})` : `names pid ${pid}, which is not running`;
-  warnLegacyOnce(legacy, `is NOT empty (${entries.join(", ")}) but ${why}, so no pre-rebuild writer can be inside it \u2014 left in place, proceeding; remove it by hand once no pre-rebuild session is running`);
-  return null;
-}
-async function withRegisterLock(root, fn, opts = {}) {
-  const retryMs = opts.retryMs ?? 50;
-  const timeoutMs2 = opts.timeoutMs ?? 1e3;
-  const lockPath = registerLockPath(root);
-  ensureLockRoot(dirname5(lockPath));
-  const db = new DatabaseSync3(lockPath);
-  try {
-    db.exec("PRAGMA busy_timeout=0");
-    const start = Date.now();
-    for (; ; ) {
-      try {
-        db.exec("BEGIN IMMEDIATE");
-      } catch (e) {
-        if (!isBusy(e)) throw e;
-        const waited2 = Date.now() - start;
-        if (waited2 >= timeoutMs2) {
-          throw refusal(
-            "register_lock_held",
-            { lock_path: lockPath, waited_ms: waited2 },
-            `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
-          );
-        }
-        await sleepAsync(retryMs);
-        continue;
-      }
-      const held = legacyLockHolder(root);
-      if (held === null) break;
-      db.exec("ROLLBACK");
-      const waited = Date.now() - start;
-      if (waited >= timeoutMs2) {
-        const { pid, host, at } = held.owner;
-        throw refusal(
-          "register_lock_held",
-          { lock_path: held.legacy, legacy: true, owner: { pid, host, at }, waited_ms: waited },
-          `register lock at ${held.legacy} is held by a PRE-rebuild writer (legacy mkdir lock, live pid ${pid} on this host) \u2014 gave up after ${waited}ms; it clears when that writer finishes, and for good once every session has relaunched onto the rebuilt hooks`
-        );
-      }
-      await sleepAsync(retryMs);
-    }
-    heldConnections.add(db);
-    try {
-      return await fn();
-    } finally {
-      heldConnections.delete(db);
-      try {
-        db.exec("COMMIT");
-      } catch (e) {
-        process.stderr.write(`dispatch-register: COMMIT of the register lock at ${lockPath} failed (${e?.message ?? e}) \u2014 the lock is released by closing the connection
-`);
-      }
-    }
-  } finally {
-    db.close();
-  }
-}
-var MAX_PROMPT_BYTES = 512 * 1024;
-var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
-var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
-var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
-var DERIVE_RETRY_INTERVAL_MS = 10;
-var DERIVE_PER_ATTEMPT_LOCK_MS = 30;
-var DERIVE_SIBLINGS_BUDGET_MS = 3e3;
-var DERIVE_LOCK_HELD_BUDGET_MS = 150;
-function retryBudgetFor(verdict) {
-  return verdict === "siblings-retry" ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
-}
-function dispatchStateDir(root) {
-  return join11(root, ".sterling", "transient", "dispatch-state");
-}
-var LIVE_PREFIX = "live-";
-var DONE_PREFIX = "done-";
-var IDS_DELIMITER = "~";
-var ID_SEPARATOR = ".";
-var EMPTY_IDS = "none";
-var MAX_FILENAME_LENGTH = 254;
-var STATE_KEY_RE = /^(?:raw-[A-Za-z0-9_-]{1,80}|sha256-[0-9a-f]{64})$/;
-var ID_HASH_RE = /^[A-Za-z0-9_-]{43}$/;
-function liveFileName(key) {
-  return `${LIVE_PREFIX}${key}.json`;
-}
-function agentIdHash(agentId) {
-  return createHash2("sha256").update(String(agentId), "utf8").digest("base64url");
-}
-function recordAgentIds(record) {
-  return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
-}
-function terminalFileName(key, record) {
-  const hashes = [...new Set(recordAgentIds(record).map(agentIdHash))].sort();
-  const name = `${DONE_PREFIX}${key}${IDS_DELIMITER}${hashes.length ? hashes.join(ID_SEPARATOR) : EMPTY_IDS}.json`;
-  if (name.length > MAX_FILENAME_LENGTH) throw new Error(`dispatch-state: terminal filename for ${key} is ${name.length} characters \u2014 over the ${MAX_FILENAME_LENGTH} limit`);
-  return name;
-}
-function parseStateFileName(name) {
-  if (name.includes(".json.tmp-")) return { kind: "tmp" };
-  if (!name.endsWith(".json")) return { kind: "other" };
-  const stem = name.slice(0, -".json".length);
-  if (stem.startsWith(LIVE_PREFIX)) {
-    const key = stem.slice(LIVE_PREFIX.length);
-    return STATE_KEY_RE.test(key) ? { kind: "live", key } : { kind: "malformed-live" };
-  }
-  if (stem.startsWith(DONE_PREFIX)) {
-    const parts = stem.slice(DONE_PREFIX.length).split(IDS_DELIMITER);
-    const malformed = STATE_KEY_RE.test(parts[0]) ? { kind: "malformed-done", key: parts[0] } : { kind: "malformed-done" };
-    if (parts.length !== 2 || !STATE_KEY_RE.test(parts[0])) return malformed;
-    const idHashes = parts[1] === EMPTY_IDS ? [] : parts[1].split(ID_SEPARATOR);
-    const canonical = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
-    return canonical ? { kind: "done", key: parts[0], idHashes } : malformed;
-  }
-  return STATE_KEY_RE.test(stem) ? { kind: "legacy", key: stem } : { kind: "unknown-json" };
-}
-var warnedStateFiles = /* @__PURE__ */ new Set();
-function warnStateFile(file, text) {
-  const tag2 = `${file}\0${text}`;
-  if (warnedStateFiles.has(tag2)) return;
-  warnedStateFiles.add(tag2);
-  process.stderr.write(`${render(disclosure("dispatch_state_poisoned", { file }, text))}
-`);
-}
-function dispatchStateKey(toolUseId) {
-  if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
-  return `sha256-${createHash2("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
-}
-function dispatchState(record) {
-  if (record?.terminal) return "terminal";
-  if (record?.started) return "started";
-  if (record?.post_binding || record?.derived_binding) return "bound";
-  return "pending";
-}
-function isNonEmptyString(v) {
-  return typeof v === "string" && v !== "";
-}
-function isPlainObject3(v) {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
-function validatePostBinding(v) {
-  return v === void 0 || isPlainObject3(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at);
-}
-function validateDerivedBinding(v) {
-  return v === void 0 || isPlainObject3(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && isNonEmptyString(v.by);
-}
-function validateStarted(v) {
-  return v === void 0 || isPlainObject3(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && Array.isArray(v.by) && v.by.every((x) => typeof x === "string");
-}
-function validateTerminal(v) {
-  return v === void 0 || isPlainObject3(v) && isNonEmptyString(v.at) && isNonEmptyString(v.reason);
-}
-function validateRecordShape(r) {
-  if (!r || typeof r !== "object" || Array.isArray(r)) return { ok: false, reason: "not-an-object" };
-  if (r.schema !== 1) return { ok: false, reason: "unknown-schema-version" };
-  if (typeof r.tool_use_id !== "string" || !r.tool_use_id) return { ok: false, reason: "tool_use_id" };
-  if (typeof r.session_id !== "string" && r.session_id !== null) return { ok: false, reason: "session_id" };
-  if (!ORIGINS.has(r.origin)) return { ok: false, reason: "origin" };
-  if (typeof r.prompt_bytes !== "number") return { ok: false, reason: "prompt_bytes" };
-  if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
-  if (typeof r.prompt === "string") {
-    const bytes = Buffer.byteLength(r.prompt, "utf8");
-    const sha = createHash2("sha256").update(r.prompt, "utf8").digest("hex");
-    if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
-  } else if (r.prompt !== null) {
-    return { ok: false, reason: "prompt-type" };
-  }
-  if (!validatePostBinding(r.post_binding)) return { ok: false, reason: "post_binding-shape" };
-  if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
-  if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
-  if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
-  return { ok: true };
-}
-function classifyRecordFile(file) {
-  let st;
-  try {
-    st = lstatSync4(file);
-  } catch {
-    return { exists: false };
-  }
-  if (st.isSymbolicLink()) return { exists: true, poisoned: true, reason: "symlink" };
-  if (!st.isFile()) return { exists: true, poisoned: true, reason: "non-regular-file" };
-  let buf;
-  try {
-    buf = readFileSync6(file);
-  } catch {
-    return { exists: true, poisoned: true, reason: "unreadable" };
-  }
-  const text = buf.toString("utf8");
-  if (!Buffer.from(text, "utf8").equals(buf)) return { exists: true, poisoned: true, reason: "invalid-utf8" };
-  let record;
-  try {
-    record = JSON.parse(text);
-  } catch {
-    return { exists: true, poisoned: true, reason: "unparseable-json" };
-  }
-  const v = validateRecordShape(record);
-  if (!v.ok) return { exists: true, poisoned: true, reason: v.reason };
-  return { exists: true, poisoned: false, record };
-}
-function checkDispatchStateContainment(root, { create }) {
-  const dir = dispatchStateDir(root);
-  let st;
-  try {
-    st = lstatSync4(dir);
-  } catch (e) {
-    if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
-    if (!create) return { ok: true, availability: "absent" };
-    mkdirSync4(dir, { recursive: true });
-    return { ok: true, availability: "ok" };
-  }
-  if (st.isSymbolicLink() || !st.isDirectory()) {
-    return { ok: false, availability: "poisoned", reason: st.isSymbolicLink() ? "symlink" : "non-regular-file" };
-  }
-  return { ok: true, availability: "ok" };
-}
-function writeRecordAtomic(root, fileName, record) {
-  const dir = dispatchStateDir(root);
-  const containment = checkDispatchStateContainment(root, { create: true });
-  if (!containment.ok) {
-    throw refusal(
-      "dispatch_state_poisoned",
-      { dir, reason: containment.reason ?? containment.availability },
-      `dispatch-state write refused \u2014 ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"}, never mkdir'd or written through`
-    );
-  }
-  const file = join11(dir, fileName);
-  const tmp = join11(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
-  writeFileSync2(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
-  renameSync2(tmp, file);
-}
-function writeLiveRecord(root, key, record) {
-  if (record.terminal) throw new Error(`dispatch-state: a terminal record for ${key} must go through terminalizeLiveRecord, never under a live name`);
-  writeRecordAtomic(root, liveFileName(key), record);
-}
-function finishTerminalRename(root, key, record) {
-  const dir = dispatchStateDir(root);
-  const from = liveFileName(key);
-  const to = terminalFileName(key, record);
-  let occupied = false;
-  try {
-    lstatSync4(join11(dir, to));
-    occupied = true;
-  } catch (e) {
-    if (e?.code !== "ENOENT") occupied = true;
-  }
-  if (occupied) {
-    warnStateFile(from, `dispatch-state: terminal record ${from} NOT renamed \u2014 ${to} already exists; never overwritten, the live source is kept for an operator`);
-    return from;
-  }
-  try {
-    renameSync2(join11(dir, from), join11(dir, to));
-    return to;
-  } catch (e) {
-    warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
-    return from;
-  }
-}
-function listStateDir(root) {
-  const containment = checkDispatchStateContainment(root, { create: false });
-  if (!containment.ok) return { availability: "unavailable", reason: "containment", names: [] };
-  if (containment.availability === "absent") return { availability: "absent", names: [] };
-  try {
-    return { availability: "ok", names: readdirSync2(dispatchStateDir(root)) };
-  } catch (e) {
-    return { availability: "unavailable", reason: "unlistable", code: e?.code, names: [] };
-  }
-}
-function validateNamedRecord(dir, name, parsed) {
-  const classified = classifyRecordFile(join11(dir, name));
-  if (!classified.exists || classified.poisoned) return classified;
-  const record = classified.record;
-  if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
-  if (parsed.kind === "done") {
-    if (!record.terminal) return { exists: true, poisoned: true, reason: "done-name-not-terminal" };
-    if (terminalFileName(parsed.key, record) !== name) return { exists: true, poisoned: true, reason: "ids-mismatch" };
-  }
-  return classified;
-}
-function readDispatchStateLocked(root) {
-  return scanLiveState(root, { repair: true });
-}
-function scanLiveState(root, { repair }) {
-  const dir = dispatchStateDir(root);
-  const listing = listStateDir(root);
-  if (listing.availability !== "ok") return { availability: listing.availability, ...listing.reason ? { reason: listing.reason } : {}, records: [], poisoned: [], done: [] };
-  const records = [];
-  const poisoned = [];
-  const done = [];
-  for (const name of listing.names) {
-    const parsed = parseStateFileName(name);
-    if (parsed.kind === "other") continue;
-    if (parsed.kind === "tmp") {
-      poisoned.push({ file: name, reason: "orphan-tmp-file" });
-      continue;
-    }
-    if (parsed.kind === "legacy") {
-      poisoned.push({ file: name, reason: "legacy-unmigrated" });
-      continue;
-    }
-    if (parsed.kind === "malformed-live") {
-      poisoned.push({ file: name, reason: "malformed-filename" });
-      continue;
-    }
-    if (parsed.kind === "malformed-done" || parsed.kind === "unknown-json") {
-      warnStateFile(name, `dispatch-state: '${name}' is not a live-<key>.json or done-<key>~<ids>.json name \u2014 ignored by the live scan, never read as a record`);
-      continue;
-    }
-    if (parsed.kind === "done") {
-      done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
-      continue;
-    }
-    const classified = classifyRecordFile(join11(dir, name));
-    if (!classified.exists) continue;
-    if (classified.poisoned) {
-      poisoned.push({ file: name, reason: classified.reason });
-      continue;
-    }
-    if (dispatchStateKey(classified.record.tool_use_id) !== parsed.key) {
-      poisoned.push({ file: name, reason: "key-mismatch" });
-      continue;
-    }
-    records.push({ key: parsed.key, file: name, record: classified.record });
-  }
-  const doneKeys = new Set(done.map((d) => d.key));
-  const kept = [];
-  for (const entry of records) {
-    if (doneKeys.has(entry.key)) {
-      if (!entry.record.terminal) {
-        poisoned.push({ file: entry.file, reason: "duplicate-key" });
-        continue;
-      }
-      warnStateFile(entry.file, `dispatch-state: terminal record ${entry.file} cannot be renamed: a done- file for the same key already exists \u2014 left under its live name for an operator, never renamed over it`);
-      kept.push(entry);
-      continue;
-    }
-    if (repair && entry.record.terminal) entry.file = finishTerminalRename(root, entry.key, entry.record);
-    kept.push(entry);
-  }
-  return { availability: "ok", records: kept, poisoned, done };
-}
-function terminalResumeHit(root, scan, agentId) {
-  const h = agentIdHash(agentId);
-  const dir = dispatchStateDir(root);
-  for (const entry of scan.done) {
-    if (!entry.idHashes.includes(h)) continue;
-    const v = validateNamedRecord(dir, entry.file, { kind: "done", key: entry.key });
-    if (!v.exists) continue;
-    if (v.poisoned) {
-      warnStateFile(entry.file, `dispatch-state: '${entry.file}' names agent id hash ${h} but failed validation (${v.reason}) \u2014 not taken as resume evidence`);
-      continue;
-    }
-    if (recordAgentIds(v.record).includes(agentId)) return true;
-  }
-  return false;
-}
-function poisonedFileList(scan) {
-  return scan.poisoned.map((p) => `${p.file} (${p.reason})`);
-}
-function hasRegisterRound(root, sessionId, agentId) {
-  const { availability, entries } = readRegister(root);
-  if (availability !== "ok") return false;
-  return entries.some((e) => e && e.agent_id === agentId && e.session_id === sessionId);
-}
-function priorRoundFiles(root, sessionId, agentId) {
-  const { availability, entries } = readRegister(root);
-  if (availability !== "ok") return null;
-  let latest = null;
-  for (const e of entries) {
-    if (!e || e.agent_id !== agentId || e.session_id !== sessionId) continue;
-    const round = typeof e.round === "number" ? e.round : 1;
-    if (latest === null || round >= latest.round) latest = { round, entry: e };
-  }
-  if (!latest) return null;
-  const fileEntries = Array.isArray(latest.entry.file_entries) ? latest.entry.file_entries.filter((f) => typeof f === "string") : [];
-  return { files: latest.entry.files.slice(), file_entries: fileEntries };
-}
-function appendStartedBy(record, consumer) {
-  const prior = record.started;
-  const by = Array.isArray(prior?.by) ? [...prior.by] : [];
-  if (consumer && !by.includes(consumer)) by.push(consumer);
-  return { ...record, started: { agent_id: prior?.agent_id ?? record.post_binding?.agent_id ?? record.derived_binding?.agent_id, at: prior?.at ?? (/* @__PURE__ */ new Date()).toISOString(), by } };
-}
-function buildResolution(source, caseName, record) {
-  return {
-    source,
-    case: caseName,
-    prompt: typeof record?.prompt === "string" ? record.prompt : null,
-    subagent_type: record?.subagent_type ?? null,
-    tool_use_id: record?.tool_use_id ?? null,
-    record: record ?? null
-  };
-}
-function unattributable(caseName, agentType, extra = {}) {
-  return { source: "unattributable", case: caseName, prompt: null, subagent_type: agentType ?? null, tool_use_id: null, record: null, ...extra };
-}
-function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) {
-  if (typeof agent_id !== "string" || agent_id === "") {
-    return { verdict: "resolved", value: unattributable("no-agent-id", agent_type) };
-  }
-  const scan = readDispatchStateLocked(root);
-  if (scan.availability === "ok") {
-    for (const { key, record } of scan.records) {
-      const boundId = record.post_binding?.agent_id ?? record.derived_binding?.agent_id;
-      if (boundId === agent_id && record.session_id === session_id && !record.terminal) {
-        const updated = appendStartedBy(record, consumer);
-        writeLiveRecord(root, key, updated);
-        const source = record.post_binding ? "post" : "derived-type-unique";
-        return { verdict: "resolved", value: buildResolution(source, source, updated) };
-      }
-    }
-  }
-  const resumeHit = scan.availability === "ok" && (scan.records.some(
-    ({ record }) => record.started?.agent_id === agent_id || record.post_binding?.agent_id === agent_id || record.derived_binding?.agent_id === agent_id
-  ) || terminalResumeHit(root, scan, agent_id));
-  if (resumeHit || hasRegisterRound(root, session_id, agent_id)) {
-    const prior = priorRoundFiles(root, session_id, agent_id);
-    const inherited_files = prior ? prior.files : null;
-    const inherited_file_entries = prior ? prior.file_entries : null;
-    return {
-      verdict: "resolved",
-      value: { source: "resume", case: "resume", prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null, inherited_files, inherited_file_entries }
-    };
-  }
-  if (typeof agent_type !== "string" || agent_type === "") {
-    return { verdict: "resolved", value: unattributable("no-agent-type", agent_type) };
-  }
-  if (scan.availability === "unavailable") {
-    return { verdict: "resolved", value: unattributable("state-unavailable", agent_type) };
-  }
-  if (scan.poisoned.length > 0) {
-    return { verdict: "resolved", value: unattributable("state-poisoned", agent_type, { poisoned_files: poisonedFileList(scan) }) };
-  }
-  const candidates = scan.records.filter(
-    ({ record }) => dispatchState(record) === "pending" && record.session_id === session_id && typeof record.subagent_type === "string" && record.subagent_type === agent_type
-  );
-  if (candidates.length === 0) {
-    return { verdict: "resolved", value: unattributable("no-slot", agent_type) };
-  }
-  if (candidates.length === 1) {
-    const { key, record } = candidates[0];
-    if (record.post_binding) {
-      return { verdict: "resolved", value: buildResolution("post", "post", record) };
-    }
-    const at = (/* @__PURE__ */ new Date()).toISOString();
-    const updated = { ...record, derived_binding: { agent_id, at, by: consumer }, started: { agent_id, at, by: consumer ? [consumer] : [] } };
-    writeLiveRecord(root, key, updated);
-    return { verdict: "resolved", value: buildResolution("derived-type-unique", "derived-type-unique", updated) };
-  }
-  return { verdict: "siblings-retry", count: candidates.length };
-}
-async function resolveDispatchStart(root, { session_id, agent_id, agent_type }, opts = {}) {
-  const consumer = opts.consumer;
-  const now = typeof opts.now === "function" ? opts.now : () => Date.now();
-  const sleep = typeof opts.sleep === "function" ? opts.sleep : sleepAsync;
-  async function tryLocked(timeoutMs2, retryMs) {
-    try {
-      return await withRegisterLock(root, () => attemptDetermine(root, { session_id, agent_id, agent_type, consumer }), { retryMs, timeoutMs: timeoutMs2 });
-    } catch (e) {
-      if (e?.code === "register_lock_held") return { verdict: "lock-held" };
-      throw e;
-    }
-  }
-  const initialTimeoutMs = typeof opts.lockTimeoutMs === "number" ? opts.lockTimeoutMs : 1e3;
-  const initialRetryMs = typeof opts.retryMs === "number" ? opts.retryMs : 50;
-  let result = await tryLocked(initialTimeoutMs, initialRetryMs);
-  if (result.verdict === "lock-held") {
-    return unattributable("lock-held", agent_type);
-  }
-  if (result.verdict === "resolved") return result.value;
-  const retryStart = now();
-  let count = result.count;
-  for (; ; ) {
-    if (now() - retryStart >= retryBudgetFor(result.verdict)) {
-      return unattributable("same-type-siblings-in-flight", agent_type, { count });
-    }
-    await sleep(DERIVE_RETRY_INTERVAL_MS);
-    result = await tryLocked(DERIVE_PER_ATTEMPT_LOCK_MS, 5);
-    if (result.verdict === "resolved") return result.value;
-    if (result.verdict === "siblings-retry") count = result.count;
-  }
-}
-
-// scripts/hooks/lib/hazard-lane-mode.mjs
-var READ_ONLY_TOOLS = /* @__PURE__ */ new Set(["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "ToolSearch"]);
-var STERLING_READ_SUFFIXES = ["knowledge_query", "knowledge_get", "knowledge_schema", "knowledge_preflight", "board_query", "board_get", "maintenance_query"];
-for (const prefix of ["mcp__sterling__", "mcp__plugin_sterling_sterling__"]) {
-  for (const suffix of STERLING_READ_SUFFIXES) READ_ONLY_TOOLS.add(`${prefix}${suffix}`);
-}
-var TOOL_TOKEN = /^(?:[A-Z][A-Za-z]*|mcp__[A-Za-z0-9_]+)$/;
-var PLAIN_AGENT_NAME = /^[A-Za-z0-9_-]+$/;
-function laneAgentType(input2, root) {
-  if (typeof input2.agent_type === "string" && input2.agent_type) return input2.agent_type;
-  const { availability, entries } = readRegister(root);
-  if (availability !== "ok") return null;
-  const types = new Set(
-    entries.filter((e) => e.agent_id === input2.agent_id && typeof e.agent_type === "string" && e.agent_type).map((e) => e.agent_type)
-  );
-  return types.size === 1 ? [...types][0] : null;
-}
-function frontmatterTools(text) {
-  const lines = text.split(/\r\n|\r|\n/);
-  if (lines[0] !== "---") return null;
-  const end = lines.indexOf("---", 1);
-  if (end === -1) return null;
-  const at = [];
-  for (let i2 = 1; i2 < end; i2++) if (/^tools\s*:/.test(lines[i2])) at.push(i2);
-  if (at.length !== 1) return null;
-  const i = at[0];
-  for (let j = 1; j < end; j++) {
-    if (j === i) continue;
-    if (/^\s*(?:\?|["']?tools["']?\s*:)/.test(lines[j]) || /^[?"']/.test(lines[j])) return null;
-  }
-  if (i + 1 < end && /^\s/.test(lines[i + 1])) return null;
-  const value = lines[i].replace(/^tools\s*:/, "").trim();
-  if (!value || /[#*(\['"]/.test(value)) return null;
-  const tokens = value.split(",").map((t) => t.trim());
-  return tokens.every((t) => TOOL_TOKEN.test(t)) ? tokens : null;
-}
-function hazardLaneMode(input2, root) {
-  try {
-    if (!input2 || typeof input2.agent_id !== "string" || !input2.agent_id) return "whole";
-    const type = laneAgentType(input2, root);
-    if (!type || !PLAIN_AGENT_NAME.test(type)) return "whole";
-    const tools = frontmatterTools(readFileSync7(join12(root, ".claude", "agents", `${type}.md`), "utf8"));
-    if (!tools) return "whole";
-    return tools.every((t) => READ_ONLY_TOOLS.has(t)) ? "pointer" : "whole";
-  } catch {
-    return "whole";
-  }
-}
-
-// scripts/hooks/lib/dispatch-prompt.mjs
-var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
-function extractPathCandidates(text) {
-  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
-  return [...new Set(found)];
-}
-
-// scripts/hooks/lib/plan-lock.mjs
-import { closeSync as closeSync3, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync5, openSync as openSync3, readSync as readSync2, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join13 } from "node:path";
-var PLAN_MAX_BYTES = 4 * 1024 * 1024;
-var LOCK_MAX_BYTES = 64 * 1024;
-var MARKER_MAX_BYTES = 64 * 1024;
-var LOCK_FILE = "plan-lock.json";
-var HEX64 = /^[0-9a-f]{64}$/i;
-function isAbsolutePlanPath(p) {
-  return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
-}
-function sterlingDirOf(cwd) {
-  return join13(cwd, ".sterling");
-}
-function sanitizeForContext(value, max) {
-  if (typeof value !== "string") return "";
-  let out = "";
-  for (const ch of value) {
-    const code = ch.codePointAt(0);
-    if (code < 32 || code === 127 || code >= 128 && code <= 159) continue;
-    out += ch;
-  }
-  out = out.trim();
-  return out.length > max ? out.slice(0, max) : out;
-}
-function readBounded2(path, maxBytes, noun) {
-  if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
-  let fd;
-  try {
-    fd = openSync3(path, FS2.O_RDONLY | (FS2.O_NOFOLLOW ?? 0) | (FS2.O_NONBLOCK ?? 0));
-  } catch (e) {
-    return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
-  }
-  try {
-    const st = fstatSync2(fd);
-    if (!st.isFile()) return { unreadable: "is not a regular file (a directory, FIFO, socket or device cannot hold it)", code: "ENOTFILE" };
-    if (st.size > maxBytes) return { unreadable: `is ${st.size} bytes, past the ${maxBytes}-byte bound`, code: "EFBIG" };
-    const buf = Buffer.allocUnsafe(st.size);
-    let read = 0;
-    while (read < st.size) {
-      const n = readSync2(fd, buf, read, st.size - read, read);
-      if (n <= 0) break;
-      read += n;
-    }
-    if (read < st.size) return { unreadable: `shrank from ${st.size} to ${read} bytes during the read`, code: "EIO" };
-    const probe = Buffer.allocUnsafe(1);
-    let extra = 0;
-    try {
-      extra = readSync2(fd, probe, 0, 1, st.size);
-    } catch {
-      extra = 0;
-    }
-    if (extra > 0) return { unreadable: `grew past its ${st.size}-byte size during the read`, code: "EFBIG" };
-    return { bytes: buf };
-  } catch (e) {
-    return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
-  } finally {
-    try {
-      closeSync3(fd);
-    } catch {
-    }
-  }
-}
-function readStoreFileBounded(path, maxBytes) {
-  const read = readBounded2(path, maxBytes, "record");
-  if (read.unreadable) return read;
-  return { text: read.bytes.toString("utf8") };
-}
-function invalidReason(l) {
-  if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
-  if (!isAbsolutePlanPath(l.plan_path)) return "plan_path is not an absolute path string";
-  if (typeof l.approved_sha256 !== "string" || !HEX64.test(l.approved_sha256)) return "approved_sha256 is not a 64-character hex digest";
-  if (l.file_sha256_at_approval !== null && (typeof l.file_sha256_at_approval !== "string" || !HEX64.test(l.file_sha256_at_approval))) {
-    return "file_sha256_at_approval is neither null nor a 64-character hex digest";
-  }
-  if (typeof l.approved_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(l.approved_at) || !Number.isFinite(Date.parse(l.approved_at))) {
-    return "approved_at is not an ISO-8601 timestamp";
-  }
-  if (l.source !== "exit_plan_mode" && l.source !== "manual") return `source is ${JSON.stringify(l.source)}, not 'exit_plan_mode' or 'manual'`;
-  if (typeof l.title !== "string") return "title is not a string";
-  for (const key of ["approved_session_id", "approved_branch", "approved_head"]) {
-    if (l[key] !== null && typeof l[key] !== "string") return `${key} is neither null nor a string`;
-  }
-  if (l.text_file_mismatch !== void 0 && typeof l.text_file_mismatch !== "boolean") return "text_file_mismatch is neither absent nor a boolean";
-  if (l.observed_at !== void 0 && typeof l.observed_at !== "string") return "observed_at is neither absent nor a string";
-  if (l.observed_sha256 !== void 0 && l.observed_sha256 !== null && typeof l.observed_sha256 !== "string") return "observed_sha256 is neither absent, null, nor a string";
-  if (l.observed_status !== void 0 && !["present", "missing", "unreadable"].includes(l.observed_status)) {
-    return `observed_status is ${JSON.stringify(l.observed_status)}, not one of 'present' | 'missing' | 'unreadable'`;
-  }
-  return null;
-}
-function readLock(sterlingDir) {
-  const read = readStoreFileBounded(join13(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
-  if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
-  const raw = read.text;
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    return { malformed: `is not valid JSON (${e && e.message || e})`, raw };
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { malformed: "is not a JSON object", raw };
-  const reason = invalidReason(parsed);
-  if (reason) return { malformed: reason, raw };
-  return { lock: parsed, raw };
-}
+// scripts/hooks/lib/delivery.mjs
+import { readFileSync as readFileSync6, writeFileSync as writeFileSync2, mkdirSync as mkdirSync4, existsSync as existsSync5, renameSync as renameSync2, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { join as join10, dirname as dirname5 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
 function isForeignTree(record, root) {
@@ -12415,47 +11336,9 @@ function isForeignTree(record, root) {
   return !(root && sameLocationAnyHost(String(wt), root));
 }
 
-// scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync5, readFileSync as readFileSync8, readdirSync as readdirSync3, mkdirSync as mkdirSync6, openSync as openSync4, writeSync, closeSync as closeSync4, unlinkSync as unlinkSync2, constants } from "node:fs";
-var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
-
-// scripts/lib/handoff-projection.mjs
-var HANDOFF_DOCS_DIR = "docs/sterling";
-var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
-var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
-     Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
-     your commit message rather than editing it. -->`;
-var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
-var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
-
-// scripts/hooks/lib/operating-state.mjs
-function readProjectConfig(cwd) {
-  let config = null;
-  let configUnreadable = false;
-  try {
-    config = loadConfig(cwd);
-  } catch {
-    config = null;
-    configUnreadable = true;
-  }
-  if (config !== null && (typeof config !== "object" || Array.isArray(config))) {
-    configUnreadable = true;
-  }
-  return { config, configUnreadable };
-}
-function tddPostureLine({ config, configUnreadable }) {
-  if (configUnreadable) {
-    return "TDD posture: UNKNOWN \u2014 the project config could not be read, so config.tdd.enabled could not be determined. This is NOT the default posture: repair the config, or state your posture explicitly.";
-  }
-  const tddOn = config?.tdd?.enabled !== false;
-  return `TDD posture: tests-first ${tddOn ? "ON" : "OFF"} (config.tdd.enabled \u2014 TUI System tab; explicit asks still work)`;
-}
-
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync9, writeFileSync as writeFileSync4, mkdirSync as mkdirSync7, existsSync as existsSync7, renameSync as renameSync4, openSync as openSync5, closeSync as closeSync5 } from "node:fs";
-import { join as join14, dirname as dirname6 } from "node:path";
 function deliveryDir(cwd) {
-  return join14(cwd, ".sterling", "transient", "delivery");
+  return join10(cwd, ".sterling", "transient", "delivery");
 }
 var HEADER_TERM_CAP = 6;
 function boundedTermClause(terms, cap = HEADER_TERM_CAP) {
@@ -12487,11 +11370,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join14(deliveryDir(cwd), component);
+  return join10(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join14(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join10(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -12530,8 +11413,8 @@ function markDiscoveryDelivered(guard, emittedDiscovery) {
 function readGuard(path) {
   if (!path) return emptyDeliveryGuard();
   try {
-    if (!existsSync7(path)) return emptyDeliveryGuard();
-    const parsed = JSON.parse(readFileSync9(path, "utf8"));
+    if (!existsSync5(path)) return emptyDeliveryGuard();
+    const parsed = JSON.parse(readFileSync6(path, "utf8"));
     if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
     return { ...emptyDeliveryGuard(), ...parsed };
   } catch {
@@ -12542,10 +11425,10 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync7(dirname6(path), { recursive: true });
+  mkdirSync4(dirname5(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync4(tmp, JSON.stringify(guard));
-  renameSync4(tmp, path);
+  writeFileSync2(tmp, JSON.stringify(guard));
+  renameSync2(tmp, path);
 }
 function statusBracket(record) {
   const status = record?.status ?? "unknown";
@@ -12590,6 +11473,17 @@ function withInboundSupersedes(store, record) {
       status: s2.status
     }))
   };
+}
+var BatchShapeError = class extends Error {
+  constructor(what, expected, value) {
+    const got = Array.isArray(value) ? `${value.length} element(s)${value.every(Array.isArray) ? "" : ", not all arrays"}` : typeof value;
+    super(`${what}: expected ${expected} array(s), one per item, got ${got}; the batch is treated as failed, never as empty`);
+    this.name = "BatchShapeError";
+  }
+};
+function assertBatchShape(value, n, what) {
+  if (!Array.isArray(value) || value.length !== n || !value.every(Array.isArray)) throw new BatchShapeError(what, n, value);
+  return value;
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
@@ -13224,6 +12118,1129 @@ function decisionPointerPart(rel, decisions, { widen, cap = DECISION_POINTER_CAP
 }
 function payloadHeaderLine(rel) {
   return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
+}
+
+// scripts/hooks/lib/subject-fan.mjs
+var defaultOpener = (dbPath) => new SterlingStore(dbPath);
+function domainMountsFromConfig(config) {
+  if (config === null || config === void 0) return [];
+  return resolveDomainMounts(parseConfig({ stack_tags: config.stack_tags, domain_paths: config.domain_paths }));
+}
+var tag = (records, source) => records.map((r) => ({ ...r, source_store: source }));
+var errorText2 = (e) => String(e && e.message || e);
+function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
+  if (storeBackend(cwd) === "routed") return openRoutedSubjectFan(cwd);
+  const projectPath = join11(cwd, ".sterling", "sterling.db");
+  if (!existsSync6(projectPath)) return null;
+  let mounts = [];
+  let configError = null;
+  try {
+    mounts = domainMountsFromConfig(loadConfig(cwd));
+  } catch (e) {
+    configError = errorText2(e);
+  }
+  const project = opener(projectPath);
+  let domains = [];
+  const missingDomains = [];
+  const unreadableDomains = [];
+  const drop = (d, e) => {
+    unreadableDomains.push({ name: d.name, dbPath: d.dbPath, error: errorText2(e) });
+    domains = domains.filter((x) => x !== d);
+    try {
+      d.store.close();
+    } catch {
+    }
+  };
+  for (const m of mounts) {
+    if (!existsSync6(m.dbPath)) {
+      missingDomains.push({ name: m.name, dbPath: m.dbPath });
+      continue;
+    }
+    try {
+      domains.push({ name: m.name, dbPath: m.dbPath, store: opener(m.dbPath) });
+    } catch (e) {
+      unreadableDomains.push({ name: m.name, dbPath: m.dbPath, error: errorText2(e) });
+    }
+  }
+  const eachDomain = (fn) => {
+    const out = [];
+    for (const d of [...domains]) {
+      try {
+        out.push([d, fn(d.store)]);
+      } catch (e) {
+        drop(d, e);
+      }
+    }
+    return out;
+  };
+  return {
+    project,
+    get domainNames() {
+      return domains.map((d) => d.name);
+    },
+    missingDomains,
+    unreadableDomains,
+    configError,
+    query(opts = {}) {
+      if (opts.file_keys !== void 0 || !domains.length) return tag(project.query(opts), "project");
+      const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+      const perStore = [["project", project.query({ ...opts, cap })], ...eachDomain((s2) => s2.query({ ...opts, cap })).map(([d, r]) => [d.name, r])];
+      const shares = allocateShares(perStore.map(([, r]) => r.length), cap);
+      return perStore.flatMap(([name, records], i) => tag(records.slice(0, shares[i]), name));
+    },
+    /** query() for each entry of `list`; element i is what query(list[i]) returns. */
+    queryEach(list) {
+      return list.map((opts) => this.query(opts));
+    },
+    /** Supersedes edges live with their SOURCE record, so every mount is read; first seen wins. */
+    inboundSupersedes(id) {
+      const seen = /* @__PURE__ */ new Set();
+      const out = [];
+      const lists = [["project", project.inboundSupersedes(id)], ...eachDomain((s2) => s2.inboundSupersedes(id)).map(([d, r]) => [d.name, r])];
+      for (const [name, records] of lists) {
+        for (const r of records) {
+          if (seen.has(r.id)) continue;
+          seen.add(r.id);
+          out.push({ ...r, source_store: name });
+        }
+      }
+      return out;
+    },
+    articlesBySlug(slug) {
+      return project.articlesBySlug(slug);
+    },
+    close() {
+      let first;
+      for (const s2 of [project, ...domains.map((d) => d.store)]) {
+        try {
+          s2.close();
+        } catch (e) {
+          first ??= e;
+        }
+      }
+      if (first) throw first;
+    }
+  };
+}
+function openRoutedSubjectFan(cwd) {
+  const { stores } = openRoutedForHook(cwd, { mount: true });
+  const project = stores.project;
+  return {
+    project,
+    get domainNames() {
+      return stores.domainNames();
+    },
+    missingDomains: [],
+    unreadableDomains: [],
+    configError: null,
+    query(opts = {}) {
+      if (opts.file_keys !== void 0 || !stores.domainNames().length) return tag(project.query(opts), "project");
+      const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+      const perStore = stores.bySource({ ...opts, cap });
+      const shares = allocateShares(perStore.map((s2) => s2.records.length), cap);
+      return perStore.flatMap((s2, i) => tag(s2.records.slice(0, shares[i]), s2.source));
+    },
+    /** query() for each entry of `list` (element i is what query(list[i]) returns) in one
+     *  store call, so a broker hook pays one round trip and one read transaction per store. */
+    queryEach(list) {
+      if (list.some((opts) => opts.file_keys !== void 0)) return list.map((opts) => this.query(opts));
+      if (!stores.domainNames().length) return assertBatchShape(project.queryEach(list), list.length, "queryEach").map((records) => tag(records, "project"));
+      const capped = list.map((opts) => ({ ...opts, cap: opts.cap ?? DEFAULT_QUERY_CAP }));
+      const perStore = stores.bySourceEach(capped);
+      if (!Array.isArray(perStore) || !perStore.length) throw new TypeError(`bySourceEach: expected one entry per store, project first, got ${Array.isArray(perStore) ? "none" : typeof perStore}`);
+      for (const s2 of perStore) assertBatchShape(s2?.results, list.length, `bySourceEach (source '${s2?.source}')`);
+      return capped.map((opts, j) => {
+        const shares = allocateShares(perStore.map((s2) => s2.results[j].length), opts.cap);
+        return perStore.flatMap((s2, i) => tag(s2.results[j].slice(0, shares[i]), s2.source));
+      });
+    },
+    /** MountedStores' own merge (project first, first seen wins). These records carry no
+     *  source_store: MountedStores does not say which mount held each edge, and the one
+     *  reader (delivery.mjs withInboundSupersedes) keeps only id, slug, title and status. */
+    inboundSupersedes(id) {
+      return stores.inboundSupersedes(id);
+    },
+    /** inboundSupersedes for each id in one store call (element i answers ids[i]). */
+    inboundSupersedesEach(ids) {
+      return stores.inboundSupersedesEach(ids);
+    },
+    articlesBySlug(slug) {
+      return project.articlesBySlug(slug);
+    },
+    close() {
+      stores.close();
+    }
+  };
+}
+function fanDegradedLine(fan, who) {
+  if (!fan) return null;
+  const parts = [];
+  if (fan.configError) parts.push(`config.json unreadable, no domains mounted (${fan.configError})`);
+  for (const d of fan.unreadableDomains) parts.push(`domain '${d.name}' unreadable at ${d.dbPath} (${d.error})`);
+  if (!parts.length) return null;
+  return `${who}: DEGRADED subject fan: ${parts.join("; ")}. Delivering from the project store only.`;
+}
+function warnFanDegraded(fan, who) {
+  const line = fanDegradedLine(fan, who);
+  if (!line) return;
+  try {
+    process.stderr.write(`${line}
+`);
+  } catch {
+  }
+}
+
+// scripts/hooks/lib/hazard-lane-mode.mjs
+import { readFileSync as readFileSync8 } from "node:fs";
+import { join as join13 } from "node:path";
+
+// scripts/lib/dispatch-register.mjs
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync3, rmSync as rmSync3, rmdirSync, renameSync as renameSync3, existsSync as existsSync7, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync4, chmodSync } from "node:fs";
+import { join as join12, resolve as resolve4, dirname as dirname6, isAbsolute } from "node:path";
+import { hostname } from "node:os";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { randomBytes, createHash as createHash2 } from "node:crypto";
+
+// scripts/lib/review-errors.mjs
+var CODES = /* @__PURE__ */ new Set([
+  // §1.4 ledger verbs
+  "ledger_corrupt",
+  "ledger_absent",
+  "ledger_digest_mismatch",
+  "compatibility_lock_held",
+  "entry_not_found",
+  "entry_selector_ambiguous",
+  "entry_not_active",
+  "class_unknown",
+  "class_not_applicable",
+  "superseder_not_found",
+  "superseder_not_reviewer_class",
+  "superseder_not_newer",
+  "superseder_branch_mismatch",
+  "superseder_lifecycle_unacceptable",
+  "superseder_coverage_incomplete",
+  "superseder_commit_not_ancestor",
+  "superseder_commit_trailer_not_roster",
+  "superseder_commit_receipt_unbound",
+  "superseder_commit_blob_mismatch",
+  "covering_not_allowed",
+  "covering_receipt_invalid",
+  "no_live_territory_disproved",
+  "reconcile_no_match",
+  "reconcile_ambiguous",
+  "reconcile_nonce_split",
+  "reconcile_unresolved",
+  "record_external_duplicate",
+  "argument_invalid",
+  // commit operation
+  "nothing_staged",
+  "message_missing",
+  "no_spendable_receipt",
+  "receipt_bytes_mismatch",
+  "coverage_incomplete",
+  "reservation_conflict",
+  "commit_failed",
+  "finalize_failed",
+  "waiver_reason_missing",
+  // A13 additions
+  "target_sha_prior_receipt_unbound",
+  "commit_verify_failed",
+  "not_sterling_project",
+  "receipt_unscoped",
+  // §1.4 disclosures (never refuse)
+  "receipt_unattributable",
+  "receipt_foreign",
+  "receipt_identity_unknown",
+  "receipt_deferred",
+  "receipt_stale",
+  "receipt_age_unverifiable",
+  "receipt_no_overlap",
+  "multi_spend",
+  "bytes_waived",
+  "legacy_entries_present",
+  "receipt_not_spent_stale_bytes",
+  "register_unavailable",
+  "dispatch_status_unknown",
+  // A9 register/ledger additions
+  "register_entry_malformed",
+  "register_agent_id_duplicate",
+  "register_lock_held",
+  "receipt_not_active",
+  "receipt_foreign_session",
+  "receipt_foreign_branch",
+  // A9 --target-sha amend mode
+  "target_sha_unresolvable",
+  "target_sha_not_head",
+  "target_sha_tree_dirty",
+  "target_sha_published",
+  "target_sha_publication_unprovable",
+  // A11 additions
+  "territory_declaration_missing",
+  "territory_declaration_malformed",
+  "dispatch_overlap",
+  "dispatch_residue",
+  // ledger entry classification
+  "ledger_entry_malformed",
+  // A19 (security review): an env override of identity is disclosed, never silent
+  "session_identity_override",
+  // dispatch state machine (decision dispatch-state-machine-pre-slot-post-
+  // binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
+  "dispatch_state_collision",
+  "dispatch_post_late",
+  "dispatch_post_mismatch",
+  "dispatch_post_refused",
+  "dispatch_state_poisoned",
+  "dispatch_unattributable",
+  "dispatch_lock_held",
+  "dispatch_post_only"
+]);
+function assertCode(code) {
+  if (!CODES.has(code)) {
+    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
+  }
+}
+function refusal(code, facts = {}, message = code) {
+  assertCode(code);
+  const err = new Error(message);
+  err.kind = "refusal";
+  err.code = code;
+  err.facts = facts;
+  return err;
+}
+function disclosure(code, facts = {}, message = code) {
+  assertCode(code);
+  return { kind: "disclosure", code, facts, message };
+}
+function render(x) {
+  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
+  return `${label} [${x?.code}] ${x?.message ?? ""}`;
+}
+
+// scripts/lib/dispatch-register.mjs
+function registerPath(root) {
+  return join12(root, ".sterling", "transient", "dispatch-register.json");
+}
+function legacyRegisterLockDir(root) {
+  return join12(root, ".sterling", "transient", "dispatch-register.lock");
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync7(p)) return { availability: "absent", arr: [] };
+  let raw;
+  try {
+    raw = readFileSync7(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+var SQLITE_BUSY = 5;
+function currentUid() {
+  if (typeof process.getuid !== "function") {
+    throw new Error("dispatch-register: process.getuid() is unavailable \u2014 the register lock root is per POSIX user (Sterling runs under WSL2)");
+  }
+  return process.getuid();
+}
+function registerLockRoot() {
+  const uid2 = currentUid();
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (typeof xdg === "string" && isAbsolute(xdg)) {
+    try {
+      const st = lstatSync4(xdg);
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid2) return join12(xdg, "sterling-locks");
+    } catch (e) {
+      if (!["ENOENT", "ENOTDIR", "EACCES"].includes(e?.code)) throw e;
+    }
+  }
+  return `/tmp/sterling-locks-${uid2}`;
+}
+function registerLockPath(root) {
+  const hash = createHash2("sha256").update(realpathSync4(resolve4(root))).digest("hex");
+  return join12(registerLockRoot(), `${hash}.db`);
+}
+function ensureLockRoot(dir) {
+  mkdirSync5(dir, { recursive: true, mode: 448 });
+  const st = lstatSync4(dir);
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    throw new Error(`dispatch-register: ${dir} is not a real directory \u2014 refusing to take the register lock through it`);
+  }
+  if (st.uid !== currentUid()) {
+    throw new Error(`dispatch-register: ${dir} is owned by uid ${st.uid}, not this user (${currentUid()}) \u2014 refusing to take the register lock through it`);
+  }
+  if ((st.mode & 63) !== 0) chmodSync(dir, 448);
+}
+function isBusy(e) {
+  return e?.errcode === SQLITE_BUSY;
+}
+function sleepAsync(ms) {
+  return new Promise((resolve5) => setTimeout(resolve5, ms));
+}
+var heldConnections = /* @__PURE__ */ new Set();
+var warnedLegacyDirs = /* @__PURE__ */ new Set();
+function warnLegacyOnce(legacy, text) {
+  if (warnedLegacyDirs.has(legacy)) return;
+  warnedLegacyDirs.add(legacy);
+  process.stderr.write(`dispatch-register: legacy lock dir ${legacy} ${text}
+`);
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code !== "ESRCH";
+  }
+}
+function readLegacyOwner(legacy) {
+  try {
+    return JSON.parse(readFileSync7(join12(legacy, "owner.json"), "utf8"));
+  } catch (e) {
+    if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
+    throw e;
+  }
+}
+function legacyLockHolder(root) {
+  const legacy = legacyRegisterLockDir(root);
+  let entries;
+  try {
+    entries = readdirSync2(legacy);
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    warnLegacyOnce(legacy, `exists but could not be listed (${e?.code ?? e}) \u2014 no live pre-rebuild owner can be verified in it; left in place, proceeding`);
+    return null;
+  }
+  if (entries.length === 0) {
+    try {
+      rmdirSync(legacy);
+    } catch (e) {
+      if (e?.code === "ENOENT") return null;
+      if (e?.code === "ENOTEMPTY" || e?.code === "EEXIST") return legacyLockHolder(root);
+      throw e;
+    }
+    process.stderr.write(`dispatch-register: removed the EMPTY legacy lock dir ${legacy} \u2014 residue of the retired mkdir lock; the register lock is now kernel-held at ${registerLockPath(root)}
+`);
+    return null;
+  }
+  const owner = readLegacyOwner(legacy);
+  const pid = owner?.pid;
+  if (owner && owner.host === hostname() && Number.isInteger(pid) && pid > 0 && isPidAlive(pid)) {
+    return { legacy, owner };
+  }
+  const why = owner === null ? "has no readable owner.json" : owner.host !== hostname() ? `names another host (${owner.host})` : `names pid ${pid}, which is not running`;
+  warnLegacyOnce(legacy, `is NOT empty (${entries.join(", ")}) but ${why}, so no pre-rebuild writer can be inside it \u2014 left in place, proceeding; remove it by hand once no pre-rebuild session is running`);
+  return null;
+}
+async function withRegisterLock(root, fn, opts = {}) {
+  const retryMs = opts.retryMs ?? 50;
+  const timeoutMs2 = opts.timeoutMs ?? 1e3;
+  const lockPath = registerLockPath(root);
+  ensureLockRoot(dirname6(lockPath));
+  const db = new DatabaseSync3(lockPath);
+  try {
+    db.exec("PRAGMA busy_timeout=0");
+    const start = Date.now();
+    for (; ; ) {
+      try {
+        db.exec("BEGIN IMMEDIATE");
+      } catch (e) {
+        if (!isBusy(e)) throw e;
+        const waited2 = Date.now() - start;
+        if (waited2 >= timeoutMs2) {
+          throw refusal(
+            "register_lock_held",
+            { lock_path: lockPath, waited_ms: waited2 },
+            `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
+          );
+        }
+        await sleepAsync(retryMs);
+        continue;
+      }
+      const held = legacyLockHolder(root);
+      if (held === null) break;
+      db.exec("ROLLBACK");
+      const waited = Date.now() - start;
+      if (waited >= timeoutMs2) {
+        const { pid, host, at } = held.owner;
+        throw refusal(
+          "register_lock_held",
+          { lock_path: held.legacy, legacy: true, owner: { pid, host, at }, waited_ms: waited },
+          `register lock at ${held.legacy} is held by a PRE-rebuild writer (legacy mkdir lock, live pid ${pid} on this host) \u2014 gave up after ${waited}ms; it clears when that writer finishes, and for good once every session has relaunched onto the rebuilt hooks`
+        );
+      }
+      await sleepAsync(retryMs);
+    }
+    heldConnections.add(db);
+    try {
+      return await fn();
+    } finally {
+      heldConnections.delete(db);
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        process.stderr.write(`dispatch-register: COMMIT of the register lock at ${lockPath} failed (${e?.message ?? e}) \u2014 the lock is released by closing the connection
+`);
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+var MAX_PROMPT_BYTES = 512 * 1024;
+var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
+var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
+var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+var DERIVE_RETRY_INTERVAL_MS = 10;
+var DERIVE_PER_ATTEMPT_LOCK_MS = 30;
+var DERIVE_SIBLINGS_BUDGET_MS = 3e3;
+var DERIVE_LOCK_HELD_BUDGET_MS = 150;
+function retryBudgetFor(verdict) {
+  return verdict === "siblings-retry" ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
+}
+function dispatchStateDir(root) {
+  return join12(root, ".sterling", "transient", "dispatch-state");
+}
+var LIVE_PREFIX = "live-";
+var DONE_PREFIX = "done-";
+var IDS_DELIMITER = "~";
+var ID_SEPARATOR = ".";
+var EMPTY_IDS = "none";
+var MAX_FILENAME_LENGTH = 254;
+var STATE_KEY_RE = /^(?:raw-[A-Za-z0-9_-]{1,80}|sha256-[0-9a-f]{64})$/;
+var ID_HASH_RE = /^[A-Za-z0-9_-]{43}$/;
+function liveFileName(key) {
+  return `${LIVE_PREFIX}${key}.json`;
+}
+function agentIdHash(agentId) {
+  return createHash2("sha256").update(String(agentId), "utf8").digest("base64url");
+}
+function recordAgentIds(record) {
+  return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
+}
+function terminalFileName(key, record) {
+  const hashes = [...new Set(recordAgentIds(record).map(agentIdHash))].sort();
+  const name = `${DONE_PREFIX}${key}${IDS_DELIMITER}${hashes.length ? hashes.join(ID_SEPARATOR) : EMPTY_IDS}.json`;
+  if (name.length > MAX_FILENAME_LENGTH) throw new Error(`dispatch-state: terminal filename for ${key} is ${name.length} characters \u2014 over the ${MAX_FILENAME_LENGTH} limit`);
+  return name;
+}
+function parseStateFileName(name) {
+  if (name.includes(".json.tmp-")) return { kind: "tmp" };
+  if (!name.endsWith(".json")) return { kind: "other" };
+  const stem = name.slice(0, -".json".length);
+  if (stem.startsWith(LIVE_PREFIX)) {
+    const key = stem.slice(LIVE_PREFIX.length);
+    return STATE_KEY_RE.test(key) ? { kind: "live", key } : { kind: "malformed-live" };
+  }
+  if (stem.startsWith(DONE_PREFIX)) {
+    const parts = stem.slice(DONE_PREFIX.length).split(IDS_DELIMITER);
+    const malformed = STATE_KEY_RE.test(parts[0]) ? { kind: "malformed-done", key: parts[0] } : { kind: "malformed-done" };
+    if (parts.length !== 2 || !STATE_KEY_RE.test(parts[0])) return malformed;
+    const idHashes = parts[1] === EMPTY_IDS ? [] : parts[1].split(ID_SEPARATOR);
+    const canonical = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
+    return canonical ? { kind: "done", key: parts[0], idHashes } : malformed;
+  }
+  return STATE_KEY_RE.test(stem) ? { kind: "legacy", key: stem } : { kind: "unknown-json" };
+}
+var warnedStateFiles = /* @__PURE__ */ new Set();
+function warnStateFile(file, text) {
+  const tag2 = `${file}\0${text}`;
+  if (warnedStateFiles.has(tag2)) return;
+  warnedStateFiles.add(tag2);
+  process.stderr.write(`${render(disclosure("dispatch_state_poisoned", { file }, text))}
+`);
+}
+function dispatchStateKey(toolUseId) {
+  if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
+  return `sha256-${createHash2("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+}
+function dispatchState(record) {
+  if (record?.terminal) return "terminal";
+  if (record?.started) return "started";
+  if (record?.post_binding || record?.derived_binding) return "bound";
+  return "pending";
+}
+function isNonEmptyString(v) {
+  return typeof v === "string" && v !== "";
+}
+function isPlainObject3(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function validatePostBinding(v) {
+  return v === void 0 || isPlainObject3(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at);
+}
+function validateDerivedBinding(v) {
+  return v === void 0 || isPlainObject3(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && isNonEmptyString(v.by);
+}
+function validateStarted(v) {
+  return v === void 0 || isPlainObject3(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && Array.isArray(v.by) && v.by.every((x) => typeof x === "string");
+}
+function validateTerminal(v) {
+  return v === void 0 || isPlainObject3(v) && isNonEmptyString(v.at) && isNonEmptyString(v.reason);
+}
+function validateRecordShape(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) return { ok: false, reason: "not-an-object" };
+  if (r.schema !== 1) return { ok: false, reason: "unknown-schema-version" };
+  if (typeof r.tool_use_id !== "string" || !r.tool_use_id) return { ok: false, reason: "tool_use_id" };
+  if (typeof r.session_id !== "string" && r.session_id !== null) return { ok: false, reason: "session_id" };
+  if (!ORIGINS.has(r.origin)) return { ok: false, reason: "origin" };
+  if (typeof r.prompt_bytes !== "number") return { ok: false, reason: "prompt_bytes" };
+  if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
+  if (typeof r.prompt === "string") {
+    const bytes = Buffer.byteLength(r.prompt, "utf8");
+    const sha = createHash2("sha256").update(r.prompt, "utf8").digest("hex");
+    if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
+  } else if (r.prompt !== null) {
+    return { ok: false, reason: "prompt-type" };
+  }
+  if (!validatePostBinding(r.post_binding)) return { ok: false, reason: "post_binding-shape" };
+  if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
+  if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
+  if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
+  return { ok: true };
+}
+function classifyRecordFile(file) {
+  let st;
+  try {
+    st = lstatSync4(file);
+  } catch {
+    return { exists: false };
+  }
+  if (st.isSymbolicLink()) return { exists: true, poisoned: true, reason: "symlink" };
+  if (!st.isFile()) return { exists: true, poisoned: true, reason: "non-regular-file" };
+  let buf;
+  try {
+    buf = readFileSync7(file);
+  } catch {
+    return { exists: true, poisoned: true, reason: "unreadable" };
+  }
+  const text = buf.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(buf)) return { exists: true, poisoned: true, reason: "invalid-utf8" };
+  let record;
+  try {
+    record = JSON.parse(text);
+  } catch {
+    return { exists: true, poisoned: true, reason: "unparseable-json" };
+  }
+  const v = validateRecordShape(record);
+  if (!v.ok) return { exists: true, poisoned: true, reason: v.reason };
+  return { exists: true, poisoned: false, record };
+}
+function checkDispatchStateContainment(root, { create }) {
+  const dir = dispatchStateDir(root);
+  let st;
+  try {
+    st = lstatSync4(dir);
+  } catch (e) {
+    if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
+    if (!create) return { ok: true, availability: "absent" };
+    mkdirSync5(dir, { recursive: true });
+    return { ok: true, availability: "ok" };
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    return { ok: false, availability: "poisoned", reason: st.isSymbolicLink() ? "symlink" : "non-regular-file" };
+  }
+  return { ok: true, availability: "ok" };
+}
+function writeRecordAtomic(root, fileName, record) {
+  const dir = dispatchStateDir(root);
+  const containment = checkDispatchStateContainment(root, { create: true });
+  if (!containment.ok) {
+    throw refusal(
+      "dispatch_state_poisoned",
+      { dir, reason: containment.reason ?? containment.availability },
+      `dispatch-state write refused \u2014 ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"}, never mkdir'd or written through`
+    );
+  }
+  const file = join12(dir, fileName);
+  const tmp = join12(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
+  writeFileSync3(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
+  renameSync3(tmp, file);
+}
+function writeLiveRecord(root, key, record) {
+  if (record.terminal) throw new Error(`dispatch-state: a terminal record for ${key} must go through terminalizeLiveRecord, never under a live name`);
+  writeRecordAtomic(root, liveFileName(key), record);
+}
+function finishTerminalRename(root, key, record) {
+  const dir = dispatchStateDir(root);
+  const from = liveFileName(key);
+  const to = terminalFileName(key, record);
+  let occupied = false;
+  try {
+    lstatSync4(join12(dir, to));
+    occupied = true;
+  } catch (e) {
+    if (e?.code !== "ENOENT") occupied = true;
+  }
+  if (occupied) {
+    warnStateFile(from, `dispatch-state: terminal record ${from} NOT renamed \u2014 ${to} already exists; never overwritten, the live source is kept for an operator`);
+    return from;
+  }
+  try {
+    renameSync3(join12(dir, from), join12(dir, to));
+    return to;
+  } catch (e) {
+    warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
+    return from;
+  }
+}
+function listStateDir(root) {
+  const containment = checkDispatchStateContainment(root, { create: false });
+  if (!containment.ok) return { availability: "unavailable", reason: "containment", names: [] };
+  if (containment.availability === "absent") return { availability: "absent", names: [] };
+  try {
+    return { availability: "ok", names: readdirSync2(dispatchStateDir(root)) };
+  } catch (e) {
+    return { availability: "unavailable", reason: "unlistable", code: e?.code, names: [] };
+  }
+}
+function validateNamedRecord(dir, name, parsed) {
+  const classified = classifyRecordFile(join12(dir, name));
+  if (!classified.exists || classified.poisoned) return classified;
+  const record = classified.record;
+  if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
+  if (parsed.kind === "done") {
+    if (!record.terminal) return { exists: true, poisoned: true, reason: "done-name-not-terminal" };
+    if (terminalFileName(parsed.key, record) !== name) return { exists: true, poisoned: true, reason: "ids-mismatch" };
+  }
+  return classified;
+}
+function readDispatchStateLocked(root) {
+  return scanLiveState(root, { repair: true });
+}
+function scanLiveState(root, { repair }) {
+  const dir = dispatchStateDir(root);
+  const listing = listStateDir(root);
+  if (listing.availability !== "ok") return { availability: listing.availability, ...listing.reason ? { reason: listing.reason } : {}, records: [], poisoned: [], done: [] };
+  const records = [];
+  const poisoned = [];
+  const done = [];
+  for (const name of listing.names) {
+    const parsed = parseStateFileName(name);
+    if (parsed.kind === "other") continue;
+    if (parsed.kind === "tmp") {
+      poisoned.push({ file: name, reason: "orphan-tmp-file" });
+      continue;
+    }
+    if (parsed.kind === "legacy") {
+      poisoned.push({ file: name, reason: "legacy-unmigrated" });
+      continue;
+    }
+    if (parsed.kind === "malformed-live") {
+      poisoned.push({ file: name, reason: "malformed-filename" });
+      continue;
+    }
+    if (parsed.kind === "malformed-done" || parsed.kind === "unknown-json") {
+      warnStateFile(name, `dispatch-state: '${name}' is not a live-<key>.json or done-<key>~<ids>.json name \u2014 ignored by the live scan, never read as a record`);
+      continue;
+    }
+    if (parsed.kind === "done") {
+      done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
+      continue;
+    }
+    const classified = classifyRecordFile(join12(dir, name));
+    if (!classified.exists) continue;
+    if (classified.poisoned) {
+      poisoned.push({ file: name, reason: classified.reason });
+      continue;
+    }
+    if (dispatchStateKey(classified.record.tool_use_id) !== parsed.key) {
+      poisoned.push({ file: name, reason: "key-mismatch" });
+      continue;
+    }
+    records.push({ key: parsed.key, file: name, record: classified.record });
+  }
+  const doneKeys = new Set(done.map((d) => d.key));
+  const kept = [];
+  for (const entry of records) {
+    if (doneKeys.has(entry.key)) {
+      if (!entry.record.terminal) {
+        poisoned.push({ file: entry.file, reason: "duplicate-key" });
+        continue;
+      }
+      warnStateFile(entry.file, `dispatch-state: terminal record ${entry.file} cannot be renamed: a done- file for the same key already exists \u2014 left under its live name for an operator, never renamed over it`);
+      kept.push(entry);
+      continue;
+    }
+    if (repair && entry.record.terminal) entry.file = finishTerminalRename(root, entry.key, entry.record);
+    kept.push(entry);
+  }
+  return { availability: "ok", records: kept, poisoned, done };
+}
+function terminalResumeHit(root, scan, agentId) {
+  const h = agentIdHash(agentId);
+  const dir = dispatchStateDir(root);
+  for (const entry of scan.done) {
+    if (!entry.idHashes.includes(h)) continue;
+    const v = validateNamedRecord(dir, entry.file, { kind: "done", key: entry.key });
+    if (!v.exists) continue;
+    if (v.poisoned) {
+      warnStateFile(entry.file, `dispatch-state: '${entry.file}' names agent id hash ${h} but failed validation (${v.reason}) \u2014 not taken as resume evidence`);
+      continue;
+    }
+    if (recordAgentIds(v.record).includes(agentId)) return true;
+  }
+  return false;
+}
+function poisonedFileList(scan) {
+  return scan.poisoned.map((p) => `${p.file} (${p.reason})`);
+}
+function hasRegisterRound(root, sessionId, agentId) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return false;
+  return entries.some((e) => e && e.agent_id === agentId && e.session_id === sessionId);
+}
+function priorRoundFiles(root, sessionId, agentId) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return null;
+  let latest = null;
+  for (const e of entries) {
+    if (!e || e.agent_id !== agentId || e.session_id !== sessionId) continue;
+    const round = typeof e.round === "number" ? e.round : 1;
+    if (latest === null || round >= latest.round) latest = { round, entry: e };
+  }
+  if (!latest) return null;
+  const fileEntries = Array.isArray(latest.entry.file_entries) ? latest.entry.file_entries.filter((f) => typeof f === "string") : [];
+  return { files: latest.entry.files.slice(), file_entries: fileEntries };
+}
+function appendStartedBy(record, consumer) {
+  const prior = record.started;
+  const by = Array.isArray(prior?.by) ? [...prior.by] : [];
+  if (consumer && !by.includes(consumer)) by.push(consumer);
+  return { ...record, started: { agent_id: prior?.agent_id ?? record.post_binding?.agent_id ?? record.derived_binding?.agent_id, at: prior?.at ?? (/* @__PURE__ */ new Date()).toISOString(), by } };
+}
+function buildResolution(source, caseName, record) {
+  return {
+    source,
+    case: caseName,
+    prompt: typeof record?.prompt === "string" ? record.prompt : null,
+    subagent_type: record?.subagent_type ?? null,
+    tool_use_id: record?.tool_use_id ?? null,
+    record: record ?? null
+  };
+}
+function unattributable(caseName, agentType, extra = {}) {
+  return { source: "unattributable", case: caseName, prompt: null, subagent_type: agentType ?? null, tool_use_id: null, record: null, ...extra };
+}
+function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) {
+  if (typeof agent_id !== "string" || agent_id === "") {
+    return { verdict: "resolved", value: unattributable("no-agent-id", agent_type) };
+  }
+  const scan = readDispatchStateLocked(root);
+  if (scan.availability === "ok") {
+    for (const { key, record } of scan.records) {
+      const boundId = record.post_binding?.agent_id ?? record.derived_binding?.agent_id;
+      if (boundId === agent_id && record.session_id === session_id && !record.terminal) {
+        const updated = appendStartedBy(record, consumer);
+        writeLiveRecord(root, key, updated);
+        const source = record.post_binding ? "post" : "derived-type-unique";
+        return { verdict: "resolved", value: buildResolution(source, source, updated) };
+      }
+    }
+  }
+  const resumeHit = scan.availability === "ok" && (scan.records.some(
+    ({ record }) => record.started?.agent_id === agent_id || record.post_binding?.agent_id === agent_id || record.derived_binding?.agent_id === agent_id
+  ) || terminalResumeHit(root, scan, agent_id));
+  if (resumeHit || hasRegisterRound(root, session_id, agent_id)) {
+    const prior = priorRoundFiles(root, session_id, agent_id);
+    const inherited_files = prior ? prior.files : null;
+    const inherited_file_entries = prior ? prior.file_entries : null;
+    return {
+      verdict: "resolved",
+      value: { source: "resume", case: "resume", prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null, inherited_files, inherited_file_entries }
+    };
+  }
+  if (typeof agent_type !== "string" || agent_type === "") {
+    return { verdict: "resolved", value: unattributable("no-agent-type", agent_type) };
+  }
+  if (scan.availability === "unavailable") {
+    return { verdict: "resolved", value: unattributable("state-unavailable", agent_type) };
+  }
+  if (scan.poisoned.length > 0) {
+    return { verdict: "resolved", value: unattributable("state-poisoned", agent_type, { poisoned_files: poisonedFileList(scan) }) };
+  }
+  const candidates = scan.records.filter(
+    ({ record }) => dispatchState(record) === "pending" && record.session_id === session_id && typeof record.subagent_type === "string" && record.subagent_type === agent_type
+  );
+  if (candidates.length === 0) {
+    return { verdict: "resolved", value: unattributable("no-slot", agent_type) };
+  }
+  if (candidates.length === 1) {
+    const { key, record } = candidates[0];
+    if (record.post_binding) {
+      return { verdict: "resolved", value: buildResolution("post", "post", record) };
+    }
+    const at = (/* @__PURE__ */ new Date()).toISOString();
+    const updated = { ...record, derived_binding: { agent_id, at, by: consumer }, started: { agent_id, at, by: consumer ? [consumer] : [] } };
+    writeLiveRecord(root, key, updated);
+    return { verdict: "resolved", value: buildResolution("derived-type-unique", "derived-type-unique", updated) };
+  }
+  return { verdict: "siblings-retry", count: candidates.length };
+}
+async function resolveDispatchStart(root, { session_id, agent_id, agent_type }, opts = {}) {
+  const consumer = opts.consumer;
+  const now = typeof opts.now === "function" ? opts.now : () => Date.now();
+  const sleep = typeof opts.sleep === "function" ? opts.sleep : sleepAsync;
+  async function tryLocked(timeoutMs2, retryMs) {
+    try {
+      return await withRegisterLock(root, () => attemptDetermine(root, { session_id, agent_id, agent_type, consumer }), { retryMs, timeoutMs: timeoutMs2 });
+    } catch (e) {
+      if (e?.code === "register_lock_held") return { verdict: "lock-held" };
+      throw e;
+    }
+  }
+  const initialTimeoutMs = typeof opts.lockTimeoutMs === "number" ? opts.lockTimeoutMs : 1e3;
+  const initialRetryMs = typeof opts.retryMs === "number" ? opts.retryMs : 50;
+  let result = await tryLocked(initialTimeoutMs, initialRetryMs);
+  if (result.verdict === "lock-held") {
+    return unattributable("lock-held", agent_type);
+  }
+  if (result.verdict === "resolved") return result.value;
+  const retryStart = now();
+  let count = result.count;
+  for (; ; ) {
+    if (now() - retryStart >= retryBudgetFor(result.verdict)) {
+      return unattributable("same-type-siblings-in-flight", agent_type, { count });
+    }
+    await sleep(DERIVE_RETRY_INTERVAL_MS);
+    result = await tryLocked(DERIVE_PER_ATTEMPT_LOCK_MS, 5);
+    if (result.verdict === "resolved") return result.value;
+    if (result.verdict === "siblings-retry") count = result.count;
+  }
+}
+
+// scripts/hooks/lib/hazard-lane-mode.mjs
+var READ_ONLY_TOOLS = /* @__PURE__ */ new Set(["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "ToolSearch"]);
+var STERLING_READ_SUFFIXES = ["knowledge_query", "knowledge_get", "knowledge_schema", "knowledge_preflight", "board_query", "board_get", "maintenance_query"];
+for (const prefix of ["mcp__sterling__", "mcp__plugin_sterling_sterling__"]) {
+  for (const suffix of STERLING_READ_SUFFIXES) READ_ONLY_TOOLS.add(`${prefix}${suffix}`);
+}
+var TOOL_TOKEN = /^(?:[A-Z][A-Za-z]*|mcp__[A-Za-z0-9_]+)$/;
+var PLAIN_AGENT_NAME = /^[A-Za-z0-9_-]+$/;
+function laneAgentType(input2, root) {
+  if (typeof input2.agent_type === "string" && input2.agent_type) return input2.agent_type;
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return null;
+  const types = new Set(
+    entries.filter((e) => e.agent_id === input2.agent_id && typeof e.agent_type === "string" && e.agent_type).map((e) => e.agent_type)
+  );
+  return types.size === 1 ? [...types][0] : null;
+}
+function frontmatterTools(text) {
+  const lines = text.split(/\r\n|\r|\n/);
+  if (lines[0] !== "---") return null;
+  const end = lines.indexOf("---", 1);
+  if (end === -1) return null;
+  const at = [];
+  for (let i2 = 1; i2 < end; i2++) if (/^tools\s*:/.test(lines[i2])) at.push(i2);
+  if (at.length !== 1) return null;
+  const i = at[0];
+  for (let j = 1; j < end; j++) {
+    if (j === i) continue;
+    if (/^\s*(?:\?|["']?tools["']?\s*:)/.test(lines[j]) || /^[?"']/.test(lines[j])) return null;
+  }
+  if (i + 1 < end && /^\s/.test(lines[i + 1])) return null;
+  const value = lines[i].replace(/^tools\s*:/, "").trim();
+  if (!value || /[#*(\['"]/.test(value)) return null;
+  const tokens = value.split(",").map((t) => t.trim());
+  return tokens.every((t) => TOOL_TOKEN.test(t)) ? tokens : null;
+}
+function hazardLaneMode(input2, root) {
+  try {
+    if (!input2 || typeof input2.agent_id !== "string" || !input2.agent_id) return "whole";
+    const type = laneAgentType(input2, root);
+    if (!type || !PLAIN_AGENT_NAME.test(type)) return "whole";
+    const tools = frontmatterTools(readFileSync8(join13(root, ".claude", "agents", `${type}.md`), "utf8"));
+    if (!tools) return "whole";
+    return tools.every((t) => READ_ONLY_TOOLS.has(t)) ? "pointer" : "whole";
+  } catch {
+    return "whole";
+  }
+}
+
+// scripts/hooks/lib/dispatch-prompt.mjs
+var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
+function extractPathCandidates(text) {
+  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
+  return [...new Set(found)];
+}
+
+// scripts/hooks/lib/plan-lock.mjs
+import { closeSync as closeSync4, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync6, openSync as openSync4, readSync as readSync2, renameSync as renameSync4, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { join as join14 } from "node:path";
+var PLAN_MAX_BYTES = 4 * 1024 * 1024;
+var LOCK_MAX_BYTES = 64 * 1024;
+var MARKER_MAX_BYTES = 64 * 1024;
+var LOCK_FILE = "plan-lock.json";
+var HEX64 = /^[0-9a-f]{64}$/i;
+function isAbsolutePlanPath(p) {
+  return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
+}
+function sterlingDirOf(cwd) {
+  return join14(cwd, ".sterling");
+}
+function sanitizeForContext(value, max) {
+  if (typeof value !== "string") return "";
+  let out = "";
+  for (const ch of value) {
+    const code = ch.codePointAt(0);
+    if (code < 32 || code === 127 || code >= 128 && code <= 159) continue;
+    out += ch;
+  }
+  out = out.trim();
+  return out.length > max ? out.slice(0, max) : out;
+}
+function readBounded2(path, maxBytes, noun) {
+  if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
+  let fd;
+  try {
+    fd = openSync4(path, FS2.O_RDONLY | (FS2.O_NOFOLLOW ?? 0) | (FS2.O_NONBLOCK ?? 0));
+  } catch (e) {
+    return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
+  }
+  try {
+    const st = fstatSync2(fd);
+    if (!st.isFile()) return { unreadable: "is not a regular file (a directory, FIFO, socket or device cannot hold it)", code: "ENOTFILE" };
+    if (st.size > maxBytes) return { unreadable: `is ${st.size} bytes, past the ${maxBytes}-byte bound`, code: "EFBIG" };
+    const buf = Buffer.allocUnsafe(st.size);
+    let read = 0;
+    while (read < st.size) {
+      const n = readSync2(fd, buf, read, st.size - read, read);
+      if (n <= 0) break;
+      read += n;
+    }
+    if (read < st.size) return { unreadable: `shrank from ${st.size} to ${read} bytes during the read`, code: "EIO" };
+    const probe = Buffer.allocUnsafe(1);
+    let extra = 0;
+    try {
+      extra = readSync2(fd, probe, 0, 1, st.size);
+    } catch {
+      extra = 0;
+    }
+    if (extra > 0) return { unreadable: `grew past its ${st.size}-byte size during the read`, code: "EFBIG" };
+    return { bytes: buf };
+  } catch (e) {
+    return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
+  } finally {
+    try {
+      closeSync4(fd);
+    } catch {
+    }
+  }
+}
+function readStoreFileBounded(path, maxBytes) {
+  const read = readBounded2(path, maxBytes, "record");
+  if (read.unreadable) return read;
+  return { text: read.bytes.toString("utf8") };
+}
+function invalidReason(l) {
+  if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
+  if (!isAbsolutePlanPath(l.plan_path)) return "plan_path is not an absolute path string";
+  if (typeof l.approved_sha256 !== "string" || !HEX64.test(l.approved_sha256)) return "approved_sha256 is not a 64-character hex digest";
+  if (l.file_sha256_at_approval !== null && (typeof l.file_sha256_at_approval !== "string" || !HEX64.test(l.file_sha256_at_approval))) {
+    return "file_sha256_at_approval is neither null nor a 64-character hex digest";
+  }
+  if (typeof l.approved_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(l.approved_at) || !Number.isFinite(Date.parse(l.approved_at))) {
+    return "approved_at is not an ISO-8601 timestamp";
+  }
+  if (l.source !== "exit_plan_mode" && l.source !== "manual") return `source is ${JSON.stringify(l.source)}, not 'exit_plan_mode' or 'manual'`;
+  if (typeof l.title !== "string") return "title is not a string";
+  for (const key of ["approved_session_id", "approved_branch", "approved_head"]) {
+    if (l[key] !== null && typeof l[key] !== "string") return `${key} is neither null nor a string`;
+  }
+  if (l.text_file_mismatch !== void 0 && typeof l.text_file_mismatch !== "boolean") return "text_file_mismatch is neither absent nor a boolean";
+  if (l.observed_at !== void 0 && typeof l.observed_at !== "string") return "observed_at is neither absent nor a string";
+  if (l.observed_sha256 !== void 0 && l.observed_sha256 !== null && typeof l.observed_sha256 !== "string") return "observed_sha256 is neither absent, null, nor a string";
+  if (l.observed_status !== void 0 && !["present", "missing", "unreadable"].includes(l.observed_status)) {
+    return `observed_status is ${JSON.stringify(l.observed_status)}, not one of 'present' | 'missing' | 'unreadable'`;
+  }
+  return null;
+}
+function readLock(sterlingDir) {
+  const read = readStoreFileBounded(join14(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
+  const raw = read.text;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { malformed: `is not valid JSON (${e && e.message || e})`, raw };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { malformed: "is not a JSON object", raw };
+  const reason = invalidReason(parsed);
+  if (reason) return { malformed: reason, raw };
+  return { lock: parsed, raw };
+}
+
+// scripts/lib/contained-fs.mjs
+import { lstatSync as lstatSync5, readFileSync as readFileSync9, readdirSync as readdirSync3, mkdirSync as mkdirSync7, openSync as openSync5, writeSync, closeSync as closeSync5, unlinkSync as unlinkSync2, constants } from "node:fs";
+var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+// scripts/lib/handoff-projection.mjs
+var HANDOFF_DOCS_DIR = "docs/sterling";
+var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
+var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
+     Regenerated by /sterling:init and /sterling:update. If it is wrong, say so in
+     your commit message rather than editing it. -->`;
+var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
+var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
+
+// scripts/hooks/lib/operating-state.mjs
+function readProjectConfig(cwd) {
+  let config = null;
+  let configUnreadable = false;
+  try {
+    config = loadConfig(cwd);
+  } catch {
+    config = null;
+    configUnreadable = true;
+  }
+  if (config !== null && (typeof config !== "object" || Array.isArray(config))) {
+    configUnreadable = true;
+  }
+  return { config, configUnreadable };
+}
+function tddPostureLine({ config, configUnreadable }) {
+  if (configUnreadable) {
+    return "TDD posture: UNKNOWN \u2014 the project config could not be read, so config.tdd.enabled could not be determined. This is NOT the default posture: repair the config, or state your posture explicitly.";
+  }
+  const tddOn = config?.tdd?.enabled !== false;
+  return `TDD posture: tests-first ${tddOn ? "ON" : "OFF"} (config.tdd.enabled \u2014 TUI System tab; explicit asks still work)`;
 }
 
 // scripts/hooks/lib/stage-brief.mjs

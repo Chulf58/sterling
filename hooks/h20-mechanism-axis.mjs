@@ -11935,17 +11935,28 @@ function withInboundSupersedes(store, record) {
     }))
   };
 }
+var BatchShapeError = class extends Error {
+  constructor(what, expected, value) {
+    const got = Array.isArray(value) ? `${value.length} element(s)${value.every(Array.isArray) ? "" : ", not all arrays"}` : typeof value;
+    super(`${what}: expected ${expected} array(s), one per item, got ${got}; the batch is treated as failed, never as empty`);
+    this.name = "BatchShapeError";
+  }
+};
+function assertBatchShape(value, n, what) {
+  if (!Array.isArray(value) || value.length !== n || !value.every(Array.isArray)) throw new BatchShapeError(what, n, value);
+  return value;
+}
 function withInboundSupersedesAll(store, records) {
   if (typeof store?.inboundSupersedesEach !== "function") return records.map((r) => withInboundSupersedes(store, r));
   if (!records.length) return [];
   let lists;
   try {
-    lists = store.inboundSupersedesEach(records.map((r) => r.id));
+    lists = assertBatchShape(store.inboundSupersedesEach(records.map((r) => r.id)), records.length, "inboundSupersedesEach");
   } catch (e) {
     return records.map((r) => ({ ...r, supersession_unknown: String(e?.message ?? e) }));
   }
   return records.map((record, i) => {
-    const inbound = lists[i] ?? [];
+    const inbound = lists[i];
     if (!inbound.length) return record;
     return {
       ...record,
@@ -12695,9 +12706,11 @@ function openRoutedSubjectFan(cwd) {
      *  store call, so a broker hook pays one round trip and one read transaction per store. */
     queryEach(list) {
       if (list.some((opts) => opts.file_keys !== void 0)) return list.map((opts) => this.query(opts));
-      if (!stores.domainNames().length) return project.queryEach(list).map((records) => tag(records, "project"));
+      if (!stores.domainNames().length) return assertBatchShape(project.queryEach(list), list.length, "queryEach").map((records) => tag(records, "project"));
       const capped = list.map((opts) => ({ ...opts, cap: opts.cap ?? DEFAULT_QUERY_CAP }));
       const perStore = stores.bySourceEach(capped);
+      if (!Array.isArray(perStore) || !perStore.length) throw new TypeError(`bySourceEach: expected one entry per store, project first, got ${Array.isArray(perStore) ? "none" : typeof perStore}`);
+      for (const s2 of perStore) assertBatchShape(s2?.results, list.length, `bySourceEach (source '${s2?.source}')`);
       return capped.map((opts, j) => {
         const shares = allocateShares(perStore.map((s2) => s2.results[j].length), opts.cap);
         return perStore.flatMap((s2, i) => tag(s2.results[j].slice(0, shares[i]), s2.source));
@@ -13240,7 +13253,7 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
     // can never deny a user's question.
     { types: ["open_question"], rank_terms: terms, cap: 40 }
   ];
-  const candidates = (typeof store.queryEach === "function" ? store.queryEach(stageOne) : stageOne.map((opts) => store.query(opts))).flat();
+  const candidates = (typeof store.queryEach === "function" ? assertBatchShape(store.queryEach(stageOne), stageOne.length, "queryEach") : stageOne.map((opts) => store.query(opts))).flat();
   if (isQuestion2 && toolInput.questions.length > 1) {
     const seen = new Set(candidates.map((r) => r.id));
     for (const q of toolInput.questions) {

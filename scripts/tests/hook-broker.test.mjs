@@ -356,9 +356,17 @@ test('the server is killed mid-operation: the hook gets BrokerOutcomeUnknownErro
 });
 
 test('H10 on a broker that dies after the store opened: fails closed with exit 2 naming the broker error, and releases with exit 1 on the re-entered Stop', { skip: PG_SKIP }, async () => {
-  const xdg = tempDir('xdg');
-  const { child } = await startServer(xdg, { STERLING_BROKER_TEST_HOLD_MS: '4000' });
-  const stop = (active) =>
+  // Each Stop gets its own server. With one server the hold below blocks its
+  // event loop on the first hook's call, so a second hook whose hello arrived
+  // after that timed out its handshake and fell back to a direct connection:
+  // about half the runs tested the fallback instead of a broker dying after
+  // the store opened. Here each hook's handshake has nothing to wait behind.
+  // The servers start one after the other: two MCP servers opening one
+  // Postgres project at the same moment can collide in their schema setup.
+  const xdgs = [tempDir('xdg'), tempDir('xdg')];
+  const held = [];
+  for (const xdg of xdgs) held.push((await startServer(xdg, { STERLING_BROKER_TEST_HOLD_MS: '4000' })).child);
+  const stop = (active, xdg) =>
     new Promise((resolve) => {
       const h = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', join(repo, 'scripts', 'hooks', 'h10-direct-capture.mjs')], { cwd: fx.root, env: envFor(xdg), stdio: ['pipe', 'pipe', 'pipe'] });
       let stderr = '';
@@ -366,10 +374,10 @@ test('H10 on a broker that dies after the store opened: fails closed with exit 2
       h.on('exit', (code) => resolve({ code, stderr }));
       h.stdin.end(JSON.stringify({ hook_event_name: 'Stop', cwd: fx.root, session_id: 's-h10', stop_hook_active: active }));
     });
-  const blocking = stop(false);
-  const releasing = stop(true);
+  const blocking = stop(false, xdgs[0]);
+  const releasing = stop(true, xdgs[1]);
   await sleep(2500);
-  child.kill('SIGKILL');
+  for (const child of held) child.kill('SIGKILL');
   const [b, r] = await Promise.all([blocking, releasing]);
   assert.equal(b.code, 2, b.stderr);
   assert.match(b.stderr, /H10: the project store failed during the session-end duties \(BrokerOutcomeUnknownError: /);

@@ -486,21 +486,39 @@ export function withInboundSupersedes(store, record) {
   };
 }
 
+/** A batch store call answered something other than one array per item. */
+export class BatchShapeError extends Error {
+  constructor(what, expected, value) {
+    const got = Array.isArray(value) ? `${value.length} element(s)${value.every(Array.isArray) ? '' : ', not all arrays'}` : typeof value;
+    super(`${what}: expected ${expected} array(s), one per item, got ${got}; the batch is treated as failed, never as empty`);
+    this.name = 'BatchShapeError';
+  }
+}
+
+/** Throws BatchShapeError unless `value` is exactly `n` arrays. Every caller of a
+ *  batch store method (queryEach, bySourceEach, inboundSupersedesEach) checks
+ *  this before reading element i, so a short reply is a failure, not "no rows". */
+export function assertBatchShape(value, n, what) {
+  if (!Array.isArray(value) || value.length !== n || !value.every(Array.isArray)) throw new BatchShapeError(what, n, value);
+  return value;
+}
+
 /** withInboundSupersedes for each record. A store with inboundSupersedesEach
- *  (the routed subject fan) answers every record in one call; a failure there
- *  marks every record `supersession_unknown`, since none of them was answered.
- *  Any other store is asked per record, exactly as withInboundSupersedes does. */
+ *  (the routed subject fan) answers every record in one call; a failure there,
+ *  or a reply that is not one array per record, marks every record
+ *  `supersession_unknown`, since none of them was answered. Any other store is
+ *  asked per record, exactly as withInboundSupersedes does. */
 export function withInboundSupersedesAll(store, records) {
   if (typeof store?.inboundSupersedesEach !== 'function') return records.map((r) => withInboundSupersedes(store, r));
   if (!records.length) return [];
   let lists;
   try {
-    lists = store.inboundSupersedesEach(records.map((r) => r.id));
+    lists = assertBatchShape(store.inboundSupersedesEach(records.map((r) => r.id)), records.length, 'inboundSupersedesEach');
   } catch (e) {
     return records.map((r) => ({ ...r, supersession_unknown: String(e?.message ?? e) }));
   }
   return records.map((record, i) => {
-    const inbound = lists[i] ?? [];
+    const inbound = lists[i];
     if (!inbound.length) return record;
     return {
       ...record,

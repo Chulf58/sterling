@@ -13144,6 +13144,16 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 import { existsSync as existsSync9 } from "node:fs";
 init_dist();
 init_dist2();
+
+// scripts/hooks/lib/working-tree.mjs
+init_dist();
+
+// scripts/hooks/lib/delivery.mjs
+init_dist2();
+var GAP_EVIDENCE_CHAR_CAP = 400;
+var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
+
+// scripts/hooks/lib/subject-fan.mjs
 var defaultOpener = (dbPath) => new SterlingStore(dbPath);
 function domainMountsFromConfig(config2) {
   if (config2 === null || config2 === void 0) return [];
@@ -13413,11 +13423,6 @@ import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypt
 import { readFileSync as readFileSync13, writeFileSync as writeFileSync5, mkdirSync as mkdirSync9, rmSync as rmSync5, statSync as statSync5, renameSync as renameSync5 } from "node:fs";
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { join as join22, dirname as dirname9 } from "node:path";
-
-// scripts/hooks/lib/working-tree.mjs
-init_dist();
-
-// scripts/hooks/lib/settlement.mjs
 function hashFile(root, rel) {
   try {
     return createHash5("sha256").update(readFileSync13(join22(root, rel))).digest("hex");
@@ -14534,13 +14539,6 @@ RECONCILE BACKLOG: ${inLane(reconcile2.count)}, the oldest of all items open sin
 // scripts/hooks/lib/board-ready.mjs
 init_dist2();
 init_dist();
-
-// scripts/hooks/lib/delivery.mjs
-init_dist2();
-var GAP_EVIDENCE_CHAR_CAP = 400;
-var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
-
-// scripts/hooks/lib/board-ready.mjs
 var BOARD_GROUP_CAP = 8;
 var DECISION = "decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start";
 function boardGroups(readiness) {

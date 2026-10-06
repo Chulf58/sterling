@@ -11343,8 +11343,98 @@ function repoRel(toolPath, cwd) {
 }
 
 // scripts/hooks/lib/subject-fan.mjs
-import { existsSync as existsSync5 } from "node:fs";
-import { join as join10 } from "node:path";
+import { existsSync as existsSync6 } from "node:fs";
+import { join as join11 } from "node:path";
+
+// scripts/hooks/lib/delivery.mjs
+import { readFileSync as readFileSync6, writeFileSync as writeFileSync2, mkdirSync as mkdirSync4, existsSync as existsSync5, renameSync as renameSync2, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
+import { join as join10, dirname as dirname5 } from "node:path";
+
+// scripts/hooks/lib/working-tree.mjs
+function isForeignTree(record, root) {
+  const wt = record?.working_tree;
+  if (!wt) return false;
+  return !(root && sameLocationAnyHost(String(wt), root));
+}
+
+// scripts/hooks/lib/delivery.mjs
+function deliveryDir(cwd) {
+  return join10(cwd, ".sterling", "transient", "delivery");
+}
+function sanitizeSessionId(sessionId) {
+  let encoded;
+  try {
+    encoded = encodeURIComponent(String(sessionId));
+  } catch {
+    return null;
+  }
+  if (!encoded) return "%00";
+  return encoded === "." ? "%2E" : encoded === ".." ? "%2E%2E" : encoded;
+}
+function deliverySessionDir(cwd, sessionId) {
+  const normalizedSessionId = sessionId == null ? "" : String(sessionId);
+  if (!normalizedSessionId) {
+    process.stderr.write("H19: session_id missing \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  const component = sanitizeSessionId(normalizedSessionId);
+  if (component === null) {
+    process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  return join10(deliveryDir(cwd), component);
+}
+function guardPath(cwd, agentId, sessionId) {
+  const dir = deliverySessionDir(cwd, sessionId);
+  return dir ? join10(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+}
+var DELIVERY_GUARD_VERSION = 2;
+function emptyDeliveryGuard() {
+  return { version: DELIVERY_GUARD_VERSION, substance: [], discovery: [], frontier_files: [], pointer_files: [], gap_articles: [] };
+}
+function readGuard(path) {
+  if (!path) return emptyDeliveryGuard();
+  try {
+    if (!existsSync5(path)) return emptyDeliveryGuard();
+    const parsed = JSON.parse(readFileSync6(path, "utf8"));
+    if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
+    return { ...emptyDeliveryGuard(), ...parsed };
+  } catch {
+    process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
+`);
+    return emptyDeliveryGuard();
+  }
+}
+function writeGuard(path, guard) {
+  if (!path) return;
+  mkdirSync4(dirname5(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync2(tmp, JSON.stringify(guard));
+  renameSync2(tmp, path);
+}
+var BatchShapeError = class extends Error {
+  constructor(what, expected, value) {
+    const got = Array.isArray(value) ? `${value.length} element(s)${value.every(Array.isArray) ? "" : ", not all arrays"}` : typeof value;
+    super(`${what}: expected ${expected} array(s), one per item, got ${got}; the batch is treated as failed, never as empty`);
+    this.name = "BatchShapeError";
+  }
+};
+function assertBatchShape(value, n, what) {
+  if (!Array.isArray(value) || value.length !== n || !value.every(Array.isArray)) throw new BatchShapeError(what, n, value);
+  return value;
+}
+var GAP_EVIDENCE_CHAR_CAP = 400;
+var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
+function joinPointerBlock({ header, lines = [], tail } = {}) {
+  const body = [];
+  for (const l of lines) {
+    body.push(l.line);
+    if (Array.isArray(l.gapLines)) body.push(...l.gapLines);
+  }
+  return [header, ...body, ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
+}
+
+// scripts/hooks/lib/subject-fan.mjs
 var defaultOpener = (dbPath) => new SterlingStore(dbPath);
 function domainMountsFromConfig(config) {
   if (config === null || config === void 0) return [];
@@ -11354,8 +11444,8 @@ var tag = (records, source) => records.map((r) => ({ ...r, source_store: source 
 var errorText2 = (e) => String(e && e.message || e);
 function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
   if (storeBackend(cwd) === "routed") return openRoutedSubjectFan(cwd);
-  const projectPath = join10(cwd, ".sterling", "sterling.db");
-  if (!existsSync5(projectPath)) return null;
+  const projectPath = join11(cwd, ".sterling", "sterling.db");
+  if (!existsSync6(projectPath)) return null;
   let mounts = [];
   let configError = null;
   try {
@@ -11376,7 +11466,7 @@ function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
     }
   };
   for (const m of mounts) {
-    if (!existsSync5(m.dbPath)) {
+    if (!existsSync6(m.dbPath)) {
       missingDomains.push({ name: m.name, dbPath: m.dbPath });
       continue;
     }
@@ -11468,9 +11558,11 @@ function openRoutedSubjectFan(cwd) {
      *  store call, so a broker hook pays one round trip and one read transaction per store. */
     queryEach(list) {
       if (list.some((opts) => opts.file_keys !== void 0)) return list.map((opts) => this.query(opts));
-      if (!stores.domainNames().length) return project.queryEach(list).map((records) => tag(records, "project"));
+      if (!stores.domainNames().length) return assertBatchShape(project.queryEach(list), list.length, "queryEach").map((records) => tag(records, "project"));
       const capped = list.map((opts) => ({ ...opts, cap: opts.cap ?? DEFAULT_QUERY_CAP }));
       const perStore = stores.bySourceEach(capped);
+      if (!Array.isArray(perStore) || !perStore.length) throw new TypeError(`bySourceEach: expected one entry per store, project first, got ${Array.isArray(perStore) ? "none" : typeof perStore}`);
+      for (const s2 of perStore) assertBatchShape(s2?.results, list.length, `bySourceEach (source '${s2?.source}')`);
       return capped.map((opts, j) => {
         const shares = allocateShares(perStore.map((s2) => s2.results[j].length), opts.cap);
         return perStore.flatMap((s2, i) => tag(s2.results[j].slice(0, shares[i]), s2.source));
@@ -11513,24 +11605,24 @@ function warnFanDegraded(fan, who) {
 }
 
 // scripts/hooks/lib/advisory-counter.mjs
-import { appendFileSync, existsSync as existsSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync6 } from "node:fs";
-import { join as join11 } from "node:path";
+import { appendFileSync, existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync7 } from "node:fs";
+import { join as join12 } from "node:path";
 function recordAdvisoryFire(root, hook, sessionId) {
   try {
     if (!root || !hook) return;
-    if (!existsSync6(join11(root, ".sterling"))) return;
-    const dir = join11(root, ".sterling", "transient");
-    mkdirSync4(dir, { recursive: true });
+    if (!existsSync7(join12(root, ".sterling"))) return;
+    const dir = join12(root, ".sterling", "transient");
+    mkdirSync5(dir, { recursive: true });
     let session = typeof sessionId === "string" && sessionId ? sessionId : null;
     if (!session) {
       try {
-        const parsed = JSON.parse(readFileSync6(join11(dir, "session.json"), "utf8"));
+        const parsed = JSON.parse(readFileSync7(join12(dir, "session.json"), "utf8"));
         session = typeof parsed?.session_id === "string" ? parsed.session_id : null;
       } catch {
       }
     }
     appendFileSync(
-      join11(dir, "advisory-fires.ndjson"),
+      join12(dir, "advisory-fires.ndjson"),
       JSON.stringify({ hook, session, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n"
     );
   } catch {
@@ -11564,83 +11656,6 @@ function isListingCommand(command) {
     listing += 1;
   }
   return listing > 0;
-}
-
-// scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync7, writeFileSync as writeFileSync2, mkdirSync as mkdirSync5, existsSync as existsSync7, renameSync as renameSync2, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
-import { join as join12, dirname as dirname5 } from "node:path";
-
-// scripts/hooks/lib/working-tree.mjs
-function isForeignTree(record, root) {
-  const wt = record?.working_tree;
-  if (!wt) return false;
-  return !(root && sameLocationAnyHost(String(wt), root));
-}
-
-// scripts/hooks/lib/delivery.mjs
-function deliveryDir(cwd) {
-  return join12(cwd, ".sterling", "transient", "delivery");
-}
-function sanitizeSessionId(sessionId) {
-  let encoded;
-  try {
-    encoded = encodeURIComponent(String(sessionId));
-  } catch {
-    return null;
-  }
-  if (!encoded) return "%00";
-  return encoded === "." ? "%2E" : encoded === ".." ? "%2E%2E" : encoded;
-}
-function deliverySessionDir(cwd, sessionId) {
-  const normalizedSessionId = sessionId == null ? "" : String(sessionId);
-  if (!normalizedSessionId) {
-    process.stderr.write("H19: session_id missing \u2014 delivery deduplication disabled; guard will not be read or written\n");
-    return null;
-  }
-  const component = sanitizeSessionId(normalizedSessionId);
-  if (component === null) {
-    process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
-    return null;
-  }
-  return join12(deliveryDir(cwd), component);
-}
-function guardPath(cwd, agentId, sessionId) {
-  const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join12(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
-}
-var DELIVERY_GUARD_VERSION = 2;
-function emptyDeliveryGuard() {
-  return { version: DELIVERY_GUARD_VERSION, substance: [], discovery: [], frontier_files: [], pointer_files: [], gap_articles: [] };
-}
-function readGuard(path) {
-  if (!path) return emptyDeliveryGuard();
-  try {
-    if (!existsSync7(path)) return emptyDeliveryGuard();
-    const parsed = JSON.parse(readFileSync7(path, "utf8"));
-    if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
-    return { ...emptyDeliveryGuard(), ...parsed };
-  } catch {
-    process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
-`);
-    return emptyDeliveryGuard();
-  }
-}
-function writeGuard(path, guard) {
-  if (!path) return;
-  mkdirSync5(dirname5(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync2(tmp, JSON.stringify(guard));
-  renameSync2(tmp, path);
-}
-var GAP_EVIDENCE_CHAR_CAP = 400;
-var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
-function joinPointerBlock({ header, lines = [], tail } = {}) {
-  const body = [];
-  for (const l of lines) {
-    body.push(l.line);
-    if (Array.isArray(l.gapLines)) body.push(...l.gapLines);
-  }
-  return [header, ...body, ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
 }
 
 // scripts/hooks/lib/axis-compose.mjs
